@@ -24,23 +24,31 @@ follow births in tie-class order.
 from __future__ import annotations
 
 from collections import OrderedDict
+from copy import copy
 from dataclasses import dataclass
+import math
+import sys
 
 import numpy as np
 from numba import njit, prange
 
 from ..execution import claim_threads
-from ..maths.ties import NOISE_MOTION, WIDE_CLASS_QUANTA, tie_classes
+from ..maths.ties import BOUNDARY_GUARD, NOISE_MOTION, WIDE_CLASS_QUANTA, tie_classes
 from .conventions import rev
-from .fixed_k.fit import FIT_MAX_THREADS, fit_one, fit_panels, fit_starts
-from .panel import _nll_quantum, canonical_solution, class_beam, deduplicate, has_distinct_rows, panel_key, sort_solutions
+from .fixed_k.fit import FIT_MAX_THREADS, fit_families, fit_panels, fit_starts
+from .panel import _nll_quantum, canonical_solution, deduplicate, has_distinct_rows, panel_key, sort_solutions, whole_class_cut
 from .residual_births import (HALF_BAND, alt_fraction_rule, capped_by_size, exact_hdbscan_labels, half_band_rows,
-                              hardening_fallback, note_band, scalar_log_floored,
+                              hardening_fallback, note_band, sample_sum, scalar_log_floored,
                               soft_candidates)
 
 _TINY = np.finfo(np.float64).tiny
 # Maximum-cut results memoised per block search (an exact memo of a pure function).
 MAX_CUT_CACHE_ENTRIES = 256
+# Assignment-only replacement screening retains at most this many starts and this estimated
+# worst-case compact-membership payload per batch. These are memory bounds, not search budgets.
+_REPLACEMENT_SCORE_BATCH = 32
+_REPLACEMENT_SCORE_BYTES = 32 * 1024 * 1024
+_REPLACEMENT_MEMO_BYTES = 32 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------------------------
@@ -66,56 +74,102 @@ def expected_agreement(likelihoods):
     return similarity
 
 
-def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None):
-    """Up to n_seeds pooled binary rows from HDBSCAN clusters of the samples (distance =
-    max agreement - expected per-site genotype agreement), largest clusters first (ties: HDBSCAN's
-    label order). A consensus within HALF_BAND of 1/2 takes the population ALT fraction (REF at
-    1/2 itself). HDBSCAN: residual_births.exact_hdbscan_labels (the package's algorithm, equal-weight tree edges in
-    a CPU-independent order)."""
+def _note_omission(omissions, cause, count, scope, count_kind="exact", kind="tie_class_at_budget"):
+    if omissions is not None and count:
+        omissions.append(dict(kind=kind, cause=cause, count=int(count), scope=scope, count_kind=count_kind))
+
+
+def _unique_seeds(rows):
+    """The union of binary seeds; byte order labels the set and never truncates it."""
+    unique = {np.asarray(row, dtype=np.int8).tobytes(): np.asarray(row, dtype=np.int64) for row in rows}
+    return [unique[key] for key in sorted(unique)]
+
+
+def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None, omissions=None, landmark_budget=0):
+    """Distinct cluster seeds admitted by whole cluster-size classes, largest first.
+
+    Duplicate consensus rows consume one slot. Complete straddling classes extend to twice the
+    nominal budget; omitted straddling classes and lower-ranked truncation are counted separately.
+    """
     if likelihoods.shape[0] < int(min_cluster_size):
         return []
     likelihoods = np.ascontiguousarray(likelihoods, dtype=np.float64)
-    similarity = expected_agreement(likelihoods)
-    distance = similarity.max() - similarity
-    np.fill_diagonal(distance, 0.0)
-    labels = exact_hdbscan_labels(distance, min_cluster_size=int(min_cluster_size),
-                                  min_samples=int(min_cluster_size), allow_single_cluster=False)
-    clusters = [tuple(np.flatnonzero(labels == label).tolist()) for label in np.unique(labels) if label != -1]
-    # Largest first (a stated preference), in whole size classes while at most n_seeds are kept: a size class that
-    # does not fit is dropped with the smaller ones (release 2.2: no label order cuts inside a class).
-    kept, overflow = capped_by_size(clusters, int(n_seeds))
-    if counter is not None:
-        counter.note("discovery.k1.seed_overflow", inside_tie=overflow)
-    clusters = [np.asarray(members, dtype=np.int64) for members in kept]
+    if landmark_budget and len(likelihoods) > landmark_budget:
+        from .landmarks import seed_groups
+        clusters, _stats = seed_groups(likelihoods, landmark_budget, int(min_cluster_size), omissions)
+    else:
+        similarity = expected_agreement(likelihoods)
+        distance = similarity.max() - similarity
+        del similarity  # No longer needed; do not retain an extra N-by-N array through clustering.
+        np.fill_diagonal(distance, 0.0)
+        labels = exact_hdbscan_labels(distance, min_cluster_size=int(min_cluster_size),
+                                      min_samples=int(min_cluster_size), allow_single_cluster=False)
+        clusters = [np.flatnonzero(labels == label) for label in np.unique(labels) if label != -1]
     alt_fraction = 0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]
-    population = alt_fraction.mean(axis=0)
+    population = sample_sum(alt_fraction) / len(alt_fraction)
     marginal = alt_fraction_rule(population, False)
     note_band(counter, "discovery.k1.half_band", population, 0.5, HALF_BAND)
-    rows = []
-    for members in clusters:
-        mean = alt_fraction[members].mean(axis=0)
-        note_band(counter, "discovery.k1.half_band", mean, 0.5, HALF_BAND)
-        rows.append(half_band_rows(mean, marginal).astype(np.int64))
+    rows, classes, seen = [], [], set()
+    for size in sorted({len(members) for members in clusters}, reverse=True):
+        group = []
+        for members in clusters:
+            if len(members) != size:
+                continue
+            mean = sample_sum(alt_fraction[members]) / len(members)
+            note_band(counter, "discovery.k1.half_band", mean, 0.5, HALF_BAND)
+            group.append(half_band_rows(mean, marginal).astype(np.int64))
+        group = [row for row in _unique_seeds(group) if row.astype(np.int8).tobytes() not in seen]
+        seen.update(row.astype(np.int8).tobytes() for row in group)
+        rows.extend(group)
+        classes.extend([size] * len(group))
+    rows, cut = whole_class_cut(rows, classes, n_seeds, omissions,
+                               cause="k1_cluster_seed", scope="initial cluster-size classes")
+    if counter is not None:
+        counter.note("discovery.k1.seed_overflow", inside_tie=cut)
     return rows
 
 
-def argmax_last_axis(values):
-    """argmax over the last axis with exact ties to the lowest index (the highest under reversed conventions)."""
-    values = np.asarray(values)
-    if not rev("d8a"):
-        return np.argmax(values, axis=-1)
-    return values.shape[-1] - 1 - np.argmax(values[..., ::-1], axis=-1)
+def _dosage_extremes(values, counter=None, kind="discovery.dosage.genotype"):
+    """Lowest/highest genotype indices in the full probability-q winning class.
+
+    For three sorted probabilities a <= b <= c, the winner includes b iff c-b <= q,
+    and includes a iff both adjacent gaps are <= q. This is exactly the central
+    descending chained-class definition, independent of genotype enumeration.
+    The likelihood values themselves are never changed.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    ordered = np.sort(values, axis=-1)
+    gaps = np.diff(ordered, axis=-1)
+    upper_tied = gaps[..., 1] <= HALF_BAND
+    all_tied = upper_tied & (gaps[..., 0] <= HALF_BAND)
+    floor = np.where(all_tied, ordered[..., 0],
+                     np.where(upper_tied, ordered[..., 1], ordered[..., 2]))
+    members = values >= floor[..., None]
+    low = np.argmax(members, axis=-1)
+    high = 2 - np.argmax(members[..., ::-1], axis=-1)
+    if counter is not None:
+        entry = counter.counts.setdefault(kind, dict(decisions=0, inside_tie=0, wide=0, boundary=0))
+        entry["decisions"] += int(low.size)
+        entry["inside_tie"] += int(np.count_nonzero(low != high))
+        entry["boundary"] += int(np.count_nonzero(
+            (gaps != 0.0) & (np.abs(gaps - HALF_BAND) <= BOUNDARY_GUARD * NOISE_MOTION["probability"])))
+        # Three members can span at most 2q, so no winning class reaches the 4q width guard.
+    return low, high
 
 
-def _dosage_seed(likelihoods, sample):
-    """The sample's argmax dosage as a row: dosage 2 -> 1, dosage 1 -> 1 where the population
-    ALT fraction exceeds 1/2 (outside HALF_BAND), else 0."""
-    dosage = argmax_last_axis(likelihoods[sample])
-    population_alt = likelihoods[..., 1].mean(axis=0) * 0.5 + likelihoods[..., 2].mean(axis=0)
-    row = np.zeros(likelihoods.shape[1], dtype=np.int64)
-    row[dosage == 2] = 1
-    row[(dosage == 1) & alt_fraction_rule(population_alt, False)] = 1
-    return row
+def _dosage_families(likelihoods, counter=None, kind="discovery.dosage.genotype"):
+    low, high = _dosage_extremes(likelihoods, counter, kind)
+    return (low,) if np.array_equal(low, high) else (low, high)
+
+
+def _dosage_seeds(likelihoods, samples, counter=None):
+    """Both extremal dosage seeds for every tied decisive sample, deduplicated as a set."""
+    samples = np.asarray(samples, dtype=np.int64)
+    dosages = _dosage_families(likelihoods[samples], counter, "discovery.k1.dosage")
+    population_alt = sample_sum(0.5 * likelihoods[..., 1] + likelihoods[..., 2]) / len(likelihoods)
+    population_row = alt_fraction_rule(population_alt, False)
+    return _unique_seeds(row for dosage in dosages for row in
+                         ((dosage == 2) | ((dosage == 1) & population_row[None, :])))
 
 
 def _most_decisive(likelihoods, observed, sample_quantum):
@@ -140,26 +194,32 @@ def _most_decisive_class(likelihoods, observed, sample_quantum):
     return [int(candidates[i]) for i in range(len(candidates)) if classes.classes[i] == first]
 
 
-def initial_solutions(workspace, likelihoods, active, config, counter=None):
-    """The K = 1 search starts: fitted soft-cluster seeds (of the samples with depth), at most
-    ``data_start_beam_width`` distinct ones in tie-class order of NLL (kind ``nll``)."""
+def initial_solutions(workspace, likelihoods, active, config, counter=None, omissions=None):
+    """K=1 starts from whole cluster-size or fallback decisive-sample classes.
+
+    The fallback is used only if clustering supplies no seed class. If all available cluster seeds
+    are omitted, no unscored population row substitutes for them: the block has no incumbent.
+    """
     seed_likelihoods = likelihoods if np.all(active) else np.ascontiguousarray(likelihoods[active])
     search = config.search
+    omitted = []
     seeds = _soft_cluster_seeds(seed_likelihoods, search.data_seed_count,
-                                search.seed_min_cluster_size, counter)
-    if not seeds:
+                                search.seed_min_cluster_size, counter, omitted, search.seed_landmark_budget)
+    if not seeds and not any("landmark" not in event["cause"] for event in omitted):
         seed_observed = workspace.observed if np.all(active) else workspace.observed[active]
-        # Every sample of the most decisive class (release 2.2: no sample order picks one), while the class has at
-        # most data_seed_count members; otherwise the population's dosage row (alt fraction rule).
         samples = _most_decisive_class(seed_likelihoods, seed_observed, workspace.quanta.sample)
-        if len(samples) <= search.data_seed_count:
-            seeds = [_dosage_seed(seed_likelihoods, sample) for sample in samples]
-        else:
-            population = 0.5 * seed_likelihoods[..., 1].mean(axis=0) + seed_likelihoods[..., 2].mean(axis=0)
-            seeds = [alt_fraction_rule(population, False).astype(np.int64)]
-    fits = fit_starts(workspace, [seed[None, :] for seed in seeds], config.model.max_iterations)
-    solutions = [canonical_solution(fit, workspace) for fit in fits]
-    return class_beam(deduplicate(solutions), search.data_start_beam_width)
+        seeds = _dosage_seeds(seed_likelihoods, samples, counter)
+        seeds, _ = whole_class_cut(seeds, [0] * len(seeds), search.data_seed_count, omitted,
+                                   cause="k1_sample_seed", scope="initial decisive-sample class")
+    if omissions is not None:
+        omissions.extend(omitted)
+    families = fit_families(workspace, [seed[None, :] for seed in seeds], config.model.max_iterations)
+    solutions = deduplicate(canonical_solution(fit, workspace) for family in families for fit in family)
+    ordered = sort_solutions(solutions, workspace.quanta)
+    classes = tie_classes([solution.nll for solution in ordered], workspace.quanta.nll).classes
+    kept, _ = whole_class_cut(ordered, classes.tolist(), search.data_start_beam_width, omissions,
+                              cause="k1_fit_beam", scope="initial fitted NLL classes")
+    return tuple(kept)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -453,10 +513,10 @@ def gauge_starts(solution, likelihoods, partitions, quantum):
             if len(resolving) == 0:
                 continue
             dosage = haplotypes[first[resolving], site] + haplotypes[second[resolving], site]
-            current = -float(np.sum(scalar_log_floored(
-                np.ascontiguousarray(likelihoods[resolving, site, dosage], dtype=np.float64), _TINY)))
-            opposite = -float(np.sum(scalar_log_floored(
-                np.ascontiguousarray(likelihoods[resolving, site, 2 - dosage], dtype=np.float64), _TINY)))
+            current = -math.fsum(scalar_log_floored(
+                np.ascontiguousarray(likelihoods[resolving, site, dosage], dtype=np.float64), _TINY).tolist())
+            opposite = -math.fsum(scalar_log_floored(
+                np.ascontiguousarray(likelihoods[resolving, site, 2 - dosage], dtype=np.float64), _TINY).tolist())
             if opposite < current - quantum:
                 sitewise[:, site] = 1 - sitewise[:, site]
         key = panel_key(sitewise)
@@ -478,46 +538,68 @@ def gauge_starts(solution, likelihoods, partitions, quantum):
 @dataclass(frozen=True)
 class GrowthInputs:
     """Evidence-only inputs of data births (one block): the sitewise genotype-oracle NLL and the
-    decisiveness of every sample over its observed sites, argmax dosages, a dosage seed row per
-    sample (dosage 2 -> 1; dosage 1 or unobserved -> 1 where the observed population ALT
+    decisiveness of every sample over its observed sites, low/high winning-class dosage
+    vectors and their seed rows (dosage 2 -> 1; dosage 1 or unobserved -> 1 where the observed population ALT
     fraction exceeds 1/2 outside HALF_BAND), the samples with depth, and each sample's number of
     observed sites."""
 
     oracle_nll: np.ndarray
     decisiveness: np.ndarray
-    dosage: np.ndarray
-    seed_rows: np.ndarray
+    dosages: tuple[np.ndarray, ...]
+    seed_rows: tuple[np.ndarray, ...]
     active: np.ndarray
     observed_sites: np.ndarray
 
 
-def growth_inputs(likelihoods, observed) -> GrowthInputs:
+def growth_inputs(likelihoods, observed, counter=None) -> GrowthInputs:
     maximum = np.max(likelihoods, axis=2)
-    dosage = argmax_last_axis(likelihoods)
+    dosages = _dosage_families(likelihoods, counter)
     active = np.any(observed, axis=1)
     oracle_nll = -np.sum(np.where(observed, scalar_log_floored(
         np.ascontiguousarray(maximum, dtype=np.float64), _TINY), 0.0), axis=1)
     decisiveness = np.sum(np.where(observed, maximum, 0.0), axis=1)
     alt_fraction = 0.5 * likelihoods[..., 1] + likelihoods[..., 2]
     observed_count = np.sum(observed, axis=0)
-    population_alt = np.divide(np.sum(np.where(observed, alt_fraction, 0.0), axis=0),
+    population_alt = np.divide(sample_sum(np.where(observed, alt_fraction, 0.0)),
                                observed_count, out=np.full(likelihoods.shape[1], 0.5),
                                where=observed_count > 0)
-    seed_rows = np.zeros_like(dosage)
-    seed_rows[observed & (dosage == 2)] = 1
-    ambiguous = (~observed) | (dosage == 1)
-    seed_rows[ambiguous & alt_fraction_rule(population_alt, False)[None, :]] = 1
+    seed_rows = []
+    population_row = alt_fraction_rule(population_alt, False)[None, :]
+    for dosage in dosages:
+        rows = np.zeros_like(dosage)
+        rows[observed & (dosage == 2)] = 1
+        ambiguous = (~observed) | (dosage == 1)
+        rows[ambiguous & population_row] = 1
+        seed_rows.append(rows)
     observed_sites = np.sum(observed, axis=1).astype(np.int64)
-    return GrowthInputs(oracle_nll, decisiveness, dosage, seed_rows, active, observed_sites)
+    return GrowthInputs(oracle_nll, decisiveness, dosages, tuple(seed_rows), active, observed_sites)
+
+
+def _data_seed_rows(growth, sample, parent_rows):
+    """Union low/high direct and subtraction seeds before the whole-class budget.
+
+    Missing-cell genotype ties matter to subtraction starts even when the direct
+    seed at that cell is fixed by the unchanged population hardening rule.
+    """
+    # The same integer subtraction/clip for all parent rows in one array operation;
+    # retain dosage-then-parent order before the existing exact union.
+    seeds = [row for dosage in growth.dosages
+             for row in np.clip(dosage[sample][None, :] - parent_rows, 0, 1)]
+    seeds.extend(rows[sample] for rows in growth.seed_rows)
+    return _unique_seeds(seeds)
 
 
 @dataclass(frozen=True)
 class DataBirths:
-    """K + 1 children of one data-birth call; ``tie_cut``: a tie group was cut at the hard cap
-    (reported as the search limit "data_birth_tie_budget")."""
+    """K+1 data-birth children; tie_cut marks a wholly omitted class at the hard cap.
+
+    omitted counts that class's distinct starts (search limit data_birth_tie_budget).
+    """
 
     children: tuple
     tie_cut: bool = False
+    omitted: int = 0
+    omissions: tuple = ()
 
 
 def data_birth_order(excess, observed_sites, samples, quantum):
@@ -545,32 +627,37 @@ def data_birth_order(excess, observed_sites, samples, quantum):
     return order, groups, classes
 
 
-def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int):
-    """(groups of start rows, cut) of data births: the starts of the samples in ``order`` collected
-    group by group (``groups[i]`` is the tie-group id of ``order[i]``) until at least ``budget``
-    starts are collected; the last group is completed unless the total would exceed ``hard_cap``
-    (then it is cut in its order: ``cut``). ``seeds_of(sample)`` yields the sample's novel starts
-    (it skips rows already proposed)."""
-    collected: list[list] = []
-    total = 0
-    position = 0
-    cut = False
-    while position < len(order) and total < budget and not cut:
+def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int, omissions=None):
+    """Union each excess/coverage class's distinct starts before its hard-cap decision.
+
+    The attempt budget is checked between groups. A class crossing the hard cap is omitted whole;
+    no sample, founder-row or seed enumeration order can select a privileged prefix.
+    """
+    collected, seen = [], set()
+    total = position = ranked = 0
+    cut = stopped = False
+    while position < len(order):
         group_id = groups[position]
-        group = []
+        unique = {}
         while position < len(order) and groups[position] == group_id:
-            sample = order[position]
+            for row in seeds_of(order[position]):
+                key = panel_key(row)
+                if key not in seen:
+                    unique.setdefault(key, row if not stopped else None)
             position += 1
-            if cut:
-                continue
-            for row in seeds_of(sample):
-                if total + len(group) >= hard_cap:
-                    cut = True
-                    break
-                group.append(row)
-        if group:
-            collected.append(group)
-            total += len(group)
+        seen.update(unique)
+        if stopped or (total >= budget and total > 0):
+            stopped = True
+            ranked += len(unique)
+        elif total + len(unique) > hard_cap:
+            cut = stopped = True
+            _note_omission(omissions, "data_birth_tie_class_at_budget", len(unique),
+                           "excess/coverage seed class")
+        elif unique:
+            collected.append([unique[key] for key in sorted(unique)])
+            total += len(unique)
+    _note_omission(omissions, "data_birth_ranked_truncation", ranked,
+                   "lower excess/coverage seed classes", kind="ranked_truncation")
     return collected, cut
 
 
@@ -578,77 +665,92 @@ def data_births(workspace, solution, growth: GrowthInputs, max_iterations, searc
                 counter=None) -> DataBirths:
     """K + 1 children of a panel from its most misfit samples (``search``: SearchConfig).
 
-    The parent is first refitted (unless the workspace certified it a fixed point). Samples
-    with depth are ranked by excess NLL over their genotype oracle in tie classes (kind
+    The parent is first refitted to its complete schedule family (unless the workspace
+    certified both schedules fixed). Parent/sample pairs with depth are ranked together by excess NLL over their genotype oracle in tie classes (kind
     ``sample``; an excess within the quantum of an all-unknown sample's exact value 2 lambda n_obs
     is that value, so mathematically equal excesses are equal), then observed sites, then
-    canonical sample order (data_birth_order). Each sample contributes K subtraction seeds
-    clip(dosage - row, 0, 1) and its dosage seed row. Tie groups are consumed whole: novel seeds
+    canonical sample order (data_birth_order). Each sample contributes both winning-class extremal dosage families: K subtraction seeds
+    clip(dosage - row, 0, 1) and a direct dosage seed row for each, deduplicated before admission. Tie groups are consumed whole: novel seeds
     are collected group by group until the attempt budget (search.data_birth_attempts(K)) is
     reached, then fitted group by group until search.data_birth_children(K) distinct complete
-    children exist or the budget is spent, both tested only at group boundaries; a group is cut
-    (canonical order) only at search.data_birth_tie_budget_factor x the budget (``tie_cut``). If no
-    child is complete, the assignment-only fits of the fitted starts with distinct rows are
-    returned instead (deduplicated, at most K + 1): the requested K without moving an unsupported
-    row.
+    children exist or the budget is spent, both tested only at group boundaries. A group crossing
+    search.data_birth_tie_budget_factor x the budget is omitted whole (``tie_cut``). If no child is
+    complete, distinct assignment-only fits are returned by whole NLL classes at width K+1:
+    the requested K without moving an unsupported row.
     """
     claim_threads(max_threads=FIT_MAX_THREADS)
     if solution.fixed_point and workspace.certifies_fixed_point(solution.haplotypes):
-        parent = solution
+        parents = (solution,)
     else:
-        parent = canonical_solution(fit_one(workspace, solution.haplotypes, max_iterations),
-                                    workspace)
+        family, = fit_families(workspace, [solution.haplotypes], max_iterations)
+        distinct = {}
+        for endpoint in family:
+            parent = canonical_solution(endpoint, workspace)
+            distinct.setdefault(parent.key, parent)
+        parents = tuple(distinct[key] for key in sorted(distinct))
+    parent_k = solution.k
     quantum = workspace.quanta.sample
-    excess = np.maximum(parent.per_sample_cost - growth.oracle_nll, 0.0)
-    # An all-unknown sample's excess is exactly 2 lambda n_obs (a grid point by construction): snap
-    # values within the quantum to it, so equal mathematics gives equal keys (2.0: 1-2 ulps apart).
-    unknown_excess = 2.0 * workspace.penalty * growth.observed_sites.astype(np.float64)
-    snapped = np.abs(excess - unknown_excess) <= quantum
-    excess = np.where(snapped, unknown_excess, excess)
-    order, groups, classes = data_birth_order(excess, growth.observed_sites,
-                                              np.flatnonzero(growth.active), quantum)
-    target = search.data_birth_children(parent.k)
-    budget = search.data_birth_attempts(parent.k)
+    # Rank parent/sample pairs together and spend one budget for the complete parent family.
+    excess = np.concatenate([np.maximum(parent.per_sample_cost - growth.oracle_nll, 0.0)
+                             for parent in parents])
+    observed_sites = np.tile(growth.observed_sites, len(parents))
+    active = np.tile(growth.active, len(parents))
+    unknown_excess = 2.0 * workspace.penalty * observed_sites.astype(np.float64)
+    excess = np.where(np.abs(excess - unknown_excess) <= quantum, unknown_excess, excess)
+    order, groups, classes = data_birth_order(excess, observed_sites, np.flatnonzero(active), quantum)
+    target = search.data_birth_children(parent_k)
+    budget = search.data_birth_attempts(parent_k)
     hard_cap = budget * max(1, int(search.data_birth_tie_budget_factor))
-    seen = {np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in parent.haplotypes}
+    seen = [{np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in parent.haplotypes}
+            for parent in parents]
 
-    def seeds_of(sample):
-        """The sample's novel K + 1 starts: K subtraction seeds, then its dosage seed row."""
-        seeds = [np.clip(growth.dosage[sample] - parent.haplotypes[index], 0, 1)
-                 for index in range(parent.k)]
-        seeds.append(growth.seed_rows[sample])
-        for seed in seeds:
+    def seeds_of(pair):
+        parent_index, sample = divmod(pair, len(growth.active))
+        parent = parents[parent_index]
+        for seed in _data_seed_rows(growth, sample, parent.haplotypes):
             row = np.ascontiguousarray(seed, dtype=np.int64)
             key = row.astype(np.int8).tobytes()
-            if key in seen:
+            if key in seen[parent_index]:
                 continue
-            seen.add(key)
+            seen[parent_index].add(key)
             yield np.vstack([parent.haplotypes, row[None, :]])
 
-    collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap)
+    omissions = []
+    collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap, omissions)
     children = []
     child_keys: set[bytes] = set()
     fitted = []
-    tie_cut = False
     for number, group in enumerate(collected):
-        for fit in fit_starts(workspace, group, max_iterations):
-            child = canonical_solution(fit, workspace)
-            if has_distinct_rows(child):
-                children.append(child)
-                child_keys.add(child.key)
+        for family in fit_families(workspace, group, max_iterations):
+            for fit in family:
+                child = canonical_solution(fit, workspace)
+                if has_distinct_rows(child):
+                    children.append(child)
+                    child_keys.add(child.key)
         fitted.extend(group)
-        if cut and number == len(collected) - 1:
-            tie_cut = True
         if len(child_keys) >= target or len(fitted) >= budget:
             break
+    tie_cut = cut and len(child_keys) < target and len(fitted) < budget
+    if not tie_cut:
+        # The complete-child target can stop before the planned attempt boundary. Those later
+        # classes are ordinary rank truncations, including a previously planned straddling class.
+        for item in omissions:
+            if item["kind"] == "tie_class_at_budget":
+                item.update(kind="ranked_truncation", cause="data_birth_ranked_truncation")
+    _note_omission(omissions, "data_birth_ranked_truncation",
+                   sum(len(group) for group in collected) - len(fitted),
+                   "seed classes below complete-child target", kind="ranked_truncation")
     if counter is not None and classes is not None:
         counter.note("discovery.data_birth", inside_tie=tie_cut, wide=classes.wide_classes,
                      boundary=len(classes.boundary_gaps))
     if children:
-        return DataBirths(tuple(children), tie_cut)
+        return DataBirths(tuple(children), tie_cut, sum(item["count"] for item in omissions), tuple(omissions))
     fallbacks = [canonical_solution(fit, workspace) for fit in fit_starts(workspace, fitted, 0)]
-    return DataBirths(deduplicate([child for child in fallbacks if has_distinct_rows(child)],
-                                  parent.k + 1), tie_cut)
+    ordered = list(deduplicate(child for child in fallbacks if has_distinct_rows(child)))
+    classes = tie_classes([child.nll for child in ordered], workspace.quanta.nll).classes
+    kept, cut = whole_class_cut(ordered, classes.tolist(), parent_k + 1, omissions,
+                                cause="data_birth_fallback", scope="assignment-only fallback NLL classes")
+    return DataBirths(tuple(kept), tie_cut, sum(item["count"] for item in omissions), tuple(omissions))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -674,6 +776,7 @@ class SoftBirths:
     children: tuple
     emitted: int
     omitted: int
+    omissions: tuple = ()
 
 
 def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache, counter=None) -> SoftBirths:
@@ -683,30 +786,133 @@ def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache
     cached = cache.get(key)
     if cached is not None:
         return cached
+    omissions = []
     soft = soft_candidates(solution.haplotypes, residual_inputs, config.residual_births, counter,
-                           limit=config.search.max_proposals_per_expansion)
+                           limit=config.search.max_proposals_per_expansion, omissions=omissions)
     if len(soft) == 0:
-        result = SoftBirths((), 0, 0)
+        result = SoftBirths((), 0, 0, tuple(omissions))
     else:
         existing = {np.asarray(row, dtype=np.int8).tobytes() for row in solution.haplotypes}
         starts = [np.vstack((solution.haplotypes, row[None, :]))
                   for row in _hardened_rows(soft, likelihoods, counter)
                   if np.asarray(row, dtype=np.int8).tobytes() not in existing]
         limit = config.search.max_proposals_per_expansion
-        synchronized, refitted = fit_panels(workspace, starts[:limit], config.model.max_iterations)
+        synchronized, refitted = fit_panels(workspace, starts, config.model.max_iterations)
         children = deduplicate((*synchronized, *refitted))
         result = SoftBirths(tuple(child for child in children if child.k == solution.k + 1),
-                            len(starts), max(0, len(starts) - limit))
+                            len(starts), 0, tuple(omissions))
     cache[key] = result
     return result
 
 
-def replacements(workspace, parent, births, config, limit=None):
+def _replacement_score_entry_bytes(key, value):
+    # Count the packed-state key and float, conservatively including the two integers even
+    # when Python interns them. OrderedDict's own table/node storage is counted separately.
+    return sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key) + sys.getsizeof(value)
+
+
+def _remember_replacement_score(workspace, key, value):
+    cache = workspace.replacement_score_cache
+    if key in cache:
+        cache.move_to_end(key)
+        return
+    value = float(value)
+    cache[key] = value
+    workspace.replacement_score_payload_bytes += _replacement_score_entry_bytes(key, value)
+    stats = workspace.replacement_ranking_counts
+    while cache and workspace.replacement_score_payload_bytes + sys.getsizeof(cache) > _REPLACEMENT_MEMO_BYTES:
+        old_key, old_value = cache.popitem(last=False)
+        workspace.replacement_score_payload_bytes -= _replacement_score_entry_bytes(old_key, old_value)
+        stats["score_cache_evictions"] += 1
+    if not cache:
+        cache.clear()
+    stats["max_score_cache_bytes"] = max(stats["max_score_cache_bytes"],
+        workspace.replacement_score_payload_bytes + sys.getsizeof(cache))
+
+
+def _replacement_assignment_scores(workspace, descriptors):
+    """Exact C(H) for deletion starts, using the assignment-only fitter in bounded batches.
+
+    Evidence and pattern tables are shared with the search workspace. Temporary fit/assignment
+    caches are isolated and cleared after each batch, so rejected starts retain no membership in
+    the search workspace. Existing search assignment records supply exact cache hits. Only the
+    scalar scores are memoized across replacement rounds under exact packed panel keys.
+    The memo retains at most 32 MiB of estimated Python object storage per block; eviction
+    changes only work, never admission. Rejected starts retain no tied-state membership.
+    """
+    scores = np.empty(len(descriptors), dtype=np.float64)
+    if not descriptors:
+        return scores
+    stats = getattr(workspace, "replacement_ranking_counts", None)
+    if stats is None:
+        stats = workspace.replacement_ranking_counts = dict(
+            starts=0, assignment_evaluations=0, assignment_cache_hits=0, batches=0,
+            max_batch_size=0, max_batch_payload_bytes=0, retained_starts=0,
+            score_cache_hits=0, score_cache_evictions=0, max_score_cache_bytes=0)
+    if not hasattr(workspace, "replacement_score_cache"):
+        workspace.replacement_score_cache = OrderedDict()
+        workspace.replacement_score_payload_bytes = 0
+    score_cache = workspace.replacement_score_cache
+    stats["starts"] += len(descriptors)
+    k = descriptors[0][0].k - 1
+    n, length = workspace.observed.shape
+    states = k * (k + 1) // 2 + k + 1
+    # Worst case: every state retained for every sample, plus offsets, A/cost/unknown arrays,
+    # and the int64 panel. Dense A-step masks are separately bounded by the fitter
+    # and shared evidence/pattern arrays are outside this compact-membership estimate.
+    per_start = 4 * n * states + 48 * n + 8 * k * length
+    batch_size = max(1, min(_REPLACEMENT_SCORE_BATCH, _REPLACEMENT_SCORE_BYTES // max(1, per_start)))
+    scoring = copy(workspace)
+    scoring.assignments = OrderedDict()
+    scoring.fits = OrderedDict()
+    scoring.transitions = OrderedDict()
+    scoring.fixed_point_keys = set()
+    pending, indices, pending_keys = [], [], []
+
+    def finish_batch():
+        if not pending:
+            return
+        records = fit_starts(scoring, pending, 0)
+        for index, key, record in zip(indices, pending_keys, records):
+            scores[index] = record[5]
+            _remember_replacement_score(workspace, key, record[5])
+        stats["assignment_evaluations"] += len(pending)
+        stats["batches"] += 1
+        stats["max_batch_size"] = max(stats["max_batch_size"], len(pending))
+        stats["max_batch_payload_bytes"] = max(stats["max_batch_payload_bytes"], len(pending) * per_start)
+        scoring.assignments.clear()
+        scoring.fits.clear()
+        pending.clear()
+        indices.clear()
+        pending_keys.clear()
+
+    for index, (birth, deleted) in enumerate(descriptors):
+        start = np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0))
+        key = workspace.state_key(start)
+        record = workspace.cached_assignment(key)
+        if record is not None:
+            scores[index] = record[3]
+            stats["assignment_cache_hits"] += 1
+            _remember_replacement_score(workspace, key, record[3])
+        elif key in score_cache:
+            scores[index] = score_cache[key]
+            score_cache.move_to_end(key)
+            stats["score_cache_hits"] += 1
+        else:
+            pending.append(start)
+            indices.append(index)
+            pending_keys.append(key)
+            if len(pending) == batch_size:
+                finish_batch()
+    finish_batch()
+    return scores
+
+
+def replacements(workspace, parent, births, config, limit=None, omissions=None):
     """Same-K starts: every K + 1 birth with any one row deleted, distinct by the remaining rows, taken by whole
     NLL tie classes of the births (best first) while at most ``limit`` (default ``max_replacement_children``)
-    starts are taken; the best class is always taken when it has at most 2 x limit starts; a class that does not fit
-    ends the list (release 2.2: no content-key order or row index cuts inside a class, so the set of starts does not
-    depend on any order). Returns (children, omitted starts)."""
+    starts are taken. Any straddling class is admitted through 2 x limit starts. A larger class is omitted
+    whole, and lower-ranked classes are counted separately. Returns (children, all omitted starts)."""
     width = parent.sites
     limit = config.search.max_replacement_children if limit is None else int(limit)
     pool = [birth for birth in deduplicate(births) if birth.k == parent.k + 1]
@@ -718,9 +924,7 @@ def replacements(workspace, parent, births, config, limit=None):
     for index in classes.order:
         by_class.setdefault(int(classes.classes[int(index)]), []).append(pool[int(index)])
     seen: set[bytes] = set()
-    descriptors = []
-    omitted = 0
-    stopped = False
+    descriptors, descriptor_classes = [], []
     for cls in sorted(by_class):
         unit, unit_keys = [], set()
         for birth in by_class[cls]:
@@ -731,13 +935,13 @@ def replacements(workspace, parent, births, config, limit=None):
                     continue
                 unit_keys.add(key)
                 unit.append((birth, deleted))
-        if not stopped and (len(descriptors) + len(unit) <= limit or (not descriptors and len(unit) <= 2 * limit)):
-            descriptors.extend(unit)
-            seen |= unit_keys
-        else:
-            stopped = True
-            omitted += len(unit)
-            seen |= unit_keys
+        descriptors.extend(unit)
+        descriptor_classes.extend([cls] * len(unit))
+        seen |= unit_keys
+    retained, _ = whole_class_cut(descriptors, descriptor_classes, limit, omissions,
+                                  cause="replacement", scope=f"K={parent.k} birth NLL classes")
+    omitted = len(descriptors) - len(retained)
+    descriptors = retained
     starts = [np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0)) for birth, deleted in descriptors]
     synchronized, refitted = fit_panels(workspace, starts, config.model.max_iterations)
     children = deduplicate((*synchronized, *refitted))
@@ -753,24 +957,29 @@ class OrdinaryMoves:
     births: tuple
     omitted: int
     limits: tuple
+    omissions: tuple = ()
 
 
 def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: MaximumCuts,
                    config, counter=None) -> OrdinaryMoves:
-    """Deaths and gauge rewires (interleaved one each, each kind in key order, at most
-    ``max_proposals_per_expansion`` starts), fitted, plus data births below the ceiling."""
+    """Whole death and gauge proposal families, in that search-priority order, then births.
+
+    Admit whole families through twice max_proposals_per_expansion; never choose a byte prefix.
+    """
     search = config.search
     buckets = {-1: [], 0: []}
     limits = []
+    omissions = []
     if solution.k > 1:
         buckets[-1].extend(death_starts(solution))
         weights = assignment_graph(solution.assignments, solution.k)
-        # Every maximum cut while there are at most 4 x max_cut_ties of them, else none (release 2.2: no code order
-        # picks among equal cuts; the overflow is reported as gauge_max_cut_ties_truncated).
+        # The historical effective budget is 4 x max_cut_ties. Its single tied class may extend
+        # through twice that effective budget; probe one further cut to detect whole-class omission.
         cap = 4 * search.max_cut_ties
-        partitions = cuts.partitions(weights, cap + 1)
-        if len(partitions) > cap:
-            limits.append("gauge_max_cut_ties_truncated")
+        partitions = cuts.partitions(weights, 2 * cap + 1)
+        if len(partitions) > 2 * cap:
+            _note_omission(omissions, "gauge_tie_class_at_budget", len(partitions),
+                           "gauge maximum-cut class", "lower_bound")
             partitions = ()
         buckets[0].extend(gauge_starts(solution, likelihoods, partitions, workspace.quanta.nll))
     unique = {}
@@ -781,30 +990,19 @@ def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: Maxi
             by_key.setdefault((value.shape, value.tobytes()), value)
         unique[offset] = [by_key[key] for key in sorted(by_key, reverse=rev("d9p"))]
     total = sum(len(starts) for starts in unique.values())
-    retained = []
-    index = 0
-    while len(retained) < min(total, search.max_proposals_per_expansion):
-        added = False
-        for offset in (-1, 0):
-            if index < len(unique[offset]):
-                retained.append(unique[offset][index])
-                added = True
-                if len(retained) == search.max_proposals_per_expansion:
-                    break
-        if not added:
-            break
-        index += 1
+    ordered = [start for offset in (-1, 0) for start in unique[offset]]
+    classes = [offset for offset in (-1, 0) for start in unique[offset]]
+    retained, _ = whole_class_cut(ordered, classes, search.max_proposals_per_expansion, omissions,
+                                  cause="proposal", scope="death/gauge proposal families")
     omitted = total - len(retained)
-    if omitted:
-        limits.append("proposal_budget")
     synchronized, refitted = fit_panels(workspace, retained, config.model.max_iterations)
     children = list(deduplicate((*synchronized, *refitted)))
     if solution.k < ceiling:
         births = data_births(workspace, solution, growth, config.model.max_iterations, search,
                              counter=counter)
-        if births.tie_cut:
-            limits.append("data_birth_tie_budget")
+        omissions.extend(births.omissions)
         children.extend(child for child in births.children if child.k == solution.k + 1)
     children = deduplicate(children)
     births = tuple(child for child in children if child.k == solution.k + 1)
-    return OrdinaryMoves(children, births, omitted, tuple(dict.fromkeys(limits)))
+    limits.extend(item["cause"] for item in omissions if item.get("kind") != "ranked_truncation")
+    return OrdinaryMoves(children, births, omitted, tuple(dict.fromkeys(limits)), tuple(omissions))

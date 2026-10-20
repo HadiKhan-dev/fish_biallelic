@@ -30,11 +30,15 @@ ROUNDS = records.ROUNDS
 
 def _tied_panels(block) -> tuple:
     """Release 2.2: discovery's NLL-tied alternative latent panels of a block (DiscoveredBlock
-    ``tied_panels``, stacked rows split by ``tied_panel_k``; None in 2.1 records), candidates in every
-    round on the same footing as the latent panel."""
+    ``tied_panels`` tuple after decoding; stacked rows split by ``tied_panel_k`` in older fixtures).
+    These enter every round on the same footing as the latent panel."""
     rows = getattr(block, "tied_panels", None)
     sizes = getattr(block, "tied_panel_k", None)
-    if rows is None or sizes is None or not len(sizes):
+    if rows is None:
+        return ()
+    if isinstance(rows, (tuple, list)):
+        return tuple(np.ascontiguousarray(panel, dtype=np.int64) for panel in rows if len(panel))
+    if sizes is None or not len(sizes):
         return ()
     bounds = np.cumsum(np.asarray(sizes, dtype=np.int64))[:-1]
     return tuple(np.ascontiguousarray(panel, dtype=np.int64)
@@ -42,9 +46,15 @@ def _tied_panels(block) -> tuple:
 
 
 def _block_tasks(discovered, evidence, genetic_map):
-    """Per informative block (in block order): its task fields shared by every round."""
+    """Per block with an incumbent (in block order): task fields shared by every round."""
     tasks = []
-    for index, block in enumerate(discovered):
+    for block in discovered:
+        # No incumbent exists when every admissible initial class was omitted. Like an
+        # uninformative block, it supplies no local panel; the discovery record retains its
+        # unresolved/omission diagnostics. Incomplete searches with an incumbent stay eligible.
+        if block is None or block.latent.shape[0] == 0:
+            continue
+        index = len(tasks)
         kept = block.kept
         positions = block.positions[kept]
         tasks.append(dict(
@@ -96,7 +106,7 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
         print(f"[Local selection] {contig}: resumed all rounds", flush=True)
         return records.load_panels(file, ROUNDS[-1])
     evidence = (evidence_records.load(file) if evidence is None else evidence).founder_view()
-    discovered = [block for block in discovery_records.load(file) if block is not None]
+    discovered = discovery_records.load(file)
     shared = _block_tasks(discovered, evidence, genetic_map)
     del discovered
     # Earlier rounds' calls are candidates of every later round; the last completed round's
@@ -117,7 +127,7 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
             saved = scope.load("proposals")
             if saved is None:
                 if assembly_evidence is None:
-                    assembly_evidence = AssemblyEvidence.from_contig(evidence, evidence_identity)
+                    assembly_evidence = AssemblyEvidence.from_record(file, evidence)
                 print(f"[Local selection] {contig}: assembling the selected context through "
                       f"L{level}", flush=True)
                 result = assemble(AssemblyInputs(tuple(panels), assembly_evidence, genetic_map),

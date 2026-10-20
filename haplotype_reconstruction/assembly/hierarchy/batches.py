@@ -35,10 +35,13 @@ def component_sites(component: FounderComponent, prepared) -> tuple[np.ndarray, 
     return sites, usable
 
 
-def informative_sites(component: FounderComponent, prepared, max_sites: int) -> np.ndarray:
+def informative_sites(component: FounderComponent, prepared, max_sites: int,
+                      usable_mask=None) -> np.ndarray:
     """Contig site indices (int64, ascending) at which a sample counts as informative for the
     component: its usable linking-proxy sites."""
     sites, usable = component_sites(component, prepared)
+    if usable_mask is not None:
+        usable &= usable_mask
     proxy = proxy_from_usable(usable, max_sites)
     return np.ascontiguousarray(sites[proxy[usable[proxy]]])
 
@@ -62,11 +65,13 @@ def _informative_samples(neutral, site_sets):
     return result
 
 
-def informative_masks(components, prepared, neutral: np.ndarray, max_sites: int) -> np.ndarray:
+def informative_masks(components, prepared, neutral: np.ndarray, max_sites: int,
+                      *, usable_masks=None) -> np.ndarray:
     """bool[n, N] informative samples of every component (float64 neutral evidence)."""
     site_sets = List.empty_list(numba.types.int64[::1])
-    for component in components:
-        site_sets.append(informative_sites(component, prepared, max_sites))
+    for index, component in enumerate(components):
+        shared = None if usable_masks is None else usable_masks[index]
+        site_sets.append(informative_sites(component, prepared, max_sites, shared))
     return _informative_samples(neutral, site_sets)
 
 
@@ -117,10 +122,11 @@ def symmetric_ranges(breaks, batch_size: int) -> list:
 
 
 def partition(components, prepared, neutral, *, batch_size: int, min_informative: int,
-              max_sites: int) -> LevelPartition:
+              max_sites: int, masks=None) -> LevelPartition:
     """Mark phase breaks and cut the components into batches (see the module docstring)."""
     components = list(components)
-    masks = informative_masks(components, prepared, neutral, max_sites)
+    if masks is None:
+        masks = informative_masks(components, prepared, neutral, max_sites)
     joint = np.zeros(max(0, len(components) - 1), dtype=np.int64)
     for boundary in range(len(components) - 1):
         left, right = components[boundary], components[boundary + 1]

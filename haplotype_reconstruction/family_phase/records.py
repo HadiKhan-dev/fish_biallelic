@@ -9,6 +9,8 @@ run ``family_phase``       the per-contig FamilyPhaseSummary rows
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -41,8 +43,9 @@ class FamilyPhaseDiagnostics:
     polished frame differs from the family MAP frame; frame_repair: root-frame decisions (masks dropped).
     map_conflicts: Mendelian-conflict diagnostic, (parent sample, bp position) of every site where the parent's best
     genotype leaves a child's allele mistransmitted in the MAP (a root's best summed genotype).
-    map_two_schedules (release 2.2): the two-schedule estimator's record (J of the canonical and mirrored end points,
-    which was the base, clusters, transplanted and tied transplants, released J); map_sweeps / map_accepted /
+    map_two_schedules (legacy field name, release 2.3): pedigree/data coordinate-order diagnostics, four initial
+    endpoint scores (both directions and schedules), every bounded continuation and exact-J retained release,
+    evaluated-difference projection, and display phase-break witnesses; map_sweeps / map_accepted /
     map_objective describe the final ascent.
     (Release 2.1; 2.0 recorded belief-propagation ``iterations`` and ``residuals`` instead of the map_* fields:
     such payloads decode with map_sweeps = iterations and empty map_accepted / map_objective / map_conflicts.)"""
@@ -148,6 +151,10 @@ def stage_identity(file, edges, config, chromosome_map) -> dict:
         "evidence": file.info(evidence_records.EVIDENCE).identity,
         "edges": edges.identity,
         "genetic_map": json_digest(chromosome_map.identity()),
+        "compound_schedule": os.environ.get("HAPLOTYPES_COMPOUND_SCHEDULE", "coloured"),
+        "cavity_mode": os.environ.get("HAPLOTYPES_CAVITY_MODE", "counts"),
+        "family_work_bound": int(os.environ.get("HAPLOTYPES_FAMILY_WORK_BOUND", "0")),
+        "compound_work_bound": int(os.environ.get("HAPLOTYPES_COMPOUND_WORK_BOUND", "0")),
     })
 
 

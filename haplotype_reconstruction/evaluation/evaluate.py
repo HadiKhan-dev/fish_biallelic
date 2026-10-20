@@ -33,10 +33,9 @@ PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
 # correct-genotype heterozygotes (wrong/uncalled ones bridged).
 LONG_SWITCH_RUNS = (5, 20)
 LONG_SWITCH_COLUMNS = tuple(f"long_phase_switches_min{runs}" for runs in LONG_SWITCH_RUNS)
-# Released phase sets (release 2.2): component-aligned allele errors per released phase set (family phase's
-# frame_undetermined breaks components where the displayed phase is undetermined), the number of phase sets with
-# at least two called heterozygotes, called alleles at undetermined sites, and the N50 (bp) of the sets' spans.
-# Gate Q of 2.2 is judged on these together: more breaks lower the errors but also the N50.
+# Exported phase sets (release 2.3): split only at components and explicit phase_breaks. Undetermined cells
+# contribute unordered errors and do not split the surrounding PS. Report qualifying sets (>=2 phased called
+# heterozygotes), undetermined called alleles and N50 of the sets' spans together with aligned allele errors.
 PHASE_SET_COLUMNS = ("ps_aligned_allele_errors", "phase_sets", "undetermined_called_alleles")
 # Reported-interval map columns, written after every earlier column.
 REPORTED_INTERVAL_COLUMNS = ("reported_intervals_containing_true_crossover",
@@ -288,16 +287,18 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
             values = long_switch_counts(calls, true_alleles, component_ids,
                                         np.asarray(LONG_SWITCH_RUNS, dtype=np.int64))
             added.update(zip(LONG_SWITCH_COLUMNS, map(int, values)))
-            undetermined = phase_records.load_arrays(file, ("frame_undetermined",), nthreads=nthreads).get(
-                "frame_undetermined")
+            metadata = phase_records.load_arrays(
+                file, ("sample_ids", "frame_undetermined", "phase_breaks", "phase_break_offsets"), nthreads=nthreads)
+            index = {name: row for row, name in enumerate(metadata["sample_ids"])}
+            order = [index[name] for name in names]
+            undetermined = metadata.get("frame_undetermined")
             if undetermined is not None:
-                undetermined = (np.asarray(undetermined) & 2) != 0          # bit 1: displayed frame
-                order = tuple(phase_records.load_arrays(file, ("sample_ids",), nthreads=nthreads)["sample_ids"])
-                if order != tuple(names):          # canonical record order -> the truth's order (as the calls)
-                    index = {name: row for row, name in enumerate(order)}
-                    undetermined = undetermined[[index[name] for name in names]]
+                undetermined = (np.asarray(undetermined)[order] & 2) != 0  # bit 1: displayed frame
+            breaks = metadata.get("phase_breaks")
+            offsets = metadata.get("phase_break_offsets")
+            sample_breaks = None if breaks is None else [breaks[offsets[i]:offsets[i + 1]] for i in order]
             errors, sets, loose, spans = phase_set_counts(calls, true_alleles, component_ids, undetermined,
-                                                          positions)
+                                                        positions, phase_breaks=sample_breaks)
             added.update(ps_aligned_allele_errors=errors, phase_sets=sets, undetermined_called_alleles=loose,
                          phase_set_spans_bp=[int(value) for value in spans])
             del calls, true_alleles
@@ -366,7 +367,7 @@ def new_report(seed, names, requested, checkpoint_root) -> dict:
     """The summary skeleton (keys in their published order)."""
     return dict(seed=seed, samples=len(names), pedigree=None, chromosomes=[], founders=[],
                 requested_stages=list(requested), checkpoint_root=str(Path(checkpoint_root).resolve()),
-                skipped=[])
+                phase_set_metric="export_phase_sets_v2", skipped=[])
 
 
 def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("available",), contigs=None) -> dict:
@@ -490,7 +491,6 @@ def write_evaluation(destination, report: dict, component_rows, matching_rows) -
 def evaluate_command(args) -> int:
     """`haplotypes evaluate RUN [--stages ...] [--contigs ...] [--cores N]`."""
     from .. import execution
-    from ..execution.kernel_cache import persistent_kernel_cache
     available = execution.affinity_cpus()
     cores = available if args.cores is None else int(args.cores)
     if not 1 <= cores <= available:
@@ -498,10 +498,11 @@ def evaluate_command(args) -> int:
     from ..pipeline.driver import RunPaths
     started = time.monotonic()
     execution.start_run(cores, preload=(__name__,))
-    with persistent_kernel_cache(cores):
-        evaluate_run(args.run_directory, checkpoints=RunPaths.from_directory(args.run_directory).checkpoints,
-                     cores=cores, stages=tuple(args.stages),
-                     contigs=None if args.contigs is None else tuple(args.contigs))
+    # Evaluation compiles only the kernels it uses. Warming the saved manifest
+    # here can compile hundreds of reconstruction kernels before a short report.
+    evaluate_run(args.run_directory, checkpoints=RunPaths.from_directory(args.run_directory).checkpoints,
+                 cores=cores, stages=tuple(args.stages),
+                 contigs=None if args.contigs is None else tuple(args.contigs))
     print(f"Evaluation written to {Path(args.run_directory).resolve() / 'evaluation'} in "
           f"{time.monotonic() - started:.1f} s", flush=True)
     for line in execution.memory_governor().summary_lines():

@@ -31,7 +31,7 @@ FINAL_PREFIX = "assembly"     # the final assembly's section; context sections a
 JOINS = "joins/"              # contig-wide joined batches, shared by every assembly of the contig
 COMPLETION = "completion"
 FINAL = "final"
-SCHEMA = 1
+SCHEMA = 2
 
 
 def level_key(level: int) -> str:

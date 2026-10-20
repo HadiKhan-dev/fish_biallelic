@@ -67,16 +67,19 @@ class ResidualBirthConfig:
     min_soft_responsibility: minimum expected copies of a subtracted row for a residual record.
     min_unique_sample_support: distinct samples behind an emitted consensus.
     min_effective_sample_support: responsibility-weighted samples behind an emitted consensus.
-    max_alternative_groups: at most this many alternative residual groups (maximal cliques) per clustering, kept by
-        whole size classes, largest first; a straddling class and the smaller ones are dropped and counted as
-        released ambiguity (tie_events discovery.residual.group_overflow).
-    max_clique_enumeration: a component of the alternative pool whose order-invariant bound on its number of maximal
-        cliques exceeds this offers no alternative groups (overflow, counted); the bound, not a measured count,
-        decides, so dense pools (simulations: up to 1.4e5 maximal cliques) are skipped without enumeration.
-    max_clique_calls: safety work limit of one component's enumeration (Bron-Kerbosch calls); a component that reaches
-        it offers no alternative groups (overflow, counted). Not reached under the default bound.
+    max_alternative_groups: soft count budget of alternative residual groups (maximal cliques),
+        ranked by whole size classes. Admit a straddling class through twice this budget;
+        omit it whole beyond that. Strictly smaller classes are ranked truncation.
+    max_clique_enumeration: maximum actual number of maximal cliques per connected component.
+        An oversized component contributes no alternatives. Exact union/join decomposition
+        can establish oversized output without materializing a large Cartesian product.
+    max_clique_calls: legacy Python reference traversal performance switch. The compiled
+        exact traversal counts complete output directly and does not use this work threshold.
+        This never changes the admitted clique set; actual output count decides.
     """
 
+    # Bounded proposal geometry; zero explicitly selects the dense reference path.
+    landmark_budget: int = 256
     usable_founder_known_fraction: float = 0.80
     residual_call_probability: float = 0.80
     min_residual_joint_known_fraction: float = 0.10
@@ -118,14 +121,15 @@ class SearchConfig:
     max_replacement_children: generator size of birth-delete replacements per expansion.
     exact_cut_max_k: gauge rewires use exact maximum cuts up to this K, a degree-ordered local
         search above (reported separately from search limits).
-    max_cut_ties: equal maximum cuts used per expansion.
+    max_cut_ties: nominal maximum-cut multiplicity; the effective family budget is four times
+        this value, with whole-family admission through twice that effective budget.
     data_birth_attempts_factor: data births fit at most max(16, 2(K + 1)) x this many starts (the
         attempt budget; release 2.1 broader births, 3).
     data_birth_children_factor: data births stop once (K + 1) x this many distinct complete
         children exist (3).
     data_birth_tie_budget_factor: data-birth tie groups (samples tied on excess NLL and observed
-        sites) are consumed whole; a group is cut (canonical order, reported as
-        "data_birth_tie_budget") only when the starts would exceed this multiple of the attempt
+        sites) union distinct seeds before admission; a whole group is omitted (reported as
+        "data_birth_tie_class_at_budget") when its starts would exceed this multiple of the attempt
         budget (the hard cap).
     reversed_convention_search: "off" (default), "fragile" or "all": a second search with the
         reversed sample order and content keys whose panels join the first search's archive
@@ -145,6 +149,9 @@ class SearchConfig:
     escalate_expansions_percent: an escalated search may run at most this percentage of the
         expansion backstop more expansions (the "escalation_backstop" limit).
 
+    Release 2.3 budgets admit every straddling class through twice the nominal budget; an
+    overlarge class is omitted whole and recorded separately from ordinary ranked truncation.
+
     Ties (release 2.1): every order, winner and improvement test of the search uses the block's tie
     quanta (maths.ties.BlockQuanta from the block's null NLL): NLL orders and the selection by tie
     classes of kind ``nll`` with the canonical key inside a class, improvement tests by the
@@ -159,8 +166,9 @@ class SearchConfig:
     max_proposals_per_expansion: int = 128
     data_start_beam_width: int = 6
     data_seed_count: int = 8
+    seed_landmark_budget: int = 256
     seed_min_cluster_size: int = 2
-    max_replacement_children: int = 24
+    max_replacement_children: int = 48
     exact_cut_max_k: int = 12
     max_cut_ties: int = 4
     data_birth_attempts_factor: int = 3
@@ -169,7 +177,7 @@ class SearchConfig:
     reversed_convention_search: str = "off"
     escalation: bool = False
     escalate_beam_width: int = 12
-    escalate_replacement_children: int = 48
+    escalate_replacement_children: int = 96
     escalate_min_k: int = 9
     escalate_margin: float = 10.0
     escalate_expansions_percent: int = 100

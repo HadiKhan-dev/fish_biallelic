@@ -181,7 +181,19 @@ The candidates are nested, from simplest (their order is the tie rule):
 
 1. `binomial`: one shared e and q, fitted by EM from the starts
    `EvidenceConfig.read_model.em_starts = ((0.02, 0.5), (0.01, 0.35), (0.08, 0.65))` (pairs (e, q)),
-   the best converged start kept;
+   each successful start finished at stationarity under the same training likelihood and the
+   existing Newton convergence, curvature, bounds and backtracking policy. The two shared
+   parameters and each sample's nuisance mixture are optimized jointly. Numerical endpoint
+   equivalence requires pairwise relative shared-logit distances at most1e-13 and nuisance-logit
+   distances at most1e-8, using max(1,abs(x),abs(y)) as the coordinate scale. These reuse the
+   solver's small-step and stagnation resolutions; the latter is an equivalence rule, not an
+   endpoint-error bound. Every completed EM endpoint must have a converged polish; original
+   EM failures remain recorded under the existing failure policy. Among equivalent endpoints, maximum
+   training log likelihood wins; exact ties use the lexicographically smallest full parameter
+   vector. Training histogram rows are evaluated in content order and nuisance rows restored
+   afterward, making reductions and the parameter-vector representation independent of sample
+   order. Held-out data and sample names do not determine this order. Distinct endpoints or
+   failed polishing stop for review and cannot silently fall back to uncalibrated likelihoods;
 2. `sample_binomial`: per-sample logit-error and logit-balance effects with binomial kernels, pooled
    by a diagonal empirical-Bayes (normal measurement-error) approximation: each sample's
    uncertainty comes from the observed Hessian of its own likelihood with its genotype mixture
@@ -261,8 +273,8 @@ Results do not depend on the CPU budget: every reduction over samples or sites r
 order, and the window partition of the loader does not change the records read.
 
 Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2): the run's canonical sample axis is reverse name order
-(maths.ties.run_sample_order); the read model keeps the last instead of the first EM start whose converged log
-likelihood lies in the band of the best; the site filter's histogram mode is the last instead of the first of
+(maths.ties.run_sample_order); shared-binomial read-model starts must agree after stationary polishing,
+so reversal does not select an EM endpoint; the site filter's histogram mode is the last instead of the first of
 exactly tied maximal bins; the sample-QC minor allele at exactly equal ALT and REF read totals is REF instead of
 ALT. Not reversed (stated preferences): the simplest read model among equally good candidates and the hyperfit
 boundary at tau = 0.
@@ -289,3 +301,55 @@ boundary at tau = 0.
   several libraries from one source is seen in part, and DNA from another analysed sample brings
   no private alleles, so contamination within the cohort is not detected.
 - Calibration cannot resolve ancestral phase that the descendants do not identify.
+
+### Shared-binomial stationarity validation
+
+The standard chr2 discovery reproducer exposes why a likelihood band alone is insufficient:
+finite EM endpoints inside that band produced different calibrated likelihoods and K5/K6
+founder selections under reversal. All three starts and both sample orders converge to a
+common stationary optimum within the existing relative tolerance of 1e-13 after three Newton
+steps. The largest parameter distance is 1.1e-14; the largest applied likelihood change from
+2.2 on the captured block is 4.38e-5. This is a numerical optimization correction under the
+same training likelihood, not a mixture of read models. The training/held-out folds and model
+selection rule are unchanged. Whole-dataset parameter, likelihood, truth and stability gates
+remain separate from this bounded reproducer.
+
+The shared Hessian has two common coordinates and a two-coordinate nuisance block per sample.
+Central differences of analytic gradient rows construct it in eight gradient passes. A Schur
+solve avoids a dense matrix whose dimension grows with sample count; independent dense-Newton
+fixtures check endpoint agreement, including an empty sample. The existing Newton stopping and
+backtracking rules are reused. Per-start objectives, iterations, convergence and endpoint
+distances and small-step/stagnation termination reasons are recorded. The endpoint equivalence
+rule does not alter Newton's updates, stopping conditions, score bands, priors or held-out weights.
+
+The110-contig census exposed seven cases whose nuisance logits differ by up to2.12e-11 despite
+successful polishing; shared logits differ at most5.61e-15 and applied likelihoods at most1.50e-14.
+Eighteen of their21starts stop by stagnation. These observations motivate the explicit equivalence
+rule; they do not prove a unique optimum. Maximum training score and the exact lexicographic tie
+rule remove start-order dependence within that family. A separate content order for training
+histograms removes last-bit sample-reduction differences. Full-model and downstream controls
+remain necessary because nuisance mixtures also enter model selection and later fits.
+
+The final census passes the approved equivalence test on all 110 contigs: all 330 original
+EM starts and their polishes succeed, with no failed or skipped starts. Eight critical
+contigs, including the seven original failures and the standard chr2 reproducer, were
+calibrated under 11 profiles each. Start permutations, duplicate starts, convention reversal,
+sample reversal and sample permutation give bitwise-identical aligned GLs in all 88 profiles.
+This checks deterministic representation within the tested endpoint families; it does not
+prove mathematical uniqueness or downstream accuracy.
+
+Compared with 2.2, full recalibration preserves the selected model on ten of eleven datasets.
+K20/K30 retain their fixed fallback and exactly unchanged GLs. Standard and stress maximum
+applied GL changes are 6.33e-5 and 3.57e-5. In sim_s10001, chr1 changes from shared binomial
+to sample binomial, while chr6 and chr11 change in the opposite direction; the largest GL
+change is 0.00679817. Shared training optimization changes held-out scores enough to cross
+the unchanged one-nat model-selection rule. Full regenerated-evidence truth gates are required
+for these discrete model changes. No held-out score enters the within-shared endpoint choice.
+
+### Shared-binomial Newton curvature and bounds (2.3)
+
+The nuisance-mixture Hessian is evaluated analytically as the histogram-weighted difference of prior and posterior categorical covariance matrices. Pair-covariance sums retain nearly absent genotype categories; the shared/nuisance coupling is the analytic posterior score covariance. The shared two-parameter block retains central finite differences.
+
+The Newton direction minimizes its quadratic over the existing parameter bounds using a structured active-set Schur solve. All simultaneous blockers enter together; multiplier ties are handled as complete classes. A nonpositive reduced Hessian or a repeated active face is an explicit fitting failure. This corrects the N-series near-boundary failure caused by separately clipping an unconstrained joint direction.
+
+The training likelihood, parameter bounds, backtracking limit, Newton convergence/iteration limits, EM starts, all-start endpoint equivalence, content representative, held-out model selection and applied evidence functional are unchanged. No damping, new tolerance, prior, or rescue start is introduced. Each reduced-face solve is linear in sample count at fixed local dimension; iteration and active-face counts are reported as solver behavior rather than a universal scaling proof.

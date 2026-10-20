@@ -17,6 +17,7 @@ decoding only the summary entries of the records; it never feeds back into infer
 """
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import math
 import re
@@ -79,6 +80,8 @@ class _Ambiguity:
     def __init__(self):
         self.blocks = self.ambiguous_blocks = self.tied_alternatives = 0
         self.margins: list[float] = []
+        self.search_incomplete_blocks = self.unresolved_blocks = 0
+        self.search_omissions: list[tuple] = []
         self.count_calls = self.ambiguous_calls = self.count_cycles = self.undecided_cycles = 0
         self.tied_refits = self.disagreeing_refits = 0
 
@@ -88,6 +91,12 @@ class _Ambiguity:
                 continue
             search = block["search"]
             self.blocks += 1
+            self.search_incomplete_blocks += int(bool(search.get("search_incomplete", False)))
+            self.unresolved_blocks += int(bool(search.get("unresolved", False)))
+            self.search_omissions.extend((str(item["cause"]), str(item["scope"]),
+                                          str(item.get("count_kind", "exact")),
+                                          str(item.get("kind", "tie_class_at_budget")), int(item["count"]))
+                                         for item in search.get("omissions", ()))
             self.ambiguous_blocks += int(bool(search.get("ambiguous", False)))
             self.tied_alternatives += int(search.get("tied_alternatives", 0))
             margin = float(search.get("score_margin", math.inf))
@@ -116,9 +125,16 @@ class _Ambiguity:
 
     def record(self) -> dict:
         margins = sorted(self.margins)
+        omissions = Counter()
+        for cause, scope, count_kind, kind, count in self.search_omissions:
+            omissions[cause, scope, count_kind, kind] += count
         return dict(
             discovery=dict(
                 blocks=self.blocks, ambiguous=self.ambiguous_blocks, tied_alternatives=self.tied_alternatives,
+                search_incomplete=self.search_incomplete_blocks, unresolved=self.unresolved_blocks,
+                search_incomplete_fraction=self.search_incomplete_blocks / self.blocks if self.blocks else 0.0,
+                omissions=[dict(cause=key[0], scope=key[1], count_kind=key[2], kind=key[3], count=count)
+                           for key, count in sorted(omissions.items())],
                 score_margin=dict(
                     blocks_with_other_k=len(margins), below_one=sum(1 for m in margins if m < 1.0),
                     minimum=margins[0] if margins else None,
@@ -221,7 +237,9 @@ def write_ties(output, store, contigs, pedigree_events: dict | None = None) -> l
     print(f"[Ties] tie-class decisions taken by the fixed conventions (docs/methods/ties.md"
           + ("; conventions REVERSED, HAPLOTYPES_TIE_REVERSE" if reversed_run else "") + f"): {classes}; "
           f"threshold comparisons inside a band: {inside_band:,} of {comparisons:,}. Discovery blocks selected "
-          f"inside a tie: {discovery['ambiguous']:,} of {discovery['blocks']:,}; founder-count calls ambiguous: "
+          f"inside a tie: {discovery['ambiguous']:,} of {discovery['blocks']:,}; computational search limits: "
+          f"{discovery['search_incomplete']:,} blocks ({discovery['unresolved']:,} with no incumbent); "
+          f"founder-count calls ambiguous: "
           f"{assembly['ambiguous']:,} of {assembly['count_calls']:,}; tied refits that disagree: "
           f"{assembly['tied_refits_disagree']:,} of {assembly['tied_refit_decisions']:,}. Tables: {directory}",
           flush=True)

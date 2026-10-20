@@ -142,13 +142,18 @@ def _exclusion_handler(contig, state, phase, common, budget):
     """Full-marker exclusion evidence of one contig for the target dyads."""
     store, file = _open(common, contig)
     config, dyads = common["config"], common["dyads"]
-    store.bind_identity(file, records.EXCLUSION, records.exclusion_identity(file, config, dyads))
+    from . import exclusion_bound
+    certificate = dict(model=exclusion_bound.MODEL, contigs=common["exclusion_contigs"],
+                       samples=common["exclusion_samples"])
+    store.bind_identity(file, records.EXCLUSION,
+                        records.exclusion_identity(file, config, dyads, certificate=certificate))
     if file.has(records.EXCLUSION):
         return None, records.decode_exclusion(file.get(records.EXCLUSION))
     evidence = evidence_records.load(file, nthreads=execution.claim_threads())
-    value = exclusion.score_contig(contig, evidence.likelihoods, evidence.observed,
-                                   evidence.positions, dyads, config.exclusion,
-                                   execution.claim_threads)
+    value, work = exclusion_bound.score_contig(
+        contig, evidence.likelihoods, evidence.observed, evidence.positions, dyads,
+        config.exclusion, common["exclusion_contigs"], common["exclusion_samples"],
+        execution.claim_threads)
     del evidence
     file.put(records.EXCLUSION, records.encode_exclusion(value))
     return None, value
@@ -279,30 +284,21 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
             f"chromosomes (found {len(informative)}); Tier B needs at least "
             f"{tier_b_minimum_contigs(config)}")
 
-    # Screen, genome-wide panel, score (projections stay resident across the barrier when their memory can be
-    # reserved; _score_handler).
-    estimates = [_scoring_bytes(store, c) for c in informative]
-    limit = execution.memory_worker_limit(estimates, len(informative), label="PEDIGREE SCORING")
-    weights = [store.contig(c).info(records.PREPARED).stored_bytes for c in informative]
-    with execution.ChromosomeExecutor(informative, _score_handler, budget=budget, weights=weights,
-                                      max_workers=limit, label="PEDIGREE SCORING",
-                                      task_bytes=estimates) as pool:
-        screens = pool.run("screen", common)
-        markers = np.asarray([value[1] for value in screens], dtype=np.float64)
-        screen_scores = panel.robust_screen(np.stack([value[0] for value in screens]), markers,
-                                            eligibility, config)
-        candidate_panel = panel.fixed_panel(screen_scores, eligibility, config)
-        chromosome_scores = tuple(pool.run("score", dict(common, panel=candidate_panel), task_bytes=0))
+    # The selective screen certifies the genome gate/profile before M2 scoring.
+    # Uncertified M1 candidates use the unchanged exact HMM.
+    from . import selective_stage
+    candidate_panel, chromosome_scores = selective_stage.score_prepared(
+        store, informative, eligibility, config, budget)
 
     identity = records.product_identity(store, contigs, informative, config, eligibility,
-                                        candidate_panel)
+                                        candidate_panel, scores_key=records.FLOORED_SCORES)
     store.bind_identity(store.run, records.PRODUCT, identity)
     if store.run.has(records.PRODUCT):
         return records.load_product(store)
 
     # Decision, then the full-marker count release of unresolved Tier-B children.
     scores = GenomeScores.stack(sample_ids, candidate_panel, chromosome_scores)
-    decided = decision_module.decide(scores, eligibility, config, budget)
+    decided = decision_module.decide_floored(scores, eligibility, config, budget)
     rows = decided.alternatives.rows
     dyads = exclusion.target_dyads(decided.tier_b, rows, eligibility)
     exclusion_summary = dict(
@@ -311,6 +307,7 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         conditional_on_supported_edge_directions=True, candidate_dyads=int(len(dyads)),
         contigs=len(contigs), status="no_unresolved_candidates")
     log_e, observed = np.empty(0), np.empty(0, dtype=np.int64)
+    log_e_upper = None
     if len(dyads):
         weights = [store.contig(c).info(evidence_records.EVIDENCE).stored_bytes for c in contigs]
         estimates = [_exclusion_bytes(store, c) for c in contigs]
@@ -318,14 +315,17 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         with execution.ChromosomeExecutor(contigs, _exclusion_handler, budget=budget, weights=weights,
                                           max_workers=limit, label="PEDIGREE EXCLUSION",
                                           task_bytes=estimates) as pool:
-            evidence = pool.run("exclusion", dict(common, dyads=dyads))
-        log_e, observed = exclusion.combine(list(evidence))
+            evidence = pool.run("exclusion", dict(common, dyads=dyads,
+                                exclusion_contigs=len(contigs), exclusion_samples=len(sample_ids)))
+        from . import exclusion_bound
+        log_e, log_e_upper, observed = exclusion_bound.combine(list(evidence))
         exclusion_summary.update(status="evaluated", chromosomes=[dict(
             contig=value.contig, markers=value.markers,
             pattern_fallback_samples=value.pattern_fallback_samples) for value in evidence])
     released = exclusion.release_counts(
         decided.tier_b, decided.partial_b, decided.complete, decided.evidence.graph_conflict,
-        decided.informative, rows, sample_ids, eligibility, dyads, log_e, observed, config)
+        decided.informative, rows, sample_ids, eligibility, dyads, log_e, observed, config,
+        log_e_upper=log_e_upper)
     exclusion_summary["released"] = int(np.count_nonzero(released.released))
 
     # Released parent order (release 2.2, pedigree.slots): dam/sire where the metadata records sexes {F, M},

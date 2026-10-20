@@ -69,7 +69,7 @@ def screen_chromosome(prepared: PreparedChromosome, eligibility: ParentEligibili
 def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
                      states: list[ResidentComponent] | None, trios: np.ndarray,
                      eligibility: ParentEligibility, config: PedigreeConfig,
-                     claim_threads=lambda: None) -> ChromosomeScores:
+                     claim_threads=lambda: None, *, one_values=None) -> ChromosomeScores:
     """M2, exposure and junction evidence for the panel ``trios``; M0/M1 from ``screen``."""
     required = eligibility.parents | eligibility.parents.T
     np.fill_diagonal(required, True)
@@ -96,10 +96,53 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
         return np.sum(np.stack([part[position] for part in parts]), axis=0)
 
     return ChromosomeScores(
-        contig=prepared.contig, zero=total(0), one=total(1), two=total(2), edge_matched=total(3),
+        contig=prepared.contig, zero=total(0),
+        one=total(1) if one_values is None else one_values,
+        two=total(2), edge_matched=total(3),
         edge_exposed=total(4), pair_explained=total(5), pair_exposed=total(6),
         total_bins=float(sum(component.n_bins for component in prepared.components)),
         junctions=total(7), callable_bins=total(8),
         informative_markers=prepared.informative_markers,
         component_count=prepared.component_count,
         scored_component_count=len(prepared.components))
+
+
+def score_chromosome_selective(prepared: PreparedChromosome, one: np.ndarray,
+                               trios: np.ndarray, eligibility: ParentEligibility,
+                               config: PedigreeConfig, claim_threads=lambda: None) -> ChromosomeScores:
+    """M2/exposure with an already fixed chromosome M1 profile.
+
+    M2 reduces to raw component M1 when exactly one parent is unavailable.
+    Those dyads are scored exactly here. The remaining partial component screen
+    cells are never consumed, checkpointed or returned as complete raw scores.
+    """
+    from . import selective_m1
+
+    screens, states = [], []
+    for component in prepared.components:
+        state = resident(component, config, claim_threads)
+        projected, terms = state.projection, state.terms
+        zero = selective_m1.zero(projected, terms, eligibility.children, claim_threads)
+        partial = np.full((len(zero), len(zero)), -np.inf)
+        first_available = projected.available[trios[:, 1]]
+        second_available = projected.available[trios[:, 2]]
+        fallback = trios[first_available ^ second_available]
+        if len(fallback):
+            parents = np.where(projected.available[fallback[:, 1]], fallback[:, 1], fallback[:, 2])
+            dyads = np.unique(np.column_stack((fallback[:, 0], parents)), axis=0)
+            for first in range(0, len(zero), terms.batch):
+                stop = min(len(zero), first + terms.batch)
+                pairs = np.ascontiguousarray(dyads[(dyads[:, 0] >= first) & (dyads[:, 0] < stop)])
+                if not len(pairs):
+                    continue
+                claim_threads()
+                products, powered = terms.common(projected, first, stop)
+                values = selective_m1.exact_pairs(projected, terms, pairs, zero, first,
+                                                   products, powered, claim_threads)
+                partial[pairs[:, 0], pairs[:, 1]] = values
+                del products, powered
+        screens.append(ComponentScreen(zero, partial))
+        states.append(state)
+    screen = ChromosomeScreen(prepared.contig, tuple(screens), prepared.informative_markers)
+    return score_chromosome(prepared, screen, states, trios, eligibility, config,
+                            claim_threads, one_values=one)

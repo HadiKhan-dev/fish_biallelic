@@ -1,14 +1,15 @@
 """Founder products of one chromosome.
 
-Founder tracks (product ``tracks``): one gzip TSV per component, `CHROM POS H0 H1 ...`, one row per panel site.
+Founder tracks (product ``tracks``): one gzip TSV per release segment, `CHROM POS H0 H1 ...`, one row per panel site.
 Cells are the released calls 0 / 1, or `.` where the panel withholds the allele (no imputation). Column Hk is
-founder row k of this component: founder labels are component-local (H0 of two components is not one founder).
+founder row k of this segment: founder labels are segment-local (H0 of two segments is not one founder).
 
 Founder VCF (product ``founders``): one BCF/VCF.gz per chromosome at the rows of an export.sites table, FORMAT GT
-haploid, one column ``c<C>_H<k>`` per founder row k of every component C. A column has calls only inside its
-component's span (first to last panel position): the released call at the component's panel sites, `.` at a span
+haploid, one column ``c<C>_H<k>`` per founder row k of every release segment C. A column has calls only inside its
+segment's span (first to last panel position): the released call at the component's panel sites, `.` at a span
 site without a panel allele, and in a full-length file the common allele at sites removed by r5 alone (`.` at sites
-removed by r1-r4). Outside its span a column is `.`, so no column implies an identity across components.
+removed by r1-r4). Outside its span a column is `.`, so no column implies an identity across release segments.
+Source inference components and segment indices are retained in the manifest and VCF header.
 """
 from __future__ import annotations
 
@@ -49,11 +50,13 @@ def vcf_column(component: int, row: int) -> str:
 
 def component_record(contig: str, component: int, positions: np.ndarray, calls: np.ndarray, stage: str,
                      filename: str | None = None, vcf_file: str | None = None,
-                     withheld: int | None = None) -> dict:
+                     withheld: int | None = None, release_segment: dict | None = None) -> dict:
     """The manifest entry of one exported component (``filename``: its track TSV; ``vcf_file``: the founder VCF
     holding its columns; ``withheld``: alleles released as '.' because no painted carrier observes them)."""
     calls = np.asarray(calls)
     entry = dict(contig=contig, component=component)
+    if release_segment is not None:
+        entry.update(release_segment)
     if filename is not None:
         entry["local_columns"] = {f"H{row}": str(row) for row in range(len(calls))}
     entry.update(first_position=int(positions[0]), last_position=int(positions[-1]), markers=len(positions),
@@ -69,7 +72,7 @@ def component_record(contig: str, component: int, positions: np.ndarray, calls: 
     return entry
 
 
-def founder_values(sites: SiteTable, panels) -> list[tuple[int, int, np.ndarray]]:
+def founder_values(sites: SiteTable, panels, release_segments=None) -> list[tuple[int, int, np.ndarray]]:
     """Per component (row range [lo, hi) of ``sites`` covered by its span, int8 [K, hi - lo] alleles): the panel
     calls at its sites, the common allele at sites removed by r5 alone, -1 elsewhere."""
     rows = sites.positions
@@ -87,12 +90,16 @@ def founder_values(sites: SiteTable, panels) -> list[tuple[int, int, np.ndarray]
         common = sites.common[lo:hi]
         fill = common >= 0            # set only at sites removed by r5 alone (never panel sites)
         values[:, fill] = common[fill]
+        if release_segments is not None:
+            no_fill = release_segments[component].get("r5_withheld_rows", ())
+            if no_fill:
+                values[np.ix_(no_fill, np.flatnonzero(fill))] = -1
         blocks.append((lo, hi, values))
     return blocks
 
 
 def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synthetic: bool,
-                      file_format: str, withheld=None) -> None:
+                      file_format: str, withheld=None, release_segments=None) -> None:
     """Write the founder VCF of one chromosome (module docstring) to ``path`` (format "bcf" or "vcf").
 
     ``panels``: [(positions int64 [L_c], released int8 [K_c, L_c])] in component order; ``withheld``: alleles
@@ -102,7 +109,7 @@ def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synth
     contig = sites.contig
     panels = [(np.asarray(positions, dtype=np.int64), np.asarray(calls, dtype=np.int8))
               for positions, calls in panels]
-    blocks = founder_values(sites, panels)
+    blocks = founder_values(sites, panels, release_segments)
     columns = [vcf_column(component, row) for component, (_, calls) in enumerate(panels)
                for row in range(len(calls))]
     length = int(sites.positions[-1]) if synthetic else sites.contig_length
@@ -112,21 +119,51 @@ def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synth
               '##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown '
               '(withheld, or no painted carrier observes it) or outside the column\'s component; no imputation">\n'
               + site_header_lines(sites) +
-              '##founder_columns="cC_Hk is founder row k of assembly component C of this chromosome. Founder labels '
-              'are component-local: columns of different components (c0_H1, c1_H1) are not implied to be one '
-              'founder. A column has calls only inside its component\'s span (first to last panel position; '
+              '##founder_columns="cC_Hk is founder row k of release segment C of this chromosome. Founder labels '
+              'are segment-local: columns of different segments (c0_H1, c1_H1) are not implied to be one '
+              'founder. A column has calls only inside its segment\'s span (first to last panel position; '
               '##component lines) and . outside it; inside the span . marks an allele the panel withholds"\n'
               f"##founder_stage={stage}\n")
     for component, (positions, calls) in enumerate(panels):
         unobserved = "" if withheld is None else f",UnobservedWithheld={int(withheld[component])}"
+        release_info = ""
+        if release_segments is not None:
+            segment = release_segments[component]
+            release_info = (f",SourceComponent={segment['source_component']},"
+                            f"SegmentIndex={segment['segment_index']},"
+                            f"AmbiguousWithheld={segment['withheld_ambiguous_alleles']}")
         header += (f"##component=<ID=c{component},Start={int(positions[0])},End={int(positions[-1])},"
-                   f"Founders={len(calls)},Sites={len(positions)}{unobserved}>\n")
+                   f"Founders={len(calls)},Sites={len(positions)}{unobserved}{release_info}>\n")
+    if release_segments is not None:
+        for component, segment in enumerate(release_segments):
+            for number, detail in enumerate(segment.get("count_unverified", ())):
+                first, last = detail["uncertainty_interval"]
+                header += (f"##founder_count_verification=<ID=c{component}u{number},Status=count_unverified,"
+                           f"SourceComponent={segment['source_component']},SegmentIndex={segment['segment_index']},"
+                           f"Start={first},End={last},Cause={detail['cause']},"
+                           f"DomainSize={detail['domain_size']},Evaluated={detail['evaluated']}>\n")
+            for number, detail in enumerate(segment.get("continuation_unverified", ())):
+                first, last = detail["uncertainty_interval"]
+                header += (f"##founder_continuation_verification=<ID=c{component}v{number},"
+                           f"Status=continuation_unverified,SourceComponent={segment['source_component']},"
+                           f"SegmentIndex={segment['segment_index']},Start={first},End={last},"
+                           f"Cause={detail['cause']},Alternatives={detail['alternative_count']},"
+                           f"ObservedIntervals={len(detail['local_disagreement_intervals'])}>\n")
+            for number, detail in enumerate(segment.get("ambiguity", ())):
+                first, last = detail["uncertainty_interval"]
+                header += (f"##founder_ambiguity=<ID=c{component}a{number},SourceComponent="
+                           f"{segment['source_component']},SegmentIndex={segment['segment_index']},"
+                           f"Start={first},End={last},Reason={detail['kind']},"
+                           f"Alternatives={detail['alternative_count']}>\n")
     if withheld is not None:
         header += (f'##unobserved_founder_alleles={int(sum(withheld))}\n'
                    '##unobserved_founder_alleles_rule="a founder allele is written as . when no sample whose '
                    'released painting names that founder at the site has read depth there (release 2.2)"\n')
     if sites.full_length:
         header += common_allele_line()
+        if release_segments is not None:
+            header += ('##assembly_ambiguity_r5="r5 filling cannot bridge release segments or restore a row '
+                       'withheld for evaluated unresolved assembly content"\n')
     if synthetic:
         header += '##synthetic_alleles="A/C encode abstract simulated 0/1; not reference-genome bases"\n'
     header += "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO" + ("\tFORMAT\t" + "\t".join(columns)

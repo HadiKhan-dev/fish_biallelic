@@ -1,11 +1,14 @@
 """The regularised fixed-assignment leave-one-sample-out cavity score of a panel.
 
 For a complete panel H with assignments A (from the full data), each sample is held out in
-turn: its state's count is deleted from the Dirichlet state prior (concentration alpha over the
+turn: its uniformly weighted tied-state counts are deleted from the Dirichlet state prior (concentration alpha over the
 row-pair, row-unknown and unknown-unknown states, prior base masses from
-``CavityScoreConfig``) and its own likelihood terms are removed from the founder-allele Markov
-random field; a mean-field posterior over the founder alleles (three starts, the best converged
-ELBO) then predicts the held-out sample's genotype likelihood under every state, and the
+``CavityScoreConfig``) and all its weighted likelihood terms are removed from the founder-allele Markov
+random field; all distinct mean-field endpoints tied under the best converged training ELBO
+predict the held-out sample's genotype likelihood under every state. These likelihoods are
+averaged before the floor and logarithm; founder marginals are never averaged. Exact-distinct
+endpoints connected within the existing mean-field convergence tolerance form one equivalence
+class. Classes have equal weight, with a uniform likelihood average inside each class. The
 sample's cavity log predictive is log sum over states of prior x predictive. The panel's score
 is the sum over samples plus the telescoping K prior -log K - log(K + 1) plus minus the code
 length log C(2^L, K) of an unordered set of K distinct binary rows. Missing cells are neutral
@@ -13,8 +16,9 @@ length log C(2^L, K) of an unordered set of K distinct binary rows. Missing cell
 
 Scores are uncalibrated pseudo-scores: the panel and A were selected from the full data.
 
-Release 2.1: a held-out solve's mean-field start is chosen with the solution's ``nll`` tie quantum
-(``FixedKSolution.quanta``; the floors for solutions without quanta), see cavity_kernels.
+Release 2.3 deliberately changes the approximate predictive functional in tied-endpoint cases.
+Eligibility and the solution's ``nll`` ELBO tie quantum are unchanged (``FixedKSolution.quanta``;
+the floors for solutions without quanta). No held-out evidence chooses the endpoint weights.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from .cavity_kernels import (_build_evidence_emission_cache_kernel, _floor_log_l
                              _score_mode_cavity_kernel)
 from ..maths.ties import BlockQuanta
 from .conventions import rev
-from .panel import FixedKSolution, log_haplotype_set_count, restricted
+from .panel import FixedKSolution, log_haplotype_set_count, restricted, solution_tie_mask
 
 
 def shared_likelihood_triples(likelihood: np.ndarray) -> np.ndarray:
@@ -82,6 +86,9 @@ class CavityWorkspace:
             self.likelihood, floor)
         self.shared_triple = shared_likelihood_triples(self.likelihood)
         self._geometry: dict[int, tuple] = {}
+        # Cumulative held-out sample/site counts by family size 1,2,3.
+        # Rows are exact-distinct endpoints and endpoint-equivalence classes.
+        self.endpoint_family_counts = np.zeros((2, 3), dtype=np.int64)
 
     def geometry(self, k: int):
         value = self._geometry.get(k)
@@ -118,10 +125,9 @@ def _elbo_tie(solution) -> float:
 
 def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray, tie_masks=None):
     """Cavity scores of solutions of the block (``active``: bool[N] samples with depth; the
-    workspace holds exactly those samples). ``tie_masks`` (release 2.2, discovery): per solution uint8[N, states] of
-    every sample's tied A-step states T (fixed_k.assign.tie_mask); a sample with |T| > 1 counts 1/|T| at each state of
-    T in the Dirichlet state prior (its evidence enters the founder field through its meet assignment). None: one
-    count at the assigned state."""
+    workspace holds exactly those samples). By default the solution carries its tied A-step states.
+    ``tie_masks`` optionally supplies those uint8[N, states] masks explicitly. Each member of a
+    sample's winning tied category contributes 1/|T| to both the state prior and founder field."""
     # A phase boundary before the parallel held-out kernel: late blocks claim freed cores.
     claim_threads()
     if not solutions:
@@ -135,7 +141,7 @@ def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray, t
         scored = solution if samples is None else restricted(solution, samples)
         kind, first, second, base = workspace.geometry(solution.k)
         if tie_masks is None:
-            mask = np.zeros((0, len(kind)), dtype=np.uint8)
+            mask = solution_tie_mask(scored)
         else:
             mask = tie_masks[index] if samples is None else tie_masks[index][samples]
             mask = np.ascontiguousarray(mask, dtype=np.uint8)
@@ -145,7 +151,8 @@ def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray, t
             np.ascontiguousarray(scored.assignments, dtype=np.int64), kind, first, second, base,
             float(config.state_concentration), int(config.mean_field_max_iterations),
             float(config.mean_field_tolerance), float(config.likelihood_floor),
-            workspace.shared_triple, float(_elbo_tie(solution)), rev("d12"), mask)
+            workspace.shared_triple, float(_elbo_tie(solution)), rev("d12"), mask,
+            workspace.endpoint_family_counts, float(config.mean_field_tolerance))
         total = math.fsum(float(value) for value in sample_scores)
         k = solution.k
         log_k_prior = -math.log(k) - math.log(k + 1)

@@ -16,7 +16,8 @@ Optimiser stop reasons (convergence, iteration cap, line-search stop) are record
 (``ReadModelFit.success``) and never decide which fit is used (class-B fix B-RM). Every L-BFGS-B fit is finished by
 a Newton polish to its stationary point (release 2.1, design A-5): the optimiser's stopping point depends on its
 path, which rounding-level arithmetic changes (another CPU, BLAS kernel or SIMD path) alter, while the optimum does
-not; the EM start is chosen within a band above EM's convergence residual. Homozygotes are
+not; shared-binomial EM endpoints are likewise finished at stationarity before checking that all starts
+represent a common optimum within the existing Newton convergence tolerance. Homozygotes are
 binomial in every candidate: the shared homozygote-overdispersion extension of earlier versions
 was removed by the owner's decision (17 Oct 2026; tickets/B-RM).
 """
@@ -32,9 +33,9 @@ from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import logit
 
-from ...maths import ties
 from ..config import ReadModelConfig
-from .emission import (em_statistics, samples_objective_parallel, samples_objective_serial)
+from .emission import (em_statistics, samples_objective_parallel, samples_objective_serial,
+                       shared_nuisance_curvature)
 
 
 # Model names in candidate order (simplest first).
@@ -72,7 +73,8 @@ _POLISH_DECREASE = 1e-12
 _POLISH_CURVATURE_FLOOR = 1e-12
 # EM starts whose converged log likelihoods lie within this many nats per observation of the best are the same
 # optimum (EM stops at a gain of em_tolerance_per_observation per observation; three starts of real contigs end
-# within 1e-11 per observation of each other, measured on actm3): the first of them in start order is used.
+# within 1e-11 per observation of each other, measured on actm3). Kept for diagnostics after stationary polishing;
+# distinct stationary models require a separately approved observation-model policy.
 _EM_START_BAND_PER_OBSERVATION = 1e-7
 # Empirical-Bayes hyperfit: the boundary tau = 0 is kept when its profile value is within this relative band of the
 # interior optimum's (the two coincide when the optimum is the boundary; a band at that exact tie, design A-7).
@@ -350,33 +352,260 @@ def _em(hist, depth, alt, initial, config: ReadModelConfig):
                 iterations=iteration + 1, last_gain=last_gain)
 
 
+def shared_objective(vector, hist, depth, alt):
+    """Shared binomial error/balance and per-sample nuisance mixture logits."""
+    local = np.empty((len(hist), 4))
+    local[:, :2] = vector[:2]
+    local[:, 2:] = vector[2:].reshape(len(hist), 2)
+    value, gradients = _objective(local, 0., hist, depth, alt, np.zeros(2), np.zeros(2))
+    return value, np.r_[gradients[:, :2].sum(axis=0), gradients[:, 2:4].ravel()]
+
+
+def _shared_em_vector(endpoint):
+    error, heterozygote = endpoint["error"], endpoint["heterozygote_alt"]
+    mixture = np.maximum(endpoint["mixture"], 1e-300)
+    return np.r_[logit(error), logit((heterozygote - error) / (1 - 2 * error)),
+                 (np.log(mixture[:, :2]) - np.log(mixture[:, 2, None])).ravel()]
+
+
+class _ActiveSetCycle(RuntimeError):
+    """The constrained Newton subproblem repeated an active face."""
+
+
+def _shared_box_step(shared, blocks, coupling, gradient, lower, upper, fixed):
+    """Minimise the structured Newton quadratic over its displacement box.
+
+    Each face is solved by the same shared/nuisance Schur complement. Travel
+    towards its minimiser until the first bound, adding all exactly tied
+    blockers. At a feasible face minimiser, release the largest wrong-sign
+    multiplier class. Neither incoming sample order nor a numerical threshold
+    selects a constraint. Nonpositive curvature and repeated faces fail.
+    """
+    n = len(blocks)
+
+    def product(step):
+        top, local = step[:2], step[2:].reshape(n, 2)
+        return np.r_[shared @ top + np.einsum('nli,nl->i', coupling, local),
+                     (np.einsum('nij,nj->ni', blocks, local)
+                      + np.einsum('nli,i->nl', coupling, top)).ravel()]
+
+    def face_minimum(active, point):
+        hs, hl = active[:2], active[2:].reshape(n, 2)
+        a = np.where(hs[:, None] | hs[None, :], 0., shared)
+        a[np.arange(2), np.arange(2)] += hs
+        b = np.where(hl[:, :, None] | hl[:, None, :], 0., blocks)
+        b[:, np.arange(2), np.arange(2)] += hl
+        c = np.where(hl[:, :, None] | hs[None, None, :], 0., coupling)
+        fixed_step = np.where(active, point, 0.)
+        rhs = gradient + product(fixed_step)
+        gs = np.where(hs, 0., rhs[:2])
+        gl = np.where(hl, 0., rhs[2:].reshape(n, 2))
+        np.linalg.cholesky(b)
+        bg = np.linalg.solve(b, gl[..., None])[..., 0]
+        bc = np.linalg.solve(b, c)
+        factor = cho_factor(a - np.einsum('nli,nlj->ij', c, bc))
+        top = -cho_solve(factor, gs - np.einsum('nli,nl->i', c, bg))
+        local = -bg - np.einsum('nli,i->nl', bc, top)
+        return fixed_step + np.r_[top, local.ravel()]
+
+    step = np.zeros_like(gradient)
+    active = fixed | ((lower == 0.) & (gradient > 0.)) | ((upper == 0.) & (gradient < 0.))
+    seen = set()
+    while True:
+        face = np.where(fixed, 2, np.where(active, np.where(step == lower, -1, 1), 0))
+        key = face.tobytes()
+        if key in seen:
+            raise _ActiveSetCycle("Shared Newton quadratic repeated an active face")
+        seen.add(key)
+        target = face_minimum(active, step)
+        below, above = (~active & (target < lower)), (~active & (target > upper))
+        if np.any(below | above):
+            direction = target - step
+            fractions = np.full(len(step), np.inf)
+            fractions[below] = (lower[below] - step[below]) / direction[below]
+            fractions[above] = (upper[above] - step[above]) / direction[above]
+            fraction = float(fractions.min())
+            blocking = fractions == fraction
+            step += fraction * direction
+            step[blocking & below] = lower[blocking & below]
+            step[blocking & above] = upper[blocking & above]
+            active |= blocking
+            continue
+        step = target
+        slope = gradient + product(step)
+        wrong = np.where(active & ~fixed & (step == lower), -slope,
+                         np.where(active & ~fixed & (step == upper), slope, 0.))
+        largest = float(wrong.max(initial=0.))
+        if largest <= 0.:
+            return step
+        active[wrong == largest] = False
+
+
+def _polish_shared(vector, hist, depth, alt, *, diagnostics=None):
+    """Existing Newton policy with a two-shared-coordinate block Hessian.
+
+    Samples have independent two-coordinate nuisance mixtures conditional on the
+    shared error and balance. The shared block uses central differences; analytic
+    covariance terms preserve nearly absent nuisance components and their shared
+    coupling. Each Newton direction solves the box-constrained quadratic via
+    the structured Schur system. Bounds, backtracking and stopping are unchanged.
+    """
+    def finish(point, iterations, converged, reason):
+        if diagnostics is not None:
+            diagnostics["termination"] = reason
+        return point, iterations, converged
+
+    n = len(hist)
+    bounds = [_ERROR_LOGIT_BOUNDS, _BALANCE_LOGIT_BOUNDS] + [_MIXING_BOUNDS] * (2 * n)
+    lower, upper = np.asarray(bounds, float).T
+    x = np.clip(np.asarray(vector, float).copy(), lower, upper)
+    scale = max(1., float(hist.sum()))
+    kernel = samples_objective_serial if n == 1 else samples_objective_parallel
+
+    def evaluate(point):
+        return shared_objective(point, hist, depth, alt)
+
+    def rows(local):
+        return -kernel(local, 0., hist, depth, alt, np.zeros(2), np.zeros(2))[1][:, :4] / scale
+
+    f, gradient = evaluate(x)
+    previous = np.inf
+    for iteration in range(1, _POLISH_ITERATIONS + 1):
+        held = _held(x, gradient, lower, upper)
+        if held.all():
+            return finish(x, iteration - 1, True, "bound_active")
+        local = np.column_stack((np.broadcast_to(x[:2], (n, 2)), x[2:].reshape(n, 2)))
+        shared = np.empty((2, 2))
+        for j in range(2):
+            h = _POLISH_STEP * np.maximum(1., np.abs(local[:, j]))
+            up, down = local.copy(), local.copy()
+            up[:, j] += h
+            down[:, j] -= h
+            difference = (rows(up) - rows(down)) / (2. * h[:, None])
+            shared[:, j] = difference[:, :2].sum(axis=0)
+        shared = (shared + shared.T) / 2.
+        blocks, coupling = shared_nuisance_curvature(local, hist, depth, alt)
+        blocks /= scale
+        coupling /= scale
+        diagonal = np.r_[np.diag(shared), np.diagonal(blocks, axis1=1, axis2=2).ravel()]
+
+        fixed = lower == upper
+
+        def solve():
+            return _shared_box_step(shared, blocks, coupling, gradient, lower - x, upper - x, fixed)
+
+        try:
+            step = solve()
+        except _ActiveSetCycle:
+            return finish(x, iteration - 1, False, "active_set_cycle")
+        except (LinAlgError, ValueError):
+            # The existing coordinate-curvature floor/fallback remains unchanged.
+            free = ~held
+            kept = diagonal > _POLISH_CURVATURE_FLOOR * max(float(diagonal[free].max(initial=0.)), 0.)
+            if kept[free].all() or not kept[free].any():
+                return finish(x, iteration - 1, False, "curvature")
+            fixed = fixed | ~kept
+            try:
+                step = solve()
+            except _ActiveSetCycle:
+                return finish(x, iteration - 1, False, "active_set_cycle")
+            except (LinAlgError, ValueError):
+                return finish(x, iteration - 1, False, "curvature")
+        free = np.flatnonzero(~fixed)
+        result = _polish_step(evaluate, x, f, gradient, step[free], free, lower, upper)
+        if result is None:
+            return finish(x, iteration - 1, False, "backtracking")
+        x, f, gradient, moved = result
+        if moved <= _POLISH_TOLERANCE:
+            return finish(x, iteration, True, "small_step")
+        if moved <= _POLISH_STAGNATION and moved > previous / 4.:
+            return finish(x, iteration, True, "stagnation")
+        previous = moved
+    return finish(x, _POLISH_ITERATIONS, False, "iteration_limit")
+
+
+class SharedStationarityError(RuntimeError):
+    """A shared read-model endpoint needs review, not uncalibrated fallback."""
+
+
 def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
-    """The shared binomial model: the first EM start (in start order) whose converged log likelihood is within
-    _EM_START_BAND_PER_OBSERVATION per observation of the best (starts that reach the same optimum differ only by EM's
-    convergence residual, which rounding-level arithmetic changes reorder; 2.0 took the strict maximum)."""
+    """Polish every start and retain a representative of equivalent stationary fits.
+
+    Shared logits use the existing small-step resolution, nuisance logits the
+    existing stagnation resolution. This is numerical equivalence, not an error
+    bound. Maximum training likelihood then lexicographic parameters chooses the
+    representative; distinct endpoints still require observation-model review.
+    """
+    # Fix only the floating-point evaluation order, using training data content.
+    # The objective and weights are unchanged. Equal histogram rows are identical
+    # terms; no sample label or incoming row position chooses a numerical endpoint.
+    order = np.asarray(sorted(range(len(hist)), key=lambda i: hist[i].tobytes()), dtype=np.int64)
+    undo = np.argsort(order)
+    hist = np.ascontiguousarray(hist[order])
     candidates, failed = [], []
     for initial in config.em_starts:
         try:
-            candidates.append(_em(hist, depth, alt, initial, config))
+            endpoint = _em(hist, depth, alt, initial, config)
         except (ValueError, RuntimeError) as error:
             failed.append(str(error))
+            continue
+        polish = {}
+        vector, steps, converged = _polish_shared(_shared_em_vector(endpoint), hist, depth, alt,
+                                                diagnostics=polish)
+        value, gradient = shared_objective(vector, hist, depth, alt)
+        candidates.append(dict(vector=vector, endpoint=endpoint, polish_steps=steps,
+                               polish_converged=converged, polish_termination=polish.get("termination"),
+                               gradient_max=float(np.max(np.abs(gradient), initial=0.)),
+                               log_likelihood=-value * max(1., float(hist.sum()))))
     if not candidates:
         raise RuntimeError(f"No shared-binomial EM fit converged: {failed}")
-    top = max(value["log_likelihood"] for value in candidates)
-    band = _EM_START_BAND_PER_OBSERVATION * max(1., float(hist.sum()))
-    # Keep-first among the starts in the band (the last under the convention reversal, release 2.2).
-    best = ties.conv_first([value for value in candidates if value["log_likelihood"] >= top - band])
-    error, heterozygote = best["error"], best["heterozygote_alt"]
-    mixture = np.maximum(best["mixture"], 1e-300)
+    if not all(c["polish_converged"] for c in candidates):
+        raise SharedStationarityError("Shared-binomial stationary polish did not converge for every EM endpoint")
+    vectors = np.asarray([c["vector"] for c in candidates])
+    # Numerical equivalence, not an error bound: shared observation parameters
+    # retain the small-step resolution; nuisance logits use the existing Newton
+    # stagnation resolution. Both distances are checked over the complete family.
+    shared_distance = nuisance_distance = 0.
+    for i in range(len(vectors)):
+        for j in range(i):
+            scale = np.maximum(1., np.maximum(np.abs(vectors[i]), np.abs(vectors[j])))
+            difference = np.abs(vectors[i] - vectors[j]) / scale
+            shared_distance = max(shared_distance, float(np.max(difference[:2], initial=0.)))
+            nuisance_distance = max(nuisance_distance, float(np.max(difference[2:], initial=0.)))
+    if shared_distance > _POLISH_TOLERANCE or nuisance_distance > _POLISH_STAGNATION:
+        scores = [c["log_likelihood"] for c in candidates]
+        raise SharedStationarityError(f"Distinct shared-binomial stationary endpoints require observation-model review: "
+                           f"shared_relative_distance={shared_distance!r}, "
+                           f"nuisance_relative_distance={nuisance_distance!r}, training_log_likelihoods={scores!r}")
+    # Only numerically equivalent endpoints reach this content-based selection:
+    # largest training likelihood, then lexicographically smallest parameter vector.
+    # Start order, duplicates, convention reversal and held-out data have no vote.
+    best = min(candidates, key=lambda c: (-c["log_likelihood"], tuple(c["vector"])))
+    vector = best["vector"]
     n = len(hist)
+    top = max(c["log_likelihood"] for c in candidates)
+    band = _EM_START_BAND_PER_OBSERVATION * max(1., float(hist.sum()))
+    diagnostics = [dict(train_log_likelihood=c["log_likelihood"],
+                        em_iterations=c["endpoint"]["iterations"],
+                        polish_iterations=c["polish_steps"],
+                        polish_converged=c["polish_converged"],
+                        polish_termination=c["polish_termination"], gradient_max=c["gradient_max"])
+                   for c in candidates]
     return ReadModelFit(
-        name=BINOMIAL, error_logit=np.full(n, logit(error)),
-        balance_logit=np.full(n, logit((heterozygote - error) / (1 - 2 * error))),
-        log_concentration=None,
-        mixing=np.log(mixture[:, :2]) - np.log(mixture[:, 2, None]), success=True,
-        details=dict(message="shared-binomial EM", iterations=best["iterations"],
-                     failed_starts=failed, train_log_likelihood=best["log_likelihood"],
-                     starts_in_band=sum(value["log_likelihood"] >= top - band for value in candidates)))
+        name=BINOMIAL, error_logit=np.full(n, vector[0]), balance_logit=np.full(n, vector[1]),
+        log_concentration=None, mixing=vector[2:].reshape(n, 2)[undo].copy(), success=True,
+        details=dict(message="shared-binomial EM with stationary polish",
+                     iterations=best["endpoint"]["iterations"], failed_starts=failed,
+                     train_log_likelihood=best["log_likelihood"],
+                     starts_in_band=sum(c["log_likelihood"] >= top - band for c in candidates),
+                     stationary_relative_distance=max(shared_distance, nuisance_distance),
+                     stationary_shared_relative_distance=shared_distance,
+                     stationary_nuisance_relative_distance=nuisance_distance,
+                     stationary_shared_resolution=_POLISH_TOLERANCE,
+                     stationary_nuisance_resolution=_POLISH_STAGNATION,
+                     stationary_representative="maximum_training_ll_then_lexicographic_parameters",
+                     stationary_sample_order="training_histogram_content",
+                     stationary_starts=diagnostics))
 
 
 # ---------------------------------------------------------------------------------------------

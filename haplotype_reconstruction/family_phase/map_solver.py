@@ -54,10 +54,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 import time
 
 import numpy as np
+from . import cavities as cavity_counts
 from numba import njit, prange
+from ..execution import claim_threads
 
 from ..maths import chains, ties
 
@@ -142,7 +145,18 @@ def _lse4(v0, v1, v2, v3):
     top = max(max(v0, v1), max(v2, v3))
     if top == -np.inf:
         return -np.inf
-    return top + math.log(((math.exp(v0 - top) + math.exp(v1 - top)) + math.exp(v2 - top)) + math.exp(v3 - top))
+    # Scaffold-conditioned genotypes usually have one or two finite states.
+    # exp(-inf - finite_top) is exactly zero; preserve the original addition
+    # order while avoiding those calls. With one finite state the sum is one.
+    finite_count = ((v0 != -np.inf) + (v1 != -np.inf)
+                    + (v2 != -np.inf) + (v3 != -np.inf))
+    if finite_count == 1 and math.isfinite(top):
+        return top + 0.0  # Same signed-zero result as top + log(1).
+    e0 = 0.0 if v0 == -np.inf else math.exp(v0 - top)
+    e1 = 0.0 if v1 == -np.inf else math.exp(v1 - top)
+    e2 = 0.0 if v2 == -np.inf else math.exp(v2 - top)
+    e3 = 0.0 if v3 == -np.inf else math.exp(v3 - top)
+    return top + math.log(((e0 + e1) + e2) + e3)
 
 
 @njit(cache=True, inline="always")
@@ -156,15 +170,18 @@ def _transition(previous, state, theta):
     return 2 * _log_theta(theta)
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _root_cavity(root, site, frame_value, exclude_group, genotype, selector, potentials, orientation, group_child,
-                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, out):
+                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, out, cavities=None):
     """out[g] = psi_r(g) + log phi(g | frame_value) + the copy terms of r's children except group ``exclude_group``
     (-2: none of them, -1: all of them)."""
     orient = orientation[root, site]
     for g in range(4):
         out[g] = potentials[root, site, g] + _phi(g, frame_value, orient, log_match, log_miss)
     if exclude_group == -2:
+        return
+    if cavities is not None and cavities[0][root] >= 0:
+        cavity_counts.add_terms(cavities, root, site, exclude_group, genotype, selector, log_keep, log_error, out)
         return
     for index in range(child_offsets[root], child_offsets[root + 1]):
         group = child_groups[index]
@@ -177,23 +194,37 @@ def _root_cavity(root, site, frame_value, exclude_group, genotype, selector, pot
             out[g] += log_keep if _allele(g, homologue) == child_allele else log_error
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _root_term(root, site, frame_value, genotype, selector, potentials, orientation, group_child, child_offsets,
                child_groups, child_slots, log_keep, log_error, log_match, log_miss):
     """R_rl with frame ``frame_value`` (every child's factor in)."""
-    cavity = np.empty(4)
-    _root_cavity(root, site, frame_value, -1, genotype, selector, potentials, orientation, group_child, child_offsets,
-                 child_groups, child_slots, log_keep, log_error, log_match, log_miss, cavity)
-    return _lse4(cavity[0], cavity[1], cavity[2], cavity[3])
+    # Fixed scalar accumulators preserve each genotype's incidence-order fold.
+    # This hot site factor is also used when genotypes change inside a joint
+    # enumeration, where a cached marginal would be invalid.
+    orient = orientation[root, site]
+    v0 = potentials[root, site, 0] + _phi(0, frame_value, orient, log_match, log_miss)
+    v1 = potentials[root, site, 1] + _phi(1, frame_value, orient, log_match, log_miss)
+    v2 = potentials[root, site, 2] + _phi(2, frame_value, orient, log_match, log_miss)
+    v3 = potentials[root, site, 3] + _phi(3, frame_value, orient, log_match, log_miss)
+    for index in range(child_offsets[root], child_offsets[root + 1]):
+        group = child_groups[index]
+        slot = child_slots[index]
+        a = _allele(genotype[group_child[group], site], slot)
+        h = (selector[group, site] >> (1 - slot)) & 1
+        v0 += log_keep if _allele(0, h) == a else log_error
+        v1 += log_keep if _allele(1, h) == a else log_error
+        v2 += log_keep if _allele(2, h) == a else log_error
+        v3 += log_keep if _allele(3, h) == a else log_error
+    return _lse4(v0, v1, v2, v3)
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _slot_tables(group, site, genotype, selector, frame, potentials, orientation, roots, group_parent, group_child,
-                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, siblings, table):
+                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, siblings, table, cavities=None, root_scratch=None):
     """table[slot, a, h]: group's slot term at ``site`` when the child's slot allele is a and the parent's homologue h.
     Root parent: R of the parent with the child's factor in (its cavity without the child, every other child in when
     ``siblings``, none of them otherwise); non-root parent: its explicit genotype's copy term; unobserved slot: 1/2."""
-    cavity = np.empty(4)
+    cavity = np.empty(4) if root_scratch is None else root_scratch
     for slot in range(2):
         parent = group_parent[group, slot]
         if parent < 0:
@@ -203,7 +234,7 @@ def _slot_tables(group, site, genotype, selector, frame, potentials, orientation
         elif roots[parent]:
             _root_cavity(parent, site, frame[parent, site], group if siblings else -2, genotype, selector, potentials,
                          orientation, group_child, child_offsets, child_groups, child_slots, log_keep, log_error,
-                         log_match, log_miss, cavity)
+                         log_match, log_miss, cavity, cavities)
             for a in range(2):
                 for h in range(2):
                     v0 = cavity[0] + (log_keep if _allele(0, h) == a else log_error)
@@ -218,10 +249,13 @@ def _slot_tables(group, site, genotype, selector, frame, potentials, orientation
                     table[slot, a, h] = log_keep if _allele(parent_genotype, h) == a else log_error
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _own_children_terms(sample, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
-                        log_keep, log_error, out):
+                        log_keep, log_error, out, cavities=None):
     """out[g] += the copy terms of non-root ``sample``'s own children when it holds genotype g."""
+    if cavities is not None and cavities[0][sample] >= 0:
+        cavity_counts.add_terms(cavities, sample, site, -1, genotype, selector, log_keep, log_error, out)
+        return
     for index in range(child_offsets[sample], child_offsets[sample + 1]):
         group = child_groups[index]
         slot = child_slots[index]
@@ -231,7 +265,7 @@ def _own_children_terms(sample, site, genotype, selector, group_child, child_off
             out[g] += log_keep if _allele(g, homologue) == child_allele else log_error
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _child_score(group, a, b, child_genotype, selector, marker_offsets, marker_sites, marker_theta, base, table):
     """The child block's terms on sites [a, b) plus its selector transitions between the last marker before a and the
     first marker at or after b (base [L, 4] and table [L, 2, 2, 2] precomputed for the block). The one routine for the
@@ -255,7 +289,7 @@ def _child_score(group, a, b, child_genotype, selector, marker_offsets, marker_s
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _viterbi4(emission, trans, left, left_theta, right, right_theta, prior, high):
     """Selector path over m markers (emission [m, 4] log, trans [m - 1] switch probabilities between consecutive
     markers, pinned states ``left``/``right`` of the markers just outside (-1: none) joined by left_theta/right_theta,
@@ -310,9 +344,46 @@ def _viterbi4(emission, trans, left, left_theta, right, right_theta, prior, high
     return path
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
+def _block_emissions(lo, base, table, marker_sites, a_idx, b_idx, emission):
+    """Independent marker emissions, called only by an already budgeted block."""
+    for block in prange((b_idx - a_idx + 255) // 256):
+        for k in range(256 * block, min(b_idx - a_idx, 256 * (block + 1))):
+            i = marker_sites[a_idx + k] - lo
+            for s in range(4):
+                best = -np.inf
+                for g in range(4):
+                    if base[i, g] == -np.inf:
+                        continue
+                    value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
+                    if value > best:
+                        best = value
+                emission[k, s] = best
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _block_genotypes(child, lo, base, table, genotype, new_selector, new_genotype, reverse):
+    """Independent genotype choices after the serial selector carry-forward."""
+    for block in prange((base.shape[0] + 255) // 256):
+        for i in range(256 * block, min(base.shape[0], 256 * (block + 1))):
+            s = new_selector[i]
+            best, arg = -np.inf, -1
+            g_now = genotype[child, lo + i]
+            for index in range(4):
+                g = 3 - index if reverse else index
+                if base[i, g] == -np.inf:
+                    continue
+                value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
+                if value > best + GENOTYPE_TIE or (value >= best - GENOTYPE_TIE and g == g_now):
+                    if value > best:
+                        best = value
+                    arg = g
+            new_genotype[i] = arg
+
+
+@njit(cache=True, nogil=True)
 def _block_path(group, child, lo, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta, a_idx,
-                b_idx, left, right, new_selector, new_genotype, reverse=False):
+                b_idx, left, right, new_selector, new_genotype, reverse=False, parallel=False):
     """A child block's optimum over sites [lo, lo + len(base)) given its terms there (base [n, 4], slot tables
     [n, 2, 2, 2]): Viterbi over the group's markers a_idx..b_idx-1 (emission: max over G), joined to the pinned
     selector states ``left`` / ``right`` of the markers just outside (-1: none), the selector carried forward between
@@ -326,17 +397,20 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
     path = np.zeros(max(markers, 1), dtype=np.int8)
     if markers > 0:
         emission = np.empty((markers, 4))
-        for k in range(markers):
-            i = marker_sites[a_idx + k] - lo
-            for s in range(4):
-                best = -np.inf
-                for g in range(4):
-                    if base[i, g] == -np.inf:
-                        continue
-                    value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
-                    if value > best:
-                        best = value
-                emission[k, s] = best
+        if parallel:
+            _block_emissions(lo, base, table, marker_sites, a_idx, b_idx, emission)
+        else:
+            for k in range(markers):
+                i = marker_sites[a_idx + k] - lo
+                for s in range(4):
+                    best = -np.inf
+                    for g in range(4):
+                        if base[i, g] == -np.inf:
+                            continue
+                        value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
+                        if value > best:
+                            best = value
+                    emission[k, s] = best
         trans = np.empty(max(markers - 1, 0))
         for k in range(markers - 1):
             trans[k] = marker_theta[a_idx + k]
@@ -375,6 +449,8 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
             current = path[k]
             k += 1
         new_selector[i] = current
+        if parallel:
+            continue
         s = current
         best, arg = -np.inf, -1
         g_now = genotype[child, site]
@@ -389,11 +465,14 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
                 arg = g
         new_genotype[i] = arg
 
+    if parallel:
+        _block_genotypes(child, lo, base, table, genotype, new_selector, new_genotype, reverse)
 
-@njit(cache=True)
+
+@njit(cache=True, nogil=True)
 def _child_block(group, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                  child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                 log_error, log_match, log_miss, quantum, decisions, decision_count, reverse=False):
+                 log_error, log_match, log_miss, quantum, decisions, decision_count, reverse=False, cavities=None, parallel_terms=False):
     """Exact update of child block ``group`` (module docstring). Returns (accepted intervals, total gain) and records
     evaluated small decisions."""
     child = group_child[group]
@@ -402,26 +481,32 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
     markers = stop - first
     base = np.empty((sites, 4))
     table = np.empty((sites, 2, 2, 2))
-    slot_table = np.empty((2, 2, 2))
-    row = np.empty(4)
-    for site in range(sites):
-        for g in range(4):
-            row[g] = potentials[child, site, g]
-        _own_children_terms(child, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
-                            log_keep, log_error, row)
-        for g in range(4):
-            base[site, g] = row[g]
-        _slot_tables(group, site, genotype, selector, frame, potentials, orientation, roots, group_parent, group_child,
-                     child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, True,
-                     slot_table)
-        for k in range(2):
-            for a in range(2):
-                for h in range(2):
-                    table[site, k, a, h] = slot_table[k, a, h]
+    if parallel_terms:
+        _block_terms(group, 0, sites, potentials, genotype, selector, frame, orientation, roots, group_parent,
+                     group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                     log_miss, base, table, cavities)
+    else:
+        slot_table = np.empty((2, 2, 2))
+        row = np.empty(4)
+        root_scratch = np.empty(4)
+        for site in range(sites):
+            for g in range(4):
+                row[g] = potentials[child, site, g]
+            _own_children_terms(child, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
+                                log_keep, log_error, row, cavities)
+            for g in range(4):
+                base[site, g] = row[g]
+            _slot_tables(group, site, genotype, selector, frame, potentials, orientation, roots, group_parent, group_child,
+                         child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, True,
+                         slot_table, cavities, root_scratch)
+            for k in range(2):
+                for a in range(2):
+                    for h in range(2):
+                        table[site, k, a, h] = slot_table[k, a, h]
     new_selector = np.empty(sites, dtype=np.int8)
     new_genotype = np.empty(sites, dtype=np.int8)
     _block_path(group, child, 0, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse)
+                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse, parallel_terms)
     # Maximal differing intervals, merged when no unchanged marker separates them; each on its own exact gain.
     accepted, total = 0, 0.0
     old_genotype = genotype[child].copy()
@@ -471,10 +556,10 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
     return accepted, total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _init_block(group, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                 child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                log_error, log_match, log_miss, decoded, soft, soft_index, reverse=False):
+                log_error, log_match, log_miss, decoded, soft, soft_index, reverse=False, cavities=None):
     """Initialisation of child block ``group`` (one top-down sum-product pass, module docstring): its optimum given
     each parent's genotype SUMMED - a root's psi, phi and its already initialised children's factors; a non-root
     parent's stored conditional (``soft``, float32 log probabilities) and its already initialised children - so that a
@@ -502,15 +587,18 @@ def _init_block(group, potentials, genotype, selector, frame, orientation, roots
             else:
                 for g in range(4):
                     cavity[g] = soft[soft_index[parent], site, g]
-            for index in range(child_offsets[parent], child_offsets[parent + 1]):
-                other = child_groups[index]
-                if other == group or not decoded[other]:
-                    continue
-                other_slot = child_slots[index]
-                child_allele = _allele(genotype[group_child[other], site], other_slot)
-                homologue = (selector[other, site] >> (1 - other_slot)) & 1
-                for g in range(4):
-                    cavity[g] += log_keep if _allele(g, homologue) == child_allele else log_error
+            if cavities is not None and cavities[0][parent] >= 0:
+                cavity_counts.add_terms(cavities, parent, site, -1, genotype, selector, log_keep, log_error, cavity)
+            else:
+                for index in range(child_offsets[parent], child_offsets[parent + 1]):
+                    other = child_groups[index]
+                    if other == group or not decoded[other]:
+                        continue
+                    other_slot = child_slots[index]
+                    child_allele = _allele(genotype[group_child[other], site], other_slot)
+                    homologue = (selector[other, site] >> (1 - other_slot)) & 1
+                    for g in range(4):
+                        cavity[g] += log_keep if _allele(g, homologue) == child_allele else log_error
             for a in range(2):
                 for h in range(2):
                     v0 = cavity[0] + (log_keep if _allele(0, h) == a else log_error)
@@ -539,7 +627,7 @@ def _init_block(group, potentials, genotype, selector, frame, orientation, roots
                 soft[own, site, g] = row[g] - norm
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _root_score(run_lo, run_hi, frame_row, starts, run_theta, run_value):
     """Root block terms of runs [run_lo, run_hi): the sum of R (run_value[run, f]) plus the frame transitions into
     run_lo and out of run_hi - 1. The one routine for the block's before and after scores."""
@@ -553,7 +641,7 @@ def _root_score(run_lo, run_hi, frame_row, starts, run_theta, run_value):
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _viterbi2(run_value, trans, anchor_run, left, left_theta, right, right_theta, end_now):
     """Frame path over m runs (run_value [m, 2], trans [m - 1], state 0 forced in ``anchor_run`` (-1: none), pinned
     frames ``left``/``right`` outside (-1: none)): back-pointers within CHAIN_TIE stay (fewest switches); the final
@@ -591,7 +679,7 @@ def _viterbi2(run_value, trans, anchor_run, left, left_theta, right, right_theta
     return path
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _frame_path(run_value, trans, anchor_run, left, left_theta, right, right_theta, first_now, last_now, reverse=False):
     """_viterbi2, or under the convention reversal its mirror (an unavoidable frame switch lands at the rightmost tied
     run boundary instead of the leftmost; keep-current applies at the chain's first run)."""
@@ -613,10 +701,21 @@ def _frame_path(run_value, trans, anchor_run, left, left_theta, right, right_the
     return path
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
+def _root_run_terms(root, starts, genotype, selector, potentials, orientation, group_child,
+                    child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, out):
+    # Runs are independent. Keep each original site/frame accumulation order.
+    for run in prange(len(starts) - 1):
+        for site in range(starts[run], starts[run + 1]):
+            for frame in range(2):
+                out[run, frame] += _root_term(root, site, frame, genotype, selector, potentials, orientation,
+                    group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss)
+
+
+@njit(cache=True, nogil=True)
 def _root_block(root, potentials, genotype, selector, frame, orientation, starts, run_theta, anchor, group_child,
                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, quantum, decisions,
-                decision_count, reverse=False):
+                decision_count, reverse=False, parallel_terms=False):
     """Exact update of root block ``root`` (Viterbi over its frame-chain runs); intervals of runs accepted on their own
     exact gains. Returns (accepted intervals, total gain)."""
     runs = len(starts) - 1
@@ -625,11 +724,16 @@ def _root_block(root, potentials, genotype, selector, frame, orientation, starts
     for run in range(runs):
         if starts[run] <= anchor < starts[run + 1]:
             anchor_run = run
-        for site in range(starts[run], starts[run + 1]):
-            for f in range(2):
-                run_value[run, f] += _root_term(root, site, f, genotype, selector, potentials, orientation,
-                                                group_child, child_offsets, child_groups, child_slots, log_keep,
-                                                log_error, log_match, log_miss)
+        if not parallel_terms:
+            for site in range(starts[run], starts[run + 1]):
+                for f in range(2):
+                    run_value[run, f] += _root_term(root, site, f, genotype, selector, potentials, orientation,
+                                                    group_child, child_offsets, child_groups, child_slots, log_keep,
+                                                    log_error, log_match, log_miss)
+    if parallel_terms:
+        _root_run_terms(root, starts, genotype, selector, potentials, orientation, group_child,
+                        child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                        log_miss, run_value)
     trans = np.empty(max(runs - 1, 0))
     for run in range(runs - 1):
         trans[run] = run_theta[run]
@@ -666,17 +770,19 @@ def _root_block(root, potentials, genotype, selector, frame, orientation, starts
     return accepted, total
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, frame, orientation, roots, free_starts,
                   free_trans, frozen_starts, frozen_trans, frozen, anchors, group_parent, group_child, child_offsets,
                   child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                  log_match, log_miss, quantum, max_decisions, reverse=False):
+                  log_match, log_miss, quantum, max_decisions, reverse=False, cavities=None):
     """Exact updates of one colour's blocks (they share no free variable)."""
     count = len(blocks)
     accepted = np.zeros(count, dtype=np.int64)
     gains = np.zeros(count)
     decisions = np.zeros((count, max_decisions, 4))
     decision_counts = np.zeros((count, 1), dtype=np.int64)
+    old_g = np.empty((count, genotype.shape[1]), np.int8) if cavities is not None else np.empty((0, 0), np.int8)
+    old_s = np.empty_like(old_g)
     for index in prange(count):
         sample = blocks[index]
         if is_root[index]:
@@ -687,14 +793,21 @@ def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, f
                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, quantum,
                 decisions[index], decision_counts[index], reverse)
         else:
+            if cavities is not None:
+                old_g[index] = genotype[sample]
+                old_s[index] = selector[node_group[sample]]
             accepted[index], gains[index] = _child_block(
                 node_group[sample], potentials, genotype, selector, frame, orientation, roots, group_parent,
                 group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
-                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index], reverse)
+                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index], reverse, cavities)
+    if cavities is not None:
+        for index in range(count):
+            if not is_root[index]:
+                cavity_counts.update_group(cavities, node_group[blocks[index]], 0, old_g[index], old_s[index], genotype, selector)
     return accepted, gains, decisions, decision_counts
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, child_offsets, child_groups, child_slots,
                     marker_offsets, marker_sites, marker_theta, toggled):
     """The transition terms a relabelling of ``root`` at ``boundary`` (between runs run - 1 and run) changes: r's frame
@@ -720,7 +833,7 @@ def _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, chi
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _relabel_scan(root, frame, selector, starts, run_theta, anchor, child_offsets, child_groups, child_slots,
                   marker_offsets, marker_sites, marker_theta, quantum, decisions, decision_count, reverse=False):
     """Every relabelling move of ``root`` (module docstring), boundaries in position order (reversed under the
@@ -755,7 +868,17 @@ def _relabel_scan(root, frame, selector, starts, run_theta, anchor, child_offset
     return accepted, total
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _sum_fixed(values):
+    # Keep the reduction outside a parallel function: Numba's automatic np.sum
+    # reduction otherwise changes its grouping when a task claims more threads.
+    total = 0.0
+    for value in values:
+        total += value
+    return total
+
+
+@njit(cache=True, parallel=True, nogil=True)
 def objective(potentials, genotype, selector, frame, orientation, roots, frozen, free_starts, free_trans,
               frozen_starts, frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
               marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match, log_miss):
@@ -800,37 +923,38 @@ def objective(potentials, genotype, selector, frame, orientation, roots, frozen,
             total += _transition(selector[group, marker_sites[k - 1]], selector[group, marker_sites[k]],
                                  marker_theta[k - 1])
         per_group[group] = total
-    return float(np.sum(per_sample) + np.sum(per_group))
+    return float(_sum_fixed(per_sample) + _sum_fixed(per_group))
 
 
 # ------------------------------------------------------------------------------------------- compound moves
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _block_terms(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
-                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, base, table):
+                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, base, table, cavities=None):
     """A child block's terms on sites [lo, end): base [n, 4] (psi + its own children's copy terms) and slot tables
     [n, 2, 2, 2] (a root parent's R with the child's factor in, its other children in)."""
     child = group_child[group]
-    slot_table = np.empty((2, 2, 2))
-    row = np.empty(4)
-    for i in range(end - lo):
+    for i in prange(end - lo):
+        slot_table = np.empty((2, 2, 2))
+        row = np.empty(4)
+        root_scratch = np.empty(4)
         site = lo + i
         for g in range(4):
             row[g] = potentials[child, site, g]
         _own_children_terms(child, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
-                            log_keep, log_error, row)
+                            log_keep, log_error, row, cavities)
         for g in range(4):
             base[i, g] = row[g]
         _slot_tables(group, site, genotype, selector, frame, potentials, orientation, roots, group_parent, group_child,
                      child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, True,
-                     slot_table)
+                     slot_table, cavities, root_scratch)
         for k in range(2):
             for a in range(2):
                 for h in range(2):
                     table[i, k, a, h] = slot_table[k, a, h]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _window_end(group, hi, marker_offsets, marker_sites, sites):
     """End (exclusive) of a windowed re-decode of ``group`` inside [lo, hi): its first marker at or after hi (the sites
     carried from its last free marker reach it), or the chromosome end."""
@@ -839,7 +963,7 @@ def _window_end(group, hi, marker_offsets, marker_sites, sites):
     return marker_sites[b_idx] if b_idx < stop else sites
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                   child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
                   log_error, log_match, log_miss, reverse=False):
@@ -869,7 +993,7 @@ def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientat
         genotype[child, lo + i] = new_genotype[i]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent,
                      group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
                      reverse=False):
@@ -899,7 +1023,7 @@ def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orie
         genotype[child, lo + i] = arg
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _window_root(root, lo, hi, potentials, genotype, selector, frame, orientation, starts, run_theta, anchor,
                  group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
                  reverse=False):
@@ -936,7 +1060,7 @@ def _window_root(root, lo, hi, potentials, genotype, selector, frame, orientatio
             frame[root, site] = path[j]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _term_masks(groups, count, extra_root, roots, group_parent, group_child, child_offsets, child_groups, samples):
     """Masks of the J terms a compound move over child groups ``groups[:count]`` (and root ``extra_root``'s frame, -1
     for none) can alter: a root's R and frame terms when its frame or any child group of it may change; a non-root's
@@ -964,7 +1088,7 @@ def _term_masks(groups, count, extra_root, roots, group_parent, group_child, chi
     return root_mask, sample_mask, group_mask, transition_mask
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype, selector,
                       frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
                       group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
@@ -1020,7 +1144,114 @@ def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mas
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
+def _term_lists(groups, count, extra_root, roots, group_parent, group_child, child_offsets, child_groups, samples):
+    """Sorted touched R/psi/copy/transition indices; no N- or G-sized scratch.
+
+    Sorting deduplicates a local factor neighbourhood. The window scorer merges
+    lists back into the old sample/group fold, preserving floating arithmetic.
+    ``samples`` stays in the private call signature for the serial reference.
+    """
+    root_items = np.empty(2 * count + 1, dtype=np.int64)
+    sample_items = np.empty(count, dtype=np.int64)
+    nr = 0
+    if extra_root >= 0:
+        root_items[nr] = extra_root
+        nr += 1
+    capacity = count
+    for q in range(count):
+        child = group_child[groups[q]]
+        capacity += child_offsets[child + 1] - child_offsets[child]
+    copies = np.empty(capacity, dtype=np.int64)
+    ng, ns = 0, 0
+    for q in range(count):
+        group = groups[q]
+        child = group_child[group]
+        if not roots[child]:
+            sample_items[ns] = child
+            ns += 1
+        copies[ng] = group
+        ng += 1
+        for slot in range(2):
+            parent = group_parent[group, slot]
+            if parent >= 0 and roots[parent]:
+                root_items[nr] = parent
+                nr += 1
+        for index in range(child_offsets[child], child_offsets[child + 1]):
+            copies[ng] = child_groups[index]
+            ng += 1
+    return (np.unique(root_items[:nr]), np.unique(sample_items[:ns]),
+            np.unique(copies[:ng]), np.unique(groups[:count]))
+
+
+@njit(cache=True, nogil=True)
+def _window_objective_lists(lo, hi, root_list, sample_list, group_list, transition_list, potentials, genotype, selector,
+                      frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
+                      group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
+                      marker_theta, log_keep, log_error, log_match, log_miss):
+    """Sparse-list terms of J (the same terms as ``objective``) that a change confined to sites [lo, hi) and to the masked
+    blocks (_term_masks) can alter: their per-site terms on [lo, hi), the masked roots' frame transitions at run starts
+    in [lo, hi] and the masked groups' selector transitions with a marker in [lo, hi). The one routine for a compound
+    move's before and after scores."""
+    total = 0.0
+    cavity = np.empty(4)
+    # Merge the two sorted sample lists: exactly the original sample-axis fold.
+    r, s = 0, 0
+    while r < len(root_list) or s < len(sample_list):
+        is_root = s == len(sample_list) or (r < len(root_list) and root_list[r] < sample_list[s])
+        if is_root:
+            sample = root_list[r]
+            r += 1
+            starts = frozen_starts if frozen[sample] else free_starts
+            trans = frozen_trans if frozen[sample] else free_trans
+            for site in range(lo, hi):
+                _root_cavity(sample, site, frame[sample, site], -1, genotype, selector, potentials, orientation,
+                             group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                             log_miss, cavity)
+                total += _lse4(cavity[0], cavity[1], cavity[2], cavity[3])
+            runs = len(starts) - 1
+            run = max(np.searchsorted(starts[:runs], lo), 1)
+            while run < runs and starts[run] <= hi:
+                switched = frame[sample, starts[run]] != frame[sample, starts[run] - 1]
+                total += _log_theta(trans[run - 1]) if switched else _log_stay(trans[run - 1])
+                run += 1
+        else:
+            sample = sample_list[s]
+            s += 1
+            for site in range(lo, hi):
+                total += potentials[sample, site, genotype[sample, site]]
+    c, t = 0, 0
+    while c < len(group_list) or t < len(transition_list):
+        if t == len(transition_list) or (c < len(group_list) and group_list[c] < transition_list[t]):
+            group = group_list[c]
+        else:
+            group = transition_list[t]
+        child = group_child[group]
+        if c < len(group_list) and group_list[c] == group:
+            c += 1
+            for slot in range(2):
+                parent = group_parent[group, slot]
+                if parent >= 0 and roots[parent]:
+                    continue
+                for site in range(lo, hi):
+                    if parent < 0:
+                        total += LOG_HALF
+                    else:
+                        homologue = (selector[group, site] >> (1 - slot)) & 1
+                        total += (log_keep if _allele(genotype[parent, site], homologue)
+                                  == _allele(genotype[child, site], slot) else log_error)
+        if t < len(transition_list) and transition_list[t] == group:
+            t += 1
+            first, stop = marker_offsets[group], marker_offsets[group + 1]
+            a_idx = first + np.searchsorted(marker_sites[first:stop], lo)
+            b_idx = first + np.searchsorted(marker_sites[first:stop], hi)
+            for k in range(max(a_idx, first + 1), min(b_idx + 1, stop)):
+                total += _transition(selector[group, marker_sites[k - 1]], selector[group, marker_sites[k]],
+                                     marker_theta[k - 1])
+    return total
+
+
+@njit(cache=True, nogil=True)
 def _pair_run(group, mask, a, b, selector, sites):
     """The change pair (c1, c2) of ``group``'s bits ``mask`` near the source pair (a, b): c1 in [a - span, b), c2 in
     (a, b + span], span = b - a, a chromosome end standing in for a change when the source interval reaches it (then
@@ -1053,7 +1284,7 @@ def _pair_run(group, mask, a, b, selector, sites):
     return c1, c2
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _pair_runs(root, a, b, selector, child_offsets, child_groups, child_slots, sites, runs):
     """Sibship-pair runs with tolerance (kind 2, release 2.2 M3): every child of root ``root`` whose bit for the root
     has a change pair (c1, c2) near the source pair (a, b) - c1 in [a - span, b), c2 in (a, b + span], span = b - a,
@@ -1100,7 +1331,7 @@ def _pair_runs(root, a, b, selector, child_offsets, child_groups, child_slots, s
     return count
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, selector, frame, orientation, roots,
               frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
               group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
@@ -1235,10 +1466,10 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
         if parent >= 0 and roots[parent]:
             saved_frame[slot] = frame[parent, lo:end]
     groups_list, groups_count, extra_root = groups, used, -1
-    root_mask, sample_mask, group_mask, transition_mask = _term_masks(
+    root_mask, sample_mask, group_mask, transition_mask = _term_lists(
         groups_list, groups_count, extra_root, roots, group_parent, group_child, child_offsets, child_groups,
         genotype.shape[0])
-    before = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
+    before = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                                selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                                frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
                                marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
@@ -1321,7 +1552,7 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
         _window_child(own, z_lo, z_hi, potentials, genotype, selector, frame, orientation, roots, group_parent,
                       group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
                       marker_theta, log_keep, log_error, log_match, log_miss, reverse)
-    after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
+    after = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                               selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                               frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
                               marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
@@ -1338,7 +1569,7 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
     return gain, False
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potentials, genotype, selector, frame,
                 orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group,
                 group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
@@ -1449,7 +1680,7 @@ def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potential
     return accepted, total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compound_sweep(quantum, max_span, margin, potentials, genotype, selector, frame, orientation, roots, frozen,
                     free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
                     group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
@@ -1491,7 +1722,7 @@ def _compound_sweep(quantum, max_span, margin, potentials, genotype, selector, f
     return accepted, total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _relabel_flip(root, boundary, anchor, frame, selector, child_offsets, child_groups, child_slots):
     """Apply (or undo: it is an involution) the relabelling of ``root`` at ``boundary`` (module docstring)."""
     sites = frame.shape[1]
@@ -1502,7 +1733,7 @@ def _relabel_flip(root, boundary, anchor, frame, selector, child_offsets, child_
             selector[child_groups[index], site] ^= 1 << (1 - child_slots[index])
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector, frame, orientation, roots, frozen,
                       free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
                       group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
@@ -1537,10 +1768,10 @@ def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector
     saved_frame = frame[root, lo:end].copy()
     groups_list = child_groups[first_child:last_child].copy()
     groups_count, extra_root = count, root
-    root_mask, sample_mask, group_mask, transition_mask = _term_masks(
+    root_mask, sample_mask, group_mask, transition_mask = _term_lists(
         groups_list, groups_count, extra_root, roots, group_parent, group_child, child_offsets, child_groups,
         genotype.shape[0])
-    before = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
+    before = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                                selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                                frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
                                marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
@@ -1553,7 +1784,7 @@ def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector
             _window_root(root, lo, hi, potentials, genotype, selector, frame, orientation, starts, trans, anchor,
                          group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                          log_miss, reverse)
-    after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
+    after = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                               selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                               frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
                               marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
@@ -1569,7 +1800,7 @@ def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector
     return gain, False
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, selector, frame, orientation, roots,
                             frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group,
                             group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
@@ -1635,7 +1866,7 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
     return accepted, total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _sibship(parent, roots, node_group, group_child, child_offsets, child_groups):
     """(members, groups) of ``parent``'s sibship: its children (and the parent itself when it is not a root)."""
     first, last = child_offsets[parent], child_offsets[parent + 1]
@@ -1653,7 +1884,7 @@ def _sibship(parent, roots, node_group, group_child, child_offsets, child_groups
     return members, groups
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _site_lists(root_mask, sample_mask, group_mask, roots, group_parent):
     """Index lists of the masked terms of one site: roots (R), non-root samples (psi), groups with a copy term to a
     non-root parent or an unobserved slot."""
@@ -1678,7 +1909,7 @@ def _site_lists(root_mask, sample_mask, group_mask, roots, group_parent):
     return root_list[:nr], sample_list[:ns], group_list[:ng]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _site_terms(site, root_list, sample_list, group_list, potentials, genotype, selector, frame, orientation, roots,
                 group_parent, group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                 log_miss):
@@ -1709,7 +1940,7 @@ def _site_terms(site, root_list, sample_list, group_list, potentials, genotype, 
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _site_conflict(parent, site, genotype, selector, frame, potentials, orientation, roots, group_child,
                    child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
     """Whether ``parent``'s best genotype at ``site`` (a root's mode of its summed terms, a non-root's current
@@ -1734,7 +1965,7 @@ def _site_conflict(parent, site, genotype, selector, frame, potentials, orientat
     return False
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _site_search(parent, site, max_combos, minimum_multi, potentials, genotype, selector, frame, orientation, roots,
                  frozen, free_starts, free_trans, frozen_starts, frozen_trans, node_group, group_parent, group_child,
                  child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
@@ -1766,10 +1997,10 @@ def _site_search(parent, site, max_combos, minimum_multi, potentials, genotype, 
             return 0.0, members
     if combos <= 1 or multi < minimum_multi:
         return 0.0, members
-    root_mask, sample_mask, group_mask, transition_mask = _term_masks(
+    root_mask, sample_mask, group_mask, transition_mask = _term_lists(
         groups, used, parent if roots[parent] else -1, roots, group_parent, group_child, child_offsets, child_groups,
         samples)
-    root_list, sample_list, group_list = _site_lists(root_mask, sample_mask, group_mask, roots, group_parent)
+    root_list, sample_list, group_list = (root_mask, sample_mask, group_mask)
     current = np.empty(used, dtype=np.int8)
     for q in range(used):
         current[q] = genotype[members[q], site]
@@ -1797,7 +2028,7 @@ def _site_search(parent, site, max_combos, minimum_multi, potentials, genotype, 
     return best_value - before, members
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen,
                free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent, group_child,
                child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
@@ -1818,7 +2049,7 @@ def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector
     return gain, False
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _joint_refit(parents, count, lo, hi, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen,
                  free_starts, free_trans, frozen_starts, frozen_trans, node_group, group_parent, group_child,
                  child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
@@ -1855,7 +2086,7 @@ def _joint_refit(parents, count, lo, hi, max_combos, potentials, genotype, selec
                     genotype[members[m], site] = best[m]
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _site_sweep(quantum, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen, free_starts,
                 free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent, group_child, child_offsets,
                 child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match,
@@ -1872,15 +2103,20 @@ def _site_sweep(quantum, max_combos, potentials, genotype, selector, frame, orie
         kids = child_offsets[parent + 1] - child_offsets[parent]
         if kids == 0 or (kids < 2 and roots[parent]):
             continue
-        for site_index in range(sites):
-            site = sites - 1 - site_index if reverse else site_index
-            if not conflict[parent, site]:
-                continue
+        columns = np.flatnonzero(conflict[parent])
+        gains = np.empty(len(columns), dtype=np.float64)
+        oks = np.empty(len(columns), dtype=np.bool_)
+        for index in prange(len(columns)):
+            site = columns[len(columns) - 1 - index] if reverse else columns[index]
             gain, ok = _site_move(parent, site, quantum, max_combos, potentials, genotype, selector, frame,
                                   orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
                                   anchors, node_group, group_parent, group_child, child_offsets, child_groups,
                                   child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
                                   log_match, log_miss, reverse)
+            gains[index], oks[index] = gain, ok
+        for index in range(len(columns)):
+            site = columns[len(columns) - 1 - index] if reverse else columns[index]
+            gain, ok = gains[index], oks[index]
             if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
                 decisions[decision_count[0], 0] = 7
                 decisions[decision_count[0], 1] = parent
@@ -1894,28 +2130,100 @@ def _site_sweep(quantum, max_combos, potentials, genotype, selector, frame, orie
 
 
 def colouring(graph, reverse=False):
-    """Colours of the conflict graph: parent-child edges plus a clique of each root's children (they share the root's
-    summed-out genotype). Greedy over samples by (-degree, sample index); a list of ascending sample arrays in colour
-    order. Under the convention reversal the sample index order and the colour order are reversed."""
+    """The original degree-ordered greedy colours, with implicit sibling cliques.
+
+    Each child belongs to at most two root factors. Pair multiplicities give
+    exact union degrees without expanding the cliques. Root colour sets and
+    their first missing colours avoid rescanning each sibling on every visit.
+    Storage is O(N+E); conflicting-colour probes can still be superlinear for
+    adversarial overlapping root families. No new visiting schedule is used.
+    """
     samples = len(graph.roots)
-    neighbours = [set() for _ in range(samples)]
+    direct = [set() for _ in range(samples)]
+    roots_of = [set() for _ in range(samples)]
+    root_children = {}
     for parent, child in zip(graph.parents, graph.children):
-        neighbours[int(parent)].add(int(child))
-        neighbours[int(child)].add(int(parent))
-    for root in np.flatnonzero(graph.roots):
-        kids = sorted({int(c) for p, c in zip(graph.parents, graph.children) if p == root})
-        for a in kids:
-            neighbours[a].update(k for k in kids if k != a)
-    order = sorted(range(samples), key=lambda n: (-len(neighbours[n]), -n if reverse else n))
+        parent, child = int(parent), int(child)
+        direct[parent].add(child)
+        direct[child].add(parent)
+        if graph.roots[parent]:
+            root_children.setdefault(parent, set()).add(child)
+            roots_of[child].add(parent)
+    roots_of = [tuple(sorted(roots)) for roots in roots_of]
+    pairs = {}
+    for roots in roots_of:
+        if len(roots) == 2:
+            pairs[roots] = pairs.get(roots, 0) + 1
+    degree = []
+    for sample, roots in enumerate(roots_of):
+        siblings = sum(len(root_children[root]) for root in roots)
+        if len(roots) == 2:
+            siblings -= pairs[roots]
+        if roots:
+            siblings -= 1  # the child belongs to its own root factor(s)
+        degree.append(siblings + sum(not any(other in root_children[root] for root in roots)
+                                     for other in direct[sample]))
+    order = sorted(range(samples), key=lambda n: (-degree[n], -n if reverse else n))
     colour = np.full(samples, -1, dtype=np.int64)
+    root_colours = {root: set() for root in root_children}
+    root_missing = dict.fromkeys(root_children, 0)
+    groups = []
     for sample in order:
-        used = {int(colour[m]) for m in neighbours[sample] if colour[m] >= 0}
-        c = 0
-        while c in used:
+        roots = roots_of[sample]
+        used = {int(colour[other]) for other in direct[sample] if colour[other] >= 0}
+        c = max((root_missing[root] for root in roots), default=0)
+        while c in used or any(c in root_colours[root] for root in roots):
             c += 1
         colour[sample] = c
-    result = [np.flatnonzero(colour == c).astype(np.int64) for c in range(int(colour.max()) + 1 if samples else 0)]
+        while len(groups) <= c:
+            groups.append([])
+        for root in roots:
+            root_colours[root].add(c)
+            while root_missing[root] in root_colours[root]:
+                root_missing[root] += 1
+    for sample, c in enumerate(colour):
+        groups[int(c)].append(sample)
+    result = [np.asarray(group, dtype=np.int64) for group in groups]
     return result[::-1] if reverse else result
+
+
+def initial_batches(graph, order):
+    """Dependency waves preserving every original sibling/parent precedence.
+
+    _init_block reads decoded siblings of either parent and the non-root parent's
+    soft conditional. Disjoint waves neither read nor write each other's state.
+    """
+    last_parent = {}
+    levels = np.zeros(len(graph.group_child), dtype=np.int64)
+    batches = []
+    for group in order:
+        group = int(group)
+        parents = [int(p) for p in graph.group_parent[group] if p >= 0]
+        dependencies = [last_parent[p] for p in parents if p in last_parent]
+        dependencies += [int(graph.node_group[p]) for p in parents if graph.node_group[p] >= 0]
+        level = 1 + max((int(levels[x]) for x in dependencies), default=-1)
+        levels[group] = level
+        while len(batches) <= level:
+            batches.append([])
+        batches[level].append(group)
+        for parent in parents:
+            last_parent[parent] = group
+    return tuple(np.asarray(batch, dtype=np.int64) for batch in batches)
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _init_batch(groups, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
+                child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
+                log_error, log_match, log_miss, decoded, soft, soft_index, reverse=False, cavities=None):
+    for k in prange(len(groups)):
+        _init_block(groups[k], potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
+                    child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
+                    log_keep, log_error, log_match, log_miss, decoded, soft, soft_index, reverse, cavities)
+
+    if cavities is not None:
+        for group in groups:
+            child = group_child[group]
+            cavity_counts.update_group(cavities, group, 0, genotype[child], selector[group], genotype, selector, True)
 
 
 def descent_order(graph, reverse=False):
@@ -1923,18 +2231,20 @@ def descent_order(graph, reverse=False):
     the convention reversal)."""
     samples = len(graph.roots)
     depth = np.zeros(samples, dtype=np.int64)
-    parents_of = [[] for _ in range(samples)]
+    children_of = [[] for _ in range(samples)]
+    indegree = np.zeros(samples, dtype=np.int64)
     for parent, child in zip(graph.parents, graph.children):
-        parents_of[int(child)].append(int(parent))
-    for _ in range(samples):
-        changed = False
-        for child in range(samples):
-            for parent in parents_of[child]:
-                if depth[child] < depth[parent] + 1:
-                    depth[child] = depth[parent] + 1
-                    changed = True
-        if not changed:
-            break
+        children_of[int(parent)].append(int(child))
+        indegree[child] += 1
+    queue = np.flatnonzero(indegree == 0).tolist()
+    for parent in queue:
+        for child in children_of[parent]:
+            depth[child] = max(depth[child], depth[parent] + 1)
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+    if len(queue) != samples:
+        raise ValueError('family phase requires an acyclic pedigree')
     children = np.asarray(graph.group_child, dtype=np.int64)
     return np.lexsort((-children if reverse else children, depth[children])).astype(np.int64)
 
@@ -1990,13 +2300,20 @@ def _difference_clusters(items, margin):
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-    order = sorted(range(count), key=lambda i: (items[i][2], items[i][3], items[i][0], items[i][1]))
-    for position, i in enumerate(order):
-        for j in order[position + 1:]:
-            if items[j][2] > items[i][3] + margin:
-                break
-            if items[i][4] & items[j][4]:
-                parent[find(i)] = find(j)
+    factors = {}
+    for i, item in enumerate(items):
+        for key in item[4]:
+            factors.setdefault(key, []).append(i)
+    for members in factors.values():
+        ordered = sorted(members, key=lambda i: (items[i][2], items[i][3], i))
+        representative, right = -1, -1
+        for i in ordered:
+            left, stop = items[i][2], items[i][3]
+            if representative >= 0 and left <= right + margin:
+                parent[find(i)] = find(representative)
+                right = max(right, stop)
+            else:
+                representative, right = i, stop
     groups = {}
     for i in range(count):
         groups.setdefault(find(i), []).append(i)
@@ -2057,10 +2374,25 @@ class FamilyMap:
         self.colours = colouring(graph, self.reverse)
         self.roots = np.asarray(graph.roots, dtype=np.bool_)
         self.descent_order = descent_order(graph, self.reverse)
+        self.initial_batches = initial_batches(graph, self.descent_order)
         self.quantum = GAIN_QUANTUM
         self.phase_steps, self.phase_seconds = {}, {}
+        self.compound_schedule = os.environ.get('HAPLOTYPES_COMPOUND_SCHEDULE', 'coloured')
+        if self.compound_schedule not in ('serial', 'coloured'):
+            raise ValueError('HAPLOTYPES_COMPOUND_SCHEDULE must be serial or coloured')
+        self.compound_layout = []
+        self.cavity_mode = os.environ.get('HAPLOTYPES_CAVITY_MODE', 'counts')
+        if self.cavity_mode not in ('counts', 'fold'):
+            raise ValueError('HAPLOTYPES_CAVITY_MODE must be counts or fold')
+
+    def cavities(self, state, decoded=None):
+        if self.cavity_mode == 'fold':
+            return None
+        return cavity_counts.build(state.genotype, state.selector, self.graph, self.child_offsets,
+                                   self.child_groups, self.child_slots, decoded)
 
     def objective(self, state):
+        claim_threads(max_threads=self.samples)
         w, g = self.workspace, self.graph
         return objective(w.potentials, state.genotype, state.selector, state.frame, w.orientation, self.roots,
                          w.frozen, self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans,
@@ -2081,11 +2413,13 @@ class FamilyMap:
         soft_index[held] = np.arange(len(held))
         soft = np.zeros((max(len(held), 1), self.sites, 4), dtype=np.float32)
         decoded = np.zeros(len(g.group_child), dtype=np.bool_)
-        for group in self.descent_order:
-            _init_block(int(group), w.potentials, state.genotype, state.selector, state.frame, w.orientation,
+        cavities = self.cavities(state, decoded)
+        for batch in self.initial_batches:
+            claim_threads(max_threads=len(batch))
+            _init_batch(batch, w.potentials, state.genotype, state.selector, state.frame, w.orientation,
                         self.roots, g.group_parent, g.group_child, self.child_offsets, self.child_groups,
                         self.child_slots, self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep,
-                        self.log_error, self.log_match, self.log_miss, decoded, soft, soft_index, self.reverse)
+                        self.log_error, self.log_match, self.log_miss, decoded, soft, soft_index, self.reverse, cavities)
         return state
 
     def sweep(self, state, decisions_out=None, tier=0):
@@ -2112,26 +2446,40 @@ class FamilyMap:
                   self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep, self.log_error,
                   self.log_match, self.log_miss)
         if tier == 1:
+            claim_threads(max_threads=1)
             started = time.perf_counter()
             decisions = np.zeros((4096, 4))
             count = np.zeros(1, dtype=np.int64)
-            moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
-                                          self.reverse, 1)
+            if self.compound_schedule == 'coloured':
+                from .compound_schedule import sweep as compound_sweep
+                moves, gain = compound_sweep(self, state, decisions, count, tier=1)
+            else:
+                moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
+                                              self.reverse, 1)
             record("compound_long", moves, gain, decisions, count[0], started)
             return steps, total
         started = time.perf_counter()
+        cavities = self.cavities(state)
         for blocks in self.colours:
+            claim_threads(max_threads=len(blocks))
             is_root = self.roots[blocks]
-            accepted, gains, decisions, counts = _sweep_colour(
-                blocks, is_root, g.node_group, w.potentials, state.genotype, state.selector, state.frame,
-                w.orientation, self.roots, self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans,
-                w.frozen, w.anchors, g.group_parent, g.group_child, self.child_offsets, self.child_groups,
-                self.child_slots, self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep,
-                self.log_error, self.log_match, self.log_miss, self.quantum, 256, self.reverse)
+            from ..execution.budget import current_budget
+            if self.sites >= 1024 and len(blocks) < current_budget().threads():
+                from .block_schedule import sweep_colour
+                accepted, gains, decisions, counts = sweep_colour(self, state, blocks, cavities)
+            else:
+                accepted, gains, decisions, counts = _sweep_colour(
+                    blocks, is_root, g.node_group, w.potentials, state.genotype, state.selector, state.frame,
+                    w.orientation, self.roots, self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans,
+                    w.frozen, w.anchors, g.group_parent, g.group_child, self.child_offsets, self.child_groups,
+                    self.child_slots, self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep,
+                    self.log_error, self.log_match, self.log_miss, self.quantum, 256, self.reverse, cavities)
             for index in range(len(blocks)):
                 record("blocks", accepted[index], gains[index], decisions[index], counts[index, 0], started)
                 started = time.perf_counter()
         started = time.perf_counter()
+        claim_threads(max_threads=1)
+        del cavities
         root_order = np.flatnonzero(self.roots)
         for root in (root_order[::-1] if self.reverse else root_order):
             if self.child_offsets[root] == self.child_offsets[root + 1]:
@@ -2149,18 +2497,26 @@ class FamilyMap:
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
-        moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
-                                      self.reverse, 0)
+        if self.compound_schedule == 'coloured':
+            from .compound_schedule import sweep as compound_sweep
+            moves, gain = compound_sweep(self, state, decisions, count, tier=0)
+        else:
+            moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
+                                          self.reverse, 0)
         record("compound", moves, gain, decisions, count[0], started)
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
-        moves, gain = _relabel_compound_sweep(self.quantum, RELABEL_REACH, COMPOUND_MARGIN, *common, decisions,
-                                              count, self.reverse)
+        if self.compound_schedule == 'coloured':
+            moves, gain = compound_sweep(self, state, decisions, count, relabel=True)
+        else:
+            moves, gain = _relabel_compound_sweep(self.quantum, RELABEL_REACH, COMPOUND_MARGIN, *common, decisions,
+                                                  count, self.reverse)
         record("compound_relabel", moves, gain, decisions, count[0], started)
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
+        claim_threads()
         moves, gain = _site_sweep(self.quantum, SITE_MAX_COMBOS, *common, decisions, count, self.reverse)
         record("site", moves, gain, decisions, count[0], started)
         return steps, total
@@ -2189,60 +2545,149 @@ class FamilyMap:
         raise RuntimeError(f"family MAP did not converge in {max_sweeps} sweeps (accepted per sweep {accepted})")
 
     def solve_symmetric(self, max_sweeps):
-        """The released family MAP (release 2.2, M5): the ascent from the default start under this map's schedule and
-        under its mirror (every order and tie convention reversed, FamilyMap(reverse=not self.reverse)), both without
-        the long compound moves, merged (merge_end_points) from the end point with the higher J, then the ascent to
-        convergence (with the long compound moves only when config.map_long_moves). Returns (MapResult of the release,
-        merge record dict)."""
+        """Unordered two-schedule search, with common-start independent transplants.
+
+        The unique better endpoint owns the continuation schedule. A tied pair gets
+        equal continuation effort; tied final alternatives are retained for release,
+        never interpreted as evidence for the representative's biological phase.
+        """
         first = self.solve(max_sweeps, long_tier=False)
         mirror = FamilyMap(self.workspace, self.config, reverse=not self.reverse)
         second = mirror.solve(max_sweeps, long_tier=False)
-        for phase, steps in mirror.phase_steps.items():
-            self.phase_steps["mirror_" + phase] = self.phase_steps.get("mirror_" + phase, 0) + steps
-        for phase, seconds in mirror.phase_seconds.items():
-            self.phase_seconds["mirror_" + phase] = self.phase_seconds.get("mirror_" + phase, 0.0) + seconds
-        j1, j2 = first.objective[-1], second.objective[-1]
-        tied_base = abs(j1 - j2) <= self.quantum
-        base, other = (first, second) if j1 >= j2 - self.quantum else (second, first)
+        endpoints = ((self, first), (mirror, second))
+        scores = [r.objective[-1] for _, r in endpoints]
+        best = ties.tie_classes(scores, self.quantum, descending=True)
         started = time.perf_counter()
-        state, taken, tied, candidates = self.merge_end_points(base.state, other.state)
-        self.phase_seconds["merge"] = self.phase_seconds.get("merge", 0.0) + time.perf_counter() - started
-        final = self.solve(max_sweeps, state=state, long_tier=bool(getattr(self.config, "map_long_moves", False)))
-        record = dict(J_schedule=float(j1), J_mirror=float(j2), base="schedule" if base is first else "mirror",
-                      tied_base=bool(tied_base), clusters=int(candidates), transplanted=int(taken),
-                      tied_transplants=int(tied), J_release=float(final.objective[-1]))
+        branches, merge_rows = [], []
+        # At most four complete continuations: no unbounded archive of chromosome
+        # states. Unvisited combinations are recorded as search incompleteness;
+        # only evaluated release differences can mask called phase.
+        continuation_bound = 4
+        endpoint_indices = np.flatnonzero(best.classes == 0)
+        per_endpoint = continuation_bound // len(endpoint_indices)
+        for index in endpoint_indices:
+            owner, base = endpoints[index]
+            other = endpoints[1 - index][1]
+            results, rows = owner.continue_endpoint(max_sweeps, base, other, per_endpoint)
+            branches.extend((owner.reverse, result) for result in results)
+            merge_rows.extend(rows)
+        ranked = ties.tie_classes([r.objective[-1] for _, r in branches], self.quantum, descending=True)
+        selected = np.flatnonzero(ranked.classes == 0)
+        retained = [branches[i] for i in selected]
+        # This order only labels the stored representative. All tied alternatives
+        # are passed to release and their disagreements remain ambiguity.
+        retained.sort(key=lambda pair: (pair[1].state.frame.tobytes(), pair[1].state.genotype.tobytes(),
+                                       pair[1].state.selector.tobytes(), pair[0]))
+        self.release_alternatives = tuple(retained)
+        self.release_reverse, final = retained[0]
+        elapsed = time.perf_counter() - started
+        self.phase_seconds["merge_continuation"] = elapsed
+        record = dict(J_schedule=float(scores[0]), J_mirror=float(scores[1]),
+                      base="tied" if best.tied_winner else ("schedule" if best.classes[0] == 0 else "mirror"),
+                      tied_base=bool(best.tied_winner), branches=len(branches),
+                      release_alternatives=len(retained), continuation_seconds=elapsed,
+                      continuation_bound=continuation_bound,
+                      bounded_out=any(r["bounded_out"] for r in merge_rows),
+                      clusters=sum(r["clusters"] for r in merge_rows),
+                      transplanted=sum(r["transplanted"] for r in merge_rows),
+                      tied_transplants=sum(r["tied_transplants"] for r in merge_rows),
+                      continuations=merge_rows, J_release=float(final.objective[-1]))
         return final, record
 
-    def merge_end_points(self, base, other):
-        """Exact best-first transplant of ``other``'s difference clusters into ``base`` (release 2.2, M5). A cluster
-        is a set of differing cells (roots' frames, selectors, non-roots' genotypes) linked by family (sample, its
-        parents and children) and site proximity (COMPOUND_MARGIN); each is scored by its exact change of J over the
-        terms it can alter (_window_objective); the best one above the quantum is taken, the rest re-scored, until
-        none gains more than the quantum. Exact ties within the quantum go to the leftmost cluster (the rightmost under
-        the convention reversal) and are counted. Returns (state, taken, tied, clusters)."""
-        w, g = self.workspace, self.graph
-        state = MapState(base.genotype.copy(), base.selector.copy(), base.frame.copy())
-        items = _difference_items(state, other, self.roots, g)
-        clusters = _difference_clusters(items, COMPOUND_MARGIN)
-        taken = tied = 0
-        remaining = list(range(len(clusters)))
-        while remaining:
-            gains = []
-            for index in remaining:
-                gains.append(self._transplant_gain(state, other, items, clusters[index]))
-            best = max(gains)
-            if not best > self.quantum:
-                break
-            winners = [k for k in range(len(remaining)) if gains[k] >= best - self.quantum]
-            if len(winners) > 1:
-                tied += 1
+    def continue_endpoint(self, max_sweeps, base, other, configuration_limit=4):
+        """Continue one endpoint in its own coordinates and schedule.
 
-            def first_site(k):
-                return clusters[remaining[k]][0]
-            pick = max(winners, key=first_site) if self.reverse else min(winners, key=first_site)
-            _apply_items(state, other, items, clusters[remaining[pick]][1])
-            taken += 1
-            remaining.pop(pick)
+        Independent exact-J improvements are accepted from one common base;
+        tied interacting transplants receive bounded, equal continuation effort.
+        Return every evaluated result so the caller ranks the complete endpoint
+        set once, using the shared tie definition.
+        """
+        state, taken, tied, candidates = self.merge_end_points(base.state, other.state)
+        items, tied_clusters = self.merge_tied
+        combinations = 1 << len(tied_clusters)
+        bounded_out = combinations > configuration_limit
+        if bounded_out:
+            combinations = 1
+        results, rows = [], []
+        for bits in range(combinations):
+            seed = MapState(state.genotype.copy(), state.selector.copy(), state.frame.copy())
+            for k, cluster in enumerate(tied_clusters):
+                if (bits >> k) & 1:
+                    _apply_items(seed, other.state, items, cluster[1])
+            final = self.solve(max_sweeps, state=seed,
+                               long_tier=bool(getattr(self.config, "map_long_moves", False)))
+            results.append(final)
+            rows.append(dict(reverse=self.reverse, clusters=candidates, transplanted=taken,
+                             tied_transplants=tied, tied_configuration=bits,
+                             combination_log2=len(tied_clusters), evaluated_configurations=combinations,
+                             bounded_out=bool(bounded_out), J=float(final.objective[-1])))
+        return results, rows
+
+    def difference_clusters(self, items):
+        """Difference runs connected through an actual J factor.
+
+        Root marginal factors join all of a root's children. Selector transitions
+        join the neighbouring *supported* markers, however long their gap. The
+        returned clusters therefore have additive transplant gains: each can be
+        evaluated from the same base, and all strict improvements applied together.
+        A cluster transplants the two endpoints' joint configuration as one move.
+        """
+        g = self.graph
+        footprints = []
+        for kind, row, lo, hi, _ in items:
+            keys = set()
+            left, right = lo, hi
+            if kind == "F":
+                keys.add(("R", row))
+                left, right = max(0, lo - 1), min(self.sites, hi + 1)
+            elif kind == "S":
+                keys.add(("C", row))
+                keys.add(("T", row))
+                for p in g.group_parent[row]:
+                    if p >= 0 and self.roots[p]:
+                        keys.add(("R", int(p)))
+                markers = self.marker_sites[self.marker_offsets[row]:self.marker_offsets[row + 1]]
+                a, b = np.searchsorted(markers, (lo, hi))
+                if a > 0:
+                    left = min(left, int(markers[a - 1]))
+                if b < len(markers):
+                    right = max(right, int(markers[b]) + 1)
+            else:
+                keys.add(("G", row))
+                own = int(g.node_group[row])
+                if own >= 0:
+                    keys.add(("C", own))
+                    for p in g.group_parent[own]:
+                        if p >= 0 and self.roots[p]:
+                            keys.add(("R", int(p)))
+                for k in range(self.child_offsets[row], self.child_offsets[row + 1]):
+                    keys.add(("C", int(self.child_groups[k])))
+            footprints.append((kind, row, left, right, frozenset(keys)))
+        groups = _difference_clusters(footprints, 0)
+        return [(min(items[i][2] for i in members), members) for _, members in groups]
+
+    def merge_end_points(self, base, other):
+        """Joint endpoint transplants, independent under J, all scored from base.
+
+        A tied transplant is kept in the current endpoint; solve_symmetric also
+        continues the opposite endpoint whenever their total scores are tied.
+        There is no best-first or leftmost/rightmost winning cluster.
+        """
+        state = MapState(base.genotype.copy(), base.selector.copy(), base.frame.copy())
+        items = _difference_items(state, other, self.roots, self.graph)
+        clusters = self.difference_clusters(items)
+        gains = [self._transplant_gain(state, other, items, cluster) for cluster in clusters]
+        taken = tied = 0
+        tied_clusters = []
+        for gain, cluster in zip(gains, clusters):
+            comparison = ties.tie_classes([0.0, gain], self.quantum, descending=True)
+            if comparison.tied_winner:
+                tied += 1
+                tied_clusters.append(cluster)
+            elif comparison.classes[1] == 0:
+                _apply_items(state, other, items, cluster[1])
+                taken += 1
+        self.merge_tied = (items, tied_clusters)
         return state, taken, tied, len(clusters)
 
     def _transplant_gain(self, state, other, items, cluster):
@@ -2250,50 +2695,54 @@ class FamilyMap:
         w, g = self.workspace, self.graph
         lo, members = cluster[0], cluster[1]
         hi = max(items[i][3] for i in members)
-        root_mask = np.zeros(self.samples, dtype=np.bool_)
-        sample_mask = np.zeros(self.samples, dtype=np.bool_)
-        group_mask = np.zeros(len(g.group_child), dtype=np.bool_)
-        transition_mask = np.zeros(len(g.group_child), dtype=np.bool_)
+        root_mask = set()
+        sample_mask = set()
+        group_mask = set()
+        transition_mask = set()
         end = hi
         for i in members:
             kind, row = items[i][0], items[i][1]
             if kind == "F":
-                root_mask[row] = True
+                root_mask.add(int(row))
             elif kind == "S":
-                group_mask[row] = True
-                transition_mask[row] = True
+                group_mask.add(int(row))
+                transition_mask.add(int(row))
                 end = max(end, int(_window_end(row, hi, self.marker_offsets, self.marker_sites, self.sites)))
                 for parent in g.group_parent[row]:
                     if parent >= 0 and self.roots[parent]:
-                        root_mask[parent] = True
+                        root_mask.add(int(parent))
             else:
-                sample_mask[row] = True
+                sample_mask.add(int(row))
                 own = g.node_group[row]
                 if own >= 0:
-                    group_mask[own] = True
+                    group_mask.add(int(own))
                     for parent in g.group_parent[own]:
                         if parent >= 0 and self.roots[parent]:
-                            root_mask[parent] = True
+                            root_mask.add(int(parent))
                 for index in range(self.child_offsets[row], self.child_offsets[row + 1]):
-                    group_mask[self.child_groups[index]] = True
+                    group_mask.add(int(self.child_groups[index]))
+        root_mask = np.asarray(sorted(root_mask), np.int64)
+        sample_mask = np.asarray(sorted(x for x in sample_mask if not self.roots[x]), np.int64)
+        group_mask = np.asarray(sorted(group_mask), np.int64)
+        transition_mask = np.asarray(sorted(transition_mask), np.int64)
         end = min(self.sites, end + 1)
         args = (w.potentials, state.genotype, state.selector, state.frame, w.orientation, self.roots, w.frozen,
                 self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans, g.group_parent,
                 g.group_child, self.child_offsets, self.child_groups, self.child_slots, self.marker_offsets,
                 self.marker_sites, self.marker_theta, self.log_keep, self.log_error, self.log_match, self.log_miss)
-        before = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
+        before = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
         saved = _save_items(state, items, members)
         _apply_items(state, other, items, members)
-        after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
+        after = _window_objective_lists(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
         _restore_items(state, items, members, saved)
         return after - before
 
 
 # ------------------------------------------------------------------------------------------------ release
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _conditionals(potentials, genotype, selector, frame, orientation, roots, node_group, group_parent, group_child,
-                  child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
+                  child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, cavities=None):
     """Per-site log Gibbs conditionals float64 [N, L, 4] of every non-root sample's ordered genotype given the rest of
     the configuration (roots' rows: log 1/4); normalised."""
     samples, sites = genotype.shape
@@ -2307,14 +2756,15 @@ def _conditionals(potentials, genotype, selector, frame, orientation, roots, nod
         group = node_group[sample]
         table = np.empty((2, 2, 2))
         row = np.empty(4)
+        root_scratch = np.empty(4)
         for site in range(sites):
             for g in range(4):
                 row[g] = potentials[sample, site, g]
             _own_children_terms(sample, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
-                                log_keep, log_error, row)
+                                log_keep, log_error, row, cavities)
             _slot_tables(group, site, genotype, selector, frame, potentials, orientation, roots, group_parent,
                          group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
-                         log_miss, True, table)
+                         log_miss, True, table, cavities, root_scratch)
             s = selector[group, site]
             for g in range(4):
                 row[g] += table[0, _allele(g, 0), (s >> 1) & 1] + table[1, _allele(g, 1), s & 1]
@@ -2353,7 +2803,7 @@ def phase_emission(belief_row, orientation_value, phase_value, phase_error):
     return e0, e1
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _frames_kernel(conditionals, frame, scaffold_orientation, roots, phase_theta, anchors, parent_counts, phase_error,
                    frozen, frozen_theta, reverse=False):
     """Family MAP frames int8 [N, L] (inferred, displayed) and, for non-roots, the released ambiguity bool [N, L]:
@@ -2398,7 +2848,7 @@ def _frames_kernel(conditionals, frame, scaffold_orientation, roots, phase_theta
     return inferred, displayed, undetermined, evidence
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _root_undetermined(potentials, genotype, selector, frame, orientation, roots, frozen, free_starts, free_trans,
                        frozen_starts, frozen_trans, anchors, group_child, child_offsets, child_groups, child_slots,
                        log_keep, log_error, log_match, log_miss):
@@ -2438,26 +2888,29 @@ def _root_undetermined(potentials, genotype, selector, frame, orientation, roots
     return out
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _parent_cavity(parent, site, exclude_group, genotype, selector, frame, potentials, orientation, roots, node_group,
                    group_parent, group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
-                   log_miss, out):
+                   log_miss, out, cavities=None):
     """out[g]: the log weight of ``parent`` holding genotype g at ``site`` without child group ``exclude_group``'s
     factor: a root's psi, phi and other children; a non-root's psi, its own slot terms and other children."""
     if roots[parent]:
         _root_cavity(parent, site, frame[parent, site], exclude_group, genotype, selector, potentials, orientation,
                      group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
-                     out)
+                     out, cavities)
         return
     for g in range(4):
         out[g] = potentials[parent, site, g]
     own = node_group[parent]
     table = np.empty((2, 2, 2))
     _slot_tables(own, site, genotype, selector, frame, potentials, orientation, roots, group_parent, group_child,
-                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, True, table)
+                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, True, table, cavities)
     s = selector[own, site]
     for g in range(4):
         out[g] += table[0, _allele(g, 0), (s >> 1) & 1] + table[1, _allele(g, 1), s & 1]
+    if cavities is not None and cavities[0][parent] >= 0:
+        cavity_counts.add_terms(cavities, parent, site, exclude_group, genotype, selector, log_keep, log_error, out)
+        return
     for index in range(child_offsets[parent], child_offsets[parent + 1]):
         group = child_groups[index]
         if group == exclude_group:
@@ -2469,9 +2922,9 @@ def _parent_cavity(parent, site, exclude_group, genotype, selector, frame, poten
             out[g] += log_keep if _allele(g, homologue) == child_allele else log_error
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _repair_emissions(potentials, genotype, selector, frame, orientation, roots, node_group, group_parent, group_child,
-                      child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
+                      child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, cavities=None):
     """Selector emissions float64 [G, L, 4] for the root-frame repair's votes (review I3): every observed parent's
     genotype summed with the voting child's own factor removed (its conditional cavity), the child's genotype summed
     with its potential and own children's factors; scaled to a maximum of 1 per site."""
@@ -2495,7 +2948,7 @@ def _repair_emissions(potentials, genotype, selector, frame, orientation, roots,
                     continue
                 _parent_cavity(parent, site, group, genotype, selector, frame, potentials, orientation, roots,
                                node_group, group_parent, group_child, child_offsets, child_groups, child_slots,
-                               log_keep, log_error, log_match, log_miss, cavity)
+                               log_keep, log_error, log_match, log_miss, cavity, cavities)
                 for a in range(2):
                     for h in range(2):
                         v0 = cavity[0] + (log_keep if _allele(0, h) == a else log_error)
@@ -2506,7 +2959,7 @@ def _repair_emissions(potentials, genotype, selector, frame, orientation, roots,
             for g in range(4):
                 base[g] = potentials[child, site, g]
             _own_children_terms(child, site, genotype, selector, group_child, child_offsets, child_groups, child_slots,
-                                log_keep, log_error, base)
+                                log_keep, log_error, base, cavities)
             for s in range(4):
                 for g in range(4):
                     terms[g] = base[g] + table[0, _allele(g, 0), (s >> 1) & 1] + table[1, _allele(g, 1), s & 1]
@@ -2517,7 +2970,7 @@ def _repair_emissions(potentials, genotype, selector, frame, orientation, roots,
     return emissions
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _conflicts(genotype, selector, frame, potentials, orientation, roots, group_child, child_offsets, child_groups,
                child_slots, log_keep, log_error, log_match, log_miss, reverse=False):
     """Mendelian-conflict diagnostic (review M4): bool [N, L] (parent, site) where the parent's best genotype (a
@@ -2560,7 +3013,7 @@ def release_frames(family_map, state):
     conditionals = _conditionals(w.potentials, state.genotype, state.selector, state.frame, w.orientation,
                                  family_map.roots, g.node_group, g.group_parent, g.group_child,
                                  family_map.child_offsets, family_map.child_groups, family_map.child_slots,
-                                 family_map.log_keep, family_map.log_error, family_map.log_match, family_map.log_miss)
+                                 family_map.log_keep, family_map.log_error, family_map.log_match, family_map.log_miss, family_map.cavities(state))
     inferred, displayed, undetermined, evidence = _frames_kernel(
         conditionals, state.frame, w.scaffold_orientation, family_map.roots, w.phase_theta, w.anchors,
         g.parent_counts, family_map.config.scaffold_phase_error, w.frozen, w.frozen_theta, family_map.reverse)
@@ -2580,7 +3033,7 @@ def selector_emissions(family_map, state):
     return _repair_emissions(w.potentials, state.genotype, state.selector, state.frame, w.orientation, family_map.roots,
                              g.node_group, g.group_parent, g.group_child, family_map.child_offsets,
                              family_map.child_groups, family_map.child_slots, family_map.log_keep,
-                             family_map.log_error, family_map.log_match, family_map.log_miss)
+                             family_map.log_error, family_map.log_match, family_map.log_miss, family_map.cavities(state))
 
 
 def conflict_sites(family_map, state):

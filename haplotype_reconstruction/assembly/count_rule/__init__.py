@@ -6,14 +6,14 @@ geometry: private cells, nearest rows, shadow paths and novelty (over the pre-fi
 config: CountRuleConfig (bootstrap, ranked refits, the join's near-identity threshold).
 """
 from .config import CountRuleConfig
-from .criterion import (CRITERION, CountDecision, MarginTest, addition_bound_excludes,
+from .criterion import (CRITERION, CountDecision, MarginTest, ShadowDecisionFamily, addition_bound_excludes,
                         addition_per_sample_bound_excludes, bootstrap_seed, decide,
                         deletion_bound_excludes, effective_carriers, founder_cost, margin,
                         passes, pre_cycle_count, smallest_threshold)
 from .geometry import RowGeometry, covered_rows, has_novelty, novel_paths, private_mask, shadow_path
 
 __all__ = [
-    "CountRuleConfig", "CRITERION", "CountDecision", "MarginTest", "addition_bound_excludes",
+    "CountRuleConfig", "CRITERION", "CountDecision", "MarginTest", "ShadowDecisionFamily", "addition_bound_excludes",
     "addition_per_sample_bound_excludes", "bootstrap_seed", "decide", "deletion_bound_excludes",
     "effective_carriers", "founder_cost", "margin", "passes", "pre_cycle_count",
     "smallest_threshold", "RowGeometry", "covered_rows", "has_novelty", "novel_paths",

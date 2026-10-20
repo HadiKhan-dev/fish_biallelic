@@ -229,3 +229,58 @@ def gather_likelihoods(counts, table, cap):
                 for g in range(3):
                     out[sample, site, g] = 0.
     return out
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def shared_nuisance_curvature(local, hist, depth, alt):
+    """Negative-LL mixture curvature, evaluated through three pair covariances.
+
+    Cov(pi)-Cov(r) has off-diagonal pair terms r_i*r_j-pi_i*pi_j.
+    Form the diagonal as the sum over the other categories, preserving the
+    contribution of a nearly absent third category without 1-p cancellation.
+    The binomial kernels and posterior weights are exactly those of the objective.
+    """
+    blocks = np.zeros((len(hist), 2, 2))
+    coupling = np.zeros((len(hist), 2, 2))
+    for sample in prange(len(hist)):
+        x = local[sample]
+        e = 1. / (1. + math.exp(-x[0]))
+        balance = 1. / (1. + math.exp(-x[1]))
+        q = e + (1. - 2. * e) * balance
+        z = _logsum3(x[2], x[3], 0.)
+        lm0, lm1, lm2 = x[2] - z, x[3] - z, -z
+        p0, p1, p2 = math.exp(lm0), math.exp(lm1), math.exp(lm2)
+        maximum_depth = 0
+        for cell in range(len(depth)):
+            if hist[sample, cell] != 0.:
+                maximum_depth = max(maximum_depth, int(depth[cell]))
+        hom, het = prefix(e, 0., maximum_depth), prefix(q, 0., maximum_depth)
+        w01, w02, w12 = 0., 0., 0.
+        for cell in range(len(depth)):
+            count = hist[sample, cell]
+            if count == 0.:
+                continue
+            d, a = int(depth[cell]), int(alt[cell]); r = d - a
+            l0 = hom[0, a] + hom[1, r] - hom[2, d] + lm0
+            l1 = het[0, a] + het[1, r] - het[2, d] + lm1
+            l2 = hom[0, r] + hom[1, a] - hom[2, d] + lm2
+            z = _logsum3(l0, l1, l2)
+            r0, r1, r2 = math.exp(l0-z), math.exp(l1-z), math.exp(l2-z)
+            w01 += count * (p0*p1-r0*r1)
+            w02 += count * (p0*p2-r0*r2)
+            w12 += count * (p1*p2-r1*r2)
+            de0 = hom[3, a] - hom[4, r]
+            de2 = hom[3, r] - hom[4, a]
+            dq = het[3, a] - het[4, r]
+            s0 = de0 * e * (1. - e)
+            s2 = de2 * e * (1. - e)
+            s1 = dq * (1. - 2. * balance) * e * (1. - e)
+            t1 = dq * (1. - 2. * e) * balance * (1. - balance)
+            coupling[sample, 0, 0] -= count * (r0*r1*(s0-s1)+r0*r2*(s0-s2))
+            coupling[sample, 1, 0] -= count * (r0*r1*(s1-s0)+r1*r2*(s1-s2))
+            coupling[sample, 0, 1] += count * r0*r1*t1
+            coupling[sample, 1, 1] -= count * (r0*r1+r1*r2)*t1
+        blocks[sample, 0, 0] = w01 + w02
+        blocks[sample, 1, 1] = w01 + w12
+        blocks[sample, 0, 1] = blocks[sample, 1, 0] = -w01
+    return blocks, coupling

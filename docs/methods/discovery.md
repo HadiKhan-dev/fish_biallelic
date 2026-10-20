@@ -20,7 +20,7 @@ diagnostic product.
 The stage has no user options; its constants are those of `DiscoveryConfig` (`discovery/config.py`),
 listed in [configuration](../configuration.md).
 
-## Ties and order (releases 2.1 and 2.2)
+## Ties and order (releases 2.1 to 2.3)
 
 No discrete outcome of discovery may depend on floating-point rounding, on perturbations of the genotype
 likelihoods far below any real difference, or on the order of the samples. Every block therefore has its tie quanta
@@ -31,12 +31,14 @@ max(2^-17, 2^-30 M) nats) orders NLLs and cavity scores, kind `sample` (max(2^-2
 data-birth excess), `h_step` (2^-18) the H step's allele sums, `improvement` (2^-14) the search's improvement tests,
 `cell` (2^-23) per-cell release contributions and `probability` (2^-20) probabilities and masses. Values are grouped
 into anchored tie classes (single-linkage chains of gaps at most the quantum over the exactly sorted values); every
-order is (class, then exact secondary keys, then an exact content key), a winner is the content-smallest member of the
-best class, and a class wider than four quanta is ordered by value inside (width guard). A band with a fixed rule is
+order is (class, then exact secondary keys, then an exact content key), and a class wider than four quanta is ordered
+by value inside (width guard). In release 2.3 the search scores and expands tied panel classes whole: the content key
+labels a representative without selecting one biological answer from an equally supported set. A band with a fixed rule is
 used only where a value can sit exactly on a threshold mathematically (an exact zero, exactly 1/2, a posterior split
 exactly in half); continuous thresholds are compared as they are. The samples of a block are searched in the run's
-canonical order (by sample name, `run_sample_order`; the evidence stage provides it), so a reordering of the input
-changes nothing. Decisions taken inside a tie, width-guard and boundary-guard events and band decisions are counted in
+canonical order (by sample name, `run_sample_order`; the evidence stage provides it). Population and cluster
+reductions use accurately rounded expansion sums equivalent to `math.fsum`, and complete tied seed classes are
+unioned before admission; neither a permutation nor a renaming can choose a seed or panel. Decisions taken inside a tie, width-guard and boundary-guard events and band decisions are counted in
 the block's `SearchSummary.tie_events`.
 
 The same evidence gives the same result on every CPU. Discovery evaluates log and exp with the C library's scalar
@@ -67,27 +69,43 @@ bound, and the stragglers of multi-way merges (strands of at least two small com
 component continues; they stay in their cluster as well). Every complete-linkage group at the bound and every pair-up
 of tied stragglers within it, under any order, lies inside one of these cliques; complete linkage itself is not
 used. Each group's consensus is a candidate and the block's cavity score decides between the panels they produce. The
-bounds are order-invariant: per connected component of that graph the enumeration (Bron-Kerbosch with pivoting in a
-degeneracy order) runs unless an a-priori bound on the number of maximal cliques (the smaller of the degeneracy bound
-and the complement's Moon-Moser bound) exceeds `max_clique_enumeration`, or it reaches `max_clique_calls` calls; at
-most `max_alternative_groups` cliques are kept, by whole size classes (largest first). The candidates are emitted by
-support class (more distinct supporting samples first); a candidate is a near-duplicate only of a panel row or of a
-candidate of a more supported class (equally supported near-duplicates are all kept; exact duplicates once), and at
-most `search.max_proposals_per_expansion` are emitted, by whole support classes. The K = 1 seeds are the largest
-HDBSCAN clusters by whole size classes. The search's other budgets are order-invariant too: same-K replacement starts
-(each K + 1 birth minus one row) are taken by whole NLL tie classes of the births (the best class always, when it
-has at most twice `max_replacement_children` starts); gauge rewires use every maximum cut while there are at most
-4 x `max_cut_ties` of them, else none (`gauge_max_cut_ties_truncated`); a soft candidate is a near-duplicate of a row
-when the rows tied at its nearest (distance, joint fraction) include one with enough coverage both ways. Every
-overflow is counted in `tie_events` (`discovery.residual.group_overflow`, `discovery.residual.emission_overflow`,
-`discovery.k1.seed_overflow`) or in the search limits.
+budgets are order-invariant. A connected component is omitted only when its actual number of maximal cliques
+exceeds `max_clique_enumeration`. Disconnected original subgraphs union their clique sets; disconnected complements
+form complete joins, so their clique sets combine by Cartesian product. Exact child counts can establish an
+oversized product without materializing it. Prime pieces use an exact compiled, pivoted Bron–Kerbosch traversal on
+packed bitset adjacency rows. A first pass counts the actual maximal cliques, stopping at the limit plus one, so an
+oversized component is omitted whole whatever its labels or traversal order; only an admitted component is
+materialized, by a second identical traversal. Enumeration order determines work only, never the admitted
+alternatives. `max_clique_calls` applies only to the legacy Python reference traversal, where it switches to
+polynomial-delay bitset reverse search ([Comin and Rizzi (2015), section 3](https://arxiv.org/abs/1506.01082)); it
+never truncates scientific output. The former worst-case count/work bounds do not reject components. No prefix of
+traversal-selected cliques is released.
 
-**Released ambiguity (release 2.2).** A founder allele that no sample assigned to the founder observes is unknown:
+Residual groups are ranked by size, candidates by distinct sample support, and K = 1 seeds by cluster size.
+Replacement starts (each K + 1 birth minus one row) follow the ranking specified under
+[Replacement admission](#replacement-admission). For discovery's archive, proposal, score and expansion
+budgets, classes are admitted whole until the nominal budget is reached.
+A straddling class is admitted when the total remains at most twice the budget; beyond that it is omitted whole.
+Strictly lower-ranked classes beyond the boundary are counted separately as `ranked_truncation`. Gauge maximum
+cuts form one tied family: the previous effective budget is 4 x `max_cut_ties`, with the same twice-budget
+allowance for that whole family. These bounds never choose a content- or sample-name prefix. A soft candidate
+is a near-duplicate only of a panel row or a more-supported candidate; equally supported near-duplicates are
+all kept, and exact duplicates are emitted once. Nearest-row ties use the union of their coverage tests.
+
+
+**Released ambiguity.** A founder allele that no positive-weight carrier observes is unknown:
 `DiscoveredBlock.latent_unknown` marks it (`latent` keeps a binary value only as the fit's initial value; `calls`
-withholds it), and local selection, completion and export release '.' there. Panels of the released panel's NLL tie
-class at its K (and other-K representatives in its score class) that differ from it, or from each other, at some
-observed allele are released with it as `tied_panels` (`tied_panel_k`, `tied_panel_nll`, `tied_unknown`); local
-selection takes them as proposals, so neighbouring blocks decide.
+withholds it), and local selection, completion and export release '.' there. Release 2.3 cavity-scores every panel
+of each K's leading NLL class. Members of the winning cavity class after the smaller-K prior that differ at an
+observed allele are released together as `tied_panels` (`tied_panel_k`, `tied_panel_nll`, `tied_unknown`); local
+selection takes them as proposals, so neighbouring blocks decide. Raw calls are conservative across the complete
+alternative set. An omitted straddling class or whole-component gate sets `SearchSummary.search_incomplete`.
+The `omissions` entries carry `kind` (`tie_class_at_budget` or `ranked_truncation`), cause, count, scope, and
+`count_kind` (`exact` or `lower_bound`). Ordinary ranked truncation has per-cause statistics but does not set
+`search_incomplete`. These are computational limits of the documented search, separate from biological
+ambiguity; valid incumbent calls stay eligible for local selection. Only when no scored incumbent exists is the
+block `unresolved`, with an empty latent/call panel. Counts are policy events, not globally unique candidates.
+
 
 **Convention reversal (release 2.2).** With `HAPLOTYPES_TIE_REVERSE=1` (maths.ties.reverse_conventions) every remaining
 arbitrary convention runs in reverse: content-key and index orders inside tie classes, the sample-name order, the
@@ -98,24 +116,36 @@ are not reversed: a smaller K, keep-current inside a tie (incumbent allele, firs
 incumbent search state), the conservative release band at an exact zero, more supporting samples first, more observed
 sites first and fewer unknown copies first; nor canonical labels (a panel's lexicographic row order and key).
 
-**Tied A-step states: the meet rule (release 2.2).** In 2.1 the A step took the first state in row order among the
-states tied within the `sample` quantum (convention D1). A sample whose tied states are identical over its observed
-sites thereby gave its evidence to whichever founder rows came first, which steered the fit: under the reversal D1
-moved about 6% of TroMau blocks (593 of 9,979; 13 of the 18 reversal changes on actm3 chr8). Release 2.2 assigns such a
-sample the *meet* of its tied states, the multiset intersection of their founder pairs inside the winning
-(fewest-unknown-copies) category: founders that every tied explanation shares receive the sample's evidence, and a copy
-that differs between tied states goes to no founder row (it is held as an unknown copy in the H step, the founder
-field of the cavity score and the release). So {(i, j), (i, j')} gives (i, -) and {(1, 1), (1, 2), (2, 2)} or
-{(0, 1), (2, 3)} give (-, -). The intersection depends only on the tied set, so the assignment is invariant to row order,
-sample order and the reversal. The ambiguity is not counted as copies from outside the panel: the sample's
-`unknown_slots` (and the released `unknown_mass`) are those of its tied states, its NLL is the Viterbi over all
-states (unchanged), and the cavity score's Dirichlet state prior counts it 1/|T| at each of its tied states T
-(`fixed_k.assign.tie_mask`), which leaves the predictive of a sample whose tied states predict alike unchanged. The
-consequence is released ambiguity: founder rows that only tied samples observe get fewer supporters (withheld calls)
-or unknown alleles ('.'). Local selection's bank fits keep the 2.1 rule (`prepare_workspace(tie_meet=False)`).
-Fractional assignment (1/|T| of the sample's evidence to each tied state in the H step and the founder field) would
-keep more of a tied sample's information (a homozygous sample tied between two identical rows contributes nothing
-under the meet) and is a possible refinement.
+**Fractional tied-state evidence (release 2.3).** Let T_i be every state within the existing
+`sample` cost band in the category with the fewest unknown copies. Sample i contributes weight
+1/|T_i| to each member, uniformly over unordered states. These weights are a symmetric allocation
+of unresolved evidence, not a calibrated posterior. They do not use the heterozygote multiplicity
+of the cavity prior. For example, T = {(i,i), (i,j), (j,j)} contributes one sample's state mass
+and one expected copy to each founder; the homozygous term contributes one genotype cost, not two.
+
+The H step averages the existing capped state costs, reading partners under the existing
+Gauss-Seidel schedule. The cavity founder field receives weighted homozygous/unknown-copy unaries
+and heterozygous edges; hold-out removes every affected factor and each state's fractional count.
+Founder support counts distinct samples with positive membership. Release applies the cell band
+to each unweighted contribution before weighting, and counts each sample at most once per
+founder/site. An allele is observed whenever any positive-weight carrier observes it.
+
+This policy applies to discovery and every local-selection bank fit, score and release; there is
+no `tie_meet` gate. The meet remains only a compact pair summary and a gauge-proposal heuristic.
+Multi-state memberships are retained as compact offsets and state IDs, remapped with founder and
+sample axes. Temporary dense membership masks have a 32 MiB frontier chunk bound. Cavity solves
+are reused only for identical complete tied-state memberships and identical per-site likelihood
+triples; membership lists are compared in full. Such cases have identical founder-support deletion,
+weighted unary and edge patches, starts and held-out prior deletion. Each original sample keeps
+its own predictive and failure-count contribution. Grouped results are checked bit for bit against
+independent ungrouped solves and a slow field-rebuild reference.
+
+The fractional evidence allocation leaves the all-state switching-Viterbi NLL, `unknown_slots`,
+caps, penalties, quanta, stopping rules, cavity functional, K prior and set code unchanged. The
+separate D12 policy below changes the approximate predictive functional only when distinct
+training-ELBO-tied mean-field endpoints remain. Fitted panels and cavity values can
+change because evidence that release 2.2's meet discarded now reaches the founders. No new
+monotonicity or EM claim follows: A, H and the reported NLL still use different functions.
 
 ## Block evidence and missingness
 
@@ -152,13 +182,14 @@ the sum over samples.
 
 A fit alternates two steps from a start panel:
 
-- **A step**: each sample's single best state for the whole block, by its summed (uncapped) bin
+- **A step**: each sample's whole-block tied-state set, by its summed (uncapped) bin
   emissions: among the states whose cost is within the block's `sample` quantum of the cheapest, the
   category with the fewest unknown copies (row pairs, then a row with an unknown copy, then two
-  unknown copies; a stated preference), and in it the meet of the tied states (release 2.2, see
+  unknown copies; a stated preference), and uniform evidence over all its tied states (see
   "Ties and order");
 - **H step**: Gauss-Seidel founder-bit updates for the fixed assignments, founders in decreasing
-  order of usage; for founder k at site l the costs of allele 0 and 1 are summed over its carriers
+  order of expected-copy usage; for founder k at site l the costs of allele 0 and 1 are averaged
+  over each carrier's tied states and summed over carriers
   (homozygous carriers, carriers with a known partner, carriers with an unknown copy), each cost
   capped at the cell's two-unknown-copies cost; the allele changes only when the two sums differ
   by at least the block's `h_step` quantum.
@@ -172,16 +203,36 @@ refits it. Panel NLLs are exactly rounded sums (`math.fsum`).
 Panels are kept in canonical form (rows in lexicographic order, assignments remapped); of two fits of
 the same panel the first is kept unless the other is lower by more than the `nll` quantum.
 
+**Complete usage-schedule families (D3).** Every discovery and candidate-bank fit canonicalizes
+its start's founder rows and evaluates two consistent schedules: decreasing positive expected-copy
+usage, with exact usage ties visited in increasing or decreasing canonical founder index. A
+trajectory uses one schedule throughout. The opposite trajectory is evaluated only if the first
+encounters an actual positive-usage tie; otherwise the trajectories coincide and only one is run.
+This is a family of two documented schedules, not an enumeration of every possible update order.
+Distinct endpoints reach the existing selectors, and tied endpoints remain alternatives. A
+collapsed endpoint is refitted at its lower K within the same original start's family.
+
+Both trajectories share exact A(H) records and identical untied H transitions. An H transition
+can also be shared across tied schedules when every equal-usage group has no internal heterozygote
+membership dependency, or when the entire H sweep changes no allele. In the first case the tied
+founder updates commute; in the second, each update reads the original panel and retains its allele,
+so induction gives the same result in the opposite order. Both conditions prove the identical next
+panel. The usage tie remains marked, and the opposite trajectory still runs: its later path may
+diverge. Other tied transitions, complete-fit caches and fixed-point certificates retain schedule
+identity. A shared transition does not certify an unexecuted trajectory, and a family certificate
+requires both schedules. The iteration and cycle rules above remain unchanged. The assignment-only
+interface evaluates C(H) without H work or schedule multiplicity.
+
 ## Cavity score
 
 The search compares panels, including panels of different K, by a regularised fixed-assignment
 leave-one-sample-out predictive score (`discovery/cavity.py`):
 
-    score(H) = sum_i log sum_s pi_-i(s) prod_l p(GL_il | s, q_l^(-i))  -  log K  -  log(K + 1)  -  log C(2^L, K)
+    score(H) = sum_i log sum_s pi_-i(s) prod_l p_bar(GL_il | s)  -  log K  -  log(K + 1)  -  log C(2^L, K)
 
-- **State prior.** pi_-i(s) = (n_s - [s = s_i] + alpha beta_s) / (N - 1 + alpha) is the
+- **State prior.** pi_-i(s) = (n_s - w_i(s) + alpha beta_s) / (N - 1 + alpha) is the
   Dirichlet-multinomial predictive of the state counts n_s of the panel's assignments with sample i's
-  own count removed; alpha = `DiscoveryConfig.cavity.state_concentration = 0.5`. A sample whose A step
+  own fractional count w_i(s) removed; alpha = `DiscoveryConfig.cavity.state_concentration = 0.5`. A sample whose A step
   held several tied states T counts 1/|T| at each of them (and removes 1/|T| from each when held out;
   release 2.2). The prior masses
   beta give the row-pair states 1 - omega (a heterozygous pair twice the weight of a homozygous one),
@@ -191,16 +242,49 @@ leave-one-sample-out predictive score (`discovery/cavity.py`):
 - **Founder alleles.** q_l^(-i) is a mean-field posterior over the K founder alleles at site l
   given every other sample's assignment and genotype likelihoods: a pairwise Markov random field
   with a uniform allele prior, unary terms from homozygous carriers and carriers with an unknown
-  copy, and edge terms from heterozygous row pairs, with sample i's own term removed. Each held-out
+  copy, and edge terms from heterozygous row pairs, all weighted by 1/|T_i|. Holding out sample i
+  removes all its weighted factors using saved unary/edge lists, then restores their exact values. Each held-out
   solve runs three starts (the panel's alleles, their complement, all one half; founders without
   other carriers stay at one half) for at most `DiscoveryConfig.cavity.mean_field_max_iterations = 100`
-  sweeps to tolerance `DiscoveryConfig.cavity.mean_field_tolerance = 1e-10`, and keeps the first
-  converged start (in that order) whose ELBO is within the block's `nll` quantum of the best. A
-  founder update whose logit is within the same quantum of zero sets its allele probability to
-  exactly one half, so an exact symmetry (equal REF and ALT evidence) is not broken by rounding or
-  noise. Solves whose three starts all fail are reported.
-- **Predictive.** p(GL_il | s, q) is sample i's likelihood averaged over independent founder alleles
-  q under state s; an unknown copy carries ALT with probability 1/2.
+  sweeps to tolerance `DiscoveryConfig.cavity.mean_field_tolerance = 1e-10`. If any start converges,
+  only converged endpoints are eligible; otherwise all endpoints are eligible and the failed solve
+  is reported. Retain every eligible endpoint within the block's existing `nll` quantum of the
+  maximum training ELBO. Deduplicate exactly equal founder-probability vectors, then connect
+  endpoints whose maximum absolute coordinate difference is at most the configured mean-field
+  convergence tolerance (1e-10 by default). Connected components define endpoint-equivalence
+  classes without choosing a representative by start order. This reuses the solver's existing
+  convergence scale; no new threshold is introduced. A founder update whose logit is within the
+  same quantum of zero sets its allele probability to
+  exactly one half, preserving the solver's treatment of symmetric evidence.
+- **Predictive mixture (D12).** For held-out sample i and site l, let C_il be those endpoint
+  classes. Under each endpoint q, p(GL_il | s, q) averages sample i's likelihood over independent
+  founder alleles for state s; an unknown copy carries ALT with probability 1/2. First average raw
+  predictive likelihoods over the distinct vectors within each class, then average those class
+  predictions uniformly:
+  p_bar(GL_il | s) = sum_{c in C_il} [sum_{q in c} p(GL_il | s, q) / |c|] / |C_il|.
+  Apply the existing probability floor only after this mixture, before taking its logarithm;
+  combine sites and the unchanged state prior as above. Multiple numerical endpoints within one
+  class cannot give that class extra weight. Founder marginals are never averaged first.
+  Eligibility and class membership use the training solve, and held-out data never choose mixture
+  weights. This deliberately changes the approximate predictive functional in training-ELBO-tie
+  cases; with one exact endpoint it reduces to that endpoint's predictive. It does not maximise
+  held-out prediction over starts. Eligibility, the `nll` quantum, state prior, K prior and set code
+  are unchanged.
+
+Exact vector equality alone failed an endpoint-identity probe: on four K30 blocks under iid12,
+iid9 and value-consistent noise (12 block/variant scopes), 1,456–2,021 of 16,000 sample-site solves
+per scope changed their exact endpoint count. All 12 scopes retained the same count of classes at
+the existing 1e-10 convergence tolerance. That evidence motivates the equivalence scale above;
+it is not a claim that the full pipeline's noise gate has passed.
+
+This bounded probe does not establish global invariance of endpoint multiplicity. Later parent7
+K30 diagnostics under iid9 changed equivalence-class histograms in six of 200 blocks. Across
+209,408,000 sample-site entries accumulated over scored panels, aggregate counts changed by
+-50 in the one-class bin and +50 in the two-class bin. These are net histogram differences,
+not fifty identified per-solve transitions. All 200 complete biological outcomes and selected
+objective classes were unchanged. The existing equivalence scale is retained; no additional
+threshold is introduced.
+
 - **Regularisers.** -log K - log(K + 1) is a telescoping prior on K (the terms 1/(K(K + 1)) sum to
   one), and log C(2^L, K) is the code length of an unordered set of K distinct binary rows of
   length L.
@@ -213,8 +297,9 @@ from were themselves selected on the full data.
 The search (`discovery/search.py`, moves in `discovery/moves.py`) keeps an archive of every fitted
 complete panel (distinct rows), one entry per canonical panel with its first fit (replaced only by a
 fit lower by more than the `nll` quantum). Per K the archived panels are ordered by tie classes of
-NLL, then canonical key; the first is that K's *representative* and is cavity-scored. The selected
-panel is the representative with the best score class (ties: smaller K, then canonical order).
+NLL, then canonical key. Every member of the leading NLL class is cavity-scored, memoized by panel key.
+The winning cavity class, the existing wide-class rule and the smaller-K prior determine the retained alternative
+set. A representative labels this complete set; panel bytes cannot choose which tied panel supplies evidence.
 There is no K grid and no K cap besides the identifiability ceiling min(2 N_active, 2^L), N_active
 being the samples with depth in the block.
 
@@ -222,40 +307,59 @@ being the samples with depth in the block.
 `DiscoveryConfig.search.data_seed_count = 8`, minimum cluster size
 `DiscoveryConfig.search.seed_min_cluster_size = 2`) of the samples with depth, clustered by their
 expected genotype agreement (summed in one fixed order, exactly symmetric); a cluster's mean ALT
-fraction within the `probability` quantum of 1/2 takes the population ALT fraction. The sample with
-the most observed sites (then the best decisiveness class, then canonical order) gives the fallback
-dosage row. They are fitted and at most `DiscoveryConfig.search.data_start_beam_width = 6`
-distinct fits are kept.
+fraction within the `probability` quantum of 1/2 takes the population ALT fraction. Distinct seed rows are unioned
+within each cluster-size class before the seed-count cap; duplicate rows consume one slot. With no cluster seed
+class, all samples with the most observed sites and best decisiveness class contribute their distinct dosage rows.
+The whole-class admission rule above applies at the seed cap; no population row substitutes for
+an omitted class. Starts are fitted as complete usage-schedule families, then retained by whole NLL
+classes at `DiscoveryConfig.search.data_start_beam_width = 6`.
+
+**Dosage families (D8a).** At each sample/site, use the full winning genotype-likelihood class at
+`probability` quantum 2^-20, with the common chained-class rule. Its minimum and maximum dosages
+form the low and high dosage vectors. Their distinct rows contribute to the initial fallback,
+direct data births and every founder-subtraction birth; rows and complete starts are deduplicated
+before the existing whole-class budgets. No REF/ALT or dosage prior is added. The population-half
+hardening rule (D8s) is separate: this construction alone is not a proof of general REF/ALT relabeling
+invariance.
 
 **Expansions.** Each expansion takes the beam of the selected K, its
 `DiscoveryConfig.search.beam_width = 6` first archived panels.
 
-- *Ordinary phase.* The first beam panel not yet expanded ordinarily proposes its deaths, gauge
-  rewires and data births. If the selected score did not improve by more than the block's
-  `improvement` quantum, birth-delete replacements follow.
-- *Residual phase.* Once every beam panel was expanded ordinarily, the first one not yet expanded
-  in this phase proposes soft-residual births, then replacements, and, if the score still did not
-  improve, a K + 2 bridge: the data and soft births of the K + 1 representative that reach K + 2.
+- *Ordinary phase.* Freeze the next complete unexpanded NLL class. Every member proposes deaths, gauge
+  rewires and data births before the union is merged and rescored. If that union did not improve the score by more
+  than the block's `improvement` quantum, birth-delete replacements of the union of births follow.
+- *Residual phase.* Once every beam panel was expanded ordinarily, the next unexpanded whole NLL class proposes
+  soft-residual births, then replacements, under the same atomic schedule. With no improvement, bridge every tied,
+  data-selected K + 1 parent through its data and soft births to K + 2. One parent's improvement cannot suppress
+  its tied peers' neighbourhoods.
 
-**Moves.** Each move proposes start panels; every start is refitted by the fixed-K fit, and both
-its assignment-only fit and its complete refit enter the archive (a refit that collapses rows
-re-enters as a start at the lower K).
+**Moves.** Each move proposes start panels; every start is fitted as a complete usage-schedule
+family. Its assignment-only fit and every complete endpoint enter the archive (an endpoint that
+collapses rows re-enters as a start at the lower K). Data births likewise refit parents to complete
+families. Parent/sample pairs share one excess-and-coverage ranking and one existing seed budget;
+there is no per-endpoint budget multiplication. Complete starts are globally deduplicated within
+the admitted class, and every admitted child's endpoint family is completed before testing the
+class-level child target.
 
 | move | K | proposal |
 | --- | --- | --- |
 | death | K - 1 | every one-row deletion |
-| gauge rewire | K | for a maximum cut of the assignment graph (rows linked by the number of samples assigned to both), flip the sites where both sides are internally constant and differ: per site to the better allele (by more than the `nll` quantum) for the samples within one side, and all such sites at once |
-| data birth | K + 1 | the samples with the largest excess NLL over their sitewise genotype oracle (tie classes of kind `sample`; an all-unknown sample's excess is its exact value 2 lambda n_obs), then more observed sites, then canonical order, propose K subtraction seeds clip(dosage - row, 0, 1) and their dosage row; tied samples form groups consumed whole: starts are collected group by group up to the attempt budget max(16, 2(K + 1)) x `data_birth_attempts_factor = 3` and fitted group by group until (K + 1) x `data_birth_children_factor = 3` distinct complete children exist (tests at group boundaries); a group is cut only at `data_birth_tie_budget_factor = 2` x the budget (limit `data_birth_tie_budget`) |
+| gauge rewire | K | for a maximum cut of the meet-summary graph (a proposal heuristic only; rows linked by the number of meet pairs containing both), flip the sites where both sides are internally constant and differ: per site to the better allele (by more than the `nll` quantum) for the samples within one side, and all such sites at once |
+| data birth | K + 1 | the samples with the largest excess NLL over their sitewise genotype oracle (tie classes of kind `sample`; an all-unknown sample's excess is its exact value 2 lambda n_obs), then more observed sites, then canonical order, propose K subtraction seeds clip(dosage - row, 0, 1) and their dosage row; tied samples form groups consumed whole: starts are collected group by group up to the attempt budget max(16, 2(K + 1)) x `data_birth_attempts_factor = 3` and fitted group by group until (K + 1) x `data_birth_children_factor = 3` distinct complete children exist (tests at group boundaries); distinct starts are unioned within the class before admission; a class crossing `data_birth_tie_budget_factor = 2` x the budget is omitted whole (limit `data_birth_tie_budget`) |
 | soft-residual birth | K + 1 | consensus rows of residual strands (below), hardened at 1/2 (within the `probability` quantum of 1/2 the population ALT fraction decides) |
-| replacement | K | a K + 1 birth (in tie-class order of NLL) with any one row deleted |
+| replacement | K | a K + 1 birth with any one row deleted; see [Replacement admission](#replacement-admission) |
 
-Deaths and gauge rewires together are capped at
-`DiscoveryConfig.search.max_proposals_per_expansion = 128` starts, as are soft births;
-replacements at `DiscoveryConfig.search.max_replacement_children = 24`. Gauge rewires use exact
+Deaths and gauge rewires together have nominal proposal budget
+`DiscoveryConfig.search.max_proposals_per_expansion = 128` starts, as do soft births;
+replacements have nominal budget `DiscoveryConfig.search.max_replacement_children = 48`.
+The whole-class allowance admits a straddling class through twice its nominal budget. Death and gauge proposal families are
+admitted whole, in that search-priority order, with no byte-prefix truncation. Assignment-only fallback births
+are cut by whole NLL classes. Gauge rewires use exact
 maximum cuts up to `DiscoveryConfig.search.exact_cut_max_k = 12` rows (by connected components:
 bipartite components by 2-colouring, the others by exhaustive enumeration of the 2^(m-1) cuts of
 a component of m rows); above that, degree-ordered local searches from every singleton and from an
-alternating start. At most `DiscoveryConfig.search.max_cut_ties = 4` equal maximum cuts are used.
+alternating start. With `DiscoveryConfig.search.max_cut_ties = 4`, the effective gauge-family budget is 16;
+complete tied families are admitted through 32 cuts. A larger family is omitted whole and reported.
 
 **Soft-residual births** (`discovery/residual_births.py`). Each sample's posterior over unordered
 row pairs (uniform prior over the hard pairs) gives every row an expected copy count; each row with
@@ -264,7 +368,7 @@ is subtracted from it, leaving a residual strand whose ALT probability at an obs
 P(GL | subtracted allele + residual allele) normalised over the residual allele. Residual strands
 called at `DiscoveryConfig.residual_births.residual_call_probability = 0.8` are clustered by
 missing-aware Hamming distance (level-wise HDBSCAN, plus maximal cliques of its noise and tied stragglers as
-alternative groups, see [Ties and order](#ties-and-order-releases-21-and-22); diameter at
+alternative groups, see [Ties and order](#ties-and-order-releases-21-to-23); diameter at
 most `DiscoveryConfig.residual_births.max_cluster_hamming = 0.1` of the sites), over all strands and
 within each (subtracted row, dominant partner) route. A cluster's consensus pools its strands'
 responsibility-weighted log odds with one capped vote per sample; it is emitted when at least
@@ -274,37 +378,74 @@ at least `DiscoveryConfig.residual_births.min_candidate_known_fraction = 0.8` of
 `DiscoveryConfig.residual_births.candidate_call_probability = 0.9`, and it duplicates neither a
 panel row nor an earlier emission. A strand's log odds are log(residual ALT mass) - log(residual REF
 mass), within the bounds [log 2^-1022, log((1 - 2^-52) / 2^-52)] (about -708 and 36), computed
-from the masses rather than from the rounded probability; the dominant partner is the largest
-partner mass beyond a relative `probability` quantum (lower row on ties); a record weight or an
+from the masses rather than from the rounded probability. Each original residual enters every
+partner route whose mass is within the existing `probability` quantum times max(1, the global
+maximum partner mass) of that maximum (D10p). It remains one global observation and appears once,
+with its original responsibility weight, in each eligible route. Routes are alternative proposal
+pools, not additional observations or votes. Identical member sets share one consensus computation;
+exact candidate duplicates are removed before the unchanged whole support-class budgets. The
+reporting-only partner label cannot choose a route. A record weight or an
 effective support within the `probability` quantum of its threshold counts as at the threshold
 (symmetric evidence splits posteriors exactly in half). Consensus rows are emitted with more distinct
 supporting samples first, then in the order of their hardened rows, then source order (so of two
 near-duplicates the better supported one is kept).
 
+### Replacement admission
+
+The 2.3 candidate retains fitted K + 1 births' NLL ranking. Union and deduplicate all
+one-row-deletion starts within each complete parent NLL class, and remove duplicates already
+seen in earlier classes. A repeated start consumes one slot, in its earliest parent NLL class.
+The ordinary search has nominal budget R = 48 unique replacement starts and admits complete
+classes until it reaches that budget. A straddling class is retained only if adding it keeps the
+cumulative total at most 2R = 96; otherwise the entire class is omitted. Optional escalation,
+when enabled and triggered, uses nominal R = 96 and the same whole-class ceiling of 192.
+Escalation remains off by default. The candidate doubles the nominal ordinary/escalated
+budgets from 24/48 to 48/96; the whole-class policy and parent-NLL ranking are unchanged.
+A replacement start's own assignment-only NLL C(H) does not change admission priority.
+
+The evaluated alternative globally deduplicates starts and ranks whole classes by their own exact
+assignment-only C(H), using bounded batches without pruning and an exact scalar-score memo. It is
+not the adopted replacement ranking. The isolated own-score arm failed stress truth; parent
+ranking at the provisional parent7 nominal 24/48 budgets also showed a K30 truth regression.
+Neither observation is a release-acceptance claim for the doubled-budget candidate.
+
+The isolated doubled-budget K30 discovery trial reduces called founder errors from 361 to 331,
+missing truth founders from 900 to 888, missing-inclusive errors from 223,419 to 221,609, and
+blocks with computational omissions from 56 to 3 of 200. All seven founder metrics improve
+on 2.2 in that trial; matched warm wall time increases 11.2%. These are discovery-stage results,
+not final released accuracy. Standard/stress truth, stability and full-run gates for the combined
+candidate remain pending. Larger-budget sensitivity remains a measured limitation.
+
+Both rankings define bounded searches. The selected objective need not improve monotonically with
+a larger budget: newly found leading NLL classes can change which panels receive cavity comparison.
+Budget sensitivity is a measured limitation, distinct from biological ambiguity.
+
 **Stopping and limits.** The search stops when the selected K's beam is exhausted in both phases,
 or at the expansion backstop. Backstops scale with K_rep, the largest K represented in the archive:
-at most 32 + 8 K_rep expansions (`DiscoveryConfig.search.expansion_backstop_base = 32`,
-`DiscoveryConfig.search.expansion_backstop_per_founder = 8`) and at most 96 + 12 K_rep cavity scores
+nominally 32 + 8 K_rep expansions (`DiscoveryConfig.search.expansion_backstop_base = 32`,
+`DiscoveryConfig.search.expansion_backstop_per_founder = 8`) and nominally 96 + 12 K_rep cavity scores
 (`DiscoveryConfig.search.exact_score_backstop_base = 96`,
-`DiscoveryConfig.search.exact_score_backstop_per_founder = 12`). They are reported limits, not
-bounds on the number of founders. The stop reason is `generated_neighbourhood_local_optimum`,
-`incumbent_neighbourhood_search_limited` (some limit was hit) or `expansion_backstop`. Limits are
-`expansion_backstop`, `exact_score_backstop`, the generator truncations `proposal_budget`,
-`replacement_proposal_budget`, `soft_residual_proposal_budget`, `data_birth_tie_budget` and
-`gauge_max_cut_ties_truncated`, `mean_field_nonconvergence`, and `escalation_backstop`. Heuristic
-maximum cuts above K = 12 are reported separately (`heuristic_gauge_cuts`) and are not a limit.
+`DiscoveryConfig.search.exact_score_backstop_per_founder = 12`). The expansion backstop is tested before a whole
+parent class. Both backstops admit a straddling class through twice their nominal count, then stop at the class
+boundary. An overlarge leading NLL class is omitted whole; the last completely scored incumbent remains valid.
+Cached scores do not justify a partial class. Limits constrain work, not the number of founders. The stop reason
+is `generated_neighbourhood_local_optimum`, `incumbent_neighbourhood_search_limited` or `expansion_backstop`.
+Omitted classes/gates have `*_tie_class_at_budget` causes; ranked tails have `*_ranked_truncation` causes and
+are excluded from the search limits. Mean-field nonconvergence is reported separately. Heuristic maximum cuts
+above K = 12 are reported as `heuristic_gauge_cuts` and are not a computational omission.
+
 
 **Switches (off in 2.1).** `DiscoveryConfig.search.escalation` widens the search once for a block the
 base search leaves fragile (selected K >= `escalate_min_k = 9`, a cavity margin over the best other K
 below `escalate_margin = 10` nats, or a selection inside a tie): beam `escalate_beam_width = 12`,
-replacements `escalate_replacement_children = 48`, at most `escalate_expansions_percent = 100` % of
+replacements `escalate_replacement_children = 96`, at most `escalate_expansions_percent = 100` % of
 the expansion backstop more expansions. `DiscoveryConfig.search.reversed_convention_search`
 (`fragile` or `all`) runs a second search with the reversed sample order and complemented content
 keys whose archived panels join the first search's archive; the selection rule is unchanged over the
 pooled archive (within K the NLL classes, across K the cavity score), and the score backstop doubles.
 
 **Certification.** A selected panel is certified when it was expanded in both phases without any
-limit, every K its moves generated is scored, and no move improved the score: a certificate of a
+limit for every tied winning panel, every K its moves generated is scored, and no move improved the score: a certificate of a
 local optimum within the generated neighbourhood, not of a global one.
 
 ## Release rule
@@ -314,7 +455,9 @@ local selection fits from, but they are not calls. Alleles are released per foun
 with the selected assignments held fixed (`discovery/release.py`). Each observed carrier of k
 contributes its capped cost difference min(c0, cap) - min(c1, cap), with the H step's costs and
 cap (homozygous carriers g = 0 against 2; carriers with a known partner j, H_j against H_j + 1;
-carriers with an unknown copy, the row-with-unknown costs). With E_kl the sum of these
+carriers with an unknown copy, the row-with-unknown costs). Apply the cell band before the
+1/|T_i| state weights; sum weighted contributions and count a sample only once per founder/site
+when any member contributes informative evidence. With E_kl the sum of these
 contributions, the capped pseudo-probability of ALT is p_kl = 1 / (1 + exp(-E_kl)), and the
 informative supporters are the carriers whose contribution exceeds the block's `cell` quantum in
 absolute value, in either direction (symmetric evidence gives exactly zero). The
@@ -330,7 +473,7 @@ Each `DiscoveredBlock` carries a `SearchSummary` (diagnostics; nothing downstrea
 
 | field | meaning |
 | --- | --- |
-| `k_values`, `k_log_scores` | represented K values and the cavity score of each K's representative; the selected K maximises it |
+| `k_values`, `k_log_scores` | represented K values and the best cavity score among each K's completely scored leading NLL class |
 | `natural_k_ceiling` | min(2 N_active, 2^L) |
 | `expansions`, `data_starts`, `exact_scores`, `exact_score_cache_hits` | work counts |
 | `residual_calls`, `residual_rows` | soft-residual birth calls and the novel rows they emitted |
@@ -339,9 +482,16 @@ Each `DiscoveredBlock` carries a `SearchSummary` (diagnostics; nothing downstrea
 | `stop_reason`, `certified` | why the search stopped; the local certificate above |
 | `tie_quantum` | the block's `nll` quantum |
 | `escalated`, `conventions` | the escalation ran; the number of pooled searches |
-| `ambiguous`, `tied_alternatives` | the selection was taken inside a tie (another representative in the selected score's class, or another panel in the selected K's first NLL class), and how many |
+| `ambiguous`, `tied_alternatives` | multiple complete panels remain in the winning cavity class after the wide-class rule and smaller-K prior, and how many alternatives |
+| `search_incomplete`, `omissions` | an oversized straddling class or whole gate was omitted; each entry gives `kind`, cause, count, scope and `count_kind`; `ranked_truncation` entries do not set incompleteness |
+| `unresolved` | no incumbent could be established because every available initial candidate class was omitted; the block has an empty latent/call panel |
 | `score_margin` | the selected score minus the best other represented K's score |
 | `tie_events` | per decision kind: decisions, decisions taken inside a tie, width-guard and boundary-guard events (diagnostic; not an outcome) |
+
+Residual-route diagnostics include `discovery.residual.partner_routes` (original observations and
+multiroute observations), `discovery.residual.partner_route_memberships` (all memberships and those
+beyond one per observation), and `discovery.residual.partner_route_pools` (distinct route pools).
+They report computational routing; they do not withhold calls.
 
 ## Records
 
@@ -371,8 +521,8 @@ complete when every block index is recorded; readers are `discovery.records.load
 
 Blocks are independent. One process pool serves every block of every contig, and the next contig's
 evidence is prepared on a helper thread while the current contig is discovered. Within a block, the
-fixed-K fits of many starts advance together as a frontier over a memoised deterministic map
-(equal states are evaluated once) and use up to `discovery.fixed_k.fit.FIT_MAX_THREADS = 16`
+fixed-K fits of many starts advance together as frontiers over the two memoised schedule maps
+(equal A states and untied transitions are evaluated once) and use up to `discovery.fixed_k.fit.FIT_MAX_THREADS = 16`
 threads, claimed from finished workers at phase boundaries; the cavity kernel runs held-out samples
 in parallel. Every sum over samples or sites runs in a fixed order, so results do not depend on
 thread counts, batch composition or the order in which blocks complete.
@@ -380,7 +530,10 @@ thread counts, batch composition or the order in which blocks complete.
 Cost in the founder count K, samples N and discovery sites L of one block:
 
 - **Fixed-K fit**: the A step evaluates (K + 1)(K + 2)/2 states over L/10 bins per sample,
-  O(N K^2 L); the H step is O(N L + K L); at most 50 iterations.
+  O(N K^2 L); the fractional H step visits the tied-state memberships of each carrier. With M
+  total memberships its work is O(L M + K L), reducing to O(N L + K L) for one state per sample.
+  Each of the at most two schedules runs at most 50 iterations; exact A work and certified identical
+  H transitions are shared between them, while both tied trajectories remain represented.
 - **Cavity score of one panel**: per site and held-out sample, mean-field sweeps over K founders
   and at most K(K - 1)/2 active edges, and a predictive over O(K^2) states: O(N L K^2) per sweep,
   with exact reuse of equal held-out cases.
@@ -388,9 +541,24 @@ Cost in the founder count K, samples N and discovery sites L of one block:
   of residual strands (at most N K).
 - **Search**: an expansion fits O(K) starts (K deaths, at most 2 x 3 x max(16, 2(K + 1)) data-birth
   starts, bounded gauge, soft and replacement starts), O(N L K^3) of fixed-K work. The number of expansions
-  is set by the local optimum, bounded only by the backstop 32 + 8 K_rep, so the worst case allowed
+  is set by the local optimum, bounded by the backstop 32 + 8 K_rep plus its whole-class allowance, so the worst case allowed
   by the backstops is O(N L K^4) per block. The only exponential step, exact maximum cuts, is
   confined to components of at most 12 rows (at most 2^11 cuts).
+
+Assignment-only fits use the same bounded shared-emission frontier as full fits and omit H work.
+The fractional H implementation traverses sample cost rows contiguously and reuses expansion-sum
+scratch while preserving each site's update order, terms and quanta. Its temporary term buffers
+use 16NL bytes per concurrently fitted panel. Newly computed dense A arrays feed their immediate
+H sweep without a redundant sparse-to-dense rebuild. Unknown-founder carrier unions use compiled
+Boolean operations, dosage-subtraction starts use equivalent integer array operations, and singleton
+endpoint diagnostics avoid component-label allocation. These exact work-sharing changes preserve
+objectives, family semantics and search budgets. Independent frozen-reference fits exercise both
+schedules, complete families, cache reuse, chunking and thread counts.
+
+Residual partner membership adds a temporary uint8 matrix of at most NK^2 bytes plus route indices.
+The evaluated own-score option's 32 MiB scalar memo covers estimated Python keys, values and table
+storage; it is separate from dense A scratch and is not a search budget. Parent-ranked replacement
+admission in this private trial does not use that memo.
 
 Memory per block worker is bounded by entry counts of the fit caches (4,096 fits, 16,384
 assignments and transitions), the lazily filled bin-pattern tables, an 8 MiB site tile of the
@@ -408,9 +576,22 @@ bit-packed, the search archive keeps per K only the panels the search reads (its
 found with a lexsort over byte rows, never by sorting a structured data type. Block workers return freed heap
 pages to the system every 32 blocks, or as soon as their resident set reaches 1.5 GiB.
 
-On the package's K-ladder simulation (N = 320, every block with K distinct founders) a block took 4.3, 12.1 and
+In the earlier implementation benchmark on the package's K-ladder simulation (N = 320), a block took 4.3, 12.1 and
 33.4 CPU seconds at K = 12, 20 and 30 (cavity scoring 73% of it at K = 30), with a worker peak of 0.70 GiB at K = 30
-([performance](../performance.md#founder-counts)).
+([performance](../performance.md#founder-counts)). These are not timings of the 2.3 symmetrized
+candidate. On one matched local two-thread TroMau critical block, two unprofiled repetitions of
+the exact work-sharing bundle averaged 23.3224 s versus 30.6957 s for its frozen parent-ranking
+reference, a 24.02% reduction, with identical scientific and search summaries. This is evidence for
+that block only. Independent checks matched every returned fit field and certificate in 108 cases
+across one and two threads; neither check establishes whole-stage accuracy or resource acceptance.
+
+On matched full nodes with two threads per worker, the exact speedups reduce the parent-ranking
+TroMau sample time from 43.056 to 33.621 s (76 CPUs, IceLake) and K30 from 119.192 to 108.122 s
+(112 CPUs, Sapphire). The resulting ratios to 2.2 are 1.848x and 1.938x, with identical outcomes
+and selected objectives. These sampled fixed-worker measurements do not establish production
+allocation or whole-run performance. Those resource checks, complete pipeline reversal and
+accuracy attribution remain open. Discovery at 2x 2.2 and whole TroMau at 47:59 are timing guides;
+report actual ratios and quality gains for any excess. The whole-run memory limit is 62.55 GiB.
 
 ## Interpretation and limitations
 
@@ -425,10 +606,33 @@ On the package's K-ladder simulation (N = 320, every block with K distinct found
   fraction and is not a probability.
 - Above 12 rows gauge rewires use heuristic maximum cuts and may miss the best rewire.
 - A cycling fixed-K fit returns its cycle's lowest-NLL state, which need not be a local optimum.
-- Values closer than a tie quantum are treated as equal and the canonical content key decides among
-  them (fewer founders first in the selection); `ambiguous` flags a selection taken inside such a tie.
-  The search stays path-dependent: a different tie convention can reach a different local optimum
-  (the optional reversed-convention search explores the alternative).
-- More search can lower a K's score: the representative is the lowest-NLL panel of its K, and a
-  lower-NLL panel found later may have a worse cavity score, which can move the selection to a
+- Values in one tie class remain tied except for stated preferences and the wide-class rule. Complete fitted
+  alternatives are retained. Omitted candidate classes describe the computational policy; they do not imply
+  biological ambiguity and do not withhold incumbent calls.
+- More search can lower a K's score: cavity scores are evaluated over its leading NLL class, and a
+  lower-NLL class found later may have worse cavity scores, which can move the selection to a
   smaller K (the broader 2.1 search does this in a few blocks of the simulations; see the 2.1 notes).
+
+## Bounded proposal geometry in 2.3
+
+
+For K=1 seed pools or residual pools exceeding 256 records, discovery constructs
+proposal geometry on at most 256 data-derived landmarks. Exact duplicate descriptors
+share an identity; original observation weights are preserved. The initial anchors
+are the complete nearest class to the population prototype; subsequent anchors
+are complete farthest-from-current-set classes. Distance comparisons use the
+existing probability quantum 2^-20, including its chained-class definition.
+Names, record order, random seeds and truth do not select members. An over-budget
+class is omitted whole and recorded in search_incomplete with cause/count/scope.
+If the first class is too large, this proposal branch contributes no groups;
+other existing starts remain eligible. Such an omission is a computational limit.
+
+The existing hierarchy and complete maximal-clique family operate on the anchors.
+Every original record whose nearest-anchor class intersects a proposed group is
+included once in that group's consensus. All tied nearest anchors are retained.
+Original responsibilities and per-sample caps are unchanged; several alternative
+groups may contain the same observation without multiplying its weight within a
+group. Support ranking uses original membership sizes. Pools at or below the
+budget take the original exact route. The old density hierarchy is not preserved
+for larger pools, so proposals and fitted outcomes can change. All observations
+remain in final fitting, held-out predictive scoring, and release.

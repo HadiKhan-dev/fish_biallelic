@@ -483,21 +483,23 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `search.max_proposals_per_expansion` | `128` | generator size of deaths + gauge rewires, and of soft births. |
 | `search.data_start_beam_width` | `6` | K=1 data-seed fits kept as search starts. |
 | `search.data_seed_count` | `8` | soft-cluster seeds tried for K=1. |
+| `search.seed_landmark_budget` | `256` |  |
 | `search.seed_min_cluster_size` | `2` | HDBSCAN minimum cluster size of the K=1 seeds. |
-| `search.max_replacement_children` | `24` | generator size of birth-delete replacements per expansion. |
+| `search.max_replacement_children` | `48` | generator size of birth-delete replacements per expansion. |
 | `search.exact_cut_max_k` | `12` | gauge rewires use exact maximum cuts up to this K, a degree-ordered local search above (reported separately from search limits). |
-| `search.max_cut_ties` | `4` | equal maximum cuts used per expansion. |
+| `search.max_cut_ties` | `4` | nominal maximum-cut multiplicity; the effective family budget is four times this value, with whole-family admission through twice that effective budget. |
 | `search.data_birth_attempts_factor` | `3` | data births fit at most max(16, 2(K + 1)) x this many starts (the attempt budget; release 2.1 broader births, 3). |
 | `search.data_birth_children_factor` | `3` | data births stop once (K + 1) x this many distinct complete children exist (3). |
-| `search.data_birth_tie_budget_factor` | `2` | data-birth tie groups (samples tied on excess NLL and observed sites) are consumed whole; a group is cut (canonical order, reported as "data_birth_tie_budget") only when the starts would exceed this multiple of the attempt budget (the hard cap). |
+| `search.data_birth_tie_budget_factor` | `2` | data-birth tie groups (samples tied on excess NLL and observed sites) union distinct seeds before admission; a whole group is omitted (reported as "data_birth_tie_class_at_budget") when its starts would exceed this multiple of the attempt budget (the hard cap). |
 | `search.reversed_convention_search` | `'off'` | "off" (default), "fragile" or "all": a second search with the reversed sample order and content keys whose panels join the first search's archive (fragile = only blocks meeting the escalation trigger). Off in 2.1 unless simulation truth favours it (owner decision 2). |
 | `search.escalation` | `False` | widen the search once for blocks the base search leaves fragile (selected K >= escalate_min_k, a cavity margin over the best other K below escalate_margin nats, or a selection taken inside a tie), keeping every fit, score and archived panel; reported as SearchSummary.escalated. Off in 2.1 unless simulation truth favours it. |
 | `search.escalate_beam_width` | `12` | the beam width of an escalated search (the archive keeps this many panels per K when escalation is on). |
-| `search.escalate_replacement_children` | `48` | the birth-delete replacement generator size of an escalated search. |
+| `search.escalate_replacement_children` | `96` | the birth-delete replacement generator size of an escalated search. |
 | `search.escalate_min_k` | `9` | a selected K of at least this triggers escalation. |
 | `search.escalate_margin` | `10.0` | a cavity-score margin (nats) of the selected K over the best other represented K below this triggers escalation. |
 | `search.escalate_expansions_percent` | `100` | an escalated search may run at most this percentage of the expansion backstop more expansions (the "escalation_backstop" limit). |
 | **residual_births** (ResidualBirthConfig) |  | Soft-residual birth proposals (residual_births.py). Fractions are of the block's sites. |
+| `residual_births.landmark_budget` | `256` | Bounded proposal geometry; zero explicitly selects the dense reference path. |
 | `residual_births.usable_founder_known_fraction` | `0.8` | rows must be known at this fraction of sites to subtract. |
 | `residual_births.residual_call_probability` | `0.8` | residual strand allele called when its probability reaches this. |
 | `residual_births.min_residual_joint_known_fraction` | `0.1` | residual pairs need this joint-known fraction for a finite Hamming distance (else distance 1). |
@@ -510,9 +512,9 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `residual_births.min_soft_responsibility` | `0.25` | minimum expected copies of a subtracted row for a residual record. |
 | `residual_births.min_unique_sample_support` | `2` | distinct samples behind an emitted consensus. |
 | `residual_births.min_effective_sample_support` | `1.5` | responsibility-weighted samples behind an emitted consensus. |
-| `residual_births.max_alternative_groups` | `64` | at most this many alternative residual groups (maximal cliques) per clustering, kept by whole size classes, largest first; a straddling class and the smaller ones are dropped and counted as released ambiguity (tie_events discovery.residual.group_overflow). |
-| `residual_births.max_clique_enumeration` | `10000000` | a component of the alternative pool whose order-invariant bound on its number of maximal cliques exceeds this offers no alternative groups (overflow, counted); the bound, not a measured count, decides, so dense pools (simulations: up to 1.4e5 maximal cliques) are skipped without enumeration. |
-| `residual_births.max_clique_calls` | `200000` | safety work limit of one component's enumeration (Bron-Kerbosch calls); a component that reaches it offers no alternative groups (overflow, counted). Not reached under the default bound. |
+| `residual_births.max_alternative_groups` | `64` | soft count budget of alternative residual groups (maximal cliques), ranked by whole size classes. Admit a straddling class through twice this budget; omit it whole beyond that. Strictly smaller classes are ranked truncation. |
+| `residual_births.max_clique_enumeration` | `10000000` | maximum actual number of maximal cliques per connected component. An oversized component contributes no alternatives. Exact union/join decomposition can establish oversized output without materializing a large Cartesian product. |
+| `residual_births.max_clique_calls` | `200000` | legacy Python reference traversal performance switch. The compiled exact traversal counts complete output directly and does not use this work threshold. This never changes the admitted clique set; actual output count decides. |
 | **release** (ReleaseRuleConfig) |  | Raw-discovery allele release (release.py): a founder allele is released when its capped fixed-assignment pseudo-probability reaches ``min_call_probability`` and at least ``min_supporters`` informative samples (of either direction) carry the founder there. |
 | `release.min_call_probability` | `0.85` |  |
 | `release.min_supporters` | `2` |  |
@@ -628,11 +630,13 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `count_rule.bootstrap_level` | `0.95` | the sample bootstrap behind the ambiguity band of a count decision (percentile interval of min(m_d, m_q)); a call is ambiguous when the band contains zero in its interior. The point decision stands either way. |
 | `count_rule.ranked_refits` | `9` | at most this many count candidates are refitted per decision (founder refinement's deletion and addition rounds, the join's duplicate-seed births); above it the candidates are ranked by cheap screens. A K-sized budget: every candidate is refitted while K <= 9. |
 | `count_rule.near_identity` | `0.01` | called-site mismatch rate at or below which the join treats two paths as the same sequence (a path that close to another owns no sequence: q = 0). Founder refinement does not use it: its sequence part is an exact shadow score. |
+| `count_rule.shadow_combinations` | `2048` | evaluate a complete nearest-row sequence-shadow family up to this many configurations. Larger families retain the incumbent evaluated decision and record count_unverified; this is separate from the shared sixteen-leaf higher-level continuation allowance. |
 | **refinement** (FounderRefinementConfig) |  | Founder refinement settings. |
 | `refinement.proposal_max_bins` | `2000` | the binned window surrogate of a component has at most this many bins per component: bin size >= ceil(component sites / proposal_max_bins). |
 | `refinement.proposal_min_sites_per_bin` | `200` | smallest surrogate bin (sites). Levels 1 and 2 share the chromosome's resolution, max(this, ceil(chromosome sites / proposal_max_bins)), so the many small early components do not each get a chromosome's bin budget. The surrogate decides which moves are proposed; acceptance always scores every site exactly. |
 | `refinement.sweep_limit` | `100` | sweeps per fixed-K search. A search that reaches it is reported (and warned) as not converged; it never stops silently. |
 | `refinement.frontier_bytes` | `137438953472` | the largest frontier one window programme may hold (bytes, counted as the frontier_limit formula: four copies of S x (Q + K + bins + 2) float64 per kept path); a programme that would exceed it keeps its incumbent (a reported fallback). A fixed constant, the same on every machine, so results never depend on free memory: 128 GiB is above base's own memory-derived cap on every reference node (at most a quarter of the available memory, about 120 GB), where base never fell back (largest frontier 76,776 paths, sim_s10001 chr3 L1); K = 30 synthetic and AulStu peaks (257 and 357 paths) are four orders of magnitude below it. The memory of large programmes is admitted by the run's memory governor (proposals.PROGRAMME_BUDGETS). |
+| `refinement.alternative_branches` | `16` | complete same-level count continuations, including the ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class when its complete expansion would exceed the budget. Branches reuse labelled fixed-K fits on identical inputs and run sequentially. |
 
 ### PaintingConfig
 
@@ -665,8 +669,8 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `scoring.source_gap_support_sites` | `1` | A candidate-parent bridge mixes in the uniform selector kernel with weight switch probability x (1 - min(1, n / N)), n = the smaller informative selected-marker count of the two adjacent parent bins, N = this value; 0 keeps the painter-interpolated chain. |
 | `scoring.bridge_tolerance` | `2e-13` | Maximum-entropy bridge: root-finding tolerance and bisection budget. |
 | `scoring.bridge_max_iterations` | `128` |  |
-| **panel** (PanelConfig) |  | Genome-wide robust parent screen and the fixed M2 candidate panel. |
-| `panel.parents_per_child` | `20` | M2 is scored for all eligible unordered pairs among each child's top-ranked screen parents. |
+| **panel** (PanelConfig) |  | Genome-wide retained-parent M2 panel; legacy screen constants remain for compatibility. |
+| `panel.parents_per_child` | `20` | Legacy reference only; production includes every eligible pair of genome-retained M1 parents. |
 | `panel.information_tempering_power` | `0.5` | Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power. |
 | `panel.maximum_contig_weight_ratio` | `4.0` | Chromosome weights sqrt(markers) / median are clipped to [1 / ratio, ratio]. |
 | `panel.rank_weight` | `0.35` | Utility = rank_weight x tied rank evidence + (1 - rank_weight) x contaminated softmax. |
@@ -811,6 +815,10 @@ No setting is read from the environment: every setting is in the configuration. 
 | `HAPLOTYPES_TIE_CENSUS` | Diagnostic, unset in normal use: a directory into which every tie decision appends its compared values (`DIR/census.<pid>.jsonl`, one JSON line per decision) for the valley census that places the tie quanta (maths/ties.py). Results do not depend on it. |
 | `HAPLOTYPES_TIE_REVERSE` | Diagnostic, unset in normal use: `1` reverses every remaining arbitrary tie convention (index, content-key, default-state, sample-name and keep-first orders; maths/ties.py `reverse_conventions`), never the stated priors. The release acceptance test compares such a run with a default run: released outputs must agree outside released ambiguity. Records written under it carry `tie_reverse` in their identities and are never resumed by a default run. |
 | `HAPLOTYPES_TIE_REVERSE_KEEP` | Diagnostic, with `HAPLOTYPES_TIE_REVERSE`: comma-separated names of discovery conventions (or `all`) kept at their default while the others are reversed, to attribute a reversal difference (discovery/conventions.py). The central reversals of maths/ties.py are not covered. |
+| `HAPLOTYPES_COMPOUND_SCHEDULE` | Family-phase compound-update schedule: `coloured` (default) or `serial` (reference). The selected schedule is part of the family-phase checkpoint identity. This diagnostic comparison does not change priors or tolerances. |
+| `HAPLOTYPES_CAVITY_MODE` | Family-phase cavity implementation: `counts` (default) or `fold` (reference). Included in checkpoint identity. |
+| `HAPLOTYPES_FAMILY_WORK_BOUND` | Experimental diagnostic family-witness bound; `0` (default) keeps complete families. Positive bounds are not part of the accepted 2.3 model; bound64 was rejected. Included in checkpoint identity. |
+| `HAPLOTYPES_COMPOUND_WORK_BOUND` | Experimental diagnostic compound-update bound; `0` (default) keeps the complete search. Positive bounds are not part of the accepted 2.3 model. Included in checkpoint identity. |
 | `HAPLOTYPES_DISCOVERY_CLIQUE_STATS` | Diagnostic, unset in normal use: a directory into which discovery's tie-carrying residual clustering appends its alternative-pool statistics (one file per process). Results do not depend on it. |
 
 and sets these for itself and its worker processes:

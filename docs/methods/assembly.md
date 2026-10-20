@@ -29,7 +29,10 @@ Every assembly also reads the contig's evidence view and genetic map. The eviden
 normalised genotype likelihoods where a sample is observed at a discovery site and exactly 1/3 at
 every other cell (unobserved, not a discovery site, or a sample the contamination QC excluded from
 founder construction). Completion and the batch partition read it in float64; the linker, the joins
-and founder refinement read one float32 copy of the same values. The genetic map gives the
+and founder refinement read one float32 copy of the same values. The view also retains compact
+per-sample keys of integer total read depths on founder-visible discovery sites for completion's
+cross-fit partition. Counts are decoded transiently to construct those keys; the full count array
+is not retained by assembly. The genetic map gives the
 linker's within-block switch probabilities and the beam's maximum gap: distances come from the map
 file where one covers the contig (with the fallback rate `[genetic_map] rate_cm_per_mb` beyond its
 ends) and from the fallback rate alone otherwise.
@@ -83,9 +86,20 @@ variable shared by every sample, and evidence enters through the robust mixture 
 `AssemblyConfig.completion.crossfit.log_floor = -2.0`.
 
 1. **Cross-fitted carrier profiles** (`assembly/completion/crossfit.py`). The samples are split into two deterministic
-   folds (`AssemblyConfig.completion.crossfit.fold_seed = 1729`): ordered by a seeded SHA-256 of their observation
-   pattern on the contig and alternated (release 2.2), so the split does not depend on sample names, input order or
-   the convention reversal, and genotype-likelihood noise cannot move it. On one fold a variational EM over
+   folds (`AssemblyConfig.completion.crossfit.fold_seed = 1729`). The primary key is a seeded
+   SHA-256 of the observation pattern on the contig; ties are refined by a seeded key of the exact
+   integer total-depth vector (REF + ALT) on founder-visible discovery sites, zero elsewhere.
+   Samples with identical observation and depth content stay in one group. In content-key order,
+   each whole group goes to the fold with fewer informative members so far; an equal load selects
+   label 0. For balancing, informative means at least one founder-visible observed site,
+   independent of likelihood values. Samples with no founder-visible observation have zero balancing weight and fixed
+   label 0. With distinct informative keys this gives an alternating balanced split. Residual
+   groups are never divided by input position, even if their genotype likelihoods differ.
+   Sample names, input order, inferred genotypes and floating-point likelihood values do not
+   enter the split. It is invariant to sample permutation, renaming and convention reversal;
+   GL-only noise cannot change the integer depth keys. Array-only callers without counts hold
+   whole observation-pattern groups together and record that key source explicitly.
+   On one fold a variational EM over
    per-sample pair states and per-site configurations of the unresolved alleles runs from one
    start (uniform configurations, pair posteriors from the complete sites) until the evidence
    lower bound converges (at most `AssemblyConfig.completion.crossfit.max_iterations = 100`
@@ -96,8 +110,12 @@ variable shared by every sample, and evidence enters through the robust mixture 
    not identical to another row, no multimodal site and no shell-guard withholding (next section).
    The other fold's samples are painted on the complete sites of that released panel. The result
    is a held-out carrier profile per sample and row (expected copies and carrier probability) that
-   never uses the sample's own evidence. These calls serve only the profiles; they are not
-   published.
+   never uses the sample's own evidence to learn its training panel. When the training complement
+   has no informative observations, it cannot learn missing alleles: the original pre-fill panel
+   is used unchanged for held-out painting and absent informative training is flagged. This
+   fallback changes neither the separate cavity-fill model nor the occupancy criteria. Fold
+   group sizes, informative loads, key source and absent-training diagnostics accompany the
+   completion summary. These learned calls serve only the profiles; they are not published.
 2. **Cavity fills** (`assembly/completion/cavity_fill.py`). The block is cut into bins of
    `AssemblyConfig.completion.cavity.snps_per_bin = 50` sites. For each bin, every sample's
    pair-state weights come from the block's complete, informative sites outside the bin
@@ -366,6 +384,88 @@ paths the beam never proposes, three-way boundary cycles and multi-founder birth
 mosaic of other founders within one batch is not carried by that batch; later levels and founder
 refinement can re-split it.
 
+## Live alternatives and founder release (2.3)
+
+Proposal budgets now retain complete `join_proxy` classes. A cut class that would exceed
+twice the quota is dropped whole unless it is the leading class; an oversized leading
+class is kept whole. Painting-derived candidates are merged across both traceback
+conventions before this cut. Admissibility is tested on each edit witness before target
+panels are deduplicated. Exact scoring identifies a one-path replacement by the target's
+path multiset, so an alternative edit description cannot choose a different scoring route.
+
+A symmetric data decision records its complete discovered panel family. Up to four
+complete search histories, including the primary history, are evaluated by replaying the
+original inputs with the chosen decision prefix. Each replay preserves the ordinary
+count-cycle and born-path rules. Immutable emissions are shared; mutable search state is
+new. At a given supported K, final outputs are compared using `join_ll` classes on one
+common scale. Different supported K values remain `ambiguous_k`; raw likelihood does
+not choose the count. The representative uses smaller K, then the exact minimum number
+of sample state changes among optimal paths. Canonical order names a representative only
+after those priors, while every remaining alternative stays recorded.
+
+At the next hierarchy level, all child choices are combined jointly. Two two-way children
+require all four configurations. The higher-level allowance is sixteen complete incoming/search
+leaves per component, shared with same-level refinement; it is never sixteen independent
+four-history searches. Each incoming join configuration receives one search execution;
+unperformed inner histories stay flagged. A product larger than sixteen is retained as an explicit
+unresolved domain; no convenient subset is declared decisive. Informative masks are
+computed on the usable-site intersection across every alternative before partitioning.
+Samples must also satisfy the original proxy eligibility under every input alternative;
+changing the proxy stride on the shared sites cannot introduce samples excluded by an original alternative.
+Every compared join uses that common sample cohort, usable-site mask and prepared span;
+excluded sites are also absent from its count geometry. Positions and bin boundaries stay fixed. Each configuration refits its linker.
+Parent outputs are compared by their common likelihood within K; scores of separately
+fitted linker models are not compared, and child likelihoods are not added to parent
+likelihoods. Lost informative samples and usable sites, branch counts and costs are recorded. In FINAL
+assemblies, surviving join panels pass through that level's refinement. CONTEXT assemblies
+return alternatives too; local selection currently consumes their declared representative.
+
+This is a bounded comparison of discovered alternatives, not an enumeration of all global
+optima. Selected count-choice ties continue from the original count-pass state within
+the shared sixteen-leaf refinement budget as fixed-K and incoming-panel choices. Uncontinued inner-seed
+histories, branch-budget overflow and any remaining untested continuations stay explicit. At a count-quiescent terminal tie, the stated exact prior selects a discovered
+neighbor and ordinary search continues with the existing count, cycle, born-path, quota and
+sweep state. Flat transitions do not count as improvements or reset the search budget.
+Already visited flat states cannot cycle; newly discovered neighbors may extend the live
+family within the same four-history budget. A continuation that reaches a backstop remains
+uncertified, and its source family is not consumed as a validated terminal alternative.
+
+Founder export reads the final sidecar. A founder column and track extend only over
+segments where represented terminal panels agree up to a whole-row permutation, preserving
+duplicate multiplicity. Forward and reverse maximal common-interval scans supply a common
+set of cuts and an uncertainty interval bracketed by observed SNP positions. Different
+local content is withheld as unknown for evaluated final alternatives with established
+final correspondence. For equal-K panels, unique exact row matches on invariant path
+anchors preserve every allele cell that agrees across the complete evaluated family;
+only differing or missing cells are withheld. Matching uses no approximate or truth-based
+alignment. For unequal-K terminal panels, a displayed full-span path occurring exactly
+once in every evaluated member retains its known prepared content, even if other paths
+change that row ID's local multiplicity. Duplicate full paths and clipped fragments do
+not establish this correspondence. This protection applies to each family before masks
+are combined; prepared missingness, carrier masks and other families' withholding remain
+in force. All continuity cuts and uncertainty intervals are retained. Without this exact
+correspondence, varying prepared-row multiplicity retains the conservative local-row
+mask in every representative. Withheld calls remain unknown during full-length r5 filling.
+A source history whose continuation was not performed retains its incumbent calls and is
+flagged `continuation_unverified`, with the evaluated source panels, their actual local
+disagreement intervals, stated priors, cause and scope. The flag alone supplies neither a cut
+nor withholding. For an evaluated biological family stopped by a joint/search budget,
+the smaller-K and exact minimum-switch priors first identify the complete class in which
+the representative can vary. A unique prior winner retains its calls. Within a remaining
+tie, immutable prepared-row IDs and exact agreeing source-path anchors identify observed
+local allele disagreement; only those differing cells are withheld. Unknown downstream
+continuation and unmapped local IDs remain explicitly unverified. Continuity cuts require
+an exact whole-row correspondence to a represented source panel. Computational count
+overflow never invokes this rule. Source paths are not claimed to be final alternatives.
+The manifest records
+source inference component, segment index, source decision, uncertainty interval and newly
+withheld cells separately from unobserved-carrier withholding.
+
+Released segment identities are local. Downstream pedigree, offspring phase and recombination
+inference remain conditional on the chosen assembly representative; this export operation does
+not marginalize those analyses over founder alternatives. A 2.2 record without the sidecar is
+reported as having unknown ambiguity coverage and must be reassembled to obtain this treatment.
+
 ## Founder-count rule
 
 The join and founder refinement decide founder counts with one rule (`assembly/count_rule/`). A
@@ -373,7 +473,7 @@ decision compares a larger panel X+ with a smaller X- that lacks one founder f. 
 scores (the join's V_s, refinement's F_s), the total gain is d_s = score_s(X+) - score_s(X-) and its
 sequence part is q_s = score_s(X+) - score_s(X+^sigma). The shadow X+^sigma replaces every cell
 (block, row) of X+ that a reference panel does not use by the reference's row at that block nearest
-in Hamming distance over sites called in both (ties: the lowest row); the reference is X- in the
+in Hamming distance over sites called in both; the reference is X- in the
 join, and in refinement X+ without f for a deletion or the incumbent for an addition. A founder
 without a private cell is a pure mosaic of the others and has q = 0 exactly, so switch savings
 alone never justify a founder.
@@ -411,6 +511,18 @@ decision); undecided cycles are counted in the census and published in `founder_
 The row geometry (nearest rows, shadows, the near-identity and novelty tests, same-count admissibility) measures
 distances on the pre-fill inference calls, the calls every likelihood reads: a completion fill is a published call
 no likelihood sees, so it never makes two rows differ or agree.
+
+For join count decisions in 2.3, every equally nearest row at every changed cell
+belongs to the sequence-shadow domain. The complete Cartesian set is evaluated when it
+fits `CountRuleConfig.shadow_combinations` (currently 2048). Agreement of all count verdicts
+resolves the shadow; conflicting evaluated verdicts retain count uncertainty and use the
+smaller-K representative. If the complete domain exceeds that computational budget, only
+the incumbent's own shadow verdict is evaluated and retained; no order-selected prefix is
+scored. The sidecar records `count_unverified`, cause, domain size, evaluated count and scope.
+Computational incompleteness cannot itself delete a row or withhold a founder call. Failure
+of the total-gain test already rejects the larger count regardless of the sequence shadow.
+These are sequence-shadow evaluations, separate from the shared sixteen-leaf higher-level
+budget. Bounds and sparse replacement scores retain their existing scientific meaning.
 
 ## Join records and reuse
 
@@ -473,8 +585,11 @@ overcommitting memory; this never changes a result.
 **Memory.** The contig's assembly evidence (`assembly/evidence.py`, `AssemblyEvidence`: the neutral float64
 likelihoods, their float32 copy and the observation mask) lives in shared memory from the start; completion,
 hierarchy and founder-refinement workers attach it instead of copying it, and a completion task copies only its
-blocks' columns. Every task reserves an upper estimate of its peak memory with the run's memory governor before it
-starts:
+blocks' columns. Constructing completion depth keys transiently decodes the int32 REF/ALT counts
+(8 bytes per sample/site), uses one int64 depth row plus a mask as scratch, and retains only
+32 key bytes per sample. Reconstruction planning and memory admission include that transient
+count/scratch footprint. Every task reserves an upper estimate of its peak memory with the run's
+memory governor before it starts:
 
 - a completion block (`assembly/completion/stage.py`, `block_memory_bytes`): its evidence columns, the cavity
   fill's (N, K, K, bin sites) emissions with their temporaries, the per-bin pair-state scores and the cross-fit's

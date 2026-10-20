@@ -2,7 +2,8 @@
 
 A tie is a decision whose alternatives the data do not separate. Either they score exactly the same (for example two
 panels that differ only at alleles no sample observes), or they differ by less than the rounding noise of the compared
-sums. Release 2.2 handles ties by principle, not by convention:
+sums. The release policy handles ties by the following principles; the acceptance section below
+distinguishes implemented treatments from remaining conventions and unfinished validation:
 
 - **No decision that selects between different biological answers depends on:**
   - array, row or sample order;
@@ -17,7 +18,9 @@ sums. Release 2.2 handles ties by principle, not by convention:
   - local selection's tied starts, bank members and refits;
   - assembly's tied joins and refits.
 
-  A bound on such a set is itself order-invariant: a size cap on a canonical superset, with the overflow counted.
+  A bound on such a set is itself order-invariant. Discovery admits or omits whole classes;
+  the bank admits or omits whole endpoint families and tied classes. Overflow is a computational
+  limit, not biological ambiguity, and does not suppress an existing valid incumbent's calls.
 - **Ambiguity the data cannot resolve is released as such**, not replaced by a conventional point answer:
   - founder alleles that no carrier observes are written as `.`;
   - painted switches inside stretches where the founders are identical become intervals;
@@ -41,6 +44,38 @@ Two acceptance tests check this on every release candidate:
   priors and canonical labels are not reversed. Released outputs must equal the default run's, except inside released
   ambiguity. A residual difference marks a convention that still selects biology; the remaining ones are listed in
   [Remaining conventions](#remaining-conventions).
+
+## Evaluating exported phase sets (2.3)
+
+The `export_phase_sets_v2` evaluation follows the sample VCF's phase-set identity: a new set starts at a component boundary or an explicit per-sample `phase_breaks` boundary. A displayed-undetermined site is unphased and contributes its unordered allele error, but it does not split the phased flanks unless an explicit boundary is present. Each set gets one strand alignment, including phased sites on both sides of such an unphased stretch. Sets with at least two phased called heterozygotes contribute to the reported count and span N50.
+
+Earlier evaluation omitted explicit boundaries and split at undetermined cells. Baseline and candidate comparisons must use the same corrected metric version. Component-aligned and union painting-tie metrics remain independent checks; releasing more PS breaks does not remove their orientation penalties. Release validation reports PS errors together with set count, N50 and callability.
+
+## Family-phase release for 2.3
+
+The stage6ab family-phase implementation retains the accepted release semantics by identity-tested kernel and scheduling changes. Whole-stage resource measurements and the incomplete final pipeline acceptance coverage are reported separately.
+The release policy below records the approved behavior; it is not a claim that the
+partially composed integration tree has passed the release gates.
+
+
+Family phase derives its internal coordinates from pedigree depth and discrete scaffold/observed-read data, refining identical keys by pedigree neighbours. Sample names do not order the search. Both coordinate directions run both MAP schedules, giving an unordered set of four initial endpoints. Each receives one continuation before shared objective tie classes rank their final exact J. Initial ranking is diagnostic only. Each endpoint supplies its coordinates and schedule through continuation, repair, polish and evidence witnesses; its donor is the other schedule on the same axis. Final score-tied alternatives are aligned to the caller axis before projection.
+
+Independent transplant clusters share no objective factor, including root marginals and supported-marker selector transitions across gaps. All gains use the same start. The total continuation bound is four; unvisited tied combinations are recorded as search incompleteness and do not themselves mask calls. Only evaluated retained releases add ambiguity masks, projected onto observable ordered calls (including half calls, excluding equal homozygotes and fully missing calls). This is not posterior enumeration. The reversal hook remains active.
+
+Residual identical data/pedigree keys on nodes with no incoming or outgoing pedigree edges have independent unary/frame-chain factors. Their updates commute even when likelihood rows differ, so no likelihood ordering or equal-release requirement is needed. Other duplicate groups need an exchangeability certificate and identical member-specific releases. Cases that cannot meet this bounded contract require joint duplicate treatment and are reported explicitly; there is no fallback to sample-name order. The panel collision census and the full reversal/renaming matrix must accompany acceptance.
+
+Every two-parent painting join requires a family-context witness comparing both relative flank orientations with equal refit effort. Ties use the shared tolerance; no confidence margin is added. Both flanks must have supported orientation. Unsupported joins become explicit display phase breaks. Each joined boundary records its relative and flank margins. Display-only breaks do not reset recombination selector chains or censor decoder calls.
+
+The MAP phase view and genotype-preserving polish are distinct estimators. In C1's fallback policy, every component-local disagreement run longer than the existing 8,192-marker long-tract span, with a fully called heterozygote, contributes its internal endpoints as display phase breaks. Whole-component strand swaps of observable ordered calls add no internal break, including when raw switches lie at different positions inside homozygous or fully missing stretches. The unordered disagreement set does not change the point estimate, calls, frames, decoder or uncertainty masks. It does not claim that an orientation has been corrected. An additional orientation estimator is deferred to 2.4.
+
+Export keeps phase-set continuity across displayed-undetermined calls. C1 therefore tests the flanks of each such internal stretch after retaining and projecting all release alternatives. The two-parent comparison leaves undetermined target genotypes unconstrained; one-parent flanks reuse their summed orientation evidence; roots reuse accepted repair votes. Every retained branch must support the released relative relation, otherwise an explicit break is added. Witnesses and counts are recorded in the existing diagnostics.
+
+Assembly carries evaluated alternative families into release. Proven disagreement can
+split founder continuity and withhold locally differing alleles. An unperformed
+comparison preserves the incumbent and records verification status; a computational
+limit alone never establishes biological ambiguity. Complete-shadow enumeration uses
+2,048 combinations and the shared higher-context allowance is sixteen leaves. Proofs
+must hold under every sample permutation of the original fixed bootstrap draws.
 
 ## Common machinery
 
@@ -74,14 +109,19 @@ Two acceptance tests check this on every release candidate:
 
 ## Principled treatments by stage
 
-| stage | 2.1 convention | 2.2 treatment |
+| stage | convention addressed | treatment |
 | --- | --- | --- |
 | discovery ([discovery.md](discovery.md)) | HDBSCAN merges of equal-weight links ordered by a content key; complete linkage on noise | every tie resolution of the residual clustering is carried as a candidate (level-wise condensed-tree groups and maximal-clique alternatives of the noise, with order-invariant bounds); the block score decides |
 | discovery | NLL-tied panels decided by panel bytes | the tied panels are released with the block (`tied_panels`) and offered to local selection; archive beams keep whole NLL classes |
 | discovery | founder alleles no carrier observes: the seed's allele | released unknown (`latent_unknown`) |
-| discovery | tied A-step states of a sample: the first in row order | the meet of the tied states (a copy that differs between them goes to no founder) |
-| local selection ([local_selection.md](local_selection.md)) | the path search starts from the last non-empty source's cavity-best panel | every source's cavity tie set is fitted and searched; outcomes go by objective classes, with fewer founders as the prior |
-| local selection | bank, refit cut and residual ties by content and order | the BIC tie set is kept whole; whole tie classes are refitted (cap 16, overflow counted); residual ties give a consensus panel whose rows not shared by every alternative are withheld (`tied_alternatives`, `withheld_by_ties`) |
+| discovery and candidate bank | tied A-step states assigned by row order or reduced to their meet | uniform fractional evidence over every tied state in the winning fewest-unknown-copy category; weighted H fields, cavity hold-out and release |
+| discovery and candidate bank | founder updates choose one ordering of exact usage ties (D3) | complete endpoints of two consistent schedules, branching only on an encountered positive-usage tie; shared exact A work and certified identical H transitions, with schedule-specific fit certificates |
+| discovery | dosage argmax chooses a single genotype (D8a) | low/high dosage vectors from the complete winning genotype class seed initial, direct and subtraction proposals; deduplication before unchanged class budgets |
+| discovery | residual chooses one tied dominant partner (D10p) | every eligible partner route receives the original observation once at its original weight; global observations are not multiplied |
+| discovery and candidate bank | first mean-field start wins a training-ELBO tie (D12) | equal weight per eligible endpoint-equivalence class, with mean predictive likelihood within each class before the log; a deliberate change to the approximate predictive functional only in tie cases |
+| local selection ([local_selection.md](local_selection.md)) | the path search starts from the last non-empty source's cavity-best panel | fit every source's cavity tie set, then search the best initial path-objective class, with fewer founders as the prior; compare completed outcomes by that objective |
+| local selection | one nearest row or nonmember consensus selects exact-screened merges | every integer-distance minimizer is exact-screened, with the union deduplicated; unchanged likelihood, objective and refit caps |
+| local selection | bank, refit cut and residual ties by content and order | the BIC tie set is kept whole; bank score caps admit complete overlapping endpoint families and tied NLL classes at unchanged caps; whole path-refit classes are retained (cap 16, overflow counted); residual ties give a consensus panel whose rows not shared by every alternative are withheld (`tied_alternatives`, `withheld_by_ties`) |
 | assembly ([assembly.md](assembly.md)) | left-anchored batching | orientation-symmetric batching |
 | assembly | join moves inside a log-likelihood tie class by path tuples or panel keys | the batch linker's path score decides before any label; painting-dependent proposals run under both traceback conventions and are merged |
 | founder refinement ([founder_refinement.md](founder_refinement.md)) | tied refits decided by content | members that disagree on K take the smaller K (prior); otherwise the member whose margin most strongly supports the decision; remaining equal-F alternatives are flagged (`ambiguous_k`, `alternatives`) |
@@ -110,7 +150,8 @@ Canonical row orders, panel keys used as identities and the gauge of the two tra
 
 ## Remaining conventions
 
-On the release candidate the convention reversal still changes these released outputs:
+The following counts are the **historical 2.2 baseline**, not validation results for the 2.3
+symmetrized candidate. They identify the earlier errors that motivated this work:
 
 | dataset | founder allele cells | genotypes | phase switches | meioses with other crossovers | Tier-B samples |
 | --- | --- | --- | --- | --- | --- |
@@ -119,23 +160,118 @@ On the release candidate the convention reversal still changes these released ou
 | std_n80 | 2 | 6 | 20 | 20 | 0 |
 | stress_n80 | 0 | 0 | 13 | 26 | 0 |
 
-They enter at the following decisions; everything downstream is inherited.
+### Discovery and bank status for 2.3
 
-- **Discovery: content and sample order inside tie classes.** These are the central reversals of `maths.ties`.
-  Through them the reversal changes 326 of 9,979 TroMau blocks and 26 of 1,028 on three chromosomes. The tie kinds
-  inside those blocks are mostly the archive's NLL classes and the K = 1 seed bands, plus their overflow bounds.
-  This is the largest residue, so the released founder panels of these blocks depend on a convention.
-- **Local selection's bank, A-step band.** Discovery assigns tied A-step states their meet (the multiset
-  intersection of the tied founder pairs). Local selection's bank keeps 2.1's rule, which takes the tied state in
-  row order. A few entries remain: cavity-best and favourable-band ties, 6-8 blocks per round on TroMau. A
-  fractional treatment is planned for 2.3.
-- **Assembly.** A few joins (7 in 1,307 on the acceptance contigs) still follow the tier-1 proposal or evaluation
-  path order and are not yet flagged. A few refinements reach different equal-F optima; these are flagged, and their
-  alternatives are released.
-- **Family phase.** The ascent under the canonical and mirrored schedules is not perfectly symmetric, so a few frames
-  differ. On std_n80 that is 20 phase switches and 20 meioses with identical upstream.
-- **Painting.** Track order is a label. The released painting (status, members, tracks unordered) is identical
-  under reversal, switch intervals included.
+D1's compact meet is now a proposal summary only; weighted evidence uses the complete tied-state
+set in every discovery and bank path. D3, D8a and D10p evaluate their complete documented candidate
+families without permitting their former direction to choose a fitted answer. D3 may share an H
+transition when tied update groups have no internal heterozygote membership dependency, or when the
+whole sweep changes no allele. These certificates prove the identical next panel; they preserve the
+usage-tie marker, both consistent trajectories and schedule-specific fit certificates. Fresh dense
+A reuse and equivalent Boolean/integer proposal operations likewise reduce work without changing
+the objectives, families or budgets. D12 uses the explicit predictive mixture described in
+[discovery](discovery.md#cavity-score). After exact
+full-vector deduplication, endpoints at maximum absolute coordinate distance at most the existing
+mean-field convergence tolerance form connected equivalence classes. Classes receive equal weight;
+within each class, distinct endpoints' raw predictive likelihoods are averaged. The existing
+probability floor applies after the mixture, then the log. No founder-marginal average or held-out
+choice of weights occurs. The unchanged eligibility rule prefers converged endpoints, uses all
+starts only when none converged, and reports that failure. State priors, the NLL quantum, K prior
+and set code are unchanged.
+
+Exact endpoint counts were noise-sensitive in 1,456–2,021 of 16,000 sample-site solves in each of
+12 K30 block/noise scopes. Counts of endpoint classes at the solver's existing 1e-10 tolerance
+changed in zero solves across those scopes. This evidence required the pre-authorized convergence
+scale for endpoint identity; no additional threshold is introduced. Full noise acceptance remains
+separate from this identity check.
+
+This bounded probe does not establish global invariance of endpoint multiplicity. Later parent7
+K30 diagnostics under iid9 changed equivalence-class histograms in six of 200 blocks. Across
+209,408,000 sample-site entries accumulated over scored panels, aggregate counts changed by
+-50 in the one-class bin and +50 in the two-class bin. These are net histogram differences,
+not fifty identified per-solve transitions. All 200 complete biological outcomes and selected
+objective classes were unchanged. The existing equivalence scale is retained; no additional
+threshold is introduced.
+
+The diagnostic hooks remain named so interactions can be tested. Remaining proposal conventions
+include D8s (population-half hardening), D9 (maximum-cut and heuristic vertex order), D9p (proposal
+enumeration), and central content/sample-order diagnostics. The bank's pre-fit start-backstop
+still takes novel starts in enumeration order; its score cap now preserves complete families.
+Other local-selection conventions are listed on its [methods page](local_selection.md#conventions-and-stated-priors).
+D3's two schedules are not all possible schedules, and D8a alone does not establish general
+REF/ALT relabeling invariance. No untested hook or interaction is declared harmless.
+
+Candidate2 attribution assigns its full-reversal changes on K30, std and stress to D3, D8a,
+D10p, D12 or their measured interactions, with zero unattributed residual. That attribution is not
+a passing reversal result for the new combined implementation. A two-block K30 D3 canary has zero
+complete biological changes under D3-only, KEEP=all, full reversal, noise, permutation and renaming;
+an exercised two-block std D10p replay likewise removes its route-direction differences. These
+bounded tests do not establish the whole-stage or whole-pipeline gates.
+
+The source6 parent-ranking discovery matrix had zero biological differences across all nine
+controls on fixed Tro220, K30, standard and stress inputs. Parent7's behavior-preserving speedups
+were checked directly against source6 on reference, iid9 and value-consistent-noise outputs across
+all four scopes: complete outcomes agreed, and reference selected objectives were identical.
+These historical controls are separate from candidate8's own matrix and from full-pipeline
+runs that regenerate evidence. The standard chr2:block511 difference is attributed to shared-binomial
+calibration selecting different finite EM endpoints within its training-score band. On either fixed
+likelihood input, parent7 and candidate8 give exactly the same discovery outcome under reversal.
+The read-model candidate finishes all shared-binomial EM endpoints at stationarity under the
+unchanged training likelihood and Newton policy. Equivalent endpoints require shared-logit
+relative distance at most1e-13 and nuisance-logit distance at most the existing1e-8 stagnation
+resolution. This equivalence is not an error bound. Maximum training likelihood, then the exact
+lexicographic minimum full parameter vector, chooses the numerical representative. Content order
+of training histograms fixes numerical sample reductions; nuisance rows are restored before use.
+No held-out score chooses this representative. Distinct stationary models require explicit review and
+cannot silently fall back to uncalibrated data. All 88 critical full-calibration profiles produce
+bitwise-identical aligned likelihoods under start and sample order, duplicate and reversal controls.
+The committed whole-run chr2:block511 outcomes both select K6 with identical complete panels and
+objective, recovering one true founder and 200 correct calls relative to candidate8. Full standard
+and stress reference/reversal discovery and all three local-selection rounds have zero biological
+changes. Later phase differences remain; these stage results do not establish merged-pipeline
+invariance.
+
+At the provisional parent7 nominal 24/48 budgets, the symmetrized parent ranking had a K30
+founder-stage regression. Own-score ranking improved K30 but worsened all seven stress founder
+metrics relative to parent and is not adopted. All requested parent7 paired block-bootstrap
+K30 and standard intervals include zero; this does not establish equivalence. Stress
+missing-inclusive founder errors versus candidate2 have a positive 95% interval. The five K30
+single-reversion ablations are complete: D8a and the narrow H/usage reference affect accuracy,
+D3 trades coverage for called accuracy, and D10p/D12 contribute zero in that realization.
+Full released calls, bank reversal, Tier-B and merged-pipeline accuracy/resource checks remain
+separate. Discovery at 2x 2.2 and whole TroMau at 47:59 are timing guides; report actual ratios
+and quality gains for any excess. The memory limit remains 62.55 GiB. Historical 2.2 residue
+counts above are not acceptance results for the provisional 2.3 pipeline.
+
+Local selection exact-screens the union of every integer-Hamming nearest-row and eligible
+nearest-consensus minimum. Neither row order nor proposal order chooses a member. The refit
+caps and likelihood/objective are unchanged; complete distance ties increase screening work.
+The K30 m2:block0 reproducer exposed the former rule: the improving merge (12, 15) was
+exact-screened only under reversal. The corrected common-input replay reaches the same K24
+panel and local calls under full reversal, KEEP-all, iid12 seeds 1–3, iid9, value-consistent noise
+and sample permutation. This block has no candidate-bank call or sample-name input. The same
+three-round trajectory takes 32.192 to 33.100 seconds in two clean warm replays per version on
+the same host with four numerical threads; the forward comparison includes an extra useful
+round and takes 21.284 to 34.001 seconds. These are bounded block costs, not whole-stage costs.
+Combined-candidate truth, stability and full-run resource gates remain separate.
+
+### Search bounds and retained incumbents
+
+Discovery's nominal class budgets admit a straddling class when the total remains at most twice
+the budget; a larger class is omitted whole. Actual maximal-clique counts, not traversal order or
+a worst-case bound, decide the clique gate. Strictly worse classes after the boundary are counted
+as ranked truncation and do not make the search incomplete. Replacement ranking and its
+ordinary R = 48 / ceiling 96 and optional escalated R = 96 / ceiling 192 bounds are described in [discovery](discovery.md#replacement-admission); larger-budget
+sensitivity must be reported for the adopted ranking.
+
+A straddling tie-class or whole-gate omission sets `search_incomplete` and records cause, count,
+scope and whether the count is exact or a lower bound. This states a computational limit of a
+bounded search, not unresolved biology. Existing calls remain eligible for local selection. Only
+a discovery block with no scored incumbent because all initial classes were omitted is
+`unresolved`, and it supplies no calls. The bank keeps its separate unchanged score cap: overlapping
+families and their tied score classes enter atomically, and an omitted first family leaves the
+existing original latent incumbent in place. Complete competing fitted panels, when available,
+still propagate as `tied_panels` with conservative raw calls.
 
 ## What a run records
 
@@ -148,7 +284,7 @@ Every stage that decides with tie classes stores `tie_events` in its records. Fo
 
 The released ambiguity fields are:
 
-- discovery: `ambiguous`, `tied_alternatives`, `score_margin`, `tied_panels`, `latent_unknown`;
+- discovery: `ambiguous`, `tied_alternatives`, `score_margin`, `tied_panels`, `tied_unknown`, `latent_unknown`;
 - local selection: `tied_alternatives`, `withheld_by_ties`;
 - refinement: `ambiguous_k`, `alternatives` and `prior` per count decision;
 - founder refit: `ambiguous_alleles` (cells released unknown);
@@ -157,12 +293,41 @@ The released ambiguity fields are:
 - family phase: `frame_undetermined` (bit 0 decoder, bit 1 displayed frame);
 - export: `unobserved_founder_alleles`.
 
+Computational reporting is separate: discovery records `search_incomplete`, `unresolved` and
+`omissions` with `kind`, cause, count, scope and `count_kind`; `ranked_truncation` does not set
+incompleteness. The bank records `budget_bound`. Residual-route counters report original
+observations, all route memberships and distinct pools without creating additional biological
+support.
+
 When the run completes:
 
 - `ties/decisions.csv` and `ties/summary.json` sum the tie events per contig, stage and kind;
+- the tie report aggregates discovery omission events and counts blocks with incomplete searches
+  separately from unresolved blocks; counts of policy events are not unique omitted candidates;
 - `painting/<contig>/sample_segments.tsv` lists every sample's released painting, intervals included;
 - the founder VCF and the export manifest count the alleles written `.`.
 
 `HAPLOTYPES_TIE_CENSUS` (a directory) switches on the diagnostic valley census that placed the quanta, and
 `HAPLOTYPES_TIE_REVERSE_KEEP` keeps named discovery conventions at their default under the reversal
 ([configuration.md](../configuration.md)).
+
+## Genome-wide pedigree admission (2.3)
+
+For each child, retain every eligible parent within 60 existing information-temperature units of the best genome-wide raw M1 sum, including cutoff ties. Excluded identities receive the fixed chromosome profile whose sum is that genome cutoff; retained identities keep their raw scores. Apply this transform once, preserving every identity's multiplicity and contamination. Fix the profile before calibration, bootstrap and LOCO. Raw component and chromosome score checkpoints remain raw.
+
+M2 includes every eligible unordered pair of retained identities, with no top-20/40 cap or partial tied class. The existing full eligible-pair denominator remains. This assumes individually plausible parents suffice; a weak M1 parent can complement another in a strong raw M2 trio. G4 diagnostics found such raw-likelihood cases, but no fitted or resampled G2 M2 winner used an excluded parent. This is not a universal false-negative guarantee. `parents_per_child` is legacy-only. Dense raw M1 and explicit floor rows remain in this reference; no near-linear claim follows from panel admission alone.
+
+Residual discovery uses exact compiled clique counts by size, preserving the existing complete-class and straddling-class rules. The legacy `max_clique_calls` parameter controls only the Python reference traversal strategy. The actual-clique cap and omission counts retain their original meaning.
+
+### Landmark proposal classes (2.3)
+
+Discovery uses complete quantized farthest-anchor classes and complete nearest-anchor classes, without sample names or row-order representatives. Classes that exceed the fixed256 budget are omitted whole and reported as computational search limits. This alters proposal geometry and may alter latent panels; it is not biological ambiguity or an exact dense search. Final fitting and scoring still use all observations. Global residual pools can exceed256 records even when there are at most116 samples, so panel reuse requires measured inactivity or product identity rather than a sample-count assumption.
+
+### Certified exclusion evidence (2.3)
+
+Completed-window lower bounds can establish the existing genome-average Mendelian
+exclusion decision; unproved cases finish exactly. This is an exact decision shortcut,
+not a candidate truncation or new threshold. All observed-site counts remain exact.
+Two diagnostic tables expose lower/upper endpoints and exactness flags, with NaN for an
+uncomputed point value. Zero-target tables retain their original schema. See
+[pedigree methods](pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-counts).

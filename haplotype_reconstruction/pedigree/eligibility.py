@@ -227,9 +227,29 @@ class ParentEligibility:
         counts = self.parent_counts()
         if self.compatible_pairs is None:
             return counts * (counts - 1) // 2
-        candidates = self.parents.astype(np.int64)
-        within = (candidates @ self.compatible_pairs.astype(np.int64)) * candidates
-        return np.sum(within, axis=1) // 2
+        # Equal compatibility rows form exact classes: every member has the same
+        # neighbours. Count selected members and selected neighbours with bitsets.
+        # No cohort/sex assumption is inferred; arbitrary caller masks remain exact.
+        packed = np.packbits(self.compatible_pairs, axis=1, bitorder="little")
+        groups: dict[bytes, int] = {}
+        for sample, row in enumerate(packed):
+            key = row.tobytes()
+            groups[key] = groups.get(key, 0) | (1 << sample)
+        classes = [(members, int.from_bytes(key, "little"))
+                   for key, members in groups.items()]
+        packed_parents = np.packbits(self.parents, axis=1, bitorder="little")
+        cache: dict[bytes, int] = {}
+        result = np.empty(len(self.sample_ids), dtype=np.int64)
+        for child, row in enumerate(packed_parents):
+            key = row.tobytes()
+            if key not in cache:
+                selected = int.from_bytes(key, "little")
+                directed = sum((selected & members).bit_count()
+                               * (selected & neighbours).bit_count()
+                               for members, neighbours in classes)
+                cache[key] = directed // 2
+            result[child] = cache[key]
+        return result
 
     def identity(self) -> str:
         """SHA-256 of the policy text and every mask (a cache identity, not an integrity check)."""

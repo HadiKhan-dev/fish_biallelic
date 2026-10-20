@@ -221,6 +221,57 @@ def select_acyclic(rows: np.ndarray, states: np.ndarray, decision_scores: np.nda
     return GraphSelection(selected, frozenset(direction_resolved), role_probability)
 
 
+def _cyclic_components(adjacency, reverse) -> list[frozenset[int]]:
+    """Iterative Kosaraju, O(vertices + edges); components in minimum-vertex order.
+
+    Traversal order cannot affect membership. The final vertex scan preserves the
+    old peeling order without sorting or a Python recursion-depth limit.
+    """
+    n = len(adjacency)
+    seen = [False] * n
+    finished = []
+    for start in range(n):
+        if seen[start]:
+            continue
+        seen[start] = True
+        stack = [(start, iter(adjacency[start]))]
+        while stack:
+            node, neighbours = stack[-1]
+            neighbour = next(neighbours, None)
+            if neighbour is None:
+                finished.append(node)
+                stack.pop()
+            elif not seen[neighbour]:
+                seen[neighbour] = True
+                stack.append((neighbour, iter(adjacency[neighbour])))
+    component_of = [-1] * n
+    components = []
+    for start in reversed(finished):
+        if component_of[start] >= 0:
+            continue
+        index = len(components)
+        members = set()
+        stack = [start]
+        component_of[start] = index
+        while stack:
+            node = stack.pop()
+            members.add(node)
+            for neighbour in reverse[node]:
+                if component_of[neighbour] < 0:
+                    component_of[neighbour] = index
+                    stack.append(neighbour)
+        components.append(frozenset(members))
+    emitted = set()
+    result = []
+    for node in range(n):
+        index = component_of[node]
+        if index not in emitted:
+            emitted.add(index)
+            if len(components[index]) > 1:
+                result.append(components[index])
+    return result
+
+
 def tie_conflict_children(rows: np.ndarray, local_rows: Mapping[int, int],
                           state_margins: np.ndarray, identity_margins: np.ndarray,
                           score_scales: np.ndarray, n_samples: int) -> frozenset[int]:
@@ -250,26 +301,7 @@ def tie_conflict_children(rows: np.ndarray, local_rows: Mapping[int, int],
                 adjacency[parent].add(child)
                 reverse[child].add(parent)
 
-        def reachable(graph: Sequence[set[int]], start: int) -> set[int]:
-            seen = {start}
-            stack = [start]
-            while stack:
-                node = stack.pop()
-                for neighbour in graph[node]:
-                    if neighbour not in seen:
-                        seen.add(neighbour)
-                        stack.append(neighbour)
-            return seen
-
-        remaining = set(range(n_samples))
-        components = []
-        while remaining:
-            start = min(remaining)
-            component = reachable(adjacency, start) & reachable(reverse, start)
-            remaining.difference_update(component)
-            if len(component) > 1:
-                components.append(frozenset(component))
-        return components
+        return _cyclic_components(adjacency, reverse)
 
     while True:
         components = cyclic_components()

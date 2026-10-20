@@ -137,7 +137,7 @@ def phase_transitions(bins, components, probability, frames, selectors, window):
     return theta
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def initialize_selectors(scaffold, frames, parents, children, slots, logstay, logjump, error, reverse=False):
     """Per edge, the MAP selector path given the current frames (two-state Viterbi on copy consistency).
 
@@ -178,7 +178,7 @@ def initialize_selectors(scaffold, frames, parents, children, slots, logstay, lo
     return result
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def conditional_score(scaffold, frames, selectors, parents, children, slots,
                       logstay, logjump, phase_stay, phase_jump, error):
     """The polish objective (module docstring) of a configuration; the reference for tests of the local gains."""
@@ -206,7 +206,7 @@ def conditional_score(scaffold, frames, selectors, parents, children, slots,
     return total
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def interval_gain(i, a, b, path, scaffold, frames, selectors, incoming, offsets, outgoing,
                   parents, logstay, logjump, phase_stay, phase_jump, error):
     """(copy-consistency gain, frame-prior gain) of replacing vertex i's configuration on [a, b) by ``path``."""
@@ -248,7 +248,7 @@ def interval_gain(i, a, b, path, scaffold, frames, selectors, incoming, offsets,
     return biological, regularisation
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def accept_supported_intervals(i, path, scaffold, frames, selectors, incoming, offsets, outgoing,
                                parents, logstay, logjump, phase_stay, phase_jump, error,
                                minimum_gain, minimum_biological_gain):
@@ -292,7 +292,7 @@ def accept_supported_intervals(i, path, scaffold, frames, selectors, incoming, o
     return total_gain, changed
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump, phase_stay,
                 phase_jump, error, reverse=False):
     """The factorised 8-state Viterbi path int8 [L] of vertex i (frame bit 0, incoming selector bits 1 and 2) with
@@ -382,7 +382,7 @@ def vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, par
     return path
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                   parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
                   minimum_biological_gain, reverse=False):
@@ -408,7 +408,7 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                                       minimum_biological_gain)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def undetermined_frames(vertices, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
                         phase_stay, phase_jump, error):
     """bool [N, L]: for each vertex of ``vertices`` (two-parent children at the converged polish), the sites where
@@ -430,7 +430,7 @@ def undetermined_frames(vertices, scaffold, frames, selectors, incoming, offsets
     return out
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def update_colour(vertices, scaffold, frames, selectors, incoming, offsets, outgoing,
                   parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
                   minimum_biological_gain, reverse=False):
@@ -451,10 +451,10 @@ def selector_log_terms(theta):
     return logstay, logjump
 
 
-def polish(scaffold, bins, components, parents, children, slots, meiosis_theta, config):
+def polish(scaffold, bins, components, parents, children, slots, meiosis_theta, config, *, reverse=None):
     """Polish the frames of two-parent children starting from the scaffold (module docstring; the convention
     reversal is read once here)."""
-    rev = reverse_conventions()
+    rev = reverse_conventions() if reverse is None else bool(reverse)
     scaffold = np.ascontiguousarray(scaffold, dtype=np.int8)
     frames = np.zeros(scaffold.shape[:2], dtype=np.int8)
     bins = np.asarray(bins, dtype=np.int64)

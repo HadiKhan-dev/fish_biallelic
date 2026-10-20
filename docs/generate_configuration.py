@@ -82,6 +82,12 @@ ENVIRONMENT_READ = (
      "the tie quanta (maths/ties.py). Results do not depend on it."),
     ("HAPLOTYPES_TIE_REVERSE", "Diagnostic, unset in normal use: `1` reverses every remaining arbitrary tie convention (index, content-key, default-state, sample-name and keep-first orders; maths/ties.py `reverse_conventions`), never the stated priors. The release acceptance test compares such a run with a default run: released outputs must agree outside released ambiguity. Records written under it carry `tie_reverse` in their identities and are never resumed by a default run."),
     ("HAPLOTYPES_TIE_REVERSE_KEEP", "Diagnostic, with `HAPLOTYPES_TIE_REVERSE`: comma-separated names of discovery conventions (or `all`) kept at their default while the others are reversed, to attribute a reversal difference (discovery/conventions.py). The central reversals of maths/ties.py are not covered."),
+    ("HAPLOTYPES_COMPOUND_SCHEDULE", "Family-phase compound-update schedule: `coloured` (default) or "
+     "`serial` (reference). The selected schedule is part of the family-phase checkpoint identity. "
+     "This diagnostic comparison does not change priors or tolerances."),
+    ("HAPLOTYPES_CAVITY_MODE", "Family-phase cavity implementation: `counts` (default) or `fold` (reference). Included in checkpoint identity."),
+    ("HAPLOTYPES_FAMILY_WORK_BOUND", "Experimental diagnostic family-witness bound; `0` (default) keeps complete families. Positive bounds are not part of the accepted 2.3 model; bound64 was rejected. Included in checkpoint identity."),
+    ("HAPLOTYPES_COMPOUND_WORK_BOUND", "Experimental diagnostic compound-update bound; `0` (default) keeps the complete search. Positive bounds are not part of the accepted 2.3 model. Included in checkpoint identity."),
     ("HAPLOTYPES_DISCOVERY_CLIQUE_STATS", "Diagnostic, unset in normal use: a directory into which discovery's tie-carrying residual clustering appends its alternative-pool statistics (one file per process). Results do not depend on it."),
 )
 ENVIRONMENT_SET = (

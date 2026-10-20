@@ -142,9 +142,13 @@ more than the tolerance), so it does not climb back to it. Each search round the
   merges by an EM lower bound: the merged panel is the drop panel of either row with the other row
   replaced by the consensus, so the drop panel's posterior gives LL(drop) plus the replaced row's
   complete-data flip gains at the changed sites plus the expected-copy frequency term, and the
-  larger of the two bounds ranks the merge. For every row k, the merge of k with its nearest row
-  and the merge not involving k whose consensus is nearest row k are scored exactly as well (at
-  most 2K forwards), because the fixed-posterior bound credits no re-routing of carriers;
+  larger of the two bounds ranks the merge. For every row k, all merges with tied nearest rows
+  and all merges not involving k with tied nearest consensus rows are scored exactly as well.
+  Hamming distances are integers: the complete minimum class is retained and the union is
+  deduplicated. The fixed-posterior bound credits no re-routing of carriers, so selecting one
+  tied distance by row or proposal order could hide an improving merge. Without distance ties
+  this adds at most 2K forwards; with ties it can include every proposed merge. Likelihoods,
+  objective, refit caps and stopping rules are unchanged;
 - refits whole tie classes of each kind's screened scores, in order, until at least
   `LocalSelectionConfig.search.refits_per_kind = 8` proposals; a class that would take the kind past
   `LocalSelectionConfig.search.refits_per_kind_cap = 16` is left out whole and counted as an overflow (the block's
@@ -175,8 +179,24 @@ source per combination of its tied rows' completions, so no donor is preferred. 
 than `LocalSelectionConfig.bank.completion_variant_cap = 8` combinations keeps only its rows with a
 unique completion as its source; this is counted as an overflow. Every source (the latent panel, each earlier selection, the newest proposals)
 is refitted with discovery's fixed-K model and its endpoints are cavity-scored
-(`local_selection/bank.py`). The union bank and the drop, add and replace neighbourhoods of its
-best panels are then searched under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
+(`local_selection/bank.py`). Every synchronized and refitted endpoint uses discovery's fractional
+A step: each sample contributes uniformly over all tied states in its winning unknown-copy
+category. Those same memberships feed the founder field, leave-one-out cavity scoring and the
+raw-discovery release of each start. The compact meet pair is only a summary and does not discard
+a tied sample's founder evidence. Samples without observed sites are removed from the cavity
+likelihoods and their memberships together. Every bank path evaluates both consistent usage-tie
+schedules when a positive-usage tie occurs, sharing exact A work and keeping every distinct endpoint
+and lower-K collapse descendant in its source family. It also shares an identical H transition when
+tied updates provably commute or the sweep changes no allele; both trajectories and their separate
+fit certificates remain required (see [discovery](discovery.md#implementation-and-cost)).
+The fractional allocation and schedule
+families leave the BIC, switching-Viterbi NLL and subsequent path objective unchanged. The separate
+[D12 cavity policy](discovery.md#cavity-score) deliberately changes tied-endpoint predictions to a
+mixture with equal endpoint-class weights and mean predictive likelihood within each class before
+the log; source cavity comparisons use that same functional.
+
+The union bank and the drop, add and replace neighbourhoods of its best panels are then searched
+under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
 K x `LocalSelectionConfig.bank.complexity_scale = 0.5` x (L / 200) x N_active + 2 NLL (lower is
 better; N_active the samples with depth), until it improves by at most the block's `improvement`
 tie quantum (2^-14 nats). The block's discovery tie quanta define the bank's tie sets, which are
@@ -184,9 +204,17 @@ kept whole (no member is preferred by its key). The selected panels are the best
 BIC score (kind `nll`), inside it the best class of the NLL, then fewer founders (a class wider
 than the width guard keeps only the panels exactly at its best value). Every member's
 neighbourhood is searched and every member's rows join the bank. The candidate starts are each
-source's cavity-best tie set, chosen the same way from its cavity scores. A budget-bound admission
-keeps the NLL tie-class order. These sets do not depend on the order in which panels were
-admitted. Reported backstops, with K the
+source's cavity-best tie set, chosen the same way from its cavity scores.
+
+Score-cap admission preserves complete source families. Families sharing any endpoint are joined
+into atomic components and ranked by their best actual endpoint NLL using the existing `nll`
+quantum; complete tied classes are admitted together. The cap counts unique new endpoints. If the
+next complete class cannot fit, it and all lower-ranked classes are omitted, `budget_bound` is
+reported, and already valid incumbents remain. There is no doubled-cap allowance in this bank
+policy. If no initial family fits, the existing original latent incumbent and its rows remain;
+no BIC winner or new calls are invented. The separate pre-fit start backstop still limits novel
+starts in enumeration order and remains a convention to test; complete endpoints of an admitted
+start are never cut to an index prefix. Reported backstops, with K the
 current panel's founder count: at most 512 + 64K novel starts per call
 (`LocalSelectionConfig.bank.start_backstop_base = 512`,
 `LocalSelectionConfig.bank.start_backstop_per_founder = 64`), 1024 + 128K admitted panels
@@ -195,10 +223,16 @@ current panel's founder count: at most 512 + 64K novel starts per call
 (`LocalSelectionConfig.bank.round_backstop_base = 8`).
 
 The candidate starts are the cavity-best tie sets of every source, each member released with the
-raw discovery rule and the block's tie quanta (released alleles, latent alleles where withheld). Each
+raw discovery rule and the block's tie quanta (released alleles, latent alleles where withheld). An
+incomplete discovery search with an incumbent follows this same path. The exceptional block with
+no incumbent because every initial class was omitted contributes no local panel; its unresolved
+status and omissions remain recorded in discovery, and no calls are supplied to assembly. Each
 candidate start is fitted. The best tie class of their selection objectives (fewer founders inside
-it) is searched from every distinct fitted panel, and the outcomes are compared by the selection
-objective's tie classes, fewer founders inside the best. Distinct panels still tied (`tied_alternatives`)
+it) is searched from every distinct fitted panel. A lower-scoring initial fit is not searched merely
+because it belongs to a different source; a better initial objective does not guarantee a better
+completed search. The incumbent can still supply the starting fit under the score/reached-panel
+rules above. Completed outcomes are compared by the selection objective's tie classes, fewer
+founders inside the best. Distinct panels still tied (`tied_alternatives`)
 are released as their consensus. A founder row that every alternative contains keeps the calls all
 alternatives' releases agree on, their mean ALT probability and their smallest support. The other
 rows are withheld (`withheld_by_ties`). Unknown slots are the largest over the alternatives. The
@@ -313,7 +347,6 @@ reversal was chosen by a convention. The conventions are:
 - the content order inside tie classes (canonical keys, panel bytes, generation and trial order; reversed centrally
   in `maths.ties.tie_classes`);
 - the merge consensus allele at a probability of exactly 1/2 (row i's, the lexicographically smaller row);
-- the tie-break of the double-removal merges (the earlier row or merge);
 - in the site posterior: the founder order of tied ascent moves and of tied ball recentrings, and the REF start of
   an exactly zero BP marginal.
 
@@ -382,10 +415,14 @@ Cost in the founder count K, samples N and discovery sites L of one block (S = K
   copies, then complete-emission flip gains and occupancy, then the exact one-bit gains, which are
   computed only at stationary points and for the reported probabilities.
 - **A GEM update** is a few passes, O(N L K^2); a fit takes at most 20 + 4K + 2L updates.
-- **A search round** screens in O(N L K^3) (K drop forwards, the add forwards, K bound passes,
-  O(K^2) bounds of O(L + K) each and at most 2K exact merges) and refits 3 x 8 proposals.
+- **A search round**, without distance ties, has the existing O(N L K^3) screening estimate:
+  drop forwards, add forwards, drop-statistic passes, merge lower bounds and at most 2K exact
+  merge forwards. Complete distance ties can select every available merge, up to K(K - 1)/2,
+  giving O(N L K^4) worst-case screening. Refit admission still uses whole score classes,
+  with target 8 and cap 16 per proposal kind.
 - **The candidate bank** fits at most 512 + 64K starts per call with discovery's fixed-K model,
-  O(N L K^2) each (see [discovery](discovery.md#implementation-and-cost)).
+  completing up to two usage schedules per start only where a tie is encountered, with shared A
+  work and certified identical H transitions (see [discovery](discovery.md#implementation-and-cost)).
 - **The release** is one per-sample E-step, O(N L K^2).
 - **A context refit** of a component with B blocks and L_c sites costs O(N L_c K^2) for its bin
   emissions and O(N B K^2) for the bin forward-backward. The site posterior costs O(N 2^K) per site

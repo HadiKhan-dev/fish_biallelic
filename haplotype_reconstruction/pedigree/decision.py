@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import alternatives as alternatives_module
-from . import calibration, release, resampling, selection
+from . import calibration, m1, release, resampling, selection
 from .alternatives import Alternatives
 from .config import PedigreeConfig
 from .eligibility import ParentEligibility
@@ -28,7 +28,7 @@ from .ties import unique_finite_winner
 class Decision:
     """Everything the release, exclusion and report steps read.
 
-    scores: the chromosome scores as scored (unscaled); inputs: the fit inputs (alternatives
+    scores: genome-floor transformed chromosome scores (unscaled); inputs: the fit inputs (alternatives
     carry the evidence scale); full / orientation / adjusted (state, identity scores) / trace: the
     full-data fit and its per-row terms; sensitivity: (priors, selection) per alternative prior;
     informative: int64 [N] chromosomes whose own evidence picks a unique state.
@@ -76,6 +76,19 @@ def informative_contigs(alternatives: Alternatives) -> np.ndarray:
 def decide(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeConfig,
            budget) -> Decision:
     """Full-data fit, resampling support and the tier views of the informative chromosomes."""
+    # Public input is RAW chromosome aggregates. Freeze the full-genome gate
+    # and chromosome profile before calibration and every resampling fit.
+    scores = m1.floor_genome(scores, eligibility, config)
+    return decide_floored(scores, eligibility, config, budget)
+
+
+def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
+                   config: PedigreeConfig, budget) -> Decision:
+    """Decide from the already fixed full-genome M1 profile.
+
+    Used by the certified screen. The genome floor is not idempotent: raw
+    chromosome scores must use ``decide`` instead.
+    """
     alternatives = alternatives_module.build(scores, eligibility)
     scale, calibration_report = calibration.fit_scale(scores, alternatives, config)
     if scale != 1.0:

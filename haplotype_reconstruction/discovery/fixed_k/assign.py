@@ -24,7 +24,6 @@ import numba
 import numpy as np
 from numba import njit, prange
 
-from ..conventions import rev
 
 
 @lru_cache(maxsize=64)
@@ -131,33 +130,12 @@ def band_meet(state_cost, threshold, first, second, n_pairs, k):
 
 
 @njit(cache=True, nogil=True, inline="always")
-def band_state(state_cost, threshold, n_pairs, k, reverse):
-    """Release 2.1 rule (workspaces without ``tie_meet``, e.g. local selection's bank): the state chosen inside the tie
-    band: fewest unknown copies first (row pairs, then (k, U), then (U, U)); inside that category the first state in
-    row order, or the last under reversed conventions (maths.ties.reverse_conventions)."""
-    n_states = n_pairs + k + 1
-    for category in range(3):
-        lo = 0 if category == 0 else (n_pairs if category == 1 else n_pairs + k)
-        hi = n_pairs if category == 0 else (n_pairs + k if category == 1 else n_states)
-        if reverse:
-            for st in range(hi - 1, lo - 1, -1):
-                if state_cost[st] <= threshold:
-                    return st
-        else:
-            for st in range(lo, hi):
-                if state_cost[st] <= threshold:
-                    return st
-    return n_states - 1
-
-
-@njit(cache=True, nogil=True, inline="always")
 def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
                    ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins,
                    founder_diff1, emissions, assignments, unknown_slots, viterbi, state_cost, tie,
-                   reverse, meet):
+                   mask):
     """One sample's state choice and Viterbi likelihood (scratch: founder_diff1 (K, bins),
-    emissions (states, bins)). ``meet``: the release 2.2 meet rule (band_meet; ``reverse`` then has no effect, there
-    is no order to reverse), else the 2.1 rule (band_state)."""
+    emissions (states, bins)). The pair is a meet summary; mask carries all evidence membership."""
     n_pairs = pair_slots.shape[0]
     n_states = n_pairs + k + 1
     # Above K = 3, gather each row's diff1 contraction once per sample: the same table scalar
@@ -201,28 +179,17 @@ def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots
     state_cost[state] = ww_total_cost[s]
     if ww_total_cost[s] < best_cost:
         best_cost = ww_total_cost[s]
-    if meet:
-        # Inside the tie quantum of the cheapest: the meet of the tied states (band_meet; order-free, release 2.2).
-        # A copy that differs between tied states goes to no founder row (k in the pair); the unknown-copy count
-        # stays that of the tied states (their category), so ambiguity is not counted as copies from outside.
-        a0, a1, category, _ = band_meet(state_cost, best_cost + tie, first, second, n_pairs, k)
-        assignments[s, 0] = a0
-        assignments[s, 1] = a1
-        unknown_slots[s] = category
-    else:
-        best_state = band_state(state_cost, best_cost + tie, n_pairs, k, reverse)
-        if best_state < n_pairs:
-            assignments[s, 0] = first[best_state]
-            assignments[s, 1] = second[best_state]
-            unknown_slots[s] = 0
-        elif best_state < n_pairs + k:
-            assignments[s, 0] = best_state - n_pairs
-            assignments[s, 1] = k
-            unknown_slots[s] = 1
-        else:
-            assignments[s, 0] = k
-            assignments[s, 1] = k
-            unknown_slots[s] = 2
+    # Keep the category preference and whole-block cost band. Evidence is uniform over
+    # this category's complete tied set; the meet is only a compact proposal summary.
+    a0, a1, category, _ = band_meet(state_cost, best_cost + tie, first, second, n_pairs, k)
+    assignments[s, 0] = a0
+    assignments[s, 1] = a1
+    unknown_slots[s] = category
+    lo = 0 if category == 0 else (n_pairs if category == 1 else n_pairs + k)
+    hi = n_pairs if category == 0 else (n_pairs + k if category == 1 else n_states)
+    for st in range(lo, hi):
+        if state_cost[st] <= best_cost + tie:
+            mask[s, st] = 1
     # Viterbi forward over bins, in place in the dead first emission column.
     for b in range(1, n_bins):
         best_previous = -np.inf
@@ -245,12 +212,13 @@ def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots
 
 @njit(cache=True, parallel=True, nogil=True)
 def _assign_parallel(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
-                     ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie, reverse, meet):
+                     ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie):
     n = c0b.shape[0]
     n_states = pair_slots.shape[0] + k + 1
     assignments = np.empty((n, 2), dtype=np.int64)
     unknown_slots = np.empty(n, dtype=np.int64)
     viterbi = np.empty(n, dtype=np.float64)
+    mask = np.zeros((n, n_states), dtype=np.uint8)
     for s in prange(n):
         founder_diff1 = np.empty((k, n_bins), dtype=np.float64)
         emissions = np.empty((n_states, n_bins), dtype=np.float64)
@@ -258,13 +226,13 @@ def _assign_parallel(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
         _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
                        pair_slots, ww_bin_emissions, ww_total_cost, first, second, penalty, k,
                        n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi,
-                       state_cost, tie, reverse, meet)
-    return assignments, -viterbi, unknown_slots
+                       state_cost, tie, mask)
+    return assignments, -viterbi, unknown_slots, mask
 
 
 @njit(cache=True, nogil=True)
 def assign_serial(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
-                  ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie, reverse, meet):
+                  ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie):
     """The A step on one thread, with one scratch slab for all samples (no per-sample
     allocation); the same arithmetic as the parallel driver."""
     n = c0b.shape[0]
@@ -272,6 +240,7 @@ def assign_serial(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pa
     assignments = np.empty((n, 2), dtype=np.int64)
     unknown_slots = np.empty(n, dtype=np.int64)
     viterbi = np.empty(n, dtype=np.float64)
+    mask = np.zeros((n, n_states), dtype=np.uint8)
     founder_diff1 = np.empty((k, n_bins), dtype=np.float64)
     emissions = np.empty((n_states, n_bins), dtype=np.float64)
     state_cost = np.empty(n_states, dtype=np.float64)
@@ -279,11 +248,11 @@ def assign_serial(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pa
         _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
                        pair_slots, ww_bin_emissions, ww_total_cost, first, second, penalty, k,
                        n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi,
-                       state_cost, tie, reverse, meet)
-    return assignments, -viterbi, unknown_slots
+                       state_cost, tie, mask)
+    return assignments, -viterbi, unknown_slots, mask
 
 
-def assign(workspace, haplotypes):
+def assign(workspace, haplotypes, *, with_ties=False):
     """The A step of a panel: (assignments int64[N, 2], per-sample cost float64[N], unknown
     slots int64[N]), with samples without any observed site set to (U, U)."""
     k = haplotypes.shape[0]
@@ -296,15 +265,18 @@ def assign(workspace, haplotypes):
     row_slots = tables.slots(row_patterns)
     pair_slots = tables.slots(pair_patterns)
     kernel = assign_serial if numba.get_num_threads() == 1 else _assign_parallel
-    assignments, cost, unknown_slots = kernel(
+    assignments, cost, unknown_slots, mask = kernel(
         workspace.c0b, tables.diff1_table, tables.w_table, workspace.kw_cb,
         tables.kw_diff_table, row_slots, pair_slots, workspace.ww_bin_emissions,
         workspace.ww_total_cost, first, second, workspace.switch_penalty, k, workspace.n_bins,
-        float(workspace.quanta.sample), rev("d1"), bool(workspace.tie_meet))
+        float(workspace.quanta.sample))
     uninformative = workspace.uninformative
     assignments[uninformative] = k
     unknown_slots[uninformative] = 2
-    return assignments, cost, unknown_slots
+    mask[uninformative] = 0
+    mask[uninformative, -1] = 1
+    result = (assignments, cost, unknown_slots)
+    return (*result, mask) if with_ties else result
 
 
 @njit(cache=True, parallel=True, nogil=True)

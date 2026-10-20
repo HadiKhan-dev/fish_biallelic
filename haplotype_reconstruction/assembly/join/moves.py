@@ -299,7 +299,7 @@ def lower_bounds(moves, forwards, likelihood, to_local, offsets, replaced=None):
 
 
 def best_improvement(bounds, canonical, materialize, score, current_score, *, signature,
-                     admissible, reach=0.0, choose=None):
+                     admissible, reach=0.0, choose=None, observe=None):
     """Best-first exact scoring of the moves a bound cannot exclude.
 
     materialize(move) -> panel; score(panel, move) -> (exact join score -2 LL, payload);
@@ -316,6 +316,9 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
     inside a class); identical panels are scored once and take the path order of their first move
     in canonical order. Entries are [change, canonical, move, panel, payload]. Returns
     ((change, canonical, move, panel, payload) or None, survivors, scored).
+    observe(panel, exact_score, payload), when given, sees each uniquely exact-scored
+    admissible panel, including flat neighbors. It does not widen the bounded search
+    or make a non-improving move eligible for acceptance.
     """
     eps = 1e-9 * (1.0 + abs(float(current_score)))
     threshold = max(1e-8, eps)
@@ -335,6 +338,9 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
         panel = materialize(move)
         key = signature(panel)
         canon = tuple(int(x) for x in canonical[move])
+        # Admissibility depends on the changed-slot witness, not just the panel.
+        if not admissible(panel):
+            continue
         entry = seen.get(key)
         if entry is not None:
             # The same panel (same paths with multiplicity) from an earlier move
@@ -345,11 +351,10 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
                 if entry[3] is not None:
                     entry[3] = panel
             continue
-        if not admissible(panel):
-            seen[key] = [np.inf, canon, move, None, None]
-            continue
         exact_score, payload = score(panel, move)
         scored += 1
+        if observe is not None:
+            observe(panel, float(exact_score), payload)
         change = float(exact_score) - float(current_score)
         improving = change < -threshold
         seen[key] = [change, canon, move, panel if improving else None,

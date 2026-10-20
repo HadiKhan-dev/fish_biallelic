@@ -77,6 +77,8 @@ class FamilyWorkspace:
     a component edge); frozen bool [N] (roots with exactly one child edge) and frozen_theta float64 [L-1]
     (their chains switch only at component edges); theta float64 [L-1] (Haldane meiosis switch probability);
     selector_support: factors.selector_support (each group's supported markers and composed switch probabilities).
+    observed bool [N, L]: positive-depth evidence mask retained without the raw genotype likelihoods;
+    None for older direct workspace constructors.
     """
 
     scaffold: np.ndarray
@@ -93,6 +95,7 @@ class FamilyWorkspace:
     theta: np.ndarray
     graph: FamilyGraph
     selector_support: tuple
+    observed: np.ndarray | None = None
 
 
 def meiosis_switch_probabilities(positions, chromosome_map):
@@ -120,4 +123,4 @@ def prepare_workspace(likelihoods, observed, scaffold, positions, bins, componen
     return FamilyWorkspace(
         scaffold, positions, bins, components, potentials, orientation, scaffold_orientation, anchors,
         phase_theta, frozen, frozen_theta, theta, graph,
-        factors.selector_support(potentials, graph.group_parent, theta))
+        factors.selector_support(potentials, graph.group_parent, theta), observed=np.asarray(observed, dtype=np.bool_))

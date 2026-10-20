@@ -1,17 +1,22 @@
 """Kernels of the fixed-assignment leave-one-sample-out cavity score (see cavity.py).
 
-At a fixed site, held-out samples with equal assigned pairs and equal likelihood triples have
-equal held-out potentials, support and starts: each such case is solved once (exact equality, no
-quantisation). Further exact reuse: a later mean-field start that reaches a state of the converged
+At a fixed site, held-out samples with equal complete tied-state memberships and likelihood triples
+have equal held-out potentials, support and starts: each such case is solved once (exact equality,
+no quantisation). Every multi-state membership is compared in full before grouping. Further exact reuse: a later mean-field start that reaches a state of the converged
 first start replays that start's remaining sweeps; a predictive value equal to a floored evidence
 value reuses that value's logarithm; the site's complete-data potentials are filled once and a
-held-out solve patches only its own sample's unary or edge term (restored afterwards); sigmoid and
+held-out solve patches every weighted unary and edge of its sample (restored afterwards); sigmoid and
 entropy terms are memoised per founder. Every sample accumulates its own predictions in site and
 founder order and samples are reduced in sample order, so results do not depend on threads.
 
-Release 2.1: the three mean-field starts of a held-out solve are compared by ELBO with a tie
-quantum (the block's ``nll`` quantum, ``elbo_tie``): converged starts within it of the best ELBO are
-tied and the first in the fixed start order (q = H, q = 1 - H, q = 1/2) wins. 2.0 compared with an
+Release 2.3: the three mean-field starts of a held-out solve are compared by training ELBO with
+its unchanged ``nll`` quantum. All distinct winning converged endpoints (all starts when none
+converged) form equivalence classes at the existing mean-field convergence tolerance, after
+exact deduplication. Classes contribute equally to each state's predictive likelihood; their
+numerically distinct members are averaged internally. The floor and log follow both averages.
+Exact identity alone made a near-duplicate mode's weight depend on GL noise. The retained scalar _solve_cavity_site wrapper still returns the old directional representative
+for reference tests; production predictions use the full endpoint family. Release 2.1 chose the
+first winning start in the fixed order (q = H, q = 1 - H, q = 1/2). 2.0 compared with an
 absolute 1e-12 band and broke ties by the endpoints' values, so rounding- or perturbation-level ELBO
 differences between different endpoints (e.g. mirror-image modes) chose the endpoint. A founder
 update's logit within the same quantum of zero is zero (q = 1/2 exactly): symmetric evidence (equal
@@ -25,6 +30,8 @@ import math
 
 import numpy as np
 from numba import njit, prange
+
+from .residual_births import _accurate_sum
 
 # Workspace budget of one site tile, not a statistical parameter: one site is the minimum, so
 # memory is O(N K^2) per tile, never O(N L K^2).
@@ -66,6 +73,10 @@ def _site_workspace(k, n_edges, max_iter):
     memo_probability = np.full(k, np.nan, dtype=np.float64)
     memo_q_log_q = np.empty(k, dtype=np.float64)
     memo_complement_log_complement = np.empty(k, dtype=np.float64)
+    patched_unaries = np.empty(k, dtype=np.int64)
+    saved_unaries = np.empty((k, 3), dtype=np.float64)
+    patched_edges = np.empty(n_edges, dtype=np.int64)
+    saved_edges = np.empty((n_edges, 8), dtype=np.float64)
     return (
         q,
         candidate_q,
@@ -84,6 +95,7 @@ def _site_workspace(k, n_edges, max_iter):
         memo_probability,
         memo_q_log_q,
         memo_complement_log_complement,
+        patched_unaries, saved_unaries, patched_edges, saved_edges,
     )
 
 
@@ -91,8 +103,8 @@ def _site_workspace(k, n_edges, max_iter):
 def _set_site_potentials(site, k, unary, pair, edge_first, edge_second, work):
     """Fill the site's complete-data potentials, shared by its held-outs.
 
-    Each held-out solve then patches only the one unary or edge to which its
-    own sample contributes and restores it afterwards.
+    Each held-out solve patches all unaries and edges to which its sample
+    contributes and restores their saved complete-data values afterwards.
     """
     cavity_unary = work[4]
     cavity_unary_logit = work[5]
@@ -127,7 +139,8 @@ def _solve_cavity_site(
         heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
         assignments, founder_support, unary, pair, edge_first, edge_second,
         neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, work, edge_lookup, elbo_tie, reverse):
+        mean_field_tolerance, work, edge_lookup, elbo_tie, reverse,
+        member_offsets, member_states, state_first, state_second, sample_support):
     (
         q,
         candidate_q,
@@ -146,89 +159,73 @@ def _solve_cavity_site(
         memo_probability,
         memo_q_log_q,
         memo_complement_log_complement,
+        patched_unaries, saved_unaries, patched_edges, saved_edges,
     ) = work
     wildcard = k
     n_edges = pair.shape[0]
     heldout_not_converged = 0
-    held_a = assignments[heldout, 0]
-    held_b = assignments[heldout, 1]
-    held_support_a = held_a if held_a < wildcard else -1
-    held_support_b = (
-        held_b if held_b < wildcard and held_b != held_a else -1
-    )
     n_supported = 0
     for founder in range(k):
-        remaining_support = founder_support[founder]
-        if founder == held_support_a or founder == held_support_b:
-            remaining_support -= 1
+        remaining_support = founder_support[founder] - sample_support[heldout, founder]
         remaining_support_by_founder[founder] = remaining_support
         if remaining_support > 0:
             supported_founders[n_supported] = founder
             n_supported += 1
-    held_log_mix0 = 0.0
-    held_log_mix1 = 0.0
-    if held_a < wildcard and held_b == wildcard:
-        held_log_mix0 = rw_log_likelihood[heldout, site, 0]
-        held_log_mix1 = rw_log_likelihood[heldout, site, 1]
 
-    # Remove this sample's own term from the site potentials: the same
-    # subtraction of the same values as rebuilding every potential, at the
-    # one unary or edge it contributes to (each is restored below).
-    patched_founder = -1
-    saved_u0 = 0.0
-    saved_u1 = 0.0
-    saved_logit = 0.0
-    if held_a == held_b and held_a < wildcard:
-        patched_founder = held_a
-    elif held_a < wildcard and held_b == wildcard:
-        patched_founder = held_a
-    if patched_founder >= 0:
-        saved_u0 = cavity_unary[patched_founder, 0]
-        saved_u1 = cavity_unary[patched_founder, 1]
-        saved_logit = cavity_unary_logit[patched_founder]
-        u0 = saved_u0
-        u1 = saved_u1
-        if held_a == held_b:
-            u0 -= log_likelihood[heldout, site, 0]
-            u1 -= log_likelihood[heldout, site, 2]
+    # Every state in the winning category has the same unknown-copy count.
+    # Its homozygote/RW unary or heterozygote edge is unique within that set.
+    # Save all affected factors before subtraction; restoring saved values
+    # avoids roundoff accumulating across successive held-out samples.
+    begin = member_offsets[heldout]
+    end = member_offsets[heldout + 1]
+    share = 1.0 / (end - begin)
+    n_patched_unaries = 0
+    n_patched_edges = 0
+    for member in range(begin, end):
+        state = member_states[member]
+        a = state_first[state]
+        b = state_second[state]
+        if a == wildcard:
+            continue
+        if a == b or b == wildcard:
+            index = n_patched_unaries
+            n_patched_unaries += 1
+            patched_unaries[index] = a
+            saved_unaries[index, 0] = cavity_unary[a, 0]
+            saved_unaries[index, 1] = cavity_unary[a, 1]
+            saved_unaries[index, 2] = cavity_unary_logit[a]
+            if a == b:
+                u0 = cavity_unary[a, 0] - share * log_likelihood[heldout, site, 0]
+                u1 = cavity_unary[a, 1] - share * log_likelihood[heldout, site, 2]
+            else:
+                u0 = cavity_unary[a, 0] - share * rw_log_likelihood[heldout, site, 0]
+                u1 = cavity_unary[a, 1] - share * rw_log_likelihood[heldout, site, 1]
+            cavity_unary[a, 0] = u0
+            cavity_unary[a, 1] = u1
+            cavity_unary_logit[a] = u1 - u0
         else:
-            u0 -= held_log_mix0
-            u1 -= held_log_mix1
-        cavity_unary[patched_founder, 0] = u0
-        cavity_unary[patched_founder, 1] = u1
-        cavity_unary_logit[patched_founder] = u1 - u0
-    patched_edge = -1
-    saved_v00 = 0.0
-    saved_v01 = 0.0
-    saved_v10 = 0.0
-    saved_v11 = 0.0
-    saved_d0_ab = 0.0
-    saved_d1_ab = 0.0
-    saved_d0_ba = 0.0
-    saved_d1_ba = 0.0
-    if held_a < wildcard and held_b < wildcard:
-        patched_edge = edge_lookup[held_a, held_b]
-    if patched_edge >= 0:
-        saved_v00 = cavity_edge_potential[patched_edge, 0]
-        saved_v01 = cavity_edge_potential[patched_edge, 1]
-        saved_v10 = cavity_edge_potential[patched_edge, 2]
-        saved_v11 = cavity_edge_potential[patched_edge, 3]
-        saved_d0_ab = directed_difference_zero[held_a, held_b]
-        saved_d1_ab = directed_difference_one[held_a, held_b]
-        saved_d0_ba = directed_difference_zero[held_b, held_a]
-        saved_d1_ba = directed_difference_one[held_b, held_a]
-        v00 = saved_v00 - log_likelihood[heldout, site, 0]
-        v01 = saved_v01 - log_likelihood[heldout, site, 1]
-        v10 = saved_v10 - log_likelihood[heldout, site, 1]
-        v11 = saved_v11 - log_likelihood[heldout, site, 2]
-        cavity_edge_potential[patched_edge, 0] = v00
-        cavity_edge_potential[patched_edge, 1] = v01
-        cavity_edge_potential[patched_edge, 2] = v10
-        cavity_edge_potential[patched_edge, 3] = v11
-        directed_difference_zero[held_a, held_b] = v10 - v00
-        directed_difference_one[held_a, held_b] = v11 - v01
-        directed_difference_zero[held_b, held_a] = v01 - v00
-        directed_difference_one[held_b, held_a] = v11 - v10
+            edge = edge_lookup[a, b]
+            index = n_patched_edges
+            n_patched_edges += 1
+            patched_edges[index] = edge
+            for value in range(4):
+                saved_edges[index, value] = cavity_edge_potential[edge, value]
+            saved_edges[index, 4] = directed_difference_zero[a, b]
+            saved_edges[index, 5] = directed_difference_one[a, b]
+            saved_edges[index, 6] = directed_difference_zero[b, a]
+            saved_edges[index, 7] = directed_difference_one[b, a]
+            v00 = cavity_edge_potential[edge, 0] - share * log_likelihood[heldout, site, 0]
+            v01 = cavity_edge_potential[edge, 1] - share * log_likelihood[heldout, site, 1]
+            v10 = cavity_edge_potential[edge, 2] - share * log_likelihood[heldout, site, 1]
+            v11 = cavity_edge_potential[edge, 3] - share * log_likelihood[heldout, site, 2]
+            cavity_edge_potential[edge, 0] = v00
+            cavity_edge_potential[edge, 1] = v01
+            cavity_edge_potential[edge, 2] = v10
+            cavity_edge_potential[edge, 3] = v11
+            directed_difference_zero[a, b] = v10 - v00
+            directed_difference_one[a, b] = v11 - v01
+            directed_difference_zero[b, a] = v01 - v00
+            directed_difference_one[b, a] = v11 - v10
 
     candidate_converged[:] = 0
     # Sweeps used by the first start; with ``trajectory`` (its state after
@@ -413,21 +410,186 @@ def _solve_cavity_site(
             break
     q[:] = candidate_q[best_start,:]
     # Restore the complete-data potentials for the site's next held-out.
-    if patched_founder >= 0:
-        cavity_unary[patched_founder, 0] = saved_u0
-        cavity_unary[patched_founder, 1] = saved_u1
-        cavity_unary_logit[patched_founder] = saved_logit
-    if patched_edge >= 0:
-        cavity_edge_potential[patched_edge, 0] = saved_v00
-        cavity_edge_potential[patched_edge, 1] = saved_v01
-        cavity_edge_potential[patched_edge, 2] = saved_v10
-        cavity_edge_potential[patched_edge, 3] = saved_v11
-        directed_difference_zero[held_a, held_b] = saved_d0_ab
-        directed_difference_one[held_a, held_b] = saved_d1_ab
-        directed_difference_zero[held_b, held_a] = saved_d0_ba
-        directed_difference_one[held_b, held_a] = saved_d1_ba
+    for index in range(n_patched_unaries):
+        founder = patched_unaries[index]
+        cavity_unary[founder, 0] = saved_unaries[index, 0]
+        cavity_unary[founder, 1] = saved_unaries[index, 1]
+        cavity_unary_logit[founder] = saved_unaries[index, 2]
+    for index in range(n_patched_edges):
+        edge = patched_edges[index]
+        a, b = edge_first[edge], edge_second[edge]
+        for value in range(4):
+            cavity_edge_potential[edge, value] = saved_edges[index, value]
+        directed_difference_zero[a, b] = saved_edges[index, 4]
+        directed_difference_one[a, b] = saved_edges[index, 5]
+        directed_difference_zero[b, a] = saved_edges[index, 6]
+        directed_difference_one[b, a] = saved_edges[index, 7]
 
     return q, heldout_not_converged
+
+
+@njit(cache=True)
+def _eligible_endpoint_indices(endpoints, elbo, converged, elbo_tie):
+    """Distinct winning training endpoints, with the existing convergence/ELBO rules.
+
+    Exact duplicates carry one share regardless of how many starts reached them.
+    This uses no held-out evidence. The returned order is immaterial to the mixture.
+    """
+    any_converged = False
+    for index in range(len(elbo)):
+        if converged[index] == 1:
+            any_converged = True
+    best = -math.inf
+    for index in range(len(elbo)):
+        if (not any_converged or converged[index] == 1) and elbo[index] > best:
+            best = elbo[index]
+    indices = np.empty(len(elbo), dtype=np.int64)
+    count = 0
+    for index in range(len(elbo)):
+        if (any_converged and converged[index] != 1) or elbo[index] < best - elbo_tie:
+            continue
+        duplicate = False
+        for previous in range(count):
+            equal = True
+            for founder in range(endpoints.shape[1]):
+                if endpoints[index, founder] != endpoints[indices[previous], founder]:
+                    equal = False
+                    break
+            if equal:
+                duplicate = True
+                break
+        if not duplicate:
+            indices[count] = index
+            count += 1
+    return indices[:count]
+
+
+@njit(cache=True)
+def _endpoint_class_labels(endpoints, indices, equivalence_scale=0.0):
+    """Connected components at the stated endpoint equivalence scale.
+
+    The helper's zero default exposes the exact-identity reference. Production
+    uses the solver's existing convergence tolerance: tiny endpoint differences
+    otherwise change mode multiplicity under GL noise. This scale is never chosen
+    from held-out evidence or endpoint predictions. Connected components avoid
+    any dependence on the order in which close endpoints are encountered.
+    """
+    count = len(indices)
+    labels = np.arange(count, dtype=np.int64)
+    for first in range(count):
+        for second in range(first + 1, count):
+            same = True
+            for founder in range(endpoints.shape[1]):
+                if abs(endpoints[indices[first], founder] -
+                       endpoints[indices[second], founder]) > equivalence_scale:
+                    same = False
+                    break
+            if same:
+                old = labels[second]
+                new = labels[first]
+                for index in range(count):
+                    if labels[index] == old:
+                        labels[index] = new
+    return labels
+
+
+@njit(cache=True)
+def _predictive_family_log_states(endpoints, indices, g0, g1, g2,
+                                  likelihood_floor, ww_log_emission,
+                                  equivalence_scale=0.0):
+    """Uniform training-endpoint mixture of state likelihoods, then floor and log.
+
+    Founder marginals are never averaged: heterozygote states contain products.
+    Endpoint-equivalence classes, when requested, have equal weight; exact-distinct
+    vectors within a class have equal weight. Expansion sums make both reductions
+    independent of start order. The WW state is endpoint-independent.
+    """
+    k = endpoints.shape[1]
+    n_states = (k + 1) * (k + 2) // 2
+    result = np.empty(n_states, dtype=np.float64)
+    count = len(indices)
+    labels = _endpoint_class_labels(endpoints, indices, equivalence_scale)
+    values = np.empty(count, dtype=np.float64)
+    class_values = np.empty(count, dtype=np.float64)
+    partials = np.empty(count, dtype=np.float64)
+    # State geometry is the unchanged RR upper triangle, RW, WW.
+    state = 0
+    for first in range(k):
+        for second in range(first, k + 1):
+            if second == k:
+                # RW states follow all RR states in the output.
+                output_state = k * (k + 1) // 2 + first
+            else:
+                output_state = state
+                state += 1
+            classes = 0
+            for root in range(count):
+                if labels[root] != root:
+                    continue
+                members = 0
+                for index in range(count):
+                    if labels[index] != root:
+                        continue
+                    qi = endpoints[indices[index], first]
+                    if second == k:
+                        predictive = 0.5 * (1.0 - qi) * g0 + 0.5 * g1 + 0.5 * qi * g2
+                    elif first == second:
+                        predictive = (1.0 - qi) * g0 + qi * g2
+                    else:
+                        qj = endpoints[indices[index], second]
+                        p0 = (1.0 - qi) * (1.0 - qj)
+                        p2 = qi * qj
+                        p1 = 1.0 - p0 - p2
+                        predictive = p0 * g0 + p1 * g1 + p2 * g2
+                    values[members] = predictive
+                    members += 1
+                class_values[classes] = _accurate_sum(values[:members], partials) / members
+                classes += 1
+            predictive = _accurate_sum(class_values[:classes], partials) / classes
+            if predictive < likelihood_floor:
+                predictive = likelihood_floor
+            result[output_state] = math.log(predictive)
+    result[-1] = ww_log_emission
+    return result
+
+
+@njit(cache=True)
+def _membership_groups(offsets, members):
+    """Exact labels of complete membership lists; candidate keys are verified in full.
+
+    Length and endpoint states only choose the short collision chain. They never
+    establish equality, and no ordering or statistical tie tolerance is used.
+    """
+    n = len(offsets) - 1
+    labels = np.empty(n, dtype=np.int64)
+    previous = np.full(n, -1, dtype=np.int64)
+    heads = {}
+    for sample in range(n):
+        begin, end = offsets[sample], offsets[sample + 1]
+        key = (end - begin, members[begin], members[end - 1])
+        head = -1
+        if key in heads:
+            head = heads[key]
+        candidate = head
+        found = -1
+        while candidate >= 0:
+            other = offsets[candidate]
+            equal = True
+            for index in range(end - begin):
+                if members[begin + index] != members[other + index]:
+                    equal = False
+                    break
+            if equal:
+                found = candidate
+                break
+            candidate = previous[candidate]
+        if found < 0:
+            previous[sample] = head
+            heads[key] = sample
+            labels[sample] = sample
+        else:
+            labels[sample] = found
+    return labels
 
 
 @njit(cache=True, parallel=True)
@@ -436,16 +598,21 @@ def grouped_cavity_predictions(
         haplotypes, assignments, founder_support, unary, pair, edge_first,
         edge_second, edge_lookup, neighbours, neighbour_counts,
         mean_field_max_iter, mean_field_tolerance, likelihood_floor,
-        site_start, site_stop, shared_triple, elbo_tie, reverse):
+        site_start, site_stop, shared_triple, elbo_tie, reverse,
+        member_offsets, member_states, state_first, state_second, sample_support,
+        endpoint_counts=None, endpoint_equivalence_scale=None):
     """Solve and predict exact cases once in a bounded, site-parallel tile.
 
     ``edge_lookup[a, b]`` is the edge index of the pair factor of founders
     a < b, or -1 when no real-real assignment uses that pair.
     """
+    if endpoint_equivalence_scale is None:
+        endpoint_equivalence_scale = mean_field_tolerance
     n_samples = likelihood.shape[0]
     k = haplotypes.shape[0]
     n_states = (k + 1) * (k + 2) // 2
     tile_sites = site_stop - site_start
+    membership_groups = _membership_groups(member_offsets, member_states)
     representatives = np.empty((tile_sites, n_samples), dtype=np.int64)
     predictions = np.empty((tile_sites, n_samples, n_states), dtype=np.float64)
     not_converged = np.empty((tile_sites, n_samples), dtype=np.int64)
@@ -463,9 +630,8 @@ def grouped_cavity_predictions(
             # A sample whose triple no other sample shares at this site can
             # never join a group, so only shared triples are looked up.
             if shared_triple[heldout, site]:
-                key = (assignments[heldout, 0], assignments[heldout, 1],
-                       likelihood[heldout, site, 0], likelihood[heldout, site, 1],
-                       likelihood[heldout, site, 2])
+                key = (membership_groups[heldout], likelihood[heldout, site, 0],
+                       likelihood[heldout, site, 1], likelihood[heldout, site, 2])
                 if key in seen:
                     representatives[offset, heldout] = seen[key]
                     continue
@@ -475,12 +641,30 @@ def grouped_cavity_predictions(
                 heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
                 assignments, founder_support, unary, pair, edge_first,
                 edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-                mean_field_tolerance, work, edge_lookup, elbo_tie, reverse)
+                mean_field_tolerance, work, edge_lookup, elbo_tie, reverse,
+                member_offsets, member_states, state_first, state_second, sample_support)
             not_converged[offset, heldout] = failed
 
             g0 = likelihood[heldout, site, 0]
             g1 = likelihood[heldout, site, 1]
             g2 = likelihood[heldout, site, 2]
+            endpoints = _eligible_endpoint_indices(work[1], work[2], work[3], elbo_tie)
+            if endpoint_counts is not None:
+                classes = 1
+                if len(endpoints) > 1:
+                    labels = _endpoint_class_labels(work[1], endpoints, endpoint_equivalence_scale)
+                    classes = 0
+                    for endpoint in range(len(endpoints)):
+                        if labels[endpoint] == endpoint:
+                            classes += 1
+                endpoint_counts[offset, heldout, 0] = len(endpoints)
+                endpoint_counts[offset, heldout, 1] = classes
+            if len(endpoints) > 1:
+                predictions[offset, heldout, :] = _predictive_family_log_states(
+                    work[1], endpoints, g0, g1, g2, likelihood_floor,
+                    ww_log_emission[heldout, site], endpoint_equivalence_scale)
+                continue
+            # A unique endpoint retains the literal scalar arithmetic and cache path.
             # log() is a pure function: a floored predictive value equal to
             # a floored evidence value reuses that value's cached logarithm
             # (the floors below mirror the cache construction exactly).
@@ -620,6 +804,110 @@ def _build_evidence_emission_cache_kernel(
     return rw_log_likelihood, ww_log_emission
 
 
+@njit(cache=True)
+def _state_membership(assignments, k, tie_mask, state_kind, state_first, state_second):
+    """Compact full membership and actual founder pairs (K denotes the unknown copy)."""
+    n_samples = assignments.shape[0]
+    n_states = state_kind.shape[0]
+    first = np.empty(n_states, dtype=np.int64)
+    second = np.empty(n_states, dtype=np.int64)
+    lookup = np.full((k + 1, k + 1), -1, dtype=np.int64)
+    for state in range(n_states):
+        kind = state_kind[state]
+        a = state_first[state] if kind < 2 else k
+        b = state_second[state] if kind == 0 else k
+        first[state], second[state] = a, b
+        lookup[a, b] = state
+    offsets = np.zeros(n_samples + 1, dtype=np.int64)
+    with_ties = tie_mask.shape[0] == n_samples
+    for sample in range(n_samples):
+        size = 0
+        if with_ties:
+            for state in range(n_states):
+                size += int(tie_mask[sample, state] != 0)
+        offsets[sample + 1] = offsets[sample] + max(1, size)
+    members = np.empty(offsets[-1], dtype=np.int64)
+    for sample in range(n_samples):
+        offset = offsets[sample]
+        if with_ties:
+            for state in range(n_states):
+                if tie_mask[sample, state]:
+                    members[offset] = state
+                    offset += 1
+        if offset == offsets[sample]:
+            members[offset] = lookup[assignments[sample, 0], assignments[sample, 1]]
+    return offsets, members, first, second
+
+
+@njit(cache=True)
+def _build_cavity_potentials(log_likelihood, rw_log_likelihood, k,
+                             member_offsets, member_states, first, second):
+    """Weighted founder fields and distinct-sample support, before any held-out deletion."""
+    n_samples, n_sites, _ = log_likelihood.shape
+    pair_used = np.zeros((k, k), dtype=np.uint8)
+    founder_support = np.zeros(k, dtype=np.int64)
+    sample_support = np.zeros((n_samples, k), dtype=np.uint8)
+    state_counts = np.zeros(first.shape[0], dtype=np.float64)
+    for sample in range(n_samples):
+        begin, end = member_offsets[sample], member_offsets[sample + 1]
+        share = 1.0 / (end - begin)
+        for member in range(begin, end):
+            state = member_states[member]
+            a, b = first[state], second[state]
+            state_counts[state] += share
+            if a < k:
+                sample_support[sample, a] = 1
+            if b < k:
+                sample_support[sample, b] = 1
+            if a < b and b < k:
+                pair_used[a, b] = 1
+        for founder in range(k):
+            founder_support[founder] += sample_support[sample, founder]
+
+    neighbours = np.empty((k, k), dtype=np.int64)
+    neighbour_counts = np.zeros(k, dtype=np.int64)
+    edge_first = np.empty(k * (k - 1) // 2, dtype=np.int64)
+    edge_second = np.empty(k * (k - 1) // 2, dtype=np.int64)
+    edge_lookup = np.full((k, k), -1, dtype=np.int64)
+    n_edges = 0
+    for a in range(k):
+        for b in range(a + 1, k):
+            if pair_used[a, b]:
+                neighbours[a, neighbour_counts[a]] = b
+                neighbours[b, neighbour_counts[b]] = a
+                neighbour_counts[a] += 1
+                neighbour_counts[b] += 1
+                edge_first[n_edges], edge_second[n_edges] = a, b
+                edge_lookup[a, b] = n_edges
+                n_edges += 1
+
+    unary = np.full((k, n_sites, 2), -math.log(2.0), dtype=np.float64)
+    pair = np.zeros((n_edges, n_sites, 4), dtype=np.float64)
+    for sample in range(n_samples):
+        begin, end = member_offsets[sample], member_offsets[sample + 1]
+        share = 1.0 / (end - begin)
+        for member in range(begin, end):
+            state = member_states[member]
+            a, b = first[state], second[state]
+            if a == b and a < k:
+                for site in range(n_sites):
+                    unary[a, site, 0] += share * log_likelihood[sample, site, 0]
+                    unary[a, site, 1] += share * log_likelihood[sample, site, 2]
+            elif a < b and b < k:
+                edge = edge_lookup[a, b]
+                for site in range(n_sites):
+                    pair[edge, site, 0] += share * log_likelihood[sample, site, 0]
+                    pair[edge, site, 1] += share * log_likelihood[sample, site, 1]
+                    pair[edge, site, 2] += share * log_likelihood[sample, site, 1]
+                    pair[edge, site, 3] += share * log_likelihood[sample, site, 2]
+            elif a < k:
+                for site in range(n_sites):
+                    unary[a, site, 0] += share * rw_log_likelihood[sample, site, 0]
+                    unary[a, site, 1] += share * rw_log_likelihood[sample, site, 1]
+    return (unary, pair, founder_support, sample_support, state_counts,
+            edge_first[:n_edges], edge_second[:n_edges], edge_lookup, neighbours, neighbour_counts)
+
+
 @njit(cache=True, parallel=True)
 def _score_mode_cavity_kernel(
     likelihood: np.ndarray,
@@ -640,6 +928,8 @@ def _score_mode_cavity_kernel(
     elbo_tie: float,
     reverse: bool,
     tie_mask: np.ndarray,
+    endpoint_counts=None,
+    endpoint_equivalence_scale=None,
 ) -> tuple[np.ndarray, int]:
     """Fixed-assignment cavity log predictive of every sample of one complete panel, and the
     number of held-out site solves whose three mean-field starts all failed to converge
@@ -649,110 +939,16 @@ def _score_mode_cavity_kernel(
     accumulates its own predictions in site/founder order.
     """
 
+    if endpoint_equivalence_scale is None:
+        endpoint_equivalence_scale = mean_field_tolerance
     n_samples, n_sites, _ = likelihood.shape
     k = haplotypes.shape[0]
     n_states = state_kind.shape[0]
-    wildcard = k
-    log_half = -math.log(2.0)
-
-    # Count support and active row-pair edges first; the potentials are then built in a
-    # sample-ordered pass storing only the edges some row-pair assignment uses.
-    pair_counts = np.zeros((k, k), dtype=np.int64)
-    founder_support = np.zeros(k, dtype=np.int64)
-    state_counts = np.zeros(n_states, dtype=np.float64)
-    # Release 2.2: a sample whose A step held several tied states T (tie_mask rows, discovery) counts 1/|T| at each
-    # of them; every other sample one count at its assigned state (the same values as integer counts).
-    with_ties = tie_mask.shape[0] == n_samples
-    tie_size = np.ones(n_samples, dtype=np.int64)
-    if with_ties:
-        for sample in range(n_samples):
-            size = 0
-            for state in range(n_states):
-                size += tie_mask[sample, state]
-            tie_size[sample] = size if size > 0 else 1
-
-    # Dense (K+1)^2 state lookup (K <= 30: under 8 KB).
-    state_lookup = np.empty((k + 1, k + 1), dtype=np.int64)
-    state_lookup[:,:] = -1
-    for state in range(n_states):
-        kind = state_kind[state]
-        if kind == 0:
-            a = state_first[state]
-            b = state_second[state]
-        elif kind == 1:
-            a = state_first[state]
-            b = wildcard
-        else:
-            a = wildcard
-            b = wildcard
-        state_lookup[a, b] = state
-
-    for sample in range(n_samples):
-        a = assignments[sample, 0]
-        b = assignments[sample, 1]
-        if tie_size[sample] > 1:
-            share = 1.0 / tie_size[sample]
-            for state in range(n_states):
-                if tie_mask[sample, state]:
-                    state_counts[state] += share
-        else:
-            state_counts[state_lookup[a, b]] += 1.0
-        if a < wildcard:
-            founder_support[a] += 1
-        if b < wildcard and b != a:
-            founder_support[b] += 1
-        if a < b and b < wildcard:
-            pair_counts[a, b] += 1
-
-    # Neighbours in ascending order and edges in ascending pair order.
-    neighbours = np.empty((k, k), dtype=np.int64)
-    neighbour_counts = np.zeros(k, dtype=np.int64)
-    edge_first = np.empty(k * (k - 1) // 2, dtype=np.int64)
-    edge_second = np.empty(k * (k - 1) // 2, dtype=np.int64)
-    edge_lookup = np.empty((k, k), dtype=np.int64)
-    edge_lookup[:,:] = -1
-    n_edges = 0
-    for first_founder in range(k):
-        for second_founder in range(first_founder + 1, k):
-            if pair_counts[first_founder, second_founder] == 0:
-                continue
-            neighbours[first_founder, neighbour_counts[first_founder]] = (
-                second_founder
-            )
-            neighbour_counts[first_founder] += 1
-            neighbours[second_founder, neighbour_counts[second_founder]] = (
-                first_founder
-            )
-            neighbour_counts[second_founder] += 1
-            edge_first[n_edges] = first_founder
-            edge_second[n_edges] = second_founder
-            edge_lookup[first_founder, second_founder] = n_edges
-            n_edges += 1
-
-    unary = np.empty((k, n_sites, 2), dtype=np.float64)
-    pair = np.zeros((n_edges, n_sites, 4), dtype=np.float64)
-    for founder in range(k):
-        for site in range(n_sites):
-            unary[founder, site, 0] = log_half
-            unary[founder, site, 1] = log_half
-    for sample in range(n_samples):
-        a = assignments[sample, 0]
-        b = assignments[sample, 1]
-        if a == b and a < wildcard:
-            for site in range(n_sites):
-                unary[a, site, 0] += log_likelihood[sample, site, 0]
-                unary[a, site, 1] += log_likelihood[sample, site, 2]
-        elif a < b and b < wildcard:
-            edge = edge_lookup[a, b]
-            for site in range(n_sites):
-                pair[edge, site, 0] += log_likelihood[sample, site, 0]
-                pair[edge, site, 1] += log_likelihood[sample, site, 1]
-                pair[edge, site, 2] += log_likelihood[sample, site, 1]
-                pair[edge, site, 3] += log_likelihood[sample, site, 2]
-        elif a < wildcard and b == wildcard:
-            for site in range(n_sites):
-                unary[a, site, 0] += rw_log_likelihood[sample, site, 0]
-                unary[a, site, 1] += rw_log_likelihood[sample, site, 1]
+    member_offsets, member_states, first, second = _state_membership(
+        assignments, k, tie_mask, state_kind, state_first, state_second)
+    (unary, pair, founder_support, sample_support, state_counts,
+     edge_first, edge_second, edge_lookup, neighbours, neighbour_counts) = _build_cavity_potentials(
+        log_likelihood, rw_log_likelihood, k, member_offsets, member_states, first, second)
 
     sample_scores = np.zeros(n_samples, dtype=np.float64)
     not_converged_by_heldout = np.zeros(n_samples, dtype=np.int64)
@@ -760,9 +956,8 @@ def _score_mode_cavity_kernel(
     log_prior_denominator = math.log(
         n_samples - 1 + state_concentration
     )
-    # Every held-out prior differs from the full count vector at one state.
-    # Cache both alternatives once per mode rather than taking the same logs
-    # for every sample.
+    # Cache the full masses and single-state deletions once per panel. Multi-state
+    # held-outs below instead subtract their share at every member of their tied set.
     full_log_state_mass = np.empty(n_states, dtype=np.float64)
     deleted_log_state_mass = np.empty(n_states, dtype=np.float64)
     for state in range(n_states):
@@ -778,17 +973,29 @@ def _score_mode_cavity_kernel(
             deleted_log_state_mass[state] = 0.0
 
     emissions = np.zeros((n_samples, n_states), dtype=np.float64)
-    bytes_per_site = 8 * max(1, n_samples) * (n_states + 2)
+    bytes_per_site = 8 * max(1, n_samples) * (n_states + 4)
     tile_width = max(1, PREDICTION_TILE_BYTES // bytes_per_site)
     for site_start in range(0, n_sites, tile_width):
         site_stop = min(n_sites, site_start + tile_width)
+        tile_endpoint_counts = np.empty((site_stop - site_start, n_samples, 2), dtype=np.int64)
         representatives, predictions, tile_not_converged = grouped_cavity_predictions(
             likelihood, log_likelihood, rw_log_likelihood, ww_log_emission,
             haplotypes, assignments, founder_support, unary, pair, edge_first,
             edge_second, edge_lookup, neighbours, neighbour_counts,
             mean_field_max_iter, mean_field_tolerance, likelihood_floor,
             site_start, site_stop, shared_triple, elbo_tie, reverse,
+            member_offsets, member_states, first, second, sample_support,
+            tile_endpoint_counts, endpoint_equivalence_scale,
         )
+        if endpoint_counts is not None:
+            # Counts refer to every held-out sample/site, including shared solves.
+            # Row zero: exact-distinct endpoints; row one: equivalence classes.
+            for offset in range(site_stop - site_start):
+                for heldout in range(n_samples):
+                    representative = representatives[offset, heldout]
+                    for identity in range(2):
+                        count = tile_endpoint_counts[offset, representative, identity]
+                        endpoint_counts[identity, count - 1] += 1
         for heldout in prange(n_samples):
             heldout_not_converged = not_converged_by_heldout[heldout]
             # Continue each sample's site-ordered accumulation across tiles.
@@ -806,15 +1013,17 @@ def _score_mode_cavity_kernel(
         log_state_predictive = np.empty(n_states, dtype=np.float64)
         for state in range(n_states):
             log_state_predictive[state] = full_log_state_mass[state]
-        if tie_size[heldout] > 1:
-            share = 1.0 / tie_size[heldout]
-            for state in range(n_states):
-                if tie_mask[heldout, state]:
-                    log_state_predictive[state] = math.log(
-                        state_counts[state] - share + state_concentration * prior_base[state])
-        else:
-            held_state = state_lookup[assignments[heldout, 0], assignments[heldout, 1]]
+        begin = member_offsets[heldout]
+        end = member_offsets[heldout + 1]
+        if end - begin == 1:
+            held_state = member_states[begin]
             log_state_predictive[held_state] = deleted_log_state_mass[held_state]
+        else:
+            share = 1.0 / (end - begin)
+            for member in range(begin, end):
+                state = member_states[member]
+                log_state_predictive[state] = math.log(
+                    state_counts[state] - share + state_concentration * prior_base[state])
         for state in range(n_states):
             log_state_predictive[state] += emissions[heldout, state]
             log_state_predictive[state] -= log_prior_denominator

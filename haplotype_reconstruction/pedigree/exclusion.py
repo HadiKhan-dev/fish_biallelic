@@ -219,13 +219,14 @@ class CountRelease:
     dyads: np.ndarray
     log_e: np.ndarray
     observed_sites: np.ndarray
+    log_e_upper: np.ndarray | None = None
 
 
 def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCalls,
                    graph_conflict: np.ndarray, informative: np.ndarray, rows: np.ndarray,
                    sample_ids: tuple[str, ...], eligibility: ParentEligibility,
                    dyads: np.ndarray, log_e: np.ndarray, observed_sites: np.ndarray,
-                   config: PedigreeConfig) -> CountRelease:
+                   config: PedigreeConfig, *, log_e_upper: np.ndarray | None = None) -> CountRelease:
     """Release M0/M1 counts that the exclusion bounds and the supported directions settle.
 
     A target child is released when every eligible candidate was scored, it is safe (eligible,
@@ -241,6 +242,11 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
             if partial_b.supported[child, slot]:
                 outgoing[int(partial_b.parents[child, slot])].add(child)
     threshold = math.log(2 * n / config.exclusion.alpha)
+    if log_e_upper is not None:
+        upper_evidence = {(int(c), int(p)): float(e)
+                          for (c, p), e in zip(dyads, log_e_upper)}
+        if np.any((log_e < threshold) & (log_e_upper >= threshold) & (log_e != log_e_upper)):
+            raise ValueError("unresolved exclusion interval requires exact refinement")
     state = tier_b.state.copy()
     row = tier_b.row.copy()
     status = list(tier_b.status)
@@ -282,6 +288,16 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
             WeakestExclusionLogE=min(excluded, default=np.nan), ThresholdLogE=threshold,
             CompleteCandidateEvidence=covered, Released=is_released,
             ReleaseConditionalOnSupportedDirections=bool(reverse)))
+        if log_e_upper is not None:
+            excluded_upper = [upper_evidence[child, p]
+                              for p in candidates if covered and p not in compatible]
+            exact_min = all(evidence[child, p] == upper_evidence[child, p]
+                            for p in candidates if covered and p not in compatible)
+            records[-1].update(WeakestExclusionLogELower=min(excluded, default=np.nan),
+                              WeakestExclusionLogEUpper=min(excluded_upper, default=np.nan),
+                              WeakestExclusionLogEExact=exact_min)
+            if not exact_min:
+                records[-1]['WeakestExclusionLogE'] = np.nan
         if not is_released:
             continue
         kept = tuple(sorted(survivors, key=name))
@@ -302,4 +318,4 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
     final_partial = PartialEdges(parents, supported, exact, count_minimum, count_maximum,
                                  partial_state, tuple(partial_status), tuple(release_evidence))
     return CountRelease(final, final_partial, released, tuple(kept_by_child), tuple(records),
-                        dyads, log_e, observed_sites)
+                        dyads, log_e, observed_sites, log_e_upper)

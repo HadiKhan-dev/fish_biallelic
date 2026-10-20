@@ -1,9 +1,8 @@
-"""Genome-wide robust parent screen and the fixed M2 candidate panel.
+"""Genome-retained parent identities define the fixed M2 panel.
 
-M0 and every eligible M1 identity are scored on every chromosome. M2 is scored for the eligible
-pairs among each child's ``parents_per_child`` best screen parents: per chromosome, a tempered
-softmax of the M1 scores (contaminated with a uniform share) is mixed with tied-rank evidence,
-then weighted over chromosomes by sqrt(markers) clipped around the median.
+Every eligible pair of retained identities is included. The robust M1 utility
+keeps all eligible identities, floor multiplicities and contamination; it is
+reported for diagnostics and does not select an arbitrary tied subset.
 """
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ..maths import ties as tie_rules
+from . import m1
 from .config import PedigreeConfig
 from .eligibility import ParentEligibility
 from .records import CandidatePanel
@@ -24,7 +24,7 @@ from .ties import tied_rank_probabilities
 SCREEN_TIE = 2.0 ** -32
 
 # Centred tempered scores below this many nats contribute exp(-60) (no underflow).
-_SOFTMAX_CLIP = -60.0
+_SOFTMAX_CLIP = m1.LOG_FLOOR
 
 
 def chromosome_weights(markers: np.ndarray, config: PedigreeConfig) -> np.ndarray:
@@ -42,8 +42,8 @@ def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: Par
     panel = config.panel
     output = np.full((n_samples, n_samples), -np.inf, dtype=np.float64)
     weights = chromosome_weights(markers, config)
-    blocks = np.maximum(np.ceil(markers / config.preparation.markers_per_information_block), 1.0)
-    tempering = blocks ** panel.information_tempering_power
+    tempering = m1.temperature(markers, config)
+    # Caller supplies the fixed genome-floor values; retained entries stay raw.
     for child in np.flatnonzero(eligibility.children):
         parents = np.flatnonzero(eligibility.parents[child])
         if not len(parents):
@@ -52,7 +52,7 @@ def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: Par
         for contig in range(n_contigs):
             values = pair_scores[contig, child, parents]
             centered = (values - np.max(values)) / tempering[contig]
-            soft = np.exp(np.clip(centered, _SOFTMAX_CLIP, 0.0))
+            soft = np.exp(centered)
             soft /= np.sum(soft)
             soft = ((1.0 - panel.chromosome_contamination) * soft
                     + panel.chromosome_contamination / len(parents))
@@ -64,7 +64,7 @@ def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: Par
 
 def fixed_panel(screen_scores: np.ndarray, eligibility: ParentEligibility,
                 config: PedigreeConfig) -> CandidatePanel:
-    """Every eligible pair among each child's top screen parents: utilities in tie classes (SCREEN_TIE), ties by
+    """Legacy reference only. Every eligible pair among top screen parents: utilities in tie classes, ties by
     sample index, and the parents tied with the last admitted one are admitted too (at most twice the budget)."""
     rows = []
     top = config.panel.parents_per_child
@@ -87,6 +87,30 @@ def fixed_panel(screen_scores: np.ndarray, eligibility: ParentEligibility,
         rows.extend((int(child), first, second) for first, second in sorted(pairs))
     trios = np.asarray(rows, dtype=np.int64).reshape((-1, 3))
     return CandidatePanel(trios, screen_scores)
+
+
+def retained_panel(keep: np.ndarray, screen_scores: np.ndarray,
+                   eligibility: ParentEligibility) -> CandidatePanel:
+    """Every eligible pair of genome-retained parents, including all cutoff ties.
+
+    Ascending indices only serialize the complete unordered set; they never
+    choose membership. There is no parent budget or tie-class cap.
+    """
+    rows = []
+    for child in np.flatnonzero(eligibility.children):
+        parents = np.flatnonzero(keep[child] & eligibility.parents[child])
+        for i, first in enumerate(parents):
+            for second in parents[i + 1:]:
+                if eligibility.pair_allowed(int(child), int(first), int(second)):
+                    rows.append((int(child), int(first), int(second)))
+    return CandidatePanel(np.asarray(rows, dtype=np.int64).reshape(-1, 3), screen_scores)
+
+
+def genome_panel(raw_one: np.ndarray, markers: np.ndarray,
+                 eligibility: ParentEligibility, config: PedigreeConfig) -> CandidatePanel:
+    """Build the fixed panel from RAW summed chromosome M1, before resampling."""
+    one, keep, _, _, _ = m1.genome_profile(raw_one, markers, eligibility, config)
+    return retained_panel(keep, robust_screen(one, markers, eligibility, config), eligibility)
 
 
 def search_diagnostics(panel: CandidatePanel, eligibility: ParentEligibility,

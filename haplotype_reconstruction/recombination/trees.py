@@ -77,8 +77,8 @@ def _leaf_product(calls, positions, runs, parent, child, slot, genetic, left, ri
                   child_flip, maximum_gap, error, artifact_rate, artifact_mean, stationary):
     matrix = np.eye(4)
     scale = 0.
-    first = -1
-    last = -1
+    first = np.int64(-1)
+    last = np.int64(-1)
     for site in range(left, right):
         if runs[parent, site] < 0 or runs[child, site] < 0:
             continue
@@ -149,7 +149,8 @@ def _query_product(tree, base, node, lo, hi, left, right, toggle, carry, positio
     stack = np.empty((2 * _tree_depth(hi) + 3, 4), dtype=np.int64)
     stack[0] = (node, lo, hi, carry)
     top = 1
-    result = (np.eye(4), 0., -1, -1)
+    # Match stored index types; literal sentinels can poison cached callee signatures.
+    result = (np.eye(4), 0., np.int64(-1), np.int64(-1))
     while top:
         top -= 1
         local, a, b, inherited = stack[top]
@@ -392,7 +393,8 @@ def _query_prior(tree, base, node, lo, hi, left, right, carry, positions, runs, 
     stack = np.empty((2 * _tree_depth(hi) + 3, 4), dtype=np.int64)
     stack[0] = (node, lo, hi, carry)
     top = 1
-    result = (0., -1, -1, 0, 0)
+    # Match _prior_value: int64 indices and int8 states, including the empty summary.
+    result = (0., np.int64(-1), np.int64(-1), np.int8(0), np.int8(0))
     while top:
         top -= 1
         local, a, b, inherited = stack[top]

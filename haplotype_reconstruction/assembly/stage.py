@@ -31,7 +31,7 @@ from . import records as assembly_records
 from .config import AssemblyConfig
 from .evidence import AssemblyEvidence
 
-SCHEMA = 1
+SCHEMA = 2
 
 
 class Role(enum.Enum):
@@ -90,6 +90,7 @@ class LevelRecord:
     refinement: dict | None = None
     elapsed_seconds: float = 0.0
     refinement_elapsed_seconds: float | None = None
+    shadows: tuple = ()
 
     def record(self) -> dict:
         """Plain record (stored in the level and final records)."""
@@ -101,7 +102,7 @@ class LevelRecord:
                     log_likelihoods=list(self.log_likelihoods), reused_joins=self.reused_joins,
                     boundary_joint=list(self.boundary_joint), refinement=self.refinement,
                     elapsed_seconds=self.elapsed_seconds,
-                    refinement_elapsed_seconds=self.refinement_elapsed_seconds)
+                    refinement_elapsed_seconds=self.refinement_elapsed_seconds, shadows=self.shadows)
 
     @classmethod
     def from_record(cls, record: dict) -> "LevelRecord":
@@ -116,7 +117,8 @@ class LevelRecord:
                    reused_joins=record["reused_joins"],
                    boundary_joint=tuple(record["boundary_joint"]),
                    refinement=record["refinement"], elapsed_seconds=record["elapsed_seconds"],
-                   refinement_elapsed_seconds=record["refinement_elapsed_seconds"])
+                   refinement_elapsed_seconds=record["refinement_elapsed_seconds"],
+                   shadows=tuple(record.get("shadows", ())))
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ class AssemblyResult:
     components: FounderComponents
     levels: tuple[LevelRecord, ...]
     identity: str
+    release_alternatives: tuple = ()
 
 
 def panels_digest(panels) -> str:
@@ -236,6 +239,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
     working = tuple(FounderComponent(index, index + 1, np.arange(panel.rows, dtype=np.int32)[:, None])
                     for index, panel in enumerate(prepared))
     level_records = []
+    release_alternatives = []
     l1_context = None
     level = 0
     while True:
@@ -246,6 +250,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
         if stored is not None:
             output = assembly_records.decode_components(stored["components"])
             record = LevelRecord.from_record(stored["record"])
+            level_alternatives = tuple(stored.get("release_alternatives", ()))
         else:
             settings = JoinSettings(
                 linker=config.linker, join=config.join, count_rule=config.count_rule,
@@ -256,24 +261,31 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
                                min_informative=config.min_boundary_informative_samples,
                                records=level_scope,
                                budget=_phase(budget, role, levels, f"hierarchy_l{level}"),
-                               queue=queue)
+                               queue=queue, release_alternatives=release_alternatives)
             output = result.components
+            level_alternatives = tuple(dict(item, source_level=item.get("source_level", level))
+                                       for item in result.release_alternatives)
             record = LevelRecord(
                 level=level, batch_size=config.batch_size, components_before=before,
                 components_after=len(output),
                 stop_reason=stop_reason(role, levels, level, before, output, config.minimum_levels),
                 plan=result.plan, joins=result.joins, log_likelihoods=result.log_likelihoods,
                 reused_joins=result.reused, boundary_joint=tuple(int(v) for v in result.partition.joint),
-                elapsed_seconds=result.elapsed_seconds)
+                elapsed_seconds=result.elapsed_seconds, shadows=result.shadows)
             if records is not None:
                 records.save(assembly_records.level_key(level), dict(
                     schema=assembly_records.SCHEMA,
-                    components=assembly_records.encode_components(output), record=record.record()))
+                    components=assembly_records.encode_components(output), record=record.record(),
+                    release_alternatives=level_alternatives))
+        release_alternatives = list(level_alternatives)
         _log_level(role, record)
         working = output
         if role is Role.FINAL:
-            working, record = _refine(level, record, working, prepared, evidence, l1_context, config,
-                                      records, _phase(budget, role, levels, f"refinement_l{level}"))
+            working, record, refined_alternatives = _refine(
+                level, record, working, prepared, evidence, l1_context, config,
+                records, _phase(budget, role, levels, f"refinement_l{level}"),
+                release_alternatives=release_alternatives)
+            release_alternatives = list(refined_alternatives)
             if level == 1:
                 # Refined paths feed the next level; both refined and unrefined L1 alternatives stay
                 # available to the refinement's coarse moves, so an early local optimum cannot erase
@@ -285,12 +297,15 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
     if role is Role.FINAL and records is not None and not records.has(assembly_records.FINAL):
         records.save(assembly_records.FINAL, dict(
             schema=assembly_records.SCHEMA, components=assembly_records.encode_components(working),
-            levels=[item.record() for item in level_records]))
+            levels=[item.record() for item in level_records],
+            release_alternatives=release_alternatives))
     return AssemblyResult(prepared=prepared, components=working, levels=tuple(level_records),
-                          identity=canonical_json(jsonable(identity)))
+                          identity=canonical_json(jsonable(identity)),
+                          release_alternatives=tuple(release_alternatives))
 
 
-def _refine(level, record, components, prepared, evidence, l1_context, config, records, budget):
+def _refine(level, record, components, prepared, evidence, l1_context, config, records, budget,
+            *, release_alternatives=()):
     """Founder refinement after a final level (resumed from ``l<k>/refined`` when recorded)."""
     from dataclasses import replace
     from .founder_refinement import LevelInput, refine_level
@@ -298,24 +313,27 @@ def _refine(level, record, components, prepared, evidence, l1_context, config, r
     if stored is not None:
         refined = assembly_records.decode_components(stored["components"])
         return refined, replace(record, refinement=stored["summary"],
-                                refinement_elapsed_seconds=stored["elapsed_seconds"])
+                                refinement_elapsed_seconds=stored["elapsed_seconds"]), tuple(
+                                    stored.get("release_alternatives", ()))
     started = time.perf_counter()
     result = refine_level(
         LevelInput(level=level, prepared=prepared, components=tuple(components),
                    evidence=evidence.scoring, l1_context=l1_context, cost_scale=config.cost_scale,
                    additions=record.stop_reason is not None, count_rule=config.count_rule,
+                   release_alternatives=tuple(release_alternatives),
                    evidence_ref=None if evidence.shared is None else evidence.shared.scoring),
         config.refinement, budget,
         None if records is None else records.scoped(assembly_records.refine_scope(level), nthreads=1))
     elapsed = time.perf_counter() - started
     summary = jsonable(result.summary)
+    release_alternatives = tuple(result.release_alternatives)
     if records is not None:
         records.save(assembly_records.refined_key(level), dict(
             schema=assembly_records.SCHEMA,
             components=assembly_records.encode_components(result.components), summary=summary,
-            elapsed_seconds=elapsed))
+            elapsed_seconds=elapsed, release_alternatives=release_alternatives))
     return tuple(result.components), replace(record, refinement=summary,
-                                             refinement_elapsed_seconds=elapsed)
+                                             refinement_elapsed_seconds=elapsed), release_alternatives
 
 
 def _log_level(role: Role, record: LevelRecord) -> None:

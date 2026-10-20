@@ -246,23 +246,24 @@ def _pairing_scores(decidable, odd, parent_offsets, parent_edges, switch_table, 
     return scores
 
 
-def _pairing_log_lr(loci, parents):
+def _pairing_log_lr(loci, parents, *, parent_offsets=None, parent_edges=None):
     """Pairing statistic of every locus pair."""
     decidable = np.ascontiguousarray([locus["decidable"] for locus in loci], dtype=np.bool_)
     odd = np.ascontiguousarray([locus["odd"] for locus in loci], dtype=np.int64)
-    order = np.argsort(parents, kind="stable")
-    parent_offsets = np.r_[0, np.cumsum(np.unique(parents, return_counts=True)[1])].astype(np.int64)
+    if parent_offsets is None:
+        parent_edges = np.argsort(parents, kind="stable")
+        parent_offsets = np.r_[0, np.cumsum(np.unique(parents, return_counts=True)[1])].astype(np.int64)
     largest = int(np.diff(parent_offsets).max())
     count_n = np.repeat(np.arange(largest + 1), np.arange(1, largest + 2))
     count_k = np.arange(len(count_n)) - count_n * (count_n + 1) // 2
     tables = []
-    for used, grid in zip(_used_pair_codes(decidable, odd, parent_offsets, order, len(count_n)),
+    for used, grid in zip(_used_pair_codes(decidable, odd, parent_offsets, parent_edges, len(count_n)),
                           (SWITCH_GRID, DISCORDANCE_GRID)):
         rows = np.full(len(count_n), -1, dtype=np.int64)
         rows[used] = np.arange(int(used.sum()))
         terms = mixture_terms(np.stack((count_k[used], count_n[used]), axis=1), grid)
         tables += [np.ascontiguousarray(terms.T), rows]
-    return _pairing_scores(decidable, odd, parent_offsets, order, *tables)
+    return _pairing_scores(decidable, odd, parent_offsets, parent_edges, *tables)
 
 
 def _hotspot_ceiling(left, right, config, chromosome_map):
@@ -306,18 +307,25 @@ def detect_junctions(contig, names, parents, children, crossovers, crossover_off
         loci.append(dict(left=left, right=right, first=first, last=last, members=members,
                          odd=odd, decidable=decidable))
     rows = []
+    # Integer counts per parent need one pass over edges per locus. Stable CSR
+    # preserves the parent and child report order and the likelihood sum order.
+    unique_parents, parent_index, parent_sizes = np.unique(parents, return_inverse=True, return_counts=True)
+    parent_edges = np.argsort(parents, kind="stable")
+    parent_offsets = np.r_[0, np.cumsum(parent_sizes)].astype(np.int64)
     for number, locus in enumerate(loci):
         counts, parent_text, children_text = [], [], []
         mixed = all_or_none = 0
-        for parent in np.unique(parents):
-            parent_edges = np.flatnonzero((parents == parent) & locus["decidable"])
-            if not len(parent_edges):
-                continue
-            k, n = int(locus["odd"][parent_edges].sum()), len(parent_edges)
+        odd_decidable = locus["decidable"] & (locus["odd"] == 1)
+        n_by_parent = np.bincount(parent_index[locus["decidable"]], minlength=len(unique_parents))
+        k_by_parent = np.bincount(parent_index[odd_decidable], minlength=len(unique_parents))
+        for index in np.flatnonzero(n_by_parent):
+            parent = unique_parents[index]
+            k, n = int(k_by_parent[index]), int(n_by_parent[index])
             counts.append((k, n))
             if k:
                 parent_text.append(f"{names[parent]}:{k}/{n}")
-                children_text.extend(names[child] for child in children[parent_edges[locus["odd"][parent_edges] == 1]])
+                edges_here = parent_edges[parent_offsets[index]:parent_offsets[index + 1]]
+                children_text.extend(names[child] for child in children[edges_here[odd_decidable[edges_here]]])
                 mixed += k < n
                 all_or_none += k == n and n >= 2
         counts = np.asarray(counts, dtype=np.int64).reshape(-1, 2)
@@ -345,7 +353,8 @@ def detect_junctions(contig, names, parents, children, crossovers, crossover_off
             paired_locus="", paired_odd_meioses=0, pairing_log_lr=0., pairing_tests=0,
             nearest_supplied_breakpoint=nearest, breakpoint_distance_bp=float(distance)))
     tests = len(loci) * (len(loci) - 1) // 2
-    scores = _pairing_log_lr(loci, parents) if len(loci) > 1 else None
+    scores = _pairing_log_lr(loci, parents, parent_offsets=parent_offsets,
+                             parent_edges=parent_edges) if len(loci) > 1 else None
     for i, locus in enumerate(loci):
         # The best pairing is the first locus with the largest positive score (the last under the reversal).
         j = -1 if scores is None else conv_argmax(scores[i])

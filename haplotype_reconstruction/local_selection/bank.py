@@ -28,6 +28,15 @@ every source's cavity-best tie set, released with the raw-discovery rule; rounds
 searches from the best tie class of their selection objectives (which include the context code)
 and lets the selection objective decide between the outcomes. 2.1 started from the latest source's
 endpoint and broke every tie by the canonical key.
+
+Release 2.3: every fixed-K endpoint carries the full winning-category A-step tie set. Its uniform
+state weights feed fitting, cavity scoring and raw allele release, as in discovery. The compact
+meet assignment is only a summary; it cannot stand in for tied samples' evidence.
+Both consistent usage-tie fit schedules contribute their complete endpoint families.
+At the unchanged score cap, overlapping families are joined, ranked by their best exact
+endpoint NLL, and admitted by whole NLL classes. A nonfitting boundary class and lower
+classes are omitted whole; existing incumbents remain. The separate start backstop's
+historical enumeration policy is unchanged.
 """
 from __future__ import annotations
 
@@ -39,7 +48,8 @@ import numpy as np
 
 from ..discovery.cavity import CavityWorkspace, score_solutions
 from ..discovery.fixed_k.fit import fit_panels, prepare_workspace
-from ..discovery.panel import deduplicate, panel_key, sort_solutions, unique_rows
+from ..discovery.panel import (deduplicate, panel_key, solution_tie_mask, sort_solutions,
+                               unique_rows)
 from ..discovery.release import release_alleles
 from ..execution import claim_threads
 from ..maths.ties import (NOISE_MOTION, WIDE_CLASS_QUANTA, TieCounter, census, census_enabled, improves,
@@ -211,6 +221,50 @@ def nested_tie_set(entries, levels, *, counter=None, kind=""):
     return [entry for entry in candidates if entry.solution.k == fewest]
 
 
+
+def _admit_endpoint_families(solutions, families, scored_keys, room, quanta):
+    """Fit families are indivisible at the unchanged endpoint-count score cap.
+
+    Overlapping families form one component, ranked by its best endpoint's exact NLL.
+    Whole NLL tie classes enter together; the first nonfitting class and all lower
+    ranks are omitted. No label or enumeration chooses a partial family or tie class.
+    """
+    by_key = {solution.key: solution for solution in solutions}
+    novel = set(by_key).difference(scored_keys)
+    if len(novel) <= room:
+        return [by_key[key] for key in sorted(novel)], False
+    leader = {key: key for key in by_key}
+
+    def find(key):
+        while leader[key] != key:
+            leader[key] = leader[leader[key]]
+            key = leader[key]
+        return key
+
+    for family in families:
+        members = [key for key in family if key in by_key]
+        if not members:
+            continue
+        first = find(members[0])
+        for key in members[1:]:
+            leader[find(key)] = first
+    components = {}
+    for key in by_key:
+        components.setdefault(find(key), set()).add(key)
+    groups = [keys for keys in components.values() if keys & novel]
+    values = [min(by_key[key].nll for key in keys) for keys in groups]
+    classes = tie_classes(values, quanta.nll)
+    kept = set()
+    for cls in sorted(set(classes.classes.tolist())):
+        members = set()
+        for index in classes.members(cls):
+            members.update(groups[int(index)] & novel)
+        if len(kept) + len(members) > room:
+            break
+        kept.update(members)
+    return [by_key[key] for key in sorted(kept)], len(kept) < len(novel)
+
+
 def _bic_search(likelihoods, observed, original_latent, proposal_panels, discovery_config,
                 bank_config, ties=None, census_key=None):
     """(BIC-selected tie set (solutions), released starts (calls, latent rows) of the cavity-best
@@ -247,6 +301,8 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
         inside it the best class of the NLL, then the prior fewer founders (release 2.2: every
         member, not one picked by the canonical key)."""
         entries = list(scored.values())
+        if not entries:
+            return ()
         if collect:
             census("ls.bank.bic", f"{census_key}/bank/{round_label}",
                    sorted(-selection_score(entry) for entry in entries)[:8])
@@ -289,19 +345,20 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
             for panel in dropped:
                 fitted_starts.remove(panel.astype(np.int8).tobytes())
         claim_threads()
-        synchronized, refitted = fit_panels(workspace, novel, model.max_iterations)
+        synchronized, refitted, families = fit_panels(
+            workspace, novel, model.max_iterations, with_families=True)
         unique = deduplicate((*synchronized, *refitted))
         if len(novel) == 1:
             endpoint_keys[panel_key(novel[0])] = tuple(solution.key for solution in unique)
-        pending = [solution for solution in unique if solution.key not in scored]
         room = max(0, bank_config.score_backstop(k) - len(scored))
-        if len(pending) > room:
-            state["budget_bound"] = True
-            pending = sort_solutions(pending, quanta)[:room]
+        pending, bounded = _admit_endpoint_families(unique, families, set(scored), room, quanta)
+        state["budget_bound"] |= bounded
         if reverse_conventions():
             # Keep-first per key (a convention): the last admitted fit of a key replaces it.
             pending += [solution for solution in unique if solution.key in scored]
         if require_cavity:
+            # score_solutions reads each endpoint's full tie membership and restricts it with
+            # the same active-sample mask as the likelihoods.
             for score in (score_solutions(cavity, pending, active) if pending else ()):
                 scored[score.solution.key] = score
         else:
@@ -329,6 +386,12 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
     start_set = [starts_by_key[key] for key in sorted(starts_by_key)]
     fit_and_score([bank])
     selected = state["selected"] = select("r0")
+    if not selected:
+        # A wholly omitted initial family supplies no BIC winner. The public bank
+        # caller retains its existing original_latent incumbent and raw start.
+        summary = BankSummary(bank_rows=len(bank), fitted_starts=len(fitted_starts), scored=0,
+                              selected_k=0, rounds=0, budget_bound=True, selected_tied=0, starts=0)
+        return (), (), summary
     rounds = 0
     while True:
         if rounds >= bank_config.round_backstop(selected[0].solution.k):
@@ -355,12 +418,13 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
         if score is None:
             return None
         solution = score.solution
-        key = (solution.key, solution.assignments.tobytes())
+        tie_mask = solution_tie_mask(solution)
+        key = (solution.key, tie_mask.tobytes())
         if key not in releases:
             claim_threads()
             _, _, calls = release_alleles(likelihood, solution.haplotypes, solution.assignments,
                                           observed, model.unknown_copy_penalty,
-                                          discovery_config.release, quanta)
+                                          discovery_config.release, quanta, tie_mask=tie_mask)
             releases[key] = calls
         return releases[key], solution.haplotypes
 

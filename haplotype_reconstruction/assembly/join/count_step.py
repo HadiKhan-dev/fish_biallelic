@@ -9,7 +9,8 @@ death of f or a birth of f) and keeps X+ iff the effective-carrier test of
 * the total per-sample gain d_s = V_s(X+) - V_s(X-), and
 * its sequence part q_s = V_s(X+) - V_s(X+^sigma): X+^sigma replaces every cell (block, row) of
   f that no path of X- uses by the nearest row X- uses at that block (Hamming distance over sites
-  called in both rows; ties to the lowest row).
+  called in both rows; all equally nearest choices are evaluated when their full Cartesian
+  family fits the shadow budget; otherwise the incumbent shadow is evaluated and flagged).
 
 Every distance of this step (nearest rows, near identity) is measured on the blocks' pre-fill
 inference calls, the calls the join's likelihood reads (:mod:`assembly.count_rule.geometry`).
@@ -37,12 +38,15 @@ O(D k |pool|) bounds plus exact scores restricted to the samples a bound cannot 
 """
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import itertools
+import math
 import threading
 
 import numpy as np
 
 from .. import count_rule
+from ..count_rule.geometry import shadow_choices
 from ...maths import ties
 from .. import tie_rules
 from .certify import PanelForwards
@@ -75,10 +79,12 @@ class CountStep:
     """
 
     def __init__(self, *, layout, penalty, cost, samples, geometry, config, score, tie_counter=None,
-                 label=None, linkage=None):
+                 label=None, linkage=None, choose_panel=None, record_count_family=None):
         self.layout = layout
         # The batch linker's path score (release 2.2): the data criterion inside tie classes (None: content).
         self.linkage = linkage
+        self.choose_panel = choose_panel
+        self.record_count_family = record_count_family
         self.total_bins = layout.total_bins
         self.offsets = np.ascontiguousarray(layout.offsets[:-1], dtype=np.int64)
         self.penalty = float(penalty)
@@ -95,7 +101,7 @@ class CountStep:
         self.tie_counter = tie_counter
         self.label = label
 
-    def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll', link=None):
+    def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll', link=None, panel=None):
         """The tie-class winner of ``items`` by value(item) (descending; nats of the join log
         likelihood, quantum_kind's quantum at |scale|); inside a class link(item) (the batch linker's
         score, descending; release 2.2), then content(item)."""
@@ -115,6 +121,11 @@ class CountStep:
         if result.tied_winner and self.tie_counter is not None:
             with self._counts:
                 self.tie_counter.note(kind + ".symmetric", inside_tie=bool(tie_rules.symmetric_members(result, links)))
+        symmetric = tie_rules.symmetric_members(result, links)
+        if symmetric and panel is not None and self.choose_panel is not None:
+            chosen = self.choose_panel(kind, [panel(items[i]) for i in symmetric],
+                                       [values[i] for i in symmetric], key)
+            return items[symmetric[chosen]]
         return items[tie_rules.linkage_order(result, links, contents)[0]]
 
     @staticmethod
@@ -127,9 +138,10 @@ class CountStep:
             self.exact_scores += scores
             self.exact_sample_scores += samples
 
-    def _decision(self, larger, smaller, shadow, kind, seed_panel, key=None):
-        decision = count_rule.decide(larger, smaller, shadow, self.cost, kind=kind, config=self.config,
+    def _decision(self, larger, smaller, shadow, kind, seed_panel, key=None, family=None):
+        decision = (count_rule.decide(larger, smaller, shadow, self.cost, kind=kind, config=self.config,
                                      seed_key=('join_count', kind, sorted(map(tuple, seed_panel))))
+                    if family is None else family.decide(shadow))
         if key is not None and self.label is not None and ties.census_enabled():
             # Valley census of the count rule's continuous thresholds (margins at 0, units of c).
             with self._counts:
@@ -137,6 +149,75 @@ class CountStep:
                             [decision.total.margin, decision.total.loso_margin, decision.sequence.margin,
                              decision.sequence.loso_margin])
         return decision
+
+    def _shadow_decision(self, larger_panel, smaller_panel, focal, larger, smaller, kind, key,
+                         forwards=None):
+        """Evaluate a whole shadow family or retain its incumbent evaluated verdict.
+
+        Computational overflow is not a competing count outcome. It records unperformed
+        verification without changing the nominal test, biological ambiguity, or release.
+        The smaller-K prior applies only to actually opposed evaluated verdicts.
+        """
+        cover = count_rule.covered_rows(np.asarray(smaller_panel, np.int64))
+        choices, lost = shadow_choices(larger_panel[focal], cover, self.geometry)
+        combinations = math.prod(map(len, choices))
+        total_passes = count_rule.passes(larger - smaller, self.cost, self.samples)
+        complete = combinations <= int(self.config.shadow_combinations)
+        paths = (list(itertools.product(*choices)) if complete and total_passes
+                 else [tuple(rows[0] for rows in choices)])
+        family = (count_rule.ShadowDecisionFamily(
+            larger, smaller, self.cost, kind=kind, config=self.config,
+            seed_key=('join_count', kind, sorted(map(tuple, larger_panel))))
+                  if len(paths) > 1 else None)
+        decisions = []
+        for path in paths:
+            panel = list(larger_panel)
+            panel[focal] = path
+            if forwards is None:
+                values = self.score(tie_rules.sort_panel(panel))
+            else:
+                bound = forwards.birth_values(self.rows([path]), self.offsets)[:, 0]
+                values = self._sparse(tie_rules.sort_panel(panel), smaller, bound)
+            self._counted(scores=1)
+            decisions.append(self._decision(larger, smaller, values, kind, larger_panel, key, family))
+        verdicts = {decision.accept_larger for decision in decisions}
+        unresolved = total_passes and len(verdicts) > 1
+        count_unverified = total_passes and not complete
+        # Pick diagnostics consistently. The prior, when used, is explicit alongside them.
+        decision = min(decisions, key=lambda d: (d.accept_larger, d.margin, d.sequence.loso_margin))
+        if unresolved:
+            decision = replace(decision, accept_larger=False)
+        details = dict(nearest_choices=choices, combinations=combinations,
+                       evaluated=len(paths), complete=len(paths) == combinations,
+                       resolved_by_total=not total_passes, unresolved=unresolved,
+                       count_unverified=count_unverified,
+                       cause='nearest_shadow_budget' if count_unverified else None,
+                       budget=int(self.config.shadow_combinations),
+                       incumbent_shadow=tuple(rows[0] for rows in choices),
+                       verdicts=[d.accept_larger for d in decisions],
+                       sequence_margins=[d.sequence.margin for d in decisions],
+                       sequence_loso_margins=[d.sequence.loso_margin for d in decisions])
+        return decision, lost, details
+
+    def _record_shadow_family(self, larger_panel, smaller_panel, details, key):
+        if self.record_count_family is None:
+            return
+        if details.get('count_unverified', False):
+            self.record_count_family(dict(
+                panels=[], reason='nearest_shadow_count', source_decision=key,
+                status='count_unverified', count_unverified=True, unresolved_search=True,
+                cause='nearest_shadow_budget', domain_size=details['combinations'],
+                evaluated=details['evaluated'], scope='join_count_candidate',
+                representative_prior=None, shadow=details))
+            return
+        if not details['unresolved']:
+            return
+        self.record_count_family(dict(
+            panels=sorted({tie_rules.panel_key(larger_panel), tie_rules.panel_key(smaller_panel)}),
+            reason='nearest_shadow_count', source_decision=key, objective='count_rule',
+            representative_prior='smaller_K_then_exact_minimum_switches',
+            status='ambiguous_k',
+            unresolved_search=True, shadow=details))
 
     def _sparse(self, panel, base, bound):
         """Exact V_s(panel) where the bound exceeds base (elsewhere V_s = base exactly)."""
@@ -163,25 +244,29 @@ class CountStep:
         founder = int(self._choose('assembly.join_death', pool.tolist(), lambda f: totals[f],
                                    lambda f: tie_rules.path_key(panel[f]), float(np.sum(base)), key,
                                    quantum_kind='join_ll_wide',
-                                   link=lambda f: -self.linkage(panel[f])))
+                                   link=lambda f: -self.linkage(panel[f]),
+                                   panel=lambda f: [path for i, path in enumerate(panel) if i != f]))
         rest = [path for i, path in enumerate(panel) if i != founder]
         smaller = removal[:, founder]
+        shadow_details = None
         if len(pure):
-            shadow = base
             lost = 0
+            decision = self._decision(base, smaller, base, 'deletion', panel,
+                                      None if key is None else f"{key}/margin")
         else:
-            cover = count_rule.covered_rows(np.asarray(rest, dtype=np.int64))
-            shadow_founder, lost = count_rule.shadow_path(panel[founder], cover, self.geometry)
-            shadow_panel = list(panel)
-            shadow_panel[founder] = shadow_founder
-            shadow = self.score(shadow_panel)
-            self._counted(scores=1)
-        decision = self._decision(base, smaller, shadow, 'deletion', panel,
-                                  None if key is None else f"{key}/margin")
+            decision, lost, shadow_details = self._shadow_decision(
+                panel, rest, founder, base, smaller, 'deletion',
+                None if key is None else f"{key}/margin")
+            self._record_shadow_family(panel, rest, shadow_details, key)
         record = dict(kind='death', founder=founder, pure_mosaic=bool(len(pure)), lost_cells=int(lost),
                       panel_size=k, deleted=not decision.accept_larger, margin=decision.margin,
                       band=list(decision.band), ambiguous=decision.ambiguous,
                       total=_test_record(decision.total), sequence=_test_record(decision.sequence))
+        if shadow_details is not None and shadow_details['combinations'] > 1:
+            record['shadow'] = shadow_details
+            record['shadow_ambiguous'] = shadow_details['unresolved']
+            record['count_unverified'] = shadow_details.get('count_unverified', False)
+            record['ambiguous'] |= shadow_details['unresolved']
         if decision.accept_larger:
             return record, None, None
         return record, rest, smaller
@@ -250,29 +335,34 @@ class CountStep:
         reach = ties.WIDE_CLASS_QUANTA * tie_rules.quantum('join_ll', scale)
         best = None
         accepted = []
+        unresolved_births = []
         for index in order.tolist():
             if best is not None and totals[index] < best[0] - reach:
                 break
             path = novel[index]
             larger_panel = list(panel) + [path]
             larger = self._sparse(larger_panel, base, bounds[:, index])
-            shadow, lost = count_rule.shadow_path(path, cover, self.geometry)
-            shadow_bound = forwards.birth_values(self.rows([shadow]), self.offsets)[:, 0]
-            shadow_values = self._sparse(list(panel) + [shadow], base, shadow_bound)
-            self._counted(scores=1)
+            decision, lost, shadow_details = self._shadow_decision(
+                larger_panel, panel, len(panel), larger, base, 'addition',
+                None if key is None else f"{key}/add{index}/margin", forwards=forwards)
             record['exact'] += 1
-            decision = self._decision(larger, base, shadow_values, 'addition', larger_panel,
-                                      None if key is None else f"{key}/add{index}/margin")
+            if shadow_details['unresolved'] or shadow_details.get('count_unverified', False):
+                unresolved_births.append((float((larger - base).sum()), larger_panel, shadow_details))
             if decision.accept_larger:
                 total = float((larger - base).sum())
                 accepted.append((total, index, decision, larger, lost))
                 if best is None or total > best[0]:
                     best = (total, index, decision, larger, lost)
+        for total_gain, alternative, details in unresolved_births:
+            if best is None or total_gain >= best[0] - reach:
+                self._record_shadow_family(alternative, panel, details, key)
+                record.setdefault('shadow_alternatives', []).append(details)
         if best is None:
             return record, None, None, indicators
         total, index, decision, larger, lost = self._choose(
             'assembly.join_birth', accepted, lambda item: item[0], lambda item: tie_rules.path_key(novel[item[1]]),
-            scale, None if key is None else f"{key}/birth", link=lambda item: self.linkage(novel[item[1]]))
+            scale, None if key is None else f"{key}/birth", link=lambda item: self.linkage(novel[item[1]]),
+            panel=lambda item: list(panel) + [novel[item[1]]])
         record.update(accepted=list(novel[index]), lost_cells=int(lost), total_gain=total,
                       margin=decision.margin, band=list(decision.band), ambiguous=decision.ambiguous,
                       total=_test_record(decision.total), sequence=_test_record(decision.sequence))
@@ -304,7 +394,8 @@ class CountStep:
             founder = int(self._choose('assembly.join_death', pure.tolist(), lambda f: totals[f],
                                        lambda f: tie_rules.path_key(panel[f]), float(np.sum(scores)),
                                        None if key is None else f"{key}/pure{removed}",
-                                       quantum_kind='join_ll_wide', link=lambda f: -self.linkage(panel[f])))
+                                       quantum_kind='join_ll_wide', link=lambda f: -self.linkage(panel[f]),
+                                       panel=lambda f: [path for i, path in enumerate(panel) if i != f]))
             scores = removal[:, founder]
             panel = [path for i, path in enumerate(panel) if i != founder]
             removed += 1

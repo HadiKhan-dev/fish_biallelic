@@ -399,3 +399,45 @@ def painting(layout, rows, penalty, tensor_budget_mb, claim, reverse=None) -> np
         result[start:stop] = paint(*layout.arrays(), rows, float(penalty), start, stop, relative,
                                    bool(ties.reverse_conventions() if reverse is None else reverse))
     return result
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def minimum_switches(flat, block_start, block_haps, block_bins, rows, penalty, samples):
+    """Exact minimum state changes among score-optimal paths, per sample.
+
+    The primary recurrence is the ordinary join score, without a traceback band. Counts
+    break exact score ties only; the stored representative prior never changes its LL.
+    """
+    first, second = pair_lists(np.ones(len(rows), np.bool_))
+    result = np.zeros(samples, np.int64)
+    for sample in prange(samples):
+        values = np.zeros(len(first))
+        counts = np.zeros(len(first), np.int64)
+        started = False
+        for block in range(len(block_start)):
+            haps, bins = block_haps[block], block_bins[block]
+            base = block_start[block] + sample * haps * haps * bins
+            for marker in range(bins):
+                best = -np.inf
+                fewest = np.iinfo(np.int64).max
+                for state in range(len(first)):
+                    if values[state] > best:
+                        best, fewest = values[state], counts[state]
+                    elif values[state] == best:
+                        fewest = min(fewest, counts[state])
+                for state in range(len(first)):
+                    stay = values[state]
+                    switch = best - penalty
+                    if started and (switch > stay or (switch == stay and fewest + 1 < counts[state])):
+                        values[state] = switch
+                        counts[state] = fewest + 1
+                    at = base + (rows[first[state], block] * haps + rows[second[state], block]) * bins
+                    values[state] += flat[at + marker]
+                started = True
+        best = np.max(values)
+        minimum = np.iinfo(np.int64).max
+        for state in range(len(first)):
+            if values[state] == best:
+                minimum = min(minimum, counts[state])
+        result[sample] = minimum
+    return result

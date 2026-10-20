@@ -1,5 +1,137 @@
 # Changelog
 
+## 2.3.0 (20 October 2026)
+
+### Scientific model and released results
+
+- Apply a **genome-wide consistent pedigree M1 floor**, fixed before calibration and resampling. Retain every eligible parent whose total raw M1 is at least the best eligible total minus 60 times the existing information temperature of the total markers. Retained parents keep raw chromosome scores; other identities share the exact-sum chromosome floor profile. Every eligible identity, contamination term and prior denominator remains. This changes the evidence model and can change inferred panels.
+- Build M2 from **every eligible pair of retained parents**, including all cutoff ties. No top-20/40 truncation or sample-index tie break selects a prefix. The M2 likelihood model is unchanged. Excluding individually weak M1 parents can still exclude a strong raw M2 pair; this admission assumption is explicit. Missing-parent component fallbacks use the original raw M1 factors.
+- Use a certified selective M1 screen by default. Every candidate whose bound cannot establish its result receives exact HMM scoring. Separate compact-profile and fixed-score checkpoints prevent a second floor transform. Four-dataset validation preserves all numerical pedigree/release fields, 4,060 bootstrap/LOCO records and 60 CSV files against the adopted exact model. Dense downstream arrays remain.
+- Speed up full-marker pedigree exclusion with lower bounds from completed windows and exact completion whenever exclusion is not certified at the original genome-average threshold. Biological calls and observed-site counts are unchanged. Two nonempty diagnostic tables expose certified intervals explicitly; zero-target tables retain their original columns. Four-dataset report checks pass (TroMau/std actual G8 artifacts; stress/sim zero-target G7 carry-over). TroMau avoids 26.224% of pair-site visits: kernel CPU falls from 20.955 to 19.741 s (**5.8%**). This is a kernel gain, not a whole-stage or scaling result.
+- Represent tied A-step assignments fractionally and carry complete tied discovery/selection families. Expand complete parent-score classes, rank replacement starts by their parent class, use ordinary/escalated replacement budgets of 48/96 (escalation off by default), and screen tied nearest-row/consensus merges without an index convention. Biological priors, state likelihoods and the binned switching objective remain unchanged.
+- Enable 256-landmark discovery proposal geometry by default; explicit zero retains the dense reference. All observations remain in consensus, fitting and scoring, and whole over-budget classes are reported as search omissions. This is an approximation: latent panels/search paths may change even when released calls agree. Residual activation depends on the number of fractional records, not only sample count. All 38 approved accuracy cells retain their seven truth metrics; 56 invariance controls pass. These component results do not replace the final pipeline matrix.
+- Finish shared-binomial read calibration at stationary endpoints with stable, content-ordered reductions. The E3 curvature and box-constrained Newton fix preserves the objective, bounds, all-start policy and standard calibration choices in 110/110 contig comparisons; the accepted maximum applied-GL residual is **1.97e-11**. Earlier stationarity changes selected three sim_s10001 models, so the broader read-model change is not described as universally output-identical.
+- Family phase uses sample-name-independent coordinates, continued endpoint families and explicit display phase breaks where relative orientation is unsupported or MAP and polish disagree. These breaks preserve point genotypes and recombination selector chains; they do not claim to repair long-range orientation. The proposed **C8 orientation estimator is deferred to 2.4**.
+- Integrate the exact Y sparse-support kernel and stage6ab first-pass sharing, scratch-before-CPU admission, initial work-based chromosome leases and dynamic load balancing. Eight std/stress single-contig reference/reversal/rename/noise controls each preserve all 22 released hashes and every truth/phase-set metric. Whole-stage AB timing remains separately measured.
+- `haplotypes evaluate` now scores released phase sets exactly as exported. Explicit/component boundaries split phase sets; displayed-undetermined calls contribute unordered errors without splitting their phased flanks. Summaries identify `export_phase_sets_v2`. Baseline comparisons must use this same metric.
+- Recombination CSR edge grouping and integer bincount totals, exact pedigree pair counting/SCCs, calibration aggregation, and compiled exact residual-clique counting preserve scientific results. Process and in-process CPU admission retain active claims until workers release them, including under memory pacing.
+
+### Accuracy interpretation
+
+The K30 forward-only baseline was convention-dependent. On the common set of 2,946,890 calls, 2.1 forward/reverse have 2,943/3,424 called errors and 224,959/229,273 wrong-or-missing genotypes; 2.2 has 3,159/3,396 and 226,449/230,891. Discovery candidate9c has 3,227 and 227,113: +43.5 common-call errors and -3 wrong-or-missing against the 2.1 convention mean, and -50.5/-1,557 against the 2.2 mean. These are component-stage descriptive comparisons, not proof of final-pipeline equivalence. The accepted assembly costs below are reported separately.
+
+### Assembly and founder release
+
+Completion's held-out folds now use exact integer total-depth vectors to distinguish
+samples with the same observation mask. Identical depth groups stay whole and are
+balanced deterministically between folds. The split uses no sample names, input index
+or genotype-likelihood value, so sample permutation, renaming, convention reversal and
+GL-only perturbations preserve fold membership. If a fold has no informative training
+observations, its learned panel remains the original pre-fill panel and the absence of
+held-out training is recorded. Original calls, cavity-fill and occupancy rules are
+preserved. This corrects input-order-dependent completion fills.
+
+Assembly now evaluates complete eligible join proposal classes and scores a proposed
+founder panel independently of the edit used to obtain it. Tied join and count-choice
+panels can continue into larger contexts, with common sample/site masks and same-level
+refinement. A shared allowance of sixteen incoming/search leaves bounds higher-level
+work; ordinary isolated join searches retain four. A complete encountered family is
+evaluated or retained with explicit verification flags. Count candidates evaluate the
+complete observed endpoint family before applying the existing acceptance rules.
+
+Computationally incomplete count comparisons retain the incumbent decision and record
+`count_unverified`, including cause, scope and domain size. They never justify a founder
+deletion or withheld call. Complete nearest-shadow enumeration has a separate budget of
+2048 combinations; exact conservative proofs may verify larger families. Such a proof
+must hold for every sample permutation of the original fixed bootstrap draws. A
+proof refusal preserves the incumbent and its verification flag. Evaluated
+conflicting count verdicts retain the stated smaller-K and exact minimum-switch priors.
+
+Founder output now records unsupported assembly continuity explicitly. Founder VCF
+columns and tracks split into release segments when evaluated alternatives disagree
+beyond a whole-panel row permutation. When invariant flanks establish a unique exact
+row correspondence, agreeing allele cells are retained and only differing or missing
+local content is withheld. For unequal-K terminal alternatives, a full-span path
+occurring exactly once in every evaluated member also retains its known prepared
+alleles. Unmatched duplicate rows use a conservative multiplicity rule. Unperformed continuations preserve incumbent calls and retain their evaluated
+source families as `continuation_unverified`; that flag alone causes no masking.
+Evaluated budget-overflow ties can still withhold their observed differing cells where
+exact local provenance establishes the disagreement.
+
+Exact bootstrap reuse and a bounded optional cache for identical refinement windows
+reduce repeated work without changing scientific decisions. Cache omission and eviction
+change computational work only.
+
+
+#### Assembly accuracy trade-offs against 2.2
+
+These are missing-inclusive founder allele-error deltas (point panel / released
+panel), not offspring genotype or phase-error deltas. These three costs are accepted for the release. No rule or parameter was tuned to truth.
+
+- **f3_fam: +107 / +107.** Completing the seven incoming branches under JOINT16
+  lets the larger-context data choose the panel. The unique L4 join winner improves
+  the join likelihood by 9.47 nats, with a 7.91-nat runner-up gap; the subsequent
+  refinement objective ties. The aggregate delta comprises chr1 +108 and chr13 −1.
+  This replaces a convention-dependent choice; it is an accepted accuracy cost,
+  not a truth improvement.
+- **K30: +26 / +26**, all on m2. Complete proposal-class evaluation replaces the
+  earlier restricted winner. At the first divergence, the 73-proposal class wins
+  by 0.330918 nats over the old 32-proposal class's winner (retained as runner-up).
+  This is a data-decided trajectory change, not an overflow deletion.
+- **Backcross: 0 / +51.** The point panel is unchanged in missing-inclusive truth;
+  the released result contains 174 withheld cells and five continuity breaks.
+  Withholding represents evaluated local disagreement with established correspondence.
+  It is counted as missing in the reported errors, not hidden from evaluation.
+
+Both dense simulations, std, stress, reallike6 and K20 have **0 / 0** deltas.
+The dense missing-inclusive error totals are 1,108 (sim_s10000) and 37 (sim_s10001),
+unchanged from 2.2. All eleven datasets' retained and withheld fractions, including
+real datasets without independent founder truth, are reported in the assembly validation record.
+
+#### Count verification and computational limits
+
+Keep complete-shadow enumeration at **2,048 combinations** and the shared higher-level
+incoming/search allowance at **16 leaves**, never 16 × 4. The corrected proof verifies
+**1,501/1,549 decisions (96.9012%) on fixed14** and **1,246/1,284 (97.0405%) on TroMau22**.
+These cover complete count criteria, not merely the fraction of candidate families
+whose size fits the budget. This coverage is accepted for the release.
+
+Final7's earlier 99% figures (99.0316% / 99.5327%) used a weaker, sample-order-dependent
+proof. Final8 requires the stronger permutation-safe proof; it is never weakened to
+meet a coverage target. On the observed domains, reaching 99% with the corrected proof
+would require budgets of **16,777,216** (fixed14) and **7,077,888** (TroMau22). These are
+domain projections, not runtime-validated settings, and are not adopted.
+
+When a complete family exceeds the budget and cannot be proved, evaluate no prefix:
+hold the incumbent and record `count_unverified` with cause and scope. Computational
+unknowns never justify deletion or masking. Unperformed continuations similarly retain
+calls and evaluated source records under `continuation_unverified`. Withholding is
+reserved for established disagreement among evaluated alternatives.
+
+### Measured resources, targets and remaining validation
+
+- TroMau v23c4 completed on 112-core **AMD EPYC 7763**: pipeline 2,947.967 s (49.13 min), complete acceptance task 3,011.076 s (50.18 min), sampled summed process-tree RSS 62.524 GiB. The raw wall ratio to the 2.1 Sapphire reference (2,298.5 s) is 1.283; hardware differs, so this is not a software-only ratio. Summed RSS is not comparable to the historical 41.74-GiB peak-process RSS. Later exact G7/C1/G8 swaps carry biological results by their documented identity evidence, not these runtime measurements.
+- The adopted G7 screen on matched 112-core EPYC simulation inputs takes 121.286 s / 3,480.03 CPU-s versus 322.982 s / 29,833.15 CPU-s exact: 2.663x wall and 8.573x CPU speedup, with 96.802% fewer exact chromosome-dyad queries.
+- The whole family-phase target is about **1,200 s at N=320 on 112 cores**, originally specified for Sapphire. The latest completed Y measurement on EPYC is **1,492.322 s** for the family stage plus **321.142 s** post-fit (1,813.464 s combined), 110,610.43 contig CPU-s, 74.12 mean busy cores, 469.605-GiB sampled whole-tree peak and 83.560-GiB largest task. AB's final whole-stage measurement on the same EPYC 112-core host is **1,570.299 s** for the family stage plus 345.638 s post-fit, 110,665.76 contig CPU-s (ideal CPU/112 988.1 s), 70.47 mean busy cores, a 343.2-GiB sampled peak and 87.99-GiB largest task, with chr3/chr7 22/22 hash-identical and zero truth deltas. It was about 5% slower than Y in this run because fewer contig workers ran concurrently; the target is not met on EPYC. Available node memory and normal headroom govern concurrency, not the historical 1.5x proxy cap.
+- The fixed-genome scaling target remains about **N^1.2** outside pedigree. The final N-series measures N80/N320 on the same frozen **v23c5 (G7 plus C1X)** source and EPYC hardware; N80 is 327.576 s. **N320 did not complete within its 45-minute cap:** discovery of a single chromosome took 1,564.7 s, with the search incomplete in 575 of 580 blocks, so no end-to-end exponent is measured. Discovery on this design is the open scaling issue. N160/N640 are unmeasured unless separately reported. A two-point slope is descriptive, not an asymptotic proof, and does not measure the later AB speedup.
+- Pedigree's restated target is linear expensive likelihood/decision/resampling work with bounded plausible parents, a certified all-pairs bound projected at **at most 10% of whole-pipeline runtime at N=10,000**, and no dense quadratic default-path arrays beyond compact screen storage. **This target is not met:** dense downstream arrays persist. The full-genome bound cost 18.3669 ms CPU/pair projects to about 4.56 hours at N=10,000 under ideal 112-core utilization; a matched-genome whole-pipeline denominator is required before claiming a fraction. Do not divide that full-genome cost by the five-short-chromosome N-series fit.
+- Final integrated truth/noise/reversal/rename coverage is incomplete. TroMau completion is not a truth or invariance pass: versus 2.2 it has 33,301 changed called genotypes, 118,698 call/unknown differences, 13,942 relative phase switches, and one changed parent set; these cross-version differences require attribution, not zero-difference acceptance. Actm3 does not carry from c3: actual residual pools reach 310, above 256, and no c4 reference has completed. Final-tree actm3 therefore rests on component evidence only. The std reference has a complete 11,822-block inactivity census (maximum residual pool 184); its reference biological outputs carry through the documented component identity chain, not through a fresh final-tree run. This does not validate its noise/reversal/renaming controls. Every deadline-skipped cell is reported as NOT_RUN, independently of pool exit status. Full final sim_s10000 truth, the remaining truth panel, broader zero loop, TroMau reversal and final Gate W remain follow-up where uncompleted; component gates remain explicitly labelled.
+
+#### Evidence freeze and uncompleted cells
+
+Evidence collected at **2026-10-20T08:22:56.652274+01:00**. At the evidence freeze (2026-10-20T08:22:56.652274+01:00), the exact terminal NOT_RUN list is empty: no deadline guard has yet skipped a task. Pending or running cells are uncompleted, not passes. The final report must add any later NOT_RUN records without changing this frozen transfer.
+
+Uncompleted final truth references: stress_n80, lad_K20_n80, lad_K30_n80, f3_fam,
+backcross_s6202, reallike6_nf_s3, actm3 and sim_s10000. The std reference relies on
+the qualified carry-over above; its queued c4 reference has not started. All six
+queued std/stress controls (iid12_s1, reversal and rename_s1 for each) are uncompleted.
+N320 did not complete (discovery time cap; see above); N160/N640 are unmeasured. AB whole-stage timing: 1,570.299 s family stage (see above).
+TroMau reversal, the broader zero loop and final Gate W also remain uncompleted.
+
+### Follow-up work
+
+Pedigree sparse downstream decisions/exposure/cavity/path/resampling, complete N-series and omitted release validations remain open. SIMD vectorisation may use the owner's post-2.3 few-ULP policy (reassociated reductions/FMA only when released decisions are unchanged); this policy is not applied retroactively to 2.3's exact-swap gates. C8 orientation estimation continues for 2.4. G8 is included after its exact-exclusion, interval-report and default-handler/checkpoint gates; its modest kernel saving does not resolve the remaining pedigree scaling requirement.
+
 ## 2.2.0 (19 October 2026)
 
 Release 2.2 removes arbitrary conventions from every decision that selects between different biological answers.

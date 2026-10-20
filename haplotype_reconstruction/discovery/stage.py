@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import math
 import time
 
 import numpy as np
@@ -22,6 +23,7 @@ from ..execution import BudgetedPool, claim_threads, malloc_trim, release_memory
 from . import records
 
 from .config import DiscoveryConfig
+from .residual_births import MASS_BAND
 from .fixed_k.workspace import search_bytes
 from .release import DiscoveredBlock, materialise
 from .search import search_block
@@ -84,17 +86,50 @@ ESTIMATE_FOUNDERS = 32
 TASK_BASE_BYTES = 512 << 20
 
 
+def clustering_matrix_bytes(samples: int, config: DiscoveryConfig | None = None) -> int:
+    """Additional dense clustering matrices, independently of the linear fit plan.
+
+    Residual copy masses sum to two per sample. A passing record has mass at
+    least min_soft_responsibility - MASS_BAND; round its count bound upward.
+    The zero-threshold case retains the existing ESTIMATE_FOUNDERS planning
+    assumption (not a hard bound on discovered K).
+
+    Global residual clustering has one R-by-R float64 matrix: min_samples=1
+    needs no reachability copy. A partner route has at most N records; its
+    previous and new N-by-N submatrices may coexist during assignment. K=1
+    seeding peaks at three N-by-N arrays (distance, reachability copy and the
+    core-distance partition scratch); similarity has already been freed.
+    Reserve both phases conservatively because allocator arenas may persist.
+    This covers dense distance matrices; the existing task base/workspace still
+    estimates Python hierarchy/clique and fitted-panel storage.
+    """
+    config = DiscoveryConfig() if config is None else config
+    threshold = float(config.residual_births.min_soft_responsibility) - MASS_BAND
+    rows_per_sample = (math.ceil(2.0 / threshold) if threshold > 0.0
+                       else ESTIMATE_FOUNDERS)
+    records = int(samples) * rows_per_sample
+    n = int(samples)
+    a = int(config.residual_births.landmark_budget)
+    b = int(config.search.seed_landmark_budget)
+    # Distance chunks + concatenate + sorted nearest ties and indexing scratch.
+    residual = (5 * records * a + 4*a*a + 5*n*min(n,a) if a and records > a
+                else records*records + 2*n*n)
+    seeds = 5*n*b + 5*b*b if b and n > b else 3*n*n
+    return 8 * (residual + seeds)
+
+
 def block_task_bytes(evidence: BlockEvidence, config: DiscoveryConfig | None = None) -> int:
     """Planned peak additional bytes of one block's discovery in a pool worker (release 2.1: plus
     the canonical-order copy of the block's GLs and mask, and a second search workspace when the
-    reversed-convention search is configured)."""
+    reversed-convention search is configured), including the dense clustering matrices."""
     samples, sites = evidence.likelihoods.shape[:2]
     kept = int(np.count_nonzero(evidence.kept))
     searches = 1
     if config is not None and config.search.reversed_convention_search != "off":
         searches = 2
     return (TASK_BASE_BYTES + 2 * 8 * 3 * samples * sites + 25 * samples * kept
-            + searches * search_bytes(samples, kept, ESTIMATE_FOUNDERS))
+            + searches * (search_bytes(samples, kept, ESTIMATE_FOUNDERS)
+                          + clustering_matrix_bytes(samples, config)))
 
 
 # Block workers return freed heap pages every this many blocks, or whenever their resident set
@@ -159,10 +194,18 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
     counts = [block.founders for block in blocks]
     limits = {name: sum(name in block.search.limits for block in blocks)
               for name in ("expansion_backstop", "exact_score_backstop")}
+    incomplete = sum(block.search.search_incomplete for block in blocks)
+    unresolved = sum(block.search.unresolved for block in blocks)
+    omission_causes = {}
+    for block in blocks:
+        for cause in {item["cause"] for item in block.search.omissions}:
+            omission_causes[cause] = omission_causes.get(cause, 0) + 1
     print(f"    [Discovery] {contig}: {len(blocks)} blocks"
           + (f", founders/block: min={min(counts)}, max={max(counts)}, mean={np.mean(counts):.1f}"
              if counts else "")
-          + f" in {time.monotonic() - started:.1f}s; backstop hits {limits}", flush=True)
+          + f" in {time.monotonic() - started:.1f}s; backstop hits {limits}"
+          + f"; search incomplete {incomplete}/{len(blocks)}, unresolved {unresolved},"
+          + f" omission blocks by cause {omission_causes}", flush=True)
 
 
 def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:

@@ -150,6 +150,36 @@ def _reciprocal_dominant_mask(rows: np.ndarray, zero: np.ndarray, one: np.ndarra
     return mask
 
 
+def _aggregate_m1(prepared, states, chromosomes):
+    """Identical M1 chromosome vectors and objective masks share a counted term.
+
+    The prior still uses the full candidate universe. Masks are part of the key:
+    genetic floor equality alone does not imply reciprocal-mask equality.
+    """
+    train, validation, combined, test, prior, prior_test = prepared
+    groups, representatives, multiplicity = {}, [], []
+    for row, state in enumerate(states):
+        key = None
+        if state == 1:
+            key = (chromosomes[:, row].tobytes(), prior[:, row].tobytes(),
+                   float(prior_test[row]))
+        old = groups.get(key) if key is not None else None
+        if old is None:
+            old = len(representatives)
+            if key is not None:
+                groups[key] = old
+            representatives.append(row)
+            multiplicity.append(1)
+        else:
+            multiplicity[old] += 1
+    if len(representatives) == len(states):
+        return prepared
+    take = np.asarray(representatives, np.int64)
+    log_count = np.log(np.asarray(multiplicity, np.float64))
+    return (train[:, take], validation[:, take], combined[take], test[take],
+            prior[:, take] + log_count[None, :], prior_test[take] + log_count)
+
+
 def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfig) -> dict:
     folds = np.arange(len(scores.contigs)) % 4
     groups = [np.flatnonzero(folds == i) for i in range(4)]
@@ -175,6 +205,7 @@ def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfi
                                                    (folds < 3) & (folds != i)) for i in range(3)])
     test_mask = _reciprocal_dominant_mask(rows, scores.zero, scores.one, folds < 3)
     prepared, omitted = [], 0
+    expanded_terms = aggregated_terms = 0
     for child_rows in alternatives.child_rows:
         finite = np.isfinite(likelihoods[:, child_rows]).all(axis=0)
         omitted += int(np.count_nonzero(~finite))
@@ -192,9 +223,15 @@ def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfi
                                          keepdims=True)
         combined = all_training[valid] - all_training[valid].max()
         test = testing[valid] - testing[valid][test_kept].max()
-        prepared.append((train, validation, combined, test,
-                         prior[valid][None, :] + fit_mask[:, valid], prior[valid] + test_mask[valid]))
+        terms = (train, validation, combined, test,
+                 prior[valid][None, :] + fit_mask[:, valid], prior[valid] + test_mask[valid])
+        compact = _aggregate_m1(terms, states[valid], likelihoods[:, valid])
+        expanded_terms += len(valid)
+        aggregated_terms += len(compact[2])
+        prepared.append(compact)
     report.update(eligible_children=len(prepared), omitted_nonfinite_alternatives=omitted,
+                  expanded_objective_terms=expanded_terms, aggregated_objective_terms=aggregated_terms,
+                  objective_aggregation="identical-M1-vectors-and-reciprocal-masks-counted",
                   reciprocal_dominant_rows_excluded_per_fold=[
                       int(np.count_nonzero(~np.isfinite(mask))) for mask in fit_mask])
     if not prepared:

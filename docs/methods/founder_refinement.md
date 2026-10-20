@@ -95,9 +95,10 @@ is reported (warned, and recorded as not converged), never silently accepted.
 
 **Best of two.** Every fit runs this search twice from the same start, concurrently: once with its
 first pass forward and once reversed (both then alternate; they share the first sweep's messages
-and proposals). Both are deterministic local searches; the fit keeps the one with the higher exact F
-(exact ties: the forward-first search), so at a fixed start it never ends below the forward-first
-search. Both results are recorded. This applies to every start fit and every count refit.
+and proposals). Both are deterministic local searches. The existing F tie classes and count
+comparison criteria identify the surviving candidates; among remaining same-K ties the
+representative uses the exact minimum sample state-change count. Both results are recorded.
+This applies to every start fit and every count refit.
 
 **Surrogate bins.** The window surrogate cuts each prepared block's sites into bins of
 max(b_min, ceil(L_c / 2000)) sites for a component of L_c sites
@@ -216,6 +217,91 @@ fail that test.
 closed a count cycle, or a restored panel fails its own deletion test. Levels before the last make
 deletion decisions only; their K is the working set of the next join. The last level's calls are the
 components' count calls in `assembly/final` and in `founder_counts.tsv`.
+
+## Bounded continuation and release (2.3)
+
+A selected fixed-K fit tie or tied count-choice panel can affect later deletion and
+addition decisions even if the returned fit has another label. Up to sixteen complete
+count-pass histories continue these choices from the original input, seed and count state. Cached fits are reused only when
+both their label and input panel agree. Terminal incoming join panels share this same
+sixteen-leaf budget, rather than each receiving a separate allowance. They use the existing common
+complete-site objective and informative cohort. The ordinary count bound remains twice
+each incoming root's founder count; it is not enlarged to obtain a preferred outcome.
+
+Completed same-K descendants are compared on the final F objective. Converged identical
+panels collapse; conflicting supported counts remain explicit, with smaller K then exact
+minimum state changes as the representative prior. An intermediate tie on discarded search
+ancestry is diagnostic history, not a current final tie. Count-choice continuations
+replay the original history with that decision prefix; an intermediate panel is never
+restarted with a fresh count or search budget. A family exceeding the joint history
+budget retains its source panels and unresolved status, with no order-selected prefix
+represented as a completed family. A partial-span incoming family
+without a justified correspondence is likewise not treated as a complete final panel.
+
+Before count-margin eligibility, every already observed fixed-K endpoint in the best F
+class is tested against its original deletion/copy reference and incumbent. Identical
+endpoint panels from different origins retain their own tests, sample masks and bootstrap
+streams. Only eligible count outcomes continue; rejected companions cannot reappear
+through an earlier direction-tie family. Count records retain the complete endpoint table
+and eligibility decisions.
+
+Nearest-row sequence shadows use the separate complete-family computational budget
+`CountRuleConfig.shadow_combinations` (currently 2048). Overflow retains the incumbent's
+own evaluated verdict and records `count_unverified` with cause, scope and domain size;
+it does not supply evidence for a count change. Every deletion still needs an evaluated
+count verdict. Only genuinely opposed evaluated verdicts use the smaller-K prior.
+
+`ComponentRefinement.release_alternatives` distinguishes terminal families from these
+uncontinued source histories and from computational `count_unverified` records. The assembled sidecar is persisted with each level and the
+final product and survives checkpoint reuse. Export uses it to split founder columns and
+tracks where evaluated final alternatives disagree in continuity and withhold unmatched
+evaluated final local content. Unique exact row correspondence on invariant path anchors
+allows cell-wise agreement to be retained. In unequal-K terminal families, full paths
+occurring exactly once in every evaluated member preserve known prepared content; the
+remaining unmatched paths use conservative local-row masking. Neither rule removes
+continuity cuts or withholding required by another family. Source histories without established final correspondence
+retain their evaluated source panels, local disagreement intervals and priors in a
+`continuation_unverified` record. The continuation flag itself and all computational `count_unverified` records
+annotate the release without withholding calls. An evaluated biological family whose
+continuation exceeded the joint/search budget can separately supply a local content meet
+inside its complete prior-eligible tie class, using exact prepared-row provenance; see
+[assembly release semantics](assembly.md#live-alternatives-and-founder-release-23).
+The records expose branch evaluations, cached fits, branch seconds and selected history.
+
+Before retaining a computational flag, refinement may prove the entire shadow domain
+with a block-factor dynamic programme. Each block keeps its local shadow choice fixed;
+the recurrence maximizes outgoing pair-state messages over all local choices before
+continuing to the next block. Its per-sample envelope covers every global shadow, with
+the original evidence mask and switch penalty. A conservative effective-carrier bound
+must establish that the total-gain test determines the point margin, leave-one-out
+margin and every seeded bootstrap replicate under every ordering of the informative
+samples. For each original draw, sorted sample multiplicities are paired against
+sorted per-sample sequence-minus-total lower gains to bound the worst permutation.
+The proof also bounds every reduction order for point and leave-one-out sums and
+requires a positive normal gain under every permitted pairing. Outward numerical
+bounds cover reduction error and the effective-carrier penalty. This only determines
+whether verification is proved: the original bootstrap draws, seeds, count decisions
+and score arrays are unchanged. A proof valid only for the current sample ordering
+cannot remove the computational flag. A successful proof leaves the evaluated
+incumbent decision and all sequence diagnostics unchanged. The record distinguishes
+`count_verified_by_bound` from enumeration: `complete=false`, `evaluated=1`, with the
+uncomputed sequence diagnostics explicitly identified. Failure to prove equality leaves
+`count_unverified` intact and never supplies evidence for a count change.
+
+This optional computation requires each local product to fit the existing shadow
+budget, at most four ordinary passes of weighted site work, the existing pair-table
+memory cap, and immediate memory admission. It shares the existing workspace and CPU
+budget. Proof attempts, reasons, time and transient bytes are recorded separately.
+Joins retain the complete-family/unknown policy above; this proof shortcut is used only
+in founder refinement.
+
+Continuations with multiple incoming whole-span panels may reuse exact window solutions
+within the component. Reuse requires identical ordered window rows, both normalized
+boundary messages, convention and frontier limit on the same immutable evidence and row
+domains. The optional cache reserves at most 256 MiB through the run's memory governor
+and is omitted when memory is unavailable. Eviction or omitted caching changes execution
+cost only; proposals, scientific diagnostics, count decisions and released results are
+unchanged. The ordinary per-direction proposal cache remains in use.
 
 ## Records and census
 

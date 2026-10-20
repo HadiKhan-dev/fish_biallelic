@@ -18,14 +18,21 @@ Best of two: every fit runs this search twice from the same start, concurrently,
 first pass forward and once reversed (both then alternate; their common sweep-0 messages and
 proposals are computed once). Each is a deterministic local search; the fit keeps the higher exact
 F, decided by tie classes of F (release 2.1: two results within the quantum tie_rules.quantum("refine_F", F)
-are tied and the canonically smaller panel is kept; base: exact ties to the forward-first one), so at a
+are tied; release 2.3 retains the family and uses the minimum exact-optimal switch count
+as the representative prior, then a naming convention), so at a
 fixed start it never ends measurably below the forward-first search. The fit's panel is returned in
 canonical founder order (rows sorted lexicographically, design 5.1): founder indices of the count pass
 (candidates, shortlists, tie-breaks) are content ranks.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from collections import OrderedDict
+from contextlib import contextmanager
+import copy
+import hashlib
+import pickle
+import sys
 import threading
 import time
 import warnings
@@ -37,7 +44,7 @@ from . import messages as kernels
 from .. import tie_rules
 from ...maths import ties
 from .acceptance import MOVE_COARSE, MOVE_FINE, accept_pass
-from .objective import SWITCH_PENALTY, score_panel, selected_alleles
+from .objective import SWITCH_PENALTY, score_panel, score_switches_direct, selected_alleles
 from .proposals import WindowSolver
 from .workspace import sample_ranges
 from ... import execution
@@ -74,7 +81,8 @@ class FitSummary:
     founders: K. F0, F: exact objective of the start and the result (log units).
     converged: the kept search ended with a sweep that accepted nothing (else it reached
     FounderRefinementConfig.sweep_limit). sweeps: sweeps of the kept search.
-    first: "fwd" | "rev", the kept search (exact F ties keep "fwd"). F_fwd, F_rev: both results.
+    first: "fwd" | "rev", the kept search after objective and minimum-switch comparison.
+    F_fwd, F_rev: both results.
     max_frontier: largest window-programme frontier; frontier_fallbacks: window programmes that
     kept the incumbent because their frontier exceeded FounderRefinementConfig.frontier_bytes.
     accepted: totals over the kept search's sweeps (fine, coarse, exchange moves and gains,
@@ -82,7 +90,9 @@ class FitSummary:
     of a sweep (the exactness check). wall, worker_cpu, thread_cpu: seconds (both searches).
     tied_panels (release 2.2): when the forward- and reverse-first results are tied on F (one tie class)
     but are different panels, their panel keys (sorted): equally supported alternatives, released flagged;
-    the kept one is then decided by the canonical panel key (a fully symmetric choice). Empty otherwise.
+    the kept one uses the minimum exact-optimal switch count prior, then a canonical
+    naming convention. tied_scores and tied_switches align with tied_panels;
+    minimum_switches is the chosen prior value. Empty otherwise.
     """
 
     label: str
@@ -102,6 +112,9 @@ class FitSummary:
     worker_cpu: float
     thread_cpu: float
     tied_panels: tuple = ()
+    tied_scores: tuple = ()
+    tied_switches: tuple = ()
+    minimum_switches: int | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,85 @@ class Orientation:
     def haps(self, panel):
         """int8 (K, L) alleles of the panel (K x B rows in this orientation's block order)."""
         return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
+
+
+# Only components with multiple incoming roots retain these optional window results.
+# One MiB of the reservation covers the bounded dict/entry bookkeeping. Input-key
+# copies and returned proposal arrays are covered by each worker's task estimate.
+WINDOW_MEMO_BYTES = 256 << 20
+_WINDOW_MEMO_OVERHEAD = 1 << 20
+_WINDOW_MEMO_ENTRIES = 4096
+
+
+class _WindowMemo:
+    """Exact window solutions within one immutable component solver.
+
+    Scope fixes emissions, row domains, templates, coarse context and penalty.
+    Keys additionally compare every row/flank byte, dtype, shape, frontier cap and
+    explicit convention. Dictionary hashing is only an index, never equality.
+    Stored serialized results are immutable; each hit returns privately owned
+    arrays and diagnostics. Concurrent misses may duplicate work, not decisions.
+    No solver or engine reference is retained, avoiding large ownership cycles.
+    """
+
+    def __init__(self, limit=WINDOW_MEMO_BYTES - _WINDOW_MEMO_OVERHEAD):
+        self.limit = int(limit)
+        self.entries = OrderedDict()
+        self.lock = threading.Lock()
+        self.used = 0
+        self.statistics = dict(calls=0, hits=0, evictions=0, peak_entry_bytes=0)
+
+    @staticmethod
+    def key(index, a, c, X, fwd, bwd, frontier_bytes, convention):
+        def array(value):
+            return value.dtype.str, value.shape, value.tobytes(order="C")
+        return (int(index), int(frontier_bytes),
+                bool(ties.reverse_conventions() if convention is None else convention),
+                array(X[:, a:c]), array(fwd[a]), array(bwd[c]))
+
+    @staticmethod
+    def transient_bytes(a, c, X, fwd, bwd):
+        # Complete input key plus a serialized/private copy of all focal paths
+        # and their small diagnostic dictionaries. Existing estimates cover the
+        # original solved result and numerical tables.
+        return (int(X[:, a:c].nbytes + fwd[a].nbytes + bwd[c].nbytes)
+                + 16 * len(X) * (c - a) + 2048 * len(X) + 4096)
+
+    @staticmethod
+    def _size(value):
+        return sys.getsizeof(value) + (sum(_WindowMemo._size(x) for x in value)
+                                      if isinstance(value, tuple) else 0)
+
+    def lookup(self, key):
+        with self.lock:
+            self.statistics["calls"] += 1
+            entry = self.entries.get(key)
+            if entry is None:
+                return None
+            self.entries.move_to_end(key)
+            self.statistics["hits"] += 1
+        return pickle.loads(entry[0])
+
+    def store(self, key, result):
+        payload = pickle.dumps(result, protocol=5)
+        size = self._size(key) + sys.getsizeof(payload) + 256
+        if size > self.limit:
+            return
+        with self.lock:
+            if key in self.entries:
+                return  # Another worker completed the identical problem.
+            while self.used + size > self.limit or len(self.entries) >= _WINDOW_MEMO_ENTRIES:
+                _, old = self.entries.popitem(last=False)
+                self.used -= old[1]
+                self.statistics["evictions"] += 1
+            self.entries[key] = payload, size
+            self.used += size
+            self.statistics["peak_entry_bytes"] = max(self.statistics["peak_entry_bytes"], self.used)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+            self.used = 0
 
 
 class ProposalCache:
@@ -228,11 +320,90 @@ class SweepEngine:
         self._reversed = Orientation(workspace, True)
         # The component's fit-state records (load/save by fit label), or None.
         self.records = records
+        self._base_records = records
         self.name = name
         spans = self.windows.spans
         self.cached_boundaries = len({a for a, _ in spans}) + len({c for _, c in spans})
         # Per-sample scores of converged fits by label, kept from their last sweep (fit_scores).
         self._fit_scores = {}
+        self._minimum_switches = {}
+        # Branches replay the original count pass. A fit is reusable only at the
+        # same labelled input panel; its alternate direction retains its own
+        # diagnostics. Workspace and completed-fit caches are shared read-only
+        # between sequential branch continuations.
+        self._fit_cache = {}
+        self._score_cache = {}
+        self._forced_panels = {}
+        self._fit_invocations = {}
+        self._chosen_panels = {}
+        self.reused_fits = 0
+        self.branch_key = None
+        self._window_memo = None
+        self._window_memo_statistics = {}
+
+    @contextmanager
+    def memoized_windows(self, enabled):
+        """Optional bounded reuse across incoming roots; memory admission never waits.
+
+        The fixed workspace and WindowSolver are shared by branch engines. Cache
+        eviction or declined admission changes runtime only. A retained-state
+        reservation is released on success or any failure of the count search.
+        """
+        if not enabled:
+            yield None
+            return
+        governor = execution.memory_governor()
+        live = execution.available_memory_bytes()
+        if (WINDOW_MEMO_BYTES > governor.limit - governor.reserved
+                or (live is not None and WINDOW_MEMO_BYTES > live - governor.headroom)):
+            # Optional reuse must never invoke the governor's run-alone exception.
+            yield None
+            return
+        request = governor.request(WINDOW_MEMO_BYTES, label="founder_refinement window memo")
+        memo = None
+        try:
+            if request.poll():
+                governor.rest(request.id)
+                memo = _WindowMemo()
+                self._window_memo = memo
+            yield memo
+        finally:
+            self._window_memo = None
+            if memo is not None:
+                self._window_memo_statistics = dict(memo.statistics)
+                memo.clear()
+            request.release()
+
+    def branch(self, choices, input_key=None):
+        """A sequential count continuation sharing the evidence and completed fits.
+
+        choices maps (fit label, canonical input panel) to a tied output panel.
+        Replaying from the original input reconstructs the same bootstrap labels,
+        count-cycle history and best-by-K state before the chosen decision.
+        """
+        branch = copy.copy(self)
+        branch._forced_panels = dict(choices)
+        branch._fit_scores = {}
+        branch._fit_invocations = {}
+        branch._chosen_panels = {}
+        branch.reused_fits = 0
+        branch.branch_key = hashlib.sha256(repr((input_key, tuple(sorted(choices.items())))).encode()).hexdigest()[:16]
+        branch.records = (None if self._base_records is None else
+                          self._base_records.scoped(f"branch/{branch.branch_key}", nthreads=1))
+        branch.census_prefix = (None if self.census_prefix is None else
+                               f"{self.census_prefix}/branch/{branch.branch_key}")
+        return branch
+
+    def _choose_fit(self, token, variants):
+        wanted = self._forced_panels.get(token)
+        fit = variants[0]
+        if wanted is not None:
+            fit = next(item for item in variants if tie_rules.panel_key(item.rows) == wanted)
+            if fit is not variants[0]:
+                self._fit_scores.pop(token[0], None)
+        self._fit_invocations[token[0]] = token[1]
+        self._chosen_panels[token] = tie_rules.panel_key(fit.rows)
+        return fit
 
     def _load(self, label):
         return None if self.records is None else self.records.load(label)
@@ -254,12 +425,33 @@ class SweepEngine:
     def score(self, panel, budget):
         return float(self.per_sample(panel, budget).sum())
 
+    def minimum_switches(self, panel, budget):
+        """Fewest exact-optimal diplotype switches, summed over the common evidence."""
+        key = tie_rules.panel_key(panel)
+        found = self._minimum_switches.get(key)
+        if found is not None:
+            return found
+        ws = self.workspace
+        with execution.numba_threads(max(1, int(budget.threads()))):
+            alleles = selected_alleles(ws.leaves, ws.offsets, np.asarray(key, np.int64))
+        total = 0
+        for s0, s1, threads in sample_ranges(ws.samples, budget):
+            with execution.numba_threads(threads):
+                _, counts = score_switches_direct(alleles, ws.logs[s0:s1], ws.penalty)
+            total += int(counts.sum())
+        self._minimum_switches[key] = total
+        return total
+
     def fit_scores(self, label, panel, budget):
         """Per-sample scores of the converged fit `label` (panel `panel`): the scores its last sweep
         computed, or computed now (a fit loaded from its record)."""
+        key = tie_rules.panel_key(panel)
         scores = self._fit_scores.pop(label, None)
         if scores is None:
+            scores = self._score_cache.get(key)
+        if scores is None:
             scores = self.per_sample(panel, budget)
+        self._score_cache[key] = scores
         return scores
 
     def fit_bytes(self, founders):
@@ -331,10 +523,22 @@ class SweepEngine:
         Numba thread each, as many at once as the live share allows (budget.thread_map)."""
         frontier_bytes = self.config.frontier_bytes
 
+        memo = self._window_memo
+
         def run(index):
+            key = None
+            if memo is not None:
+                a, c = self.windows.spans[index]
+                key = memo.key(index, a, c, X, fwd, bwd, frontier_bytes, convention)
+                result = memo.lookup(key)
+                if result is not None:
+                    return result, 0.0
             started = time.thread_time()
             result = self.windows.solve(index, X, fwd, bwd, frontier_bytes, convention)
-            return result, time.thread_time() - started
+            cpu = time.thread_time() - started
+            if memo is not None:
+                memo.store(key, result)
+            return result, cpu
 
         spans = self.windows.spans
         results = [None] * len(spans)
@@ -342,6 +546,7 @@ class SweepEngine:
                 else cache.lookup(spans, X, fwd, bwd, results))
         windows = self.windows
         sizes = [windows.template_bytes(*windows.templates[index], self.workspace.samples, len(X))
+                 + (0 if memo is None else memo.transient_bytes(*spans[index], X, fwd, bwd))
                  for index in todo]
         computed = budget.thread_map(run, todo, item_bytes=sizes, label="founder_refinement window solves")
         for index, value in zip(todo, computed):
@@ -408,10 +613,19 @@ class SweepEngine:
         reverse-first search (reversed convention) (module docstring). Both run concurrently, each with its share
         of the budget; the higher exact F is kept (tie classes of F; within a class the canonically smaller panel,
         flagged as tied_panels when the panels differ). Returns a Fit whose rows are in canonical founder order."""
+        token = (label, tie_rules.panel_key(start))
+        cached = self._fit_cache.get(token)
+        if cached is not None:
+            self.reused_fits += 1
+            return self._choose_fit(token, cached)
         done = self._load(f"{label}.done")
-        if done is not None:
-            return Fit(np.asarray(done["rows"], np.int64).copy(), FitSummary(**done["summary"]),
-                       tuple(WeakJunction(*item) for item in done["weak_junctions"]))
+        if done is not None and (not done["summary"].get("tied_panels") or "variants" in done):
+            payloads = done.get("variants", (done,))
+            variants = tuple(Fit(np.asarray(item["rows"], np.int64).copy(), FitSummary(**item["summary"]),
+                                 tuple(WeakJunction(*entry) for entry in item["weak_junctions"]))
+                             for item in payloads)
+            self._fit_cache[token] = variants
+            return self._choose_fit(token, variants)
         started = time.perf_counter()
         # Release 2.2: the two searches differ in their start direction and in their content-order convention
         # (forward-first: the default order, reverse-first: the reversed one), so the kept fit is the better of
@@ -439,8 +653,18 @@ class SweepEngine:
             tie_rules.census("assembly.refine_converge", f"{self.census_prefix}/{label}", [-v for v in values])
         chosen = ("fwd", "rev")[result.winner]
         tied_panels = ()
+        tied_scores = tied_switches = ()
+        minimum_switches = None
         if result.tied_winner and contents[0] != contents[1]:
             tied_panels = tuple(sorted(contents))
+            counts = [self.minimum_switches(X, budget) for X in (X_fwd, X_rev)]
+            minimum_switches = min(counts)
+            eligible = [i for i in result.order if counts[i] == minimum_switches]
+            chosen = ("fwd", "rev")[eligible[0]]
+            by_panel = {content: (value, count)
+                        for content, value, count in zip(contents, values, counts)}
+            tied_scores = tuple(by_panel[panel][0] for panel in tied_panels)
+            tied_switches = tuple(by_panel[panel][1] for panel in tied_panels)
             if self.counter is not None:
                 self.counter.note("assembly.refine_converge.symmetric", inside_tie=True)
         X, kept = (X_rev, rev) if chosen == "rev" else (X_fwd, fwd)
@@ -451,6 +675,7 @@ class SweepEngine:
         scores = {first: self._fit_scores.pop(f"{label}.{first}", None) for first in ("fwd", "rev")}
         if scores[chosen] is not None:
             self._fit_scores[label] = scores[chosen]
+            self._score_cache[tie_rules.panel_key(X)] = scores[chosen]
         summary = FitSummary(
             label=label, founders=int(kept["founders"]), F0=float(kept["F0"]), F=float(kept["F"]),
             converged=bool(kept["converged"]), sweeps=int(kept["sweeps"]), first=chosen,
@@ -459,12 +684,35 @@ class SweepEngine:
             max_deviation=float(kept["max_deviation"]),
             wall=time.perf_counter() - started,
             worker_cpu=float(fwd["worker_cpu"] + rev["worker_cpu"]),
-            thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]), tied_panels=tied_panels)
+            thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]), tied_panels=tied_panels,
+            tied_scores=tied_scores, tied_switches=tied_switches,
+            minimum_switches=minimum_switches)
         weak = tuple(WeakJunction(first, last, tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))),
                                   gain) for first, last, pair, gain in kept["weak_junctions"])
-        self._save(f"{label}.done", dict(rows=X.astype(np.int32), summary=vars(summary).copy(),
-                                         weak_junctions=[tuple(vars(item).values()) for item in weak]))
-        return Fit(X, summary, weak)
+        variants = [Fit(X, summary, weak)]
+        if tied_panels:
+            other_name = "fwd" if chosen == "rev" else "rev"
+            other_X, other = (X_fwd, fwd) if other_name == "fwd" else (X_rev, rev)
+            other_X, order = tie_rules.canonical_rows(np.asarray(other_X, np.int64))
+            inverse = np.empty(len(order), np.int64)
+            inverse[order] = np.arange(len(order), dtype=np.int64)
+            other_weak = tuple(WeakJunction(first, last,
+                tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))), gain)
+                for first, last, pair, gain in other["weak_junctions"])
+            other_summary = replace(summary, F=float(other["F"]), first=other_name,
+                converged=bool(other["converged"]), sweeps=int(other["sweeps"]),
+                max_frontier=int(other["max_frontier"]), frontier_fallbacks=int(other["frontier_fallbacks"]),
+                accepted=dict(other["accepted"]), max_deviation=float(other["max_deviation"]),
+                minimum_switches=self.minimum_switches(other_X, budget))
+            variants.append(Fit(other_X, other_summary, other_weak))
+            if scores[other_name] is not None:
+                self._score_cache[tie_rules.panel_key(other_X)] = scores[other_name]
+        payloads = [dict(rows=fit.rows.astype(np.int32), summary=vars(fit.summary).copy(),
+                         weak_junctions=[tuple(vars(item).values()) for item in fit.weak_junctions])
+                    for fit in variants]
+        self._save(f"{label}.done", dict(payloads[0], variants=payloads))
+        self._fit_cache[token] = tuple(variants)
+        return self._choose_fit(token, variants)
 
     def _converge_direction(self, start, label, first, budget, shared=None):
         """One search from start: sweeps until one accepts nothing (or the reported sweep limit);

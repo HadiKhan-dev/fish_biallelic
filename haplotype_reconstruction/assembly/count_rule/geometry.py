@@ -4,7 +4,9 @@ A panel is a K x B matrix of rows (one local row per founder and block). A cell 
 *private* to a founder when no other founder of the panel uses that row at that block. The
 shadow X+^sigma of a decided founder f replaces each of f's cells that the smaller panel does not
 use by the row the smaller panel uses at that block nearest to it (Hamming distance over sites
-called in both rows; ties to the lowest row). A founder without a private cell is a pure mosaic
+called in both rows). Equally nearest rows form a complete factored shadow domain; the count
+callers evaluate or explicitly flag that domain. The scalar helper chooses a representative
+for legacy/diagnostic uses. A founder without a private cell is a pure mosaic
 of the others: its sequence part q is exactly zero.
 
 Distances are measured on the pre-fill inference calls, the calls every likelihood of the join and
@@ -33,6 +35,7 @@ class RowGeometry:
     def __init__(self, calls: Sequence[np.ndarray]):
         self.calls = [np.asarray(value, dtype=np.int8) for value in calls]
         self._nearest = {}
+        self._nearest_options = {}
         self._pairs = {}
 
     @classmethod
@@ -53,6 +56,19 @@ class RowGeometry:
             # covered is sorted: ties -> lowest row (the highest under ties.reverse_conventions())
             found = covered[ties.conv_argmin(distance)]
             self._nearest[key] = found
+        return found
+
+    def nearest_options(self, block, row, covered):
+        """All equally nearest rows, cached independently of the traversal convention."""
+        key = (block, row, covered)
+        found = self._nearest_options.get(key)
+        if found is None:
+            target = self.calls[block][row]
+            candidates = self.calls[block][list(covered)]
+            both = (target >= 0)[None, :] & (candidates >= 0)
+            distance = ((candidates != target[None, :]) & both).sum(axis=1)
+            found = tuple(int(covered[i]) for i in np.flatnonzero(distance == distance.min()))
+            self._nearest_options[key] = found
         return found
 
     def _pair(self, block, first, second):
@@ -129,3 +145,21 @@ def has_novelty(path, others, cover, geometry: RowGeometry, near_identity: float
     if not any(row not in cover[b] for b, row in enumerate(path)):
         return False
     return not geometry.near_identical(path, others, near_identity)
+
+
+def shadow_choices(path, smaller_cover, geometry: RowGeometry):
+    """Factored complete nearest-row shadow family, independent of tie traversal.
+
+    Choices describe hypothetical count-test shadows, not additional inferred founders.
+    Returning the factorization avoids constructing an exponential path Cartesian product.
+    """
+    choices = []
+    lost = 0
+    for block, row in enumerate(path):
+        covered = smaller_cover[block]
+        if row in covered:
+            choices.append((int(row),))
+            continue
+        lost += 1
+        choices.append(geometry.nearest_options(block, int(row), covered))
+    return tuple(choices), lost

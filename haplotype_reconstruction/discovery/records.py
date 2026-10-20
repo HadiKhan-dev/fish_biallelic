@@ -9,6 +9,7 @@
 A contig is complete when every block index 0 .. B-1 is in some chunk. No genotype likelihoods
 are stored (blocks reference the evidence record by site span).
 
+Release 2.3: search summaries also hold search_incomplete, omissions and unresolved (defaults decode older records).
 Release 2.2: blocks also hold latent_unknown (founder alleles no assigned carrier observes) and the tied alternatives
 (tied_panels, tied_panel_nll, tied_unknown; recorded stacked with their founder counts tied_panel_k); 2.1 payloads
 decode with None / empty tuples.
@@ -76,6 +77,8 @@ def encode(block: DiscoveredBlock | None):
             conventions=int(summary.conventions), ambiguous=bool(summary.ambiguous),
             tied_alternatives=int(summary.tied_alternatives),
             score_margin=float(summary.score_margin),
+            search_incomplete=bool(summary.search_incomplete), unresolved=bool(summary.unresolved),
+            omissions=[dict(item) for item in summary.omissions],
             tie_events={str(kind): {str(name): int(value) for name, value in counts.items()}
                         for kind, counts in summary.tie_events.items()}))
 
@@ -86,6 +89,8 @@ def decode(payload) -> DiscoveredBlock | None:
         return None
     search = dict(payload["search"])
     search["limits"] = tuple(search["limits"])
+    if "omissions" in search:
+        search["omissions"] = tuple(dict(item) for item in search["omissions"])
     if "tie_events" in search:
         search["tie_events"] = {str(kind): {str(name): int(value) for name, value in dict(counts).items()}
                                 for kind, counts in dict(search["tie_events"]).items()}

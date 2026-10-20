@@ -50,9 +50,27 @@ class ComponentRefinement:
     additions reached it. ambiguous: the call is ambiguous (any decision, a cycle or a restored
     panel failing its own deletion test). final_fit: label of the returned panel's fit;
     best_f_replacement: see BestFReplacement. weak_label_junctions: of the returned fit.
-    alternatives (release 2.2): sets of alternative panels (panel keys) equally supported by the data -- the
-    final fit's tied forward/reverse results and the count decisions' alternatives -- released flagged; the kept
-    panel is one of them (decided by a stated prior, else the canonical key). Empty when the data decide.
+    alternatives: terminal same-K panels tied with the returned panel on the common F
+    objective, freshly compared; earlier discarded fit/count ties are not terminal ties.
+    release_alternatives (release 2.3): absolute-span families for founder release. A
+    same_k_equal_F family contains current final candidates. An
+    unresolved_count_continuation family contains actual decision-point panels on
+    the selected search ancestry whose alternate later count continuation was not
+    evaluated. Such a family has unresolved_search=True, not an asserted final F tie.
+    Computational shadow overflow is a separate count_unverified record with empty
+    panels, cause, domain size and decision scope. It never creates biological
+    alternatives or release withholding. Old records default to no metadata; this
+    is not evidence of absence of ambiguity.
+    count_continuations: evaluated count-choice source events and their actual
+    original-input terminal histories. source_choices_complete reports started
+    choices separately from unfinished descendant histories. retained_terminal_panels
+    are panel digests after the existing within-K F comparison; final_status distinguishes
+    resolved, same_k_tie, ambiguous_k and unverified. A cycle, count backstop or
+    missing descendant continuation cannot be reported as resolved. Source histories
+    survive as unresolved alternatives when comparison remains incomplete.
+    count_branch_evaluations / count_branch_seconds: extra original-input replays
+    directly triggered by a count choice, excluding the nominal run and later fit
+    branches. They are subsets of the overall branch counters.
     elapsed_seconds: wall time of the component's refinement. tie_events: maths.ties.TieCounter record of
     the component's tie-class decisions ({kind: {decisions, inside_tie, wide, boundary}}, release 2.1).
     """
@@ -83,6 +101,16 @@ class ComponentRefinement:
     elapsed_seconds: float = 0.0
     tie_events: dict = field(default_factory=dict)
     alternatives: tuple = ()
+    release_alternatives: tuple = ()
+    input_alternatives: tuple = ()
+    branch_evaluations: int = 1
+    branch_reused_fits: int = 0
+    branch_seconds: float = 0.0
+    branch_status: str = "none"
+    selected_branch: str | None = None
+    count_continuations: tuple = ()
+    count_branch_evaluations: int = 0
+    count_branch_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

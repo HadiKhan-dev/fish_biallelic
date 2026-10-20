@@ -21,9 +21,9 @@ from __future__ import annotations
 import numba
 import numpy as np
 from numba import njit, prange
-from numba.typed import List
 
 from ...maths import ties
+from .. import tie_rules
 from .objective import max_range
 
 
@@ -157,143 +157,86 @@ def candidate_novelty(local, candidates, penalty, panel_scores, eligible, *, wor
     return novelty, len(chosen)
 
 
-@njit(cache=True)
-def _top_replacement_indices(gains, eligible, quota, reverse):
-    """Same finite-gain order as (-gain, ('replace', founder, candidate)); the index order of equal gains is
-    reversed under the convention reversal."""
-    capacity = min(quota + 1, gains.shape[0] * len(eligible))
-    scores = np.empty(capacity)
-    founders = np.empty(capacity, np.int64)
-    candidates = np.empty(capacity, np.int64)
-    count = 0
-    n_founders = gains.shape[0]
-    n_eligible = len(eligible)
-    for f_index in range(n_founders):
-        founder = n_founders - 1 - f_index if reverse else f_index
-        for c_index in range(n_eligible):
-            candidate = eligible[n_eligible - 1 - c_index] if reverse else eligible[c_index]
-            gain = gains[founder, candidate]
-            at = 0
-            # Equal gains retain founder/candidate order from the traversal.
-            while at < count and gain <= scores[at]:
-                at += 1
-            if at < capacity:
-                end = min(count, capacity - 1)
-                for slot in range(end, at, -1):
-                    scores[slot] = scores[slot - 1]
-                    founders[slot] = founders[slot - 1]
-                    candidates[slot] = candidates[slot - 1]
-                scores[at] = gain
-                founders[at] = founder
-                candidates[at] = candidate
-                count = min(count + 1, capacity)
-    count = _cut_exact_ties(scores, count, quota)
-    return scores[:count], founders[:count], candidates[:count]
+class ScoredEdits:
+    """Complete numeric proxy candidates; materialise descriptions only after the global cut.
+
+    Identically indexed generators from the two paintings combine by maximum before any
+    screening. This retains chained near ties and oversized leading classes without a Python
+    tuple per replacement in a large pool.
+    """
+
+    def __init__(self, scores, edits, kind):
+        self.scores = np.asarray(scores, dtype=np.float64)
+        self.edits = np.asarray(edits, dtype=np.int64)
+        self.kind = kind
+
+    def __len__(self):
+        return len(self.scores)
+
+    def merge(self, other):
+        # Both paintings use the same incumbent, eligible pool and block row layout.
+        self.scores = np.maximum(self.scores, other.scores)
+
+    def ranked(self, quota, counter=None):
+        if not len(self) or quota <= 0:
+            return []
+        scale = float(np.max(np.abs(self.scores)))
+        quantum = tie_rules.quantum('join_proxy', scale)
+        order, classes, wide, boundary = tie_rules.path_class_order(
+            self.scores, self.edits, quantum, descending=True,
+            motion_value=tie_rules.motion('join_proxy', scale))
+        inside = (quota < len(order) and classes[order[quota - 1]] == classes[order[quota]])
+        tie_rules.count_vector_classes(counter, 'assembly.join_proposals', classes, wide,
+                                      boundary, inside)
+        if quota < len(order):
+            cut_class = classes[order[quota - 1]]
+            first = int(np.searchsorted(classes[order], cut_class, side='left'))
+            stop = int(np.searchsorted(classes[order], cut_class, side='right'))
+            order = order[:stop if stop <= 2 * quota or first == 0 else first]
+        return [(float(self.scores[i]), (self.kind, *map(int, self.edits[i]))) for i in order]
+
+
+def replacement_candidates(gains, eligible):
+    """All replacement proxies in compact arrays, before merging paintings and cutting."""
+    founders, columns = np.indices((len(gains), len(eligible)))
+    edits = np.column_stack((founders.ravel(), np.asarray(eligible)[columns.ravel()]))
+    return ScoredEdits(gains[:, eligible].ravel(), edits, 'replace')
 
 
 def replacement_proposals(gains, eligible, quota):
-    """The top ``quota`` replace(f, c) edits by gains[f, c] over the eligible pool paths."""
-    scores, founders, candidates = _top_replacement_indices(gains, eligible, quota,
-                                                            bool(ties.reverse_conventions()))
-    return [(float(score), ("replace", int(founder), int(candidate)))
-            for score, founder, candidate in zip(scores, founders, candidates)]
+    """Top replacement proxy classes, keeping the complete leading class even if oversized."""
+    return replacement_candidates(gains, eligible).ranked(quota)
 
 
-@njit(cache=True)
-def _cut_exact_ties(scores, count, quota):
-    """Release 2.2: the number of top items kept from a list sorted by score (descending) holding up to quota + 1
-    items, without letting the index order choose among items whose score equals the quota-th score: when the
-    (quota + 1)-th item ties the quota-th exactly, that whole tie group is dropped (kept whole only when it is the
-    first group, which then fills the quota in traversal order)."""
-    if quota <= 0:
-        return 0
-    if count <= quota:
-        return count
-    boundary = scores[quota - 1]
-    if scores[quota] != boundary:
-        return quota
-    start = quota - 1
-    while start > 0 and scores[start - 1] == boundary:
-        start -= 1
-    return start if start > 0 else quota
-
-
-@njit(cache=True)
-def _insert_edit(scores, edits, count, gain, first, second, third, reverse):
-    """Bounded insertion in (-gain, integer-description) order (the description order reversed under the
-    convention reversal)."""
-    at = 0
-    while at < count:
-        if gain > scores[at]:
-            break
-        if gain == scores[at]:
-            a, b, c = edits[at]
-            before = (first < a or (first == a and (second < b or (second == b and third < c))))
-            after = (first > a or (first == a and (second > b or (second == b and third > c))))
-            if (after if reverse else before):
-                break
-        at += 1
-    if at < len(scores):
-        for slot in range(min(count, len(scores) - 1), at, -1):
-            scores[slot] = scores[slot - 1]
-            edits[slot] = edits[slot - 1]
-        scores[at] = gain
-        edits[at, 0] = first
-        edits[at, 1] = second
-        edits[at, 2] = third
-        count = min(count + 1, len(scores))
-    return count
-
-
-@njit(cache=True)
-def _top_local_edits(fields, local, quota, reverse):
-    scores = np.empty(quota + 1)
-    edits = np.empty((quota + 1, 3), np.int64)
-    count = 0
-    screened = 0
-    for founder in range(len(local)):
-        for block in range(len(fields)):
-            for hap in range(fields[block].shape[1]):
-                if hap != local[founder, block]:
-                    screened += 1
-                    count = _insert_edit(scores, edits, count,
-                                         fields[block][founder, hap], founder, block, hap, reverse)
-    count = _cut_exact_ties(scores, count, quota)
-    return scores[:count], edits[:count], screened
+def local_candidates(fields, local):
+    """All one-block proxies; numeric storage follows the same layout in both paintings."""
+    scores, edits = [], []
+    for block, values in enumerate(fields):
+        founder, hap = np.indices(values.shape)
+        keep = hap != local[:, block, None]
+        scores.append(values[keep])
+        edits.append(np.column_stack((founder[keep], np.full(np.count_nonzero(keep), block), hap[keep])))
+    return ScoredEdits(np.concatenate(scores), np.concatenate(edits), 'local')
 
 
 def local_proposals(fields, local, quota):
-    """The top ``quota`` local(f, b, r) edits by their conditional field, and the number screened."""
-    arrays = List()
-    for values in fields:
-        arrays.append(values)
-    scores, edits, screened = _top_local_edits(arrays, local, quota, bool(ties.reverse_conventions()))
-    return [(float(score), ("local", int(a), int(b), int(c)))
-            for score, (a, b, c) in zip(scores, edits)], screened
-
-
-@njit(cache=True)
-def _top_boundary_edits(gains, boundary, quota, upper_triangle, reverse):
-    scores = np.empty(quota + 1)
-    edits = np.empty((quota + 1, 3), np.int64)
-    count = 0
-    for first in range(len(gains)):
-        for second in range(first + 1 if upper_triangle else 0, len(gains)):
-            if first != second:
-                count = _insert_edit(scores, edits, count,
-                                     gains[first, second], first, second, boundary, reverse)
-    count = _cut_exact_ties(scores, count, quota)
-    return scores[:count], edits[:count]
+    candidates = local_candidates(fields, local)
+    return candidates.ranked(quota), len(candidates)
 
 
 def boundary_proposals(gains, boundary, quota, kind):
-    """The top ``quota`` (kind, f, g, boundary) edits by gains[f, g] (splices: f < g only)."""
-    # Keeping q from every boundary is sufficient for the global top-q.
-    # Its final ranking still precedes cross-category panel de-duplication.
-    scores, edits = _top_boundary_edits(gains, boundary, quota, kind == "splice",
-                                        bool(ties.reverse_conventions()))
-    return [(float(score), (kind, int(a), int(b), int(c)))
-            for score, (a, b, c) in zip(scores, edits)]
+    """Boundary candidates. ``quota=None`` defers the cut until all boundaries are merged.
+
+    A per-boundary cut cannot preserve the global quantum or a chained cut class.
+    """
+    first, second = np.indices(gains.shape)
+    keep = first < second if kind == 'splice' else first != second
+    candidates = ScoredEdits(gains[keep], np.column_stack(
+        (first[keep], second[keep], np.full(np.count_nonzero(keep), boundary))), kind)
+    if quota is not None:
+        return candidates.ranked(quota)
+    return [(float(score), (kind, *map(int, edit)))
+            for score, edit in zip(candidates.scores, candidates.edits)]
 
 
 @njit(cache=True, parallel=True)

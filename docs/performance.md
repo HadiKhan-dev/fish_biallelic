@@ -1,8 +1,113 @@
 # Performance and resource use
 
-How a run uses its CPUs and memory, what the compiled-kernel and checkpoint caches do, why results do not depend
-on any of it, and what a whole-genome run costs. Runtime, peak memory and scaling are acceptance criteria of the
-package, measured on the reference runs ([validation.md](validation.md)).
+## 2.3 integration measurements
+
+The release benchmark uses 112 allocated cores on an AMD EPYC 7763 node. Report
+host, CPU model, affinity, wall time, CPU time and memory together. The 2.1 TroMau
+reference ran on 112-core Sapphire: 2,298.5 seconds and 41.74 GiB peak process RSS.
+A ratio across these machines does not isolate a software speed change. The governor
+uses available node memory with normal headroom, without throttling at the historical
+1.5-times baseline. Report both the whole-run peak and largest single-task footprint.
+
+### Completed integration measurements
+
+| Measurement | Source and hardware | Result |
+| --- | --- | --- |
+| TroMau cold pipeline | v23c4, EPYC 7763, 112 cores | 2,947.967 s; full acceptance task 3,011.076 s |
+| TroMau sampled process-tree resources | Same run | 93,379.74 CPU-s; 62.524 GiB summed RSS peak |
+| Whole family-phase stage | C1 Y, EPYC 7763, 112 cores | 1,492.322 s; post-fit separately 321.142 s |
+| Family-stage worker resources | Same Y run | 110,610.43 contig CPU-s; 74.12 mean busy cores |
+| Family-stage memory | Same Y run | 469.605 GiB whole-tree peak; 83.560 GiB largest task |
+| Fixed-genome N80 pipeline | v23c5 (G7 and C1 X), EPYC 7763, 112 cores | 327.576 s |
+
+TroMau's raw wall ratio to the 2.1 Sapphire baseline is 1.283. Hardware differs,
+so this does not establish a matched resource gate. Four observed exit-counter races
+qualify its sampled CPU total. Summed RSS can count shared pages repeatedly; it is
+not directly comparable to a historical peak-process value. Later G7/C1/G8 biological
+identity evidence carries results, not the v23c4 timing.
+
+The whole family-phase target is about **1,200 seconds at N=320 on 112 cores**,
+originally Sapphire. Y's combined family stage and post-fit is 1,813.464 seconds;
+its ideal 112-core floor from contig CPU is 987.59 seconds. Stage6ab whole-stage timing
+is pending at freeze unless reported below. Eight passing std/stress identity controls
+do not establish speed. The N-series uses C1 X, so neither Y nor AB timings may be
+substituted into that series. Full final truth and invariance coverage is incomplete.
+
+### Certified exclusion shortcut
+
+G8's completed-window certificate preserves the original genome-average exclusion
+threshold, with exact completion for unproved cases. On TroMau it certifies 273 of
+704 chromosome-dyads, completes 431 exactly and avoids 26.224% of pair-site visits.
+Measured kernel CPU falls from 20.955 to 19.741 seconds (5.79%) on the 112-core
+EPYC 7763 worker. This modest kernel saving is not a whole-pedigree speedup or a
+subquadratic complexity claim. Two diagnostic tables expose certified intervals;
+biological releases are identical under the approved report contract. Four-dataset
+checks cover actual G8 TroMau/std artifacts and zero-target stress/sim carry-over,
+plus a bounded default-handler, serialization and checkpoint-reuse fixture.
+
+### Fixed-genome scaling design and interpretation
+
+The prepared series uses five cropped template chromosomes (chr8, chr10, chr13,
+chr19 and chr20), six founder haplotypes, depth five, three observed generations and
+repeated family units of 2/4/4 samples, at N=80/160/320/640. Each chromosome retains
+a fixed 15,200,363-bp prefix span from its first marker. The total is 652,126 markers,
+equal to the former two-chromosome design. Original probabilities and coordinates
+are preserved. Exact counts, positions and template hashes are in the benchmark
+manifest. Pedigree thresholds are unchanged; observed-parent family sizes stay
+fixed while family count grows.
+
+The pedigree adapter changes only structure sampling; production meiosis and read
+kernels are unchanged. The same tiny preflight precedes each timed cell outside
+measured time and warms its exercised signatures; residual compilation can remain.
+Measured cells start with cold inference checkpoints. One realization per N gives
+descriptive slopes, not an asymptotic proof. The extractor refuses mixed hardware,
+core budgets, source, design or cache regimes. N80/N320 use frozen v23c5 (G7 plus
+C1 X). N80 completed in 327.576 seconds; N320 and two-point exponents are pending
+at freeze unless reported below. N160/N640 remain unmeasured unless separately
+reported. Later Y/AB exact swaps do not change the source of these measurements.
+
+Native records preserve per-contig stage work times. A separate benchmark sampler
+measures major-phase wall and CPU time and summed process-tree RSS every 0.25 seconds.
+Concurrent local selection, assembly and painting share the reconstruction resource
+row; their native individual worker times remain separate. Summed worker seconds
+are not elapsed wall time. Nested pedigree phase rows must not be added to the
+inclusive stage total.
+
+The target outside pedigree remains about **N^1.2**. Pedigree's restated target is
+linear expensive work with bounded plausible parents, a certified all-pairs screen
+projected at at most 10% of total runtime at N=10,000 on the same genome and hardware,
+and no dense quadratic default-path arrays beyond compact screen storage. Dense
+downstream arrays remain, so the full pedigree target is **not met**. The later
+sections distinguish kernel gains from these unresolved pipeline requirements.
+
+Process-pool claims reserve shared capacity before admission and retain it until the
+worker reduces its claim at a numerical boundary or finishes. Late workers wait when
+no CPU is free. Counter fixtures, bounded four-core numerical fixtures and paired K30
+scientific identity pass. Family phase uses the matching in-process claim ledger.
+Stage6ab adds first-task work-based initial shares while retaining remaining work for
+dynamic growth, and admits scratch before nested CPU claims. Focused admission and
+first-pass tests preserve the model and CPU accounting; full-run utilization is
+measured separately.
+
+### Validation coverage at freeze
+
+Evidence snapshot: **2026-10-20T08:22:56.652274+01:00**. At the evidence freeze (2026-10-20T08:22:56.652274+01:00), the exact terminal NOT_RUN list is empty: no deadline guard has yet skipped a task. Pending or running cells are uncompleted, not passes. The final report must add any later NOT_RUN records without changing this frozen transfer.
+
+Std reference carry-over is established for discovery by all 11,822 saved c3 blocks on eight contigs: K1 has at most 80 samples and the largest residual pool is 184, below 256. Partner pools are subsets of the global pool. The inactive branches retain the dense code; exact clique changes and C1/G7/G8 deltas use their accepted identity evidence. This is compositional biological carry-over of the c3 reference, not a fresh final-tree run or proof for perturbed inputs.
+
+Actm3's saved c3 residual pools reach 292, 310 and 270 on the three checked contigs,
+so A256 can activate. Its c3 result does **not** carry to the final tree. No c4 actm3
+reference has completed; final actm3 evidence is component-only. TroMau completed
+on c4 and carries biologically through the accepted exact swaps, with G8's explicit
+interval-report contract. Completion is not a truth or reversal/noise pass.
+
+The uncompleted truth references are stress_n80, lad_K20_n80, lad_K30_n80, f3_fam,
+backcross_s6202, reallike6_nf_s3, actm3 and sim_s10000. The queued c4 std reference
+has not started. Both std and stress still lack their final iid12_s1, reversal and
+rename_s1 controls. N320 is running, N160/N640 are unmeasured and AB whole-stage
+timing is pending. TroMau reversal, the broader zero loop and final Gate W remain
+uncompleted. Later results belong in the campaign report; this document does not
+anticipate their outcomes.
 
 ## Where the time goes
 
@@ -187,3 +292,79 @@ a fifth of TroMau's.
 
 Concurrent runs belong on separate allocations with separate output roots. On a shared node, the governor's limit
 starts from the memory available when the run starts; set `[execution] memory_limit` to leave room for other work.
+
+## Earlier integration measurements (v23c2/v23c3)
+
+The earlier v23c2 integration combined stage6v family phase, the G4 genome-wide pedigree model and exact-only hotspot3 discovery. G4's cached-score replays took about25/27/51/32seconds for std/stress/sim/TroMau on112 EPYC7763 cores; these are not full-stage timings. Raw M1 remains quadratic and downstream floor rows remain dense. The retained M2 panel has no arbitrary cap, so its cost depends on the data-supported parent counts.
+
+Hotspot3 counts exact residual clique size classes before materialization; dense distances remain quadratic. Published warm residual slopes1.077(wall)/1.078(CPU) and the28.25x N640 speedup were measured with the A256 pilot enabled. They are not exponents for that earlier exact-only configuration. Default-on landmarks entered v23c4, as described below.
+
+Stage6v isolated chr3/chr12 fits took733.290/407.284seconds on112 EPYC7763 cores; the former U runs shared a concurrent whole-stage budget, so these are not matched speedup ratios. Whole-stage1200seconds and N^1.2 acceptance remain open. Later exact changes require explicit identity checks before earlier validation is carried forward. Current release-panel tasks record frozen source manifests, hardware, native stage timings, sampled process-tree CPU/RSS and per-process high-water statistics. Sampled RSS may count shared pages more than once.
+
+### Integrated W and calibration aggregation measurements
+
+Stage6w preserves stage6v released fields in the supplied identity gates. Its transition lookup, allocation-free cavity accumulation and independent-site parallelism are integrated; these gates are not a whole-stage 1,200-second result. G5 calibration aggregates identical complete chromosome vectors with identical priors and reciprocal masks. On the paired 112-core EPYC 7763 replay, the sim_s10000 fit drops from 7.357 to 4.246 seconds (42.3%); this is predominantly serial optimizer work, not a whole-pedigree speedup. Exact M1 screening and dense layouts remain. The final measured complete-pedigree N80/N320 cohort uses v23c5; its hardware-specific wall, CPU and sampled RSS slopes are reported separately above.
+
+## Default-on A256 measurements and scaling limits
+
+
+Let N be samples, M retained markers, L markers per block, K founders, R <= NK
+residual records (default responsibility threshold further bounds R by a constant
+times N), A=256, P<=K^2 partner routes, U searched panels, and I fit iterations.
+Assume the genome/block width, cross design/K and computational budgets are fixed
+when describing scaling with N. Let F(A) denote hierarchy/clique work on at most A
+vertices; it can be exponential in A and is a potentially large fixed constant.
+Hotspot3 changes this constant by exact packed enumeration/counting and size-class
+screening; it does not impose a new clique cap.
+
+| Phase | Dense reference | Enabled A256 |
+|---|---|---|
+| Input/evidence tables | O(NM) | unchanged |
+| K1 descriptors and geometry per block | O(N^2 L) distances and quadratic arrays | O(N L log N + A N log N + A N L + F(A)); O(N(L+A)+A^2) arrays |
+| Fixed-K A/H fitting | leading O(I N L K^2), plus K-dependent solves | unchanged |
+| Cavity score | O(N L f(K,I)) with held-out patches | unchanged |
+| Residual records | O(N K^2 L), O(RL+NK^2) storage | unchanged |
+| Each residual pool | O(R^2 ceil(L/64)) distances, quadratic hierarchy storage, potentially cubic diameter work and exponential cliques | O(R L log R + A R log R + R A ceil(L/64) + F(A)), plus group lifting/consensus linear in R at fixed admitted group budget/A |
+| Partner routes | corresponding dense terms summed over P<=K^2 routes, each at most N records | corresponding bounded terms summed over the same routes; small exact routes also have at most A records |
+| Search/release | preceding costs multiplied by U and M/L blocks; release O(NKL) per block | same search policy, altered proposals; O(N log N) dependence at fixed K,L,A,U,I |
+
+The prototype and duplicate sorting produce N log N terms: this is not literally
+an O(NA)-only algorithm. For fixed K, L and budgets, the asymptotic sample dependence
+is below N^1.2. No claim is made if K, genome size, solver iterations or admitted
+search count grow with N, or that F(256) is harmless on all possible graphs.
+The memory planner switches from dense squares to conservative linear record-by-A
+scratch reservations above the activation boundary. The same exact1 digest keys
+avoid retained quadratic key bytes. Caches remain bounded or depend on fixed
+search budgets; reported process RSS includes Python/JIT allocator high-water.
+
+
+The complete-block pilot exponent is 0.330 for N>=320 (wall), not a whole-genome guarantee. Residual activation depends on record count R>256; small sample count alone does not establish inactivity. Integrated N-series results are required.
+
+Pedigree acceptance now requires linear expensive exact M1/M2/decision/resampling work with bounded plausible candidates per child. Any all-pairs screen must remain cheap: project its measured per-pair cost to N=10,000 on matching hardware and report its share of the total-runtime fit, with a target at most10%. No dense [N,N] or [C,N,N] arrays may remain outside compact screen storage. The current integrated dense screen is not claimed to meet this requirement. The N-series reports screen wall/CPU per directed dyad and its observed/projection share separately; projections from four points are descriptive and must not be treated as asymptotic proof.
+
+## Certified pedigree screen
+
+The default pedigree stage uses a certified selective M1 screen. Unproved
+candidates receive exact HMM scores; the genome-wide floor and complete retained
+parent-pair panel are unchanged. Raw component scores are computed where a missing
+parent requires the existing M2 fallback. Compact screen and fixed-score checkpoints
+are distinct from raw reference scores, avoiding a second genome-floor transform.
+
+On the matched 112-core EPYC 7763 simulation screen, exact computation took
+322.982 seconds and 29,833.15 CPU seconds; selective computation took 121.286
+seconds and 3,480.03 CPU seconds (2.663 times wall and 8.573 times CPU speedup).
+The screen avoided 96.802% of exact chromosome-dyad queries. This is screen timing,
+not whole-pipeline scaling. Dense downstream decision, exposure, cavity and
+resampling arrays remain; the full memory and scaling requirements are not met.
+The observed bound cost of 18.3669 ms CPU per full-genome pair projects to about
+4.56 hours at N=10,000 under ideal 112-core utilization. Its fraction of a matched
+whole-pipeline runtime awaits the N-series; do not compare different genome spans.
+
+## Follow-up performance policy
+
+Sparse downstream pedigree decisions, exposure, cavity/path and resampling remain
+necessary to eliminate dense quadratic arrays. Full N80/160/320/640 validation and
+omitted release controls remain follow-up. After2.3, the owner permits a few ULP of
+floating-point difference for SIMD/FMA or reassociated reductions only when released
+decisions remain unchanged. That policy is not used for2.3 identity swaps. The C8
+orientation estimator is deferred to2.4; honest phase breaks remain the2.3 output.

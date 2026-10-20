@@ -30,7 +30,7 @@ from ...store.identity import canonical_json, code_identity, jsonable
 from .. import records as assembly_records
 from .batch import (BatchTask, JoinResult, JoinSettings, batch_digest, join_batch, run_batch,
                     team_size)
-from .batches import LevelPartition, partition
+from .batches import LevelPartition, partition, informative_masks
 
 MAX_TASKS_PER_WORKER = 4                 # base WORKER_MAXTASKS: recycle workers to return freed memory
 BUNDLE_EVIDENCE_BYTES = 256 << 20        # batch queue: evidence transported per bundle (about)
@@ -52,6 +52,8 @@ class LevelOutput:
     reused: int
     partition: LevelPartition
     elapsed_seconds: float
+    release_alternatives: tuple = ()
+    shadows: tuple = ()
 
 
 def join_context(settings: JoinSettings) -> str:
@@ -84,6 +86,9 @@ def batch_memory_bytes(task: BatchTask) -> int:
     0.37-0.40, L3 0.55, L3 at 2,000 bins 0.80, a pool at quota 1024 (backstop counted) 0.69; AulStu chr3
     proxy L1 (K 8-16, S 290): 0.43-0.79. A process's first batch also loads its cached kernels (+0.3 GB).
     """
+    if task.branches:
+        return max(batch_memory_bytes(replace(task, components=branch, branches=()))
+                   for branch in task.branches)
     from ..join import emissions as join_emissions
     from ..join import moves as join_moves
     from ..join import search as join_search
@@ -128,28 +133,59 @@ def _task(index, components, prepared, samples, settings) -> BatchTask:
 def _encode_join(result: JoinResult) -> dict:
     return dict(schema=assembly_records.SCHEMA, rows=np.ascontiguousarray(result.rows, np.int32),
                 log_likelihood=float(result.log_likelihood), summary=result.summary.record(),
-                seconds=float(result.seconds))
+                seconds=float(result.seconds), release_alternatives=result.release_alternatives,
+                minimum_switches=result.minimum_switches, shadow=result.shadow)
 
 
 def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_size: int,
-              min_informative: int, records=None, budget, queue=None) -> LevelOutput:
+              min_informative: int, records=None, budget, queue=None,
+              release_alternatives=()) -> LevelOutput:
     """Join one level (see the module docstring). ``records``: the assembly section's RecordScope
     already scoped to the level (``<P>/l<k>``) or None."""
     from ...execution import numba_threads
     from ..join.search import JoinSummary
     started = time.perf_counter()
     evidence = evidence.ensure_shared()
+    from ..alternatives import component_choices, common_masks, common_site_masks, joint_choices
+    choices, consumable, inherited = component_choices(components, release_alternatives)
+    shared_sites, lost_sites = common_site_masks(choices, prepared) if consumable else ((), ())
     with numba_threads(team_size(budget)):
+        masks = (common_masks(choices, prepared, evidence.neutral, settings.linker.max_sites,
+                              usable_masks=shared_sites) if consumable else None)
         split = partition(components, prepared, evidence.neutral, batch_size=batch_size,
-                          min_informative=min_informative, max_sites=settings.linker.max_sites)
+                          min_informative=min_informative, max_sites=settings.linker.max_sites, masks=masks)
     context = join_context(settings)
     tasks, digests = {}, {}
+    retained = list(inherited)
     for index, (first, end) in enumerate(split.ranges):
         samples = split.batch_samples[index]
+        source = [family for family in consumable
+                  if components[first].start <= family["start"] and family["stop"] <= components[end - 1].stop]
+        branches, combinations = joint_choices(choices[first:end])
         if end - first >= 2 and len(samples):
             task = _task(index, split.components[first:end], prepared, samples, settings)
+            if source:
+                task = replace(task, common_usable=shared_sites[first:end],
+                               common_usable_lost=sum(lost_sites[first:end]))
+            if source and combinations > 1:
+                if branches:
+                    origin = components[first].start
+                    relative = tuple(tuple(FounderComponent(c.start - origin, c.stop - origin, c.rows)
+                                           for c in branch) for branch in branches)
+                    nominal_mask = np.logical_and.reduce(
+                        informative_masks(components[first:end], prepared, evidence.neutral,
+                                           settings.linker.max_sites))
+                    task = replace(task, branches=relative, branch_sources=tuple(source),
+                                   common_mask_lost=int(nominal_mask.sum()) - len(samples))
+                else:
+                    retained.extend(dict(family, unresolved_search=True, status="unresolved_joint_budget",
+                                         joint_combinations=combinations,
+                                         lost_usable_sites=task.common_usable_lost,
+                                         usable_site_reference="union_of_input_alternatives") for family in source)
             tasks[index] = task
             digests[index] = batch_digest(task, context=context, evidence_identity=evidence.identity)
+        else:
+            retained.extend(source)
     plan = tuple((first, end, digests.get(index)) for index, (first, end) in enumerate(split.ranges))
     if records is not None and not records.has("plan"):
         records.save("plan", {"batches": [list(item) for item in plan]})
@@ -188,13 +224,19 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
             for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
                                               task_bytes=estimates, envelope=True):
                 record(result)
-    output, joins, likelihoods = [], [], []
+    output, joins, likelihoods, release_alternatives = [], [], [], retained
+    shadows = []
     for index, (first, end) in enumerate(split.ranges):
         inputs = split.components[first:end]
         if index not in tasks:
             output.extend(inputs)      # a single component, or a batch without informative samples
             continue
         payload = results[index]
+        if payload.get("shadow") is not None:
+            shadows.append(dict(payload["shadow"], start=inputs[0].start, stop=inputs[-1].stop))
+        release_alternatives.extend(dict(item, start=inputs[0].start + int(item["start"]),
+                                          stop=inputs[0].start + int(item["stop"]))
+                                    for item in payload.get("release_alternatives", ()))
         output.append(FounderComponent(
             start=inputs[0].start, stop=inputs[-1].stop, rows=payload["rows"],
             break_before=inputs[0].break_before, break_after=inputs[-1].break_after))
@@ -202,7 +244,8 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
         likelihoods.append(float(payload["log_likelihood"]))
     return LevelOutput(components=tuple(output), plan=plan, joins=tuple(joins),
                        log_likelihoods=tuple(likelihoods), reused=reused, partition=split,
-                       elapsed_seconds=time.perf_counter() - started)
+                       elapsed_seconds=time.perf_counter() - started,
+                       release_alternatives=tuple(release_alternatives), shadows=tuple(shadows))
 
 
 def _task_sites(task: BatchTask) -> tuple[int, int]:

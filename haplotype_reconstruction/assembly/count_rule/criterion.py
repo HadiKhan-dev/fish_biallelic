@@ -216,6 +216,62 @@ def decide(per_sample_larger, per_sample_smaller, per_sample_shadow, cost: float
         samples=samples, cost=float(cost), seed=seed)
 
 
+class ShadowDecisionFamily:
+    """Reuse one count comparison's total test and bootstrap draws across shadows.
+
+    Construct only for a multi-shadow family sharing larger/smaller scores, cost,
+    kind, configuration and seed. The caller still scores every represented shadow
+    before calling ``decide``. Identical float64 score vectors reuse the immutable
+    CountDecision; no approximation, alternative pruning or cross-family cache is
+    involved. Drop this object after the family so its draw matrix and small score
+    keys are released. ``decide`` above remains the ordinary/reference path.
+    """
+
+    def __init__(self, per_sample_larger, per_sample_smaller, cost: float, *, kind: str,
+                 config: CountRuleConfig, seed_key):
+        self.larger = np.asarray(per_sample_larger, np.float64)
+        differences = self.larger - np.asarray(per_sample_smaller, np.float64)
+        self.samples = len(self.larger)
+        self.cost = float(cost)
+        self.kind = kind
+        self.seed = bootstrap_seed(seed_key)
+        self.level = float(config.bootstrap_level)
+        self.total = _test(differences, cost, self.samples)
+        self.index = _resampled_individuals(self.seed, int(config.bootstrap_resamples), self.samples)
+        self.total_replicates = self._replicates(differences)
+        self._decisions = {}
+
+    def _replicates(self, differences):
+        # Keep the exact array shapes and arithmetic order of _joint_bootstrap.
+        draws = differences[self.index]
+        net = draws.sum(axis=1) / self.cost
+        positive = np.maximum(draws, 0.)
+        square = (positive * positive).sum(axis=1)
+        mass = positive.sum(axis=1)
+        carriers = np.divide(mass * mass, square, out=np.zeros_like(mass), where=square > 0.)
+        return net - carriers / (2. * self.samples)
+
+    def decide(self, per_sample_shadow) -> CountDecision:
+        shadow = np.asarray(per_sample_shadow, np.float64)
+        key = shadow.tobytes()
+        found = self._decisions.get(key)
+        if found is not None:
+            return found
+        differences = self.larger - shadow
+        sequence = _test(differences, self.cost, self.samples)
+        values = np.minimum(self.total_replicates, self._replicates(differences))
+        tail = (1. - self.level) / 2.
+        low, high = np.quantile(values, [tail, 1. - tail])
+        band = float(low), float(high)
+        decision = CountDecision(
+            kind=self.kind, accept_larger=bool(self.total.passes and sequence.passes),
+            margin=float(min(self.total.margin, sequence.margin)), band=band,
+            ambiguous=bool(band[0] < 0. < band[1]), total=self.total, sequence=sequence,
+            samples=self.samples, cost=self.cost, seed=self.seed)
+        self._decisions[key] = decision
+        return decision
+
+
 def pre_cycle_count(history, larger: int, structural=frozenset()) -> int:
     """The founder count a count cycle started from (the join and founder refinement).
 

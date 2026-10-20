@@ -67,6 +67,7 @@ class LevelInput:
     additions: bool
     count_rule: count_rule.CountRuleConfig
     evidence_ref: object | None = None
+    release_alternatives: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,12 @@ class LevelResult:
     components: FounderComponents
     refinements: tuple[ComponentRefinement, ...]
     summary: LevelSummary
+
+    @property
+    def release_alternatives(self):
+        """Decision-point families and terminal ties on absolute prepared-block spans."""
+        return tuple(family for refinement in self.refinements
+                     for family in refinement.release_alternatives)
 
 
 @dataclass(frozen=True)
@@ -123,16 +130,39 @@ def macro_context(component, l1_context):
 
 
 def _final_alternatives(result) -> tuple:
-    """Release 2.2: the sets of alternative panels the data support equally for the refined component (released
-    flagged, panel keys): the final fit's tied forward/reverse results and the alternatives of its count decisions."""
-    sets = []
-    for fit in result.fits:
-        if fit.label == result.final_fit and getattr(fit, "tied_panels", ()):
-            sets.append(tuple(fit.tied_panels))
-    for decision in result.decisions:
-        if getattr(decision, "alternatives", ()):
-            sets.append(tuple(decision.alternatives))
-    return tuple(sets)
+    """Current final-F alternatives only, never the union of historical decisions."""
+    return tuple(tuple(family["panels"]) for family in result.live_alternatives)
+
+
+def _release_alternatives(result, component, level):
+    """Biological families and nonwithholding count-verification metadata for release."""
+    return tuple(dict(family, start=int(component.start), stop=int(component.stop),
+                      source_level=int(level))
+                 for family in (*result.live_alternatives, *result.unresolved_alternatives,
+                                *result.count_unverified))
+
+
+def _refinement_inputs(component, incoming):
+    """Whole-span terminal families can be compared on this workspace's common mask.
+
+    A partial-span source or an uncontinued source has no justified full panel
+    correspondence. Keep it explicitly unresolved while refining the representative.
+    """
+    nominal = tie_rules.panel_key(component.rows)
+    panels = {nominal}
+    retained = []
+    for family in incoming:
+        exact = (int(family["start"]) == component.start and int(family["stop"]) == component.stop)
+        family_panels = {tie_rules.panel_key(np.asarray(panel)) for panel in family["panels"]}
+        if exact and not family.get("unresolved_search", False) and nominal in family_panels:
+            panels.update(family_panels)
+        elif family.get("unresolved_search", False):
+            retained.append(family)
+        else:
+            reason = "unresolved_component_correspondence" if exact else "unresolved_refinement_continuation"
+            retained.append(dict(family, source_reason=family.get("reason"),
+                                 reason=reason, unresolved_search=True))
+    return tuple(sorted(panels)), tuple(retained)
 
 
 def _count_call(refinement: ComponentRefinement) -> CountCall:
@@ -151,7 +181,8 @@ def _count_call(refinement: ComponentRefinement) -> CountCall:
         reason=None)
 
 
-def refine_component(number, component, panels, evidence, context, settings, budget, fit_records):
+def refine_component(number, component, panels, evidence, context, settings, budget, fit_records,
+                     incoming=()):
     """Refine one component (the converged fit of its incoming panel and its count pass).
 
     panels: its prepared panels; evidence: its float32 (S, L_c, 3) evidence; context: its L1
@@ -165,7 +196,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         refinement = ComponentRefinement(
             component=int(number), start=int(component.start), stop=int(component.stop),
             changed=False, reason="single_block_or_founder", founders_before=int(founders),
-            founders=int(founders), elapsed_seconds=time.perf_counter() - started)
+            founders=int(founders), elapsed_seconds=time.perf_counter() - started,
+            release_alternatives=tuple(incoming), input_alternatives=tuple(incoming))
         return replace(component, count_call=_count_call(refinement)), refinement
     # Tie-class decisions of the component (fits and count pass) and its valley-census prefix.
     counter = tie_rules.SharedCounter()
@@ -185,15 +217,18 @@ def refine_component(number, component, panels, evidence, context, settings, bud
     # Deterministic bootstrap streams per component and decision (positions, size).
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks),
                 int(founders)]
-    result = count_pass(engine, geometry, start_rows, cost, settings.count_rule, budget, seed_key,
-                        settings.additions, counter=counter, census_prefix=census_prefix)
+    alternative_starts, retained = _refinement_inputs(component, incoming)
+    with engine.memoized_windows(enabled=len(alternative_starts) > 1):
+        result = count_pass(engine, geometry, start_rows, cost, settings.count_rule, budget, seed_key,
+                            settings.additions, counter=counter, census_prefix=census_prefix,
+                            alternative_starts=alternative_starts)
     rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(
         component=int(number), start=int(component.start), stop=int(component.stop),
         changed=not (same_shape and np.array_equal(rows, start_rows)), reason=None,
         founders_before=int(founders), founders=int(len(rows)),
-        F0=float(result.fits[0].F0), F=float(result.F),
+        F0=float(result.input_F0), F=float(result.F),
         changed_local_rows=int(np.count_nonzero(rows != start_rows)) if same_shape else None,
         bin_size=int(workspace.bin_size), coarse_units=engine.windows.coarse_units, cost=cost,
         decisions=result.decisions, fits=result.fits, count_cycle=result.count_cycle,
@@ -201,7 +236,15 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         count_limit_reached=result.count_limit_reached, ambiguous=result.ambiguous,
         final_fit=result.final_fit, best_f_replacement=result.best_f_replacement,
         weak_label_junctions=result.weak_junctions, elapsed_seconds=time.perf_counter() - started,
-        tie_events=counter.record(), alternatives=_final_alternatives(result))
+        tie_events=counter.record(), alternatives=_final_alternatives(result),
+        release_alternatives=(*retained, *_release_alternatives(result, component, settings.level)),
+        input_alternatives=tuple(incoming),
+        branch_evaluations=result.branch_evaluations, branch_reused_fits=result.branch_reused_fits,
+        branch_seconds=result.branch_seconds, branch_status=result.branch_status,
+        selected_branch=result.selected_branch,
+        count_continuations=result.count_continuations,
+        count_branch_evaluations=result.count_branch_evaluations,
+        count_branch_seconds=result.count_branch_seconds)
     refined = replace(component, rows=np.ascontiguousarray(rows, np.int32),
                       count_call=_count_call(refinement))
     return refined, refinement
@@ -209,11 +252,11 @@ def refine_component(number, component, panels, evidence, context, settings, bud
 
 def _component_task(task, shared, budget):
     """One component's refinement in a pool worker (the chromosome evidence attached, not copied)."""
-    number, component, panels, context, settings, fit_records = task
+    number, component, panels, context, settings, fit_records, incoming = task
     execution.release_memory()
     evidence = component_evidence(shared["evidence"], panels)
     return number, refine_component(number, component, panels, evidence, context, settings, budget,
-                                    fit_records)
+                                    fit_records, incoming)
 
 
 def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds) -> LevelSummary:
@@ -291,8 +334,10 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
             continue
         panels = tuple(level.prepared[component.start:component.stop])
         fit_records = None if store is None else store.fits(number, component.stop - component.start)
+        incoming = tuple(family for family in level.release_alternatives
+                         if int(family["start"]) < component.stop and int(family["stop"]) > component.start)
         tasks.append((number, component, panels, macro_context(component, level.l1_context),
-                      settings, fit_records))
+                      settings, fit_records, incoming))
 
     def record(number, result):
         results[number] = result
@@ -311,7 +356,7 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
     if workers <= 1:
         functions = [lambda child, task=task: refine_component(
             task[0], task[1], task[2], component_evidence(level.evidence, task[2]), task[3],
-            task[4], child, task[5]) for task in tasks]
+            task[4], child, task[5], task[6]) for task in tasks]
         for index, result in budget.concurrent(functions, sizes, label=label):
             record(tasks[index][0], result)
     else:

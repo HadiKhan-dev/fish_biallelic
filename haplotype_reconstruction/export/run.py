@@ -2,9 +2,9 @@
 
 The same files as the run's export stage (OUTPUT/export, export.stage), written to DEST, which must be new or empty
 (an export never overwrites). Per chromosome, by default: the founder VCF (one haploid column c<C>_H<k> per founder
-row k of every component C; founder-refit panels when recorded, else the painted panels) and the family-phase
+row k of every release segment C; founder-refit panels when recorded, else the painted panels) and the family-phase
 calls, full length (every input biallelic SNP that reached the site filter, FILTER PASS or the rules that removed
-it), each with its index; optionally the per-component founder-track TSVs. DEST/manifest.json describes every file.
+it), each with its index; optionally the per-segment founder-track TSVs. DEST/manifest.json describes every file.
 The products are read through their stages' records APIs; nothing is recomputed or recorded.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .vcf import place, suffix
 
 DEFAULT_PRODUCTS = ExportConfig().products
 SCHEMA_V1 = "released-allele-export-v1"     # founder tracks and kept-site sample phase only (export_contig API)
-SCHEMA = "released-allele-export-v2"
+SCHEMA = "released-allele-export-v3"
 # Per-task allowance besides the decoded records: htslib and gzip buffers, record formatting and the fixed-size
 # text chunks (founders.CHUNK_SITES, samples.CHUNK_SITES). With SITE_ROW_BYTES, calibrated on the a90 integration
 # runs (18 Oct): measured task peak / estimate 0.74-0.79 (reconstruct_actm3 0.14 of 0.18 GiB, std_n80 0.19 of
@@ -45,18 +45,22 @@ def founder_panels(file, *, withhold_unobserved: bool = True) -> tuple[str, list
 
     ``withhold_unobserved`` (release 2.2, :func:`unobserved_founder_alleles`): founder alleles that no painted
     carrier observes are released as -1 ('.')."""
-    from ..founder_refit import records as refit_records
-    from ..painting import records as painting_records
-    if refit_records.complete(file):
-        stage, panels = "founder_refit", refit_records.founder_panels(file)
-    elif painting_records.complete(file):
-        stage, panels = "painting", painting_records.founder_panels(file)
-    else:
-        raise FileNotFoundError(f"{file.label}: no painted founder panels")
-    panels = [(panel.positions, panel.released) for panel in panels]
+    stage, components = _founder_component_panels(file)
+    panels = [(panel.positions, panel.released) for panel in components]
     if withhold_unobserved:
         panels, _ = unobserved_founder_alleles(file, panels)
     return stage, panels
+
+
+def _founder_component_panels(file):
+    """Original painted/refit axes, retained for release segmentation after carrier masking."""
+    from ..founder_refit import records as refit_records
+    from ..painting import records as painting_records
+    if refit_records.complete(file):
+        return "founder_refit", refit_records.founder_panels(file)
+    if painting_records.complete(file):
+        return "painting", painting_records.founder_panels(file)
+    raise FileNotFoundError(f"{file.label}: no painted founder panels")
 
 
 def refit_ambiguous_alleles(file) -> int | None:
@@ -87,14 +91,15 @@ def phase_ambiguity(file):
             np.asarray(arrays["frame_undetermined"]))
 
 
-def unobserved_founder_alleles(file, panels) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[int]]:
+def unobserved_founder_alleles(file, panels, *, return_masks=False):
     """(panels with unobserved alleles set to -1, withheld alleles per component) of a contig (release 2.2).
 
     A released founder allele (row k, site j) is kept only if some sample whose released painting names k at j
     (a track's member set: named, pooled, local equivalence or switch interval; painting
     ComponentPainting.carrier_observed) has read depth at j (the evidence observed mask). Elsewhere no carrier
     observes it and the allele is the upstream fit's convention (e.g. a seed allele kept by keep-current rules),
-    so it is withheld. Panels are the painting's components in order (the founder-refit panels keep its rows)."""
+    so it is withheld. Panels are the painting's components in order (the founder-refit panels keep its rows).
+    ``return_masks=True`` also returns the original masks, for exact counts after release segmentation."""
     from ..evidence import records as evidence_records
     from ..painting import records as painting_records
     painting = painting_records.load(file, panels=False, emissions=False)
@@ -102,7 +107,7 @@ def unobserved_founder_alleles(file, panels) -> tuple[list[tuple[np.ndarray, np.
         raise ValueError(f"{file.label}: founder panels and painting components differ")
     evidence = evidence_records.load_arrays(file, ("positions", "observed"))
     sites, observed = np.asarray(evidence["positions"]), np.asarray(evidence["observed"], dtype=bool)
-    result, withheld = [], []
+    result, withheld, masks = [], [], []
     for component, (positions, calls) in zip(painting.components, panels):
         positions = np.asarray(positions, dtype=np.int64)
         calls = np.asarray(calls, dtype=np.int8)
@@ -113,11 +118,13 @@ def unobserved_founder_alleles(file, panels) -> tuple[list[tuple[np.ndarray, np.
         seen = component.carrier_observed(positions, columns, observed, len(calls))
         hidden = (calls >= 0) & ~seen
         withheld.append(int(np.count_nonzero(hidden)))
+        if return_masks:
+            masks.append(hidden)
         if withheld[-1]:
             calls = calls.copy()
             calls[hidden] = -1
         result.append((positions, calls))
-    return result, withheld
+    return (result, withheld, masks) if return_masks else (result, withheld)
 
 
 def founder_source_key(file) -> str:
@@ -159,6 +166,13 @@ def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool =
         summary = painting_records.load_summary(file)
         bins = sum(shape.bins for shape in summary.components)
         total += 2 * 28 * summary.samples * bins + (summary.samples + 8) * len(evidence["kept_positions"])
+        # Ambiguity release reads the immutable prepared catalogue once. Its decoded
+        # record is transient; only released allele views survive the load.
+        total += file.info(f"{assembly_records.FINAL_PREFIX}/{assembly_records.COMPLETION}").decoded_bytes
+        # Carrier masks, ambiguity masks, an exact-family local mask and the segmented
+        # call copy (release 2.3). The allele catalogue is accounted for above.
+        total += 4 * sum(shape.founders * shape.sites for shape in summary.components)
+        total += file.info(f"{assembly_records.FINAL_PREFIX}/{assembly_records.FINAL}").decoded_bytes
     total += source
     if "samples" in products and phase_records.complete(file):
         total += file.info(phase_records.KEY).decoded_bytes
@@ -176,7 +190,7 @@ def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool =
 
 def export_contig(destination: Path, contig: str, *, products, founders=None, phase=None, reference=None,
                   synthetic=False, file_format="bcf", sites=None, index=False, input_sample_ids=None,
-                  withheld=None, phase_ambiguity=None) -> dict:
+                  withheld=None, phase_ambiguity=None, founder_release=None) -> dict:
     """Write one chromosome's files; returns its manifest entry.
 
     ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
@@ -185,7 +199,8 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
     ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi); ``input_sample_ids``: the run's input
     sample order (the sample columns are written in it; the records hold the canonical order, release 2.1), None
     to write the records' order; ``withheld``: founder alleles withheld per component as unobserved
-    (unobserved_founder_alleles; recorded in the manifest entry and the founder VCF header); ``phase_ambiguity``:
+    (unobserved_founder_alleles; recorded in the manifest entry and the founder VCF header); ``founder_release``:
+    assembly release metadata per segment (source axes, ambiguity and r5 exclusions); ``phase_ambiguity``:
     family phase's (phase breaks per row, frame_undetermined) (phase_ambiguity; None = component phase sets only).
     """
     destination = Path(destination)
@@ -213,7 +228,7 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
         vcf_name = stem + ".founders" + suffix(file_format)
         temporary = destination / f".{vcf_name}.tmp"
         write_founder_vcf(temporary, sites, panels, stage, synthetic=synthetic, file_format=file_format,
-                          withheld=withheld)
+                          withheld=withheld, release_segments=founder_release)
         files.extend(place(temporary, destination / vcf_name, file_format=file_format,
                            last_position=int(sites.positions[-1]), index=index))
     for component, (positions, calls) in enumerate(panels or ()):
@@ -223,7 +238,8 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
             write_founder_tracks(destination / filename, contig, positions, calls)
             files.append(filename)
         components.append(component_record(contig, component, positions, calls, stage, filename, vcf_name,
-                                           None if withheld is None else withheld[component]))
+                                           None if withheld is None else withheld[component],
+                                           None if founder_release is None else founder_release[component]))
     if "samples" in products:
         sample_ids, positions, component_ids, calls = phase
         calls = np.asarray(calls)
@@ -259,11 +275,24 @@ def _export_task(task, shared, budget):
     if "founders" in products or "samples" in products:
         sites = build_site_table(file, task["contig"], full_length=task["full_length"],
                                  reference=task["reference"], synthetic=task["synthetic"])
-    founders = withheld = ambiguous = None
+    founders = withheld = ambiguous = release = None
     if "founders" in products or "tracks" in products:
-        stage, panels = founder_panels(file, withhold_unobserved=False)
-        panels, withheld = unobserved_founder_alleles(file, panels)
-        founders = (stage, panels)
+        from ..assembly.release import (ReleaseAxes, budget_overflow, load_prepared_alleles,
+                                        load_release_input, release_founders)
+        stage, components = _founder_component_panels(file)
+        panels = [(panel.positions, panel.released) for panel in components]
+        components = tuple(ReleaseAxes(panel.start, panel.stop, panel.rows, panel.atomic_offsets)
+                           for panel in components)
+        panels, _, masks = unobserved_founder_alleles(file, panels, return_masks=True)
+        alternatives, nominal = load_release_input(file)
+        prepared_alleles = (load_prepared_alleles(file)
+                            if any(budget_overflow(family) or (
+                                not family.get("unresolved_search", False) and len(family.get("panels", ())) > 1)
+                                   for family in alternatives or ()) else None)
+        release = release_founders(components, panels, alternatives, unobserved_masks=masks,
+                                   nominal_components=nominal, prepared_alleles=prepared_alleles)
+        withheld = release.withheld_unobserved
+        founders = (stage, release.panels)
         ambiguous = refit_ambiguous_alleles(file)
         print(f"  [export] {task['contig']}: {sum(withheld)} founder alleles withheld (no observing painted "
               f"carrier)" + ("" if ambiguous is None else f"; {ambiguous} unknown from tied refit moves"), flush=True)
@@ -274,9 +303,18 @@ def _export_task(task, shared, budget):
                           reference=task["reference"], synthetic=task["synthetic"],
                           file_format=task["file_format"], sites=sites, index=True,
                           input_sample_ids=task.get("input_sample_ids"), withheld=withheld,
-                          phase_ambiguity=ambiguity)
+                          phase_ambiguity=ambiguity,
+                          founder_release=None if release is None else release.segments)
     if ambiguous is not None:
         entry["refit_ambiguous_alleles"] = ambiguous
+    if release is not None:
+        entry.update(founder_continuity_breaks=release.breaks,
+                     assembly_ambiguous_alleles=release.withheld_ambiguous,
+                     assembly_ambiguity_metadata=release.metadata_status,
+                     assembly_continuation_unverified_records=release.continuation_unverified_records,
+                     assembly_count_unverified_records=sum(
+                         bool(family.get("count_unverified", False) or family.get("status") == "count_unverified")
+                         for family in alternatives or ()))
     if task.get("record") is not None:
         from . import records
         for name in set(task.get("previous_files", ())) - set(entry["files"]):
@@ -288,12 +326,12 @@ def _export_task(task, shared, budget):
 def write_manifest(destination: Path, checkpoint_root, *, synthetic: bool, reference: str | None,
                    contigs: list[dict], settings: ExportConfig | None = None) -> dict:
     """DEST/manifest.json (written last, atomically); returns the manifest. ``settings`` (the CLI and the export
-    stage) describe the VCF products (schema v2); without them the manifest is the v1 one of founder tracks and
+    stage) describe the VCF products (schema v3); without them the manifest is the v1 one of founder tracks and
     kept-site sample phase."""
     manifest = dict(schema=SCHEMA_V1 if settings is None else SCHEMA,
                     checkpoint_root=str(Path(checkpoint_root).resolve()),
                     coordinate_system="1-based input SNP positions", unknown_allele=".",
-                    founder_identity="chromosome AND component local; H0 across components is not an identity",
+                    founder_identity="chromosome AND release-segment local; H0 across segments is not an identity",
                     unobserved_founder_alleles=("released founder alleles that no painted carrier observes (no "
                                                 "sample painted with the founder there has read depth) are '.'; "
                                                 "counts per contig (unobserved_founder_alleles) and component "
@@ -310,11 +348,18 @@ def write_manifest(destination: Path, checkpoint_root, *, synthetic: bool, refer
                       else "the sites the site-quality filter kept (FILTER '.')"),
             omitted_records=("records the loader drops never reach the site filter and are not written: "
                              "non-biallelic records (r0) and biallelic SNPs sharing a position"),
-            founder_columns=("cC_Hk = founder row k of component C of the chromosome (component-local labels); a "
-                             "column has calls only inside its component's span and is '.' outside it"))
+            founder_columns=("cC_Hk = founder row k of release segment C of the chromosome; source_component "
+                             "and segment_index identify its inference component and local segment. A column "
+                             "has calls only inside its segment's span and is '.' outside it"),
+            founder_continuity=("live assembly alternatives split founder columns/tracks at unsupported "
+                                "continuity; unmatched evaluated final local content is withheld. "
+                                "Computational count overflow is count_unverified; unperformed source continuation is continuation_unverified. Both preserve calls and record the unperformed scope. "
+                                "Uncertainty intervals use observed 1-based SNP positions; old assembly "
+                                "records without alternatives have legacy_unknown coverage"))
         if settings.full_length:
             manifest["filters"] = dict(PASS="kept by the site-quality filter", **RULE_DESCRIPTIONS)
-            manifest["common_allele"] = COMMON_ALLELE_RULE
+            manifest["common_allele"] = (COMMON_ALLELE_RULE + "; assembly ambiguity additionally withholds "
+                                        "unmatched rows and unexplored source spans, including r5 sites")
     temporary = Path(destination) / ".manifest.json.tmp"
     temporary.write_text(json.dumps(manifest, indent=2) + "\n")
     temporary.replace(Path(destination) / "manifest.json")

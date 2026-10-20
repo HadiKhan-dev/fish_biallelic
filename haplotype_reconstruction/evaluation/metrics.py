@@ -107,13 +107,13 @@ def long_switch_counts(calls, truth, components, minimum_runs):
 
 @njit(cache=True)
 def _phase_sets_of_sample(calls, truth, components, undetermined, positions, spans):
-    """One sample's released phase sets (release 2.2; evaluation only).
+    """One sample's exported phase sets (release 2.3; evaluation only).
 
     calls, truth int8 [L, 2]; components int [L] (-1 between components); undetermined bool [L] (the displayed phase
     of the site is undetermined: family phase's frame_undetermined bit 1); positions int64 [L]; spans int64 [L]
-    (output buffer). A phase set is a maximal run of sites of one component whose displayed phase is determined:
-    a component change, a site outside components or an undetermined site ends the set, and the next determined
-    site starts a new one (as the export breaks the VCF phase set there). Returns int64 [4]: allele errors aligned
+    (output buffer). Components are already split at the sample's explicit phase boundaries. Component/piece
+    changes or sites outside components end a set. An undetermined site is unphased but does not break the
+    surrounding set, matching the exported PS. Returns int64 [4]: allele errors aligned
     by one strand swap per phase set (undetermined called sites add their per-site minimum, i.e. genotype-level
     errors only), phase sets holding at least two called heterozygotes, called alleles at undetermined sites, and the
     number of spans written (bp from the first to the last called heterozygote of each such set)."""
@@ -128,7 +128,7 @@ def _phase_sets_of_sample(calls, truth, components, undetermined, positions, spa
         component = components[site]
         d = int(a >= 0 and a != x) + int(b >= 0 and b != y)
         w = int(a >= 0 and a != y) + int(b >= 0 and b != x)
-        closes = component < 0 or undetermined[site] or (current != -2 and component != current)
+        closes = component < 0 or (current != -2 and component != current)
         if closes and current != -2:
             out[0] += min(direct, swapped)
             if hets >= 2:
@@ -161,10 +161,23 @@ def _phase_sets_of_sample(calls, truth, components, undetermined, positions, spa
     return out
 
 
-def phase_set_counts(calls, truth, components, undetermined, positions):
-    """Released-phase-set metrics of one chromosome (release 2.2): (ps_aligned_allele_errors, phase_sets,
-    undetermined_called_alleles, spans int64[...]). ``undetermined`` bool [N, L] or None (2.1 records: phase sets are
-    the components, and ps_aligned_allele_errors equals component_aligned_allele_errors)."""
+def phase_set_components(components, boundaries):
+    """Split components after each released boundary (marker i separates i and i+1)."""
+    cut = np.zeros(len(components), dtype=np.bool_)
+    cut[1:] = components[1:] != components[:-1]
+    indices = np.asarray(boundaries, dtype=np.int64) + 1
+    cut[indices[(indices > 0) & (indices < len(components))]] = True
+    return np.where(components >= 0, np.cumsum(cut), -1)
+
+
+def phase_set_counts(calls, truth, components, undetermined, positions, *, phase_breaks=None):
+    """Released-phase-set metrics: (ps_aligned_allele_errors, phase_sets, undetermined_called_alleles, spans).
+
+    ``undetermined`` is bool [N, L] or None. ``phase_breaks`` optionally supplies one array of released marker
+    boundaries per sample, in the calls' sample order. Boundary i splits before site i+1. Component changes also
+    split sets. Displayed-undetermined sites contribute unordered errors without breaking the surrounding PS;
+    its phased flanks keep one strand alignment, exactly as exported.
+    """
     samples, sites, _ = calls.shape
     if undetermined is None:
         undetermined = np.zeros((samples, sites), dtype=np.bool_)
@@ -174,8 +187,11 @@ def phase_set_counts(calls, truth, components, undetermined, positions):
     errors = sets = loose = 0
     spans = []
     for sample in range(samples):
+        sample_components = components
+        if phase_breaks is not None and len(phase_breaks[sample]):
+            sample_components = phase_set_components(components, phase_breaks[sample])
         result = _phase_sets_of_sample(np.ascontiguousarray(calls[sample]), np.ascontiguousarray(truth[sample]),
-                                       components, np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
+                                       sample_components, np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
                                        positions, buffer)
         errors += int(result[0])
         sets += int(result[1])

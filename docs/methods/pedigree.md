@@ -210,8 +210,7 @@ containing it reduces to the other parent's M1 score (or to M0).
 
 ## Candidate panel
 
-M0, and M1 for every eligible (child, parent) edge, are scored first on every informative chromosome (the screen,
-`pedigree/scoring.py`). M2 is scored only for a fixed panel chosen genome-wide from the screen (`pedigree/panel.py`).
+M0 and a certified genome-wide M1 profile are computed first. Unproved eligible dyads receive exact scoring; retained identities keep raw scores and excluded identities share the fixed floor profile described below. M2 is scored only for the complete retained-parent panel (`pedigree/panel.py`).
 For child c with n_c eligible parents, the robust screen utility of parent p is
 
     u(c, p) = Σ_k w_k [ρ r_k(p) + (1 − ρ) ((1 − γ) σ_k(p) + γ / n_c)].
@@ -225,12 +224,13 @@ contrast tolerance sharing their rank);
 chromosome weights are √m_k / median, clipped to [1/R, R] with R = `PedigreeConfig.panel.maximum_contig_weight_ratio = 4.0`
 and normalised to sum 1, so no chromosome dominates the screen.
 
-The panel holds every admissible pair among each child's top `PedigreeConfig.panel.parents_per_child = 20` parents
-by u (ties broken by sample index): at most 190 M2 configurations per child. It is built once from all informative
-chromosomes and stays fixed in every resampled fit. When a child has more admissible pairs than the panel scores,
-its M2 state evidence is a lower bound, because the identity prior divides by the full number of admissible pairs
-([marginal state, then identity](#marginal-state-then-identity)); `search_diagnostics.csv` reports the screen
-boundary of every child.
+The panel holds every admissible pair among each child's genome-retained parents,
+including all cutoff ties. It has no fixed top-parent cap. It is built once before
+calibration and remains fixed in every resampled fit. The full eligible-pair prior
+denominator is retained. Individually weak M1 parents may form a strong raw M2 pair;
+excluding such a pair is an explicit model approximation, and M2 evidence remains a
+lower bound when admissible pairs are outside the retained panel. Robust utility is
+reported for diagnostics; it does not select an arbitrary prefix.
 
 ## Exposure and junction counts
 
@@ -565,6 +565,20 @@ errors independent across markers, not on independent inheritance of SNPs; the a
 observed parent edges, including when the targets were selected using the same data. Mapping errors, ascertainment
 and correlated errors violate these assumptions.
 
+The default scorer can stop likelihood work once completed-window products certify this same
+final genome-average threshold. An unfinished product cannot certify exclusion: later factors
+can reduce it. The certificate accounts for the number of configured chromosomes and samples;
+unproved dyads complete the original calculation exactly. Observed-site counts still cover the
+whole chromosome. The exact reference remains available in `pedigree/exclusion.py`.
+
+Certified results carry lower and upper log-evidence endpoints. In `exclusion_evidence.csv`,
+`LogE` is the exact value when known and NaN otherwise; `LogELower`, `LogEUpper` and
+`LogEExact` expose the interval. `exclusion_diagnostics.csv` adds the corresponding
+`WeakestExclusionLogELower`, `WeakestExclusionLogEUpper` and `WeakestExclusionLogEExact`
+fields. These columns appear when interval evidence is supplied; zero-target tables keep
+their original schema. Bounds never masquerade as exact point evidence. The release decision
+and its assumptions are unchanged.
+
 Mendelian compatibility is symmetric and cannot tell parent from child. A compatible candidate of which the child is
 already the supported Tier-B parent is ruled out by acyclicity, so the release is conditional on the supported
 directions. A child's count is released when every eligible candidate was checked, the child is a target with at
@@ -635,8 +649,8 @@ names are `zero_observed_parents`, `one_observed_parent`, `two_observed_parents`
 | `call_explanations.csv` | sample | one readable row per sample: the candidate-set columns with the local and selected states, local parents, graph conflict, margins, the local state's bootstrap and LOCO fractions, the M2 search completeness and a plain-language interpretation |
 | `alternative_explanations.csv` | configuration | the local and graph configurations and the three leading identities within each state, with separate GeneticLogEvidence (scaled, after the M0 mixture), StructuralStateLogEvidence, StructuralIdentityEligible (the gate), DirectionLogContribution, ReciprocalFamilyLogContribution, AncestryPathLogContribution, adjusted state and identity evidence, ParentStateLogPrior, LogEligibleIdentityMultiplicity, MarginalStateLogEvidence and GraphDecisionUtility; priors, multiplicities, marginal evidence and graph utility are not additive terms of one posterior |
 | `search_diagnostics.csv` | sample | the M2 screen: eligible parents, scored pairs and panel parents, ScreenBoundaryRank, ScreenBoundaryGap (weakest panel utility minus the strongest omitted one), omitted parents, the called parents' screen ranks and SelectedParentAtScreenBoundary; M1 always scores every eligible parent |
-| `exclusion_evidence.csv` | target dyad | Sample, CandidateParent, LogE (genome-wide log E), ObservedSites |
-| `exclusion_diagnostics.csv` | target child | compatible, supported-reverse and remaining candidates, the weakest exclusion log E against ThresholdLogE, CompleteCandidateEvidence, Released, ReleaseConditionalOnSupportedDirections |
+| `exclusion_evidence.csv` | target dyad | Sample, CandidateParent, LogE (exact genome-wide log E, otherwise NaN), ObservedSites; interval evidence adds LogELower, LogEUpper, LogEExact |
+| `exclusion_diagnostics.csv` | target child | compatible, supported-reverse and remaining candidates, the weakest exclusion log E against ThresholdLogE, CompleteCandidateEvidence, Released, ReleaseConditionalOnSupportedDirections; interval evidence adds WeakestExclusionLogELower/Upper/Exact |
 | `evidence_summary.csv` | informative chromosome | selected markers, mean minimum junctions and mean callable haplotype bins |
 | `chromosome_summary.csv` | configured contig | ComponentCount, ScoredComponentCount, InformativeMarkers, OmittedReason |
 | `evidence_calibration.json` | (one object) | the calibration report: mode, applied and fitted scale, status, folds, search grid, selection gain, untouched test gains |
@@ -725,7 +739,7 @@ Per contig, each record bound to its identity:
 - `pedigree/scores`: the chromosome's M0, M1 and panel M2 scores, exposure and junction counts; bound to the screen
   record and the panel's rows.
 - `pedigree/exclusion`: the contig's exclusion evidence for the target dyads, written only when there are targets;
-  bound to the evidence record, the target dyads and `PedigreeConfig.exclusion`.
+  bound to the evidence record, target dyads and `PedigreeConfig.exclusion`; the default certificate also binds its model identity, chromosome count and sample count, so a bound cannot be reused with a different genome divisor or threshold.
 
 The run record `pedigree` (the product) is bound to every contig's prepared and scores identities, the eligibility,
 the panel and the whole `PedigreeConfig`; `complete/pedigree` marks the stage done. Every identity also contains the
@@ -769,9 +783,38 @@ ties, the symmetric top-16 boundary, and the released parent order's dam/sire ba
   simulations with a known pedigree, and real data are judged by internal consistency, chromosome-level stability,
   competing-candidate margins and explicit unresolved outcomes ([validation](../validation.md)).
 - Known failure modes: fewer than 5 informative chromosomes (nothing released), a true parent pair outside the
-  20-parent screen (the M2 evidence is a lower bound; see `search_diagnostics.csv`), unsampled parents, closely
+  retained-parent screen (the M2 evidence is a lower bound; see `search_diagnostics.csv`), unsampled parents, closely
   related alternatives, long feedback loops and highly structured missingness.
 - The exclusion release assumes calibrated, independent read errors and correct supported directions. Samples
   flagged by the contamination QC still enter it as targets and candidates; the required concordance with the
   complete view limits, but does not exclude, the effect of their miscalibrated likelihoods.
 - One current record per product: changing any pedigree setting on an existing run needs a separate output root.
+
+## Genome-wide consistent M1 floor in 2.3
+
+Let S(c,p) be the sum of raw chromosome M1 scores for eligible parent p of child c,
+and B(c) its maximum over eligible parents. The retained set includes every parent
+with S(c,p) >= B(c) - 60 T(sum of informative markers), including equality.
+T(m) = max(ceil(m / markers_per_information_block), 1)^information_tempering_power
+uses the existing information temperature. This genome set is fixed before
+calibration and resampling. Retained identities keep their raw chromosome scores.
+
+For chromosome j, let b(c,j) be its maximum raw eligible score and T_j its temperature.
+Every excluded identity uses the same chromosome profile
+f(c,j) = b(c,j) - T_j / sum(T) * (sum_j b(c,j) - cutoff(c)).
+Its sum is the genome cutoff. This profile feeds ranks, calibration, state/family
+inference, informative tests, path/cavity evidence and resampling consistently.
+Identity multiplicities, contamination and full prior denominators remain.
+The transform is applied once; applying it again would change the model.
+
+The default certified screen derives this same profile with exact fallback for
+unproved candidates. Compact-screen and fixed-score records have separate keys
+from legacy raw records. M2 kernels are unchanged; where exactly one parent is
+available in a component, the fallback uses freshly computed raw component M1,
+not the fixed genome profile. All retained-parent pairs enter the uncapped M2 panel.
+
+Four-dataset checks preserve the adopted exact model's released fields, all 4,060
+resample records and 60 CSV files; bounded default-stage and missing-parent fixtures
+also verify fresh M2/exposure scores and resume. Dense downstream migration arrays
+remain. These tests establish scientific identity, not sub-quadratic memory or a
+whole-pipeline scaling result.

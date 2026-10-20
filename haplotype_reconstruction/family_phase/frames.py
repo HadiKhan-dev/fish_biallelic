@@ -134,7 +134,7 @@ class FrameRepair:
     undecided_ties: dict | None = field(default=None, repr=False)
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def window_gains(emission, theta, lo, hi, boundaries, mask):
     """Max-path score change of a selector chain when ``mask`` is relabelled after each boundary.
 
@@ -182,7 +182,7 @@ def window_gains(emission, theta, lo, hi, boundaries, mask):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def zone_gain(emission, theta, lo, zone_lo, zone_hi, hi, edge_theta, mask):
     """Max-path score change when ``mask`` is relabelled on [zone_hi, hi), evidence on [zone_lo, zone_hi) left out.
 
@@ -256,7 +256,7 @@ def _component_runs(components):
     return start, stop
 
 
-def repair_root_frames(workspace, emissions, family_frame, config, *, tie_boundaries, protected):
+def repair_root_frames(workspace, emissions, family_frame, config, *, tie_boundaries, protected, reverse=None):
     """Decide root frame moves, reverts and transfers on the final family state (module docstring).
 
     ``emissions`` float64 [G, L, 4] are the final selector emissions (map_solver.selector_emissions; relabelled in
@@ -264,7 +264,7 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
     marker boundaries}; ``protected`` int64 (n, 2) closed bp intervals. Masks are relative to the scaffold. The
     convention reversal is read once here (module docstring).
     """
-    rev = reverse_conventions()
+    rev = reverse_conventions() if reverse is None else bool(reverse)
     cfg = config
     graph = workspace.graph
     pos = np.asarray(workspace.positions, dtype=np.int64)

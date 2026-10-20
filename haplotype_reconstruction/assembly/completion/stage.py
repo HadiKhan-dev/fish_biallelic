@@ -36,7 +36,7 @@ from ...execution.shared_arrays import COPY_THREADS, attach_shared_array, close_
 from ...model.components import PreparedPanel
 from ..founder_alleles import site_posterior
 from .cavity_fill import cavity_fill
-from .crossfit import content_two_folds, crossfit_block
+from .crossfit import content_fold_plan, crossfit_block
 from .links import link_boundary
 from .observation import UNIFORM_TOLERANCE
 from .occupancy import occupancy_gate
@@ -91,6 +91,11 @@ class CompletionSummary:
     guard_skipped: releases the Hamming-ball shell guard withheld (cross-fit and cavity).
     tie_events: decisions of the occupancy gate taken inside a tie or a threshold band (``maths.ties.TieCounter``
         record; release 2.1).
+    fold_key_source / fold_group_sizes / fold_informative_sizes: source of discrete fold
+        keys, whole-group sizes in content-key order and observed-member totals by fold.
+    fold_absent_informative_training: block/fold and informative heldout-sample counts
+        where no block-specific training data were available; cross-fit learning used
+        the pre-fill panel. Independent cavity fills and occupancy rules are unchanged.
     """
 
     candidate_fills: np.ndarray
@@ -101,6 +106,10 @@ class CompletionSummary:
     site_posterior: tuple[int, ...]
     guard_skipped: int
     tie_events: dict = field(default_factory=dict)
+    fold_key_source: str = "unrecorded"
+    fold_group_sizes: tuple[int, ...] = ()
+    fold_informative_sizes: tuple[int, ...] = ()
+    fold_absent_informative_training: tuple[dict, ...] = ()
 
     @property
     def blocks(self) -> int:
@@ -130,6 +139,10 @@ class CompletionSummary:
                                        (int(value) for value in self.site_posterior))),
             "guard_skipped": int(self.guard_skipped),
             "tie_events": {kind: dict(values) for kind, values in self.tie_events.items()},
+            "fold_key_source": self.fold_key_source,
+            "fold_group_sizes": list(self.fold_group_sizes),
+            "fold_informative_sizes": list(self.fold_informative_sizes),
+            "fold_absent_informative_training": [dict(value) for value in self.fold_absent_informative_training],
         }
 
     @classmethod
@@ -145,6 +158,10 @@ class CompletionSummary:
                                  for field in site_posterior.SUMMARY_FIELDS),
             guard_skipped=int(record["guard_skipped"]),
             tie_events={str(kind): dict(values) for kind, values in record.get("tie_events", {}).items()},
+            fold_key_source=str(record.get("fold_key_source", "unrecorded")),
+            fold_group_sizes=tuple(int(value) for value in record.get("fold_group_sizes", ())),
+            fold_informative_sizes=tuple(int(value) for value in record.get("fold_informative_sizes", ())),
+            fold_absent_informative_training=tuple(dict(value) for value in record.get("fold_absent_informative_training", ())),
         )
 
     def describe(self) -> str:
@@ -286,8 +303,8 @@ def complete(panels: Sequence, evidence, config, budget) -> tuple[tuple[Prepared
 def _complete(panels, evidence, config, budget):
     blocks = len(panels)
     samples = evidence.samples
-    # Release 2.2: the fold split follows the samples' observation patterns, not their positions on the axis.
-    folds = content_two_folds(evidence.observed, config.crossfit.fold_seed)
+    fold_plan = content_fold_plan(evidence.observed, config.crossfit.fold_seed, evidence.depth_keys)
+    folds = fold_plan.folds
     veto = np.array([_unknown_mass_veto(panel, config.maximum_discovery_unknown_mass)
                      for panel in panels], dtype=np.bool_)
     inference = []
@@ -376,7 +393,14 @@ def _complete(panels, evidence, config, budget):
             unknown_mass_veto=veto, gate_reasons=gate.reason_counts,
             rare_without_focal_observation=gate.rare_without_focal_observation,
             site_posterior=tuple(int(value) for value in totals), guard_skipped=int(guard_skipped),
-            tie_events=dict(gate.tie_events or {}))
+            tie_events=dict(gate.tie_events or {}),
+            fold_key_source=fold_plan.key_source,
+            fold_group_sizes=fold_plan.group_sizes,
+            fold_informative_sizes=fold_plan.informative_sizes,
+            fold_absent_informative_training=tuple(
+                dict(block=block, fold=fold, heldout_informative_samples=count)
+                for block, crossfit in enumerate(crossfits)
+                for fold, count in crossfit.absent_informative_training))
     finally:
         releaser.join()
     if errors:

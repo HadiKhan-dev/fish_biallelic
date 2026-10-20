@@ -44,9 +44,9 @@ class ScoringConfig:
 
 @dataclass(frozen=True)
 class PanelConfig:
-    """Genome-wide robust parent screen and the fixed M2 candidate panel."""
+    """Genome-wide retained-parent M2 panel; legacy screen constants remain for compatibility."""
 
-    # M2 is scored for all eligible unordered pairs among each child's top-ranked screen parents.
+    # Legacy reference only; production includes every eligible pair of genome-retained M1 parents.
     parents_per_child: int = 20
     # Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power.
     information_tempering_power: float = 0.5

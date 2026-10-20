@@ -11,11 +11,12 @@ Every allowance is a `CpuBudget`; `threads()` re-reads it at a safe boundary (ne
   remainder CPUs while it holds a remainder claim. Until a batch's start-up gate opens (min(tasks, workers)
   distinct workers have started, or every task has), each worker runs one thread, so an early worker cannot take
   the CPUs its peers are about to need. A pool whose total is a live lease raises its total as the lease grows.
-* Slot share: one of several concurrent in-process tasks (`concurrent`): floor(share / admitted) plus one for
-  the lowest slots.
+* Slot share: one of several concurrent in-process tasks (`concurrent`). Like pool seats, slots reserve
+  one CPU before admission and retain their claims until an owner boundary releases them. Fair shares guide
+  growth, but a task may claim only CPUs that are currently free.
 
-Process x thread totals stay within the budget (up to the transient a pool share allows while a peer has not yet
-re-read its share). Thread counts never change results: every parallel kernel reduces per-sample (or per-site)
+Process x thread totals stay within the budget: a late pool seat or slot waits for a free claim; running
+claims are never taken from peers. Thread counts never change results: every parallel kernel reduces per-sample (or per-site)
 rows in a fixed order.
 
 A process holds at most one seat: a pool worker's (`_POOL_SEAT`) or an executor worker's (`_LEASE_SEAT`).
@@ -146,6 +147,8 @@ class PoolCounters:
         value = context.Value
         self.total = value("i", int(total))        # raised while a live parent budget grows
         self.active = value("i", 0)                # workers inside a task
+        self.claimed = value("i", 0)               # retained numerical-team claims
+        self.admission = context.Condition(self.claimed.get_lock())
         self.extra = value("i", 0)                 # remainder claims held
         self.started = value("i", 0)               # tasks started in the current batch
         self.participants = value("i", 0)          # distinct workers started in the current batch
@@ -173,8 +176,10 @@ class PoolCounters:
             self.generation.get_obj().value += 1
 
     def raise_total(self, threads: int) -> None:
-        if threads > _read(self.total):
-            self._store(self.total, threads)
+        with self.admission:
+            if threads > _read(self.total):
+                self._store(self.total, threads)
+                self.admission.notify_all()
 
     def open_gate(self) -> None:
         """Open the current batch's start-up gate now (memory holds the remaining tasks back)."""
@@ -187,15 +192,21 @@ class _PoolSeat:
     def __init__(self, counters: PoolCounters):
         self.counters = counters
         self.has_extra = False
+        self.claimed = 0
         self.last_generation = None
         self.last_applied = None
         self.last_logged = None
 
     def begin_task(self) -> None:
-        """Register as active and as started in the current batch (opens the gate when it may)."""
+        """Reserve one CPU before admission, then register the task with the start-up gate."""
         c = self.counters
-        with c.active.get_lock():
-            c.active.get_obj().value += 1
+        with c.admission:
+            while _read(c.claimed) >= _read(c.total):
+                c.admission.wait()
+            c.claimed.get_obj().value += 1
+            self.claimed = 1
+            with c.active.get_lock():
+                c.active.get_obj().value += 1
         with c.started.get_lock():
             c.started.get_obj().value += 1
             started = c.started.get_obj().value
@@ -214,11 +225,15 @@ class _PoolSeat:
                 c.startup_ready.get_obj().value = 1
 
     def end_task(self) -> None:
-        """Release any remainder claim first, then deregister (peers see the freed claim first)."""
-        self._release_extra()
+        """Release this finished kernel's claim and wake workers waiting for admission."""
         c = self.counters
-        with c.active.get_lock():
-            c.active.get_obj().value -= 1
+        with c.admission:
+            self._release_extra()
+            c.claimed.get_obj().value -= self.claimed
+            self.claimed = 0
+            with c.active.get_lock():
+                c.active.get_obj().value -= 1
+            c.admission.notify_all()
 
     def _claim_extra(self, remainder: int) -> None:
         if self.has_extra:
@@ -238,32 +253,45 @@ class _PoolSeat:
         self.has_extra = False
 
     def share(self, max_threads: int | None = None) -> int:
-        """floor(total / active) (+1 with a remainder claim), 1 before the gate opens; capped by max_threads."""
+        """Claim only free CPUs; peers retain their teams until their own boundary or task end.
+
+        As with in-process slots, an existing claim is not revoked because another
+        task starts. A cap releases this caller's excess at its kernel boundary.
+        """
         if max_threads is not None:
             max_threads = int(max_threads)
             if max_threads < 1:
                 raise ValueError("max_threads must be a positive integer or None")
         c = self.counters
-        if not _read(c.startup_ready):
-            self._release_extra()
-            return 1
-        active = max(_read(c.active), 1)
-        total = _read(c.total)
-        floor = total // active
-        remainder = total - floor * active
-        if max_threads is not None and max_threads <= floor:
-            # A capped worker leaves its remainder claim to an uncapped peer.
-            self._release_extra()
-            return max(1, min(floor, max_threads))
-        extras = _read(c.extra)
-        if not self.has_extra and extras < remainder:
-            self._claim_extra(remainder)
-        elif self.has_extra and extras > remainder:
-            self._release_extra()
-        allocated = max(1, floor + (1 if self.has_extra else 0))
-        if max_threads is not None:
-            allocated = min(allocated, max_threads)
-        return allocated
+        with c.admission:
+            if not self.claimed:  # outside a task, including worker initialization
+                return 1
+            if not _read(c.startup_ready):
+                self._release_extra()
+                desired = 1
+            else:
+                active = max(_read(c.active), 1)
+                total = _read(c.total)
+                floor, remainder = divmod(total, active)
+                if max_threads is not None and max_threads <= floor:
+                    self._release_extra()
+                else:
+                    extras = _read(c.extra)
+                    if not self.has_extra and extras < remainder:
+                        self._claim_extra(remainder)
+                    elif self.has_extra and extras > remainder:
+                        self._release_extra()
+                desired = max(self.claimed, floor + int(self.has_extra))
+            if max_threads is not None:
+                desired = min(desired, max_threads)
+            available = _read(c.total) - (_read(c.claimed) - self.claimed)
+            allocated = max(1, min(desired, available))
+            change = allocated - self.claimed
+            c.claimed.get_obj().value += change
+            self.claimed = allocated
+            if change < 0:
+                c.admission.notify_all()
+            return allocated
 
     def apply(self, max_threads: int | None = None) -> int:
         """Recompute the share and apply it to the calling thread's Numba team; return it."""
@@ -350,10 +378,10 @@ class LeaseState:
         self.lock = context.Lock()
         self.budget = int(budget)
 
-    def start_phase(self, loads) -> list[int]:
-        """Initial claims of a phase: the budget in proportion to each worker's whole load."""
+    def start_phase(self, loads, initial=None) -> list[int]:
+        """Initial claims follow initial work (or whole load); growth tracks all remaining work."""
         with self.lock:
-            shares = apportion(self.budget, loads)
+            shares = apportion(self.budget, loads if initial is None else initial)
             for index, share in enumerate(shares):
                 self.claims[index] = share
                 self.remaining[index] = loads[index]
@@ -467,12 +495,47 @@ class LeaseBudget(CpuBudget):
 # The calling process's seat
 # ---------------------------------------------------------------------------------------------------------------
 
+_THREAD_BUDGET = threading.local()
+
+
+@contextmanager
+def budget_context(budget):
+    """Bind deep numerical claims to this task, including nested thread work."""
+    previous = getattr(_THREAD_BUDGET, "value", None)
+    _THREAD_BUDGET.value = budget
+    try:
+        yield
+    finally:
+        _THREAD_BUDGET.value = previous
+
+
+def current_budget():
+    """Capture the caller's live allowance before creating worker threads."""
+    own = getattr(_THREAD_BUDGET, "value", None)
+    if own is not None:
+        return own
+    if _POOL_SEAT is not None:
+        return PoolShareBudget()
+    if _LEASE_SEAT is not None:
+        return LeaseBudget()
+    return FixedBudget(int(_numba().get_num_threads()))
+
+
 def claim_threads(*, max_threads: int | None = None) -> int:
     """Boundary call: recompute this process's share, apply it to the calling thread's Numba team, return it.
 
     Pool worker: its pool share; executor worker: its lease, grown toward its work share; elsewhere the current
     team. ``max_threads`` caps the result for this phase.
     """
+    local = getattr(_THREAD_BUDGET, "value", None)
+    if local is not None:
+        n = local.claim(max_threads) if isinstance(local, SlotBudget) else local.threads()
+        if max_threads is not None:
+            n = min(n, max_threads)
+        numba = _numba()
+        n = max(1, min(int(n), numba.config.NUMBA_NUM_THREADS))
+        numba.set_num_threads(n)
+        return n
     if _POOL_SEAT is not None:
         return _POOL_SEAT.apply(max_threads)
     numba = _numba()
@@ -499,24 +562,31 @@ class _Slots:
         self.budget = budget
         self.owners = {}
         self.admitted = 0
+        self.claims = {}
         self.lock = threading.Lock()
         self.stopped = threading.Event()
 
-    def admit(self):
+    def admit(self, index):
         with self.lock:
-            self.admitted += 1
-
-    def start(self, index):
-        with self.lock:
+            if sum(self.claims.values()) >= self.budget.threads():
+                return False
             slot = next(i for i in range(self.workers) if i not in self.owners.values())
             self.owners[index] = slot
+            self.claims[index] = 1
+            self.admitted += 1
+            return True
+
+    def start(self, index):
+        # Admission already reserved one thread, including workers not yet started.
+        assert index in self.claims
 
     def finish(self, index):
         with self.lock:
             del self.owners[index]
+            del self.claims[index]
             self.admitted -= 1
 
-    def allocation(self, index) -> int:
+    def allocation(self, index, max_threads=None) -> int:
         """The task's share of the live budget among the admitted (running or starting) tasks; the remainder
         goes to the lowest slots. Admitted tasks that have not started yet are counted, so a just-started task
         never takes their threads."""
@@ -526,7 +596,15 @@ class _Slots:
             count = max(1, self.admitted)
             rank = sum(slot < self.owners[index] for slot in self.owners.values())
             cores = int(self.budget.threads())
-            return max(1, cores // count + int(rank < cores % count))
+            desired = max(self.claims[index], cores // count + int(rank < cores % count))
+            # Existing kernels keep their claims. A new task cannot assume peers
+            # have already applied a smaller fair share. Only an explicit cap at
+            # the owner's kernel boundary releases some of its own claim.
+            if max_threads is not None:
+                desired = min(desired, max_threads)
+            available = cores - sum(value for owner, value in self.claims.items() if owner != index)
+            self.claims[index] = max(1, min(desired, available))
+            return self.claims[index]
 
 
 class SlotBudget(CpuBudget):
@@ -540,6 +618,9 @@ class SlotBudget(CpuBudget):
 
     def threads(self) -> int:
         return self.slots.allocation(self.index)
+
+    def claim(self, maximum=None) -> int:
+        return self.slots.allocation(self.index, maximum)
 
 
 def _threading_layer_is_workqueue() -> bool:
@@ -580,7 +661,7 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
             request = reserve(index)
             request.wait()
             try:
-                with adopted(request.held), numba_threads(budget.threads()):
+                with adopted(request.held), budget_context(budget), numba_threads(budget.threads()):
                     value = function(budget)
             finally:
                 request.release()
@@ -591,8 +672,9 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
     def execute(index, request):
         slots.start(index)
         try:
-            with adopted(request.held), numba_threads(slots.allocation(index)):
-                return functions[index](SlotBudget(slots, index))
+            own = SlotBudget(slots, index)
+            with adopted(request.held), budget_context(own), numba_threads(own.threads()):
+                return functions[index](own)
         finally:
             slots.finish(index)
             request.release()
@@ -614,9 +696,10 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
                         if running or starting:
                             break
                         pending.wait()      # nothing of ours runs: wait here (the governor guarantees progress)
+                    if not slots.admit(queued[0]):
+                        break
                     starting.append((queued.pop(0), pending))
                     pending = None
-                    slots.admit()
                 for index, request in starting:
                     running[executor.submit(execute, index, request)] = index
                 timeout = POLL_SECONDS if queued and (budget.live or pending is not None) else None
@@ -661,7 +744,7 @@ def _one_thread_map(budget: CpuBudget, function, items, sizes, label, envelope=F
         # the thread marks it while it waits for an item's memory).
         presence = governor.presence(label, depth, parent=parent)
         try:
-            with numba_threads(1), adopted(presence.held):
+            with numba_threads(1), budget_context(FixedBudget(1)), adopted(presence.held):
                 while True:
                     with changed:
                         if (state["error"] is not None or state["taken"] == len(items)

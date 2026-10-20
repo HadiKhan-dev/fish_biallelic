@@ -62,25 +62,25 @@ def contig_done(store, contig) -> bool:
 
 def planning_bytes(store, contig, n_samples: int) -> int:
     """Lane planning size of a contig from record metadata: its discovery records plus twice its genotype
-    likelihoods and once its observation mask (base: discovery records + prepared evidence + one rebuilt GL copy)."""
+    likelihoods, its observation mask and transient REF/ALT counts used to make completion depth keys."""
     file = store.contig(contig)
     sites = len(file.get("evidence", items=("positions",))["positions"])
     discovered = sum(info.decoded_bytes for info in file.infos("discovery/"))
-    return discovered + 2 * n_samples * sites * 3 * 8 + n_samples * sites
+    return (discovered + 2 * n_samples * sites * 3 * 8 + n_samples * sites
+            + 8 * n_samples * sites + 9 * sites + 32 * n_samples)
 
 
 def final_assembly(store, contig, config, genetic_map, budget, *, view=None, queue=None):
     """The contig's final assembly (role FINAL) from its l2 local panels; resumes from its records."""
     from ..assembly import AssemblyEvidence, AssemblyInputs, Role, assemble
     from ..assembly import records as assembly_records
-    from ..evidence import records as evidence_records
     from ..local_selection import records as selection_records
     from ..store.store import RecordScope
     file = store.contig(contig)
     if assembly_records.complete(file):
         return
     if view is None:
-        view = AssemblyEvidence.from_contig(evidence_records.load(file), file.info("evidence").identity)
+        view = AssemblyEvidence.from_record(file)
     panels = selection_records.load_panels(file, FINAL_ROUND)
     inputs = AssemblyInputs(panels, view, genetic_map,
                             panels_identity=selection_records.panels_identity(file, FINAL_ROUND))
@@ -108,7 +108,7 @@ def reconstruct_contig(store, contig, context: ContigContext, budget) -> ContigS
         if not assembly_records.complete(file):
             # One founder-view evidence for the context assemblies and the final assembly (as base).
             decoded = evidence_records.load(file)
-            view = AssemblyEvidence.from_contig(decoded, file.info("evidence").identity)
+            view = AssemblyEvidence.from_record(file, decoded)
             # Local selection takes the decoded evidence instead of decoding the record again when the founder
             # view is the evidence itself (no QC-flagged sample); otherwise this copy would stay referenced beside
             # local selection's founder copy during the whole selection.

@@ -284,7 +284,12 @@ def search_bytes(samples: int, sites: int, founders: int, snps_per_bin: int = 10
     packed = -(-k * length // 8) + 120
     caches = (TRANSITION_CACHE_ENTRIES * (32 * n + 400 + packed + 150)
               + FIT_CACHE_ENTRIES * (2 * packed + 300) + 16384 * packed)
-    return tables + patterns + caches
+    # Sparse tie membership: plan two retained states per sample per cached record;
+    # singletons store none. Transient frontier masks are split at 32 MiB (one very
+    # large panel can exceed this without imposing a scientific K cap).
+    membership = TRANSITION_CACHE_ENTRIES * (8 * (n + 1) + 2 * 4 * n)
+    transient = max(64 << 20, n * (k * (k + 1) // 2 + k + 1))
+    return tables + patterns + caches + membership + transient
 
 
 def bin_layout(n_sites: int, snps_per_bin: int) -> tuple[int, int]:
@@ -299,17 +304,17 @@ class FixedKWorkspace:
     """One block's fixed-K model tables and fit caches (see the module docstring).
 
     Fit caches are exact memos of deterministic functions of an *ordered* panel: the A(H)
-    assignment record, the A(H), H(A) transition and the complete fit per (start, iteration
-    limit); ``fixed_point_keys`` holds the ordered panels proved to be fixed points.
+    assignment record, two schedule-specific H(A) transitions and complete fits per
+    (schedule, start, iteration limit). Untied transitions share both schedule slots.
+    ``fixed_point_keys`` holds schedule-specific certificates; a public family certificate
+    requires both schedules.
     Caches are bounded by entry count (least recently used entries leave first).
     """
 
-    def __init__(self, likelihoods, observed, model, quanta=None, *, tie_meet=False):
+    def __init__(self, likelihoods, observed, model, quanta=None):
         """``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
         uses ``quanta.sample``, the H step ``quanta.h_step``, cycle and duplicate resolution ``quanta.nll``.
-        ``tie_meet``: the A step assigns a sample with several tied states the meet of their founder pairs (release
-        2.2, discovery; assign.band_meet), else the first tied state in row order (release 2.1 rule)."""
-        self.tie_meet = bool(tie_meet)
+        Every fixed-K path uses uniform evidence over its winning category's tied states."""
         from ...maths.ties import BlockQuanta, block_scale
         self.penalty = float(model.unknown_copy_penalty)
         self.quanta = (quanta if quanta is not None else BlockQuanta.for_scale(
@@ -338,6 +343,9 @@ class FixedKWorkspace:
         self.assignments: OrderedDict = OrderedDict()
         self.transitions: OrderedDict = OrderedDict()
         self.fixed_point_keys: set = set()
+        self.fit_schedule_counts = dict(family_starts=0, branched_starts=0, a_evaluations=0,
+                                        a_reuses_for_h=0, h_sweeps=0, tied_h_sweeps=0,
+                                        commuting_tied_h_sweeps=0, stationary_tied_h_sweeps=0, dense_a_h_reuses=0)
 
     @property
     def samples(self) -> int:
@@ -347,7 +355,7 @@ class FixedKWorkspace:
     def sites(self) -> int:
         return int(self.observed.shape[1])
 
-    # -- ordered-panel state keys (founder order matters: assignment ties are index ordered)
+    # -- ordered-panel state keys (founder order matters: the Gauss-Seidel schedule is ordered)
     @staticmethod
     def state_key(haplotypes) -> tuple:
         matrix = np.asarray(haplotypes)
@@ -375,49 +383,74 @@ class FixedKWorkspace:
         while len(self.assignments) > TRANSITION_CACHE_ENTRIES:
             self.assignments.popitem(last=False)
 
-    def cached_transition(self, key):
-        record = self.transitions.get(key)
-        if record is not None:
-            self.transitions.move_to_end(key)
-        return record
+    def cached_transition(self, key, schedule_reverse=False):
+        """One schedule's H transition; untied transitions share both slots."""
+        schedules = self.transitions.get(key)
+        if schedules is None:
+            return None
+        self.transitions.move_to_end(key)
+        return schedules[int(bool(schedule_reverse))]
 
-    def remember_transition(self, key, assignment, next_key, changes):
-        transition = (assignment, next_key, int(changes))
+    def remember_transition(self, key, assignment, next_key, changes,
+                            schedule_reverse=False, usage_tie=False, commuting=False):
+        transition = (assignment, next_key, int(changes), bool(usage_tie))
         self.remember_assignment(key, assignment)
-        self.transitions[key] = transition
+        schedules = self.transitions.setdefault(key, [None, None])
+        schedules[int(bool(schedule_reverse))] = transition
+        # A tied transition is shared only with an exact dependency certificate:
+        # no heterozygote membership edge joins founders within any tied usage group.
+        # The usage-tie flag stays true, so both complete schedule families still run.
+        # A zero-change sweep is also an exact certificate. Each founder/site is
+        # updated once, so every update kept its allele while reading the original
+        # panel. In the opposite order the same induction leaves every allele fixed.
+        if not usage_tie or commuting or changes == 0:
+            schedules[:] = (transition, transition)
         self.transitions.move_to_end(key)
         while len(self.transitions) > TRANSITION_CACHE_ENTRIES:
             self.transitions.popitem(last=False)
         return transition
 
     @staticmethod
-    def fit_key(haplotypes, max_iterations) -> tuple:
-        return (int(max_iterations),) + FixedKWorkspace.state_key(haplotypes)
+    def fit_key(haplotypes, max_iterations, schedule_reverse=False) -> tuple:
+        limit = int(max_iterations)
+        if limit <= 0:
+            return (limit,) + FixedKWorkspace.state_key(haplotypes)
+        return (limit, bool(schedule_reverse)) + FixedKWorkspace.state_key(haplotypes)
 
     def cached_fit(self, key):
-        """A remembered fit tuple; its panel is stored bit-packed (K x L / 8 bytes, not the
-        K x L x 8 of an int64 array) and returned as a fresh read-only int64 array."""
+        """A remembered fit tuple, with its panel stored bit-packed."""
         stored = self.fits.get(key)
         if stored is None:
             return None
         self.fits.move_to_end(key)
-        packed, rest = stored
+        packed, rest, _usage_tie = stored
         haplotypes = self.state_from_key(packed)
         haplotypes.setflags(write=False)
         return (haplotypes, *rest)
 
-    def remember_fit(self, key, result, *, fixed_point):
+    def fit_encountered_usage_tie(self, key):
+        return bool(self.fits[key][2])
+
+    def remember_fit(self, key, result, *, fixed_point, schedule_reverse=False,
+                     usage_tie=False):
         packed = self.state_key(result[0])
-        self.fits[key] = (packed, tuple(result[1:]))
+        self.fits[key] = (packed, tuple(result[1:]), bool(usage_tie))
         self.fits.move_to_end(key)
         while len(self.fits) > FIT_CACHE_ENTRIES:
             self.fits.popitem(last=False)
         if fixed_point:
-            self.fixed_point_keys.add(packed)
+            self.fixed_point_keys.add((bool(schedule_reverse), packed))
+            transition = self.cached_transition(packed, schedule_reverse)
+            if transition is not None and not transition[3]:
+                self.fixed_point_keys.add((not bool(schedule_reverse), packed))
 
     @staticmethod
     def fixed_point_key(haplotypes) -> tuple:
         return FixedKWorkspace.state_key(haplotypes)
 
-    def certifies_fixed_point(self, haplotypes) -> bool:
-        return self.fixed_point_key(haplotypes) in self.fixed_point_keys
+    def certifies_fixed_point(self, haplotypes, schedule_reverse=None) -> bool:
+        key = self.fixed_point_key(haplotypes)
+        if schedule_reverse is not None:
+            return (bool(schedule_reverse), key) in self.fixed_point_keys
+        return ((False, key) in self.fixed_point_keys and
+                (True, key) in self.fixed_point_keys)

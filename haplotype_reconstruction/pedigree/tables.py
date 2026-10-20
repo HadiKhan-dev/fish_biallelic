@@ -425,6 +425,15 @@ def build(decision: Decision, release: CountRelease, search: pd.DataFrame,
         CandidateParent=[sample_ids[p] for _, p in release.dyads],
         LogE=release.log_e, ObservedSites=release.observed_sites),
         columns=["Sample", "CandidateParent", "LogE", "ObservedSites"])
+    exclusion_columns = list(EXCLUSION_DIAGNOSTIC_COLUMNS)
+    if release.log_e_upper is not None:
+        exact_e = release.log_e == release.log_e_upper
+        exclusion_evidence["LogE"] = np.where(exact_e, release.log_e, np.nan)
+        exclusion_evidence["LogELower"] = release.log_e
+        exclusion_evidence["LogEUpper"] = release.log_e_upper
+        exclusion_evidence["LogEExact"] = exact_e
+        exclusion_columns.extend(["WeakestExclusionLogELower", "WeakestExclusionLogEUpper",
+                                  "WeakestExclusionLogEExact"])
     scores = decision.scores
     evidence_summary = pd.DataFrame({
         "Contig": list(scores.contigs),
@@ -442,5 +451,5 @@ def build(decision: Decision, release: CountRelease, search: pd.DataFrame,
         alternative_explanations=alternative_table, search_diagnostics=search,
         exclusion_evidence=exclusion_evidence,
         exclusion_diagnostics=pd.DataFrame(list(release.records),
-                                           columns=list(EXCLUSION_DIAGNOSTIC_COLUMNS)),
+                                           columns=exclusion_columns),
         evidence_summary=evidence_summary, chromosome_summary=chromosome_summary)

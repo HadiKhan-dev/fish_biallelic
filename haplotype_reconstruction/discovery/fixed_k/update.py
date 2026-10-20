@@ -1,7 +1,8 @@
 """H step: Gauss-Seidel founder-bit updates for fixed assignments.
 
-Founders are updated in stable decreasing order of usage (copies assigned; founders without
-copies keep their alleles). For founder k at site l the cost of allele 0 and 1 is summed over
+Founders are updated in stable decreasing order of expected-copy usage (founders without
+copies keep their alleles). Tied samples share each existing state cost uniformly over their
+winning category. Homozygous states count once in evidence and twice in usage. For founder k at site l the cost of allele 0 and 1 is summed over
 its carriers, in ascending sample order within each bucket: homozygous carriers (genotype 0 vs
 2), carriers with a known partner j (genotype H[j, l] vs H[j, l] + 1, reading partners already
 updated in this sweep) and carriers with an unknown copy (the row-unknown costs); every cost is
@@ -17,6 +18,7 @@ import numpy as np
 from numba import njit, prange
 
 from ..conventions import rev
+from ..residual_births import _accurate_sum
 
 
 
@@ -190,18 +192,220 @@ def sweep_one_thread(haplotypes, order, homozygous, with_partner, with_unknown, 
     return changes
 
 
-def update_founders(workspace, haplotypes, assignments) -> int:
-    """One H step in place on the int64 C-contiguous ``haplotypes``; returns the bits changed."""
+@njit(cache=True, nogil=True)
+def _fractional_usage_commutes(usage, row_ptr, partner_ptr, partners):
+    """No tied-usage founders share a heterozygote term, so their updates commute."""
+    for founder in range(len(usage)):
+        if usage[founder] <= 0:
+            continue
+        for entry in range(row_ptr[founder], row_ptr[founder + 1]):
+            for at in range(partner_ptr[entry], partner_ptr[entry + 1]):
+                if usage[founder] == usage[partners[at]]:
+                    return False
+    return True
+
+
+@njit(cache=True, nogil=True)
+def _singleton_usage_commutes(usage, partner, n_with_partner):
+    for founder in range(len(usage)):
+        if usage[founder] <= 0:
+            continue
+        for entry in range(n_with_partner[founder]):
+            if usage[founder] == usage[partner[founder, entry]]:
+                return False
+    return True
+
+
+def update_founders(workspace, haplotypes, assignments, tie_mask=None, *,
+                    schedule_reverse=None, with_usage_tie=False, with_transition_certificate=False):
+    """One H sweep; an explicit schedule reverses only exact positive-usage ties."""
     k = haplotypes.shape[0]
-    (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
-     n_with_unknown, usage) = founder_buckets(assignments, k)
-    order = usage_order(usage, rev("d3"))
-    if numba.get_num_threads() == 1:
-        return int(sweep_one_thread(
-            haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
-            n_with_partner, n_with_unknown, workspace.genotype_cost_by_sample,
-            workspace.unknown_cost_by_sample, float(workspace.quanta.h_step)))
-    return int(_sweep_site_parallel(
-        haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
-        n_with_partner, n_with_unknown, workspace.genotype_cost_by_site,
-        workspace.unknown_cost_by_site, float(workspace.quanta.h_step)))
+    reverse = rev("d3") if schedule_reverse is None else bool(schedule_reverse)
+    if tie_mask is None:
+        from .assign import tie_mask as membership
+        tie_mask = membership(workspace, haplotypes)
+    fractional = np.any(np.count_nonzero(tie_mask, axis=1) > 1)
+    if fractional:
+        buckets = fractional_buckets(tie_mask, k)
+        usage = buckets[-1]
+        order = usage_order(usage, reverse)
+        sweep = fractional_sweep_one_thread if numba.get_num_threads() == 1 else _fractional_sweep_parallel
+        changes = int(sweep(haplotypes, order, *buckets[:-1], workspace.genotype_cost_by_sample,
+                            workspace.unknown_cost_by_sample, float(workspace.quanta.h_step)))
+    else:
+        (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
+         n_with_unknown, usage) = founder_buckets(assignments, k)
+        order = usage_order(usage, reverse)
+        if numba.get_num_threads() == 1:
+            changes = int(sweep_one_thread(
+                haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
+                n_with_partner, n_with_unknown, workspace.genotype_cost_by_sample,
+                workspace.unknown_cost_by_sample, float(workspace.quanta.h_step)))
+        else:
+            changes = int(_sweep_site_parallel(
+                haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
+                n_with_partner, n_with_unknown, workspace.genotype_cost_by_site,
+                workspace.unknown_cost_by_site, float(workspace.quanta.h_step)))
+    tied = bool(np.any(usage[order[1:]] == usage[order[:-1]]))
+    if with_transition_certificate:
+        commuting = (not tied or
+                     (_fractional_usage_commutes(usage, buckets[0], buckets[5], buckets[6])
+                      if fractional else _singleton_usage_commutes(usage, partner, n_with_partner)))
+        return changes, tied, bool(commuting)
+    return (changes, tied) if with_usage_tie else changes
+
+
+@njit(cache=True, nogil=True)
+def fractional_buckets(mask, k):
+    """Sparse founder/sample entries and integer state counts, with expected-copy usage.
+
+    At a site only the partner-allele counts change with Gauss-Seidel updates. One
+    homozygous state is one cost term but contributes two copies to usage.
+    """
+    n = mask.shape[0]
+    n_pairs = k * (k + 1) // 2
+    lookup = np.empty((k, k), dtype=np.int64)
+    state = 0
+    for a in range(k):
+        for b in range(a, k):
+            lookup[a, b] = lookup[b, a] = state
+            state += 1
+    sizes = np.zeros(n, dtype=np.int64)
+    partner_count = 0
+    for s in range(n):
+        for st in range(mask.shape[1]):
+            sizes[s] += mask[s, st]
+        for a in range(k):
+            for b in range(a + 1, k):
+                partner_count += 2 * int(mask[s, lookup[a, b]])
+    row_ptr = np.zeros(k + 1, dtype=np.int64)
+    samples = np.empty(k * n, dtype=np.int64)
+    homozygous = np.empty(k * n, dtype=np.uint8)
+    unknown = np.empty(k * n, dtype=np.uint8)
+    denominator = np.empty(k * n, dtype=np.int64)
+    partner_ptr = np.empty(k * n + 1, dtype=np.int64)
+    partners = np.empty(partner_count, dtype=np.int64)
+    usage = np.zeros(k, dtype=np.float64)
+    entry = 0
+    at = 0
+    terms = np.empty(n, dtype=np.float64)
+    for founder in range(k):
+        row_ptr[founder] = entry
+        used = 0
+        for s in range(n):
+            first = at
+            for other in range(k):
+                if other != founder and mask[s, lookup[founder, other]]:
+                    partners[at] = other
+                    at += 1
+            h = mask[s, lookup[founder, founder]]
+            u = mask[s, n_pairs + founder]
+            if at != first or h or u:
+                samples[entry] = s
+                homozygous[entry] = h
+                unknown[entry] = u
+                denominator[entry] = sizes[s]
+                partner_ptr[entry] = first
+                terms[used] = (2 * int(h) + int(u) + at - first) / sizes[s]
+                used += 1
+                entry += 1
+        usage[founder] = _accurate_sum(terms[:used])
+    row_ptr[k] = entry
+    partner_ptr[entry] = at
+    return (row_ptr, samples[:entry], homozygous[:entry], unknown[:entry], denominator[:entry],
+            partner_ptr[:entry + 1], partners, usage)
+
+
+@njit(cache=True, nogil=True)
+def _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unknown,
+                     denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+    terms0 = np.empty(genotype_cost.shape[0], dtype=np.float64)
+    terms1 = np.empty(genotype_cost.shape[0], dtype=np.float64)
+    partials = np.empty(genotype_cost.shape[0], dtype=np.float64)
+    changes = 0
+    for position in range(len(order)):
+        founder = order[position]
+        start, stop = row_ptr[founder], row_ptr[founder + 1]
+        for entry in range(start, stop):
+            s = samples[entry]
+            count0 = 0
+            count1 = 0
+            for at in range(partner_ptr[entry], partner_ptr[entry + 1]):
+                if haplotypes[partners[at], site] == 0:
+                    count0 += 1
+                else:
+                    count1 += 1
+            # Aggregate integer counts before weighting, so ordering tied partners cannot
+            # affect a sample's contribution. Read partners updated earlier in this sweep.
+            h, u = int(homozygous[entry]), int(unknown[entry])
+            terms0[entry - start] = ((h + count0) * genotype_cost[s, 0, site]
+                                    + count1 * genotype_cost[s, 1, site]
+                                    + u * unknown_cost[s, 0, site]) / denominator[entry]
+            terms1[entry - start] = (count0 * genotype_cost[s, 1, site]
+                                    + (h + count1) * genotype_cost[s, 2, site]
+                                    + u * unknown_cost[s, 1, site]) / denominator[entry]
+        nll0 = _accurate_sum(terms0[:stop - start], partials)
+        nll1 = _accurate_sum(terms1[:stop - start], partials)
+        current = haplotypes[founder, site]
+        value = current
+        if abs(nll0 - nll1) >= tie:
+            value = 0 if nll0 < nll1 else 1
+        haplotypes[founder, site] = value
+        changes += value != current
+    return changes
+
+
+@njit(cache=True, nogil=True)
+def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous, unknown,
+                                 denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+    # Each site's Gauss-Seidel order is unchanged. Moving independent sites inside
+    # the sample loop reads the cost and founder rows contiguously, and reuses the
+    # expansion-sum scratch instead of allocating it for every founder/site pair.
+    n_samples, _, length = genotype_cost.shape
+    terms0 = np.empty((n_samples, length), dtype=np.float64)
+    terms1 = np.empty((n_samples, length), dtype=np.float64)
+    partials = np.empty(n_samples, dtype=np.float64)
+    counts1 = np.empty(length, dtype=np.int64)
+    changes = 0
+    for position in range(len(order)):
+        founder = order[position]
+        start, stop = row_ptr[founder], row_ptr[founder + 1]
+        for entry in range(start, stop):
+            sample = samples[entry]
+            for site in range(length):
+                counts1[site] = 0
+            begin, end = partner_ptr[entry], partner_ptr[entry + 1]
+            for at in range(begin, end):
+                partner = partners[at]
+                for site in range(length):
+                    counts1[site] += haplotypes[partner, site]
+            h, u = int(homozygous[entry]), int(unknown[entry])
+            for site in range(length):
+                count1 = counts1[site]
+                count0 = end - begin - count1
+                terms0[entry - start, site] = ((h + count0) * genotype_cost[sample, 0, site]
+                                              + count1 * genotype_cost[sample, 1, site]
+                                              + u * unknown_cost[sample, 0, site]) / denominator[entry]
+                terms1[entry - start, site] = (count0 * genotype_cost[sample, 1, site]
+                                              + (h + count1) * genotype_cost[sample, 2, site]
+                                              + u * unknown_cost[sample, 1, site]) / denominator[entry]
+        for site in range(length):
+            nll0 = _accurate_sum(terms0[:stop - start, site], partials)
+            nll1 = _accurate_sum(terms1[:stop - start, site], partials)
+            current = haplotypes[founder, site]
+            value = current
+            if abs(nll0 - nll1) >= tie:
+                value = 0 if nll0 < nll1 else 1
+            haplotypes[founder, site] = value
+            changes += value != current
+    return changes
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _fractional_sweep_parallel(haplotypes, order, row_ptr, samples, homozygous, unknown,
+                               denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+    changes = 0
+    for site in prange(haplotypes.shape[1]):
+        changes += _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unknown,
+                                    denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie)
+    return changes

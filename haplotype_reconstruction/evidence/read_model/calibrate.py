@@ -136,6 +136,10 @@ def calibrate(counts, positions, config: ReadModelConfig, *, threads: int):
     training = hist[_TRAIN_FOLDS[0]] + hist[_TRAIN_FOLDS[1]]
     try:
         shared = fits.fit_shared(training, depth, alt, config)
+    except fits.SharedStationarityError:
+        # Distinct stationary modes need an explicit observation-model policy.
+        # They must not silently select the uncalibrated fallback.
+        raise
     except (ValueError, RuntimeError) as error:
         return None, CalibrationReport(applied=False, selected=None, fallback_reason=str(error),
                                        **report)

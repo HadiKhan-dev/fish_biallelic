@@ -1,12 +1,16 @@
 """Fixed-K fits of many starts: one frontier engine over the deterministic coordinate map.
 
-A fit of an ordered panel H0 is the trajectory H0 -> H1 = H(A(H0)) -> ... of the A step
+Biological consumers fit complete families of the two consistent usage-tie schedules.
+The second schedule is run only if the first encounters a positive-usage tie. A(H) and
+untied H transitions are shared; tied H transitions, full fits and fixed-point proofs
+are schedule-specific. A scalar fit of an ordered panel H0 is the trajectory H0 -> H1 = H(A(H0)) -> ... of the A step
 (assign.py) and the H step (update.py). It stops at a fixed point (an H step that changes
 nothing: the fit's assignments are then A of the final panel), when the trajectory enters a
 cycle (it then returns the cycle's lowest-NLL state, unconverged) or after ``max_iterations``
 steps (the assignments are then recomputed for the last panel). A fit result is the tuple
-``(H, A, per_sample_cost, unknown_slots, iterations, nll)`` of read-only arrays; an unconverged
-fit reports ``iterations = max_iterations``.
+``(H, A, per_sample_cost, unknown_slots, iterations, nll, tie_offsets, tie_states)``.
+Arrays are read-only; the last two arrays compactly store multi-state evidence membership.
+An unconverged fit reports ``iterations = max_iterations``.
 
 The map is deterministic, so every state's transition A(H), H(A(H)) is memoised in the block's
 workspace and all starts of a batch advance together as a frontier: equal states are evaluated
@@ -24,9 +28,12 @@ from numba import njit, prange
 
 from ...execution import claim_threads
 from ..conventions import rev
-from ..panel import canonical_solution, deduplicate, unique_rows
+from ..panel import (assignment_tie_mask, canonical_solution, compact_ties, deduplicate,
+                     panel_key, unique_rows)
 from .assign import assign, haplotype_patterns, meet_pairs, pair_indices
-from .update import founder_buckets, sweep_one_thread, update_founders, usage_order
+from .update import (founder_buckets, fractional_buckets, fractional_sweep_one_thread,
+                     sweep_one_thread, update_founders, usage_order,
+                     _fractional_usage_commutes, _singleton_usage_commutes)
 from .workspace import FixedKWorkspace
 
 # Thread cap of one block's fixed-K fitting phase (a thread limit, not a K limit): the frontier
@@ -36,6 +43,8 @@ FIT_MAX_THREADS = 16
 # sample-tile width; a frontier whose tile would not fit is split (identical results).
 _FRONTIER_TILE_BYTES = 8 * 1024 * 1024
 _FRONTIER_TILE_SAMPLES = 16
+# Dense membership exists only during a transition; cached records keep sparse multi-state IDs.
+_FRONTIER_MEMBERSHIP_BYTES = 32 * 1024 * 1024
 # The batched kernel parallelises over sample tiles; beyond this many threads per frontier
 # state a wider Numba team only adds start-up cost (measured low-frontier saturation).
 _FRONTIER_MIN_THREADS = 4
@@ -46,32 +55,45 @@ def _readonly(*arrays):
         array.setflags(write=False)
 
 
-def _assignment_record(assignments, cost, unknown_slots):
+def _assignment_record(assignments, cost, unknown_slots, mask):
     """Immutable A(H) record: (assignments, per-sample cost, unknown slots, total NLL)."""
     _readonly(assignments, cost, unknown_slots)
     # The exactly rounded total: independent of sample order and summation layout (release 2.1).
-    return (assignments, cost, unknown_slots, math.fsum(cost.tolist()))
+    offsets, states = compact_ties(mask)
+    return (assignments, cost, unknown_slots, math.fsum(cost.tolist()), offsets, states)
 
 
 def _fit_result(haplotypes, record, iterations):
     """A fit result tuple from an ordered panel (taken over: made read-only) and its
     assignment record."""
     haplotypes.setflags(write=False)
-    return (haplotypes, record[0], record[1], record[2], int(iterations), record[3])
+    return (haplotypes, record[0], record[1], record[2], int(iterations), record[3], record[4], record[5])
 
 
 def _assignment_scalar(workspace, haplotypes, key):
-    record = _assignment_record(*assign(workspace, haplotypes))
+    workspace.fit_schedule_counts["a_evaluations"] += 1
+    record = _assignment_record(*assign(workspace, haplotypes, with_ties=True))
     workspace.remember_assignment(key, record)
     return record
 
 
-def _transition_scalar(workspace, haplotypes, key):
-    assignments, cost, unknown_slots = assign(workspace, haplotypes)
+def _transition_scalar(workspace, haplotypes, key, schedule_reverse=False):
+    record = workspace.cached_assignment(key)
+    if record is None:
+        record = _assignment_scalar(workspace, haplotypes, key)
+    else:
+        workspace.fit_schedule_counts["a_reuses_for_h"] += 1
+    mask = assignment_tie_mask(record[0], len(haplotypes), record[4], record[5])
     following = np.array(haplotypes, dtype=np.int64, order="C", copy=True)
-    changes = update_founders(workspace, following, assignments)
-    record = _assignment_record(assignments, cost, unknown_slots)
-    return workspace.remember_transition(key, record, workspace.state_key(following), changes)
+    changes, tied, commuting = update_founders(
+        workspace, following, record[0], mask, schedule_reverse=schedule_reverse,
+        with_transition_certificate=True)
+    workspace.fit_schedule_counts["h_sweeps"] += 1
+    workspace.fit_schedule_counts["tied_h_sweeps"] += int(tied)
+    workspace.fit_schedule_counts["commuting_tied_h_sweeps"] += int(tied and commuting)
+    workspace.fit_schedule_counts["stationary_tied_h_sweeps"] += int(tied and not commuting and changes == 0)
+    return workspace.remember_transition(key, record, workspace.state_key(following), changes,
+                                         schedule_reverse, tied, commuting)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -116,7 +138,7 @@ def _frontier_layout(batch, first, second):
 @njit(cache=True, parallel=True, nogil=True)
 def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emissions,
                      ww_total_cost, row_slots, pair_i, pair_j, pair_slots, state_indices, first,
-                     second, penalty, k, n_bins, tile_width, tie, reverse, meet):
+                     second, penalty, k, n_bins, tile_width, tie):
     """A step of every panel of a frontier, sharing the emissions of distinct rows and row
     pairs within sample tiles; per panel the state order, argmin tie rule and Viterbi are those
     of the single-panel A step (identical values)."""
@@ -130,6 +152,7 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
     assignments = np.empty((b_count, n, 2), dtype=np.int64)
     cost = np.empty((b_count, n), dtype=np.float64)
     unknown_slots = np.empty((b_count, n), dtype=np.int64)
+    mask = np.zeros((b_count, n, n_states), dtype=np.uint8)
     for tile in prange((n + tile_width - 1) // tile_width):
         start_sample = tile * tile_width
         width = min(tile_width, n - start_sample)
@@ -177,72 +200,36 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
                     best_cost[t] = ww_total_cost[s]
                 alpha[n_states - 1, t] = ww_bin_emissions[s, 0]
                 threshold = best_cost[t] + tie
-                if meet:
-                    # As assign.band_meet (release 2.2): the meet of the winning category's tied states; the
-                    # unknown-copy count is the category's.
-                    m0 = k
-                    m1 = k
-                    category_won = 2
-                    for category in range(2):
-                        lo = 0 if category == 0 else n_rr
-                        hi = n_rr if category == 0 else n_states - 1
-                        tied = 0
-                        for st in range(lo, hi):
-                            if -totals[state_indices[panel, st], t] <= threshold:
-                                if st < n_rr:
-                                    c = first[st]
-                                    d = second[st]
-                                else:
-                                    c = st - n_rr
-                                    d = k
-                                if tied == 0:
-                                    m0 = c
-                                    m1 = d
-                                else:
-                                    m0, m1 = meet_pairs(m0, m1, c, d, k)
-                                tied += 1
-                        if tied > 0:
-                            category_won = category
-                            break
-                    assignments[panel, s, 0] = m0
-                    assignments[panel, s, 1] = m1
-                    unknown_slots[panel, s] = category_won
-                    continue
-                # Release 2.1 rule, as assign.band_state: fewest unknown copies first
-                # (row pairs, then (k, U), then (U, U)), then row order (the last under reversed conventions).
-                chosen = n_states - 1
-                found = False
+                m0 = k
+                m1 = k
+                category_won = 2
                 for category in range(2):
                     lo = 0 if category == 0 else n_rr
                     hi = n_rr if category == 0 else n_states - 1
-                    if reverse:
-                        for st in range(hi - 1, lo - 1, -1):
-                            if -totals[state_indices[panel, st], t] <= threshold:
-                                chosen = st
-                                found = True
-                                break
-                    else:
-                        for st in range(lo, hi):
-                            if -totals[state_indices[panel, st], t] <= threshold:
-                                chosen = st
-                                found = True
-                                break
-                    if found:
+                    tied = 0
+                    for st in range(lo, hi):
+                        if -totals[state_indices[panel, st], t] <= threshold:
+                            mask[panel, s, st] = 1
+                            if st < n_rr:
+                                c = first[st]
+                                d = second[st]
+                            else:
+                                c = st - n_rr
+                                d = k
+                            if tied == 0:
+                                m0 = c
+                                m1 = d
+                            else:
+                                m0, m1 = meet_pairs(m0, m1, c, d, k)
+                            tied += 1
+                    if tied > 0:
+                        category_won = category
                         break
-                best_state[t] = chosen
-                state = best_state[t]
-                if state < n_rr:
-                    assignments[panel, s, 0] = first[state]
-                    assignments[panel, s, 1] = second[state]
-                    unknown_slots[panel, s] = 0
-                elif state < n_rr + k:
-                    assignments[panel, s, 0] = state - n_rr
-                    assignments[panel, s, 1] = k
-                    unknown_slots[panel, s] = 1
-                else:
-                    assignments[panel, s, 0] = k
-                    assignments[panel, s, 1] = k
-                    unknown_slots[panel, s] = 2
+                if category_won == 2:
+                    mask[panel, s, n_states - 1] = 1
+                assignments[panel, s, 0] = m0
+                assignments[panel, s, 1] = m1
+                unknown_slots[panel, s] = category_won
             for b in range(1, n_bins):
                 for t in range(width):
                     best_previous[t] = -np.inf
@@ -274,31 +261,59 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
                     if alpha[state, t] > best_final:
                         best_final = alpha[state, t]
                 cost[panel, start_sample + t] = -best_final
-    return assignments, cost, unknown_slots
+    return assignments, cost, unknown_slots, mask
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _update_frontier(batch, assignments, unknown_slots, uninformative, genotype_cost_by_sample,
-                     unknown_cost_by_sample, tie, reverse):
+def _update_frontier(batch, assignments, unknown_slots, mask, uninformative, genotype_cost_by_sample,
+                     unknown_cost_by_sample, tie, reverse, commuting=None):
     """Uninformative samples to (U, U), then every panel's one-thread H sweep (parallel over
     panels)."""
     following = batch.copy()
     changes = np.empty(batch.shape[0], dtype=np.int64)
+    usage_ties = np.zeros(batch.shape[0], dtype=np.bool_)
     k = batch.shape[1]
     for panel in prange(batch.shape[0]):
+        multiple = False
         for sample in range(assignments.shape[1]):
             if uninformative[sample]:
                 assignments[panel, sample, 0] = k
                 assignments[panel, sample, 1] = k
                 unknown_slots[panel, sample] = 2
+                mask[panel, sample, :] = 0
+                mask[panel, sample, -1] = 1
+            size = 0
+            for state in range(mask.shape[2]):
+                size += mask[panel, sample, state]
+            if size > 1:
+                multiple = True
+        if multiple:
+            buckets = fractional_buckets(mask[panel], k)
+            order = usage_order(buckets[-1], reverse)
+            for pos in range(1, len(order)):
+                if buckets[-1][order[pos]] == buckets[-1][order[pos - 1]]:
+                    usage_ties[panel] = True
+            if commuting is not None:
+                commuting[panel] = (not usage_ties[panel] or _fractional_usage_commutes(
+                    buckets[-1], buckets[0], buckets[5], buckets[6]))
+            changes[panel] = fractional_sweep_one_thread(
+                following[panel], order, buckets[0], buckets[1], buckets[2], buckets[3],
+                buckets[4], buckets[5], buckets[6], genotype_cost_by_sample, unknown_cost_by_sample, tie)
+            continue
         (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
          n_with_unknown, usage) = founder_buckets(assignments[panel], k)
         order = usage_order(usage, reverse)
+        for pos in range(1, len(order)):
+            if usage[order[pos]] == usage[order[pos - 1]]:
+                usage_ties[panel] = True
+        if commuting is not None:
+            commuting[panel] = (not usage_ties[panel] or
+                                _singleton_usage_commutes(usage, partner, n_with_partner))
         changes[panel] = sweep_one_thread(
             following[panel], order, homozygous, with_partner, with_unknown, partner,
             n_homozygous, n_with_partner, n_with_unknown, genotype_cost_by_sample,
             unknown_cost_by_sample, tie)
-    return following, changes
+    return following, changes, usage_ties
 
 
 def _row_patterns(rows, snps_per_bin, n_bins):
@@ -307,8 +322,8 @@ def _row_patterns(rows, snps_per_bin, n_bins):
     return patterns
 
 
-def _batched_transitions(workspace, batch):
-    """(following panels, assignments, cost, unknown slots, changes) of a frontier batch."""
+def _batched_assignments(workspace, batch):
+    """Exact A(H) for a batch, sharing row/pair emissions without an H sweep."""
     b, k, _ = batch.shape
     first, second = pair_indices(k)
     rows, pair_i, pair_j, state_indices = _frontier_layout(batch, first, second)
@@ -320,43 +335,118 @@ def _batched_transitions(workspace, batch):
             # Too many distinct rows/pairs for one tile: split the frontier (each panel's
             # transition is independent of its batch-mates, so the results are identical).
             half = b // 2
-            left = _batched_transitions(workspace, batch[:half])
-            right = _batched_transitions(workspace, batch[half:])
+            left = _batched_assignments(workspace, batch[:half])
+            right = _batched_assignments(workspace, batch[half:])
             return tuple(np.concatenate((x, y)) for x, y in zip(left, right))
         tile_width = 1
     tables = workspace.patterns
     patterns = _row_patterns(rows, workspace.snps_per_bin, n_bins)
     row_slots = tables.slots(patterns)
     pair_slots = tables.slots(patterns[pair_i] & patterns[pair_j])
-    assignments, cost, unknown_slots = _assign_frontier(
+    assignments, cost, unknown_slots, mask = _assign_frontier(
         workspace.c0b, tables.diff1_table, tables.w_table, workspace.kw_cb, tables.kw_diff_table,
         workspace.ww_bin_emissions, workspace.ww_total_cost, row_slots, pair_i, pair_j,
         pair_slots, state_indices, first, second, workspace.switch_penalty, k, n_bins,
-        tile_width, float(workspace.quanta.sample), rev("d1"), bool(workspace.tie_meet))
-    following, changes = _update_frontier(
-        batch, assignments, unknown_slots, workspace.uninformative,
+        tile_width, float(workspace.quanta.sample))
+    # The full transition historically applied this correction in _update_frontier.
+    # A-only results need the same neutral (U,U) membership as scalar assign.
+    inactive = workspace.uninformative
+    if np.any(inactive):
+        assignments[:, inactive, :] = k
+        unknown_slots[:, inactive] = 2
+        mask[:, inactive, :] = 0
+        mask[:, inactive, -1] = 1
+    return assignments, cost, unknown_slots, mask
+
+
+def _batched_transitions(workspace, batch, schedule_reverse=None):
+    """A(H) then H(A), retaining the exact assignment-only batch as a reusable phase."""
+    assignments, cost, unknown_slots, mask = _batched_assignments(workspace, batch)
+    following, changes, _usage_ties = _update_frontier(
+        batch, assignments, unknown_slots, mask, workspace.uninformative,
         workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample,
-        float(workspace.quanta.h_step), rev("d3"))
-    return following, assignments, cost, unknown_slots, changes
+        float(workspace.quanta.h_step), rev("d3") if schedule_reverse is None else bool(schedule_reverse))
+    return following, assignments, cost, unknown_slots, changes, mask
 
 
-def _transition_batch(workspace, matrices, keys):
-    """Compute and remember the transitions of distinct uncached states of one frontier."""
+def _assignment_batch(workspace, matrices, keys, *, with_dense=False):
+    """Cache exact A-only frontiers, with the same bounded dense membership workspace."""
+    k = matrices[0].shape[0]
+    membership_bytes = len(matrices) * workspace.samples * (k * (k + 1) // 2 + k + 1)
+    if len(matrices) > 1 and membership_bytes > _FRONTIER_MEMBERSHIP_BYTES:
+        half = len(matrices) // 2
+        left = _assignment_batch(workspace, matrices[:half], keys[:half], with_dense=with_dense)
+        right = _assignment_batch(workspace, matrices[half:], keys[half:], with_dense=with_dense)
+        if with_dense:
+            return tuple(np.concatenate((x, y)) for x, y in zip(left, right))
+        return
+    workspace.fit_schedule_counts["a_evaluations"] += len(matrices)
     batch = np.ascontiguousarray(np.stack(matrices), dtype=np.int64)
     active = numba.get_num_threads()
-    threads = min(active, max(_FRONTIER_MIN_THREADS, batch.shape[0]))
+    threads = min(active, max(_FRONTIER_MIN_THREADS, len(batch)))
     if threads != active:
         numba.set_num_threads(threads)
     try:
-        following, assignments, cost, unknown_slots, changes = _batched_transitions(workspace, batch)
+        assignments, cost, unknown_slots, mask = _batched_assignments(workspace, batch)
     finally:
         if threads != active:
             numba.set_num_threads(active)
     for index, key in enumerate(keys):
-        # The batched A step has no capped/uncapped split: cost is the one per-sample NLL.
-        record = _assignment_record(assignments[index], cost[index], unknown_slots[index])
-        workspace.remember_transition(key, record, workspace.state_key(following[index]),
-                                      int(changes[index]))
+        record = _assignment_record(assignments[index], cost[index], unknown_slots[index], mask[index])
+        workspace.remember_assignment(key, record)
+    if with_dense:
+        return assignments, cost, unknown_slots, mask
+
+
+def _transition_batch(workspace, matrices, keys, schedule_reverse=False):
+    """Share each exact A(H); only H transitions and certificates depend on schedule."""
+    k = matrices[0].shape[0]
+    membership_bytes = len(matrices) * workspace.samples * (k * (k + 1) // 2 + k + 1)
+    if len(matrices) > 1 and membership_bytes > _FRONTIER_MEMBERSHIP_BYTES:
+        half = len(matrices) // 2
+        _transition_batch(workspace, matrices[:half], keys[:half], schedule_reverse)
+        _transition_batch(workspace, matrices[half:], keys[half:], schedule_reverse)
+        return
+    missing = [(matrix, key) for matrix, key in zip(matrices, keys)
+               if workspace.cached_assignment(key) is None]
+    workspace.fit_schedule_counts["a_reuses_for_h"] += len(matrices) - len(missing)
+    dense = None
+    if len(missing) == 1:
+        _assignment_scalar(workspace, missing[0][0], missing[0][1])
+    elif missing:
+        dense = _assignment_batch(workspace, [item[0] for item in missing], [item[1] for item in missing],
+                                  with_dense=len(missing) == len(matrices))
+    records = [workspace.cached_assignment(key) for key in keys]
+    batch = np.ascontiguousarray(np.stack(matrices), dtype=np.int64)
+    if dense is not None:
+        assignments, _cost, unknown_slots, mask = dense
+        workspace.fit_schedule_counts["dense_a_h_reuses"] += len(matrices)
+    else:
+        assignments = np.stack([record[0] for record in records])
+        unknown_slots = np.stack([record[2] for record in records])
+        mask = np.stack([assignment_tie_mask(record[0], k, record[4], record[5]) for record in records])
+    commuting = np.empty(len(matrices), dtype=np.bool_)
+    active = numba.get_num_threads()
+    threads = min(active, max(_FRONTIER_MIN_THREADS, len(batch)))
+    if threads != active:
+        numba.set_num_threads(threads)
+    try:
+        following, changes, usage_ties = _update_frontier(
+            batch, assignments, unknown_slots, mask, workspace.uninformative,
+            workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample,
+            float(workspace.quanta.h_step), bool(schedule_reverse), commuting)
+    finally:
+        if threads != active:
+            numba.set_num_threads(active)
+    workspace.fit_schedule_counts["h_sweeps"] += len(keys)
+    workspace.fit_schedule_counts["tied_h_sweeps"] += int(np.count_nonzero(usage_ties))
+    workspace.fit_schedule_counts["commuting_tied_h_sweeps"] += int(np.count_nonzero(usage_ties & commuting))
+    workspace.fit_schedule_counts["stationary_tied_h_sweeps"] += int(np.count_nonzero(
+        usage_ties & ~commuting & (changes == 0)))
+    for index, key in enumerate(keys):
+        workspace.remember_transition(key, records[index], workspace.state_key(following[index]),
+                                      int(changes[index]), schedule_reverse, bool(usage_ties[index]),
+                                      bool(commuting[index]))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -376,18 +466,19 @@ def _best_cycle_state(workspace, cycle_keys):
         record = workspace.cached_assignment(key)
         if record is None:
             # Evicted from the bounded cache: recompute (a pure function of the state).
-            record = _transition_scalar(workspace, workspace.state_from_key(key), key)[0]
+            record = _assignment_scalar(workspace, workspace.state_from_key(key), key)
         if best is None or record[3] < best[3] - workspace.quanta.nll:
             best_key, best = key, record
     return best_key, best
 
 
-def _frontier_fits(workspace, starts, max_iterations, with_initial):
+def _frontier_fits(workspace, starts, max_iterations, with_initial, schedule_reverse=False):
     """Fit distinct same-K starts together; returns final fits (and initial assignment-only fits
     when ``with_initial``) in start order, remembering both in the workspace."""
     count = len(starts)
     limit = max(0, int(max_iterations))
     finals = [None] * count
+    usage_ties = [False] * count
     initials = [None] * count
     fit_keys = [None] * count
     initial_keys = [None] * count
@@ -399,8 +490,10 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
     cached_finals = [None] * count
     active = []
     for index, start in enumerate(starts):
-        fit_keys[index] = workspace.fit_key(start, max_iterations)
+        fit_keys[index] = workspace.fit_key(start, max_iterations, schedule_reverse)
         cached_finals[index] = workspace.cached_fit(fit_keys[index])
+        if cached_finals[index] is not None:
+            usage_ties[index] = workspace.fit_encountered_usage_tie(fit_keys[index])
         if with_initial:
             initial_keys[index] = workspace.fit_key(start, 0)
             initials[index] = workspace.cached_fit(initial_keys[index])
@@ -415,7 +508,8 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
 
     def finish(index, result, fixed_point):
         finals[index] = result
-        workspace.remember_fit(fit_keys[index], result, fixed_point=fixed_point)
+        workspace.remember_fit(fit_keys[index], result, fixed_point=fixed_point,
+                               schedule_reverse=schedule_reverse, usage_tie=usage_ties[index])
         if with_initial:
             workspace.remember_fit(initial_keys[index], initials[index], fixed_point=False)
 
@@ -425,26 +519,28 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
         for index in active:
             key = state_keys[index]
             cached = (workspace.cached_assignment(key) if assignment_only
-                      else workspace.cached_transition(key))
+                      else workspace.cached_transition(key, schedule_reverse))
             if cached is None:
                 missing.setdefault(key, None)
         if missing:
             matrices = [workspace.state_from_key(key) for key in missing]
             if assignment_only:
-                for key, matrix in zip(missing, matrices):
-                    _assignment_scalar(workspace, matrix, key)
+                if len(matrices) == 1:
+                    _assignment_scalar(workspace, matrices[0], next(iter(missing)))
+                else:
+                    _assignment_batch(workspace, matrices, tuple(missing))
             elif len(matrices) == 1:
                 # A single state keeps the internally parallel A and H steps.
-                _transition_scalar(workspace, matrices[0], next(iter(missing)))
+                _transition_scalar(workspace, matrices[0], next(iter(missing)), schedule_reverse)
             else:
-                _transition_batch(workspace, matrices, tuple(missing))
+                _transition_batch(workspace, matrices, tuple(missing), schedule_reverse)
         next_active = []
         for index in active:
             key = state_keys[index]
             if assignment_only:
-                record, next_key, changes = workspace.cached_assignment(key), None, 0
+                record, next_key, changes, tied = workspace.cached_assignment(key), None, 0, False
             else:
-                record, next_key, changes = workspace.cached_transition(key)
+                record, next_key, changes, tied = workspace.cached_transition(key, schedule_reverse)
             if with_initial and initials[index] is None:
                 initials[index] = _fit_result(starts[index].copy(), record, 0)
             if cached_finals[index] is not None:
@@ -453,6 +549,7 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
             if completed[index] >= limit:
                 finish(index, _fit_result(workspace.state_from_key(key), record, limit), False)
                 continue
+            usage_ties[index] |= tied
             completed[index] += 1
             if changes == 0:
                 # A fixed point: the assignments are A of the final panel. A fit whose
@@ -481,26 +578,17 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
             next_active.append(index)
         active = next_active
     if with_initial:
-        return list(zip(initials, finals))
-    return finals
+        return list(zip(initials, finals)), usage_ties
+    return finals, usage_ties
 
 
-def fit_starts(workspace, starts, max_iterations, *, with_initial=False, quanta=None):
-    """Fit binary int64 starts of one K (in order); duplicate starts are fitted once.
-
-    Returns the fit tuples (with ``with_initial``: (initial assignment-only fit, final fit)
-    pairs) in start order. ``quanta`` (release 2.1 interface): must be None or the workspace's own
-    BlockQuanta (the fits' tie rules are those of the workspace).
-    """
+def _scheduled_starts(workspace, starts, max_iterations, with_initial, quanta, schedule_reverse):
     _check_quanta(workspace, quanta)
     starts = [np.ascontiguousarray(start, dtype=np.int64) for start in starts]
     if not starts:
-        return []
-    # A phase boundary: tail blocks claim cores released by finished workers.
+        return [], []
     claim_threads(max_threads=FIT_MAX_THREADS)
-    unique: dict[bytes, int] = {}
-    distinct = []
-    replay = []
+    unique, distinct, replay = {}, [], []
     for start in starts:
         key = start.tobytes()
         index = unique.get(key)
@@ -508,69 +596,131 @@ def fit_starts(workspace, starts, max_iterations, *, with_initial=False, quanta=
             index = unique[key] = len(distinct)
             distinct.append(start)
         replay.append(index)
-    results = _frontier_fits(workspace, distinct, max_iterations, with_initial)
-    return [results[index] for index in replay]
+    records, tied = _frontier_fits(workspace, distinct, max_iterations, with_initial, schedule_reverse)
+    return [records[index] for index in replay], [tied[index] for index in replay]
 
 
-def fit_panels(workspace, starts, max_iterations, *, quanta=None):
-    """Fit every distinct-row start and return (synchronized, refitted) canonical solutions.
+def fit_starts(workspace, starts, max_iterations, *, with_initial=False, quanta=None,
+               schedule_reverse=None):
+    """Explicit single-schedule fit primitive; max_iterations=0 is unchanged exact A(H).
 
-    ``quanta``: None (the workspace's) or the workspace's own BlockQuanta; solutions carry them and both
-    collections are deduplicated and ordered with them (tie classes of kind ``nll``).
+    Biological discovery and bank consumers use fit_families. The optional legacy schedule
+    default remains for reference callers; it never chooses a production family endpoint.
+    """
+    reverse = rev("d3") if schedule_reverse is None else bool(schedule_reverse)
+    return _scheduled_starts(workspace, starts, max_iterations, with_initial, quanta, reverse)[0]
 
-    For each start (its distinct rows), the synchronized endpoint is its assignment-only fit
-    (A of the start, no H step) and the refitted endpoint its complete fit. A refit that collapses
-    rows re-enters as a start at the lower K (refitted collection only). Both collections are
-    deduplicated (distinct complete panels, lowest NLL, ordered by (nll, key)). A synchronized
-    endpoint is marked a fixed point only if its start was certified before this call.
+
+def fit_families(workspace, starts, max_iterations, *, with_initial=False, quanta=None):
+    """Complete endpoints of both consistent usage-tie schedules, per canonical start.
+
+    No second trajectory is run when the first encounters no positive-usage tie. Exact A(H)
+    and untied H transitions are shared. Assignment-only calls have one unchanged endpoint.
+    """
+    starts = [np.ascontiguousarray(start, dtype=np.int64) for start in starts]
+    if max_iterations > 0:
+        starts = [np.ascontiguousarray(start[np.lexsort(start.T[::-1])]) for start in starts]
+    primary, tied = _scheduled_starts(workspace, starts, max_iterations, with_initial, quanta, False)
+    branch = [index for index, value in enumerate(tied) if value]
+    workspace.fit_schedule_counts["family_starts"] += len(starts)
+    workspace.fit_schedule_counts["branched_starts"] += len(branch)
+    alternate = {}
+    if branch:
+        records, _ = _scheduled_starts(workspace, [starts[index] for index in branch],
+                                       max_iterations, False, quanta, True)
+        alternate = dict(zip(branch, records))
+    result = []
+    for index, record in enumerate(primary):
+        initial, final = record if with_initial else (None, record)
+        endpoints = [final]
+        if index in alternate:
+            endpoints.append(alternate[index])
+        unique = {}
+        for endpoint in endpoints:
+            unique.setdefault(panel_key(endpoint[0]), endpoint)
+        family = tuple(unique[key] for key in sorted(unique))
+        result.append((initial, family) if with_initial else family)
+    return result
+
+
+def fit_panels(workspace, starts, max_iterations, *, quanta=None, with_families=False):
+    """Synchronized and refitted solutions, retaining both schedule endpoints per start.
+
+    Row collapse recurses at lower K. With ``with_families``, a third collection gives each
+    original start's complete canonical endpoint keys, including its synchronized endpoint
+    and all lower-K descendants. Bank score limits admit those families atomically.
     """
     _check_quanta(workspace, quanta)
     quanta = workspace.quanta
-    pending = []
-    seen = set()
-    certified_before = {}
+    pending, roots, seen, certified_before = [], [], set(), {}
     for start in starts:
         rows = np.ascontiguousarray(unique_rows(np.asarray(start)), dtype=np.int64)
-        key = (rows.shape, rows.tobytes())
+        key = workspace.state_key(rows)
         if key in seen:
             continue
         seen.add(key)
+        roots.append(key)
         pending.append(rows)
         certified_before[key] = workspace.certifies_fixed_point(rows)
     synchronized, refitted = [], []
+    initial_keys, endpoints, collapsed = {}, {}, {}
     capture_initial = True
     while pending:
-        grouped: dict[int, list] = {}
+        grouped = {}
         for rows in pending:
             grouped.setdefault(len(rows), []).append(rows)
         pending = []
         for k in sorted(grouped):
             group = grouped[k]
             if capture_initial:
-                records = fit_starts(workspace, group, max_iterations, with_initial=True)
+                records = fit_families(workspace, group, max_iterations, with_initial=True)
             else:
-                records = [(None, fit) for fit in fit_starts(workspace, group, max_iterations)]
-            for start, (initial, final) in zip(group, records):
+                records = [(None, family) for family in fit_families(workspace, group, max_iterations)]
+            for start, (initial, family) in zip(group, records):
+                source_key = workspace.state_key(start)
+                endpoints.setdefault(source_key, set())
+                collapsed.setdefault(source_key, set())
                 if initial is not None:
-                    key = (start.shape, start.tobytes())
-                    synchronized.append(canonical_solution(
-                        initial, workspace if certified_before[key] else None, quanta))
-                solution = canonical_solution(final, workspace, quanta)
-                rows = np.ascontiguousarray(unique_rows(solution.haplotypes), dtype=np.int64)
-                if len(rows) == solution.k:
-                    refitted.append(solution)
-                    continue
-                key = (rows.shape, rows.tobytes())
-                if key not in seen:
-                    seen.add(key)
-                    pending.append(rows)
+                    solution = canonical_solution(initial,
+                        workspace if certified_before[source_key] else None, quanta)
+                    synchronized.append(solution)
+                    initial_keys[source_key] = solution.key
+                for final in family:
+                    solution = canonical_solution(final, workspace, quanta)
+                    rows = np.ascontiguousarray(unique_rows(solution.haplotypes), dtype=np.int64)
+                    if len(rows) == solution.k:
+                        refitted.append(solution)
+                        endpoints[source_key].add(solution.key)
+                        continue
+                    key = workspace.state_key(rows)
+                    collapsed[source_key].add(key)
+                    if key not in seen:
+                        seen.add(key)
+                        pending.append(rows)
         capture_initial = False
-    return deduplicate(synchronized, quanta=quanta), deduplicate(refitted, quanta=quanta)
+    synchronized = deduplicate(synchronized, quanta=quanta)
+    refitted = deduplicate(refitted, quanta=quanta)
+    if not with_families:
+        return synchronized, refitted
+    families = []
+    for root in roots:
+        keys = {initial_keys[root]}
+        queue, reached = [root], set()
+        while queue:
+            source = queue.pop()
+            if source in reached:
+                continue
+            reached.add(source)
+            keys.update(endpoints[source])
+            queue.extend(collapsed[source])
+        families.append(tuple(sorted(keys)))
+    return synchronized, refitted, tuple(families)
 
 
-def fit_one(workspace, haplotypes, max_iterations, *, quanta=None):
+def fit_one(workspace, haplotypes, max_iterations, *, quanta=None, schedule_reverse=None):
     """The fit tuple of one start."""
-    return fit_starts(workspace, [haplotypes], max_iterations, quanta=quanta)[0]
+    return fit_starts(workspace, [haplotypes], max_iterations, quanta=quanta,
+                      schedule_reverse=schedule_reverse)[0]
 
 
 def _check_quanta(workspace, quanta):
@@ -578,8 +728,6 @@ def _check_quanta(workspace, quanta):
         raise ValueError("a fixed-K fit uses its workspace's tie quanta; pass None or workspace.quanta")
 
 
-def prepare_workspace(likelihoods, observed, model, quanta=None, *, tie_meet=False) -> FixedKWorkspace:
-    """A block's fixed-K workspace (see workspace.FixedKWorkspace); ``quanta``: the block's BlockQuanta
-    (None: derived from the block's null NLL, maths.ties.block_scale); ``tie_meet``: the A step's release 2.2 meet
-    rule for tied states (discovery), else the 2.1 rule (local selection's bank)."""
-    return FixedKWorkspace(likelihoods, observed, model, quanta, tie_meet=tie_meet)
+def prepare_workspace(likelihoods, observed, model, quanta=None) -> FixedKWorkspace:
+    """A block's fixed-K workspace with uniform winning-category tie evidence in every path."""
+    return FixedKWorkspace(likelihoods, observed, model, quanta)

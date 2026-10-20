@@ -186,6 +186,8 @@ class ChromosomeExecutor:
 
     ``budget`` (a CpuBudget or thread count) is the total CPU budget shared by the workers, bounded by affinity
     and Numba's pool size; there are at most min(tasks, budget, max_workers) persistent processes.
+    ``frontload`` apportions initial leases by each partition's first task; later growth still follows its
+    remaining total work. This gives long first tasks their cores before short queued tasks begin.
     ``weights`` are nonnegative workload estimates in task order: the largest tasks go first to the
     least-loaded partition, and every phase starts each worker with a lease proportional to its partition's
     work. ``phase_progress`` maps phase names that handlers pass to ``budget.phase(name)`` to the fraction of a
@@ -197,7 +199,8 @@ class ChromosomeExecutor:
     """
 
     def __init__(self, tasks, handler, *, budget, weights=None, max_workers=None, label="CHROMOSOME",
-                 phase_progress=None, task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None):
+                 phase_progress=None, task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None,
+                 frontload=False):
         self.tasks = tuple(tasks)
         self.handler = handler
         self.label = label
@@ -222,6 +225,8 @@ class ChromosomeExecutor:
             self.partitions[owner].append((task_index, self.tasks[task_index]))
             self._loads[owner] += values[task_index]
         self._weights = values
+        self._initial_loads = ([values[partition[0][0]] for partition in self.partitions]
+                               if frontload and self.tasks else None)
         self._state = LeaseState(FORKSERVER, self.worker_count, self.cpu_budget)
         # Worker processes are recycled (execution.pools.recycle_threshold); the in-process worker never is.
         self.recycle_bytes = recycle_threshold(self.worker_count, recycle_bytes) if self.worker_count > 1 else 0
@@ -336,7 +341,7 @@ class ChromosomeExecutor:
         sizes = self.task_bytes if task_bytes is None else task_sizes(task_bytes, self.tasks)
         caller = held_context()
         depth, parent = depth_below(caller), caller[0] if caller else 0
-        shares = self._state.start_phase(self._loads)
+        shares = self._state.start_phase(self._loads, initial=self._initial_loads)
         print(f"{self.label} chromosome phase={phase}: {self.worker_count} workers, {self.cpu_budget} CPUs; "
               f"initial threads={shares}", flush=True)
         results = [None] * len(self.tasks)

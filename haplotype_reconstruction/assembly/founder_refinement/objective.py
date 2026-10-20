@@ -320,6 +320,33 @@ def score_direct(haps, logs, penalty):
     return answer
 
 
+
+@njit(cache=True, parallel=True, nogil=True)
+def score_switches_direct(haps, logs, penalty):
+    """Exact score and fewest switches among its exact maximisers, per sample.
+
+    The coarse guard's score/count recurrence without block-boundary message histories.
+    This chooses a representative of a panel tie; the prior never clears the alternatives.
+    """
+    samples, sites = logs.shape[:2]
+    first, second = unordered_pairs(len(haps))
+    scores = np.empty(samples)
+    switches = np.empty(samples, np.int64)
+    for s in prange(samples):
+        row = np.zeros(len(first))
+        counts = np.zeros(len(first), np.int64)
+        for j in range(sites):
+            if is_skipped(logs, s, j):
+                continue
+            e0, e1, e2 = site_emissions(logs, s, j)
+            best, count = lex_best(row, counts)
+            for q in range(len(first)):
+                lex_switch(row, counts, q, best - penalty, count)
+                row[q] += pick(haps[first[q], j] + haps[second[q], j], e0, e1, e2)
+        scores[s], switches[s] = lex_best(row, counts)
+    return scores, switches
+
+
 def score_panel(haps, logs, penalty, ranges, table_bytes):
     """Per-sample F_s of the panel with alleles haps (int8 K x L) on the log evidence logs.
 

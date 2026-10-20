@@ -57,31 +57,64 @@ class CrossFit:
     site_posterior_counts: the two fold fits' site-posterior counts (``site_posterior.SUMMARY_FIELDS``
         order; sites above MAX_EXACT_BITS unresolved founders).
     guard_skipped: releases the Hamming-ball shell guard withheld in the two folds.
+    absent_informative_training: (heldout fold, informative heldout samples) where the
+        complementary training samples had no observed non-uniform block evidence. The
+        heldout profiles then use only the unmodified pre-fill panel.
     """
 
     profiles: CarrierProfiles
     site_posterior_counts: tuple[int, ...]
     guard_skipped: int
+    absent_informative_training: tuple[tuple[int, int], ...] = ()
 
 
-def content_two_folds(observed: np.ndarray, seed: int) -> np.ndarray:
-    """int8[N] fold label (0/1) of each sample from its data (release 2.2): samples ordered by a seeded SHA-256 of
-    their observation pattern (``observed`` bool [N, L], read depth at the contig's discovery sites), alternated
-    between the folds. The split depends neither on sample names nor on the input order nor on the convention
-    reversal, and GL noise cannot move it; the sample index orders only samples with identical patterns
-    (exchangeable for the split). Replaces deterministic_two_folds' seeded permutation of positions."""
+@dataclass(frozen=True)
+class FoldPlan:
+    """Whole content groups assigned to folds, with order-independent split diagnostics."""
+
+    folds: np.ndarray
+    key_source: str
+    group_sizes: tuple[int, ...]
+    informative_sizes: tuple[int, int]
+
+
+def content_fold_plan(observed: np.ndarray, seed: int, depth_keys=None) -> FoldPlan:
+    """Split whole observation/depth groups without names, sample indices or GL values.
+
+    Groups are ordered by seeded observation-mask SHA256, then seeded total-depth SHA256
+    when supplied. Each active group goes to the fold with fewer observed members, fold 0
+    on equality. All-unobserved groups go to fold 0 and contribute no balancing weight.
+    Array-only callers without depths retain whole observation-pattern groups.
+    """
     import hashlib
     observed = np.asarray(observed, dtype=np.bool_)
     n_samples = observed.shape[0]
     if n_samples < 2:
         raise ValueError("two-fold cross-fitting requires at least two samples")
     prefix = int(seed).to_bytes(8, "little", signed=True)
-    keys = [hashlib.sha256(prefix + np.packbits(observed[sample]).tobytes()).digest()
-            for sample in range(n_samples)]
-    order = sorted(range(n_samples), key=lambda sample: (keys[sample], sample))
+    groups = {}
+    active = np.any(observed, axis=1)
+    for sample in range(n_samples):
+        primary = hashlib.sha256(prefix + np.packbits(observed[sample]).tobytes()).digest()
+        secondary = b"" if depth_keys is None else hashlib.sha256(prefix + depth_keys[sample]).digest()
+        groups.setdefault((primary, secondary), []).append(sample)
     folds = np.empty(n_samples, dtype=np.int8)
-    folds[np.asarray(order, dtype=np.int64)] = np.arange(n_samples, dtype=np.int64) % 2
-    return folds
+    sizes = [0, 0]
+    group_sizes = []
+    for key in sorted(groups):
+        members = np.asarray(groups[key], dtype=np.int64)
+        weight = int(np.count_nonzero(active[members]))
+        fold = 0 if weight == 0 or sizes[0] <= sizes[1] else 1
+        folds[members] = fold
+        sizes[fold] += weight
+        group_sizes.append(len(members))
+    return FoldPlan(folds, "observed_only" if depth_keys is None else "observed_total_depth",
+                    tuple(group_sizes), tuple(sizes))
+
+
+def content_two_folds(observed: np.ndarray, seed: int, depth_keys=None) -> np.ndarray:
+    """int8[N] fold labels from :func:`content_fold_plan`; no group is split."""
+    return content_fold_plan(observed, seed, depth_keys).folds
 
 
 def deterministic_two_folds(n_samples: int, seed: int) -> np.ndarray:
@@ -314,7 +347,7 @@ def crossfit_block(alleles, evidence, observed, folds, config, settings) -> Cros
 
     alleles: int8[K, L] the block's pre-fill calls (-1 unresolved, and at every non-discovery site);
     evidence: float64[N, L, 3] genotype likelihoods (1/3 where unobserved); observed: bool[N, L];
-    folds: int8[N] (``deterministic_two_folds``); config: CompletionConfig.crossfit; settings:
+    folds: int8[N] (``content_two_folds``); config: CompletionConfig.crossfit; settings:
     ``site_posterior.settings()``.
     """
     founders = alleles.shape[0]
@@ -323,13 +356,22 @@ def crossfit_block(alleles, evidence, observed, folds, config, settings) -> Cros
     informative_count = np.zeros(evidence.shape[0], dtype=np.int64)
     counts = np.zeros(len(site_posterior.SUMMARY_FIELDS), dtype=np.int64)
     guard_skipped = 0
+    informative = np.any(observed & (np.ptp(normalised_evidence(evidence), axis=2)
+                                     > UNIFORM_TOLERANCE), axis=1)
+    absent_training = []
     for fold in (0, 1):
         heldout = np.flatnonzero(folds == fold)
+        if not len(heldout):
+            continue
         training = np.flatnonzero(folds != fold)
-        released, guarded, site_info = _released_alleles(
-            alleles, evidence[training], observed[training], config, settings)
-        guard_skipped += guarded
-        counts += site_posterior.summary_counts(site_info)
+        if not np.any(informative[training]):
+            released = alleles
+            absent_training.append((fold, int(np.count_nonzero(informative[heldout]))))
+        else:
+            released, guarded, site_info = _released_alleles(
+                alleles, evidence[training], observed[training], config, settings)
+            guard_skipped += guarded
+            counts += site_posterior.summary_counts(site_info)
         heldout_observed = observed[heldout]
         log_emission = _log_emission(evidence[heldout], heldout_observed, config)
         scores, count = _complete_site_state_scores(released, log_emission, heldout_observed, pairs)
@@ -337,4 +379,5 @@ def crossfit_block(alleles, evidence, observed, folds, config, settings) -> Cros
         informative_count[heldout] = count
     return CrossFit(profiles=founder_profiles(pairs, heldout_probability, informative_count, founders),
                     site_posterior_counts=tuple(int(value) for value in counts),
-                    guard_skipped=guard_skipped)
+                    guard_skipped=guard_skipped,
+                    absent_informative_training=tuple(absent_training))

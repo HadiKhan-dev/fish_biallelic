@@ -3,9 +3,11 @@
 Rounds continue until the best refit does not improve the selection objective by more than the
 tolerance; ``round_backstop(K)`` rounds are a reported backstop. Each round screens every drop
 and add by its exact initial score and every merge by an EM lower bound from the
-forward-backward statistics of the two corresponding drop panels (plus at most 2K exact
-"double-removal" merges), then refits the top ``refits_per_kind`` proposals of each kind:
-O(N L K^3) per round. Reuse is keyed by the complete panel AND its frequencies. Fits, scores and
+forward-backward statistics of the two corresponding drop panels (plus the complete nearest-
+distance classes of exact "double-removal" merges), then refits the top ``refits_per_kind``
+proposals of each kind. Screening costs O(N L K^3) without distance ties and up to O(N L K^4)
+when ties require every merge's exact forward. Reuse is keyed by the complete panel AND its
+frequencies. Fits, scores and
 merge bounds are founder-independent and kept across rounds in a ``LikelihoodMemo``; a whole
 search is reused when all its inputs are identical (``search_input_key``).
 
@@ -29,7 +31,7 @@ import itertools
 import numpy as np
 
 from ..execution import claim_threads
-from ..maths.ties import (TieCounter, census, census_enabled, conv_argmin, improves, reverse_conventions,
+from ..maths.ties import (TieCounter, census, census_enabled, improves, reverse_conventions,
                           tie_classes)
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
 from .objective import ContextFounders, coded_regularizer, selection_objective
@@ -187,10 +189,10 @@ def merge_bounds(panel, drops, merges, prepared, buffers=None):
 
 def double_removal_merges(panel, merges) -> set[int]:
     """Merges scored exactly besides their EM bounds: for every row k, the merge of k with its
-    nearest row and the merge (i, j), k not in {i, j}, whose consensus is nearest row k (Hamming;
-    ties: the earlier row / merge, a convention reversed under maths.ties.reverse_conventions). The
+    nearest rows and every merge (i, j), k not in {i, j}, whose consensus is nearest row k.
+    All minima at the integer Hamming distance are included, with their union deduplicated. The
     fixed-posterior bound credits no re-routing of carriers, so it can rank such merges far below
-    their exact scores. At most 2K exact forwards per round."""
+    their exact scores. Distance ties can require every available merge to be scored exactly."""
     if len(panel) < 2 or not merges:
         return set()
     panel = np.asarray(panel)
@@ -202,13 +204,14 @@ def double_removal_merges(panel, merges) -> set[int]:
     distance = (consensus[:, None, :] != panel[None, :, :]).sum(axis=2)
     chosen = set()
     for k in range(len(panel)):
-        nearest = conv_argmin(rows[k])
-        pair = (min(k, nearest), max(k, nearest))
-        if pair in order:
-            chosen.add(order[pair])
+        for nearest in np.flatnonzero(rows[k] == rows[k].min()):
+            pair = (min(k, int(nearest)), max(k, int(nearest)))
+            if pair in order:
+                chosen.add(order[pair])
         valid = (pairs[:, 0] != k) & (pairs[:, 1] != k)
         if valid.any():
-            chosen.add(conv_argmin(np.where(valid, distance[:, k], np.iinfo(np.int64).max)))
+            minimum = distance[valid, k].min()
+            chosen.update(np.flatnonzero(valid & (distance[:, k] == minimum)).tolist())
     return chosen
 
 

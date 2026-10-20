@@ -30,9 +30,14 @@ class FounderRefinementConfig:
         L1); K = 30 synthetic and AulStu peaks (257 and 357 paths) are four orders of magnitude
         below it. The memory of large programmes is admitted by the run's memory governor
         (proposals.PROGRAMME_BUDGETS).
+    alternative_branches: complete same-level count continuations, including the
+        ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class
+        when its complete expansion would exceed the budget. Branches reuse
+        labelled fixed-K fits on identical inputs and run sequentially.
     """
 
     proposal_max_bins: int = 2000
     proposal_min_sites_per_bin: int = 200
     sweep_limit: int = 100
     frontier_bytes: int = 128 << 30
+    alternative_branches: int = 16

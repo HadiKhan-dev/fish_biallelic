@@ -28,8 +28,8 @@ class FixedKSolution:
     """A fitted fixed-K factorisation in canonical form (arrays read-only).
 
     haplotypes: int64[K, L] binary rows, canonical order.
-    assignments: int64[N, 2] sorted row pairs, K = unknown copy (release 2.2, discovery's meet rule: also a copy
-        that differs between the sample's tied A-step states, which goes to no founder row).
+    assignments: int64[N, 2] sorted row pairs, K = unknown copy or a copy absent from the meet of the tied states.
+        This pair is a summary; tie_offsets/tie_states retain fractional evidence membership.
     per_sample_cost: float64[N] per-sample binned switching-Viterbi NLL.
     unknown_slots: int64[N] unknown copies of the sample's (tied) A-step states (0, 1, 2); without ties the unknown
         copies in its pair.
@@ -50,6 +50,9 @@ class FixedKSolution:
     fixed_point: bool = field(compare=False)
     key: bytes = field(repr=False)
     quanta: BlockQuanta | None = field(default=None, compare=False, repr=False)
+    # Multi-state samples only: zero-length segments use their singleton assignment.
+    tie_offsets: np.ndarray | None = field(default=None, compare=False, repr=False)
+    tie_states: np.ndarray | None = field(default=None, compare=False, repr=False)
 
     @property
     def k(self) -> int:
@@ -118,7 +121,7 @@ def _canonical_panel_kernel(haplotypes, assignments):
         for site in range(n_sites):
             canonical_haplotypes[index, site] = haplotypes[source, site]
             canonical_bytes[index, site] = byte_rows[source, site]
-    return canonical_haplotypes, canonical_assignments, canonical_bytes
+    return canonical_haplotypes, canonical_assignments, canonical_bytes, inverse
 
 
 def canonical_solution(fit, workspace, quanta=None) -> FixedKSolution:
@@ -130,23 +133,88 @@ def canonical_solution(fit, workspace, quanta=None) -> FixedKSolution:
     """
     if quanta is None and workspace is not None:
         quanta = workspace.quanta
-    haplotypes, assignments, key_bytes = _canonical_panel_kernel(
+    haplotypes, assignments, key_bytes, inverse = _canonical_panel_kernel(
         np.ascontiguousarray(fit[0], dtype=np.int64), np.ascontiguousarray(fit[1], dtype=np.int64))
+    offsets, states = (fit[6], fit[7]) if len(fit) > 6 else (None, None)
+    if offsets is not None:
+        k = len(haplotypes)
+        first, second = np.triu_indices(k)
+        state_first = np.concatenate((first, np.arange(k), [k]))
+        state_second = np.concatenate((second, np.full(k + 1, k)))
+        mapping = np.append(inverse, k)
+        a = mapping[state_first[states]]
+        b = mapping[state_second[states]]
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        n_pairs = len(first)
+        remapped = np.where(hi < k, lo * k - lo * (lo - 1) // 2 + hi - lo,
+                            np.where(lo < k, n_pairs + lo, n_pairs + k)).astype(np.int32)
+        for sample in range(len(offsets) - 1):
+            remapped[offsets[sample]:offsets[sample + 1]].sort()
+        states = _readonly(remapped)
     certified = bool(workspace is not None and workspace.certifies_fixed_point(haplotypes))
     return FixedKSolution(
         haplotypes=_readonly(haplotypes), assignments=_readonly(assignments),
         per_sample_cost=fit[2], unknown_slots=fit[3], iterations=int(fit[4]),
-        nll=float(fit[5]), fixed_point=certified, key=key_bytes.tobytes(), quanta=quanta)
+        nll=float(fit[5]), fixed_point=certified, key=key_bytes.tobytes(), quanta=quanta,
+        tie_offsets=offsets, tie_states=states)
 
 
 def restricted(solution: FixedKSolution, samples: np.ndarray) -> FixedKSolution:
     """The same panel with only the ``samples`` rows of the sample arrays (nll re-summed)."""
     cost = solution.per_sample_cost[samples]
+    offsets, states = subset_ties(solution, samples)
     return FixedKSolution(
         haplotypes=solution.haplotypes, assignments=solution.assignments[samples],
         per_sample_cost=cost, unknown_slots=solution.unknown_slots[samples],
         iterations=solution.iterations, nll=math.fsum(cost.tolist()),
-        fixed_point=solution.fixed_point, key=solution.key, quanta=solution.quanta)
+        fixed_point=solution.fixed_point, key=solution.key, quanta=solution.quanta,
+        tie_offsets=offsets, tie_states=states)
+
+
+def compact_ties(mask):
+    """Retain state IDs only for multi-state samples (singletons use the pair summary)."""
+    counts = np.count_nonzero(mask, axis=1)
+    multiple = counts > 1
+    if not multiple.any():
+        return None, None
+    offsets = np.zeros(len(mask) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(np.where(multiple, counts, 0))
+    states = np.nonzero(mask[multiple])[1].astype(np.int32)
+    return _readonly(offsets), _readonly(states)
+
+
+def subset_ties(solution, samples):
+    """Compact membership for a sample restriction or permutation."""
+    if solution.tie_offsets is None:
+        return None, None
+    old = solution.tie_offsets
+    counts = np.diff(old)[samples]
+    if not np.any(counts):
+        return None, None
+    offsets = np.zeros(len(samples) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(counts)
+    states = np.concatenate([solution.tie_states[old[s]:old[s + 1]] for s in samples])
+    return _readonly(offsets), _readonly(states)
+
+
+def solution_tie_mask(solution):
+    """Full winning-category membership, including singletons; old fixtures use their pair."""
+    return assignment_tie_mask(solution.assignments, solution.k, solution.tie_offsets, solution.tie_states)
+
+
+def assignment_tie_mask(assignments, k, offsets=None, states=None):
+    n_pairs = k * (k + 1) // 2
+    mask = np.zeros((len(assignments), n_pairs + k + 1), dtype=np.uint8)
+    a = assignments[:, 0]
+    b = assignments[:, 1]
+    single = np.where(b < k, a * k - a * (a - 1) // 2 + b - a,
+                      np.where(a < k, n_pairs + a, n_pairs + k))
+    mask[np.arange(len(assignments)), single] = 1
+    if offsets is not None:
+        for sample in np.flatnonzero(np.diff(offsets)):
+            mask[sample] = 0
+            mask[sample, states[offsets[sample]:offsets[sample + 1]]] = 1
+    return mask
 
 
 def has_distinct_rows(solution: FixedKSolution) -> bool:
@@ -192,11 +260,39 @@ def deduplicate(solutions, beam_width: int | None = None, *, quanta=None) -> tup
     return tuple(ordered if beam_width is None else ordered[:beam_width])
 
 
-def unknown_alleles(assignments, observed, k):
+@njit(cache=True)
+def _unknown_alleles_from_membership(observed, k, mask):
+    """Exact Boolean carrier union, without per-founder fancy-index temporaries."""
+    n, length = observed.shape
+    carriers = np.zeros((k, n), dtype=np.bool_)
+    state = 0
+    for first in range(k):
+        for second in range(first, k):
+            for sample in range(n):
+                if mask[sample, state]:
+                    carriers[first, sample] = True
+                    carriers[second, sample] = True
+            state += 1
+    for founder in range(k):
+        for sample in range(n):
+            if mask[sample, state + founder]:
+                carriers[founder, sample] = True
+    known = np.zeros((k, length), dtype=np.bool_)
+    for founder in range(k):
+        for sample in range(n):
+            if carriers[founder, sample]:
+                for site in range(length):
+                    known[founder, site] |= observed[sample, site]
+    return ~known
+
+
+def unknown_alleles(assignments, observed, k, tie_mask=None):
     """bool[K, L]: True where no sample assigned to the founder (either copy; K = unknown copy) observes the site
     (exact integer counts): the founder's allele there is unknown (release 2.2)."""
     assignments = np.asarray(assignments, dtype=np.int64)
     observed = np.asarray(observed, dtype=np.bool_)
+    if tie_mask is not None:
+        return _unknown_alleles_from_membership(observed, k, tie_mask)
     known = np.zeros((k, observed.shape[1]), dtype=np.bool_)
     for copy in (0, 1):
         rows = assignments[:, copy]
@@ -211,21 +307,33 @@ def known_content_key(haplotypes, unknown) -> bytes:
     return b"|".join(sorted(row.tobytes() for row in masked)) + b"#" + str(masked.shape).encode()
 
 
-def whole_class_cut(ordered, classes, width: int):
-    """The leading members of ``ordered`` (tie-class ids ``classes``, non-decreasing) taken by whole classes while
-    fewer than ``width`` are kept; a class that would take the count beyond 2 x width ends the cut (the first class is
-    always kept). No content order cuts inside a class (release 2.2). Returns (kept, a class was left out)."""
+def whole_class_cut(ordered, classes, width: int, omissions=None, *, cause="beam", scope="NLL classes"):
+    """Keep complete ranked classes until reaching ``width``, extending a straddling class
+    through 2 x width. Larger straddling classes are omitted whole. Lower-ranked classes after
+    the stopping boundary are ordinary truncations. Returns (kept, a straddling class was omitted).
+    """
     kept = []
     position = 0
-    while position < len(ordered) and len(kept) < width:
-        stop = position
+    cut = False
+    while position < len(ordered):
+        stop = position + 1
         while stop < len(ordered) and classes[stop] == classes[position]:
             stop += 1
-        if kept and len(kept) + (stop - position) > 2 * width:
-            return kept, True
+        if position and len(kept) >= width:
+            break
+        if len(kept) + stop - position > 2 * width:
+            cut = True
+            if omissions is not None:
+                omissions.append(dict(kind="tie_class_at_budget", cause=cause + "_tie_class_at_budget",
+                                      count=stop - position, scope=scope, count_kind="exact"))
+            position = stop
+            break
         kept.extend(ordered[position:stop])
         position = stop
-    return kept, False
+    if position < len(ordered) and omissions is not None:
+        omissions.append(dict(kind="ranked_truncation", cause=cause + "_ranked_truncation",
+                              count=len(ordered) - position, scope=scope, count_kind="exact"))
+    return kept, cut
 
 
 def class_beam(solutions, width: int, quanta=None):

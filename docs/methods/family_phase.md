@@ -172,20 +172,33 @@ depended on the phase of the cycle.
   default: when enabled, one such sweep follows a sweep of the first kind that accepts nothing, and the solver returns
   to the first kind when it accepts anything. They are off because they cost 4-6 times 2.1's family-phase time on
   dense data and changed about 10 of 63 validated reference releases.
-- **Two schedules** (release 2.2). The ascent's end point can depend on its schedule (block order, scan direction,
-  tie conventions). The released MAP therefore runs the ascent (first kind of sweep only) from the default start
-  under the canonical schedule and under its mirror (every arbitrary order and tie convention reversed, as the
-  convention-reversal switch does),
-  takes the end point with the higher J as the base and transplants into it, best exact gain first, each cluster of
-  differing cells of the other end point (cells linked by family and site proximity) whose exact change of J exceeds
-  the quantum, re-scoring the rest after each transplant (exact ties within the quantum: the leftmost cluster,
-  counted); then the ascent runs again to convergence (with the long compound moves when `map_long_moves`). Both end points are optima of the same J, so this is a fixed
-  pair of deterministic starts with exact recombination, not a different estimator.
+- **Four endpoints** (release 2.3). Internal sample coordinates use pedigree depth, roots first,
+  followed by discrete scaffold and observed-read-mask keys. Pedigree-neighbour refinement separates
+  otherwise identical keys. Sample names and likelihood floating-point values do not order the search.
+  Both directions of this order run both schedules from the same default start. Every initial endpoint
+  receives one continuation, for a total bound of four, before global ranking by exact J with the shared
+  `maths.ties.tie_classes` definition and existing objective quantum. A worse initial endpoint can improve
+  beyond the initially best endpoint during continuation; initial scores are diagnostic only.
+  Each endpoint supplies its own coordinates and schedule throughout continuation, root-frame repair,
+  polish and family evidence tests. Its transplant donor is the other schedule on the same axis.
+  Differences are grouped by affected objective factors, including shared root marginals and selector
+  transitions between supported markers across gaps. Independent gains are evaluated from one base;
+  strict improvements are applied together. Diagnostics record tied configurations exceeding the
+  continuation bound; unvisited configurations do not themselves mask released calls.
+  Final score-tied alternatives are released in their native coordinates and aligned to the caller's
+  axis before projection. Their disagreement is recorded rather than interpreted as evidence for a
+  stored representative. The reversal switch changes execution order while preserving the endpoint
+  set; it is not disabled. Residual identical keys from samples with no incoming or outgoing pedigree
+  edges have independent unary and frame-chain factors; their storage order cannot couple their
+  updates or releases, even when likelihood rows differ. Other duplicate groups require an
+  exchangeability certificate (identical model rows and actual pedigree neighbours) and identical
+  member-specific releases. If that certificate fails, this bounded solver reports that joint
+  duplicate treatment is required; it does not order samples by names or likelihood floats.
 - **Convergence and guarantee.** After every sweep the from-scratch J must have risen by the accepted gains
   (checked). Every accepted step raises J by more than the quantum, J is bounded and the configurations are finite,
   so each ascent stops when a sweep of each kind accepts nothing. Cycles are impossible. The release is a fixed point
-  of every move above (block-, relabelling-, compound-, site-wise optimal) and at least as good as both schedules'
-  end points; it is not a certified global maximum. `FamilyPhaseConfig.map_max_sweeps` is a safety cap per ascent;
+  of the enabled block, relabelling, compound and site moves and within the shared objective tie tolerance of the best of all four
+  continued endpoints; it is not a certified global maximum. `FamilyPhaseConfig.map_max_sweeps` is a safety cap per ascent;
   reaching it is an error.
 - **Mendelian-conflict diagnostic.** `diagnostics.map_conflicts` lists the (parent, bp) sites where the converged
   configuration needs a transmission error (a root's best genotype, or a non-root's MAP genotype, leaves a child's
@@ -338,19 +351,48 @@ the product says so instead of releasing a convention:
   ambiguity is released as phase breaks), two-parent children's polished chains (`polish.undetermined_frames`, both
   bits), and a root-frame repair decision at a
   flagged edge, which could sit at any boundary of its flagged stretch (`FrameDecision.interval_left_bp` /
-  `interval_right_bp` give that interval). Undetermined stretches hold no heterozygous site whose phase the data
-  determine (measured on TroMau chr7: 566,310 undetermined cells, 0 at heterozygous calls, 100 at half calls); export
-  writes a heterozygous or half-called site with bit 1 set unphased.
+  `interval_right_bp` give that interval). A chain-placement ambiguity can lie entirely between informative calls (the release 2.2 TroMau chr7
+  example had no heterozygous calls in its ambiguous stretches). Retained, evaluated family modes are also
+  projected onto their released ordered calls: only differing heterozygous or half-called cells acquire the
+  corresponding displayed or decoder uncertainty bit. Homozygous and fully missing cells do not differ under
+  a strand swap. An unvisited continuation is a search limitation, not evidence for masking cells.
+  Export writes heterozygous and half-called
+  sites with the displayed bit set unphased; recombination censors non-homozygous calls with the decoder bit set.
+  Validation therefore reports both ordinary callability and the fraction of called alleles whose displayed
+  phase is supported, together with phase-set counts and physical-span N50.
 - `phase_breaks` (+ `phase_break_offsets`): per sample, the marker boundaries where the displayed phase of the right
   side relative to the left side is not determined by data: a painting tie boundary (inside a component; the
   painting's track order there is a convention) of a root that the root-frame repair does not decide (no decision's
   stretch holds it and fewer than `root_frame_minimum_children` children oppose a change there with none
   supporting; every tie boundary of a root with fewer children), and a painting tie boundary of a one-parent child
   when the stretch on either side of it carries no frame evidence (its orientation is then the painting's).
-  Export starts a new phase set after each break (component edges already start one).
+  Two-parent painting boundaries also require a family evidence witness. The adjacent pieces are compared in
+  all four absolute orientations, using the same affected family, start, genotype constraints and bounded refit.
+  The best scores for equal and opposite relative orientations are compared with the shared tie definition.
+  Both flanks must have supported orientation; a tied relative order, an unsupported flank, or conflicting
+  retained alternatives produces a break. A joined boundary records its relative margin and both flank margins
+  in `diagnostics.map_two_schedules["release"][...]["painting_joins"]`.
+  For two-parent samples, long disagreements between the existing MAP phase view and polish also delimit
+  phase sets. Each component-local disagreement run longer than the existing `LONG_SPAN` (8,192 markers)
+  and containing a fully called heterozygote contributes its two internal endpoints. Whole-component strand
+  swaps add no internal break. This comparison uses observable ordered calls: different frame-switch
+  positions inside homozygous or fully missing stretches do not turn a whole-component swap into a relative
+  phase disagreement. The disagreement set is unchanged when the two outputs are exchanged.
+  This records disagreement between two estimators; it does not correct the point estimate or alter calls,
+  frames, decoder uncertainty, or the objective J.
+  Export starts a new phase set after each break (component edges already start one). Display-only breaks do
+  not by themselves set decoder uncertainty or reset recombination selector chains.
+  Export retains PS continuity across displayed-undetermined sites. After the final alternative projection,
+  each internal undetermined stretch therefore requires a witness connecting its determined flanks in every
+  retained branch. Two-parent fits use the same four-orientation comparison and leave undetermined target
+  genotypes unconstrained. One-parent flanks reuse their signed per-site orientation evidence, accumulated
+  in float64 with the existing chain tolerance. Roots reuse accepted repair votes covering the stretch.
+  Unsupported or disagreeing witnesses add a break after the stretch. Whole-component or terminal uncertainty
+  has no two-flank continuity claim. Diagnostics record the witnesses and the number of added breaks.
 
-The family MAP therefore enters the released calls only through the root-frame repair decisions; it gives the
-decoder frame of samples with fewer than two observed parents and the diagnostic
+The fallback two-parent point estimate uses the family MAP through root-frame repair. One-parent displayed
+stretches use the family-MAP orientation evidence described above. MAP also supplies the decoder frame of
+samples with fewer than two observed parents and the diagnostic
 `changed_observable_phase_sites` (two-parent sample-sites at scaffold-heterozygous sites where the polished frame
 differs from the family MAP frame).
 
@@ -372,8 +414,9 @@ differs from the family MAP frame).
 | `frame_undetermined` | `int8[N, L]` | released ambiguity of the decoder (bit 0) and displayed (bit 1) frames (release 2.2) |
 | `phase_breaks`, `phase_break_offsets` | `int64[B]`, `int64[N + 1]` | per sample, marker boundaries where the displayed phase is not determined across (release 2.2) |
 
-Evaluation and export read `sample_ids`, `positions`, `component_ids` and `calls`; export writes them as phased
-genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`,
+Evaluation and export read `sample_ids`, `positions`, `component_ids`, `calls` and the released ambiguity fields.
+Export starts phase sets at component edges and explicit phase breaks; displayed-undetermined calls are unphased
+without implicitly splitting the phase set. Evaluation scores those same sets. `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`,
 `sites`, `map_sweeps`, `converged`, `map_objective` (final J), `called_alleles`, `changed_observable_phase_sites`,
 `root_frame_moves`, `root_frame_reverts`, `root_frame_transfers` and `elapsed_seconds`.
 
@@ -382,31 +425,49 @@ genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` ha
 - **Structure.** One chromosome per worker of a chromosome executor sharing the stage's CPU budget; the number of
   concurrent chromosomes is limited by a per-chromosome byte estimate (ten evidence-sized arrays, two decoded
   paintings and 5 GiB). Inside a chromosome, Numba kernels parallelise over the blocks of a colour, samples and
-  child groups (objective, release) and the vertices of a polish colour.
-- **Cost.** The family model is independent of the founder count K. A sweep costs O(N L) over the sample blocks,
-  each site's maximisation touching the sample's own copy factor and its children's (O(E L) in all; a root's R sums
-  over its children), plus the relabelling scan (per root, one binary search per child and frame-chain boundary)
+  child groups (objective, release) and the vertices of a polish colour. The four initial endpoints execute as
+  independent tasks under the chromosome's live CPU and memory budget; after they join, the four continuations
+  execute the same way. Each task owns its mutable state and shares immutable coordinate inputs. Thread claims
+  are refreshed at kernel boundaries; completion order never determines ranking or the stored representative.
+  Initialization parallelises only dependency waves preserving parent and shared-parent sibling precedence.
+  Independent site columns run concurrently while parent order and gain/diagnostic folds stay fixed.
+  Orientation witnesses use execution-layer tasks with marker-window scratch including their true flanking
+  selector support and root transitions. Their scratch and masks use a compact family/factor graph, including complete shared-root factors and
+  pinned exterior genotypes with their original non-root status. Unrelated sample rows are omitted. The private
+  stage6s prototype supports `HAPLOTYPES_COMPOUND_SCHEDULE=serial` as the reference and `coloured` for a fixed
+  sweep catalogue of factor-independent compound moves. Snapshot pairs are revalidated; new pairs wait for the
+  next sweep. Relabel tails conflict over their full affected rows. This changes search scheduling, with J and
+  every tolerance unchanged; promotion requires the accuracy and stability gates.
+- **Cost.** The family model is independent of the founder count K. With bounded family degree, a fixed sweep
+  has O(N L) sample-block work. Repeated evaluation of shared-root sibling factors can introduce a degree factor;
+  graph setup and witness metadata also contain repeated sample/edge scans. The implementation does not yet
+  establish near-linear scaling when family degree grows with N. Additional work includes the relabelling scan (per root, one binary search per child and frame-chain boundary)
   and the sequential compound moves, whose windowed re-decodes and gains touch only the moved family's blocks and
   terms; site moves enumerate a sibship's genotypes at its Mendelian-conflict sites only. The solver converges in at
   most a few sweeps (measured: at most 6). Root-frame repair re-decodes windows of the children's selector chains per
   candidate edge; the polish costs O(L) per two-parent child and sweep.
-- **Memory.** Float64 potentials (N × L × 4), int8 genotypes, frames (N × L) and dense selector states (G × L),
-  and during the initialisation float32 conditionals (L × 4) of each non-root parent; no message arrays. The
-  genotype likelihoods are released once the potentials exist.
+- **Memory.** Each workspace holds float64 potentials (N × L × 4), discrete scaffold/orientation
+  arrays and an observed-read mask. The symmetric search retains two coordinate views in addition to the
+  caller workspace when neither view is already in caller order, four initial discrete states, and up to
+  four continued states. States contain int8 genotypes and frames (N × L) and selector states (G × L).
+  Coordinate views share marker arrays but copy sample-indexed arrays. Initialisation temporarily holds
+  float32 conditionals (L × 4) for each non-root parent; release uses repair/polish work arrays.
+  Raw genotype likelihoods are released once the potentials exist. There are no belief-propagation
+  message arrays. Peak RSS must include all views, retained endpoints and concurrent workers.
 - **Resume.** `identity/family_phase` is bound per contig before any work and checked on resume; a contig with a
   `family_phase` record is not recomputed; an interrupted contig is recomputed.
 - **Determinism.** Blocks of a colour share no free variable and colours run in a fixed order; relabelling and
-  compound moves run sequentially in canonical order; sums run in fixed orders, so results do not depend on the
+  compound candidates use the endpoint's pedigree/data coordinates; each prototype colour is factor-independent
+  and gains fold in catalogue order. Sums run in fixed orders, so results do not depend on the
   thread count.
-- **Convention reversal** (`HAPLOTYPES_TIE_REVERSE=1`, `maths.ties.reverse_conventions`; release 2.2 acceptance
-  test). Every arbitrary convention of family phase runs reversed: chain decodes are mirrored (an unavoidable switch
-  lands at the rightmost tied position) and state ties go to the highest state (selectors, genotypes, the polish's
-  eight states, the end state of an unanchored phase view); sample, colour, root, boundary and pair scan orders,
-  site-move enumeration, the polish's colour order and sweep direction, the repair's order among equal totals and
-  its children's-frame ties, the shared-orientation candidate order and the junction table's ties are reversed. Not
-  reversed (stated priors and inherited labels): fewest switches, keep-current inside a tie class, conservative
-  threshold sides, descending degree, and start states that keep the scaffold orientation (the painting's track
-  order, reversed by the painting's own switch).
+- **Convention reversal** (`HAPLOTYPES_TIE_REVERSE=1`, release 2.3). Family phase always runs both
+  explicit schedules in both pedigree/data coordinate directions. The global switch changes their
+  execution order, while continuation, repair, polish and release evidence use the owning endpoint's
+  explicit schedule. Within a mirrored schedule, chain directions, tied state labels, sample/colour/root
+  scans, site enumeration, polish scans and repair tie order are reversed. Every retained release is
+  aligned back to caller coordinates before projection. Fewest switches, keep-current inside a tie
+  class, conservative threshold sides, descending degree, and scaffold-based starts remain stated
+  priors. Recombination applies its own reversal checks after consuming this symmetric family product.
 
 ## Interpretation and limitations
 
@@ -416,8 +477,8 @@ genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` ha
   one-parent child's other track is constrained only by its own scaffold.
 - The scaffold limits what can be phased: a track the painting withholds, or whose candidate rows disagree, stays
   unknown even where relatives would determine it.
-- The released family MAP is a fixed point of every move above and at least as good as both schedules' end points,
-  not a certified global maximum, and it can stop short of the best mode. Validation (19 Oct 2026, fixed upstream,
+- The released family MAP is a fixed point of the enabled moves and within the shared objective tie tolerance of the best of all four continued endpoints,
+  not a certified global maximum, and it can stop short of the best mode. Earlier two-schedule validation (19 Oct 2026, fixed upstream,
   measured with the long compound moves enabled): the same ascent started from a belief-propagation configuration
   (25 iterations, the method 2.1 replaced) ends higher than the release on 7 of 22 TroMau chromosomes (by at most 23.9
   nats; 2.1: 11 of 22, up to 303), on 2 of 8 `std_n80` chromosomes (at most 30.6; 2.1: 5 of 8, up to 153) and on 7 of
@@ -425,11 +486,104 @@ genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` ha
   1,162); with the default (long moves off) the gaps can be larger on the chromosomes where those moves were
   accepted. The remaining gaps are joint changes of an F1 root's frame with its descendants over long regions in the
   multi-generation stress pedigree, and a few multi-family genotype changes on TroMau.
-- The two-schedule estimator is not exactly symmetric under the convention reversal (its base choice and final
-  ascent follow the convention): in the stage-level reversal test 30 of 38 TroMau/std/stress chromosomes released
-  identical outputs outside the released ambiguity, and 8 differed in up to 4 call cells and 4 crossovers (end points
-  that neither schedule's basin reaches). It is a point estimate (overconfident relative to marginals).
+- The symmetric four-endpoint search still explores a bounded subset of modes. Its diagnostics record
+  alternatives that could not be jointly continued within the bound. Masks project only evaluated alternatives;
+  these masks are not a calibrated posterior or a claim to enumerate every possible mode.
+  The release 2.2 stage-level reversal comparison had differences on 8 of 38
+  TroMau/std/stress chromosomes. Release 2.3 replaces the convention-dependent base and continuation policy;
+  validation must compare released calls, uncertainty, phase sets and recombination together.
 - Root-frame repair is a vote with fixed thresholds. A real scaffold frame error of a root with a single child
   becomes one false crossover call; the two cannot be told apart.
 - Inside a painting bin the frame is constant except where the polish uses the fine boundaries near selector
   changes; within a bin the position of a phase change is otherwise not identified.
+
+
+The stage6t performance path retains the stage6s model, schedules and tolerances.
+Touched-factor lists replace chromosome-length masks in compound, site and
+transplant scores; merging the sorted lists preserves the original floating-point
+addition order. Difference clusters use an interval index for each factor and
+return the same connected components. Pedigree depths use a DAG traversal;
+root-child adjacency and sample partitions are indexed once. Each witness's four
+orientations run as separate budgeted tasks from the identical common start,
+sharing immutable local input arrays and owning their mutable states. The serial
+compound reference remains available through HAPLOTYPES_COMPOUND_SCHEDULE=serial;
+its value is part of the family checkpoint identity. No score threshold changes.
+
+These changes remove the per-move global-mask factor and the all-pairs difference
+cluster scan. Complete shared-root contributions still depend on family degree;
+the near-linear claim is conditional on bounded family size. Coordinate refinement
+can still take N rounds in a pathological unresolved pedigree. These remaining
+terms are recorded in the performance design, rather than declared solved.
+
+### Witness scratch admission and implicit root conflicts
+
+Independent orientation configurations share the immutable family/window input
+while each owns its mutable state. A flexible reservation from the execution
+memory governor bounds all live templates and mutable scratch in one batch.
+The requested allowance is one additional chromosome-sized mutable state or
+one largest complete family window with all its configurations, whichever is
+larger; the minimum is one configuration. Work waits for scratch and every
+configuration still receives the same refits. Idle templates release their
+arrays before returning memory credit. This affects scheduling, not evidence,
+phase decisions or the number of evaluated alternatives.
+
+Root sibling conflicts are stored as factor membership rather than explicit
+clique edges. Shared co-parent multiplicities preserve the exact original
+greedy degrees and visiting colours; direct edges and occupied factor colours
+use linear storage in pedigree size. Repeated root-factor scoring and worst-case
+canonical refinement remain separate scaling costs.
+
+
+### Parallel execution and parental count cavities
+
+Independent endpoint, retained release and witness tasks use the production CPU budget. Long child-block term tables parallelize across markers; root emission tables parallelize across chain runs while retaining the original summation order within each run. Colour membership, visit order and accepted-move rule are unchanged. Sparse colours can distribute spare threads inside their blocks. Whole-task memory reservations cover their nested work instead of reserving those arrays twice; the governor still uses available node memory and normal headroom. Witness batches retain their own scratch allowance.
+
+Parental copy factors admit integer sufficient counts indexed by selected parental homologue and child allele. A cavity subtracts the excluded group's one or two slots from these counts. Initial counts contain only decoded child blocks, including the original soft-parent initialization. Mutable counters are private to each endpoint and update after a parallel colour or initialization wave; concurrent siblings never write one counter simultaneously. Constrained witness refits refresh after joint genotype updates and update after each child block. Static conditional and repair queries use a cache of the converged state. The mathematical objective J and every tolerance remain unchanged. Count-times-log arithmetic changes rounding from the sequential fold, so scientific decisions require the release gates. HAPLOTYPES_CAVITY_MODE=fold retains the reference arithmetic; the mode participates in checkpoint identity.
+
+Canonical pedigree refinement uses deterministic smaller-piece splitters with keys from the existing discrete scaffold, pedigree and slot data. It retains the equivalence partition and does not use sample names. Refinement costs O((N+E) log N); split-class ordering can change search endpoints and is validated as such.
+
+Prototype effort bounds are disabled by default pending their standard-data continuity review. HAPLOTYPES_FAMILY_WORK_BOUND bounds a complete witness neighbourhood, including shared root marginals and pinned boundary factors. Overflow releases a display phase-set break with computational_bound provenance and empty scores. It does not truncate a family or change calls, decoder frames or ambiguity masks. The separate HAPLOTYPES_COMPOUND_WORK_BOUND records uncomputed optional proposals and adds display breaks at their proposed tract boundaries. Omitting search proposals can change the MAP endpoint and decoder and therefore requires the stronger decision gate. Zero selects the unbounded reference for either bound; both values participate in checkpoint identity. Display-only breaks do not reset recombination selector chains.
+
+
+### Independent sites in the witness refit
+
+For a fixed parent, the joint genotype update conditions on selectors and frame states. It updates one marker at a time and reads no genotype at another marker. The implementation evaluates disjoint marker chunks concurrently, with private enumeration scratch, then joins them before advancing to the next parent. Parent visitation, configuration enumeration, the finite-state limit, tie rules and the number of refit sweeps are unchanged. A configuration claims its live CPU allowance at this kernel boundary.
+
+Copy-factor sufficient-count queries use four scalar integer counts. Child-term and conditional loops reuse a private four-state root scratch buffer across sites instead of allocating it for each query. These are storage changes; the arithmetic expressions and accumulation order are unchanged.
+
+The complete-family witness and optional-compound effort bounds remain disabled. Release 2.3 retains the complete evaluated family context; a 64-sample default was rejected because it would remove all two-parent witness decisions on the standard N=320 simulations. Scaling of the unbounded witness remains a measured acceptance requirement.
+
+Root marginal site factors use four scalar accumulators, each retaining the original child-incidence addition order, rather than a newly allocated buffer for each evaluation. Budgeted sparse-colour and witness blocks may evaluate independent marker emissions and genotype choices concurrently; the selector Viterbi and carry-forward order are unchanged. Outer parallel block callers retain the serial marker path. All paths use the same genotype tie rule and exact within-site operations.
+
+The four-state log-sum-exp kernel omits exponential calls for impossible genotypes (`-inf` potential), whose terms are exactly zero when the maximum is finite. It retains the original left-associated addition order. A single finite state gives the maximum plus `log(1) = 0`; the implementation preserves that addition, including signed zero. No finite likelihood term is removed or approximated.
+
+
+### Exact first-pass sharing and chromosome scheduling (2.3)
+
+For four configurations of two disjoint flanking pieces on one sample, the
+first joint-genotype pass has only two possible complete input columns at each
+marker. The scorer evaluates the complete parent-ordered pass for the unflipped
+and both-flipped configurations, then assembles the matching columns for the
+other two. Shared root factors and non-root parent dependencies remain in each
+pass. Initial objective scores, subsequent selector/root refits and convergence
+checks are unchanged. Overlapping pieces, different samples and other sets of
+configurations retain the independent reference calculation. Two additional
+family-local genotype windows are charged to the scratch reservation. These are
+computational reuse rules; the estimator, phase sets and recombination evidence
+do not change.
+
+Chromosome CPU-work weights are separate from memory reservations: marker count
+plus the minimum two-sided compound window per painting switch. Longest-first
+partitioning starts large work first, with initial leases proportional to each
+worker's first task rather than its queued tasks. Initial process concurrency leaves room
+for four endpoints with three numerical threads each, using the full allocated
+CPU budget through live leases; freed cores move to remaining work at kernel
+boundaries. This scheduling estimate is name-free and has no effect on candidate
+sets, arithmetic or release rules. Node memory retains its automatic available
+memory limit and normal headroom.
+
+Scratch admission precedes numerical CPU leases: each configuration batch fits
+its reservation even with all private states live. The two reusable first passes
+and then the four continuations run through the same live thread budget. This
+retains configuration parallelism when only one large witness fits in memory,
+without letting tasks waiting for scratch occupy otherwise useful CPU shares.

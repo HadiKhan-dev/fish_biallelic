@@ -17,14 +17,16 @@ Emission order (release 2.1): more distinct supporting samples first, then the c
 as the search hardens it), then source order -- exact discrete keys (2.0 sorted by a digest of the
 probabilities rounded to 12 decimals, which 1e-12 GL noise reshuffled). The order decides which of
 two near-duplicate consensus rows is kept, so the better supported one is (measured on stress_n80:
-fewer blocks losing a founder than with the hardened row first, design A-6). A record's dominant
-partner is the largest partner mass beyond a relative band of the ``probability`` quantum (lower
-row on ties). The candidates are soft (ALT probabilities); the search hardens them into birth
+fewer blocks losing a founder than with the hardened row first, design A-6). Every record enters all dominant-partner routes within the existing relative ``probability``
+band of its largest partner mass. It remains one observation in global clustering and has its
+original weight once within each route; convention order cannot select a route. The candidates are soft (ALT probabilities); the search hardens them into birth
 starts and its cavity score decides.
 """
 from __future__ import annotations
 
 import math
+from hashlib import blake2b
+from itertools import product
 
 import numpy as np
 from numba import njit
@@ -77,10 +79,70 @@ def alt_fraction_rule(population_alt, at_half: bool):
     return rows
 
 
+@njit(cache=True)
+def _accurate_sum(values, partials=None):
+    """Finite-value expansion sum (the fsum reference, including halfway correction).
+
+    The partials retain low bits discarded by ordinary addition. This makes population and
+    cluster reductions independent of sample order, including cancellation of log odds.
+    """
+    if partials is None:
+        partials = np.empty(len(values), dtype=np.float64)
+    n = 0
+    for value in values:
+        x = value
+        i = 0
+        for j in range(n):
+            y = partials[j]
+            if abs(x) < abs(y):
+                x, y = y, x
+            hi = x + y
+            lo = y - (hi - x)
+            if lo != 0.0:
+                partials[i] = lo
+                i += 1
+            x = hi
+        partials[i] = x
+        n = i + 1
+    hi = 0.0
+    lo = 0.0
+    if n:
+        n -= 1
+        hi = partials[n]
+        while n:
+            x = hi
+            n -= 1
+            y = partials[n]
+            hi = x + y
+            lo = y - (hi - x)
+            if lo != 0.0:
+                break
+        if n and ((lo < 0.0 and partials[n - 1] < 0.0) or (lo > 0.0 and partials[n - 1] > 0.0)):
+            y = lo * 2.0
+            x = hi + y
+            if y == x - hi:
+                hi = x
+    return hi
+
+
+@njit(cache=True)
+def _sample_sum_2d(values):
+    result = np.empty(values.shape[1], dtype=np.float64)
+    for column in range(values.shape[1]):
+        result[column] = _accurate_sum(values[:, column])
+    return result
+
+
+def sample_sum(values):
+    """Accurately sum the sample axis, matching math.fsum of each column."""
+    values = np.asarray(values, dtype=np.float64)
+    return _sample_sum_2d(values.reshape((values.shape[0], -1))).reshape(values.shape[1:])
+
+
 def hardening_fallback(likelihoods):
     """The ALT/REF row hardening uses within HALF_BAND of 1/2: the population ALT fraction of all
     samples >= 1/2 (ALT within HALF_BAND of 1/2, 2.0's decision at exactly 1/2)."""
-    marginal = np.mean(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2], axis=0)
+    marginal = sample_sum(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]) / len(likelihoods)
     return alt_fraction_rule(marginal, True)
 
 
@@ -144,12 +206,25 @@ def level_hdbscan(distance, min_cluster_size, min_samples, allow_single_cluster)
     grouping a binary merge order would decide; :func:`_cluster` offers them as alternative groups.
     """
     from hdbscan._hdbscan_linkage import mst_linkage_core
-    from hdbscan._hdbscan_reachability import mutual_reachability
-    reachability = np.array(distance, dtype=np.float64, order="C", copy=True)
-    n = reachability.shape[0]
+    distance = np.ascontiguousarray(distance, dtype=np.float64)
+    n = distance.shape[0]
     if n < 2:
         return np.full(n, -1, dtype=np.int64), np.zeros(n, dtype=np.bool_), []
-    reachability = mutual_reachability(reachability, max(1, min(n - 1, int(min_samples))), 1.0)
+    neighbours = max(1, min(n - 1, int(min_samples)))
+    if neighbours == 1:
+        # Symmetric nonnegative distances, zero diagonal: each endpoint's nearest
+        # other distance is <= their mutual distance. Mutual reachability therefore
+        # leaves every off-diagonal entry unchanged. Prim never reads the diagonal
+        # or writes its input (hdbscan._hdbscan_linkage.mst_linkage_core).
+        reachability = distance
+    else:
+        # Copy just the core vector so the partition's dense backing array dies
+        # before allocating reachability. These are the same alpha=1 operations
+        # as HDBSCAN, with memory bounded independently of its implementation.
+        core = np.partition(distance, neighbours, axis=0)[neighbours].copy()
+        reachability = np.array(distance, copy=True)
+        np.maximum(reachability, core, out=reachability)
+        np.maximum(reachability, core[:, None], out=reachability)
     tree = mst_linkage_core(reachability)
     return level_hdbscan_labels(n, tree[:, 0].astype(np.int64), tree[:, 1].astype(np.int64),
                                 np.asarray(tree[:, 2], dtype=np.float64), int(min_cluster_size),
@@ -317,7 +392,7 @@ def level_hdbscan_labels(n, first, second, weight, min_cluster_size, allow_singl
 
 class _CliqueStats:
     """Diagnostics only (no effect on results): with HAPLOTYPES_DISCOVERY_CLIQUE_STATS set to a directory, every clustering appends
-    (alternative pool size, Bron-Kerbosch calls, overflow) to a per-process file there."""
+    (alternative pool size, enumeration work units, overflow) to a per-process file there."""
 
     def __init__(self):
         self.path = None
@@ -339,8 +414,8 @@ _CLIQUE_STATS = _CliqueStats()
 def _degeneracy_order(vertices, adjacent):
     """(degeneracy, smallest-last vertex order) of a graph. The degeneracy is a graph invariant; the order (ties by
     vertex label) only steers the enumeration, never its result."""
-    degree = {vertex: len(adjacent[vertex]) for vertex in vertices}
     remaining = set(vertices)
+    degree = {vertex: len(adjacent[vertex] & remaining) for vertex in vertices}
     order, degeneracy = [], 0
     while remaining:
         vertex = min(remaining, key=lambda u: (degree[u], u))
@@ -393,53 +468,238 @@ def clique_count_bound(vertices, adjacent) -> float:
     return min(sparse, dense)
 
 
-def maximal_cliques(vertices, adjacent, limit, max_calls=200_000):
-    """(cliques, work): every maximal clique (sorted tuples, sorted) of the connected graph on ``vertices``
-    (``adjacent``: vertex -> set of neighbours), or None when the order-invariant bound :func:`clique_count_bound`
-    exceeds ``limit`` (or, as a safety net never reached in the measured data, Bron-Kerbosch needs more than
-    ``max_calls`` calls). Bron-Kerbosch with pivoting inside a degeneracy order; ``work``: recursive calls made."""
-    m = len(vertices)
-    if m == 0:
-        return [], 0
-    if clique_count_bound(vertices, adjacent) > limit:
-        return None, 0
-    degeneracy, order = _degeneracy_order(vertices, adjacent)
+def _graph_components(vertices, adjacent, complement=False):
+    """Connected components, including isolated vertices, independent of vertex names."""
+    members = set(vertices)
+    unseen = set(vertices)
+    components = []
+    while unseen:
+        start = min(unseen)
+        unseen.remove(start)
+        component, frontier = {start}, [start]
+        while frontier:
+            vertex = frontier.pop()
+            neighbours = members - adjacent[vertex] - {vertex} if complement else adjacent[vertex]
+            fresh = neighbours & unseen
+            unseen -= fresh
+            component |= fresh
+            frontier.extend(fresh)
+        components.append(tuple(sorted(component)))
+    return components
+
+
+def _clique_plan(vertices, adjacent):
+    """Exact union/join decomposition and invariant (clique count, work) upper bounds.
+
+    Disconnected graphs union their components' maximal cliques. Disconnected complements
+    give a complete join, whose maximal cliques are Cartesian products of its parts' cliques.
+    The bounds are diagnostic only; neither may reject a component. Count one work unit
+    per recursive Bron-Kerbosch call or emitted join combination; this does not bound the
+    optional reverse-search fallback. Prime pieces use sum_v 2^min(d, degree(v)).
+    """
+    members = set(vertices)
+    degrees = [len(adjacent[vertex] & members) for vertex in vertices]
+    if all(degree == len(vertices) - 1 for degree in degrees):
+        return ("complete", tuple(vertices), ()), 1, 1
+    components = _graph_components(vertices, adjacent)
+    kind = "union"
+    if len(components) == 1:
+        components = _graph_components(vertices, adjacent, complement=True)
+        kind = "join"
+    if len(components) > 1:
+        children = [_clique_plan(component, adjacent) for component in components]
+        counts = [count for _, count, _ in children]
+        count = sum(counts) if kind == "union" else math.prod(counts)
+        work = sum(work for _, _, work in children) + (count if kind == "join" else 0)
+        return (kind, tuple(vertices), tuple(plan for plan, _, _ in children)), count, work
+    degeneracy, _ = _degeneracy_order(vertices, adjacent)
+    work = sum(1 << min(degeneracy, degree) for degree in degrees)
+    try:
+        count = int(math.ceil(clique_count_bound(vertices, adjacent)))
+    except OverflowError:
+        # This upper bound is diagnostic only; enumeration never consults it.
+        # All cliques are vertex subsets, so arbitrary-precision 2**n is valid
+        # when the tighter floating-point bound cannot be represented.
+        count = 1 << len(vertices)
+    return ("prime", tuple(vertices), ()), count, work
+
+
+def _reverse_search_cliques(vertices, adjacent, limit):
+    """Polynomial-delay maximal-clique enumeration using bitset lexicographic completion.
+
+    The parent/child reconstruction is Proposition 7 of Comin & Rizzi (2015),
+    https://arxiv.org/abs/1506.01082, Section 3. Each emitted clique has at most n
+    prospective children, each checked with two O(n) bitset completions. Child indices
+    strictly increase, so the stack depth is at most n. Labels steer traversal only;
+    the whole component is admitted iff its actual maximal-clique count <= limit.
+    """
+    vertices = tuple(sorted(vertices))
+    n = len(vertices)
+    slots = {vertex: i for i, vertex in enumerate(vertices)}
+    neighbours = [sum(1 << slots[other] for other in adjacent[vertex] if other in slots)
+                  for vertex in vertices]
+    universe = (1 << n) - 1
+
+    def complete(seed):
+        available = universe
+        remaining = seed
+        while remaining:
+            bit = remaining & -remaining
+            remaining ^= bit
+            available &= neighbours[bit.bit_length() - 1]
+        clique = seed
+        while available:
+            bit = available & -available
+            clique |= bit
+            available &= neighbours[bit.bit_length() - 1]
+        return clique
+
+    # Every stack entry is an actual, distinct maximal clique. There are no dead
+    # recursive search branches and no traversal-dependent scientific cutoff.
+    stack = [(complete(0), 0)]
     cliques = []
-    work = [0]
+    work = 0
+    while stack:
+        parent, parent_index = stack.pop()
+        work += 1
+        if len(cliques) >= limit:
+            return None, work
+        cliques.append(tuple(vertices[i] for i in range(n) if parent & (1 << i)))
+        remaining = universe & ~parent & ~((parent_index << 1) - 1 if parent_index else 0)
+        while remaining:
+            bit = remaining & -remaining
+            remaining ^= bit
+            before = bit - 1
+            prefix = parent & before
+            seed = prefix & neighbours[bit.bit_length() - 1]
+            work += 1
+            if complete(seed) & before != prefix:
+                continue
+            child = complete(seed | bit)
+            if child & before == seed:
+                stack.append((child, bit))
+    return cliques, work
+
+
+def _bron_kerbosch_cliques(vertices, adjacent, limit, max_calls):
+    """Fast exact traversal, or a request to restart with the bounded-delay method.
+
+    ``max_calls`` only switches algorithm: it never rejects a graph. ``None`` for
+    cliques means the actual output limit was exceeded; ``restart`` means use RS.
+    """
+    _, order = _degeneracy_order(vertices, adjacent)
+    cliques = []
+    work = 0
+    restart = False
+    overflow = False
 
     def expand(chosen, candidates, excluded):
-        work[0] += 1
-        if work[0] > max_calls:
-            return False
+        nonlocal work, restart, overflow
+        work += 1
+        if work > max_calls:
+            restart = True
+            return
         if not candidates and not excluded:
-            cliques.append(tuple(sorted(chosen)))
-            return True
+            if len(cliques) >= limit:
+                overflow = True
+            else:
+                cliques.append(tuple(sorted(chosen)))
+            return
         pivot = max(candidates | excluded, key=lambda u: (len(adjacent[u] & candidates), u))
         for vertex in sorted(candidates - adjacent[pivot]):
-            if not expand(chosen | {vertex}, candidates & adjacent[vertex], excluded & adjacent[vertex]):
-                return False
+            expand(chosen | {vertex}, candidates & adjacent[vertex], excluded & adjacent[vertex])
+            if restart or overflow:
+                return
             candidates = candidates - {vertex}
             excluded = excluded | {vertex}
-        return True
 
     position = {vertex: index for index, vertex in enumerate(order)}
+    members = set(vertices)
     for vertex in order:
-        later = {u for u in adjacent[vertex] if position[u] > position[vertex]}
-        earlier = {u for u in adjacent[vertex] if position[u] < position[vertex]}
-        if not expand({vertex}, later, earlier):
-            return None, work[0]
-    return sorted(cliques), work[0]
+        neighbours = adjacent[vertex] & members
+        later = {u for u in neighbours if position[u] > position[vertex]}
+        expand({vertex}, later, neighbours - later)
+        if restart or overflow:
+            break
+    return None if overflow else cliques, work, restart
 
 
-def capped_by_size(groups, cap):
-    """(kept, overflowed): ``groups`` by whole size classes, largest first, while at most ``cap`` are kept; a class
-    that does not fit is dropped with every smaller one (no order inside a class decides)."""
+def _enumerate_clique_plan(plan, adjacent, limit, max_calls):
+    kind, vertices, children = plan
+    if kind == "complete":
+        return ([tuple(sorted(vertices))] if limit >= 1 else None), 1
+    if children:
+        parts, work, count = [], 0, (0 if kind == "union" else 1)
+        for child in children:
+            child_limit = limit - count if kind == "union" else limit // count
+            groups, calls = _enumerate_clique_plan(child, adjacent, child_limit, max_calls)
+            work += calls
+            if groups is None:
+                return None, work
+            parts.append(groups)
+            count = count + len(groups) if kind == "union" else count * len(groups)
+        if kind == "union":
+            return [group for groups in parts for group in groups], work
+        cliques = [tuple(sorted(vertex for group in choice for vertex in group))
+                   for choice in product(*parts)]
+        return cliques, work + len(cliques)
+    # Same complete output/count policy; the packed compiled traversal replaces
+    # the Python fast-traversal/reverse-search performance switch only.
+    from ._cliques import maximal_cliques as packed_cliques
+    return packed_cliques(vertices, adjacent, limit)
+
+
+def maximal_cliques(vertices, adjacent, limit, max_calls=200_000, omissions=None):
+    """All maximal cliques, or omit the component if its actual count exceeds limit.
+
+    Exact union/join decomposition avoids materializing an oversized Cartesian product.
+    Prime pieces use exact compiled, pivoted bitset Bron--Kerbosch traversal.
+    Count first, materialize only when admitted. The legacy max_calls argument
+    remains compatible with reference callers; it cannot truncate scientific output.
+    No a-priori worst-case bound rejects a component.
+    """
+    if not vertices:
+        return [], 0
+    plan, _, _ = _clique_plan(vertices, adjacent)
+    cliques, work = _enumerate_clique_plan(plan, adjacent, int(limit), int(max_calls))
+    if cliques is None:
+        if omissions is not None:
+            omissions.append(dict(cause="residual_clique_enumeration_tie_class_at_budget",
+                                  kind="tie_class_at_budget", count=1,
+                                  scope=f"component with {len(vertices)} records; more than {limit} maximal cliques",
+                                  count_kind="exact"))
+        return None, work
+    return sorted(cliques), work
+
+
+def capped_by_size(groups, cap, omissions=None, *, cause="residual_group", scope="size classes", group_size=len):
+    """Whole size classes through the cap, admitting a straddler through 2*cap.
+
+    A straddler beyond twice the cap is an omitted tie class. Strictly smaller
+    classes beyond the stopping boundary are ordinary ranked truncation.
+    """
     kept = []
-    for size in sorted({len(group) for group in groups}, reverse=True):
-        members = [group for group in groups if len(group) == size]
-        if len(kept) + len(members) > cap:
-            return kept, True
-        kept.extend(members)
+    by_size = {}
+    for group in groups:
+        by_size.setdefault(group_size(group), []).append(group)
+    classes = [by_size[size] for size in sorted(by_size, reverse=True)]
+    for index, members in enumerate(classes):
+        before, after = len(kept), len(kept) + len(members)
+        if after <= cap:
+            kept.extend(members)
+            continue
+        tie_omitted = (before < cap or before == 0) and after > 2 * cap
+        if before < cap and after <= 2 * cap:
+            kept.extend(members)
+        if omissions is not None:
+            if tie_omitted:
+                omissions.append(dict(cause=cause + "_tie_class_at_budget", kind="tie_class_at_budget",
+                                      count=len(members), scope=scope, count_kind="exact"))
+            tail = sum(map(len, classes[index + 1:])) + (len(members) if before >= cap and not tie_omitted else 0)
+            if tail:
+                omissions.append(dict(cause=cause + "_ranked_truncation", kind="ranked_truncation",
+                                      count=tail, scope=scope, count_kind="exact"))
+        return kept, tie_omitted
     return kept, False
 
 
@@ -466,6 +726,7 @@ class ResidualInputs:
         self.log_likelihood = scalar_log_floored(self.likelihood, np.finfo(np.float64).tiny)
         self.observed = np.ascontiguousarray(observed, dtype=np.bool_)
         self.cluster_cache: dict = {}
+        self.landmark_cache: dict = {}
 
 
 @njit(cache=True, nogil=True)
@@ -515,13 +776,15 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
                       call_probability, minimum_responsibility, partner_band, mass_band, reverse):
     """Residual strands of every (sample, subtracted row) with enough expected copies.
 
-    Returns sample, subtracted row, dominant partner (largest posterior partner mass of the
-    subtracted row; a later row replaces the current one only when its mass exceeds the current
-    by more than partner_band x max(1, current): lowest index on ties), weight min(1, expected
+    Returns sample, subtracted row, a reporting-only partner label, weight min(1, expected
     copies), the residual ALT probability per site (0.5 where unobserved), hard calls (-1
     uncalled), the compatible mask (observed sites with positive residual mass) and the residual
     ALT log odds log(r1) - log(r0) at compatible sites within [_LOG_ODDS_MIN, _LOG_ODDS_MAX] (0
-    elsewhere). A record needs weight + mass_band >= minimum_responsibility.
+    elsewhere), and the complete dominant-partner membership mask. A record needs
+    weight + mass_band >= minimum_responsibility. Partners within
+    partner_band * max(1, global maximum mass) of that maximum all receive the same
+    original record. The legacy reverse argument cannot change this class; the lower
+    member is retained only as a reporting label, never as a routing decision.
     """
     n_samples, n_states = responsibility.shape
     n_sites = haplotypes.shape[1]
@@ -529,6 +792,7 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
     sample_indices = np.empty(maximum_records, dtype=np.int64)
     subtracted = np.empty(maximum_records, dtype=np.int64)
     partners = np.empty(maximum_records, dtype=np.int64)
+    partner_membership = np.zeros((maximum_records, n_rows), dtype=np.uint8)
     weights = np.empty(maximum_records, dtype=np.float64)
     copy_mass = np.zeros(n_rows, dtype=np.float64)
     partner_mass = np.zeros((n_rows, n_rows), dtype=np.float64)
@@ -553,16 +817,14 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
             weight = min(1.0, expected)
             if weight + mass_band < minimum_responsibility:
                 continue
-            # Scan in row order (reversed conventions: from the last row); a later row replaces the current only
-            # beyond the band, so ties keep the first scanned row.
-            partner = n_rows - 1 if reverse else 0
-            best = partner_mass[row, partner]
-            for position in range(1, n_rows):
-                other = n_rows - 1 - position if reverse else position
-                band = partner_band * (best if best > 1.0 else 1.0)
-                if partner_mass[row, other] > best + band:
-                    partner = other
-                    best = partner_mass[row, other]
+            best = np.max(partner_mass[row])
+            band = partner_band * max(1.0, best)
+            partner = -1
+            for other in range(n_rows):
+                if best - partner_mass[row, other] <= band:
+                    partner_membership[count, other] = 1
+                    if partner < 0:
+                        partner = other
             sample_indices[count] = sample
             subtracted[count] = row
             partners[count] = partner
@@ -600,7 +862,7 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
                 if value <= 1.0 - call_probability:
                     hard_calls[record, site] = 0
     return (sample_indices[:count], subtracted[:count], partners[:count], weights[:count],
-            soft_alt, hard_calls, compatible, log_odds)
+            soft_alt, hard_calls, compatible, log_odds, partner_membership[:count])
 
 
 @njit(cache=True, inline="always")
@@ -646,7 +908,17 @@ def _hamming_distances(hard_calls, minimum_joint):
     return distance
 
 
-def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=200_000):
+@njit(cache=True)
+def _diameter_within(distance, members, bound):
+    """The dense submatrix maximum test, without allocating that submatrix."""
+    for i in range(len(members)):
+        for j in range(i + 1, len(members)):
+            if distance[members[i], members[j]] > bound:
+                return False
+    return True
+
+
+def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=200_000, omissions=None, group_size=len, group_identity=None):
     """(groups, overflow): cohesive groups of residual records, independent of the record and link order
     (release 2.2; replaces one tie order's clusters plus complete linkage).
 
@@ -671,13 +943,13 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
     # excess of mass picks one level per branch, a binary merge order can shift that pick, and the block score can
     # decide instead.
     groups = [members for members in tree_groups
-              if float(np.max(distance[np.ix_(members, members)])) <= bound]
+              if _diameter_within(distance, np.asarray(members, dtype=np.int64), bound)]
     pool = set(np.flatnonzero(labels == -1).tolist())
     for label in sorted(set(labels.tolist()) - {-1}):
         members = tuple(np.flatnonzero(labels == label).tolist())
         if len(members) < 2:
             pool.update(members)
-        elif float(np.max(distance[np.ix_(members, members)])) <= bound:
+        elif _diameter_within(distance, np.asarray(members, dtype=np.int64), bound):
             groups.append(members)
         else:
             pool.update(members)
@@ -693,6 +965,8 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
                     adjacent[first].add(second)
                     adjacent[second].add(first)
         cliques, work, enumerated = [], 0, True
+        components = []
+        compact = group_identity is None and group_size is len
         seen = set()
         for vertex in vertices:
             if vertex in seen:
@@ -707,28 +981,50 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
             seen |= component
             if len(component) < 2:
                 continue
-            found, calls = maximal_cliques(sorted(component), adjacent, int(max_enumeration), int(max_calls))
+            if compact:
+                components.append(tuple(sorted(component)))
+                continue
+            found, calls = maximal_cliques(sorted(component), adjacent, int(max_enumeration), int(max_calls), omissions)
             work += calls
             if found is None:
                 enumerated = False
                 continue
             cliques.extend(clique for clique in found if len(clique) >= 2)
-        kept, capped = capped_by_size(cliques, int(max_groups))
+        if group_identity is not None:
+            unique = {}
+            for clique in cliques:
+                unique.setdefault(group_identity(clique), clique)
+            cliques = list(unique.values())
+        if compact:
+            from ._cliques import screened_components
+            kept, capped, enumerated, work, clique_count = screened_components(
+                components, adjacent, int(max_enumeration), int(max_groups), omissions)
+        else:
+            kept, capped = capped_by_size(cliques, int(max_groups), omissions,
+                                          scope="residual alternative size classes", group_size=group_size)
+            clique_count = len(cliques)
         overflow = capped or not enumerated
         known = set(groups)
         groups.extend(clique for clique in kept if clique not in known)
-        _CLIQUE_STATS.record(len(vertices), work, overflow, len(cliques), enumerated)
+        _CLIQUE_STATS.record(len(vertices), work, overflow, clique_count, enumerated)
     return tuple(sorted(set(groups))), overflow
 
 
-def _cluster_cached(distance, maximum_hamming, cache, max_groups=64, max_enumeration=10_000_000, max_calls=200_000):
+def _cluster_cached(distance, maximum_hamming, cache, max_groups=64, max_enumeration=10_000_000, max_calls=200_000,
+                    omissions=None):
+    # A fixed-size content digest avoids retaining another dense matrix per memo.
+    # Hash the contiguous buffer directly, without an R-by-R bytes temporary.
     value = np.ascontiguousarray(distance)
     key = (float(maximum_hamming), int(max_groups), int(max_enumeration), int(max_calls), value.shape,
-           value.tobytes())
+           blake2b(memoryview(value).cast("B"), digest_size=32).digest())
     result = cache.get(key)
     if result is None:
-        result = cache[key] = _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls)
-    return result
+        details = []
+        groups, overflow = _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls, details)
+        result = cache[key] = (groups, overflow, tuple(details))
+    if omissions is not None:
+        omissions.extend(result[2])
+    return result[:2]
 
 
 @njit(cache=True)
@@ -738,6 +1034,8 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
     ordered by sample."""
     n_sites = log_odds.shape[1]
     total = np.zeros(n_sites, dtype=np.float64)
+    sample_terms = np.zeros((members.shape[0], n_sites), dtype=np.float64)
+    term_index = 0
     contributing = np.zeros(n_sites, dtype=np.int32)
     weighted = np.zeros(n_sites, dtype=np.float64)
     weight_at_site = np.zeros(n_sites, dtype=np.float64)
@@ -752,10 +1050,11 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
                 weight = weight_at_site[site]
                 if weight > 0.0:
                     sample_weight = 1.0 if weight > 1.0 else weight
-                    total[site] += sample_weight * (weighted[site] / weight)
+                    sample_terms[term_index, site] = sample_weight * (weighted[site] / weight)
                     contributing[site] += 1
                     weighted[site] = 0.0
                     weight_at_site[site] = 0.0
+            term_index += 1
             current = sample
         record_weight = weights[record]
         for site in range(n_sites):
@@ -766,8 +1065,9 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
         weight = weight_at_site[site]
         if weight > 0.0:
             sample_weight = 1.0 if weight > 1.0 else weight
-            total[site] += sample_weight * (weighted[site] / weight)
+            sample_terms[term_index, site] = sample_weight * (weighted[site] / weight)
             contributing[site] += 1
+        total[site] = _accurate_sum(sample_terms[:term_index + 1, site])
     return total, contributing
 
 
@@ -842,7 +1142,20 @@ def _hardened_key(candidate, fallback) -> bytes:
     return np.ascontiguousarray(half_band_rows(candidate, fallback), dtype=np.uint8).tobytes()
 
 
-def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, limit=None) -> np.ndarray:
+def _partner_routes(subtracted, membership):
+    """Unique original observation indices in each complete winning partner route.
+
+    Multiple routes are alternative proposal pools, not additional observations or
+    copies: the global pool and every within-route consensus keep each weight once.
+    """
+    routes: dict[tuple[int, int], list[int]] = {}
+    for index in range(len(subtracted)):
+        for partner in np.flatnonzero(membership[index]):
+            routes.setdefault((int(subtracted[index]), int(partner)), []).append(index)
+    return {route: tuple(indices) for route, indices in routes.items()}
+
+
+def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, limit=None, omissions=None) -> np.ndarray:
     """float64[C, L] soft birth candidates of a complete binary panel, in emission order
     (``config``: ResidualBirthConfig; the block's sites are all kept; ``counter``: optional TieCounter of the
     band decisions, kinds discovery.residual.half_band and discovery.residual.mass_band, and of the order-invariant
@@ -855,34 +1168,53 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
     pair_j = np.ascontiguousarray(pair_j, dtype=np.int64)
     responsibility = _diplotype_responsibility(inputs.log_likelihood, rows, pair_i, pair_j)
     (sample_indices, subtracted, partners, weights, soft_alt, hard_calls,
-     compatible, log_odds) = _residual_records(
+     compatible, log_odds, partner_membership) = _residual_records(
         responsibility, pair_i, pair_j, k, inputs.likelihood, inputs.observed, rows,
         float(config.residual_call_probability), float(config.min_soft_responsibility),
-        float(PARTNER_BAND), float(MASS_BAND), rev("d10p"))
+        float(PARTNER_BAND), float(MASS_BAND), False)
     n_records = len(sample_indices)
     # Sources: global clusters, then clusters within each (subtracted row, partner) route.
     sources = []
     distance = None
     if n_records >= 2:
         minimum_joint = max(1, int(math.ceil(config.min_residual_joint_known_fraction * n_sites)))
-        distance = _hamming_distances(np.ascontiguousarray(hard_calls), minimum_joint)
-        groups, overflow = _cluster_cached(distance, config.max_cluster_hamming, inputs.cluster_cache,
-                                           config.max_alternative_groups, config.max_clique_enumeration,
-                                           config.max_clique_calls)
+        if config.landmark_budget and n_records > config.landmark_budget:
+            from .landmarks import residual_groups
+            groups, overflow, _stats = residual_groups(hard_calls, config.landmark_budget, minimum_joint,
+                                                       config, omissions, "global residuals", inputs.landmark_cache)
+        else:
+            distance = _hamming_distances(np.ascontiguousarray(hard_calls), minimum_joint)
+            groups, overflow = _cluster_cached(distance, config.max_cluster_hamming, inputs.cluster_cache,
+                                               config.max_alternative_groups, config.max_clique_enumeration,
+                                               config.max_clique_calls, omissions)
         sources.extend(groups)
         if counter is not None:
             counter.note("discovery.residual.group_overflow", inside_tie=overflow)
-    routes: dict[tuple[int, int], list[int]] = {}
-    for index in range(n_records):
-        routes.setdefault((int(subtracted[index]), int(partners[index])), []).append(index)
+    routes = _partner_routes(subtracted, partner_membership)
+    if counter is not None:
+        sizes = np.count_nonzero(partner_membership, axis=1)
+        for kind, decisions, tied in (
+                ("discovery.residual.partner_routes", n_records, int(np.count_nonzero(sizes > 1))),
+                ("discovery.residual.partner_route_memberships", int(sizes.sum()),
+                 int(np.maximum(sizes - 1, 0).sum())),
+                ("discovery.residual.partner_route_pools", len(routes), 0)):
+            entry = counter.counts.setdefault(kind, dict(decisions=0, inside_tie=0, wide=0, boundary=0))
+            entry["decisions"] += decisions
+            entry["inside_tie"] += tied
     for route in sorted(routes):
-        pool = tuple(sorted(routes[route]))
+        pool = routes[route]
         if len(pool) < 2:
             continue
-        sub_distance = distance[np.ix_(pool, pool)]
-        local_groups, overflow = _cluster_cached(sub_distance, config.max_cluster_hamming, inputs.cluster_cache,
-                                                 config.max_alternative_groups, config.max_clique_enumeration,
-                                                 config.max_clique_calls)
+        if config.landmark_budget and len(pool) > config.landmark_budget:
+            from .landmarks import residual_groups
+            local_groups, overflow, _stats = residual_groups(hard_calls[list(pool)], config.landmark_budget,
+                minimum_joint, config, omissions, "partner residual route", inputs.landmark_cache)
+        else:
+            sub_distance = (distance[np.ix_(pool, pool)] if distance is not None else
+                            _hamming_distances(np.ascontiguousarray(hard_calls[list(pool)]), minimum_joint))
+            local_groups, overflow = _cluster_cached(sub_distance, config.max_cluster_hamming, inputs.cluster_cache,
+                                                     config.max_alternative_groups, config.max_clique_enumeration,
+                                                     config.max_clique_calls, omissions)
         if counter is not None:
             counter.note("discovery.residual.group_overflow", inside_tie=overflow)
         for local in local_groups:
@@ -897,7 +1229,7 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
     consensus_by_members: dict[tuple, tuple] = {}
     for source_index, members in enumerate(sources):
         ordered = tuple(sorted(members, key=lambda index: (
-            sample_indices[index], subtracted[index], partners[index], index)))
+            sample_indices[index], subtracted[index], index)))
         cached = consensus_by_members.get(ordered)
         if cached is None:
             by_sample: dict[int, float] = {}
@@ -918,11 +1250,13 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
     # Support classes, most supported first (a stated preference). A candidate is a near-duplicate only of a panel
     # row or of a candidate of a MORE supported class: equally supported near-duplicates are all kept, since no order
     # may decide between them, and exact duplicates are one candidate (release 2.2; 2.1 kept the first by content
-    # key). A class that would exceed ``limit`` is dropped with every less supported one (released ambiguity).
+    # key). A straddling class fits through 2*limit; beyond that it is omitted whole.
+    # Lower support classes are counted as ranked truncation, separately from tie-class omissions.
     panel_rows = [np.asarray(row, dtype=np.float64) for row in rows]
     emitted, emitted_bytes = [], set()
     minimum_dedup_joint = max(1, int(math.ceil(config.min_dedup_joint_known_fraction * n_sites)))
     overflow = False
+    stopped = False
     index = 0
     while index < len(prepared):
         support = prepared[index][0][1]
@@ -949,9 +1283,23 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
                 continue
             accepted.append(candidate)
             accepted_bytes.add(exact)
-        if limit is not None and len(emitted) + len(accepted) > int(limit):
+        if limit is not None and (stopped or (len(emitted) > 0 and len(emitted) >= int(limit))):
+            if accepted and omissions is not None:
+                omissions.append(dict(cause="soft_residual_proposal_ranked_truncation",
+                                      kind="ranked_truncation", count=len(accepted),
+                                      scope=f"residual support={support} class", count_kind="exact"))
+            stopped = True
+            index = stop
+            continue
+        if limit is not None and len(emitted) + len(accepted) > 2 * int(limit):
             overflow = True
-            break
+            stopped = True
+            if omissions is not None:
+                omissions.append(dict(cause="soft_residual_proposal_tie_class_at_budget",
+                                      kind="tie_class_at_budget", count=len(accepted),
+                                      scope=f"residual support={support} class", count_kind="exact"))
+            index = stop
+            continue
         emitted.extend(accepted)
         emitted_bytes |= accepted_bytes
         index = stop

@@ -211,3 +211,67 @@ Python callers find the code under stage packages; `core/` and `workflows/` are 
 | `workflows.export`, `workflows.reports`, `assembly.support` | `export`, `reports` |
 | `core.products.load_panels(file, stage)` | each stage's `records.founder_panels(file)` |
 | `core.genetic_map` | `model.genetic_map` |
+
+## Founder release in 2.3
+
+The founder export manifest schema is `released-allele-export-v3`. A column named
+`c<C>_H<k>` identifies row `k` of release segment `C` on that chromosome. Release segments
+can subdivide an inference component. Use `source_component` and `segment_index` in
+`founder_components` to relate them to assembly and painting; the corresponding VCF
+`##component` fields are `SourceComponent` and `SegmentIndex`. `source_founder_rows`
+maps displayed rows to the original painting/refit row indices. Identical `H0` labels
+in different segments do not assert a common founder identity.
+
+Track filenames retain `<chromosome>.componentNNNN.founders.tsv.gz`, but `NNNN` now
+enumerates release segments. An `ambiguity` record gives its source level, half-open
+prepared-block span, source decision, status, alternative count, representative prior,
+and `uncertainty_interval` in 1-based observed SNP positions. A continuity interval
+brackets supported boundaries; it is not a precise crossover estimate. Whole-panel
+row permutations alone do not create breaks.
+
+For equal-K terminal alternatives, exact invariant flanks/path anchors can establish
+one common row correspondence. Export retains every agreeing known source allele cell
+and withholds cells that differ or are missing in any evaluated member. The mapping
+uses neither approximate matching nor truth. For unequal-K terminal families, a
+displayed path occurring exactly once in every evaluated full-span panel also has
+an exact correspondence. Its known prepared cells are retained despite changes in
+other paths' local multiplicity. Duplicate paths and clipped fragments do not qualify.
+This protection applies within each family before masks from independent families
+are combined, and preserves prepared missingness and all continuity cuts.
+If unique correspondence is unavailable,
+varying duplicate multiplicities receive the same conservative local-row mask under
+every representative. Existing founder-refit and carrier-observation unknown calls are
+preserved. Full-length r5 filling cannot restore withheld content or bridge segments.
+
+The separate `count_unverified` list reports incomplete computational verification of
+count decisions. Entries include cause, domain size, evaluated count, source decision,
+block span and observed-position interval. VCF headers expose them as
+`##founder_count_verification`. These flags preserve calls and ordinary r5 filling;
+they do not establish biological disagreement.
+
+The separate `continuation_unverified` list preserves evaluated source families whose
+later continuation was not completed. Its records include `evaluated_source_panels`,
+`evaluated_source_founder_counts`, actual `local_disagreement_intervals`, cause, source
+scope and stated prior. Source panels are not presented as equally supported final
+panels. VCF/BCF headers expose compact `##founder_continuation_verification` records.
+Calls remain conditional on the incumbent. Only independently established observed
+content disagreement can cause withholding; an unperformed continuation alone cannot.
+
+Per contig, `founder_continuity_breaks` counts additional boundaries within source
+components. `assembly_ambiguous_alleles` and segment `withheld_ambiguous_alleles` count
+newly withheld panel cells after the existing carrier-observation mask. They exclude
+already missing calls and r5 sites outside the panel. Retained/withheld counts must be
+reported against same-input baseline called cells, alongside total called/missing cells
+and missing-inclusive founder errors. Count and continuation verification record counts
+refer to source records once per contig, even if they annotate several segments.
+
+Both `haplotypes export RUN DEST` and pipeline export use this release reader. Older
+assembly products without recorded alternative families report
+`assembly_ambiguity_metadata = "legacy_unknown"`. Re-export cannot reconstruct discarded
+alternatives or establish that no alternatives existed; recompute assembly under 2.3
+for the new treatment. Export identity includes assembly records and release code.
+Regenerate the merged configuration reference after integrating all owners' changes.
+
+Painting, pedigree, sample phase and recombination remain conditional on the assembly
+representative where alternatives are unresolved. Segmentation does not marginalize
+those models or change sample VCF calls and phase sets by itself.

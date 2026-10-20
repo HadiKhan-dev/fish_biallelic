@@ -3,7 +3,7 @@
 Per contig (one current record each, bound to its stage identity):
   pedigree/prepared   PreparedChromosome   painting + raw evidence -> transmission inputs
   pedigree/screen     ChromosomeScreen     M0 and all-pairs M1 per component (panel input)
-  pedigree/scores     ChromosomeScores     M0/M1/M2 + exposure + junctions for the fixed panel
+  pedigree/scores     ChromosomeScores     RAW M0/M1/M2 + exposure + junctions for the fixed panel
   pedigree/exclusion  ExclusionEvidence    full-marker Mendelian exclusion of the target dyads
 Run:
   pedigree            PedigreeProduct      decisions, typed views for family phase / evaluation, reports
@@ -30,6 +30,8 @@ STAGE = "pedigree"
 PREPARED = "pedigree/prepared"
 SCREEN = "pedigree/screen"
 SCORES = "pedigree/scores"
+SELECTIVE_SCREEN = "pedigree/selective_screen"
+FLOORED_SCORES = "pedigree/floored_scores"
 EXCLUSION = "pedigree/exclusion"
 PRODUCT = "pedigree"
 # 2: release 2.2 released parent order (pedigree.slots: dam/sire or canonical), eligibility sexes.
@@ -253,7 +255,8 @@ class ExclusionEvidence:
     """Full-marker exclusion of one contig (record ``pedigree/exclusion``).
 
     dyads:          int64 [D, 2] (child, candidate parent) in target order.
-    log_e:          float64 [D] window- and bet-averaged log E-value of the contig.
+    log_e:          float64 [D] exact log E, or a certified lower endpoint.
+    log_e_upper:    optional float64 [D] upper endpoint; None means legacy exact evidence.
     observed_sites: int64 [D] sites observed in both samples.
     markers:        markers of the contig; pattern_fallback_samples: samples scored without the
                     exact repeated-pattern cache (more than its cap of distinct GL triples).
@@ -265,6 +268,7 @@ class ExclusionEvidence:
     observed_sites: np.ndarray
     markers: int
     pattern_fallback_samples: int
+    log_e_upper: np.ndarray | None = None
 
 
 # ------------------------------------------------------------------------------- product
@@ -402,23 +406,45 @@ def prepared_identity(file, config, genetic_map) -> dict:
 
 
 def screen_identity(file, config, eligibility) -> dict:
-    """M0/M1 screen <- prepared record, scoring settings, eligibility."""
-    return _identity({"scoring": config.scoring},
+    """Raw component screen and aggregate model <- prepared, scoring, floor, eligibility."""
+    from . import m1
+    return _identity({"scoring": config.scoring, "m1": m1.identity(config)},
                      {"prepared": file.info(PREPARED).identity, "eligibility": eligibility.identity()})
 
 
 def scores_identity(file, panel: "CandidatePanel") -> dict:
-    """Scores <- screen record and the genome-wide panel."""
+    """Raw chromosome scores <- screen record and the genome-retained M2 panel."""
     return _identity({}, {"screen": file.info(SCREEN).identity, "panel": array_digest(panel.trios)})
 
 
-def exclusion_identity(file, config, dyads: np.ndarray) -> dict:
+def selective_screen_identity(store, contigs, config, eligibility) -> dict:
+    """Whole-genome profile <- all prepared factors, original model and eligibility."""
+    from . import m1
+    upstream = {"eligibility": eligibility.identity()}
+    upstream.update({f"prepared/{c}": store.contig(c).info(PREPARED).identity for c in contigs})
+    return _identity({"scoring": config.scoring, "m1": m1.identity(config),
+                      "representation": "genome-floor-csr-v1"}, upstream)
+
+
+def floored_scores_identity(store, file, panel) -> dict:
+    """Fixed-profile scores use a separate key from legacy raw M1 records."""
+    return _identity({"m1_values": "fixed-genome-profile"}, {
+        "prepared": file.info(PREPARED).identity,
+        "selective_screen": store.run.info(SELECTIVE_SCREEN).identity,
+        "panel": array_digest(panel.trios)})
+
+
+def exclusion_identity(file, config, dyads: np.ndarray, *, certificate=None) -> dict:
     """Exclusion evidence <- evidence record, target dyads, exclusion settings."""
-    return _identity({"exclusion": config.exclusion},
+    settings = {"exclusion": config.exclusion}
+    if certificate is not None:
+        settings["certificate"] = certificate
+    return _identity(settings,
                      {"evidence": file.info(EVIDENCE_KEY).identity, "dyads": array_digest(dyads)})
 
 
-def product_identity(store, contigs, informative, config, eligibility, panel) -> dict:
+def product_identity(store, contigs, informative, config, eligibility, panel,
+                     *, scores_key=SCORES) -> dict:
     """The pedigree <- every contig's prepared and scores records, the panel and all settings (the
     exclusion targets and evidence are a deterministic function of these)."""
     upstream = {"eligibility": eligibility.identity(), "panel": array_digest(panel.trios)}
@@ -426,7 +452,7 @@ def product_identity(store, contigs, informative, config, eligibility, panel) ->
         file = store.contig(contig)
         upstream[f"prepared/{contig}"] = file.info(PREPARED).identity
         if contig in informative:
-            upstream[f"scores/{contig}"] = file.info(SCORES).identity
+            upstream[f"scores/{contig}"] = file.info(scores_key).identity
     return _identity({"pedigree": config}, upstream)
 
 
