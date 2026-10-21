@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.6.0 (21 October 2026)
+
+Release 2.6 speeds discovery and local selection, and separates the copying intensity from assembly's gap horizon.
+Both parameter defaults stay at 3, preserving scientific results; the local-selection conventions remain unchanged.
+
+### Local selection: conventions checked
+
+- The bank's 512 + 64K start cap binds in six block-rounds on TroMau and K30. There are 73 same-K
+  distinct-winner ties, six of which advance the inner search.
+- Reversal checks change no released local call, K, missingness, support or decision in 223 flagged
+  block-round replays or through all three rounds on K30 m1 and TroMau chr7. One uncalled latent cell
+  and posterior drift up to 7e-6 remain on K30. No remedy is needed on this evidence.
+
+### Copying and assembly parameters separated
+
+- The shared `n_generations` is replaced by two independent internal parameters:
+  `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` is the founder-copy redraw intensity per Morgan;
+  `AssemblyConfig.gap_horizon_scale = 3` limits linker and beam proposal gaps. Defaults retain the same
+  arithmetic and scientific results. Neither parameter is a public TOML setting.
+- In a bounded chr19 sweep, copying intensities 1 and 6 worsen TroMau G0 pseudo-truth consistency.
+  Other settings bring no principled gain across std, F3 and TroMau. Both defaults stay at 3;
+  no generation labels or painting-switch estimates set them.
+
+### Discovery speed
+
+- Birth proposals retain canonical keys and descriptors until fitting needs panel arrays. Fractional-founder
+  scalar certification runs before term-column views are built. Search budgets, objectives and fits are unchanged.
+- Matched single-contig discovery wall times on 76-core Ice Lake nodes fall from 33.3 to 30.1 s at N=80
+  (-9.6%), 54.4 to 47.0 s at N=320 (-13.6%), and 32.7 to 30.6 s on TroMau (-6.4%). All 2,696 blocks
+  and fit counts agree, with zero measured continuous drift. Each result is one matched pair, not a
+  whole-pipeline timing estimate.
+
+### Local-selection speed
+
+- Copying kernels use adaptive sample lanes and cap their threads at the useful lane count. Normalization
+  reuses reciprocals and combines triangular normalization with marginal accumulation. The model, search
+  budgets, thresholds and stopping rules are unchanged.
+- Matched local-stage wall times on a 76-core Ice Lake node fall from 373.3 to 237.1 s on K30 m1 (-36.5%),
+  200.8 to 179.8 s on TroMau chr7 (-10.5%), and 120.2 to 114.3 s on std chr1 (-4.9%). N320 is within
+  timing noise. These are single matched pairs, not whole-pipeline speedups; K30 uses about 7% more CPU.
+- Released scientific fields agree in four matched local comparisons and their final assembly/painting checks.
+  Full std passes local selection, assembly, painting, pedigree, founder refit, family phase, recombination,
+  truth evaluation and all 4,727,400 records in 16 exported VCFs. Maximum local log-likelihood drift is
+  2e-10; final products, evaluation and exports have zero measured drift. Kernel and parameter-split checks pass.
+
+### Findings, no code change
+
+- Targeted 2x/4x discovery-budget replays show mixed accuracy effects and no demonstrated downstream
+  accuracy gain. Search budgets are unchanged.
+- A conditional residual-seed augmentation was prototyped and rejected: final K30 genotype wrong-or-missing
+  rose 1.7%, exceeding the allowed 1%. No rare-founder code change is included.
+- The global tie-reversal hook changes one TroMau L2 context-assembly `release_alternatives` record.
+  The isolated local winner reversal does not cause it, and released local calls remain unchanged.
+  This assembly convention remains a follow-up for the assembly stage.
+
+### Fixed
+
+- A cold-cache crash present since 2.0: parallel kernel warm-up could leave Numba's cache index pointing
+  at another overload's compiled code, causing the caller to fail to type. This occurred in a K30 simulation.
+  Cached kernels are used only when their signature matches the requested one; otherwise they are recompiled.
+
+### Validation
+
+- Whole-pipeline runs on 76-core Ice Lake nodes agree with 2.5 in every released discovery field, every
+  pedigree call, and the per-contig site counts, K, painting switches and crossovers:
+  - TroMau: 9,979 blocks, 116 samples, 22 contigs;
+  - the std, stress, K20, K30, f3 and reallike simulations;
+  - the N-series at N = 80, 160, 320 and 640.
+- Whole-pipeline wall times, 2.5 against 2.6:
+  - TroMau 67.7 against 64.7 min; std 24.6 against 22.6 min;
+  - N-series 10.6, 14.6, 22.6 and 45.6 against 8.2, 13.2, 20.8 and 46.1 min;
+  - matched pairs run side by side: K30 46.1 against 39.0 min (-15%), K20 7.3 against 6.8 min, f3 22.7
+    against 22.0 min, stress 21.7 against 21.6 min and reallike 17.4 against 18.1 min.
+- A reproducer with a corrupted kernel-cache index fails on 2.5 and passes on 2.6, both in the main process
+  and in pool workers. The focused tests pass.
+
 ## 2.5.0 (21 October 2026)
 
 Release 2.5 changes the discovery stage. Discovery is practical at large sample sizes, and population-half

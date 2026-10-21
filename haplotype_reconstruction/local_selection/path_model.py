@@ -4,12 +4,12 @@ Each of a sample's two homologues copies a founder row or the *unknown* state (i
 independent Bernoulli(1/2) draws, NOT one shared unknown founder). The prior state probability is
 pi = ((1 - u) f, u) with founder frequencies f and fixed unknown mass u; between adjacent sites
 a homologue redraws its state from pi with probability r = 1 - exp(-g x Morgans) (g = the
-copying-hazard multiplier), so the ordered-pair transition is ((1-r) I + r 1 pi^T) per homologue.
+copying redraw intensity per Morgan), so the ordered-pair transition is ((1-r) I + r 1 pi^T) per homologue.
 Emissions are the sample's normalised genotype likelihoods of the pair's dosage (an unknown copy
 mixes its two alleles); unobserved cells emit 1.
 
 Two kernels evaluate the model:
-* the lane kernels (score, fit statistics): samples in lane blocks of 64 side by side so the
+* the lane kernels (score, fit statistics): samples in lane blocks of up to 64 side by side so the
   compiler vectorises each recursion across samples; trajectories store upper triangles (the two
   homologues are exchangeable); a lane block's forward trajectory is kept only until its backward
   pass, which follows at once (``_evaluate_lanes``: storage for one lane block per thread, not
@@ -28,8 +28,10 @@ from __future__ import annotations
 import numpy as np
 from numba import get_num_threads, njit, prange
 
-# Samples per lane block (a work split only; results do not depend on it). Wide blocks amortise
-# the per-loop overhead (16 lanes gave 1.1x over one sample at a time, 32 1.5-1.9x, 64 2.0-2.2x).
+from ..execution import numba_threads
+
+# Maximum samples per lane block (a work split only). Wide blocks amortise loop overhead;
+# narrower blocks use a growing tail budget when every block fits in one parallel wave.
 LANE_WIDTH = 64
 # Samples per parallel release E-step batch and elements per combine tile (memory bounds only).
 RELEASE_SAMPLE_BATCH = 128
@@ -104,6 +106,68 @@ def _pair(a, b, s):
     return a * s - a * (a - 1) // 2 + (b - a)
 
 
+@njit(cache=True, inline='always', error_model='numpy')
+def _reciprocals(denominator, inverse, lanes):
+    """One inverse per lane; subnormal divisors retain direct division.
+
+    A ratio can be finite even when the denominator's reciprocal overflows.
+    The rare fallback also preserves the existing zero-normalizer error path.
+    """
+    regular = True
+    for j in range(lanes):
+        if denominator[j] >= np.finfo(np.float64).tiny:
+            inverse[j] = 1. / denominator[j]
+        else:
+            inverse[j] = 0.
+            regular = False
+    return regular
+
+
+@njit(cache=True, error_model='numpy')
+def _normalise_pairs(values, denominator, inverse, regular, normalized, marginal,
+                     s, lanes, copies):
+    """Normalize triangular pairs and sum both endpoints in one sweep.
+
+    Off-diagonal cells represent one ordered pair and contribute to both row
+    marginals. ``copies`` is one for filtered row masses, two for copy counts.
+    Source and normalized arrays may be the same forward buffer.
+    """
+    for a in range(s):
+        for j in range(lanes):
+            marginal[a, j] = 0.
+    index = 0
+    if regular:
+        for a in range(s):
+            for b in range(a, s):
+                if a == b:
+                    for j in range(lanes):
+                        value = values[index, j] * inverse[j]
+                        normalized[index, j] = value
+                        marginal[a, j] += copies * value
+                else:
+                    for j in range(lanes):
+                        value = values[index, j] * inverse[j]
+                        normalized[index, j] = value
+                        marginal[a, j] += copies * value
+                        marginal[b, j] += copies * value
+                index += 1
+    else:
+        for a in range(s):
+            for b in range(a, s):
+                if a == b:
+                    for j in range(lanes):
+                        value = values[index, j] / denominator[j]
+                        normalized[index, j] = value
+                        marginal[a, j] += copies * value
+                else:
+                    for j in range(lanes):
+                        value = values[index, j] / denominator[j]
+                        normalized[index, j] = value
+                        marginal[a, j] += copies * value
+                        marginal[b, j] += copies * value
+                index += 1
+
+
 @njit(cache=True, error_model='numpy')
 def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, scale, ll, alive):
     """Scaled forward pass of the first ``lanes`` samples of one lane block.
@@ -123,6 +187,7 @@ def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, s
     k = s - 1
     pairs = s * (s + 1) // 2
     prior_period, row_period = pt.shape[1], wt.shape[1]
+    inverse = np.empty_like(scale)
     for j in range(lanes):
         ll[j] = 0.
         alive[j] = True
@@ -181,22 +246,9 @@ def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, s
                     alive[j] = False
                 else:
                     ll[j] += np.log(scale[j])
-        for index in range(pairs):
-            for j in range(lanes):
-                filtered[index, j] = filtered[index, j] / scale[j]
-        # A row marginal adds its pairs in the order (0, r), ..., (r - 1, r),
-        # (r, r), ..., (r, s - 1), as a sweep over the upper triangle does.
-        for r in range(s):
-            for j in range(lanes):
-                wt[slot, ws, r, j] = 0.
-            for a in range(r):
-                p = _pair(a, r, s)
-                for j in range(lanes):
-                    wt[slot, ws, r, j] += filtered[p, j]
-            for b in range(r, s):
-                p = _pair(r, b, s)
-                for j in range(lanes):
-                    wt[slot, ws, r, j] += filtered[p, j]
+        regular = _reciprocals(scale, inverse, lanes)
+        _normalise_pairs(filtered, scale, inverse, regular, filtered, wt[slot, ws],
+                         s, lanes, 1.)
 
 
 @njit(cache=True, parallel=True, error_model='numpy')
@@ -259,7 +311,7 @@ def _backward_block(block, slot, lanes, panel, et, rt, st, ot, pi, rates, pt, wt
     # assignment for that site.
     rate, stay = 0., 1.
     for site in range(length - 1, -1, -1):
-        # vec rows: 0 denominator, 1 total, 2 maximum, 3 left, 4 right.
+        # vec rows: 0 denominator, 1 total, 2 maximum, 3 left, 4 right, 5 inverse.
         for j in range(lanes):
             vec[0, j] = 0.
         if site:
@@ -313,21 +365,9 @@ def _backward_block(block, slot, lanes, panel, et, rt, st, ot, pi, rates, pt, wt
                     for j in range(lanes):
                         row[r, j] += future[p, j] * pb
                         redraw[r, j] += future[p, j] * previous[b, j]
+        regular = _reciprocals(vec[0], vec[5], lanes)
         if store_mass:
-            for index in range(pairs):
-                for j in range(lanes):
-                    posterior[index, j] = mass[index, j] / vec[0, j]
-            for r in range(s):
-                for j in range(lanes):
-                    copies[r, j] = 0.
-                for a in range(r):
-                    p = _pair(a, r, s)
-                    for j in range(lanes):
-                        copies[r, j] += 2. * posterior[p, j]
-                for b in range(r, s):
-                    p = _pair(r, b, s)
-                    for j in range(lanes):
-                        copies[r, j] += 2. * posterior[p, j]
+            _normalise_pairs(mass, vec[0], vec[5], regular, posterior, copies, s, lanes, 2.)
             for a in range(s):
                 if full_statistics:
                     if direct:
@@ -467,11 +507,18 @@ def _backward_block(block, slot, lanes, panel, et, rt, st, ot, pi, rates, pt, wt
         if site > 0:
             for j in range(lanes):
                 vec[1, j] = 0.
-            for a in range(s):
-                c, pa = 2. * rate * pi[a], pi[a]
-                for j in range(lanes):
-                    destinations[a, j] += c * redraw[a, j] / vec[0, j]
-                    vec[1, j] += pa * row[a, j]
+            if regular:
+                for a in range(s):
+                    c, pa = 2. * rate * pi[a], pi[a]
+                    for j in range(lanes):
+                        destinations[a, j] += c * redraw[a, j] * vec[5, j]
+                        vec[1, j] += pa * row[a, j]
+            else:
+                for a in range(s):
+                    c, pa = 2. * rate * pi[a], pi[a]
+                    for j in range(lanes):
+                        destinations[a, j] += c * redraw[a, j] / vec[0, j]
+                        vec[1, j] += pa * row[a, j]
             ss, sr, rr = stay * stay, stay * rate, rate * rate
             for j in range(lanes):
                 vec[2, j] = 0.
@@ -485,10 +532,16 @@ def _backward_block(block, slot, lanes, panel, et, rt, st, ot, pi, rates, pt, wt
                         largest = vec[2, j]
                         vec[2, j] = value if value > largest else largest
                     index += 1
-            for index in range(pairs):
-                for j in range(lanes):
-                    largest = vec[2, j]
-                    backward[index, j] = backward[index, j] / largest if largest > 0 else backward[index, j]
+            if _reciprocals(vec[2], vec[5], lanes):
+                for index in range(pairs):
+                    for j in range(lanes):
+                        backward[index, j] *= vec[5, j]
+            else:
+                for index in range(pairs):
+                    for j in range(lanes):
+                        largest = vec[2, j]
+                        if largest > 0:
+                            backward[index, j] /= largest
 
 
 @njit(cache=True)
@@ -499,7 +552,7 @@ def _backward_work(s, width):
             np.empty((pairs, width)), np.empty((pairs, width)),
             np.empty((s, width)), np.empty((s, width)), np.empty((s, width)), np.empty((s, width)),
             np.empty((s, width)), np.empty((s, width)), np.empty((s, width)),
-            np.empty((5, width)), np.empty((s, s + 1, width)), np.empty((s, s + 1, width)),
+            np.empty((6, width)), np.empty((s, s + 1, width)), np.empty((s, s + 1, width)),
             np.empty((s + 1, width)), np.empty(width), np.empty(width, dtype=np.int64),
             np.empty(width), np.empty(width, dtype=np.bool_))
 
@@ -750,12 +803,13 @@ class PreparedBlock:
     search: GLs and observation mask at the discovery sites, redraw probabilities between
     adjacent sites, emission tables, and (built on first use) Q log ratios and lane layouts."""
 
-    def __init__(self, likelihoods, observed, intervals_morgans, generations, unknown_mass):
+    def __init__(self, likelihoods, observed, intervals_morgans, redraw_rate, unknown_mass):
         self.gl = np.ascontiguousarray(likelihoods, dtype=np.float64)
         self.observed = np.ascontiguousarray(observed, dtype=np.bool_)
         self.unknown_mass = float(unknown_mass)
-        self.rates = -np.expm1(-float(generations) * np.asarray(intervals_morgans, dtype=np.float64))
+        self.rates = -np.expm1(-float(redraw_rate) * np.asarray(intervals_morgans, dtype=np.float64))
         self.emissions = _emission_tables(self.gl, self.observed)
+        self._lane_width = LANE_WIDTH
         self._lane_emissions = None
         self._fit_lanes = None
 
@@ -769,24 +823,45 @@ class PreparedBlock:
         return np.r_[(1 - self.unknown_mass) * (frequencies / frequencies.sum()), self.unknown_mass]
 
     def lane_emissions(self):
+        width = LANE_WIDTH
+        if self.samples > LANE_WIDTH:
+            threads = get_num_threads()
+            for candidate in (16, 32):
+                if (self.samples + candidate - 1) // candidate <= threads:
+                    width = candidate
+                    break
+        if width != self._lane_width:
+            # Retain one layout. Repacking occurs only when the caller crosses
+            # a lane-budget boundary, never during a numerical kernel.
+            self._lane_width = width
+            self._lane_emissions = self._fit_lanes = None
         if self._lane_emissions is None:
-            self._lane_emissions = _emission_lanes(self.emissions, LANE_WIDTH)
+            self._lane_emissions = _emission_lanes(self.emissions, width)
         return self._lane_emissions
 
     def fit_lanes(self):
         """(et, rt, st, ot) lane layouts of emissions, Q log ratios and the observed mask."""
+        emissions = self.lane_emissions()
         if self._fit_lanes is None:
             ratios, self_ratios = _ratio_tables(self.emissions, self.observed)
-            self._fit_lanes = _ratio_lanes(self.observed, ratios, self_ratios, LANE_WIDTH)
-        return (self.lane_emissions(), *self._fit_lanes)
+            self._fit_lanes = _ratio_lanes(self.observed, ratios, self_ratios, self._lane_width)
+        return (emissions, *self._fit_lanes)
 
 
 def log_likelihood(panel, frequencies, prepared: PreparedBlock) -> float:
     """Forward log likelihood of a panel (no trajectories kept)."""
     et = prepared.lane_emissions()
-    values = _score_lanes(np.ascontiguousarray(panel, dtype=np.int64), et,
-                          prepared.state_prior(frequencies), prepared.rates, prepared.samples,
-                          min(len(et), get_num_threads()))
+    workers = min(len(et), get_num_threads())
+    if get_num_threads() > workers:
+        # The budget claim stays held: restoring this caller's team is safe.
+        with numba_threads(workers):
+            values = _score_lanes(np.ascontiguousarray(panel, dtype=np.int64), et,
+                                  prepared.state_prior(frequencies), prepared.rates, prepared.samples,
+                                  workers)
+    else:
+        values = _score_lanes(np.ascontiguousarray(panel, dtype=np.int64), et,
+                              prepared.state_prior(frequencies), prepared.rates, prepared.samples,
+                              workers)
     return float(values.sum())
 
 
@@ -849,6 +924,9 @@ class PathWorkspace:
         if (self.cached is not None and self.cached_level >= level
                 and np.array_equal(panel, self.panel) and np.array_equal(frequencies, self.frequencies)):
             return self.cached
+        # The pool may grant more threads after other blocks finish. Each
+        # evaluation uses the current data layout; cached statistics need no repack.
+        self.lanes = self.prepared.fit_lanes()
         et, rt, st, ot = self.lanes
         length, width = et.shape[1], et.shape[4]
         s = self.k + 1
@@ -856,8 +934,15 @@ class PathWorkspace:
         priors, rows = self.buffers.views((workers, length, s * (s + 1) // 2, width),
                                           (workers, length, s, width))
         pi = self.prepared.state_prior(frequencies)
-        likelihoods, gains, occupancy, initial, destinations = _evaluate_lanes(
-            panel, et, rt, st, ot, pi, self.prepared.rates, priors, rows, level, self.n, workers)
+        # More threads add parallel-region overhead without more lane work.
+        # Keep the budget claim and restore the mask before another phase runs.
+        if get_num_threads() > workers:
+            with numba_threads(workers):
+                likelihoods, gains, occupancy, initial, destinations = _evaluate_lanes(
+                    panel, et, rt, st, ot, pi, self.prepared.rates, priors, rows, level, self.n, workers)
+        else:
+            likelihoods, gains, occupancy, initial, destinations = _evaluate_lanes(
+                panel, et, rt, st, ot, pi, self.prepared.rates, priors, rows, level, self.n, workers)
         if np.any(~np.isfinite(likelihoods)):
             raise ValueError("E-step undefined for a sample with zero panel likelihood")
         # A zero posterior normaliser of a finite-likelihood sample (underflow) leaves NaN or inf

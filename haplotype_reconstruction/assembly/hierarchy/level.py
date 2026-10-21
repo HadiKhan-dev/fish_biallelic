@@ -62,7 +62,7 @@ def join_context(settings: JoinSettings) -> str:
         code=code_identity("assembly"),
         linker=jsonable(settings.linker), join=jsonable(settings.join),
         count_rule=jsonable(settings.count_rule), cost_scale=settings.cost_scale,
-        n_generations=None if settings.level_one else settings.n_generations,
+        gap_horizon_scale=None if settings.level_one else settings.gap_horizon_scale,
         recombination_tolerance=None if settings.level_one else settings.recombination_tolerance,
         genetic_map=jsonable(settings.genetic_map.identity())))
 

@@ -18,11 +18,15 @@ class PathModelConfig:
     unknown_mass: fixed prior mass of the unknown state (base ``background_mass``; also the
         background-state mass of the context refit's bin-level HMM).
 
-    The copying hazard r = 1 - exp(-g x Morgans) uses g = ``AssemblyConfig.n_generations`` (one
-    value shared with assembly's linker gap, as base) and the contig's genetic map.
+    redraw_rate_per_morgan: founder-copy redraw intensity per Morgan for both the block
+        path HMM and the context-refit HMM. The redraw probability is
+        r = 1 - exp(-redraw_rate_per_morgan x Morgans), using the contig's genetic map.
+        A redraw can choose the same state; this is not the observed founder-switch rate
+        or a sample's generation label. Independent of assembly's gap horizon.
     """
 
     unknown_mass: float = 0.01
+    redraw_rate_per_morgan: float = 3.0
 
 
 @dataclass(frozen=True)

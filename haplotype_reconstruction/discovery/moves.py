@@ -23,10 +23,12 @@ follow births in tie-class order.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass
 import math
+from operator import itemgetter
 import sys
 
 import numpy as np
@@ -576,7 +578,7 @@ def growth_inputs(likelihoods, observed, counter=None) -> GrowthInputs:
     return GrowthInputs(oracle_nll, decisiveness, dosages, tuple(seed_rows), active, observed_sites)
 
 
-def _data_seed_rows(growth, sample, parent_rows):
+def _data_seed_keys(growth, sample, parent_rows):
     """Union dosage, population-half and subtraction seeds before the whole-class budget.
 
     Missing-cell genotype ties matter to subtraction starts even when the direct
@@ -587,7 +589,13 @@ def _data_seed_rows(growth, sample, parent_rows):
     seeds = [row for dosage in growth.dosages
              for row in np.clip(dosage[sample][None, :] - parent_rows, 0, 1)]
     seeds.extend(rows[sample] for rows in growth.seed_rows)
-    return _unique_seeds(seeds)
+    return sorted({np.asarray(row, dtype=np.int8).tobytes() for row in seeds})
+
+
+def _data_seed_rows(growth, sample, parent_rows):
+    """Binary rows of the complete seed union, in canonical order."""
+    return [np.frombuffer(key, dtype=np.int8).astype(np.int64)
+            for key in _data_seed_keys(growth, sample, parent_rows)]
 
 
 @dataclass(frozen=True)
@@ -628,11 +636,13 @@ def data_birth_order(excess, observed_sites, samples, quantum):
     return order, groups, classes
 
 
-def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int, omissions=None):
+def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int, omissions=None,
+                         *, key_of=panel_key):
     """Union each excess/coverage class's distinct starts before its hard-cap decision.
 
     The attempt budget is checked between groups. A class crossing the hard cap is omitted whole;
     no sample, founder-row or seed enumeration order can select a privileged prefix.
+    ``key_of`` also accepts deferred starts: omitted classes need their identities only.
     """
     collected, seen = [], set()
     total = position = ranked = 0
@@ -642,7 +652,7 @@ def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int, om
         unique = {}
         while position < len(order) and groups[position] == group_id:
             for row in seeds_of(order[position]):
-                key = panel_key(row)
+                key = key_of(row)
                 if key not in seen:
                     unique.setdefault(key, row if not stopped else None)
             position += 1
@@ -702,26 +712,35 @@ def data_births(workspace, solution, growth: GrowthInputs, max_iterations, searc
     target = search.data_birth_children(parent_k)
     budget = search.data_birth_attempts(parent_k)
     hard_cap = budget * max(1, int(search.data_birth_tie_budget_factor))
-    seen = [{np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in parent.haplotypes}
-            for parent in parents]
+    parent_rows = [tuple(sorted(np.asarray(row, dtype=np.int8).tobytes()
+                                for row in parent.haplotypes)) for parent in parents]
+    parent_keys = [b"".join(rows) for rows in parent_rows]
+    seen = [set(rows) for rows in parent_rows]
+    width = solution.sites
 
     def seeds_of(pair):
         parent_index, sample = divmod(pair, len(growth.active))
         parent = parents[parent_index]
-        for seed in _data_seed_rows(growth, sample, parent.haplotypes):
-            row = np.ascontiguousarray(seed, dtype=np.int64)
-            key = row.astype(np.int8).tobytes()
+        for key in _data_seed_keys(growth, sample, parent.haplotypes):
             if key in seen[parent_index]:
                 continue
             seen[parent_index].add(key)
-            yield np.vstack([parent.haplotypes, row[None, :]])
+            # Inserting one binary row into sorted parent rows gives exactly panel_key
+            # without building/sorting a full int64 panel for every omitted proposal.
+            offset = bisect_left(parent_rows[parent_index], key) * width
+            base = parent_keys[parent_index]
+            yield base[:offset] + key + base[offset:], parent_index, key
 
     omissions = []
-    collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap, omissions)
+    collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap, omissions,
+                                         key_of=itemgetter(0))
     children = []
     child_keys: set[bytes] = set()
     fitted = []
-    for number, group in enumerate(collected):
+    for descriptors in collected:
+        group = [np.vstack((parents[parent_index].haplotypes,
+                            np.frombuffer(key, dtype=np.int8).astype(np.int64)[None, :]))
+                 for _, parent_index, key in descriptors]
         for family in fit_families(workspace, group, max_iterations):
             for fit in family:
                 child = canonical_solution(fit, workspace)

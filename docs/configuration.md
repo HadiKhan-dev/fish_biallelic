@@ -519,6 +519,7 @@ Stage `local_selection`, `local_selection/config.py`. All local-selection settin
 | --- | --- | --- |
 | **model** (PathModelConfig) |  | The copying model of a block. |
 | `model.unknown_mass` | `0.01` | fixed prior mass of the unknown state (base ``background_mass``; also the background-state mass of the context refit's bin-level HMM). |
+| `model.redraw_rate_per_morgan` | `3.0` | founder-copy redraw intensity per Morgan for both the block path HMM and the context-refit HMM. The redraw probability is r = 1 - exp(-redraw_rate_per_morgan x Morgans), using the contig's genetic map. A redraw can choose the same state; this is not the observed founder-switch rate or a sample's generation label. Independent of assembly's gap horizon. |
 | **search** (PathSearchConfig) |  | Drop / merge / add search with GEM refits (search.py, fit.py). |
 | `search.refits_per_kind` | `8` | top proposals per kind (drop, merge, add) refitted each round. round_backstop_base/_per_founder: reported round backstop, K of the current panel. update_backstop_base/_per_founder/_per_site: reported backstop of fixed-K GEM updates, base + per_founder K + per_site L. |
 | `search.refits_per_kind_cap` | `16` | release 2.2: the proposal cut takes whole tie classes of the screened score (at decision_tolerance) until at least refits_per_kind; a class that would take the refits of a kind past this cap is left out whole (counted as an overflow; no member of a tie class is preferred to another). |
@@ -557,8 +558,8 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `batch_size` | `10` | input components per joined batch at every level (base L1 and L2-L4 both 10). |
 | `minimum_levels` | `4` | hierarchy levels that run (while they reduce the component count) before the loop may stop because only phase breaks separate the remaining components; base ran exactly four levels, so at today's sizes (<= 10^4 blocks per break-free segment) the level schedule is base's. Beyond it a level runs only while a boundary that is not a phase break remains (base stopped at level 4 regardless: B4). |
 | `min_boundary_informative_samples` | `4` | a boundary between adjacent components becomes a phase break (never joined) when fewer samples are informative on both sides. |
-| `n_generations` | `3` | generations of recombination since the founders; sets the beam's maximum transition gap at levels >= 2 (level 1 uses every gap). Local selection's path model reads it too. |
-| `recombination_tolerance` | `0.5` | expected recombinations per transition step that the beam's maximum gap allows. |
+| `gap_horizon_scale` | `3` | inverse-Morgan scale of the linker and beam's maximum transition gap at levels >= 2: max(1, 1 + floor(recombination_tolerance / (mean component span in Morgans x gap_horizon_scale))). Level 1 uses every gap. This search-horizon control is independent of local selection's copying intensity. |
+| `recombination_tolerance` | `0.5` | dimensionless span budget in the maximum-gap rule; divided by the mean component span in Morgans times gap_horizon_scale. |
 | `cost_scale` | `0.5` | scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B (count_rule.founder_cost) of the join and founder refinement. |
 | **linker** (LinkerConfig) |  | The distance-aware sum-product linker that fits dense haploid transitions between blocks. |
 | `linker.max_sites` | `2000` | linking proxies keep at most this many sites per input component (a stride over its usable sites); emissions marginalise unknown alleles at partial sites. |

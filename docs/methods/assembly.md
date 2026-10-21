@@ -241,8 +241,8 @@ samples.
   at most one homologue switches founder: with theta the interval's genetic distance (Morgans;
   max(1 bp, distance) times the fallback rate without a map), capped at 0.5, the stay and
   per-founder switch weights (1 - theta)^2 and theta (1 - theta)/(K - 1) are normalised to row
-  mass 1. Theta is the distance of one meiosis; it is not multiplied by `AssemblyConfig.n_generations = 3`,
-  which only the beam's gap and local selection's path model read. A two-state quality indicator
+  mass 1. Theta is the distance of one meiosis; it is not multiplied by `AssemblyConfig.gap_horizon_scale = 3`,
+  which controls only the linker and beam's inter-component gap horizon. A two-state quality indicator
   follows a continuous-distance Markov process with stationary error fraction
   `AssemblyConfig.linker.error_fraction = 0.01` and mean error tract
   `AssemblyConfig.linker.error_tract_bp = 20000.0` bp: in the normal state the pair emits through
@@ -291,10 +291,22 @@ descending score with ties broken by the lexicographic path; scores accumulate i
 past-block order. The panel search's tie rules downstream depend on this order.
 
 At level 1 every gap enters a step. At later levels the maximum gap is
-max(1, 1 + floor(t / r)), where r is the expected number of recombinations per step (the mean
-genetic length of the batch's components times n_generations) and
-`AssemblyConfig.recombination_tolerance = 0.5` is t; a batch whose components carry no
-recombination uses every gap.
+max(1, 1 + floor(t / s)), where s is the mean genetic span of the batch's components in
+Morgans times `AssemblyConfig.gap_horizon_scale = 3`, and
+`AssemblyConfig.recombination_tolerance = 0.5` is the dimensionless budget t. The scale has
+units of inverse Morgans and controls the proposal horizon: increasing it shortens the gaps
+considered by both linker fitting and the beam. A zero scaled span uses every gap; if no
+component spans two sites, the maximum gap is 1. This is a search rule, not a sample's meiotic
+depth or a transition likelihood. It is independent of local selection's
+`LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0`. Neither setting is derived from
+generation labels or estimated from painting switches.
+
+Both parameters are internal constants, not public TOML settings. The retained defaults are
+copying intensity 3.0 and gap scale 3. A bounded chr19 study on std, F3 and TroMau finds no
+principled gain from gap scales 1 or 6: both retain std accuracy and TroMau G0 pseudo-truth
+consistency, while scale 1 trades better F3 genotype recovery for worse founder recovery.
+These are painting-stage comparisons, not final-export accuracy gates or proof of an optimal scale.
+Changing the gap scale bounds proposal search; it does not change the copying transition model.
 
 ## Join objective
 
@@ -383,6 +395,20 @@ paths the beam never proposes, three-way boundary cycles and multi-founder birth
 (tier 1 still proposes cycles, and duplicate seeds split chimeras). A founder that is a pure block
 mosaic of other founders within one batch is not carried by that batch; later levels and founder
 refinement can re-split it.
+
+## Context-assembly convention follow-up
+
+In a TroMau chr7 propagation check, the global tie-reversal hook changes the L2 context assembly's
+`release_alternatives` record from zero families to one unresolved two-panel family. All incoming
+L1 local panels agree in their compared scientific values, with zero measured continuous drift;
+reversing only the local inner winner does not create this family. This is an assembly convention
+effect, separate from the [local-selection convention checks](local_selection.md#observed-effects-of-the-start-cap-and-inner-winner-order).
+
+Nominal components and released local calls remain unchanged. The context-refit consumer uses
+the representative components and prepared panels, not this alternatives sidecar. Final founder
+release does consume ambiguity metadata, so the context result does not establish that the same
+effect would be harmless in final assembly. The finding remains an assembly-stage follow-up;
+no assembly remedy or downstream accuracy result follows from this check.
 
 ## Live alternatives and founder release (2.3)
 

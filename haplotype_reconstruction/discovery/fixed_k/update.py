@@ -333,8 +333,8 @@ def _fractional_sum_error(count, cost_bound):
 
 
 @njit(cache=True, inline="always")
-def _fractional_allele(nll0, nll1, current, tie, terms0, terms1, partials, error):
-    """Use ordinary sums only when their interval certifies the H-step decision."""
+def _fractional_guard(nll0, nll1, current, tie, error):
+    """Certified allele, or -1 when the accurate-sum reference is required."""
     difference = nll0 - nll1
     if np.isfinite(error) and np.isfinite(difference):
         if abs(difference) + error < tie:
@@ -343,6 +343,15 @@ def _fractional_allele(nll0, nll1, current, tie, terms0, terms1, partials, error
             return 1
         if difference + error < -tie:
             return 0
+    return -1
+
+
+@njit(cache=True, inline="always")
+def _fractional_allele(nll0, nll1, current, tie, terms0, terms1, partials, error):
+    """Use ordinary sums only when their interval certifies the H-step decision."""
+    value = _fractional_guard(nll0, nll1, current, tie, error)
+    if value >= 0:
+        return value
     nll0 = _accurate_sum(terms0, partials)
     nll1 = _accurate_sum(terms1, partials)
     if abs(nll0 - nll1) >= tie:
@@ -438,9 +447,12 @@ def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous,
         error = _fractional_sum_error(stop - start, cost_bound)
         for site in range(length):
             current = haplotypes[founder, site]
-            value = _fractional_allele(nll0[site], nll1[site], current, tie,
-                                       terms0[:stop - start, site], terms1[:stop - start, site],
-                                       partials, error)
+            value = _fractional_guard(nll0[site], nll1[site], current, tie, error)
+            if value < 0:
+                # Construct strided column views only at an uncertified boundary.
+                value = _fractional_allele(nll0[site], nll1[site], current, tie,
+                                           terms0[:stop - start, site], terms1[:stop - start, site],
+                                           partials, np.inf)
             haplotypes[founder, site] = value
             changes += value != current
     return changes

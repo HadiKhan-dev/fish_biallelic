@@ -275,12 +275,13 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
     return [(tuple(int(row) for row in result_paths[i]), float(result_scores[i])) for i in ranked.tolist()]
 
 
-def max_gap(blocks: Sequence[ComponentPanel], genetic_map, n_generations, tolerance) -> int:
+def max_gap(blocks: Sequence[ComponentPanel], genetic_map, gap_horizon_scale, tolerance) -> int:
     """The beam's (and linker's) maximum transition gap of a batch at levels >= 2 (base compute_max_gap).
 
-    recombinations per step = mean block span x n_generations (in Morgans: the map's interval distance when
-    the contig has a map, else span bp x fallback rate); gap = max(1, 1 + floor(tolerance / recombinations per
-    step)); n blocks when a step carries no recombination; 1 when no block spans two sites.
+    scaled span = mean component span in Morgans x gap_horizon_scale (the map's interval
+    distance when available, else span bp x fallback rate). The search horizon is
+    max(1, 1 + floor(tolerance / scaled span)); all blocks when the scaled span is zero,
+    1 when no component spans two sites. This is a proposal limit, not a copying rate.
     """
     spans = [block.positions[-1] - block.positions[0] for block in blocks if len(block.positions) > 1]
     if not spans:
@@ -288,9 +289,9 @@ def max_gap(blocks: Sequence[ComponentPanel], genetic_map, n_generations, tolera
     if genetic_map.has_map:
         morgans = [float(genetic_map.interval_morgans(block.positions[0], block.positions[-1]))
                    for block in blocks if len(block.positions) > 1]
-        recombinations_per_step = np.mean(morgans) * n_generations
+        scaled_span = np.mean(morgans) * gap_horizon_scale
     else:
-        recombinations_per_step = np.mean(spans) * genetic_map.fallback_rate_per_bp * n_generations
-    if recombinations_per_step <= 0:
+        scaled_span = np.mean(spans) * genetic_map.fallback_rate_per_bp * gap_horizon_scale
+    if scaled_span <= 0:
         return len(blocks)
-    return max(1, 1 + int(math.floor(tolerance / recombinations_per_step)))
+    return max(1, 1 + int(math.floor(tolerance / scaled_span)))

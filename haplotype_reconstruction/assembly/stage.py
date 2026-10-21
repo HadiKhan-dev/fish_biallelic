@@ -254,7 +254,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
         else:
             settings = JoinSettings(
                 linker=config.linker, join=config.join, count_rule=config.count_rule,
-                cost_scale=config.cost_scale, n_generations=config.n_generations,
+                cost_scale=config.cost_scale, gap_horizon_scale=config.gap_horizon_scale,
                 recombination_tolerance=config.recombination_tolerance, level_one=level == 1,
                 genetic_map=inputs.genetic_map)
             result = run_level(working, prepared, evidence, settings, batch_size=config.batch_size,

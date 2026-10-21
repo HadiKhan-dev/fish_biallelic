@@ -13,7 +13,7 @@ operations, not pedigree or family-phase feedback.
 
 | | |
 | --- | --- |
-| input | the contig's `evidence` record in the founder view (samples flagged by the contamination QC are unobserved; see [evidence](evidence.md)), restricted to discovery sites; the discovery records (the latent panel of every informative block); the contig's genetic map; the assembly configuration (context assemblies and the copying-hazard multiplier) |
+| input | the contig's `evidence` record in the founder view (samples flagged by the contamination QC are unobserved; see [evidence](evidence.md)), restricted to discovery sites; the discovery records (the latent panel of every informative block); the contig's genetic map; the local-selection configuration (including the copying redraw intensity); the assembly configuration (context assemblies) |
 | product | one `LocalPanel` (`model/local_panels.py`) per informative block and round, in block order: positions, discovery sites, released calls `int8[K, L]`, ALT probabilities, favourable carrier support, and the per-sample unknown-copy summary that assembly's completion reads |
 | records | `local_selection/<round>/...` for the rounds `initial`, `l1`, `l2`; `identity/local_selection/<round>` |
 
@@ -46,8 +46,21 @@ site each homologue's state is drawn from pi; between adjacent discovery sites e
 redraws its state from pi with probability r = 1 - exp(-g dM), so the per-homologue transition is
 T = (1 - r) I + r 1 pi^T, where dM is the genetic distance in Morgans between the two sites (from
 the contig's genetic map, or the fallback rate without one) and
-g = `AssemblyConfig.n_generations = 3` is the copying-hazard multiplier.
-<!-- owner question (blueprint 8): AssemblyConfig.n_generations is shared by the path model and assembly's linker -->
+g = `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` is the redraw intensity per Morgan.
+The same intensity controls the block path HMM and the context-refit HMM. A redraw can select the
+current state again, so g is not the observed founder-switch density: at stationary state
+frequencies pi, the expected state-change intensity is g times (1 - sum_i pi_i^2). It is not
+a generation label and is not fitted from painting counts. Assembly's independent
+`AssemblyConfig.gap_horizon_scale = 3` limits linker and beam proposals; it does not set these
+copying transitions. Both settings are internal constants, with independent roles, and neither
+is a public TOML setting.
+
+A bounded chr19 sensitivity study on std, F3 and TroMau retains copying intensity 3.0 and assembly
+gap scale 3. Copying intensities 1 and 6 both worsen TroMau consistency against the G0 pseudo-truth;
+F3 gains in genotype recovery at intensity 1 trade against worse founder recovery. The tested
+assembly scales 1 and 6 offer no consistent gain. These painting-stage comparisons support keeping
+the defaults, not treating 3 as optimal or interpreting pseudo-truth as known biological truth.
+
 At an observed site, a pair of copy states emits the sample's normalised genotype likelihood of its
 dosage: GL[H_a + H_b] for two founders, (GL[H_a] + GL[H_a + 1]) / 2 for a founder and an unknown
 copy, and GL[0]/4 + GL[1]/2 + GL[2]/4 for two unknown copies. Unobserved cells emit 1.
@@ -262,9 +275,10 @@ component's founder order. Per sample, a bin-level diploid HMM has one bin per c
 states the ordered pairs of the component's K founders and a background state, whose alleles are
 Bernoulli(site background frequency) per copy, the background frequency at a site being
 (1 + called ALT) / (2 + called founders). Transitions redraw toward pi = ((1 - u)/K, ..., u) at
-rate 1 - exp(-g D) over the distance D between block centres (Morgans with a genetic map file,
-else bp times the fallback rate), with u the unknown mass above and g the copying-hazard
-multiplier. A pair's bin emission sums, over the bin's observed discovery sites at which some
+probability 1 - exp(-g D) over the distance D between block centres (Morgans with a genetic map file,
+else bp times the fallback rate), with u the unknown mass above and
+g = `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0`, the same redraw intensity used
+by the block path HMM. A pair's bin emission sums, over the bin's observed discovery sites at which some
 founder is called, the logarithm of a robust genotype likelihood (1 - m) GL(pair) + m/3, with
 m = `LocalSelectionConfig.context_refit.emission_mix = 0.01`.
 The *cavity* weights of block b, its pair posterior from a forward-backward pass that excludes
@@ -373,6 +387,31 @@ start, not alternatives. Refits that reach the winning panel from different prop
 only by EM residuals; the refit of the proposal with the smallest (kind, proposal panel) label represents it.
 Canonical row orders and these labels are not conventions.
 
+### Observed effects of the start cap and inner winner order
+
+A census of 318,048 block-rounds across eleven datasets finds nine start-cap events in six
+block-rounds, all on TroMau or K30. The cap is the 512 + 64K novel starts per bank call stated above.
+There are 73 same-K distinct-winner ties among 311,074 inner winner decisions; six advance the
+search and 67 are terminal. Both conventions therefore bind internally.
+
+Replaying 223 flagged block-rounds with the global convention reversal and with reversal isolated
+to the inner winner's content key changes no released local calls, K, missingness, favourable
+support, unknown-copy summaries or local alternative/incumbent decisions. Native propagation
+checks on K30 m1 (40 blocks) and TroMau chr7 (834 blocks) retain these results through all three
+rounds. The start-cap check uses the global hook, not an isolated start-cap-only intervention.
+
+K30 retains one changed latent allele that is uncalled in both releases, with maximum ALT-probability
+drift 6.7e-6. TroMau's initial drift disappears after the first context round. These are measured
+search-trajectory effects, not a claim that all numerical fields are identical. The evidence
+does not justify a remedy for these two conventions and does not establish invariance on untested data.
+
+The global hook also reverses assembly conventions. It changes one TroMau L2 context-assembly
+`release_alternatives` record and some K30 context-proposal probabilities; neither effect occurs
+under winner-only reversal, and neither changes the released local calls or decisions in these
+checks. The [assembly follow-up](assembly.md#context-assembly-convention-follow-up) is separate
+from the two local-selection conventions. Final assembly, painting, pedigree, phase and exported
+outputs are outside the propagation check.
+
 ## Records
 
 | key (under `local_selection/<round>/`) | content |
@@ -384,7 +423,7 @@ Canonical row orders and these labels are not conventions.
 | `assembly/...` | rounds `l1` and `l2`: the context assembly's own records (joined batches are shared by all assemblies of a contig) |
 
 The identity of the `initial` round binds the local-selection and discovery configurations, the
-copying multiplier, the genetic map and the evidence and discovery record identities, with the
+copying redraw intensity, the genetic map and the evidence and discovery record identities, with the
 code of local selection and discovery only, so assembly changes leave the initial fits valid. The
 context rounds add the assembly configuration and the previous round's identity. Readers:
 `local_selection.records.load_panels` (the final assembly reads round `l2`), `load_selections`,
@@ -404,9 +443,13 @@ for evaluation).
 
 Blocks are independent within a round. A round runs one task per block in a process pool over
 shared evidence arrays (or as cross-node batches of consecutive blocks), and the context refit runs
-one task per component. The lane kernels process samples in blocks of 64 side by side; every total
-over samples adds the samples in ascending order, so results do not depend on thread counts or
-lane widths, and a memoised entry equals its recomputation.
+one task per component. The path kernels process samples in lanes of up to 64 side by side. For
+blocks with more than 64 samples, lanes narrow to 32 or 16 when all resulting lane blocks fit the
+held thread budget. Each kernel caps its active threads at the useful lane count and restores the
+caller's thread mask afterwards, retaining the CPU claim throughout. Uncached evaluations refresh
+the layout when the budget changes. Sample results are combined in the existing order; released
+scientific outputs and decisions are unchanged, with continuous drift reported in the
+[performance checks](../performance.md#local-selection-measurements-for-26).
 
 Cost in the founder count K, samples N and discovery sites L of one block (S = K + 1 copy states):
 
@@ -433,11 +476,12 @@ Cost in the founder count K, samples N and discovery sites L of one block (S = K
 The numbers of search rounds, GEM updates and bank rounds are set by convergence; their reported
 backstops grow linearly in K (and in L for GEM updates), so the worst case the backstops allow is
 O(N L K^3 (K + L)) per block for the search. Memory per block search is dominated by the trajectory
-scratch, 64 L (S(S + 1)/2 + S) float64 values per thread (one lane block each), shared by the block's
-sequential fits; a context refit holds one (N, B, S, S) array per component.
+scratch, at most 64 L (S(S + 1)/2 + S) float64 values per active thread (one lane block each), shared
+by the block's sequential fits. The memory estimate retains width 64; layout transitions can briefly
+retain old arrays. A context refit holds one (N, B, S, S) array per component.
 
 The path kernels evaluate the likelihood and its statistics in one pass per lane block of
-`local_selection.path_model.LANE_WIDTH = 64` samples (forward, then backward at once), so a fit keeps the
+up to `local_selection.path_model.LANE_WIDTH = 64` samples (forward, then backward at once), so a fit keeps the
 trajectories of one lane block per thread, not of every sample, in one scratch buffer per block search
 (`workspace_bytes`); the release E-step accumulates carrier counts inside the kernel in batches of
 `local_selection.path_model.RELEASE_SAMPLE_BATCH = 128` samples. Rows are deduplicated with a lexsort, never by
@@ -472,7 +516,7 @@ On the package's K-ladder simulation (N = 320, every block with K distinct found
   lost when no candidate or move recovers them.
 - Released alleles carry conditional one-bit support plus directional carrier evidence, not full
   allele posteriors. Unsupported alleles stay -1.
-- The copying hazard uses the genetic map and one multiplier g for all blocks; a wrong map or g
+- The copying model uses the genetic map and one redraw intensity g for all samples and blocks; a wrong map or g
   changes how readily samples switch founders within a block.
 - The unknown state absorbs copies no founder explains; a high `unknown_mass` flags a block whose
   panel misses haplotypes or whose reads are poor.

@@ -14,7 +14,7 @@ Genetic distances d (Morgans) become the probabilities the models use through:
 
 Family phase computes the Haldane fraction of its marker intervals with NumPy's vectorised expm1 (solver.py), which
 differs from the scalar expm1 of these kernels in the last bit, and local selection's copying path model uses
-1 - e^{-generations x d} in NumPy (path_model.py).
+1 - e^{-redraw_rate x d} in NumPy (path_model.py).
 """
 from __future__ import annotations
 

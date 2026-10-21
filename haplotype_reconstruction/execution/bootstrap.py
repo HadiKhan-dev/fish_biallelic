@@ -222,6 +222,7 @@ def start_run(cores: int, *, preload: tuple[str, ...] = (), profile: bool = Fals
     start_governor(memory_limit)
     import numba as numba_module
     numba_module.set_num_threads(min(cores, numba_module.config.NUMBA_NUM_THREADS))
+    _check_cached_kernel_signatures()
     return _RUN
 
 
@@ -238,6 +239,32 @@ def apply_worker_settings(settings: tuple[RunSettings | None, str | None]) -> No
     _RUN, memory_handle = settings
     from .memory import attach_governor
     attach_governor(memory_handle)
+    _check_cached_kernel_signatures()
+
+
+def _check_cached_kernel_signatures() -> None:
+    """Use a cached Numba kernel only when it was compiled for the requested argument types.
+
+    Numba trusts its cache index. Processes that save different overloads of one function at the same time (the
+    kernel warm-up's parallel tasks also compile their callees; pool workers compile on first use) can leave an
+    index entry naming another overload's data file, and loading it returns that other kernel, so the calling
+    kernel fails to type. A cold-cache K30 simulation failed this way on 21 Oct 2026. Such an entry is now a cache
+    miss: the kernel is compiled again.
+    """
+    from numba.core import caching, sigutils
+    load = caching.Cache._load_overload
+    if getattr(load, "checks_signature", False):
+        return
+
+    def load_checked(self, sig, target_context):
+        data = load(self, sig, target_context)
+        signature = getattr(data, "signature", None)
+        if signature is not None and tuple(signature.args) != tuple(sigutils.normalize_signature(sig)[0]):
+            return None
+        return data
+
+    load_checked.checks_signature = True
+    caching.Cache._load_overload = load_checked
 
 
 def profiling() -> bool:

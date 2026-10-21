@@ -385,7 +385,7 @@ _TOTALS = ("cube_sites", "core_cube_sites", "core_ball_sites", "bp_nonconverged"
            "multimodal_abstained", "guard_withheld")
 
 
-def refine(panels, components, evidence, genetic_map, config, generations, budget, census_key=None):
+def refine(panels, components, evidence, genetic_map, config, redraw_rate, budget, census_key=None):
     """Context proposals of every panel (one per LocalPanel, same order) and a summary.
 
     panels: the current round's LocalPanels; components: the context assembly's materialised
@@ -422,9 +422,9 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
         if genetic_map.has_map:
             # Rate per Morgan; the map is integrated between block centres (with its tails).
             centers = genetic_map.cumulative_morgans(centers)
-            rate = float(generations)
+            rate = float(redraw_rate)
         else:
-            rate = genetic_map.fallback_rate_per_bp * generations
+            rate = genetic_map.fallback_rate_per_bp * redraw_rate
         columns = np.searchsorted(evidence.positions, positions)
         specs[index] = (members, starts, stops, template)
         tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass, census_key))

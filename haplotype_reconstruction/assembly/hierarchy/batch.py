@@ -29,14 +29,14 @@ class JoinSettings:
     """Everything a join reads besides its inputs (same for every batch of an assembly level).
 
     level_one: level 1 joins use every transition gap; later levels limit the beam's gap by
-    ``n_generations`` and ``recombination_tolerance``.
+    ``gap_horizon_scale`` and ``recombination_tolerance``.
     """
 
     linker: LinkerConfig
     join: JoinConfig
     count_rule: CountRuleConfig
     cost_scale: float
-    n_generations: int
+    gap_horizon_scale: int
     recombination_tolerance: float
     level_one: bool
     genetic_map: object
@@ -136,7 +136,7 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
     # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
     label = batch_digest(task, context="", evidence_identity="")[:16]
     gap = None if settings.level_one else join_beam.max_gap(
-        inputs.blocks, settings.genetic_map, settings.n_generations,
+        inputs.blocks, settings.genetic_map, settings.gap_horizon_scale,
         settings.recombination_tolerance)
     transitions = linker_em.fit_transitions(inputs, settings.genetic_map, max_gap=gap,
                                             config=settings.linker, budget=budget, label=label)

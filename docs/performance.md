@@ -1,5 +1,60 @@
 # Performance and resource use
 
+## Discovery measurements for 2.6
+
+Discovery keeps canonical birth-proposal keys and descriptors until fitting needs panel arrays,
+and runs the fractional-founder scalar certificate before building term-column views. These exact
+changes preserve the search budgets, objective, fit counts and released decisions.
+
+Each row below is one single-contig pair against 2.5, run sequentially on the same 76-core Ice Lake
+node with all 76 cores and symmetric kernel warm-up. Native discovery wall time measures the block
+pool; inclusive stage wall time also includes preparation and startup. These are single matched
+pairs, not repeated estimates or whole-pipeline speedups.
+
+| Workload | Blocks | Discovery wall, 2.5 to 2.6 | Change | Inclusive stage wall, 2.5 to 2.6 |
+| --- | ---: | ---: | ---: | ---: |
+| N=80 | 1,282 | 33.3 to 30.1 s | -9.6% | 36.13 to 32.66 s |
+| N=320 | 580 | 54.4 to 47.0 s | -13.6% | 58.62 to 51.24 s |
+| TroMau | 834 | 32.7 to 30.6 s | -6.4% | 47.04 to 43.97 s |
+
+All 2,696 block records agree in non-timing fields, including fit counts, omission scopes and
+nonfinite classifications, with zero measured continuous drift. A separate three-chromosome std
+check preserves 4,080 discovery block records and downstream scientific summary fields, also with
+zero measured continuous drift. That check has fewer than the five contigs required for Tier-B
+pedigree inference and does not establish parent-linked phase coverage. Scientific outputs and
+decisions, rather than byte equality, define identity.
+
+Stage CPU time falls from 2,362.1 to 2,114.3 s at N=80, 3,888.0 to 3,304.7 s at N=320, and
+2,317.8 to 2,171.3 s on TroMau. Summed discovery process RSS is 22.03 to 22.02, 27.81 to 27.79,
+and 27.59 to 27.23 GiB respectively; shared pages can be counted repeatedly. Both TroMau arms
+logged a cache-manifest publication warning after successful computation and cache-file publication;
+the warning did not affect completion, the scientific comparison or the measured block pool.
+
+## Local-selection measurements for 2.6
+
+Copying kernels use 64-sample lanes, narrowed to 32 or 16 for blocks with more than 64 samples
+when all resulting lanes fit the held thread budget. Each kernel temporarily caps its threads at
+the useful lane count, then restores the caller's mask without releasing its CPU claim. Normalization
+reuses reciprocals and combines triangular normalization with marginal accumulation. Model and search
+cost orders are unchanged; the trajectory memory estimate retains the conservative 64-sample width.
+
+One matched pair per workload ran sequentially on the same 76-core Ice Lake node, with symmetric
+kernel warm-up. These local-stage timers exclude final assembly and painting:
+
+| Workload | Local-stage wall, reference to optimized | Change |
+| --- | ---: | ---: |
+| K30 m1 | 373.3 to 237.1 s | -36.5% |
+| TroMau chr7 | 200.8 to 179.8 s | -10.5% |
+| std chr1 | 120.2 to 114.3 s | -4.9% |
+| N320 chr8 | 97.5 to 99.7 s | +2.2% |
+
+The reference includes the discovery speed changes and parameter split. N320's selection rounds
+are flat; its small stage increase is in unchanged context assembly and is within timing noise.
+Std's smaller gain is provisional. K30 uses about 7% more CPU for the shorter wall time. These
+single pairs do not establish whole-pipeline gains. Scientific gates pass for all four contigs
+and full std through truth evaluation and semantic exports; maximum local log-likelihood drift
+is 2e-10, with zero measured final-product, evaluation and export drift.
+
 ## Historical 2.3 integration measurements
 
 The release benchmark uses 112 allocated cores on an AMD EPYC 7763 node. Report

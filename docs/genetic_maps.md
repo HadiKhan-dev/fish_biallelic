@@ -64,13 +64,14 @@ linearly through their whole gap. Each model turns distances d (Morgans) into pr
 | form | used by |
 | --- | --- |
 | Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), family phase and phase polishing, the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
-| the probability of at least one event of a Poisson process, 1 - e^(-d) | pedigree's selector switches (`poisson_switch_stay_terms`, which also returns the log switch and stay costs) and local selection's copying path model, with d multiplied by the number of generations |
+| the probability of at least one event of a Poisson process, 1 - e^(-d) | pedigree's selector switches (`poisson_switch_stay_terms`, which also returns the log switch and stay costs) and local selection's copying path model, with d multiplied by `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` |
 
 Family phase evaluates the Haldane fraction of its marker intervals with NumPy's vectorised `expm1`, which can
 differ from the compiled kernels' scalar `expm1` in the last bit.
 
-Assembly's linker and endpoint beam use genetic distances between blocks the same way (the beam's maximum
-transition gap comes from the map and the number of generations). The map's knots and fallback rate are part of the
+Assembly's linker uses genetic distances for its within-block transitions. The linker and endpoint beam's
+maximum inter-component gap instead uses mean map span and the independent search-horizon scale
+`AssemblyConfig.gap_horizon_scale = 3`. The map's knots and fallback rate are part of the
 identities of every stage that uses them, so a changed map gives new results in a new output root rather than
 reusing old ones.
 

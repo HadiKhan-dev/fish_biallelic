@@ -72,8 +72,8 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
     """Select the local panels of one contig (resuming completed rounds from their records).
 
     store: the run's checkpoint store; contig: name; config: LocalSelectionConfig;
-    assembly_config: passed to the context assemblies (its n_generations is the path model's
-    copying-hazard multiplier); genetic_map: the contig's ChromosomeGeneticMap (a constant-rate
+    assembly_config: passed to the context assemblies; the block and context-refit HMMs use
+    config.model.redraw_rate_per_morgan. genetic_map: the contig's ChromosomeGeneticMap (a constant-rate
     map when no map file is configured); budget: the contig lane's CPU budget; discovery_config:
     the DiscoveryConfig of the discovery records (the candidate bank refits with the same fixed-K
     model and cavity score); queue: the cross-node batch queue directory or None;
@@ -88,13 +88,13 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
     file = store.contig(contig)
     evidence_identity = file.info(evidence_records.EVIDENCE).identity
     discovery_identity = file.info(f"identity/{discovery_records.STAGE}").identity
-    generations = float(assembly_config.n_generations)
-    settings = (config, discovery_config, generations)
+    redraw_rate = float(config.model.redraw_rate_per_morgan)
+    settings = (config, discovery_config, redraw_rate)
     upstream = dict(evidence=evidence_identity, discovery=discovery_identity)
     scopes = []
     for round_index, round_name in enumerate(ROUNDS):
         scope = records.round_scope(file, round_name)
-        scope.bind(records.round_identity(round_name, config, discovery_config, generations,
+        scope.bind(records.round_identity(round_name, config, discovery_config, redraw_rate,
                                           genetic_map, upstream,
                                           assembly_config if round_index else None))
         upstream = dict(upstream, previous_round=file.info(
@@ -136,7 +136,7 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                                   budget=budget, queue=queue)
                 components = materialise(result.components, result.prepared)
                 proposals, summary = refine(
-                    panels, components, evidence, genetic_map, config, generations,
+                    panels, components, evidence, genetic_map, config, redraw_rate,
                     budget.phase(f"feedback_l{level}_refine"), census_key=f"{contig}/{round_name}/refit")
                 scope.save("proposals", records.encode_proposals(proposals, summary))
                 del result, components

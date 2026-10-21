@@ -11,7 +11,7 @@ Per round R in ROUNDS, under ``local_selection/R/`` (a RecordScope bound to the 
 ``assembly/...``    rounds "l1", "l2": the context assembly's records (assembly's API)
 
 Identities (``identity/local_selection/R``): the initial round binds the local-selection and
-discovery configs, the copying generations, the genetic map and the evidence and discovery
+discovery configs, the copying redraw intensity, the genetic map and the evidence and discovery
 record identities, with the code of local_selection + discovery only (assembly changes leave
 the initial fits valid, as base); the context rounds add the assembly config and the previous
 round's identity record, with the assembly code too.
@@ -44,11 +44,11 @@ def context_assembly_prefix(round_name: str) -> str:
     return f"{round_prefix(round_name)}/assembly"
 
 
-def round_identity(round_name, config, discovery_config, generations, genetic_map, upstream,
+def round_identity(round_name, config, discovery_config, redraw_rate, genetic_map, upstream,
                    assembly_config=None) -> dict:
     """The identity of one round (see the module docstring)."""
     settings = dict(round=round_name, local_selection=config, discovery=discovery_config,
-                    copying_generations=float(generations), genetic_map=genetic_map.identity())
+                    redraw_rate_per_morgan=float(redraw_rate), genetic_map=genetic_map.identity())
     if round_name == ROUNDS[0]:
         return stage_identity(STAGE, schema=SCHEMA, config=settings, upstream=upstream,
                               packages=("local_selection", "discovery"))

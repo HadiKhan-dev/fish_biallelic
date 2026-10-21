@@ -74,11 +74,12 @@ class AssemblyConfig:
         phase break remains (base stopped at level 4 regardless: B4).
     min_boundary_informative_samples: a boundary between adjacent components becomes a phase
         break (never joined) when fewer samples are informative on both sides.
-    n_generations: generations of recombination since the founders; sets the beam's maximum
-        transition gap at levels >= 2 (level 1 uses every gap). Local selection's path model reads
-        it too.
-    recombination_tolerance: expected recombinations per transition step that the beam's maximum
-        gap allows.
+    gap_horizon_scale: inverse-Morgan scale of the linker and beam's maximum transition
+        gap at levels >= 2: max(1, 1 + floor(recombination_tolerance /
+        (mean component span in Morgans x gap_horizon_scale))). Level 1 uses every gap.
+        This search-horizon control is independent of local selection's copying intensity.
+    recombination_tolerance: dimensionless span budget in the maximum-gap rule; divided
+        by the mean component span in Morgans times gap_horizon_scale.
     cost_scale: scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B
         (count_rule.founder_cost) of the join and founder refinement.
     """
@@ -86,7 +87,7 @@ class AssemblyConfig:
     batch_size: int = 10
     minimum_levels: int = 4
     min_boundary_informative_samples: int = 4
-    n_generations: int = 3
+    gap_horizon_scale: int = 3
     recombination_tolerance: float = 0.5
     cost_scale: float = 0.5
     linker: LinkerConfig = field(default_factory=LinkerConfig)

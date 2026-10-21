@@ -148,10 +148,10 @@ def _consensus_panel(task, outcome, path_release, alternatives, prepared, releas
 
 def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelection:
     """Select one block's panel (``likelihoods``/``observed``: its discovery-site columns)."""
-    config, discovery_config, generations = settings
+    config, discovery_config, redraw_rate = settings
     started = time.monotonic()
     claim_threads()
-    prepared = PreparedBlock(likelihoods, observed, task.intervals, generations,
+    prepared = PreparedBlock(likelihoods, observed, task.intervals, redraw_rate,
                              config.model.unknown_mass)
     incumbent = task.incumbent
     ties = TieCounter()
