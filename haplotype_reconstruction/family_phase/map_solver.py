@@ -181,7 +181,7 @@ def _root_cavity(root, site, frame_value, exclude_group, genotype, selector, pot
     if exclude_group == -2:
         return
     if cavities is not None and cavities[0][root] >= 0:
-        cavity_counts.add_terms(cavities, root, site, exclude_group, genotype, selector, log_keep, log_error, out)
+        cavity_counts.add_terms(cavities, root, site, np.int64(exclude_group), genotype, selector, log_keep, log_error, out)
         return
     for index in range(child_offsets[root], child_offsets[root + 1]):
         group = child_groups[index]
@@ -232,7 +232,7 @@ def _slot_tables(group, site, genotype, selector, frame, potentials, orientation
                 for h in range(2):
                     table[slot, a, h] = LOG_HALF
         elif roots[parent]:
-            _root_cavity(parent, site, frame[parent, site], group if siblings else -2, genotype, selector, potentials,
+            _root_cavity(parent, site, frame[parent, site], np.int64(group if siblings else -2), genotype, selector, potentials,
                          orientation, group_child, child_offsets, child_groups, child_slots, log_keep, log_error,
                          log_match, log_miss, cavity, cavities)
             for a in range(2):
@@ -254,7 +254,7 @@ def _own_children_terms(sample, site, genotype, selector, group_child, child_off
                         log_keep, log_error, out, cavities=None):
     """out[g] += the copy terms of non-root ``sample``'s own children when it holds genotype g."""
     if cavities is not None and cavities[0][sample] >= 0:
-        cavity_counts.add_terms(cavities, sample, site, -1, genotype, selector, log_keep, log_error, out)
+        cavity_counts.add_terms(cavities, sample, site, np.int64(-1), genotype, selector, log_keep, log_error, out)
         return
     for index in range(child_offsets[sample], child_offsets[sample + 1]):
         group = child_groups[index]
@@ -429,11 +429,11 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
                 mirrored_prior[k] = prior[markers - 1 - k]
             for k in range(markers - 1):
                 mirrored_trans[k] = trans[markers - 2 - k]
-            flipped = _viterbi4(mirrored, mirrored_trans, right, right_theta, left, left_theta, mirrored_prior, True)
+            flipped = _viterbi4(mirrored, mirrored_trans, np.int64(right), right_theta, np.int64(left), left_theta, mirrored_prior, np.bool_(True))
             for k in range(markers):
                 path[k] = flipped[markers - 1 - k]
         else:
-            path = _viterbi4(emission, trans, left, left_theta, right, right_theta, prior, False)
+            path = _viterbi4(emission, trans, np.int64(left), left_theta, np.int64(right), right_theta, prior, np.bool_(False))
     if left >= 0:
         current = left
     elif markers > 0:
@@ -482,7 +482,7 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
     base = np.empty((sites, 4))
     table = np.empty((sites, 2, 2, 2))
     if parallel_terms:
-        _block_terms(group, 0, sites, potentials, genotype, selector, frame, orientation, roots, group_parent,
+        _block_terms(group, np.int64(0), sites, potentials, genotype, selector, frame, orientation, roots, group_parent,
                      group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                      log_miss, base, table, cavities)
     else:
@@ -505,8 +505,8 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
                         table[site, k, a, h] = slot_table[k, a, h]
     new_selector = np.empty(sites, dtype=np.int8)
     new_genotype = np.empty(sites, dtype=np.int8)
-    _block_path(group, child, 0, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse, parallel_terms)
+    _block_path(group, child, np.int64(0), base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
+                marker_offsets[group], marker_offsets[group + 1], np.int64(-1), np.int64(-1), new_selector, new_genotype, np.bool_(reverse), np.bool_(parallel_terms))
     # Maximal differing intervals, merged when no unchanged marker separates them; each on its own exact gain.
     accepted, total = 0, 0.0
     old_genotype = genotype[child].copy()
@@ -588,7 +588,7 @@ def _init_block(group, potentials, genotype, selector, frame, orientation, roots
                 for g in range(4):
                     cavity[g] = soft[soft_index[parent], site, g]
             if cavities is not None and cavities[0][parent] >= 0:
-                cavity_counts.add_terms(cavities, parent, site, -1, genotype, selector, log_keep, log_error, cavity)
+                cavity_counts.add_terms(cavities, parent, site, np.int64(-1), genotype, selector, log_keep, log_error, cavity)
             else:
                 for index in range(child_offsets[parent], child_offsets[parent + 1]):
                     other = child_groups[index]
@@ -608,8 +608,8 @@ def _init_block(group, potentials, genotype, selector, frame, orientation, roots
                     table[site, slot, a, h] = _lse4(v0, v1, v2, v3)
     new_selector = np.empty(sites, dtype=np.int8)
     new_genotype = np.empty(sites, dtype=np.int8)
-    _block_path(group, child, 0, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse)
+    _block_path(group, child, np.int64(0), base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
+                marker_offsets[group], marker_offsets[group + 1], np.int64(-1), np.int64(-1), new_selector, new_genotype, np.bool_(reverse), np.bool_(False))
     for site in range(sites):
         selector[group, site] = new_selector[site]
         genotype[child, site] = new_genotype[site]
@@ -684,7 +684,7 @@ def _frame_path(run_value, trans, anchor_run, left, left_theta, right, right_the
     """_viterbi2, or under the convention reversal its mirror (an unavoidable frame switch lands at the rightmost tied
     run boundary instead of the leftmost; keep-current applies at the chain's first run)."""
     if not reverse:
-        return _viterbi2(run_value, trans, anchor_run, left, left_theta, right, right_theta, last_now)
+        return _viterbi2(run_value, trans, np.int64(anchor_run), np.int64(left), left_theta, np.int64(right), right_theta, np.int8(last_now))
     m = run_value.shape[0]
     mirrored = np.empty((m, 2))
     mirrored_trans = np.empty(max(m - 1, 0))
@@ -693,8 +693,8 @@ def _frame_path(run_value, trans, anchor_run, left, left_theta, right, right_the
         mirrored[j, 1] = run_value[m - 1 - j, 1]
     for j in range(m - 1):
         mirrored_trans[j] = trans[m - 2 - j]
-    flipped = _viterbi2(mirrored, mirrored_trans, m - 1 - anchor_run if anchor_run >= 0 else -1, right, right_theta,
-                        left, left_theta, first_now)
+    flipped = _viterbi2(mirrored, mirrored_trans, np.int64(m - 1 - anchor_run if anchor_run >= 0 else -1), np.int64(right), right_theta,
+                        np.int64(left), left_theta, np.int8(first_now))
     path = np.empty(m, dtype=np.int8)
     for j in range(m):
         path[j] = flipped[m - 1 - j]
@@ -737,8 +737,8 @@ def _root_block(root, potentials, genotype, selector, frame, orientation, starts
     trans = np.empty(max(runs - 1, 0))
     for run in range(runs - 1):
         trans[run] = run_theta[run]
-    path = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[root, starts[0]],
-                       frame[root, starts[runs] - 1], reverse)
+    path = _frame_path(run_value, trans, np.int64(anchor_run), np.int64(-1), 0.0, np.int64(-1), 0.0, np.int8(frame[root, starts[0]]),
+                       np.int8(frame[root, starts[runs] - 1]), np.bool_(reverse))
     accepted, total = 0, 0.0
     run = 0
     while run < runs:
@@ -791,7 +791,7 @@ def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, f
             accepted[index], gains[index] = _root_block(
                 sample, potentials, genotype, selector, frame, orientation, starts, trans, anchors[sample], group_child,
                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, quantum,
-                decisions[index], decision_counts[index], reverse)
+                decisions[index], decision_counts[index], np.bool_(reverse), np.bool_(False))
         else:
             if cavities is not None:
                 old_g[index] = genotype[sample]
@@ -799,11 +799,11 @@ def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, f
             accepted[index], gains[index] = _child_block(
                 node_group[sample], potentials, genotype, selector, frame, orientation, roots, group_parent,
                 group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
-                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index], reverse, cavities)
+                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index], np.bool_(reverse), cavities, np.bool_(False))
     if cavities is not None:
         for index in range(count):
             if not is_root[index]:
-                cavity_counts.update_group(cavities, node_group[blocks[index]], 0, old_g[index], old_s[index], genotype, selector)
+                cavity_counts.update_group(cavities, node_group[blocks[index]], np.int64(0), old_g[index], old_s[index], genotype, selector, np.bool_(False))
     return accepted, gains, decisions, decision_counts
 
 
@@ -846,9 +846,9 @@ def _relabel_scan(root, frame, selector, starts, run_theta, anchor, child_offset
         run = runs - index if reverse else index
         boundary = starts[run] - 1
         before = _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, child_offsets, child_groups,
-                                 child_slots, marker_offsets, marker_sites, marker_theta, False)
+                                 child_slots, marker_offsets, marker_sites, marker_theta, np.bool_(False))
         after = _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, child_offsets, child_groups,
-                                child_slots, marker_offsets, marker_sites, marker_theta, True)
+                                child_slots, marker_offsets, marker_sites, marker_theta, np.bool_(True))
         gain = after - before
         if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
             decisions[decision_count[0], 0] = 2
@@ -980,14 +980,14 @@ def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientat
         return
     base = np.empty((n, 4))
     table = np.empty((n, 2, 2, 2))
-    _block_terms(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
+    _block_terms(group, np.int64(lo), end, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                  child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, base, table)
     left = selector[group, marker_sites[a_idx - 1]] if a_idx > first else -1
     right = selector[group, marker_sites[b_idx]] if b_idx < stop else -1
     new_selector = np.empty(n, dtype=np.int8)
     new_genotype = np.empty(n, dtype=np.int8)
-    _block_path(group, child, lo, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta, a_idx,
-                b_idx, left, right, new_selector, new_genotype, reverse)
+    _block_path(group, child, np.int64(lo), base, table, genotype, selector, marker_offsets, marker_sites, marker_theta, a_idx,
+                b_idx, np.int64(left), np.int64(right), new_selector, new_genotype, np.bool_(reverse), np.bool_(False))
     for i in range(n):
         selector[group, lo + i] = new_selector[i]
         genotype[child, lo + i] = new_genotype[i]
@@ -1005,7 +1005,7 @@ def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orie
         return
     base = np.empty((n, 4))
     table = np.empty((n, 2, 2, 2))
-    _block_terms(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
+    _block_terms(group, np.int64(lo), end, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                  child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, base, table)
     for i in range(n):
         s = selector[group, lo + i]
@@ -1052,9 +1052,9 @@ def _window_root(root, lo, hi, potentials, genotype, selector, frame, orientatio
     trans = np.empty(max(m - 1, 0))
     for j in range(m - 1):
         trans[j] = run_theta[r0 + j]
-    path = _frame_path(run_value, trans, anchor_run, left, run_theta[r0 - 1] if left >= 0 else 0.0, right,
-                       run_theta[r1 - 1] if right >= 0 else 0.0, frame[root, starts[r0]], frame[root, starts[r1] - 1],
-                       reverse)
+    path = _frame_path(run_value, trans, np.int64(anchor_run), np.int64(left), run_theta[r0 - 1] if left >= 0 else 0.0, np.int64(right),
+                       run_theta[r1 - 1] if right >= 0 else 0.0, np.int8(frame[root, starts[r0]]), np.int8(frame[root, starts[r1] - 1]),
+                       np.bool_(reverse))
     for j in range(m):
         for site in range(starts[r0 + j], starts[r0 + j + 1]):
             frame[root, site] = path[j]
@@ -1107,7 +1107,7 @@ def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mas
             starts = frozen_starts if frozen[sample] else free_starts
             trans = frozen_trans if frozen[sample] else free_trans
             for site in range(lo, hi):
-                _root_cavity(sample, site, frame[sample, site], -1, genotype, selector, potentials, orientation,
+                _root_cavity(sample, site, frame[sample, site], np.int64(-1), genotype, selector, potentials, orientation,
                              group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                              log_miss, cavity)
                 total += _lse4(cavity[0], cavity[1], cavity[2], cavity[3])
@@ -1205,7 +1205,7 @@ def _window_objective_lists(lo, hi, root_list, sample_list, group_list, transiti
             starts = frozen_starts if frozen[sample] else free_starts
             trans = frozen_trans if frozen[sample] else free_trans
             for site in range(lo, hi):
-                _root_cavity(sample, site, frame[sample, site], -1, genotype, selector, potentials, orientation,
+                _root_cavity(sample, site, frame[sample, site], np.int64(-1), genotype, selector, potentials, orientation,
                              group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                              log_miss, cavity)
                 total += _lse4(cavity[0], cavity[1], cavity[2], cavity[3])
@@ -1749,9 +1749,9 @@ def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector
     boundary = starts[run] - 1
     anchor = anchors[root]
     before_b = _boundary_terms(root, boundary, run, starts, trans, frame, selector, child_offsets, child_groups,
-                               child_slots, marker_offsets, marker_sites, marker_theta, False)
+                               child_slots, marker_offsets, marker_sites, marker_theta, np.bool_(False))
     after_b = _boundary_terms(root, boundary, run, starts, trans, frame, selector, child_offsets, child_groups,
-                              child_slots, marker_offsets, marker_sites, marker_theta, True)
+                              child_slots, marker_offsets, marker_sites, marker_theta, np.bool_(True))
     _relabel_flip(root, boundary, anchor, frame, selector, child_offsets, child_groups, child_slots)
     first_child, last_child = child_offsets[root], child_offsets[root + 1]
     count = last_child - first_child
@@ -1947,7 +1947,7 @@ def _site_conflict(parent, site, genotype, selector, frame, potentials, orientat
     genotype) leaves a child's allele mistransmitted (the per-site test of _conflicts)."""
     if roots[parent]:
         cavity = np.empty(4)
-        _root_cavity(parent, site, frame[parent, site], -1, genotype, selector, potentials, orientation, group_child,
+        _root_cavity(parent, site, frame[parent, site], np.int64(-1), genotype, selector, potentials, orientation, group_child,
                      child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, cavity)
         best = 0
         for g in range(1, 4):
@@ -2038,7 +2038,7 @@ def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector
     swapping which parent transmitted which allele together, which no single child block can do (_site_search);
     accepted only above ``quantum``. Returns (gain, accepted)."""
     best = np.empty(child_offsets[parent + 1] - child_offsets[parent] + 1, dtype=np.int8)
-    gain, members = _site_search(parent, site, max_combos, 1, potentials, genotype, selector, frame, orientation,
+    gain, members = _site_search(parent, site, max_combos, np.int64(1), potentials, genotype, selector, frame, orientation,
                                  roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, node_group,
                                  group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
                                  marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, reverse, best)
@@ -2076,7 +2076,7 @@ def _joint_refit(parents, count, lo, hi, max_combos, potentials, genotype, selec
                 continue
             gain, members = _site_search(parent, site,
                                          max_combos if (conflict and all_sites) else min(max_combos, JOINT_REFIT_COMBOS),
-                                         2, potentials, genotype, selector, frame,
+                                         np.int64(2), potentials, genotype, selector, frame,
                                          orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                                          frozen_trans, node_group, group_parent, group_child, child_offsets,
                                          child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
@@ -2223,7 +2223,7 @@ def _init_batch(groups, potentials, genotype, selector, frame, orientation, root
     if cavities is not None:
         for group in groups:
             child = group_child[group]
-            cavity_counts.update_group(cavities, group, 0, genotype[child], selector[group], genotype, selector, True)
+            cavity_counts.update_group(cavities, group, np.int64(0), genotype[child], selector[group], genotype, selector, np.bool_(True))
 
 
 def descent_order(graph, reverse=False):
@@ -2876,10 +2876,10 @@ def _root_undetermined(potentials, genotype, selector, frame, orientation, roots
         trans = np.empty(max(runs - 1, 0))
         for run in range(runs - 1):
             trans[run] = run_theta[run]
-        left = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[sample, starts[0]],
-                           frame[sample, starts[runs] - 1], False)
-        right = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[sample, starts[0]],
-                            frame[sample, starts[runs] - 1], True)
+        left = _frame_path(run_value, trans, np.int64(anchor_run), np.int64(-1), 0.0, np.int64(-1), 0.0, np.int8(frame[sample, starts[0]]),
+                           np.int8(frame[sample, starts[runs] - 1]), np.bool_(False))
+        right = _frame_path(run_value, trans, np.int64(anchor_run), np.int64(-1), 0.0, np.int64(-1), 0.0, np.int8(frame[sample, starts[0]]),
+                            np.int8(frame[sample, starts[runs] - 1]), np.bool_(True))
         for run in range(runs):
             f = frame[sample, starts[run]]
             if left[run] != f or right[run] != f:
@@ -2895,7 +2895,7 @@ def _parent_cavity(parent, site, exclude_group, genotype, selector, frame, poten
     """out[g]: the log weight of ``parent`` holding genotype g at ``site`` without child group ``exclude_group``'s
     factor: a root's psi, phi and other children; a non-root's psi, its own slot terms and other children."""
     if roots[parent]:
-        _root_cavity(parent, site, frame[parent, site], exclude_group, genotype, selector, potentials, orientation,
+        _root_cavity(parent, site, frame[parent, site], np.int64(exclude_group), genotype, selector, potentials, orientation,
                      group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
                      out, cavities)
         return
@@ -2909,7 +2909,7 @@ def _parent_cavity(parent, site, exclude_group, genotype, selector, frame, poten
     for g in range(4):
         out[g] += table[0, _allele(g, 0), (s >> 1) & 1] + table[1, _allele(g, 1), s & 1]
     if cavities is not None and cavities[0][parent] >= 0:
-        cavity_counts.add_terms(cavities, parent, site, exclude_group, genotype, selector, log_keep, log_error, out)
+        cavity_counts.add_terms(cavities, parent, site, np.int64(exclude_group), genotype, selector, log_keep, log_error, out)
         return
     for index in range(child_offsets[parent], child_offsets[parent + 1]):
         group = child_groups[index]
@@ -2984,7 +2984,7 @@ def _conflicts(genotype, selector, frame, potentials, orientation, roots, group_
         cavity = np.empty(4)
         for site in range(sites):
             if roots[parent]:
-                _root_cavity(parent, site, frame[parent, site], -1, genotype, selector, potentials, orientation,
+                _root_cavity(parent, site, frame[parent, site], np.int64(-1), genotype, selector, potentials, orientation,
                              group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                              log_miss, cavity)
                 best = 3 if reverse else 0

@@ -231,7 +231,8 @@ def update_founders(workspace, haplotypes, assignments, tie_mask=None, *,
         order = usage_order(usage, reverse)
         sweep = fractional_sweep_one_thread if numba.get_num_threads() == 1 else _fractional_sweep_parallel
         changes = int(sweep(haplotypes, order, *buckets[:-1], workspace.genotype_cost_by_sample,
-                            workspace.unknown_cost_by_sample, float(workspace.quanta.h_step)))
+                            workspace.unknown_cost_by_sample, float(workspace.quanta.h_step),
+                            workspace.h_term_bound))
     else:
         (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
          n_with_unknown, usage) = founder_buckets(assignments, k)
@@ -316,9 +317,43 @@ def fractional_buckets(mask, k):
             partner_ptr[:entry + 1], partners, usage)
 
 
+@njit(cache=True, inline="always")
+def _fractional_sum_error(count, cost_bound):
+    """Bound the ordinary difference's error relative to the expansion-sum difference.
+
+    For m terms bounded by B, sequential summation has error at most gamma_(m-1)*m*B.
+    The factor 16 covers both sums, reference rounding, and the final subtraction with
+    ample room for computing the bound. The tiny term covers subnormal rounding.
+    Infinite B deliberately requests the reference path, useful for validation.
+    """
+    eps = np.finfo(np.float64).eps
+    if count * eps >= 0.0625:
+        return np.inf
+    return 16.0 * eps * count * (count + 1) * cost_bound + np.finfo(np.float64).tiny
+
+
+@njit(cache=True, inline="always")
+def _fractional_allele(nll0, nll1, current, tie, terms0, terms1, partials, error):
+    """Use ordinary sums only when their interval certifies the H-step decision."""
+    difference = nll0 - nll1
+    if np.isfinite(error) and np.isfinite(difference):
+        if abs(difference) + error < tie:
+            return current
+        if difference - error > tie:
+            return 1
+        if difference + error < -tie:
+            return 0
+    nll0 = _accurate_sum(terms0, partials)
+    nll1 = _accurate_sum(terms1, partials)
+    if abs(nll0 - nll1) >= tie:
+        return 0 if nll0 < nll1 else 1
+    return current
+
+
 @njit(cache=True, nogil=True)
 def _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unknown,
-                     denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+                     denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie,
+                     cost_bound=np.inf):
     terms0 = np.empty(genotype_cost.shape[0], dtype=np.float64)
     terms1 = np.empty(genotype_cost.shape[0], dtype=np.float64)
     partials = np.empty(genotype_cost.shape[0], dtype=np.float64)
@@ -326,6 +361,7 @@ def _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unkn
     for position in range(len(order)):
         founder = order[position]
         start, stop = row_ptr[founder], row_ptr[founder + 1]
+        nll0, nll1 = 0.0, 0.0
         for entry in range(start, stop):
             s = samples[entry]
             count0 = 0
@@ -344,12 +380,12 @@ def _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unkn
             terms1[entry - start] = (count0 * genotype_cost[s, 1, site]
                                     + (h + count1) * genotype_cost[s, 2, site]
                                     + u * unknown_cost[s, 1, site]) / denominator[entry]
-        nll0 = _accurate_sum(terms0[:stop - start], partials)
-        nll1 = _accurate_sum(terms1[:stop - start], partials)
+            nll0 += terms0[entry - start]
+            nll1 += terms1[entry - start]
         current = haplotypes[founder, site]
-        value = current
-        if abs(nll0 - nll1) >= tie:
-            value = 0 if nll0 < nll1 else 1
+        error = _fractional_sum_error(stop - start, cost_bound)
+        value = _fractional_allele(nll0, nll1, current, tie, terms0[:stop - start],
+                                   terms1[:stop - start], partials, error)
         haplotypes[founder, site] = value
         changes += value != current
     return changes
@@ -357,19 +393,27 @@ def _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unkn
 
 @njit(cache=True, nogil=True)
 def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous, unknown,
-                                 denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+                                 denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie,
+                                 cost_bound=np.inf):
     # Each site's Gauss-Seidel order is unchanged. Moving independent sites inside
     # the sample loop reads the cost and founder rows contiguously, and reuses the
     # expansion-sum scratch instead of allocating it for every founder/site pair.
+    # Ordinary sums vectorize across sites; near an H-step boundary the expansion
+    # reference decides the allele. cost_bound=np.inf requests that reference throughout.
     n_samples, _, length = genotype_cost.shape
     terms0 = np.empty((n_samples, length), dtype=np.float64)
     terms1 = np.empty((n_samples, length), dtype=np.float64)
     partials = np.empty(n_samples, dtype=np.float64)
     counts1 = np.empty(length, dtype=np.int64)
+    nll0 = np.empty(length, dtype=np.float64)
+    nll1 = np.empty(length, dtype=np.float64)
     changes = 0
     for position in range(len(order)):
         founder = order[position]
         start, stop = row_ptr[founder], row_ptr[founder + 1]
+        for site in range(length):
+            nll0[site] = 0.0
+            nll1[site] = 0.0
         for entry in range(start, stop):
             sample = samples[entry]
             for site in range(length):
@@ -389,13 +433,14 @@ def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous,
                 terms1[entry - start, site] = (count0 * genotype_cost[sample, 1, site]
                                               + (h + count1) * genotype_cost[sample, 2, site]
                                               + u * unknown_cost[sample, 1, site]) / denominator[entry]
+                nll0[site] += terms0[entry - start, site]
+                nll1[site] += terms1[entry - start, site]
+        error = _fractional_sum_error(stop - start, cost_bound)
         for site in range(length):
-            nll0 = _accurate_sum(terms0[:stop - start, site], partials)
-            nll1 = _accurate_sum(terms1[:stop - start, site], partials)
             current = haplotypes[founder, site]
-            value = current
-            if abs(nll0 - nll1) >= tie:
-                value = 0 if nll0 < nll1 else 1
+            value = _fractional_allele(nll0[site], nll1[site], current, tie,
+                                       terms0[:stop - start, site], terms1[:stop - start, site],
+                                       partials, error)
             haplotypes[founder, site] = value
             changes += value != current
     return changes
@@ -403,9 +448,11 @@ def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous,
 
 @njit(cache=True, parallel=True, nogil=True)
 def _fractional_sweep_parallel(haplotypes, order, row_ptr, samples, homozygous, unknown,
-                               denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie):
+                               denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie,
+                               cost_bound=np.inf):
     changes = 0
     for site in prange(haplotypes.shape[1]):
         changes += _fractional_site(haplotypes, site, order, row_ptr, samples, homozygous, unknown,
-                                    denominator, partner_ptr, partners, genotype_cost, unknown_cost, tie)
+                                    denominator, partner_ptr, partners, genotype_cost, unknown_cost,
+                                    tie, cost_bound)
     return changes

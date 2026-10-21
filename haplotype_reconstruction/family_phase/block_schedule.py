@@ -17,14 +17,14 @@ def sweep_colour(fm, state, blocks, cavities=None):
                 starts,trans=((fm.frozen_starts,fm.frozen_trans) if w.frozen[sample] else (fm.free_starts,fm.free_trans))
                 return ms._root_block(sample,w.potentials,state.genotype,state.selector,state.frame,w.orientation,
                     starts,trans,w.anchors[sample],g.group_child,fm.child_offsets,fm.child_groups,fm.child_slots,
-                    fm.log_keep,fm.log_error,fm.log_match,fm.log_miss,fm.quantum,decisions[index],counts[index],fm.reverse,True)
+                    fm.log_keep,fm.log_error,fm.log_match,fm.log_miss,fm.quantum,decisions[index],counts[index],np.bool_(fm.reverse),np.bool_(True))
             group=int(g.node_group[sample])
             if cavities is not None:
                 saved[index]=(state.genotype[sample].copy(),state.selector[group].copy())
             return ms._child_block(group,w.potentials,state.genotype,state.selector,state.frame,w.orientation,
                 fm.roots,g.group_parent,g.group_child,fm.child_offsets,fm.child_groups,fm.child_slots,
                 fm.marker_offsets,fm.marker_sites,fm.marker_theta,fm.log_keep,fm.log_error,fm.log_match,
-                fm.log_miss,fm.quantum,decisions[index],counts[index],fm.reverse,cavities,True)
+                fm.log_miss,fm.quantum,decisions[index],counts[index],np.bool_(fm.reverse),cavities,np.bool_(True))
         return run
     for i,value in current_budget().concurrent([task(i,int(sample)) for i,sample in enumerate(blocks)],
                                                fm.sites*144,label='family colour blocks'):
@@ -33,5 +33,5 @@ def sweep_colour(fm, state, blocks, cavities=None):
         for i,sample in enumerate(blocks):
             if saved[i] is not None:
                 old_g,old_s=saved[i]
-                ms.cavity_counts.update_group(cavities,int(g.node_group[sample]),0,old_g,old_s,state.genotype,state.selector)
+                ms.cavity_counts.update_group(cavities,int(g.node_group[sample]),np.int64(0),old_g,old_s,state.genotype,state.selector, np.bool_(False))
     return accepted,gains,decisions,counts

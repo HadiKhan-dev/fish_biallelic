@@ -313,16 +313,20 @@ class BudgetedPool:
     `empty_shared_array`) is attached as it is, neither copied nor unlinked nor reserved by the pool. Use as a
     context manager: a normal exit closes and joins the pool, an exception terminates it. ``recycle_bytes``: a
     worker whose private memory grows by more than this since its first task is replaced after its task (None:
-    a quarter of a worker's share of the run's memory limit, 256 MiB to 1 GiB; 0: never).
+    a quarter of a worker's share of the run's memory limit, 256 MiB to 1 GiB; 0: never). ``yield_to_waiters``:
+    at numerical-team boundaries, yield borrowed CPUs to memory-admitted workers waiting for their first CPU.
+    The default retains the existing policy; memory reservations and pure budget queries are unchanged.
     """
 
     def __init__(self, budget, *, processes: int, shared=None, max_tasks_per_child: int | None = None,
-                 label: str = "pool", recycle_bytes: int | None = None):
+                 label: str = "pool", recycle_bytes: int | None = None,
+                 yield_to_waiters: bool = False):
         self.budget: CpuBudget = as_budget(budget)
         self.processes = max(1, int(processes))
         self.label = label
         total = max(1, int(self.budget.threads()))
-        self._counters = PoolCounters(FORKSERVER, total, self.processes)
+        self._counters = PoolCounters(FORKSERVER, total, self.processes,
+                                      yield_to_waiters=yield_to_waiters)
         self._handles = []
         self._closed = False
         self._batch_in_progress = False

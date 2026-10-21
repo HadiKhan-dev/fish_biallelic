@@ -37,8 +37,8 @@ from ..maths.ties import BOUNDARY_GUARD, NOISE_MOTION, WIDE_CLASS_QUANTA, tie_cl
 from .conventions import rev
 from .fixed_k.fit import FIT_MAX_THREADS, fit_families, fit_panels, fit_starts
 from .panel import _nll_quantum, canonical_solution, deduplicate, has_distinct_rows, panel_key, sort_solutions, whole_class_cut
-from .residual_births import (HALF_BAND, alt_fraction_rule, capped_by_size, exact_hdbscan_labels, half_band_rows,
-                              hardening_fallback, note_band, sample_sum, scalar_log_floored,
+from .residual_births import (HALF_BAND, alt_fraction_families, capped_by_size, exact_hdbscan_labels, half_band_rows,
+                              hardening_fallbacks, note_band, sample_sum, scalar_log_floored,
                               soft_candidates)
 
 _TINY = np.finfo(np.float64).tiny
@@ -107,7 +107,7 @@ def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None, om
         clusters = [np.flatnonzero(labels == label) for label in np.unique(labels) if label != -1]
     alt_fraction = 0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]
     population = sample_sum(alt_fraction) / len(alt_fraction)
-    marginal = alt_fraction_rule(population, False)
+    marginals = alt_fraction_families(population, False)
     note_band(counter, "discovery.k1.half_band", population, 0.5, HALF_BAND)
     rows, classes, seen = [], [], set()
     for size in sorted({len(members) for members in clusters}, reverse=True):
@@ -117,7 +117,7 @@ def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None, om
                 continue
             mean = sample_sum(alt_fraction[members]) / len(members)
             note_band(counter, "discovery.k1.half_band", mean, 0.5, HALF_BAND)
-            group.append(half_band_rows(mean, marginal).astype(np.int64))
+            group.extend(half_band_rows(mean, marginal).astype(np.int64) for marginal in marginals)
         group = [row for row in _unique_seeds(group) if row.astype(np.int8).tobytes() not in seen]
         seen.update(row.astype(np.int8).tobytes() for row in group)
         rows.extend(group)
@@ -163,12 +163,12 @@ def _dosage_families(likelihoods, counter=None, kind="discovery.dosage.genotype"
 
 
 def _dosage_seeds(likelihoods, samples, counter=None):
-    """Both extremal dosage seeds for every tied decisive sample, deduplicated as a set."""
+    """Complete dosage and population-half families of each decisive sample, deduplicated."""
     samples = np.asarray(samples, dtype=np.int64)
     dosages = _dosage_families(likelihoods[samples], counter, "discovery.k1.dosage")
     population_alt = sample_sum(0.5 * likelihoods[..., 1] + likelihoods[..., 2]) / len(likelihoods)
-    population_row = alt_fraction_rule(population_alt, False)
-    return _unique_seeds(row for dosage in dosages for row in
+    population_rows = alt_fraction_families(population_alt, False)
+    return _unique_seeds(row for dosage in dosages for population_row in population_rows for row in
                          ((dosage == 2) | ((dosage == 1) & population_row[None, :])))
 
 
@@ -540,8 +540,8 @@ class GrowthInputs:
     """Evidence-only inputs of data births (one block): the sitewise genotype-oracle NLL and the
     decisiveness of every sample over its observed sites, low/high winning-class dosage
     vectors and their seed rows (dosage 2 -> 1; dosage 1 or unobserved -> 1 where the observed population ALT
-    fraction exceeds 1/2 outside HALF_BAND), the samples with depth, and each sample's number of
-    observed sites."""
+    fraction exceeds 1/2 outside HALF_BAND; both coherent hardenings inside the band), the samples
+    with depth, and each sample's number of observed sites."""
 
     oracle_nll: np.ndarray
     decisiveness: np.ndarray
@@ -564,22 +564,23 @@ def growth_inputs(likelihoods, observed, counter=None) -> GrowthInputs:
                                observed_count, out=np.full(likelihoods.shape[1], 0.5),
                                where=observed_count > 0)
     seed_rows = []
-    population_row = alt_fraction_rule(population_alt, False)[None, :]
+    population_rows = alt_fraction_families(population_alt, False)
     for dosage in dosages:
-        rows = np.zeros_like(dosage)
-        rows[observed & (dosage == 2)] = 1
-        ambiguous = (~observed) | (dosage == 1)
-        rows[ambiguous & population_row] = 1
-        seed_rows.append(rows)
+        for population_row in population_rows:
+            rows = np.zeros_like(dosage)
+            rows[observed & (dosage == 2)] = 1
+            ambiguous = (~observed) | (dosage == 1)
+            rows[ambiguous & population_row[None, :]] = 1
+            seed_rows.append(rows)
     observed_sites = np.sum(observed, axis=1).astype(np.int64)
     return GrowthInputs(oracle_nll, decisiveness, dosages, tuple(seed_rows), active, observed_sites)
 
 
 def _data_seed_rows(growth, sample, parent_rows):
-    """Union low/high direct and subtraction seeds before the whole-class budget.
+    """Union dosage, population-half and subtraction seeds before the whole-class budget.
 
     Missing-cell genotype ties matter to subtraction starts even when the direct
-    seed at that cell is fixed by the unchanged population hardening rule.
+    seed at that cell comes from the population hardening family.
     """
     # The same integer subtraction/clip for all parent rows in one array operation;
     # retain dosage-then-parent order before the existing exact union.
@@ -758,13 +759,18 @@ def data_births(workspace, solution, growth: GrowthInputs, max_iterations, searc
 # ---------------------------------------------------------------------------------------------
 def _hardened_rows(soft, likelihoods, counter=None):
     """Binary rows of soft candidates (> 1/2 is ALT; within HALF_BAND of 1/2 the population ALT
-    fraction decides; release 2.1, was 1e-12), distinct, in candidate order."""
+    fraction decides). Both population-half hardenings enter as distinct proposal starts."""
     note_band(counter, "discovery.soft.half_band", soft, 0.5, HALF_BAND)
-    binary = half_band_rows(soft, hardening_fallback(likelihoods))
+    fallbacks = hardening_fallbacks(likelihoods)
     unique: dict[bytes, np.ndarray] = {}
-    for row in np.asarray(binary, dtype=np.int64):
-        row = np.ascontiguousarray(row, dtype=np.int64)
-        unique.setdefault(row.astype(np.int8).tobytes(), row)
+    for fallback in fallbacks:
+        binary = half_band_rows(soft, fallback)
+        for row in np.asarray(binary, dtype=np.int64):
+            row = np.ascontiguousarray(row, dtype=np.int64)
+            unique.setdefault(row.astype(np.int8).tobytes(), row)
+    if len(fallbacks) > 1:
+        # Canonical order labels the complete union; no within-family prefix is taken.
+        return tuple(unique[key] for key in sorted(unique))
     return tuple(unique.values())
 
 

@@ -64,7 +64,7 @@ def _popcount(x):
     return n
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _hamming_to(known, alt, target_known, target_alt, minimum_joint):
     out = np.empty((len(known),len(target_known)), dtype=np.float64)
     for i in range(len(known)):
@@ -105,6 +105,18 @@ def _nearest_ties(distance):
     return distance <= ordered[np.arange(len(ordered)),first,None]
 
 
+@njit(cache=True, nogil=True)
+def _pack_memberships(nearest, inverse):
+    """Each original record once per nearest-anchor tie; duplicates keep their indices."""
+    result = np.zeros((nearest.shape[1], (len(inverse)+63)//64), dtype=np.uint64)
+    for record in range(len(inverse)):
+        bit = np.uint64(1) << np.uint64(record % 64)
+        for anchor in range(nearest.shape[1]):
+            if nearest[inverse[record], anchor]:
+                result[anchor, record//64] |= bit
+    return result
+
+
 @dataclass
 class LandmarkSet:
     rows: np.ndarray
@@ -120,12 +132,23 @@ class LandmarkSet:
         included = self.nearest[:,np.asarray(group,dtype=np.int64)].any(axis=1)
         return tuple(np.flatnonzero(included[self.inverse]).tolist())
 
+    def packed_membership(self):
+        return _pack_memberships(self.nearest, self.inverse)
+
     @property
     def matrix(self):
         return np.ascontiguousarray(self.distances[self.anchors])
 
 
 def select(rows, budget, *, kind, minimum_joint=1, omissions=None, scope='global'):
+    """Select complete landmark classes under the block timing clock."""
+    from .search import diagnostic_phase
+    with diagnostic_phase('landmarks'):
+        return _select(rows, budget, kind=kind, minimum_joint=minimum_joint,
+                       omissions=omissions, scope=scope)
+
+
+def _select(rows, budget, *, kind, minimum_joint=1, omissions=None, scope='global'):
     """O(R log R * L + A*R log R + R*A*L) work; linear-in-R live arrays.
 
     Selection computes each unique-record/anchor distance once. Hamming distances
@@ -212,29 +235,29 @@ def residual_groups(hard_calls, budget, minimum_joint, config, omissions=None, s
     details = []
     chosen = select(hard_calls,budget,kind='hamming',minimum_joint=minimum_joint,
                     omissions=details,scope=scope)
-    # A lifted group may recur from several anchor groups. It counts once at a budget.
-    lifted_cache = {}
-    def lift(group):
-        if group not in lifted_cache:
-            lifted_cache[group] = chosen.lift(group)
-        return lifted_cache[group]
     matrix = chosen.matrix
     pairs = len(matrix)*(len(matrix)-1)
     edges = int(np.count_nonzero(matrix <= config.max_cluster_hamming+1e-12))-len(matrix)
     chosen.stats.update(anchor_edges=edges//2, anchor_edge_density=edges/pairs if pairs else 0.0)
-    groups, overflow = _cluster(matrix,config.max_cluster_hamming,config.max_alternative_groups,
+    lifted, overflow = _cluster(matrix,config.max_cluster_hamming,config.max_alternative_groups,
         config.max_clique_enumeration,config.max_clique_calls,details,
-        group_size=lambda group: len(lift(group)), group_identity=lift)
-    lifted = tuple(sorted({lift(g) for g in groups}))
+        lifted=(chosen.packed_membership(), len(hard_calls)))
     result = lifted, bool(overflow or chosen.stats['omitted_class']), chosen.stats
     if omissions is not None:
         omissions.extend(details)
     if cache is not None:
-        size = 512 + sum(64+36*len(g) for g in lifted) + 512*len(details)
-        # Pure recomputation on eviction; this bound cannot affect proposals.
-        if size <= 8*1024*1024:
-            if cache.get('bytes',0)+size > 8*1024*1024:
-                cache.clear()
-            cache[key] = (*result, tuple(details))
-            cache['bytes'] = cache.get('bytes',0)+size
+        _remember_residual_groups(cache, key, (*result, tuple(details)))
     return result
+
+
+def _remember_residual_groups(cache, key, value):
+    """Merge recomputation-only pool cache entries in source order."""
+    if key in cache:
+        return
+    groups, _, _, details = value
+    size = 512 + sum(64+36*len(group) for group in groups) + 512*len(details)
+    if size <= 8*1024*1024:
+        if cache.get('bytes', 0)+size > 8*1024*1024:
+            cache.clear()
+        cache[key] = value
+        cache['bytes'] = cache.get('bytes', 0)+size

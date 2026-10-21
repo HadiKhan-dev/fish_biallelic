@@ -12,7 +12,7 @@ task reserves its planned peak memory with the run's memory governor (``block_ta
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
 
@@ -26,7 +26,7 @@ from .config import DiscoveryConfig
 from .residual_births import MASS_BAND
 from .fixed_k.workspace import search_bytes
 from .release import DiscoveredBlock, materialise
-from .search import search_block
+from .search import search_block, diagnostic_block, diagnostic_phase, backstop_counts
 
 
 @dataclass(frozen=True)
@@ -70,12 +70,14 @@ def discover_block(evidence: BlockEvidence, config: DiscoveryConfig) -> Discover
     """Search one block's panel and release its alleles; None for an uninformative block."""
     if not evidence.informative:
         return None
-    kept = evidence.kept
-    result = search_block(np.ascontiguousarray(evidence.likelihoods[:, kept]),
-                          np.ascontiguousarray(evidence.observed[:, kept]), config,
-                          sample_ids=evidence.sample_ids)
-    return materialise(evidence.block, evidence.site_start, evidence.positions, kept,
-                       evidence.likelihoods, evidence.observed, result, config)
+    with diagnostic_block() as diagnostics:
+        kept = evidence.kept
+        result = search_block(np.ascontiguousarray(evidence.likelihoods[:, kept]),
+                              np.ascontiguousarray(evidence.observed[:, kept]), config,
+                              sample_ids=evidence.sample_ids)
+        block = materialise(evidence.block, evidence.site_start, evidence.positions, kept,
+                            evidence.likelihoods, evidence.observed, result, config)
+        return replace(block, search=replace(block.search, **diagnostics.summary_fields()))
 
 
 # Memory plan of one block task (the governor reservation): the block's evidence copies and the
@@ -119,17 +121,13 @@ def clustering_matrix_bytes(samples: int, config: DiscoveryConfig | None = None)
 
 
 def block_task_bytes(evidence: BlockEvidence, config: DiscoveryConfig | None = None) -> int:
-    """Planned peak additional bytes of one block's discovery in a pool worker (release 2.1: plus
-    the canonical-order copy of the block's GLs and mask, and a second search workspace when the
-    reversed-convention search is configured), including the dense clustering matrices."""
+    """Planned peak bytes: evidence copies, canonical-order copy, fit workspace
+    and clustering matrices. A=0 retains the explicit dense geometry plan."""
     samples, sites = evidence.likelihoods.shape[:2]
     kept = int(np.count_nonzero(evidence.kept))
-    searches = 1
-    if config is not None and config.search.reversed_convention_search != "off":
-        searches = 2
     return (TASK_BASE_BYTES + 2 * 8 * 3 * samples * sites + 25 * samples * kept
-            + searches * (search_bytes(samples, kept, ESTIMATE_FOUNDERS)
-                          + clustering_matrix_bytes(samples, config)))
+            + search_bytes(samples, kept, ESTIMATE_FOUNDERS)
+            + clustering_matrix_bytes(samples, config))
 
 
 # Block workers return freed heap pages every this many blocks, or whenever their resident set
@@ -142,14 +140,32 @@ _blocks_since_trim = 0
 def _discover_task(task, shared, budget):
     """Pool task: one block (worker side)."""
     global _blocks_since_trim
-    evidence, config = task
-    claim_threads()
-    result = discover_block(evidence, config)
+    evidence, config, dispatched_at = task
+    with diagnostic_block(dispatched_at):
+        with diagnostic_phase("idle_admission"):
+            claim_threads()
+        result = discover_block(evidence, config)
     _blocks_since_trim += 1
     if _blocks_since_trim >= _TRIM_EVERY_BLOCKS or resident_bytes() >= _TRIM_RSS_BYTES:
         malloc_trim()
         _blocks_since_trim = 0
     return evidence.block, result
+
+
+class _TimedTasks:
+    """Retain the known batch size for the pool's existing startup/share policy."""
+
+    def __init__(self, tasks):
+        self.tasks = tasks
+
+    def __len__(self):
+        return len(self.tasks)
+
+    def __iter__(self):
+        # Drawn after a worker slot opens, before its memory reservation. perf_counter
+        # uses the same monotonic clock in parent and child processes on supported hosts.
+        for evidence, config in self.tasks:
+            yield evidence, config, time.perf_counter()
 
 
 def _discover_contig(store, contig, config, pool, evidence=None) -> None:
@@ -183,8 +199,12 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
                 tasks.append((block_input, config))
             else:
                 writer.add(block, None)
-        sizes = [block_task_bytes(block_input, config) for block_input, _config in tasks]
-        for index, result in pool.imap_unordered(_discover_task, tasks, task_bytes=sizes):
+        # Plan bytes before dispatch, as for the original eager task list; the
+        # cheap lookup still lets _TimedTasks timestamp each task before admission.
+        sizes = {block_input.block: block_task_bytes(block_input, config) for block_input, _config in tasks}
+        for index, result in pool.imap_unordered(
+                _discover_task, _TimedTasks(tasks),
+                task_bytes=lambda task: sizes[task[0].block]):
             writer.add(index, result)
     finally:
         writer.flush()
@@ -192,8 +212,9 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
         raise RuntimeError(f"{contig}: block discovery records are incomplete")
     blocks = [block for block in records.load(file) if block is not None]
     counts = [block.founders for block in blocks]
-    limits = {name: sum(name in block.search.limits for block in blocks)
-              for name in ("expansion_backstop", "exact_score_backstop")}
+    counters = [backstop_counts(block.search) for block in blocks]
+    limits = {name: sum(counts[name] for counts in counters)
+              for name in backstop_counts({})}
     incomplete = sum(block.search.search_incomplete for block in blocks)
     unresolved = sum(block.search.unresolved for block in blocks)
     omission_causes = {}
@@ -217,7 +238,7 @@ def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
     if not contigs:
         return
     with BudgetedPool(budget, processes=max(1, int(budget.threads())),
-                      label="discovery") as pool, \
+                      label="discovery", yield_to_waiters=True) as pool, \
             ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
         upcoming = preparer.submit(prepare, contigs[0])
         for index, contig in enumerate(contigs):

@@ -1,6 +1,6 @@
 # Performance and resource use
 
-## 2.3 integration measurements
+## Historical 2.3 integration measurements
 
 The release benchmark uses 112 allocated cores on an AMD EPYC 7763 node. Report
 host, CPU model, affinity, wall time, CPU time and memory together. The 2.1 TroMau
@@ -28,8 +28,9 @@ identity evidence carries results, not the v23c4 timing.
 
 The whole family-phase target is about **1,200 seconds at N=320 on 112 cores**,
 originally Sapphire. Y's combined family stage and post-fit is 1,813.464 seconds;
-its ideal 112-core floor from contig CPU is 987.59 seconds. Stage6ab whole-stage timing
-is pending at freeze unless reported below. Eight passing std/stress identity controls
+its ideal 112-core floor from contig CPU is 987.59 seconds. The later completed AB measurement is 1,570.299 s for family phase plus 345.638 s
+post-fit on EPYC, with 110,665.76 contig CPU-s and 343.2-GiB sampled peak. It did
+not meet the target; fewer simultaneous contig workers made it about 5% slower than Y. Eight passing std/stress identity controls
 do not establish speed. The N-series uses C1 X, so neither Y nor AB timings may be
 substituted into that series. Full final truth and invariance coverage is incomplete.
 
@@ -62,8 +63,9 @@ measured time and warms its exercised signatures; residual compilation can remai
 Measured cells start with cold inference checkpoints. One realization per N gives
 descriptive slopes, not an asymptotic proof. The extractor refuses mixed hardware,
 core budgets, source, design or cache regimes. N80/N320 use frozen v23c5 (G7 plus
-C1 X). N80 completed in 327.576 seconds; N320 and two-point exponents are pending
-at freeze unless reported below. N160/N640 remain unmeasured unless separately
+C1 X). N80 completed in 327.576 seconds. N320 did not complete within its 2,700-second
+cap; chr8 discovery alone took 1,564.7 seconds versus 14.4 seconds at N80. No
+end-to-end N80/N320 exponent is available. N160/N640 remain unmeasured unless separately
 reported. Later Y/AB exact swaps do not change the source of these measurements.
 
 Native records preserve per-contig stage work times. A separate benchmark sampler
@@ -91,7 +93,10 @@ measured separately.
 
 ### Validation coverage at freeze
 
-Evidence snapshot: **2026-10-20T08:22:56.652274+01:00**. At the evidence freeze (2026-10-20T08:22:56.652274+01:00), the exact terminal NOT_RUN list is empty: no deadline guard has yet skipped a task. Pending or running cells are uncompleted, not passes. The final report must add any later NOT_RUN records without changing this frozen transfer.
+This is the historical 2.3 acceptance state, reconciled with the release changelog.
+The 08:22:56+01:00 transfer snapshot had no terminal NOT_RUN records, which did not
+make its queued/running cells passes. Component receipts, compositional carry-over
+and fresh final-pipeline runs are distinguished below.
 
 Std reference carry-over is established for discovery by all 11,822 saved c3 blocks on eight contigs: K1 has at most 80 samples and the largest residual pool is 184, below 256. Partner pools are subsets of the global pool. The inactive branches retain the dense code; exact clique changes and C1/G7/G8 deltas use their accepted identity evidence. This is compositional biological carry-over of the c3 reference, not a fresh final-tree run or proof for perturbed inputs.
 
@@ -104,10 +109,45 @@ interval-report contract. Completion is not a truth or reversal/noise pass.
 The uncompleted truth references are stress_n80, lad_K20_n80, lad_K30_n80, f3_fam,
 backcross_s6202, reallike6_nf_s3, actm3 and sim_s10000. The queued c4 std reference
 has not started. Both std and stress still lack their final iid12_s1, reversal and
-rename_s1 controls. N320 is running, N160/N640 are unmeasured and AB whole-stage
-timing is pending. TroMau reversal, the broader zero loop and final Gate W remain
-uncompleted. Later results belong in the campaign report; this document does not
-anticipate their outcomes.
+rename_s1 controls. N320 timed out at 45 minutes, N160/N640 are unmeasured, and
+AB whole-stage timing completed as reported above. TroMau reversal, the broader zero loop and final Gate W remain
+uncompleted. These are evidence gaps, not demonstrated failures. Release 2.4 added evidence
+identity on all 22 TroMau chromosomes and std chr1/chr2, plus TroMau chr19 downstream
+identity and a three-chromosome end-to-end check; it did not rerun the simulation matrix.
+
+Release 2.5 combines the exact residual-tail remedy, inline small residual work, guarded fractional
+fixed-K reductions, discovery's CPU handoff to waiting block workers, discovery diagnostics and mode
+removal, the population-half proposal family and an operational family-phase typing fix. Measured on
+76-core Ice Lake nodes:
+
+- Discovery on the five N-series chromosomes takes 235 s at N=160 and 369 s at N=320, against 7,973 s and
+  10,266 s in 2.4.
+- The whole N-series pipeline takes 10.6, 14.6, 22.6 and 45.6 minutes at N = 80, 160, 320 and 640, a
+  scaling exponent of about 0.8. The N=80 run includes first-use kernel compilation.
+- TroMau takes 67.7 minutes, against 72.4 in 2.4.
+
+Released results equal 2.3 on TroMau (all 22 chromosomes) and on the std, stress, K20 and K30 simulations.
+Successive 2.5 candidates were compared block for block and downstream. Historical gaps remain explicit, and
+component checks do not substitute for full runs.
+
+### Saved TroMau cross-version attribution
+
+The matched 2.2/c4 saved products first differ at discovery on all 22 chromosomes:
+1,028/9,979 blocks change in known latent content, calls or retained alternatives;
+455 change selected K. Initial/L1/L2 selected discrete products differ in
+272/376/540 blocks respectively. All 22 final internal assembly/refit chromosome
+panels change. These observations locate the first changed interface, not an
+exclusive cause for every downstream change.
+
+The exports have 33,301 changed genotypes among 230,485,131 common-called sample-site
+cells, plus 118,698 call/unknown disagreements among 686,590,544 total cells. The
+13,942 relative phase switches compare 101,413,928 eligible consecutive heterozygous
+observations within matching pairs of released phase sets. None is an accuracy/error
+rate against truth. The one changed parent release (1/116 samples) changes from
+unresolved to a supported two-parent state; both versions selected the same local
+pair, while the state bootstrap fraction changed from 0.674 to 0.709. Pedigree modelling
+also changed in 2.3, so saved matched outputs alone cannot assign that transition to
+discovery. No inference was rerun for this attribution.
 
 ## Where the time goes
 
@@ -171,7 +211,12 @@ contig lane -> pool -> worker), never exceeded by the product of processes and t
   and inside pool phases.
 - **Pools.** A pool task claims `floor(total / active)` threads plus a share of the remainder at its numerical
   boundaries; during a batch's start-up every worker has one thread until the batch's workers have started.
-  Freed threads move to surviving tasks at their next boundary; a running Numba kernel never changes its team.
+  Freed threads move to surviving tasks at their next boundary; a running Numba kernel never changes its team. Discovery
+  enables an additional handoff at the owner's existing apply/claim boundary: when
+  memory-admitted block workers wait for their first CPU, a borrower caps its team at
+  max(1, floor(total / (active + waiting))). The same call resizes its Numba team; pure
+  budget queries retain running claims. Growth resumes as waiters drain. Other stages
+  keep the default policy, and memory admission/reservation rules are unchanged.
 - **Shared arrays** are copied into shared memory once per pool, with at most
   `execution.shared_arrays.COPY_THREADS = 16` threads (the copy saturates memory bandwidth at about 16 threads).
 - **Serial mode** runs one contig at a time with every core: less throughput on a large node, smaller units of
@@ -337,6 +382,115 @@ Stage6v isolated chr3/chr12 fits took733.290/407.284seconds on112 EPYC7763 cores
 
 Stage6w preserves stage6v released fields in the supplied identity gates. Its transition lookup, allocation-free cavity accumulation and independent-site parallelism are integrated; these gates are not a whole-stage 1,200-second result. G5 calibration aggregates identical complete chromosome vectors with identical priors and reciprocal masks. On the paired 112-core EPYC 7763 replay, the sim_s10000 fit drops from 7.357 to 4.246 seconds (42.3%); this is predominantly serial optimizer work, not a whole-pedigree speedup. Exact M1 screening and dense layouts remain. The final measured complete-pedigree N80/N320 cohort uses v23c5; its hardware-specific wall, CPU and sampled RSS slopes are reported separately above.
 
+## Fractional founder reductions and discovery CPU handoff
+
+Fractional H updates accumulate costs along contiguous site rows. A conservative
+floating-point interval certifies each allele decision; intervals touching a decision
+boundary use the accurate expansion-sum reference. The workspace computes its term bound
+once. Sample terms, founder order, usage sums, tie quantum, both schedules and stopping
+rules are unchanged. The CPU handoff described above applies only to discovery and
+lets admitted waiting blocks begin at existing numerical-team boundaries.
+
+Matched native discovery timings use one sequential pair per 76-core Ice Lake node,
+empty compiled caches and the same 751-overload warm-up manifest in isolated cache stores.
+Both arms warm 746 applicable overloads; changed H signatures finish compiling before
+measurement. Results compare the timed-flush/inline-work baseline with both exact speedups.
+
+| Workload | Baseline wall | Guarded H + CPU handoff | Reduction | Identical block products |
+| --- | --- | --- | --- | --- |
+| std_n80 chr8 | 38.6 s | 33.3 s | 13.7% | 1,282/1,282 |
+| N320 chr8 | 72.9 s | 53.5 s | 26.6% | 580/580 |
+| TroMau chr7 | 45.0 s | 32.7 s | 27.3% | 834/834 |
+
+All 2,696 blocks preserve scientific and non-timing diagnostic records, including raw
+omission scopes, with zero observed continuous drift. Worker CPU is 2,386.9 -> 2,320.5 s,
+4,578.4 -> 3,735.1 s and 2,692.7 -> 2,093.1 s respectively. Accumulated worker wait
+reductions overlap and must not be interpreted as recoverable chromosome wall time.
+Internal scratch-sum drift reaches 6.25e-13 in the fractional fixture; persisted results
+are unchanged. This is scientific identity, not a requirement for identical floating-point bits.
+
+A three-contig std_n80 downstream pair preserves all 4,080 discovery blocks and all six
+founder/sample VCF contents. Its full wall time is 615.12 -> 630.49 s (+2.5%), with
+asymmetric first-use cache treatment; this is an identity check, not evidence of an
+end-to-end speedup. The controlled discovery pairs above provide the timing evidence.
+
+## Exact residual-tail remedy in 2.5
+
+Matched Ice Lake measurements on 76 cores show N320 chr8 discovery falling from
+**1,327.6 s in 2.4 to 84.2 s**, and N160 from **888.4 to 48.6 s**. The complete
+five-contig N320 N-series pipeline takes **27 minutes**. These measurements precede
+the small-work and checkpoint-flush refinements and do not establish an N^1.2 exponent.
+
+The residual-group tail entered in 2.3 and made larger simulations impractical:
+sim_s10000 (N320, 22 contigs) chr1 discovery took **79.1 s in 2.2 versus 2,476.9 s
+in 2.3**; sim_s10001 had not finished chr1 after 80 minutes. These are discovery
+stage measurements or censored observations, not completed whole-genome timings.
+
+The first integrated remedy also exposed a small-work regression: matched std_n80
+chr8 discovery took **38.9 s in 2.4 versus 76.2 s**. Executor creation, reservations,
+thread dispatch and cache copies on tiny residual calls accounted for the overhead.
+Small residual work now follows an inline path, with concurrency reserved for substantial
+independent work. Per-block diagnostic fsyncs added **4.6%** in a separate diagnostic
+measurement. Completed blocks and diagnostics instead share scientific chunk commits:
+64 blocks or the next completion after about 30 seconds, plus the final partial chunk.
+The timer is checked at completion, so it does not guarantee a flush during a long wait
+for another result. These execution/I/O refinements preserve scientific decisions;
+their final regression and identity gates are reported separately.
+
+The isolated inline-work remedy passes matched small-N discovery checks on 76 cores:
+**std_n80 chr8 40.0 s versus 38.9 s in 2.4 (+2.83%)** and **TroMau chr7 46.7 s
+versus 46.3 s (+0.86%)**. Runs used the same host/configs sequentially after low-load
+checks, with separate per-tree kernel caches; discovery stage timers exclude startup.
+All 1,282 N80 and 834 TroMau blocks retain the compared scientific fields, with zero
+observed continuous drift. These gates isolate the execution remedy; final combined
+checkpoint-flush and downstream checks remain separate.
+
+The refined exact remedy completes N320 chr8 in **73.75 s on 76 Ice Lake cores**,
+with 4,663.76 task CPU-s and 29.31 GiB sampled summed process RSS. All 580 saved block
+products retain scientific decisions with zero observed drift; diagnostic context
+suffixes alone differ. The 76.58 s earlier component run used a different Ice Lake node,
+so that pair is not a matched-node speedup. There were no memory waits, forced grants
+or run-alone grants. Together the three chromosome gates cover 2,696 blocks.
+
+With fractional fixed-K reductions and discovery's CPU handoff added, matched same-node discovery
+pairs with identical kernel manifests measure:
+
+- std_n80 chr8: 38.6 to 33.3 s (-13.7%);
+- N320 chr8: 72.9 to 53.5 s (-26.6%);
+- TroMau chr7: 45.0 to 32.7 s (-27.3%).
+
+All 2,696 blocks are unchanged. In the full N-series pipelines, discovery on the five chromosomes takes
+235 s at N=160 and 369 s at N=320, against 7,973 s and 10,266 s in 2.4. The whole pipeline takes 10.6,
+14.6, 22.6 and 45.6 minutes at N = 80, 160, 320 and 640, a scaling exponent of about 0.8 (the N=80 run
+includes first-use kernel compilation).
+
+### Component measurements before the small-work refinement
+
+The same-host 24-core warm adverse N320 chr8 block22 falls from **1,625.9 to 9.8 s**
+and **54.4 to 2.1 GiB peak RSS**. Process CPU falls from 1,623.3 to 11.7 s. The early
+K=1 control43 falls from 1.133 to 0.728 s; its CPU rises from 0.765 to 0.844 s and peak
+RSS from 1.549 to 1.591 GiB. Both preserve every compared scientific field, with zero
+observed continuous drift. Each process was warmed on its own block; RSS includes
+warmup/evidence. Baseline per-lift timing wrappers add overhead, so ratios are indicative.
+
+The exact remedy completes all **580 N320 chr8 blocks in 76.6 s on 76 Ice Lake cores**,
+with 4,766.4 task CPU-s and 30.32 GiB sampled summed process RSS (shared pages may be
+counted repeatedly). All saved scientific decisions, families, calls and omissions agree;
+maximum observed continuous drift is zero. Only diagnostic context suffixes differ.
+The saved **1,564.7 s** used **112 AMD EPYC cores** and different timer boundaries;
+this is a qualified historical comparison, not a matched-hardware speedup.
+
+The last 68 results finish in 6.38 s after the 512th, versus the historical 1,501 s tail.
+All 76 workers become active, and dynamic grants rise to 16 threads as workers finish.
+Measured whole-run task CPU/wall is 62.24 occupied CPU equivalents; no memory waits,
+forced grants or run-alone grants occurred. This does not claim perfect saturation.
+Parallel geometry timing is a mixed parent envelope: unused serial phase buckets are
+not zero worker costs, and overlapping task-wall sums are not exclusive elapsed times.
+
+These component measurements precede the population-half proposal-family update.
+Integrated canaries check their composition; final scaling and downstream validation
+remain separate gates.
+
 ## Default-on A256 measurements and scaling limits
 
 
@@ -346,8 +500,20 @@ times N), A=256, P<=K^2 partner routes, U searched panels, and I fit iterations.
 Assume the genome/block width, cross design/K and computational budgets are fixed
 when describing scaling with N. Let F(A) denote hierarchy/clique work on at most A
 vertices; it can be exponential in A and is a potentially large fixed constant.
-Hotspot3 changes this constant by exact packed enumeration/counting and size-class
-screening; it does not impose a new clique cap.
+Exact packed enumeration/counting and size-class screening apply to ordinary and lifted
+components in 2.5. Actual anchor-clique counts admit whole components; packed unions and
+collision-checked deduplication count unique original-record size classes before Python
+groups are materialised. This removes base24's A256 lifted-path limitation while preserving
+the 64/128 complete-class policy, nearest-anchor ties and multiplicities. With C admitted
+cliques, packed storage scales with C ceil(R/64), plus hash storage; graph-dependent
+traversal/lifting remains and no new clique cap or polynomial worst-case claim is introduced.
+Dense residual pools, a single pool or pools with one live budget thread run inline
+with shared caches. Component jobs at most 4,096 estimated traversal steps and 1 MiB
+scratch use the block reservation and run inline; these thresholds select execution only. Substantial independent work uses live dynamic CPU sharing;
+large counted storage, scratch and decoding retain explicit memory reservations. Parallel
+cache snapshots are confined to that concurrent path. Available cores pass to remaining
+work without a fixed split or named-contig schedule; execution thresholds do not alter
+component admission, class budgets or scientific outputs.
 
 | Phase | Dense reference | Enabled A256 |
 |---|---|---|
@@ -356,13 +522,15 @@ screening; it does not impose a new clique cap.
 | Fixed-K A/H fitting | leading O(I N L K^2), plus K-dependent solves | unchanged |
 | Cavity score | O(N L f(K,I)) with held-out patches | unchanged |
 | Residual records | O(N K^2 L), O(RL+NK^2) storage | unchanged |
-| Each residual pool | O(R^2 ceil(L/64)) distances, quadratic hierarchy storage, potentially cubic diameter work and exponential cliques | O(R L log R + A R log R + R A ceil(L/64) + F(A)), plus group lifting/consensus linear in R at fixed admitted group budget/A |
+| Each residual pool | O(R^2 ceil(L/64)) distances, quadratic hierarchy storage, potentially cubic diameter work and exponential cliques | O(R L log R + A R log R + R A ceil(L/64) + F(A)), plus graph-dependent packed lifting/deduplication, O(C ceil(R/64)) packed storage and hash storage; Python groups/consensus for retained classes |
 | Partner routes | corresponding dense terms summed over P<=K^2 routes, each at most N records | corresponding bounded terms summed over the same routes; small exact routes also have at most A records |
 | Search/release | preceding costs multiplied by U and M/L blocks; release O(NKL) per block | same search policy, altered proposals; O(N log N) dependence at fixed K,L,A,U,I |
 
 The prototype and duplicate sorting produce N log N terms: this is not literally
-an O(NA)-only algorithm. For fixed K, L and budgets, the asymptotic sample dependence
-is below N^1.2. No claim is made if K, genome size, solver iterations or admitted
+an O(NA)-only algorithm. For fixed K, L, A and search/iteration budgets, the formal sample dependence
+is below N^1.2, with graph-dependent combinatorial constants. This does not establish
+practical scaling: historical N320 timed out, and the 2.5 chromosome remedy does not
+establish the measured whole-pipeline target. No claim is made if K, genome size, solver iterations or admitted
 search count grow with N, or that F(256) is harmless on all possible graphs.
 The memory planner switches from dense squares to conservative linear record-by-A
 scratch reservations above the activation boundary. The same exact1 digest keys
@@ -370,7 +538,7 @@ avoid retained quadratic key bytes. Caches remain bounded or depend on fixed
 search budgets; reported process RSS includes Python/JIT allocator high-water.
 
 
-The complete-block pilot exponent is 0.330 for N>=320 (wall), not a whole-genome guarantee. Residual activation depends on record count R>256; small sample count alone does not establish inactivity. Integrated N-series results are required.
+The historical complete-block pilot exponent is 0.330 for N>=320 (wall), not a whole-genome guarantee. Residual activation depends on record count R>256; small sample count alone does not establish inactivity. Integrated N-series results are required.
 
 Pedigree acceptance now requires linear expensive exact M1/M2/decision/resampling work with bounded plausible candidates per child. Any all-pairs screen must remain cheap: project its measured per-pair cost to N=10,000 on matching hardware and report its share of the total-runtime fit, with a target at most10%. No dense [N,N] or [C,N,N] arrays may remain outside compact screen storage. The current integrated dense screen is not claimed to meet this requirement. The N-series reports screen wall/CPU per directed dyad and its observed/projection share separately; projections from four points are descriptive and must not be treated as asymptotic proof.
 

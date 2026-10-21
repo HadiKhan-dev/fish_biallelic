@@ -131,23 +131,6 @@ class SearchConfig:
         sites) union distinct seeds before admission; a whole group is omitted (reported as
         "data_birth_tie_class_at_budget") when its starts would exceed this multiple of the attempt
         budget (the hard cap).
-    reversed_convention_search: "off" (default), "fragile" or "all": a second search with the
-        reversed sample order and content keys whose panels join the first search's archive
-        (fragile = only blocks meeting the escalation trigger). Off in 2.1 unless simulation truth
-        favours it (owner decision 2).
-    escalation: widen the search once for blocks the base search leaves fragile (selected K >=
-        escalate_min_k, a cavity margin over the best other K below escalate_margin nats, or a
-        selection taken inside a tie), keeping every fit, score and archived panel; reported as
-        SearchSummary.escalated. Off in 2.1 unless simulation truth favours it.
-    escalate_beam_width: the beam width of an escalated search (the archive keeps this many panels
-        per K when escalation is on).
-    escalate_replacement_children: the birth-delete replacement generator size of an escalated
-        search.
-    escalate_min_k: a selected K of at least this triggers escalation.
-    escalate_margin: a cavity-score margin (nats) of the selected K over the best other
-        represented K below this triggers escalation.
-    escalate_expansions_percent: an escalated search may run at most this percentage of the
-        expansion backstop more expansions (the "escalation_backstop" limit).
 
     Release 2.3 budgets admit every straddling class through twice the nominal budget; an
     overlarge class is omitted whole and recorded separately from ordinary ranked truncation.
@@ -174,17 +157,6 @@ class SearchConfig:
     data_birth_attempts_factor: int = 3
     data_birth_children_factor: int = 3
     data_birth_tie_budget_factor: int = 2
-    reversed_convention_search: str = "off"
-    escalation: bool = False
-    escalate_beam_width: int = 12
-    escalate_replacement_children: int = 96
-    escalate_min_k: int = 9
-    escalate_margin: float = 10.0
-    escalate_expansions_percent: int = 100
-
-    def __post_init__(self):
-        if self.reversed_convention_search not in ("off", "fragile", "all"):
-            raise ValueError("reversed_convention_search must be 'off', 'fragile' or 'all'")
 
     def data_birth_attempts(self, k: int) -> int:
         """Attempt budget of one data-birth call from a K-row panel."""

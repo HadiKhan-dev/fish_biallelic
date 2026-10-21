@@ -79,6 +79,21 @@ def alt_fraction_rule(population_alt, at_half: bool):
     return rows
 
 
+def alt_fraction_families(population_alt, at_half: bool):
+    """Both coherent hardenings of population-half ties, or one untied row.
+
+    The convention only orders this complete two-member proposal family; tied
+    sites are not independently enumerated. Callers deduplicate resulting starts.
+    """
+    first = alt_fraction_rule(population_alt, at_half)
+    tied = np.abs(np.asarray(population_alt, dtype=np.float64) - 0.5) <= HALF_BAND
+    if not np.any(tied):
+        return (first,)
+    second = first.copy()
+    second[tied] = ~second[tied]
+    return first, second
+
+
 @njit(cache=True)
 def _accurate_sum(values, partials=None):
     """Finite-value expansion sum (the fsum reference, including halfway correction).
@@ -144,6 +159,12 @@ def hardening_fallback(likelihoods):
     samples >= 1/2 (ALT within HALF_BAND of 1/2, 2.0's decision at exactly 1/2)."""
     marginal = sample_sum(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]) / len(likelihoods)
     return alt_fraction_rule(marginal, True)
+
+
+def hardening_fallbacks(likelihoods):
+    """Complete population-half fallback family for soft proposal starts."""
+    marginal = sample_sum(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]) / len(likelihoods)
+    return alt_fraction_families(marginal, True)
 
 
 # Elementary functions (release 2.1): discovery takes log and exp from the C library's scalar functions (math.log /
@@ -875,7 +896,7 @@ def _popcount(value):
     return int((value * np.uint64(0x0101010101010101)) >> np.uint64(56))
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _hamming_distances(hard_calls, minimum_joint):
     """Missing-aware Hamming distance of every record pair: mismatches over jointly called
     sites, 1 when fewer than ``minimum_joint`` sites are called in both (bit-packed)."""
@@ -918,7 +939,7 @@ def _diameter_within(distance, members, bound):
     return True
 
 
-def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=200_000, omissions=None, group_size=len, group_identity=None):
+def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=200_000, omissions=None, group_size=len, group_identity=None, lifted=None):
     """(groups, overflow): cohesive groups of residual records, independent of the record and link order
     (release 2.2; replaces one tie order's clusters plus complete linkage).
 
@@ -931,13 +952,18 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
     one of these cliques: the tied resolutions are carried forward as candidates and the block score decides. Bound:
     at most ``max_groups`` cliques, by whole size classes (capped_by_size), and no cliques at all when there are more
     than ``max_enumeration``; either is reported as ``overflow``. Groups are sorted tuples of record indices, in
-    sorted order."""
+    sorted order. With ``lifted=(anchor_membership_bits, original_record_count)``,
+    identities, size classes and returned tuples refer to original records."""
     n = distance.shape[0]
     if n < 2:
         return (), False
     bound = maximum_hamming + 1e-12
     if n == 2:
-        return (((0, 1),) if float(distance[0, 1]) <= bound else ()), False
+        groups = ((0, 1),) if float(distance[0, 1]) <= bound else ()
+        if lifted is not None:
+            from ._cliques import lift_groups
+            groups = tuple(lift_groups(groups, lifted[0]))
+        return groups, False
     labels, stragglers, tree_groups = level_hdbscan(distance, 2, 1, True)
     # Every cluster of the condensed tree (all density levels, selected or not) within the bound is a group: the
     # excess of mass picks one level per branch, a binary merge order can shift that pick, and the block score can
@@ -955,6 +981,11 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
             pool.update(members)
     groups = sorted(set(groups))
     pool.update(np.flatnonzero(stragglers).tolist())
+    if lifted is not None:
+        from ._cliques import lift_groups
+        # Core groups do not consume the alternative budget, even when a clique
+        # later lifts to one of these same groups.
+        groups = lift_groups(groups, lifted[0])
     overflow = False
     if len(pool) >= 2:
         vertices = sorted(pool)
@@ -966,7 +997,7 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
                     adjacent[second].add(first)
         cliques, work, enumerated = [], 0, True
         components = []
-        compact = group_identity is None and group_size is len
+        compact = lifted is not None or (group_identity is None and group_size is len)
         seen = set()
         for vertex in vertices:
             if vertex in seen:
@@ -995,7 +1026,12 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
             for clique in cliques:
                 unique.setdefault(group_identity(clique), clique)
             cliques = list(unique.values())
-        if compact:
+        if lifted is not None:
+            from ._cliques import screened_lifted_components
+            kept, capped, enumerated, work, clique_count = screened_lifted_components(
+                components, adjacent, int(max_enumeration), int(max_groups),
+                lifted[0], lifted[1], omissions)
+        elif compact:
             from ._cliques import screened_components
             kept, capped, enumerated, work, clique_count = screened_components(
                 components, adjacent, int(max_enumeration), int(max_groups), omissions)
@@ -1155,6 +1191,94 @@ def _partner_routes(subtracted, membership):
     return {route: tuple(indices) for route, indices in routes.items()}
 
 
+def _residual_pool_groups(pool, hard_calls, distance, minimum_joint, config,
+                          cluster_cache, landmark_cache, budget=None, *, isolated=False):
+    """One pool, sharing caches inline or returning isolated worker deltas.
+
+    Concurrent tasks receive a live child budget and read-only cache snapshots.
+    Serial pools use the original caches directly, including entries just computed
+    by earlier pools; no cache copies or delta scans are needed on that path.
+    """
+    local_cluster = dict(cluster_cache) if isolated else cluster_cache
+    local_landmarks = dict(landmark_cache) if isolated else landmark_cache
+    size = len(hard_calls) if pool is None else len(pool)
+    details = []
+    if config.landmark_budget and size > config.landmark_budget:
+        from .landmarks import residual_groups
+        local_calls = hard_calls if pool is None else np.ascontiguousarray(hard_calls[list(pool)])
+        groups, overflow, _ = residual_groups(local_calls, config.landmark_budget, minimum_joint,
+            config, details, 'global residuals' if pool is None else 'partner residual route', local_landmarks)
+    else:
+        local_distance = (distance if pool is None else distance[np.ix_(pool, pool)]) if distance is not None else None
+        if local_distance is None:
+            local_calls = hard_calls if pool is None else np.ascontiguousarray(hard_calls[list(pool)])
+            local_distance = _hamming_distances(np.ascontiguousarray(local_calls), minimum_joint)
+        groups, overflow = _cluster_cached(local_distance, config.max_cluster_hamming, local_cluster,
+            config.max_alternative_groups, config.max_clique_enumeration, config.max_clique_calls, details)
+    if not isolated:
+        return groups, overflow, details, None, None
+    return (groups, overflow, details,
+            {key: value for key, value in local_cluster.items() if key not in cluster_cache},
+            {key: value for key, value in local_landmarks.items() if key != 'bytes' and key not in landmark_cache})
+
+
+def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, omissions):
+    from functools import partial
+    from ..execution.budget import current_budget
+    from .landmarks import _remember_residual_groups
+    records, sites = hard_calls.shape
+    tasks = ([(None, None)] if records >= 2 else [])
+    tasks.extend((route, routes[route]) for route in sorted(routes) if len(routes[route]) >= 2)
+    if not tasks:
+        return {}
+    distance = None
+    if records >= 2 and (not config.landmark_budget or records <= config.landmark_budget):
+        distance = _hamming_distances(np.ascontiguousarray(hard_calls), minimum_joint)
+    # Dense pools share one global matrix and run in source order, as in base24.
+    # At A=256 each dense matrix is at most 8*256**2 bytes; serial global/route
+    # matrices are already covered by the block's clustering_matrix_bytes plan.
+    # Executors, per-pool ledger entries and O(cache) copies cost more than these
+    # small tasks. A landmark pool also runs inline when its live share is one;
+    # large lifted storage is still reserved by screened_lifted_components.
+    dense = not config.landmark_budget or records <= config.landmark_budget
+    if dense or len(tasks) == 1 or current_budget().threads() <= 1:
+        results = {}
+        for route, pool in tasks:
+            groups, overflow, details, _, _ = _residual_pool_groups(
+                pool, hard_calls, distance, minimum_joint, config,
+                inputs.cluster_cache, inputs.landmark_cache)
+            if omissions is not None:
+                omissions.extend(details)
+            results[route] = groups, overflow
+        return results
+    # Record count estimates pool work before geometry exists. Component work is
+    # subsequently ordered by its clique plan, then by its actual output count.
+    order = sorted(range(len(tasks)), key=lambda index: (
+        records if tasks[index][1] is None else len(tasks[index][1])), reverse=True)
+    functions, sizes = [], []
+    for index in order:
+        pool = tasks[index][1]
+        size = records if pool is None else len(pool)
+        anchors = int(config.landmark_budget)
+        geometry = (8*(5*size*anchors+4*anchors*anchors) if anchors and size > anchors
+                    else 8*size*size)
+        sizes.append(geometry + size*sites + 8*1024*1024)
+        functions.append(partial(_residual_pool_groups, pool, hard_calls, distance, minimum_joint,
+                                 config, inputs.cluster_cache, inputs.landmark_cache, isolated=True))
+    completed = [None]*len(tasks)
+    for index, result in current_budget().concurrent(functions, sizes, label='residual geometry pool'):
+        completed[order[index]] = result
+    results = {}
+    for (route, _), (groups, overflow, details, clusters, landmarks) in zip(tasks, completed):
+        if omissions is not None:
+            omissions.extend(details)
+        inputs.cluster_cache.update(clusters)
+        for key, value in landmarks.items():
+            _remember_residual_groups(inputs.landmark_cache, key, value)
+        results[route] = groups, overflow
+    return results
+
+
 def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, limit=None, omissions=None) -> np.ndarray:
     """float64[C, L] soft birth candidates of a complete binary panel, in emission order
     (``config``: ResidualBirthConfig; the block's sites are all kept; ``counter``: optional TieCounter of the
@@ -1175,22 +1299,19 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
     n_records = len(sample_indices)
     # Sources: global clusters, then clusters within each (subtracted row, partner) route.
     sources = []
-    distance = None
+    routes = _partner_routes(subtracted, partner_membership)
+    minimum_joint = max(1, int(math.ceil(config.min_residual_joint_known_fraction * n_sites)))
+    from .search import diagnostic_phase
+    # This parent clock measures exact elapsed wall and mixed process CPU across
+    # parallel pools (including their landmark/counting work). Worker ContextVars
+    # are deliberately not copied; their overlapping phases cannot be exclusive.
+    with diagnostic_phase('lifting_budgeting'):
+        grouped = _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, omissions)
     if n_records >= 2:
-        minimum_joint = max(1, int(math.ceil(config.min_residual_joint_known_fraction * n_sites)))
-        if config.landmark_budget and n_records > config.landmark_budget:
-            from .landmarks import residual_groups
-            groups, overflow, _stats = residual_groups(hard_calls, config.landmark_budget, minimum_joint,
-                                                       config, omissions, "global residuals", inputs.landmark_cache)
-        else:
-            distance = _hamming_distances(np.ascontiguousarray(hard_calls), minimum_joint)
-            groups, overflow = _cluster_cached(distance, config.max_cluster_hamming, inputs.cluster_cache,
-                                               config.max_alternative_groups, config.max_clique_enumeration,
-                                               config.max_clique_calls, omissions)
+        groups, overflow = grouped[None]
         sources.extend(groups)
         if counter is not None:
             counter.note("discovery.residual.group_overflow", inside_tie=overflow)
-    routes = _partner_routes(subtracted, partner_membership)
     if counter is not None:
         sizes = np.count_nonzero(partner_membership, axis=1)
         for kind, decisions, tied in (
@@ -1205,16 +1326,7 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
         pool = routes[route]
         if len(pool) < 2:
             continue
-        if config.landmark_budget and len(pool) > config.landmark_budget:
-            from .landmarks import residual_groups
-            local_groups, overflow, _stats = residual_groups(hard_calls[list(pool)], config.landmark_budget,
-                minimum_joint, config, omissions, "partner residual route", inputs.landmark_cache)
-        else:
-            sub_distance = (distance[np.ix_(pool, pool)] if distance is not None else
-                            _hamming_distances(np.ascontiguousarray(hard_calls[list(pool)]), minimum_joint))
-            local_groups, overflow = _cluster_cached(sub_distance, config.max_cluster_hamming, inputs.cluster_cache,
-                                                     config.max_alternative_groups, config.max_clique_enumeration,
-                                                     config.max_clique_calls, omissions)
+        local_groups, overflow = grouped[route]
         if counter is not None:
             counter.note("discovery.residual.group_overflow", inside_tie=overflow)
         for local in local_groups:

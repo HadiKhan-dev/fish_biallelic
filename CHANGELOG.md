@@ -1,5 +1,97 @@
 # Changelog
 
+## 2.5.0 (21 October 2026)
+
+Release 2.5 changes the discovery stage. Discovery is practical at large sample sizes, and population-half
+proposal starts are independent of any hardening convention. Released results on TroMau and the simulations are
+those of 2.3/2.4 except in rare population-half blocks.
+
+### Discovery speed at large N
+- 2.3 and 2.4 had a residual-group tail. At N=320 a few blocks took tens of minutes each: chr1 of an N=320
+  simulation took 2,476.9 s against 79.1 s in 2.2, and the tail made whole runs impractical. Residual alternatives
+  are now counted and deduplicated as exact packed original-record memberships before Python groups are built.
+  Component admission, complete size classes, omissions and every released decision are unchanged. The adverse
+  N=320 block falls from 1,625.9 s and 54.4 GiB to 9.8 s and 2.1 GiB.
+- Small residual pools and clique counts run inline. Larger independent pools share the live CPU budget, so
+  freed cores pass to unfinished work.
+- Fixed-K fitting uses guarded fractional-founder reductions. Wherever a decision could depend on them, the
+  accurate-sum path decides.
+- Discovery hands borrowed CPU threads to waiting block workers at its existing claim boundaries. Other stages
+  keep their scheduling policy.
+- Discovery wall time on the five N-series chromosomes (76-core Ice Lake nodes):
+  - N=160: 7,973 s in 2.4, 235 s in 2.5 (34x faster);
+  - N=320: 10,266 s in 2.4, 369 s in 2.5 (28x faster);
+  - std_n80 (eight chromosomes): 367 s in 2.3, 331 s in 2.5.
+
+### Population-half proposals
+- Both coherent hardenings of population-half ties are evaluated as one proposal family, and duplicate starts
+  are removed before fitting and admission. Budgets and co-winning alternatives are unchanged. Blocks without
+  such ties are unchanged. On TroMau one block of 9,979 changes its panel, and the change does not reach the
+  assembled founders, paintings or pedigree. Truth effects on low-coverage tests are small and mixed, and no
+  accuracy gain is claimed.
+
+### Diagnostics
+- Expansion and score backstops are reported separately from ranked truncation and omitted tied classes.
+- Search records persist archive-maximum K, block and phase wall and CPU times, and selected versus
+  other-panel mean-field failures.
+- Completed discovery blocks and their diagnostics are checkpointed every 64 blocks, or on the first completion
+  at least 30 seconds after the last flush, so a stopped run keeps nearly all finished blocks.
+
+### Removed modes
+- The optional reversed-convention second search and its escalation are removed. The default search, the
+  dense-geometry reference and acceptance-only reversal checks remain. Historical mode metadata still decodes.
+
+### Findings
+- Landmark (A256) and dense residual geometry agree in all 60 tested comparisons, including 20 landmark-active
+  N=320 blocks.
+- The TroMau chr1 and chr23 pseudo-truth regressions from 2.2 to 2.3 come mainly from long-range identity
+  propagation in chromosome assembly. Block-level discovery is about equal on chr1 and better on chr23.
+  Assembly is outside this release.
+- Simulated K30 is under-K in 200 of 200 blocks, driven by rare founders: an information limit at N=80. K6 misses
+  are near-twin founders. No tested wrong K lies within the score quantum. A broader complete-family eligibility
+  policy worsened all four tested cases, so the selection objective is unchanged.
+- A normalized shared-sequence panel prior was implemented exactly, including unobserved founder cells, and
+  validated end to end. Gains on K30 were large: genotype wrong-or-missing -28% and founder called errors -2,911. Across seven
+  held-out simulations, genotype wrong-or-missing fell 10.6%.
+  But it failed the predeclared gates:
+  - final founder accuracy was worse at N=80, with wrong-or-missing alleles +24%;
+  - surplus-K blocks increased at N=80, at N=320 and in the backcross;
+  - on K30 the called-genotype error rate rose 12% and phase switch errors rose from 192 to 272;
+  - TroMau mismatches against the G0 pseudo-truth rose 5.5%.
+  It is not included, and it remains the leading research item for high-K designs.
+- 2.2 against 2.3 on seven paired simulations:
+  - common-called genotype errors are identical in five;
+  - K30 and backcross trade small genotype changes against founder recovery and phase continuity;
+  - phase sets are more and shorter;
+  - f3 gains four wrong parent edges.
+
+  2.3 is therefore not more accurate overall. On TroMau, mismatches against the G0 v1.4 pseudo-truth fall
+  2.8%, with chr1 and chr23 worse. These later-stage regressions are follow-ups for assembly, pedigree and
+  family phase.
+
+### Operational fix
+- A cache-order-dependent Numba typing crash in family phase is fixed by passing consistent scalar types to the
+  cached frame, block, cavity and polish kernels. Scientific outputs are unchanged.
+
+### Validation
+- **Scientific identity with 2.3 on TroMau:** all 22 chromosomes have identical sites, K, painting switches and
+  crossovers, and no pedigree parent call changes.
+- **Simulations:** std, stress and K20 show no released discovery difference from 2.3. Measured accuracy equals
+  2.3 on all seven paired simulations (std, stress, K20, K30, f3, real-like and backcross). N=160 and N=320 discovery
+  match 2.4 block for block.
+- **Speed work is exact:** successive candidates reproduce every discovery field except timing, plus pedigree,
+  K, switches and crossovers. On a three-chromosome check the exported founder and sample VCFs are byte-identical.
+- **Whole-pipeline scaling (N-series, five chromosomes):** 10.6, 14.6, 22.6 and 45.6 minutes at N = 80, 160, 320
+  and 640. The N=80 run includes about 2 minutes of first-use kernel compilation. The scaling exponent is about 0.8.
+- **TroMau whole pipeline:** 67.7 minutes, against 72.4 minutes for 2.4.
+- **Final accuracy across N (N-series):**
+  - founder haplotypes are reconstructed without error at N >= 160; N=80 has 1,021 wrong-or-missing alleles per
+    million;
+  - genotype errors are 165-194 per million called genotypes;
+  - phase switches are about 1 per million heterozygous sites;
+  - there are no false parent edges.
+- **Sample order:** TroMau with a permuted VCF sample order gives identical outputs.
+
 ## 2.4.0 (20 October 2026)
 
 Release 2.4 changes the evidence stage only. Evidence products on all 22 TroMau chromosomes are identical to 2.3,

@@ -9,6 +9,7 @@
 A contig is complete when every block index 0 .. B-1 is in some chunk. No genotype likelihoods
 are stored (blocks reference the evidence record by site span).
 
+Release 2.5: optional archive/timing/failure diagnostics; no schema bump.
 Release 2.3: search summaries also hold search_incomplete, omissions and unresolved (defaults decode older records).
 Release 2.2: blocks also hold latent_unknown (founder alleles no assigned carrier observes) and the tied alternatives
 (tied_panels, tied_panel_nll, tied_unknown; recorded stacked with their founder counts tied_panel_k); 2.1 payloads
@@ -18,6 +19,8 @@ tied_alternatives, score_margin and tie_events (search.SearchSummary); 2.0 paylo
 defaults. The SCHEMA stays 1 (the stage identity carries the code digest, so 2.1 never resumes 2.0 records).
 """
 from __future__ import annotations
+
+import time
 
 import numpy as np
 
@@ -32,6 +35,8 @@ PLAN = "discovery/plan"
 CHUNK_PREFIX = "discovery/blocks/"
 # Completed blocks per chunk record (a kill loses at most the unwritten blocks of one chunk).
 CHUNK_BLOCKS = 64
+# Flush a partial chunk on the next completion after this much elapsed wall time.
+CHUNK_FLUSH_SECONDS = 30.0
 
 
 def chunk_key(ordinal: int) -> str:
@@ -79,8 +84,18 @@ def encode(block: DiscoveredBlock | None):
             score_margin=float(summary.score_margin),
             search_incomplete=bool(summary.search_incomplete), unresolved=bool(summary.unresolved),
             omissions=[dict(item) for item in summary.omissions],
+            **diagnostic_fields(summary),
             tie_events={str(kind): {str(name): int(value) for name, value in counts.items()}
                         for kind, counts in summary.tie_events.items()}))
+
+
+def diagnostic_fields(summary) -> dict:
+    """Fixed-size measured fields; None/empty buckets mean unavailable in old data."""
+    return dict(archive_max_k=summary.archive_max_k,
+                wall_seconds=summary.wall_seconds, cpu_seconds=summary.cpu_seconds,
+                phase_seconds={name: dict(values) for name, values in summary.phase_seconds.items()},
+                selected_mean_field_failures=summary.selected_mean_field_failures,
+                other_mean_field_failures=summary.other_mean_field_failures)
 
 
 def decode(payload) -> DiscoveredBlock | None:
@@ -110,17 +125,20 @@ def decode(payload) -> DiscoveredBlock | None:
 
 
 class ChunkWriter:
-    """Completed blocks recorded CHUNK_BLOCKS at a time; chunk numbers stay contiguous across
-    resumes and advance only after a successful put (discovery B1)."""
+    """Record completed blocks by count or elapsed time checked at each completion.
+
+    Chunk numbers stay contiguous across resumes and advance only after a successful put (discovery B1).
+    """
 
     def __init__(self, file):
         self.file = file
         self.next_ordinal = len(file.keys(CHUNK_PREFIX))
         self.pending: list = []
+        self.last_flush = time.monotonic()
 
     def add(self, index: int, block: DiscoveredBlock | None) -> None:
         self.pending.append((int(index), block))
-        if len(self.pending) == CHUNK_BLOCKS:
+        if len(self.pending) >= CHUNK_BLOCKS or time.monotonic() - self.last_flush >= CHUNK_FLUSH_SECONDS:
             self.flush()
 
     def flush(self) -> None:
@@ -131,6 +149,7 @@ class ChunkWriter:
             blocks=[encode(block) for _, block in self.pending]), nthreads=1)
         self.next_ordinal += 1
         self.pending = []
+        self.last_flush = time.monotonic()
 
 
 def planned_blocks(file) -> int | None:

@@ -143,12 +143,15 @@ def _read(value):
 class PoolCounters:
     """The shared state of one pool's thread shares (created by the pool's parent, passed to its workers)."""
 
-    def __init__(self, context, total: int, processes: int):
+    def __init__(self, context, total: int, processes: int, *, yield_to_waiters: bool = False):
         value = context.Value
         self.total = value("i", int(total))        # raised while a live parent budget grows
         self.active = value("i", 0)                # workers inside a task
         self.claimed = value("i", 0)               # retained numerical-team claims
         self.admission = context.Condition(self.claimed.get_lock())
+        # Optional discovery policy; only memory-admitted workers enter begin_task.
+        # The admission lock protects this count; default pools retain the old policy.
+        self.waiting = value("i", 0, lock=False) if yield_to_waiters else None
         self.extra = value("i", 0)                 # remainder claims held
         self.started = value("i", 0)               # tasks started in the current batch
         self.participants = value("i", 0)          # distinct workers started in the current batch
@@ -201,8 +204,14 @@ class _PoolSeat:
         """Reserve one CPU before admission, then register the task with the start-up gate."""
         c = self.counters
         with c.admission:
-            while _read(c.claimed) >= _read(c.total):
-                c.admission.wait()
+            if c.waiting is not None:
+                c.waiting.value += 1
+            try:
+                while _read(c.claimed) >= _read(c.total):
+                    c.admission.wait()
+            finally:
+                if c.waiting is not None:
+                    c.waiting.value -= 1
             c.claimed.get_obj().value += 1
             self.claimed = 1
             with c.active.get_lock():
@@ -295,6 +304,15 @@ class _PoolSeat:
 
     def apply(self, max_threads: int | None = None) -> int:
         """Recompute the share and apply it to the calling thread's Numba team; return it."""
+        c = self.counters
+        if c.waiting is not None:
+            with c.admission:
+                waiting = _read(c.waiting)
+                if waiting:
+                    # This owner boundary immediately resizes the Numba team below.
+                    # Pure share()/threads() queries must retain running-team claims.
+                    fair = max(1, _read(c.total) // max(1, _read(c.active) + waiting))
+                    max_threads = fair if max_threads is None else min(int(max_threads), fair)
         numba = _numba()
         n = min(self.share(max_threads), numba.config.NUMBA_NUM_THREADS)
         current = int(numba.get_num_threads())

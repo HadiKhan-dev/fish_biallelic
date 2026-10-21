@@ -43,7 +43,7 @@ def _constrained_block(group, lo, hi, constraint, potentials, genotype, selector
     if not n:
         return
     base, table = np.empty((n, 4)), np.empty((n, 2, 2, 2))
-    ms._block_terms(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent,
+    ms._block_terms(group, np.int64(lo), end, potentials, genotype, selector, frame, orientation, roots, group_parent,
                     group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                     log_miss, base, table, cavities)
     for j in range(n):
@@ -55,8 +55,8 @@ def _constrained_block(group, lo, hi, constraint, potentials, genotype, selector
     left = selector[group, marker_sites[a - 1]] if a > first else -1
     right = selector[group, marker_sites[b]] if b < stop else -1
     new_s, new_g = np.empty(n, dtype=np.int8), np.empty(n, dtype=np.int8)
-    ms._block_path(group, child, lo, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                   a, b, left, right, new_s, new_g, reverse, True)
+    ms._block_path(group, child, np.int64(lo), base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
+                   a, b, np.int64(left), np.int64(right), new_s, new_g, np.bool_(reverse), np.bool_(True))
     if cavities is not None:
         old_g = genotype[child, lo:end].copy()
         old_s = selector[group, lo:end].copy()
@@ -64,7 +64,7 @@ def _constrained_block(group, lo, hi, constraint, potentials, genotype, selector
     genotype[child, lo:end] = new_g
 
     if cavities is not None:
-        ms.cavity_counts.update_group(cavities, group, lo, old_g, old_s, genotype, selector)
+        ms.cavity_counts.update_group(cavities, group, np.int64(lo), old_g, old_s, genotype, selector, np.bool_(False))
 
 
 @njit(cache=True, parallel=True, nogil=True)

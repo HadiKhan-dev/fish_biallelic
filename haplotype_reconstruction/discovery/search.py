@@ -9,7 +9,10 @@ Computational omissions are recorded separately from complete fitted alternative
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
+import time
 
 import numpy as np
 
@@ -24,9 +27,99 @@ from .residual_births import ResidualInputs
 
 # Relative K of the moves a search step generates (death, same-K, birth, bridge).
 _MOVE_OFFSETS = (-1, 0, 1, 2)
-# Content keys of the reversed tie convention: the complemented 0/1 row bytes (reverse lexicographic order of
-# equally long keys).
-_COMPLEMENT = bytes.maketrans(bytes([0, 1]), bytes([1, 0]))
+# Fixed block-local buckets, not an event stream. Geometry routines enter
+# diagnostic_phase locally; outside a timed block it is a no-op.
+_PHASES = ("fitting", "landmarks", "clique_counting", "lifting_budgeting", "cavity", "idle_admission")
+_DIAGNOSTICS = ContextVar("discovery_diagnostics", default=None)
+
+
+class BlockDiagnostics:
+    """Exclusive wall/process-CPU times in a single block worker.
+
+    Fitting includes surrounding search/release orchestration not inside a more
+    specific bucket. CPU includes the worker's numerical threads, not other
+    processes. idle_admission is elapsed dispatch preparation/admission/transport
+    to worker entry plus the initial thread claim. Waiting for an undispatched
+    pool slot is excluded. Block wall time starts at dispatch preparation when
+    run in the pool, or at direct in-memory entry otherwise.
+    """
+
+    def __init__(self, dispatched_at=None):
+        self.wall = dict.fromkeys(_PHASES, 0.0)
+        self.cpu = dict.fromkeys(_PHASES, 0.0)
+        self.phase = "fitting"
+        self.wall_at = self.wall_start = time.perf_counter()
+        self.cpu_at = self.cpu_start = time.process_time()
+        if dispatched_at is not None:
+            self.wall_start = dispatched_at
+            self.wall["idle_admission"] = self.wall_at - dispatched_at
+
+    def switch(self, phase):
+        wall, cpu = time.perf_counter(), time.process_time()
+        self.wall[self.phase] += wall - self.wall_at
+        self.cpu[self.phase] += cpu - self.cpu_at
+        self.wall_at, self.cpu_at = wall, cpu
+        previous, self.phase = self.phase, phase
+        return previous
+
+    def summary_fields(self):
+        self.switch(self.phase)
+        return dict(wall_seconds=self.wall_at - self.wall_start,
+                    cpu_seconds=self.cpu_at - self.cpu_start,
+                    phase_seconds={name: dict(wall=self.wall[name], cpu=self.cpu[name]) for name in _PHASES})
+
+
+@contextmanager
+def diagnostic_block(dispatched_at=None):
+    """Use one clock per block; nested search/release calls share it."""
+    current = _DIAGNOSTICS.get()
+    if current is not None:
+        yield current
+        return
+    current = BlockDiagnostics(dispatched_at)
+    token = _DIAGNOSTICS.set(current)
+    try:
+        yield current
+    finally:
+        _DIAGNOSTICS.reset(token)
+
+
+@contextmanager
+def diagnostic_phase(name):
+    """Charge a named discovery phase exclusively (nested phases subtract)."""
+    current = _DIAGNOSTICS.get()
+    if current is None:
+        yield
+        return
+    previous = current.switch(name)
+    try:
+        yield
+    finally:
+        current.switch(previous)
+
+
+def contextual_omissions(items, k, phase):
+    """Copy geometry omission scopes; never mutate cached generator receipts."""
+    return [dict(item, scope=f"{item['scope']}; generating K={k} phase={phase}")
+            if "landmark" in item["cause"] or "clique" in item["cause"] else item for item in items]
+
+
+def backstop_counts(summary):
+    """Block indicators, separating ordinary truncation from omitted ties.
+
+    Accept a decoded summary or its saved mapping. Stop reasons also cover old
+    expansion records whose omission list was not yet persisted.
+    """
+    get = summary.get if isinstance(summary, dict) else lambda key, default=None: getattr(summary, key, default)
+    causes = {item["cause"] for item in get("omissions", ())}
+    expansion_ranked = "expansion_ranked_truncation" in causes
+    expansion_tied = "expansion_tie_class_at_budget" in causes
+    score_ranked = "exact_score_ranked_truncation" in causes
+    score_tied = "exact_score_tie_class_at_budget" in causes
+    return dict(expansion_backstop=int(get("stop_reason") == "expansion_backstop" or expansion_ranked or expansion_tied),
+                exact_score_backstop=int(score_ranked or score_tied),
+                expansion_ranked_truncation=int(expansion_ranked), expansion_tie_class_at_budget=int(expansion_tied),
+                exact_score_ranked_truncation=int(score_ranked), exact_score_tie_class_at_budget=int(score_tied))
 
 
 @dataclass(frozen=True)
@@ -49,8 +142,7 @@ class SearchSummary:
         without improvement (a local certificate, not a global one).
     Release 2.1 (defaults keep 2.0 records decodable):
     tie_quantum: the block's ``nll`` tie quantum (selection and archive orders).
-    escalated: the escalation ran (SearchConfig.escalation).
-    conventions: searches pooled (2 when the reversed-convention search ran).
+    escalated, conventions: historical metadata only; the alternative modes were removed in 2.5.
     ambiguous: the winning cavity class after the wide-class rule and smaller-K prior has alternatives.
     tied_alternatives: the number of other members of that complete fitted set.
     score_margin: the selected score minus the best other represented K's score (inf if none).
@@ -60,6 +152,12 @@ class SearchSummary:
         kind is tie_class_at_budget or ranked_truncation. Ordinary lower-ranked truncations are
         recorded but do not set search_incomplete or limits.
     unresolved: no scored incumbent exists; release an empty panel only in this case.
+    archive_max_k: largest K ever added to the archive, even if subsequently pruned.
+    wall_seconds, cpu_seconds, phase_seconds: optional block timings (BlockDiagnostics).
+    selected_mean_field_failures: held-out site solves whose starts all failed, summed over
+        the complete winning set, including tied selected alternatives.
+    other_mean_field_failures: the same count over uniquely scored cached panels outside
+        that winning set (including panels no longer in the archive). Old records use None.
     """
 
     k_values: np.ndarray
@@ -85,6 +183,13 @@ class SearchSummary:
     search_incomplete: bool = False
     omissions: tuple = ()
     unresolved: bool = False
+    # None means not measured in older records, not zero work/failures.
+    archive_max_k: int | None = None
+    wall_seconds: float | None = None
+    cpu_seconds: float | None = None
+    phase_seconds: dict = field(default_factory=dict)
+    selected_mean_field_failures: int | None = None
+    other_mean_field_failures: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +247,9 @@ def search_block(likelihoods, observed, config, *, sample_ids=None) -> BlockSear
     if order is not None:
         likelihood = np.ascontiguousarray(likelihood[order])
         observed = np.ascontiguousarray(observed[order])
-    result = _search(likelihood, observed, config)
+    with diagnostic_block() as diagnostics:
+        result = _search(likelihood, observed, config)
+        result = replace(result, summary=replace(result.summary, **diagnostics.summary_fields()))
     if order is None or result.selected is None:
         return result
     inverse = inverse_permutation(order)
@@ -164,7 +271,7 @@ def select_scores(values, quantum: float, content):
 
 class _Archive:
     """Per K the retained panels in decision order: tie classes of NLL (kind ``nll``), the content
-    key inside a class labels members (forward: canonical key; reverse: complement). Each add
+    key inside a class labels members. Each add
     receives a complete proposal round. The retained list combines previous members and the new
     arrivals before a whole-class cut at ``width``; a straddling hard-bound class is omitted whole."""
 
@@ -259,14 +366,12 @@ class _Archive:
 
 
 class _Search:
-    """One search of a block under one tie convention (+1 forward, -1 reversed: the caller passes
-    the samples in reversed canonical order and content keys are complemented)."""
+    """One search of a block in canonical sample order."""
 
-    def __init__(self, likelihood, observed, config, convention: int = 1):
+    def __init__(self, likelihood, observed, config):
         search = config.search
         self.config = config
         self.search = search
-        self.convention = int(convention)
         self.likelihood = likelihood
         self.observed = observed
         self.active = np.ascontiguousarray(observed.any(axis=1))
@@ -274,10 +379,7 @@ class _Search:
         self.quanta = BlockQuanta.for_scale(
             block_scale(likelihood, observed, config.model.unknown_copy_penalty))
         self.counter = TieCounter()
-        if self.convention > 0:
-            self.content = lambda solution: solution.key
-        else:
-            self.content = lambda solution: solution.key.translate(_COMPLEMENT)
+        self.content = lambda solution: solution.key
         self.workspace = prepare_workspace(likelihood, observed, config.model, self.quanta)
         self.growth = growth_inputs(likelihood, observed, self.counter)
         self.residual_inputs = ResidualInputs(likelihood, observed)
@@ -285,8 +387,6 @@ class _Search:
         self.cavity_workspace = CavityWorkspace(
             likelihood if bool(self.active.all()) else likelihood[self.active], config.cavity)
         width = search.beam_width
-        if search.escalation:
-            width = max(width, search.escalate_beam_width)
         self.archive = _Archive(width, self.quanta, self.content, self.counter, observed)
         self.beam_width = int(search.beam_width)
         self.replacement_limit = int(search.max_replacement_children)
@@ -301,7 +401,6 @@ class _Search:
         self.limits: list[str] = []
         self.exact_scores = 0
         self.cache_hits = 0
-        self.score_backstop_factor = 1
         self.mean_field_failed = False
         self.ordinary_expanded: set[bytes] = set()
         self.residual_expanded: set[bytes] = set()
@@ -314,7 +413,6 @@ class _Search:
         self.heuristic_cuts = False
         self.stop_reason = ""
         self.expansions = 0
-        self.escalated = False
         self.data_starts = 0
 
     # ---------------------------------------------------------------------------------- scoring
@@ -334,7 +432,7 @@ class _Search:
         Cached members never allow a prefix of the new class to displace the incumbent.
         """
         omitted = stopped = False
-        backstop = self.search.exact_score_backstop(self.archive.max_k) * self.score_backstop_factor
+        backstop = self.search.exact_score_backstop(self.archive.max_k)
         for k in sorted(self.archive.beams, key=lambda value: (abs(value - preferred_k), value)):
             group = self.archive.first_class(k)
             if not group:
@@ -353,7 +451,9 @@ class _Search:
                 omitted = stopped = True
                 continue
             self.cache_hits += len(group) - len(novel)
-            for score in score_solutions(self.cavity_workspace, novel, self.active):
+            with diagnostic_phase("cavity"):
+                scored = score_solutions(self.cavity_workspace, novel, self.active)
+            for score in scored:
                 self.score_cache[score.solution.key] = score
                 if score.mean_field_failures:
                     self.mean_field_failed = True
@@ -421,6 +521,7 @@ class _Search:
     def start(self) -> None:
         data_solutions = initial_solutions(self.workspace, self.likelihood, self.active,
                                            self.config, counter=self.counter, omissions=self.omissions)
+        self.omissions = contextual_omissions(self.omissions, 1, "initial")
         self.limits.extend(item["cause"] for item in self.omissions if item.get("kind") != "ranked_truncation")
         self.data_starts = len(data_solutions)
         self.archive.add(data_solutions)
@@ -463,14 +564,14 @@ class _Search:
                 generated.extend(moves.children)
                 births.extend(moves.births)
                 local_limits.extend(moves.limits)
-                omissions.extend(moves.omissions)
+                omissions.extend(contextual_omissions(moves.omissions, parent.k, phase))
             else:
                 result = self.soft(parent)
                 self.residual_calls += 1
                 self.residual_rows += result.emitted
                 generated.extend(result.children)
                 births.extend(result.children)
-                omissions.extend(result.omissions)
+                omissions.extend(contextual_omissions(result.omissions, parent.k, phase))
         self.archive.add(deduplicate(generated))
         if self.refresh(parent_k):
             local_limits.append("exact_score_tie_class_at_budget")
@@ -493,12 +594,12 @@ class _Search:
                 bridge = bridge_score.solution
                 result = data_births(self.workspace, bridge, self.growth,
                                      config.model.max_iterations, search, counter=self.counter)
-                omissions.extend(result.omissions)
+                omissions.extend(contextual_omissions(result.omissions, bridge.k, "bridge"))
                 paired.extend(child for child in result.children if child.k == parent_k + 2)
                 result = self.soft(bridge)
                 self.residual_calls += 1
                 self.residual_rows += result.emitted
-                omissions.extend(result.omissions)
+                omissions.extend(contextual_omissions(result.omissions, bridge.k, "bridge"))
                 paired.extend(child for child in result.children if child.k == parent_k + 2)
             paired = deduplicate(paired)
             generated.extend(paired)
@@ -520,34 +621,6 @@ class _Search:
             self.limits.append("mean_field_nonconvergence")
         self.expansions += len(parents)
 
-    def fragile(self) -> bool:
-        """The escalation trigger (on the representatives, 2.0's selection): selected K >=
-        escalate_min_k, a score margin below escalate_margin, or a selection inside a tie."""
-        if not self.scores:
-            return False
-        best, margin, tied = self.margin_and_ties()
-        search = self.search
-        return bool(best.k >= search.escalate_min_k or margin < search.escalate_margin or tied > 0)
-
-    def escalate(self) -> bool:
-        """Widen the search once (beam, replacements) for a fragile block, keeping every fit, score
-        and archived panel; the widened beam is expanded again until exhausted or until
-        escalate_expansions_percent % of the expansion backstop more expansions."""
-        search = self.search
-        if not search.escalation or self.escalated or not self.fragile():
-            return False
-        self.escalated = True
-        self.beam_width = max(self.beam_width, int(search.escalate_beam_width))
-        self.replacement_limit = max(self.replacement_limit,
-                                     int(search.escalate_replacement_children))
-        for collection in (self.ordinary_expanded, self.residual_expanded, self.ordinary_complete,
-                           self.residual_complete, self.no_improvement):
-            collection.clear()
-        self.escalation_limit = self.expansions + max(
-            1, search.expansion_backstop(self.archive.max_k) * int(search.escalate_expansions_percent)
-            // 100)
-        return True
-
     def run(self) -> None:
         self.start()
         if not self.scores:
@@ -564,38 +637,16 @@ class _Search:
             if not parents:
                 self.stop_reason = ("generated_neighbourhood_local_optimum" if not self.limits
                                     else "incumbent_neighbourhood_search_limited")
-                if self.escalate():
-                    continue
                 break
-            budget = self.escalation_limit if self.escalated else search.expansion_backstop(self.archive.max_k)
+            budget = search.expansion_backstop(self.archive.max_k)
             if (self.expansions >= budget and self.expansions > 0) or self.expansions + len(parents) > 2 * budget:
                 kind = "ranked_truncation" if self.expansions >= budget and self.expansions > 0 else "tie_class_at_budget"
-                cause = ("escalation" if self.escalated else "expansion") + "_" + kind
+                cause = "expansion_" + kind
                 self.omit(cause, len(parents), f"K={before.k} {phase} next parent class",
                           token=tuple(sorted(parent.key for parent in parents)), kind=kind)
                 self.stop_reason = "expansion_backstop"
-                if self.escalate():
-                    continue
                 break
             self.expand(parents, phase, before)
-        if self.mean_field_failed:
-            self.limits.append("mean_field_nonconvergence")
-
-    # ---------------------------------------------------------------------------------- pooling
-    def archived(self):
-        """Every retained archived panel (all K, decision order)."""
-        return [panel for k in sorted(self.archive.beams) for panel in self.archive.beams[k]]
-
-    def adopt(self, other: "_Search", index: np.ndarray) -> None:
-        """Pool another search's archived panels (per-sample arrays mapped to this search's sample
-        order by ``index``) into this archive and re-select: within K the NLL classes decide, across
-        K the cavity score (the shared-archive rule). The score backstop doubles."""
-        panels = [_sample_subset(panel, index) for panel in other.archived()]
-        self.archive.add(panels)
-        self.score_backstop_factor = 2
-        preferred_k = self.selected().k if self.scores else 1
-        if self.refresh(preferred_k):
-            self.limits.append("exact_score_tie_class_at_budget")
         if self.mean_field_failed:
             self.limits.append("mean_field_nonconvergence")
 
@@ -610,19 +661,10 @@ class _Search:
 
 def _search(likelihood, observed, config) -> BlockSearch:
     """The search of a block whose samples are in canonical order (see search_block)."""
-    forward = _Search(likelihood, observed, config, convention=1)
+    forward = _Search(likelihood, observed, config)
     forward.run()
-    searches = [forward]
-    mode = config.search.reversed_convention_search
-    if mode == "all" or (mode == "fragile" and forward.fragile()):
-        reverse = np.arange(likelihood.shape[0] - 1, -1, -1, dtype=np.int64)
-        second = _Search(np.ascontiguousarray(likelihood[reverse]),
-                         np.ascontiguousarray(observed[reverse]), config, convention=-1)
-        second.run()
-        forward.adopt(second, reverse)          # reverse is its own inverse
-        searches.append(second)
-    omissions = [item for search in searches for item in (*search.omissions, *search.archive.omissions)]
-    limits = [name for search in searches for name in search.limits]
+    omissions = [*forward.omissions, *forward.archive.omissions]
+    limits = list(forward.limits)
     limits.extend(item["cause"] for item in omissions if item.get("kind") != "ranked_truncation")
     unique_limits = tuple(dict.fromkeys(limits))
     best = None
@@ -633,11 +675,8 @@ def _search(likelihood, observed, config) -> BlockSearch:
         _, margin, tied = forward.margin_and_ties()
         winners = forward.winning_scores(values, classes)
         forward.counter.add("discovery.selection", classes)
-        certified = all(any(search.certified(score.solution.key, score.k, unique_limits)
-                            for search in searches) for score in winners)
-    counter = TieCounter()
-    for search in searches:
-        counter.merge(search.counter)
+        certified = all(forward.certified(score.solution.key, score.k, unique_limits) for score in winners)
+    selected_keys = {score.solution.key for score in winners}
     k_values = np.array(sorted(forward.scores), dtype=np.int16)
     stop_reason = forward.stop_reason
     if unique_limits and stop_reason == "generated_neighbourhood_local_optimum":
@@ -647,19 +686,23 @@ def _search(likelihood, observed, config) -> BlockSearch:
         k_log_scores=np.array([max(score.log_score for score in forward.class_scores[int(k)]) for k in k_values],
                               dtype=np.float64),
         natural_k_ceiling=int(forward.ceiling),
-        expansions=int(sum(search.expansions for search in searches)),
+        expansions=int(forward.expansions),
         data_starts=int(forward.data_starts),
-        exact_scores=int(sum(search.exact_scores for search in searches)),
-        exact_score_cache_hits=int(sum(search.cache_hits for search in searches)),
-        residual_calls=int(sum(search.residual_calls for search in searches)),
-        residual_rows=int(sum(search.residual_rows for search in searches)),
+        exact_scores=int(forward.exact_scores),
+        exact_score_cache_hits=int(forward.cache_hits),
+        residual_calls=int(forward.residual_calls),
+        residual_rows=int(forward.residual_rows),
         limits=unique_limits,
-        heuristic_gauge_cuts=bool(any(search.heuristic_cuts for search in searches)),
+        heuristic_gauge_cuts=bool(forward.heuristic_cuts),
         stop_reason=stop_reason, certified=bool(certified),
-        tie_quantum=float(forward.quanta.nll), escalated=bool(forward.escalated),
-        conventions=len(searches), ambiguous=bool(tied > 0), tied_alternatives=int(tied),
-        score_margin=float(margin), tie_events=counter.record(),
+        tie_quantum=float(forward.quanta.nll),
+        ambiguous=bool(tied > 0), tied_alternatives=int(tied),
+        score_margin=float(margin), tie_events=forward.counter.record(),
         search_incomplete=any(item.get("kind") != "ranked_truncation" for item in omissions),
-        omissions=tuple(omissions), unresolved=best is None)
+        omissions=tuple(omissions), unresolved=best is None,
+        archive_max_k=int(forward.archive.max_k),
+        selected_mean_field_failures=sum(score.mean_field_failures for score in winners),
+        other_mean_field_failures=sum(score.mean_field_failures for key, score in forward.score_cache.items()
+                                      if key not in selected_keys))
     alternatives = tuple(score.solution for score in winners if score.solution.key != best.solution.key)
     return BlockSearch(selected=None if best is None else best.solution, summary=summary, alternatives=alternatives)

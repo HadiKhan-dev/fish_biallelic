@@ -117,6 +117,7 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 | discovery and candidate bank | tied A-step states assigned by row order or reduced to their meet | uniform fractional evidence over every tied state in the winning fewest-unknown-copy category; weighted H fields, cavity hold-out and release |
 | discovery and candidate bank | founder updates choose one ordering of exact usage ties (D3) | complete endpoints of two consistent schedules, branching only on an encountered positive-usage tie; shared exact A work and certified identical H transitions, with schedule-specific fit certificates |
 | discovery | dosage argmax chooses a single genotype (D8a) | low/high dosage vectors from the complete winning genotype class seed initial, direct and subtraction proposals; deduplication before unchanged class budgets |
+| discovery | one population-half hardening chooses proposal starts (D8s) | both coherent hardenings are unioned and deduplicated before existing fitting and complete-class budgets; co-winning fits remain represented |
 | discovery | residual chooses one tied dominant partner (D10p) | every eligible partner route receives the original observation once at its original weight; global observations are not multiplied |
 | discovery and candidate bank | first mean-field start wins a training-ELBO tie (D12) | equal weight per eligible endpoint-equivalence class, with mean predictive likelihood within each class before the log; a deliberate change to the approximate predictive functional only in tie cases |
 | local selection ([local_selection.md](local_selection.md)) | the path search starts from the last non-empty source's cavity-best panel | fit every source's cavity tie set, then search the best initial path-objective class, with fewer founders as the prior; compare completed outcomes by that objective |
@@ -147,6 +148,36 @@ These decide exact ties. They are not reversed by the reversal test.
 | pure-mosaic deaths first; flips before swaps | assembly count steps; founder refit | simpler explanations first |
 
 Canonical row orders, panel keys used as identities and the gauge of the two tracks are labels, not choices.
+
+## Status is not ambiguity
+
+Discovery reports ranked truncation, computational incompleteness, unresolved initial
+search, numerical non-convergence and local certification separately; their definitions
+and effects are in [discovery status](discovery.md#interpreting-search-status). Only
+evaluated conflicting alternatives establish biological uncertainty. An omission alone
+cannot justify masking an incumbent. In particular, the 488/9,979 historical TroMau
+blocks with mean-field failure somewhere in scoring do not establish 488 failed selected
+panels. Scientific equivalence checks compare decisions, complete alternatives, calls
+and missingness, while reporting continuous drift; floating-point bit equality is not a gate.
+
+Selected-versus-other failure counts are now persisted; optional reversed search and
+escalation are removed, while acceptance-only diagnostic hooks remain.
+W3's D8s proposal union is accepted, and the bounded D9/order/solver findings are
+recorded below. I6 broader observational-equivalence collapse remains analysis only;
+G0 inclusion is retained.
+
+## D8s family and bounded 2.5 closure
+
+Population-half ties contribute both existing coherent hardenings as one complete family
+for K1 cluster/dosage seeds, data births and soft-residual hardening. All tied sites move
+together between those two members; the algorithm does not enumerate independent sitewise
+completions. Union/dedup precedes existing fitting and complete-class admission. Objectives,
+priors and budget values stay fixed; active paths/counts and calls can change. The accepted
+gates have 4/4 inactive identities and 5/5 active hook-order identities. Low-coverage truth
+differences are small and mixed, accepted without an accuracy-improvement claim; details
+and empirical soft-hardening limits are in [discovery](discovery.md).
+
+Bounded v2.5 discovery analysis closes D9 with 0/5 released changes on three K30 simulated and two TroMau blocks despite 40/81 changed cut sets (28/81 changed best cut weights); the three simulated blocks retain 16,256 calls, 6 called errors and 1,750 wrong-or-missing cells out of 18,000 truth cells. D9p/D3/central sample order has 0/15 released changes in the fresh controls. Across four retained mean-field cases, 5/53 scored panels fail only in losers, with zero selected or nearest-competitor failures; a stricter solve clears 470 failed held-out/site cells with maximum score drift 3.13e-10 and no class, K, panel, alternative or call change. I6 remains analysis only: the captured TroMau binding class has 50 omitted starts, 44 assignment-masked content classes and 50 distinct full-state signatures, so this capture supports no all-future-context quotient. These are bounded evidence closures, not universal invariance or full-pipeline proofs.
 
 ## Remaining conventions
 
@@ -194,8 +225,9 @@ objective classes were unchanged. The existing equivalence scale is retained; no
 threshold is introduced.
 
 The diagnostic hooks remain named so interactions can be tested. Remaining proposal conventions
-include D8s (population-half hardening), D9 (maximum-cut and heuristic vertex order), D9p (proposal
-enumeration), and central content/sample-order diagnostics. The bank's pre-fit start-backstop
+include D9 (maximum-cut and heuristic vertex order), D9p (proposal enumeration),
+and central content/sample-order diagnostics. D8s now orders a complete two-member
+family; both members are retained before admission. The bank's pre-fit start-backstop
 still takes novel starts in enumeration order; its score cap now preserves complete families.
 Other local-selection conventions are listed on its [methods page](local_selection.md#conventions-and-stated-priors).
 D3's two schedules are not all possible schedules, and D8a alone does not establish general

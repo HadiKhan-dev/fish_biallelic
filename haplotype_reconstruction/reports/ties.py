@@ -82,15 +82,24 @@ class _Ambiguity:
         self.margins: list[float] = []
         self.search_incomplete_blocks = self.unresolved_blocks = 0
         self.search_omissions: list[tuple] = []
+        self.backstops = Counter()
+        self.mean_field_measured_blocks = 0
+        self.selected_mean_field_failures = self.other_mean_field_failures = 0
         self.count_calls = self.ambiguous_calls = self.count_cycles = self.undecided_cycles = 0
         self.tied_refits = self.disagreeing_refits = 0
 
     def discovery(self, payload) -> None:
+        from ..discovery.search import backstop_counts
         for block in payload.get("blocks") or ():
             if block is None:                     # uninformative block: no search
                 continue
             search = block["search"]
             self.blocks += 1
+            self.backstops.update(backstop_counts(search))
+            if search.get("selected_mean_field_failures") is not None:
+                self.mean_field_measured_blocks += 1
+                self.selected_mean_field_failures += int(search["selected_mean_field_failures"])
+                self.other_mean_field_failures += int(search["other_mean_field_failures"])
             self.search_incomplete_blocks += int(bool(search.get("search_incomplete", False)))
             self.unresolved_blocks += int(bool(search.get("unresolved", False)))
             self.search_omissions.extend((str(item["cause"]), str(item["scope"]),
@@ -124,6 +133,7 @@ class _Ambiguity:
             setattr(self, name, getattr(self, name) + value)
 
     def record(self) -> dict:
+        from ..discovery.search import backstop_counts
         margins = sorted(self.margins)
         omissions = Counter()
         for cause, scope, count_kind, kind, count in self.search_omissions:
@@ -132,6 +142,10 @@ class _Ambiguity:
             discovery=dict(
                 blocks=self.blocks, ambiguous=self.ambiguous_blocks, tied_alternatives=self.tied_alternatives,
                 search_incomplete=self.search_incomplete_blocks, unresolved=self.unresolved_blocks,
+                backstops={name: self.backstops[name] for name in backstop_counts({})},
+                mean_field_failures=dict(measured_blocks=self.mean_field_measured_blocks,
+                                        selected=self.selected_mean_field_failures,
+                                        other=self.other_mean_field_failures),
                 search_incomplete_fraction=self.search_incomplete_blocks / self.blocks if self.blocks else 0.0,
                 omissions=[dict(cause=key[0], scope=key[1], count_kind=key[2], kind=key[3], count=count)
                            for key, count in sorted(omissions.items())],

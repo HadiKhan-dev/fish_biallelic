@@ -391,7 +391,7 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
     sites = scaffold.shape[1]
     e0, e1 = incoming[i, 0], incoming[i, 1]
     path = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
-                       phase_stay, phase_jump, error, reverse)
+                       phase_stay, phase_jump, error, np.bool_(reverse))
     # Gains are exact interval differences (accept_supported_intervals), never this DP maximum (review B2): an
     # unchanged configuration is not a move.
     different_configuration = False
@@ -420,9 +420,9 @@ def undetermined_frames(vertices, scaffold, frames, selectors, incoming, offsets
     for v in prange(len(vertices)):
         i = vertices[v]
         left = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
-                           phase_stay, phase_jump, error, False)
+                           phase_stay, phase_jump, error, np.bool_(False))
         right = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
-                            phase_stay, phase_jump, error, True)
+                            phase_stay, phase_jump, error, np.bool_(True))
         for j in range(sites):
             f = frames[i, j]
             if (left[j] & 1) != f or (right[j] & 1) != f:

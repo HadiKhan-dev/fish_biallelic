@@ -266,7 +266,7 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
 
 @njit(cache=True, parallel=True, nogil=True)
 def _update_frontier(batch, assignments, unknown_slots, mask, uninformative, genotype_cost_by_sample,
-                     unknown_cost_by_sample, tie, reverse, commuting=None):
+                     unknown_cost_by_sample, tie, reverse, commuting=None, cost_bound=np.inf):
     """Uninformative samples to (U, U), then every panel's one-thread H sweep (parallel over
     panels)."""
     following = batch.copy()
@@ -298,7 +298,8 @@ def _update_frontier(batch, assignments, unknown_slots, mask, uninformative, gen
                     buckets[-1], buckets[0], buckets[5], buckets[6]))
             changes[panel] = fractional_sweep_one_thread(
                 following[panel], order, buckets[0], buckets[1], buckets[2], buckets[3],
-                buckets[4], buckets[5], buckets[6], genotype_cost_by_sample, unknown_cost_by_sample, tie)
+                buckets[4], buckets[5], buckets[6], genotype_cost_by_sample, unknown_cost_by_sample,
+                tie, cost_bound)
             continue
         (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
          n_with_unknown, usage) = founder_buckets(assignments[panel], k)
@@ -434,7 +435,7 @@ def _transition_batch(workspace, matrices, keys, schedule_reverse=False):
         following, changes, usage_ties = _update_frontier(
             batch, assignments, unknown_slots, mask, workspace.uninformative,
             workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample,
-            float(workspace.quanta.h_step), bool(schedule_reverse), commuting)
+            float(workspace.quanta.h_step), bool(schedule_reverse), commuting, workspace.h_term_bound)
     finally:
         if threads != active:
             numba.set_num_threads(active)

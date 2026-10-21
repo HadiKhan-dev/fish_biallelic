@@ -20,6 +20,22 @@ diagnostic product.
 The stage has no user options; its constants are those of `DiscoveryConfig` (`discovery/config.py`),
 listed in [configuration](../configuration.md).
 
+## Current policy and release status
+
+The adopted search uses an archive beam of six, parent-NLL-ranked replacement starts
+with nominal budget 48 and a whole-class straddler ceiling of 96, residual groups with
+nominal budget 64 and ceiling 128, and at most 256 proposal landmarks. These are the
+2.3/2.4 defaults, not a private trial. The 96 replacement ceiling is distinct from the
+historical optional escalation's nominal 96 budget. All observations, including G0 rows,
+remain eligible for fitting and scoring subject to the evidence QC mask. Landmark
+geometry changes proposals above its activation threshold; it is not an exact replacement
+for dense geometry. Scientific identity means equal decisions and released uncertainty,
+with continuous drift well below consequential scales, not equal floating-point bits.
+
+Release 2.5 uses exact packed lifted-group counting, discovery diagnostics
+and mode removal, and the accepted D8s complete proposal family. Bounded scientific
+closures and their limits are recorded below; final full-pipeline validation remains pending.
+
 ## Ties and order (releases 2.1 to 2.3)
 
 No discrete outcome of discovery may depend on floating-point rounding, on perturbations of the genotype
@@ -322,6 +338,28 @@ before the existing whole-class budgets. No REF/ALT or dosage prior is added. Th
 hardening rule (D8s) is separate: this construction alone is not a proof of general REF/ALT relabeling
 invariance.
 
+**Population-half families (D8s).** When population ALT is within the existing HALF_BAND
+of one half, both coherent population hardenings enter as one complete proposal family.
+Every tied site takes the first convention together or its complement together; this is
+not enumeration of all independent sitewise completions. K1 cluster/dosage starts, data
+births and soft-residual hardening union and deduplicate distinct rows before existing
+fitting and whole-class admission. Reversing D8s only orders the same family. Objectives,
+priors, weights, thresholds and budget values are unchanged; existing release carries
+co-winning fitted alternatives. More starts can change active search paths, omission
+counts and released calls, even though the configured budgets and admission rules stay fixed.
+This does not restore a reversed second search or prove general REF/ALT invariance.
+
+The accepted W3 gates preserve inactive products in 4/4 cases and preserve the complete
+released family under D8s hook reversal in 5/5 active cases. Four frozen depth-0.1 fixtures
+have small mixed truth differences against the shipped default, judged not materially worse
+by the coordinator; no accuracy improvement is claimed. In the N320 fixture, common-called
+errors change from 19 to 20 of 508 while wrong-or-missing cells fall from 697 to 694 of
+1,200 truth cells. The std fixture adds four calls and one error while retaining all 112
+common calls at 15 errors; wrong-or-missing falls from 1,103 to 1,100 of 1,200. These are
+bounded founder-truth measurements, not downstream or full-pipeline acceptance. A consequential
+second soft-residual hardening was not reached in those fixtures; that path has source-review
+coverage, not an empirical released-effect gate. Search cost has no general twofold bound.
+
 **Expansions.** Each expansion takes the beam of the selected K, its
 `DiscoveryConfig.search.beam_width = 6` first archived panels.
 
@@ -392,29 +430,32 @@ near-duplicates the better supported one is kept).
 
 ### Replacement admission
 
-The 2.3 candidate retains fitted K + 1 births' NLL ranking. Union and deduplicate all
+The adopted policy retains fitted K + 1 births' NLL ranking. Union and deduplicate all
 one-row-deletion starts within each complete parent NLL class, and remove duplicates already
 seen in earlier classes. A repeated start consumes one slot, in its earliest parent NLL class.
 The ordinary search has nominal budget R = 48 unique replacement starts and admits complete
 classes until it reaches that budget. A straddling class is retained only if adding it keeps the
-cumulative total at most 2R = 96; otherwise the entire class is omitted. Optional escalation,
-when enabled and triggered, uses nominal R = 96 and the same whole-class ceiling of 192.
-Escalation remains off by default. The candidate doubles the nominal ordinary/escalated
-budgets from 24/48 to 48/96; the whole-class policy and parent-NLL ranking are unchanged.
+cumulative total at most 2R = 96; otherwise the entire class is omitted. Optional
+escalation and reversed-convention second search have been removed. The historical
+2.3/2.4 escalation nominal budget of 96 is not a current option. The ordinary 48/96
+whole-class policy and parent-NLL ranking are unchanged.
 A replacement start's own assignment-only NLL C(H) does not change admission priority.
 
 The evaluated alternative globally deduplicates starts and ranks whole classes by their own exact
 assignment-only C(H), using bounded batches without pruning and an exact scalar-score memo. It is
 not the adopted replacement ranking. The isolated own-score arm failed stress truth; parent
 ranking at the provisional parent7 nominal 24/48 budgets also showed a K30 truth regression.
-Neither observation is a release-acceptance claim for the doubled-budget candidate.
+These historical experiments motivated the adopted doubled-budget policy; neither is a
+final-pipeline acceptance result.
 
-The isolated doubled-budget K30 discovery trial reduces called founder errors from 361 to 331,
+In the historical isolated doubled-budget K30 discovery trial, the policy reduces called founder errors from 361 to 331,
 missing truth founders from 900 to 888, missing-inclusive errors from 223,419 to 221,609, and
 blocks with computational omissions from 56 to 3 of 200. All seven founder metrics improve
 on 2.2 in that trial; matched warm wall time increases 11.2%. These are discovery-stage results,
-not final released accuracy. Standard/stress truth, stability and full-run gates for the combined
-candidate remain pending. Larger-budget sensitivity remains a measured limitation.
+not final released accuracy. The adopted A256 component campaign subsequently retained all seven truth metrics in 38
+accuracy cells and passed 56 invariance controls. Final full-pipeline coverage remains
+incomplete as recorded in [performance](../performance.md#validation-coverage-at-freeze).
+Larger-budget sensitivity remains a measured limitation.
 
 Both rankings define bounded searches. The selected objective need not improve monotonically with
 a larger budget: newly found leading NLL classes can change which panels receive cavity comparison.
@@ -435,18 +476,32 @@ are excluded from the search limits. Mean-field nonconvergence is reported separ
 above K = 12 are reported as `heuristic_gauge_cuts` and are not a computational omission.
 
 
-**Switches (off in 2.1).** `DiscoveryConfig.search.escalation` widens the search once for a block the
-base search leaves fragile (selected K >= `escalate_min_k = 9`, a cavity margin over the best other K
-below `escalate_margin = 10` nats, or a selection inside a tie): beam `escalate_beam_width = 12`,
-replacements `escalate_replacement_children = 96`, at most `escalate_expansions_percent = 100` % of
-the expansion backstop more expansions. `DiscoveryConfig.search.reversed_convention_search`
-(`fragile` or `all`) runs a second search with the reversed sample order and complemented content
-keys whose archived panels join the first search's archive; the selection rule is unchanged over the
-pooled archive (within K the NLL classes, across K the cavity score), and the score backstop doubles.
+**One search policy.** Release 2.5 removes optional escalation and the reversed-convention
+second search. Custom Python callers must remove the former SearchConfig mode
+arguments; there is no replacement switch. These internal constants were never supported
+TOML keys. Explicit A=0 dense geometry and acceptance-only convention-reversal diagnostics
+remain available. Historical `escalated` and `conventions` summary metadata still decode;
+new runs record False and 1 respectively.
 
 **Certification.** A selected panel is certified when it was expanded in both phases without any
 limit for every tied winning panel, every K its moves generated is scored, and no move improved the score: a certificate of a
 local optimum within the generated neighbourhood, not of a global one.
+
+## Interpreting search status
+
+| Term | Meaning and consequence |
+| --- | --- |
+| Ranked truncation | Strictly lower-ranked candidates beyond the admitted boundary are not searched. Counts describe the bounded policy; they do not set `search_incomplete`. |
+| Incompleteness | An entire tied boundary class or a computational gate is omitted. An established incumbent remains usable; this flag is not an error rate or biological ambiguity. Counts may include repeated cached visits, not distinct alternatives. |
+| Unresolved | No initial incumbent can be established because all available initial classes are omitted. The block has an empty latent/call panel. |
+| Non-convergence | A numerical solve did not satisfy its convergence criterion. Fixed-K cycles retain their best cycle state; cavity scoring prefers converged starts and uses finite endpoints if none converge. The block flag concerns any scored candidate; separate counts now distinguish the complete winning set from other scored panels. |
+| Certification | A local statement about all tied winners and their generated, scored neighbourhood, subject to the documented numerical and search limits. It is not a global optimum, ancestral-founder truth or accuracy guarantee. |
+
+These conditions are distinct from evaluated ambiguity, where complete competing answers
+remain tied and the release rule preserves their uncertainty. A heuristic gauge family above
+K=12 is reported separately and does not by itself set incompleteness. The saved 2.3 TroMau
+records have 390/9,979 incomplete blocks and 488/9,979 blocks with some scored-candidate
+mean-field non-convergence; selected-panel failure cannot be recovered from those flags.
 
 ## Release rule
 
@@ -481,7 +536,11 @@ Each `DiscoveredBlock` carries a `SearchSummary` (diagnostics; nothing downstrea
 | `heuristic_gauge_cuts` | some expanded panel had K > 12 and used heuristic maximum cuts |
 | `stop_reason`, `certified` | why the search stopped; the local certificate above |
 | `tie_quantum` | the block's `nll` quantum |
-| `escalated`, `conventions` | the escalation ran; the number of pooled searches |
+| `archive_max_k` | largest K ever added to the archive, including subsequently pruned panels; unavailable in old records |
+| `wall_seconds`, `cpu_seconds`, `phase_seconds` | completed-block wall/process-CPU and phase buckets, with parallel geometry in a mixed envelope; unavailable in old records |
+| `selected_mean_field_failures` | held-out site solves with no converged start, summed over the complete winning fitted set including tied alternatives |
+| `other_mean_field_failures` | such failures in uniquely scored cached panels outside that winning set, including pruned panels; cache hits do not duplicate counts |
+| `escalated`, `conventions` | historical mode metadata retained for decoding; new runs use False and 1 |
 | `ambiguous`, `tied_alternatives` | multiple complete panels remain in the winning cavity class after the wide-class rule and smaller-K prior, and how many alternatives |
 | `search_incomplete`, `omissions` | an oversized straddling class or whole gate was omitted; each entry gives `kind`, cause, count, scope and `count_kind`; `ranked_truncation` entries do not set incompleteness |
 | `unresolved` | no incumbent could be established because every available initial candidate class was omitted; the block has an empty latent/call panel |
@@ -491,7 +550,25 @@ Each `DiscoveredBlock` carries a `SearchSummary` (diagnostics; nothing downstrea
 Residual-route diagnostics include `discovery.residual.partner_routes` (original observations and
 multiroute observations), `discovery.residual.partner_route_memberships` (all memberships and those
 beyond one per observation), and `discovery.residual.partner_route_pools` (distinct route pools).
-They report computational routing; they do not withhold calls.
+They report computational routing; they do not withhold calls. Landmark/clique omission
+scopes also record generating K and phase without changing their kinds or counts. Expansion
+and score backstop reports count affected blocks using actual stop reasons/omissions, with
+ordinary ranked truncation and omitted tied classes reported separately.
+
+Block memory estimates are prepared before dispatch. A cheap lookup supplies the estimate
+while each task is timestamped before admission. Block wall starts when a pool task is
+drawn, before memory admission, and ends after allele release; estimate preparation is
+outside that timer. A direct call starts at in-memory entry. `idle_admission` covers dispatch preparation,
+memory admission, transport/startup and the initial thread claim, excluding waiting for an
+undispatched pool slot. CPU covers the worker's numerical threads, not child processes.
+Parent timing buckets are `fitting`, `landmarks`, `clique_counting`, `lifting_budgeting`,
+`cavity` and `idle_admission`; fitting includes otherwise unseparated search/release
+orchestration. Parallel residual geometry is one `lifting_budgeting` envelope with mixed
+worker work, including landmark selection and clique counting. Worker timing contexts
+are not propagated: zero serial geometry buckets do not measure zero worker cost.
+Auxiliary task-wall sums can overlap and must not be added as exclusive elapsed time.
+Heap trimming, checkpoint writes and unfinished killed blocks are excluded. Historical
+unavailable fields decode as None or an empty phase mapping, not fabricated zeros.
 
 ## Records
 
@@ -508,6 +585,13 @@ assignment's unknown copies over the 2 copies of every sample with depth), `nll`
 genotype likelihoods are stored: blocks refer to the evidence record by site span. A contig is
 complete when every block index is recorded; readers are `discovery.records.load`, `complete`,
 `progress` and `founder_panels` (released calls of the informative blocks, for evaluation).
+Completed blocks and their search diagnostics are buffered and committed together in the
+scientific chunks. The writer flushes at 64 pending blocks, or at the next block completion
+when about 30 seconds have elapsed since the last flush; it also flushes the final partial
+chunk. The elapsed-time check is completion-driven, not a background timer: a long gap
+between results can exceed 30 seconds. An interruption preserves committed chunks;
+uncommitted blocks are recomputed on resume. Diagnostics require no separate per-block
+write or fsync. The schema remains 1; normal source/configuration identity rules apply.
 
 ## Implementation and cost
 
@@ -523,8 +607,24 @@ Blocks are independent. One process pool serves every block of every contig, and
 evidence is prepared on a helper thread while the current contig is discovered. Within a block, the
 fixed-K fits of many starts advance together as frontiers over the two memoised schedule maps
 (equal A states and untied transitions are evaluated once) and use up to `discovery.fixed_k.fit.FIT_MAX_THREADS = 16`
-threads, claimed from finished workers at phase boundaries; the cavity kernel runs held-out samples
-in parallel. Every sum over samples or sites runs in a fixed order, so results do not depend on
+threads, claimed at phase boundaries; the cavity kernel runs held-out samples in parallel.
+Discovery alone enables CPU handoff to memory-admitted blocks waiting for their first CPU.
+At the owner's existing apply/claim boundary, borrowed claims can shrink to a fair share
+including those waiters, with the Numba team resized in the same call. Pure share queries
+retain running claims; normal growth resumes as waiters drain. Other stages retain the
+default policy, and memory admission and reservations are unchanged. Small residual work runs inline in source order with shared caches, avoiding
+executor setup, per-pool cache copies and repeated memory-accounting calls for tiny work.
+Pools execute inline when all use dense geometry, only one pool is present, or only one
+budget thread is available. Component jobs with at most 4,096 estimated traversal steps
+and at most 1 MiB scratch also run inline within the block workspace. Storage above
+1 MiB retains an explicit counted reservation. These thresholds affect execution only.
+Substantial independent pools and ordinary or lifted
+clique components use the concurrent path when spare budget threads can help. Estimated
+work orders parallel tasks largest first; counted output sizes govern large-storage
+reservations and materialisation. There is no fixed core split or named-contig scheduling.
+Read-only cache snapshots feed parallel tasks; their deltas, omissions and sources merge
+in original source order. Execution thresholds select scheduling only, preserving admission,
+groups, complete classes and omissions. Every sum over samples or sites runs in a fixed order, so results do not depend on
 thread counts, batch composition or the order in which blocks complete.
 
 Cost in the founder count K, samples N and discovery sites L of one block:
@@ -537,17 +637,51 @@ Cost in the founder count K, samples N and discovery sites L of one block:
 - **Cavity score of one panel**: per site and held-out sample, mean-field sweeps over K founders
   and at most K(K - 1)/2 active edges, and a predictive over O(K^2) states: O(N L K^2) per sweep,
   with exact reuse of equal held-out cases.
-- **Soft-residual births**: pair posteriors O(N K^2 L) and a distance matrix quadratic in the number
-  of residual strands (at most N K).
-- **Search**: an expansion fits O(K) starts (K deaths, at most 2 x 3 x max(16, 2(K + 1)) data-birth
-  starts, bounded gauge, soft and replacement starts), O(N L K^3) of fixed-K work. The number of expansions
-  is set by the local optimum, bounded by the backstop 32 + 8 K_rep plus its whole-class allowance, so the worst case allowed
-  by the backstops is O(N L K^4) per block. The only exponential step, exact maximum cuts, is
-  confined to components of at most 12 rows (at most 2^11 cuts).
+- **Proposal geometry**: K1 pools and residual pools larger than A=256 use the bounded
+  landmark construction described [below](#bounded-proposal-geometry-in-23). A residual
+  pool with R records has sorting and descriptor terms O(R L log R + A R log R),
+  distances O(R A ceil(L/64)), and hierarchy/clique work F(A). Dense pools of size at
+  most A retain exact quadratic geometry; explicit A=0 is the dense reference.
+- **Residual groups**: pair posteriors cost O(N K^2 L). Maximal-clique enumeration can
+  be exponential in A, independently of maximum-cut search. Exact anchor-clique counts
+  admit or omit whole components before lifting; factored sums/products avoid unnecessary
+  enumeration, and a prime-plan bound only orders work. Compiled traversal unions packed
+  original-record memberships, preserving nearest-anchor ties and descriptor multiplicity.
+  Deduplication checks every packed word on a hash collision, then counts unique lifted
+  sizes before the unchanged 64/128 whole-class rule. Only admitted alternative classes
+  become Python groups; core/hierarchy groups join separately outside that budget. This removes
+  base24's A256 limitation of constructing every admitted clique as a Python group before
+  lifted size screening. Packed storage still scales with admitted clique count C times
+  ceil(R/64), plus exact hash storage; traversal/lifting remains graph-dependent. The
+  output budget does not bound all pre-budget work or prove polynomial clique complexity.
+- **Search**: fixed-K work per expansion is roughly O(N L K^3) for O(K) starts at
+  fixed proposal budgets/iteration counts. With a K-scaled expansion backstop this
+  gives an O(N L K^4) fitting term, not a bound on total discovery: geometry, clique
+  families, tied alternatives and solver work must also be counted. Exact maximum
+  cuts are confined to at most 12 rows; larger gauge components use heuristics.
+
+At fixed K, L, A and search/iteration budgets, bounded geometry has nominal O(N log N)
+sample dependence but potentially enormous graph-dependent constants. This is not an
+empirical whole-stage N^1.2 result. Historical matched chr8 discovery took 14.4 s at
+N80 and 1,564.7 s at N320 (580 blocks each); N320 did not finish the whole pipeline
+within 2,700 s. Profiling confirmed the pre-budget construction/lifting bottleneck. On
+the same Ice Lake host with a 24-core allowance, the adverse block fell from 1,625.9 to
+9.8 s and from 54.4 to 2.1 GiB peak RSS, retaining scientific outputs with zero observed
+continuous drift. Baseline per-lift timing wrappers add overhead, so ratios are indicative.
+All 580 N320 chr8 blocks retained saved scientific decisions with zero observed drift in
+76.6 s on 76 Ice Lake cores. The saved 1,564.7 s used 112 AMD EPYC cores and different timer
+boundaries; this is a historical comparison, not a matched-hardware speedup. A later
+matched 76-core Ice Lake comparison measures N320 chr8 at 1,327.6 -> 84.2 s and N160
+at 888.4 -> 48.6 s. Those measurements precede the inline-work and chunk-flush refinements;
+final timings and downstream validation are tracked in [performance](../performance.md).
 
 Assignment-only fits use the same bounded shared-emission frontier as full fits and omit H work.
-The fractional H implementation traverses sample cost rows contiguously and reuses expansion-sum
-scratch while preserving each site's update order, terms and quanta. Its temporary term buffers
+The fractional H implementation traverses sample cost rows contiguously and accumulates
+ordinary cost sums with a conservative error interval. An allele decision is accepted
+only when the interval is clear of every decision boundary; otherwise the accurate
+expansion-sum reference decides. The finite term bound is prepared once per workspace;
+an infinite bound selects the reference path for validation. Per-sample terms, founder
+order, usage sums, quanta, both schedules and stopping rules are preserved. Its temporary term buffers
 use 16NL bytes per concurrently fitted panel. Newly computed dense A arrays feed their immediate
 H sweep without a redundant sparse-to-dense rebuild. Unknown-founder carrier unions use compiled
 Boolean operations, dosage-subtraction starts use equivalent integer array operations, and singleton
@@ -558,14 +692,17 @@ schedules, complete families, cache reuse, chunking and thread counts.
 Residual partner membership adds a temporary uint8 matrix of at most NK^2 bytes plus route indices.
 The evaluated own-score option's 32 MiB scalar memo covers estimated Python keys, values and table
 storage; it is separate from dense A scratch and is not a search budget. Parent-ranked replacement
-admission in this private trial does not use that memo.
+admission does not use that memo.
 
 Memory per block worker is bounded by entry counts of the fit caches (4,096 fits, 16,384
 assignments and transitions), the lazily filled bin-pattern tables, an 8 MiB site tile of the
 cavity kernel (at least one site, O(N K^2)), a 32 MiB chunk of the residual pair posteriors and
-the residual distance matrix. Block tasks read views of the contig's evidence; no per-block
-likelihood copy is made. Completed blocks are recorded in chunks of 64, so an interrupted contig
-resumes with its missing blocks only.
+dense or landmark geometry scratch, plus packed lifted memberships/hash storage reserved
+from actual admitted counts, component scratch and admitted-group decoding. Contig evidence
+is shared, but kept-site selection and sample canonicalisation/neutralisation make private
+block likelihood copies; there is no copy-free per-block guarantee. Completed blocks are
+recorded in chunks of up to 64 with the completion-driven elapsed-time flush described
+above. An interrupted contig resumes with blocks absent from committed chunks.
 
 Each block task reserves its planned peak memory with the run's memory governor before it starts
 (`discovery/stage.py`, `block_task_bytes`): a fixed `discovery.stage.TASK_BASE_BYTES = 536870912` (512 MiB), the
@@ -578,8 +715,7 @@ pages to the system every 32 blocks, or as soon as their resident set reaches 1.
 
 In the earlier implementation benchmark on the package's K-ladder simulation (N = 320), a block took 4.3, 12.1 and
 33.4 CPU seconds at K = 12, 20 and 30 (cavity scoring 73% of it at K = 30), with a worker peak of 0.70 GiB at K = 30
-([performance](../performance.md#founder-counts)). These are not timings of the 2.3 symmetrized
-candidate. On one matched local two-thread TroMau critical block, two unprofiled repetitions of
+([performance](../performance.md#founder-counts)). These historical timings do not measure the adopted 2.3/2.4 search. On one matched local two-thread TroMau critical block, two unprofiled repetitions of
 the exact work-sharing bundle averaged 23.3224 s versus 30.6957 s for its frozen parent-ranking
 reference, a 24.02% reduction, with identical scientific and search summaries. This is evidence for
 that block only. Independent checks matched every returned fit field and certificate in 108 cases
@@ -589,9 +725,20 @@ On matched full nodes with two threads per worker, the exact speedups reduce the
 TroMau sample time from 43.056 to 33.621 s (76 CPUs, IceLake) and K30 from 119.192 to 108.122 s
 (112 CPUs, Sapphire). The resulting ratios to 2.2 are 1.848x and 1.938x, with identical outcomes
 and selected objectives. These sampled fixed-worker measurements do not establish production
-allocation or whole-run performance. Those resource checks, complete pipeline reversal and
-accuracy attribution remain open. Discovery at 2x 2.2 and whole TroMau at 47:59 are timing guides;
-report actual ratios and quality gains for any excess. The whole-run memory limit is 62.55 GiB.
+allocation or whole-run performance. Full TroMau subsequently completed; see the versioned
+[measurements](../performance.md#completed-integration-measurements). Complete pipeline
+reversal and cross-version accuracy attribution are not supplied by those timings. Discovery at 2x 2.2 and whole TroMau at 47:59 are timing guides;
+report actual ratios and quality gains for any excess. The historical 62.55-GiB comparison proxy is not a runtime memory throttle; available
+node memory and normal headroom govern admission.
+
+## Bounded 2.5 scientific closure
+
+Bounded v2.5 discovery analysis closes D9 with 0/5 released changes on three K30 simulated and two TroMau blocks despite 40/81 changed cut sets (28/81 changed best cut weights); the three simulated blocks retain 16,256 calls, 6 called errors and 1,750 wrong-or-missing cells out of 18,000 truth cells. D9p/D3/central sample order has 0/15 released changes in the fresh controls. Across four retained mean-field cases, 5/53 scored panels fail only in losers, with zero selected or nearest-competitor failures; a stricter solve clears 470 failed held-out/site cells with maximum score drift 3.13e-10 and no class, K, panel, alternative or call change. I6 remains analysis only: the captured TroMau binding class has 50 omitted starts, 44 assignment-masked content classes and 50 distinct full-state signatures, so this capture supports no all-future-context quotient. These are bounded evidence closures, not universal invariance or full-pipeline proofs.
+
+D9 remains heuristic above K=12, and D3 still carries only its two documented schedules.
+The closure is a decision against further changes on the bounded evidence, not a proof
+that every graph, sample ordering or failed solve is harmless. No fixed-K or cavity solver
+change is included in W3. G0 inclusion is unchanged.
 
 ## Interpretation and limitations
 

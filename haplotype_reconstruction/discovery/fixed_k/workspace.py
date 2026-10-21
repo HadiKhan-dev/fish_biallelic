@@ -328,6 +328,10 @@ class FixedKWorkspace:
             np.ascontiguousarray(likelihoods, dtype=np.float64), self.observed, self.penalty)
         self.ww_total_cost, genotype_cost, unknown_cost = _capped_update_costs(
             self.cost_ww, self.log_probs, self.observed, self.penalty)
+        # Each fractional H term is a weighted average of these costs. Twice their
+        # largest magnitude bounds the rounded term, including its arithmetic rounding.
+        self.h_term_bound = 2.0 * max(float(np.max(np.abs(genotype_cost), initial=0.0)),
+                                    float(np.max(np.abs(unknown_cost), initial=0.0)))
         # The same capped costs in two layouts: (L, N, c) for the site-parallel H sweep and
         # site-contiguous (N, c, L) for the one-thread founder-outer sweep.
         self.genotype_cost_by_site = np.ascontiguousarray(genotype_cost.transpose(1, 0, 2))

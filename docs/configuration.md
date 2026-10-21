@@ -490,13 +490,6 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `search.data_birth_attempts_factor` | `3` | data births fit at most max(16, 2(K + 1)) x this many starts (the attempt budget; release 2.1 broader births, 3). |
 | `search.data_birth_children_factor` | `3` | data births stop once (K + 1) x this many distinct complete children exist (3). |
 | `search.data_birth_tie_budget_factor` | `2` | data-birth tie groups (samples tied on excess NLL and observed sites) union distinct seeds before admission; a whole group is omitted (reported as "data_birth_tie_class_at_budget") when its starts would exceed this multiple of the attempt budget (the hard cap). |
-| `search.reversed_convention_search` | `'off'` | "off" (default), "fragile" or "all": a second search with the reversed sample order and content keys whose panels join the first search's archive (fragile = only blocks meeting the escalation trigger). Off in 2.1 unless simulation truth favours it (owner decision 2). |
-| `search.escalation` | `False` | widen the search once for blocks the base search leaves fragile (selected K >= escalate_min_k, a cavity margin over the best other K below escalate_margin nats, or a selection taken inside a tie), keeping every fit, score and archived panel; reported as SearchSummary.escalated. Off in 2.1 unless simulation truth favours it. |
-| `search.escalate_beam_width` | `12` | the beam width of an escalated search (the archive keeps this many panels per K when escalation is on). |
-| `search.escalate_replacement_children` | `96` | the birth-delete replacement generator size of an escalated search. |
-| `search.escalate_min_k` | `9` | a selected K of at least this triggers escalation. |
-| `search.escalate_margin` | `10.0` | a cavity-score margin (nats) of the selected K over the best other represented K below this triggers escalation. |
-| `search.escalate_expansions_percent` | `100` | an escalated search may run at most this percentage of the expansion backstop more expansions (the "escalation_backstop" limit). |
 | **residual_births** (ResidualBirthConfig) |  | Soft-residual birth proposals (residual_births.py). Fractions are of the block's sites. |
 | `residual_births.landmark_budget` | `256` | Bounded proposal geometry; zero explicitly selects the dense reference path. |
 | `residual_births.usable_founder_known_fraction` | `0.8` | rows must be known at this fraction of sites to subtract. |
