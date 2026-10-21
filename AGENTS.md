@@ -1011,6 +1011,37 @@ Spend it on tests that can still change a decision.
   turn, or sleep without repeatedly re-reading large state, rather than poll.
   Every poll costs model tokens as well as scheduler or filesystem load.
 
+### Keep allocated nodes busy with useful work
+
+On 21 October 2026 the owner asked to "make sure that the nodes we have
+allocated to us aren't being left idle or underutilised periodically." While a
+campaign is active, the coordinator checks every allocated node about every 30
+minutes. This includes the hosting node, SL4 pool workers and any other
+allocation. A check costs one cheap pass over pool heartbeats, claimed and
+pending tasks, and host load, plus at most one `squeue`. Reuse that pass for the
+other scheduled checks.
+
+- **Idle or underused means** a live pool worker with nothing claimed, a node
+  whose load stays well below its cores while it holds a task, or an allocation
+  with no task at all.
+- **Act on it, in this order:**
+  1. Queue the next useful authorized work in priority order: critical-path
+     tasks first, then validation that can still change a decision.
+  2. Widen running work through dynamic core sharing, so freed cores pass to
+     unfinished tasks.
+  3. Let bounded agent tests use the idle cores of a shared host.
+  4. Release non-SL4 allocations under the release rules. SL4 allocations are
+     kept until they expire.
+- **Do not fill nodes with busywork.** Speculative validation, duplicate runs
+  and superseded tests remain prohibited
+  (**Retire superseded runs; keep validation proportionate**).
+- **The full-node rule still applies:** whole-genome workloads never run on a
+  partial or shared allocation.
+- **Plan ahead.** Order pool tasks so that critical work is claimed first.
+  Keep a short ready queue for nodes about to start.
+- **Record each check** in one status line: workers alive and busy, the queue,
+  host load, and any action taken.
+
 ### Allocation-utilization reassessment
 
 During an authorized long-running computation, periodically reassess whether
