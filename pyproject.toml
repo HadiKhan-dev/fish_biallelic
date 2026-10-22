@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haplotype-reconstruction"
-version = "2.6.0"
+version = "2.7.0"
 description = "Founder-haplotype reconstruction, pedigree, phase and recombination maps for experimental crosses"
 readme = "README.md"
 license = "MIT"
@@ -35,3 +35,4 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "haplotype_reconstruction.config" = ["presets/*.toml"]
+"haplotype_reconstruction.execution" = ["kernel_manifest.json"]

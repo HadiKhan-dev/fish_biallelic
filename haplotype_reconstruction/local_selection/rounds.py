@@ -30,7 +30,7 @@ import time
 import numpy as np
 
 from ..discovery.fixed_k.workspace import search_bytes
-from ..execution import BudgetedPool, claim_threads, memory_worker_limit
+from ..execution import BudgetedPool, claim_threads, memory_worker_limit, reserve_memory
 from ..execution.batch_queue import BatchKind, map_batches, queue_key
 from ..maths.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, improves, tie_classes
 from ..model.local_panels import unknown_copy_mass
@@ -235,13 +235,15 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
                           memo=memo.state() if task.keep_memo else None, summary=summary)
 
 
-# Memory plan of one block task (the governor reservation), calibrated on AulStu chr3 (N 290,
-# L 200, one thread: measured block peaks 0.20-0.23 GB above the worker's baseline at path K 13-19;
-# estimate ~0.6 GB at start K 22) and reconstruct_actm3 chr8 (N 116: a worker's first task, which
-# also loads the kernels, peaks at up to 0.31 GB; later tasks at up to 0.05 GB). The search's panel
-# can outgrow its start by several rows (chr3 initial round: up to +12, mean +3.6), so the
-# trajectories are planned for SEARCH_GROWTH more.
-TASK_BASE_BYTES = 320 << 20
+# Private process residence (runtime, compiled code and retained heap), held until its pool joins.
+# Cold bounded K29 workers retained up to 674 MB after trimming; 768 MiB covers that observed residence.
+WORKER_RESIDENT_BYTES = 768 << 20
+# Active first-use/transient workspace beyond the named arrays below. Historical TroMau incremental
+# RSS reached 3.023 GB with 356 MB named workspace. With the bounded fixture's 106 MB starting private
+# memory, 2 GiB workspace plus 768 MiB residence covers that projection by 180 MB. The archived startup
+# baseline is unavailable; these mixed measurements do not isolate JIT compilation from heap retention.
+TASK_WORKSPACE_BASE_BYTES = 2048 << 20
+# The search can outgrow its initial panel; size transient trajectories for this many extra founders.
 SEARCH_GROWTH = 8
 
 
@@ -266,14 +268,15 @@ def block_task_bytes(task: BlockTask, samples: int) -> int:
     slice, emission tables and lane layouts, the trajectory scratch for the largest panel the
     search may reach (one lane block per thread; planned for a thread per lane block, the most a
     task can claim), the release E-step's batch rows, the candidate bank's discovery workspace
-    (context rounds) and the incoming likelihood memo (and its growth)."""
+    (context rounds) and the incoming likelihood memo (and its growth). Private worker residence is
+    planned and held separately for the pool's lifetime."""
     sites = len(task.columns)
     peak = _founders(task) + SEARCH_GROWTH
     data = 232 * int(samples) * sites
     trajectories = workspace_bytes(sites, peak, threads=-(-int(samples) // LANE_WIDTH))
     release = 4 * 8 * RELEASE_SAMPLE_BATCH * (peak + 1) * sites
     bank = search_bytes(samples, sites, peak) if task.proposals else 0
-    return (TASK_BASE_BYTES + data + trajectories + release + bank
+    return (TASK_WORKSPACE_BASE_BYTES + data + trajectories + release + bank
             + 2 * _memo_bytes(task.memo, sites, peak))
 
 
@@ -332,11 +335,15 @@ def _execute_bundle(payload, cpus):
     likelihoods, observed = payload["arrays"]
     sizes = [block_task_bytes(task, likelihoods.shape[0]) for task, _settings in tasks]
     workers = max(1, min(cpus, len(tasks)))
-    workers = max(1, min(workers, memory_worker_limit(sizes, workers, label="local-fit-bundle")))
-    with BudgetedPool(CpuBudget.fixed(cpus), processes=workers,
-                      shared=dict(likelihoods=likelihoods, observed=observed),
-                      label="local-fit-bundle") as pool:
-        return list(pool.imap_unordered(_select_task, tasks, task_bytes=sizes))
+    planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
+    # The pool's shared copy is one allocation, not one copy per worker. Preserve graded headroom.
+    planned[planned.index(max(planned))] += int(likelihoods.nbytes + observed.nbytes)
+    workers = max(1, min(workers, memory_worker_limit(planned, workers, label="local-fit-bundle")))
+    with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="local-fit-bundle workers"):
+        with BudgetedPool(CpuBudget.fixed(cpus), processes=workers,
+                          shared=dict(likelihoods=likelihoods, observed=observed),
+                          label="local-fit-bundle") as pool:
+            return list(pool.imap_unordered(_select_task, tasks, task_bytes=sizes))
 
 
 LOCAL_FIT = BatchKind(name="local_fit", bundles=_bundles, execute=_execute_bundle)
@@ -352,6 +359,7 @@ def run_round(round_scope, tasks, settings, evidence, budget, *, queue=None, lab
         print(f"[Local selection] {label}: {len(pending)} blocks"
               + (f" ({len(done)} recorded earlier)" if done else ""), flush=True)
         payloads = [(task, settings) for task in pending]
+        pooled_results = None
         try:
             if queue is not None:
                 results = map_batches(LOCAL_FIT, payloads, (evidence.likelihoods, evidence.observed),
@@ -364,29 +372,36 @@ def run_round(round_scope, tasks, settings, evidence, budget, *, queue=None, lab
                 payloads = [(task, settings) for task in pending]
                 sizes = [block_task_bytes(task, evidence.likelihoods.shape[0]) for task in pending]
                 workers = max(1, min(int(budget.threads()), len(payloads)))
-                workers = max(1, min(workers, memory_worker_limit(sizes, workers,
+                planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
+                # Plan the pool's shared copy once, before reserving its worker residence.
+                planned[planned.index(max(planned))] += int(evidence.likelihoods.nbytes + evidence.observed.nbytes)
+                workers = max(1, min(workers, memory_worker_limit(planned, workers,
                                                                   label="local-selection")))
-                pool = BudgetedPool(budget, processes=workers,
-                                    shared=dict(likelihoods=evidence.likelihoods,
-                                                observed=evidence.observed),
-                                    label="local-selection")
-                results = _pooled(pool, payloads, sizes)
+                shared = dict(likelihoods=evidence.likelihoods, observed=evidence.observed)
+                results = pooled_results = _pooled(budget, workers, shared, payloads, sizes)
             for count, selection in enumerate(results, 1):
                 done[selection.index] = selection
                 writer.add(selection)
                 if count % 20 == 0 or count == len(pending):
                     print(f"[Local selection] {label}: completed {count}/{len(pending)}", flush=True)
         finally:
-            writer.flush()
+            try:
+                # An exception while recording a yielded result must close the suspended generator now.
+                if pooled_results is not None:
+                    pooled_results.close()
+            finally:
+                writer.flush()
     writer.complete(len(tasks))
     selections = [done[task.index] for task in tasks]
     _report(selections, label)
     return selections
 
 
-def _pooled(pool, payloads, sizes):
-    with pool:
-        yield from pool.imap_unordered(_select_task, payloads, task_bytes=sizes)
+def _pooled(budget, workers, shared, payloads, sizes):
+    # Both resources start on first iteration; closing an unstarted generator owns no pool or hold.
+    with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="local-selection workers"):
+        with BudgetedPool(budget, processes=workers, shared=shared, label="local-selection") as pool:
+            yield from pool.imap_unordered(_select_task, payloads, task_bytes=sizes)
 
 
 def _report(selections, label):

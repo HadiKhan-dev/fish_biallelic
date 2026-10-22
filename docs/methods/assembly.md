@@ -2,16 +2,16 @@
 
 Assembly turns the path-selected local founder panels of one contig (one small panel per discovery
 block, each with K_b local founder rows) into chromosome-scale founder haplotypes, split only into
-phase components whose boundaries the data cannot bridge. It runs in three steps. Founder
+phase components whose boundaries the data cannot bridge. It prepares local panels and joins them hierarchically. Founder
 completion fixes the prepared panels: the local calls plus the unknown alleles the data determine
 well enough to publish. A hierarchy of levels then joins batches of adjacent components: a
 distance-aware linker fits founder transitions between the blocks of a batch, an endpoint beam
 enumerates candidate chromosome paths, and a certified panel search chooses the batch's founder
 paths, with their number decided by the pipeline's founder-count rule. In the contig's final
-assembly, [founder refinement](founder_refinement.md) re-chooses every component's founders after
-every level. The same computation has two roles: the final assembly (`Role.FINAL`), the stage
+assembly, joined components pass directly to the next level and final output. Founder-path
+refinement is disabled in 2.7, with its source retained for the planned 2.8 rebuild. The same computation has two roles: the final assembly (`Role.FINAL`), the stage
 product that [painting](painting.md) reads, and the context assemblies of local selection's
-feedback rounds (`Role.CONTEXT`, through level 1 or 2 and without refinement), whose components
+feedback rounds (`Role.CONTEXT`, through level 1 or 2), whose components
 seed the next round of [local selection](local_selection.md). No pedigree, cohort label,
 simulation truth or target founder count enters.
 
@@ -21,15 +21,13 @@ simulation truth or target founder count enters.
 |---|---|---|
 | Local panels | the `local_selection/l2` panels (`LocalPanel`, one per informative block) | the panels of the calling round |
 | Levels | until the stop rule ends the loop ([hierarchy](#hierarchy)) | 1 (round `l1`) or 2 (round `l2`), `LocalSelectionConfig.context_levels = (1, 2)` |
-| Founder refinement | after every level | none |
 | Records | under `assembly/` | under `local_selection/l1/assembly` and `local_selection/l2/assembly` |
 
 Every assembly also reads the contig's evidence view and genetic map. The evidence view
 (`assembly/evidence.py`, built once per contig from the evidence record's founder view) holds the
 normalised genotype likelihoods where a sample is observed at a discovery site and exactly 1/3 at
 every other cell (unobserved, not a discovery site, or a sample the contamination QC excluded from
-founder construction). Completion and the batch partition read it in float64; the linker, the joins
-and founder refinement read one float32 copy of the same values. The view also retains compact
+founder construction). Completion and the batch partition read it in float64; the linker and the joins read one float32 copy of the same values. The view also retains compact
 per-sample keys of integer total read depths on founder-visible discovery sites for completion's
 cross-fit partition. Counts are decoded transiently to construct those keys; the full count array
 is not retained by assembly. The genetic map gives the
@@ -40,8 +38,7 @@ ends) and from the fallback rate alone otherwise.
 The product of the final assembly is the record `assembly/final`: the phase components
 (`FounderComponent`, with their count calls) over the prepared panels of `assembly/completion`.
 Other stages and the evaluator read it through `assembly/records.py`: `load_product`,
-`founder_panels(file, level)` (level k: the level-k product after refinement, or the hierarchy
-output where refinement did not run; no level: the final product), `level_records` and
+`founder_panels(file, level)` (level k: the level-k joined product; no level: the final product), `level_records` and
 `join_searches` (the reports' assembly search table). `model.components.materialise` turns
 components into chromosome-scale arrays. Two report tables are written with each contig's painting
 outputs ([painting](painting.md)): `assembly_search.tsv` (every record of the final assembly's join
@@ -68,10 +65,15 @@ component (component-local, with no key objects). `materialise` gives a `Compone
 component: positions, released and inference calls int8[K, L], discovery sites, ALT probabilities,
 supporters, the site offsets of the prepared spans and `source_rows` (two founders that copy the
 same prepared row at a site share one latent allele there). A `CountCall` records a component's
-last count step (founder refinement at the final level): K before and after, each decision (kind,
-K, kept or added, skipped by a bound, margin, bootstrap band, ambiguity), count cycles and the
-overall ambiguity; components with one block or one founder carry the reason
-`single_block_or_founder` instead. Stage inputs are never modified: completion returns prepared
+latest join: K before and after, explicit deletion comparisons and accepted pool births (kind,
+K, kept or added, margin, bootstrap band, ambiguity), count cycles and overall ambiguity.
+Seed and bound work remains in the full join census. A component that never joined has no
+count call; its row count is the local panel's count, with no new confidence claim.
+`founder_counts.tsv` names this source (`join` or `local_panel`). Its `CountStepReason` is
+`join_search_unverified` for unfinished search/verification; `FounderCountAmbiguous` is empty
+when such work is unverified without demonstrated ambiguity. Evaluated different-K alternatives
+remain ambiguous. The latest join's undecided cycles are already in `JoinUndecidedCycles` and
+are not counted again in `UndecidedCountCycles`. Stage inputs are never modified: completion returns prepared
 panels without touching the local panels, and phase breaks are carried on fresh components.
 
 ## Founder completion
@@ -149,7 +151,7 @@ variable shared by every sample, and evidence enters through the robust mixture 
    `AssemblyConfig.completion.maximum_discovery_unknown_mass = 0.0`.
 
 Released fills change only the published calls (`released`, with the fill posterior as ALT
-probability). Every likelihood of the linker, the joins, founder refinement and painting reads the
+probability). Every likelihood of the linker, the joins and painting reads the
 pre-fill `inference` calls, so a fill never strengthens the evidence that produced it, and the count
 rule's row geometry measures distances on the same pre-fill calls
 ([founder-count rule](#founder-count-rule)): a fill changes the published panel, never an assembly
@@ -191,6 +193,21 @@ ascent step, O(N (m^2 + 2^10)) for a core enumeration and O(N m^3) for a radius-
 completion's EM the support of every site is fixed for the whole EM (chosen under the starting pair
 posteriors), so the evidence lower bound stays a lower bound.
 
+Completion retains this support as a centre, an ordered core and sparse flip sets. No growing
+ball is expanded to a configuration-by-founder matrix. Quadratic scores use the value and local
+fields at the centre plus the couplings among the flipped bits. Pair-dosage probabilities use
+single- and joint-flip masses. Their work is O(K^2 + C r^2) per site and update, where C is the
+support size and r its radius. Allele and shell marginals cost O(C r + K^2); cavity log odds use
+positive interval sums of the unchanged support, avoiding subtraction of nearly equal masses.
+Carrier sensitivity still evaluates the mode and its single core flips, O(N U^2).
+
+The exact cube at U <= 10 remains bounded by 1,024 assignments. Larger-radius balls also remain
+inside the existing 1,024-configuration envelope; growing supports have radius three and
+C = 1 + U + choose(U,2) + choose(U,3). Thus completion has at most cubic dependence on K,
+with fixed sample count, block length and existing iteration limits. This changes evaluation
+order only: support, priors, thresholds, convergence rules and released scientific decisions
+are preserved. Continuous agreement is scientific, not bitwise.
+
 ## Hierarchy
 
 Level 1 starts from one single-block component per prepared panel, with every local row as a
@@ -217,9 +234,9 @@ not reduce the component count. A context assembly stops at its level count. The
 runs at least `AssemblyConfig.minimum_levels = 4` levels while they reduce the count, and beyond
 them continues only while some boundary between adjacent components is not a phase break. With
 batches of ten, four levels join up to 10^4 blocks into one component; a longer break-free segment
-is joined at level 5 and above. In the final assembly, founder refinement runs after every level
-and its output is the next level's input; the level at which the assembly stops is its last level,
-the only one at which refinement may add founders.
+is joined at level 5 and above. In both roles, each level's joined components and release
+alternatives are the next level's inputs. The final product is the last joined output.
+There is no later founder-path refit or extra final founder-addition pass.
 
 A component boundary is either a data-unsupported break (the reason above) or carries no reason:
 a chromosome end, or a boundary the hierarchy left unjoined for another reason (a batch without
@@ -267,12 +284,30 @@ samples.
   damped toward the previous transitions: T becomes (1 - eta) T + eta T_target with
   eta = max(0.9^t, 0.1) at iteration t = 0, 1, ... (`AssemblyConfig.linker.learning_rate_decay = 0.9`,
   `AssemblyConfig.linker.minimum_learning_rate = 0.1`), so the first update is undamped. The EM
-  stops when no transition probability and no reverse summary (the column-normalised regularised
-  edge evidence, read only by this stop rule) changes by more than
-  `AssemblyConfig.linker.min_change = 0.001`, and after at most
-  `AssemblyConfig.linker.max_iterations = 20` iterations.
+  stops when the undamped fixed-point residual `max(abs(M(T) - T))` at the returned forward
+  transitions is at most `AssemblyConfig.linker.min_change = 0.001`, with M the regularised
+  forward M-step, or after `AssemblyConfig.linker.max_iterations = 50` applied updates. The
+  cap increases from 20 to 50 in 2.7; tolerance and damping are unchanged. The higher cap
+  allows further fitting but does not guarantee convergence. Column-normalised reverse summaries no
+  longer enter the stopping rule: they are not parameters of this fixed-point problem. A uniform
+  starting point that already satisfies the criterion takes zero updates.
 
-The linker hands the beam the natural logs of the fitted probabilities, rounded to float32. Its
+Each fitted gap persists a `linker_em` event in its join search summary (or the retained-input
+shadow record when the beam cannot establish a joined panel). It records the number of
+updates, whether the iteration cap was reached, whether the fit exhausted the cap without satisfying
+the stopping rule, the last damped **forward** change (absent for zero updates), and the undamped
+fixed-point residual (also per edge). Each iterate's target is computed once and reused for its
+update; there are updates + 1 E/M evaluations, including the final stopping evaluation. `converged`
+means the returned residual is within tolerance; reaching the cap alone does not establish this.
+All incoming parent branches retain these records, including branches that were not selected.
+Existing checkpoints without these events have unmeasured convergence diagnostics; zero must not
+be inferred from their absence. The changed stopping rule can change beam candidates and scientific
+outputs, so it requires validation with the integrated candidate. The optional
+`assembly.linker_em_stop` census now records residual-minus-tolerance distances, matching the
+reported stopping rule rather than the previous damped-change distances.
+Completion retains its own cross-fit diagnostics; these linker records describe boundary fits.
+
+The linker hands the beam the natural logs of the fitted probabilities in float64. Its
 dense propagation and edge counts are cubic in the founder count (O(N (K_i^2 K_j + K_i K_j^2)) per
 edge and iteration); scaled arithmetic with a log-domain fallback implements the same model.
 
@@ -286,9 +321,15 @@ to right and keeps, at every block, at most q paths per endpoint founder
 every kept path tries every founder at block k with the rest fixed, and the pooled candidates are
 selected with the same endpoint quota. Every path selected at any step is archived, so full paths
 through interior states survive; the archive, sorted by score, is the batch's candidate pool C0
-(at most n times the per-block sum of endpoint quotas, linear in K). Candidates are ranked by
-descending score with ties broken by the lexicographic path; scores accumulate in float32 in
+(bounded complete families in 2.7; see below). Candidates are ranked by
+anchored score tie classes with content ordering inside each class; scores accumulate in float64 in
 past-block order. The panel search's tie rules downstream depend on this order.
+
+Release2.7 represents constant-transition Cartesian families without enumeration and stops a
+complete oversized frontier without first-N deletion. A current incumbent is retained and the
+family is released as unresolved continuation. An initial nonconstant forward overflow retains
+the input components unjoined because no joined incumbent yet exists. The binding policy is
+output-changing; [assembly work and memory](assembly_performance.md) describes its bound and gates.
 
 At level 1 every gap enters a step. At later levels the maximum gap is
 max(1, 1 + floor(t / s)), where s is the mean genetic span of the batch's components in
@@ -394,21 +435,32 @@ Certification is relative to this neighbourhood and to the beam's pool, not a gl
 paths the beam never proposes, three-way boundary cycles and multi-founder births lie outside it
 (tier 1 still proposes cycles, and duplicate seeds split chimeras). A founder that is a pure block
 mosaic of other founders within one batch is not carried by that batch; later levels and founder
-refinement can re-split it.
+a later join can reconsider it.
 
-## Context-assembly convention follow-up
+## Equivalent seed histories (2.7)
 
-In a TroMau chr7 propagation check, the global tie-reversal hook changes the L2 context assembly's
-`release_alternatives` record from zero families to one unresolved two-panel family. All incoming
-L1 local panels agree in their compared scientific values, with zero measured continuous drift;
-reversing only the local inner winner does not create this family. This is an assembly convention
-effect, separate from the [local-selection convention checks](local_selection.md#observed-effects-of-the-start-cap-and-inner-winner-order).
+The TroMau chr7 L2 context join exposes a result-selecting convention in 2.6. Two
+accepted duplicate-seed refits reach exactly the same canonical settled panel, but
+only one encounters an unresolved two-panel tier-2 family. The global reversal hook
+changes which equivalent seed witness is selected, so promoting only that witness's
+histories changes `release_alternatives` from zero families to one. A bounded replay
+of saved 2.6 inputs reproduces this while keeping all nominal rows and the join
+likelihood identical. This is separate from the
+[local-selection convention checks](local_selection.md#observed-effects-of-the-start-cap-and-inner-winner-order).
 
-Nominal components and released local calls remain unchanged. The context-refit consumer uses
-the representative components and prepared panels, not this alternatives sidecar. Final founder
-release does consume ambiguity metadata, so the context result does not establish that the same
-effect would be harmless in final assembly. The finding remains an assembly-stage follow-up;
-no assembly remedy or downstream accuracy result follows from this check.
+For a selected seed endpoint, the join now retains the union of unresolved source
+families from every accepted seed candidate with that exact canonical settled panel.
+Equality of likelihood alone does not qualify. Rejected seeds and different endpoints
+do not contribute. This removes the witness-order convention without adding a search,
+changing a count test, or declaring unexplored continuations equivalent. The union
+uses only the candidates and family records already evaluated by the count step.
+
+The context-refit consumer still uses the representative components and prepared
+panels, not the alternatives sidecar. The observed context case therefore has no
+released-local-call change. Final founder release does read ambiguity metadata;
+its existing distinction between evaluated terminal disagreement and unperformed
+continuations remains in force. This fix does not claim a downstream accuracy gain
+or complete coverage of every remaining assembly convention.
 
 ## Live alternatives and founder release (2.3)
 
@@ -431,7 +483,7 @@ after those priors, while every remaining alternative stays recorded.
 
 At the next hierarchy level, all child choices are combined jointly. Two two-way children
 require all four configurations. The higher-level allowance is sixteen complete incoming/search
-leaves per component, shared with same-level refinement; it is never sixteen independent
+leaves per component; it is never sixteen independent
 four-history searches. Each incoming join configuration receives one search execution;
 unperformed inner histories stay flagged. A product larger than sixteen is retained as an explicit
 unresolved domain; no convenient subset is declared decisive. Informative masks are
@@ -442,14 +494,13 @@ Every compared join uses that common sample cohort, usable-site mask and prepare
 excluded sites are also absent from its count geometry. Positions and bin boundaries stay fixed. Each configuration refits its linker.
 Parent outputs are compared by their common likelihood within K; scores of separately
 fitted linker models are not compared, and child likelihoods are not added to parent
-likelihoods. Lost informative samples and usable sites, branch counts and costs are recorded. In FINAL
-assemblies, surviving join panels pass through that level's refinement. CONTEXT assemblies
-return alternatives too; local selection currently consumes their declared representative.
+likelihoods. Lost informative samples and usable sites, branch counts and costs are recorded.
+Both FINAL and CONTEXT assemblies carry the surviving join alternatives directly.
+Local selection currently consumes a context's declared representative.
 
 This is a bounded comparison of discovered alternatives, not an enumeration of all global
-optima. Selected count-choice ties continue from the original count-pass state within
-the shared sixteen-leaf refinement budget as fixed-K and incoming-panel choices. Uncontinued inner-seed
-histories, branch-budget overflow and any remaining untested continuations stay explicit. At a count-quiescent terminal tie, the stated exact prior selects a discovered
+optima. Uncontinued inner-seed histories, branch-budget overflow and any remaining untested
+continuations stay explicit. At a count-quiescent terminal tie, the stated exact prior selects a discovered
 neighbor and ordinary search continues with the existing count, cycle, born-path, quota and
 sweep state. Flat transitions do not count as improvements or reset the search budget.
 Already visited flat states cannot cycle; newly discovered neighbors may extend the live
@@ -494,22 +545,19 @@ reported as having unknown ambiguity coverage and must be reassembled to obtain 
 
 ## Founder-count rule
 
-The join and founder refinement decide founder counts with one rule (`assembly/count_rule/`). A
+Each join decides founder counts with the rule in `assembly/count_rule/`. A
 decision compares a larger panel X+ with a smaller X- that lacks one founder f. With per-sample
-scores (the join's V_s, refinement's F_s), the total gain is d_s = score_s(X+) - score_s(X-) and its
+scores V_s, the total gain is d_s = score_s(X+) - score_s(X-) and its
 sequence part is q_s = score_s(X+) - score_s(X+^sigma). The shadow X+^sigma replaces every cell
 (block, row) of X+ that a reference panel does not use by the reference's row at that block nearest
-in Hamming distance over sites called in both; the reference is X- in the
-join, and in refinement X+ without f for a deletion or the incumbent for an addition. A founder
+in Hamming distance over sites called in both; the reference is X-. A founder
 without a private cell is a pure mosaic of the others and has q = 0 exactly, so switch savings
 alone never justify a founder.
 
 **Effective-carrier test.** The per-founder cost is c = s x (mean sites per block / 200) x S x B
 for a span of B blocks and S samples, i.e. c = s S L / 200 for a span of L sites, with
 `AssemblyConfig.cost_scale = 0.5` as s. In the join the blocks are the batch's input components and
-S counts its informative samples; in founder refinement the blocks are the component's prepared
-panels and S counts the component's informative samples (samples with evidence at one of its complete
-sites). With n_eff = (sum_s d_s+)^2 / sum_s (d_s+)^2, the
+S counts its informative samples. With n_eff = (sum_s d_s+)^2 / sum_s (d_s+)^2, the
 participation ratio of the positive differences, a difference vector passes when
 m = sum_s d_s / c - n_eff / (2S) > 0 and m' > 0, where m' is the same margin with the sample of
 largest d_s left out (S unchanged). The cost is thus charged only to a founder's effective carriers
@@ -523,13 +571,23 @@ from a SHA-256 of its key) and min(m_d, m_q) is recomputed; a call whose percent
 (`AssemblyConfig.count_rule.bootstrap_level = 0.95`) contains zero in its interior is ambiguous.
 The point decision stands.
 
+**Near-zero margins (2.7 decision 3).** There is no additional heuristic dead band around
+zero. The effective-carrier point test remains `m > 0` and `m' > 0` for both total and
+sequence gain. Count-margin candidate comparisons use the existing numerical tie quantum
+(`count_margin`, 2^-26 in units of c); that ranking quantum is not a replacement threshold
+for the point test. A numerical tie must be treated as its complete candidate family or
+reported as unresolved, never settled by an arbitrary candidate order. Differences above
+the applicable quantum are evidence, however small their absolute value. Bootstrap
+uncertainty and unperformed comparisons remain separately reported. A new dead band would
+change the model and requires independently demonstrated harm against simulation truth.
+
 **Near identity (join only).** A path within 1% called-site mismatch of another panel path over the
 batch span owns no sequence (q = 0): it is never added, it is deleted first, and no same-count move
-may produce one. Founder refinement does not use this shortcut (it scores the shadow exactly).
+may produce one.
 
 **Count cycles.** Deleting a path that an addition of the same search created closes a count cycle:
 the rule, called against different panels, has both added and deleted that row. The deletion
-stands; the join then adds no further births, and refinement ends its additions. A cycle is
+stands; the join then adds no further births. A cycle is
 undecided when its closing deletion is ambiguous and it began with a decided deletion (not with an
 addition, and not with the deletion of a path without sequence of its own, which is not a
 decision); undecided cycles are counted in the census and published in `founder_counts.tsv`.
@@ -550,6 +608,14 @@ of the total-gain test already rejects the larger count regardless of the sequen
 These are sequence-shadow evaluations, separate from the shared sixteen-leaf higher-level
 budget. Bounds and sparse replacement scores retain their existing scientific meaning.
 
+**Zero-sequence screening (R0-P03).** No additional priority rule is introduced for
+private-cell founders with a diagnostic sequence-test failure. The existing pure-mosaic
+case has exactly zero sequence gain by construction; a failed effective-carrier test
+can instead reflect small positive, concentrated, negative or mixed contributions.
+Saved hidden failures do not establish an identically zero sequence vector over every
+nearest-shadow alternative. Prioritising them would change count selection, so it needs
+that evidence and independent simulation validation before adoption.
+
 ## Join records and reuse
 
 Every joined batch is recorded as `joins/<digest>` at the contig root as soon as it completes. The
@@ -564,12 +630,13 @@ the record instead of recomputing it.
 
 ## Records
 
-Every assembly binds its identity before writing: the stage configuration (without the refinement
-settings for a context assembly, which never refines), the role and level count, the upstream
+Every assembly binds its identity before writing: the stage configuration, the role and level count, the upstream
 identities (the evidence record, the local panels: the `local_selection/l2` record for the final
 assembly and a content digest for contexts, and the genetic map) and the code identity of the
 assembly package (with `model/` and `maths/`). A different bound identity stops the run instead of
-reusing records. Records under the section prefix P (`assembly`, or the context's prefix):
+reusing records. Assembly schema 3 identifies the pipeline without refinement. Run preflight
+rejects older assembly identities before completed-stage shortcuts, including context identities;
+use a new output/checkpoint root for this pipeline. Records under the section prefix P (`assembly`, or the context's prefix):
 
 | Key | Content |
 |---|---|
@@ -578,12 +645,10 @@ reusing records. Records under the section prefix P (`assembly`, or the context'
 | `P/l<k>/plan` | level k's batches: (first input component, end, join digest or none) |
 | `joins/<digest>` | one joined batch, shared by the contig's assemblies: rows over its prepared panels, panel log likelihood, search summary |
 | `P/l<k>/join` | level k's hierarchy output: components and the level record (plan, join summaries, log likelihoods, reused joins, informative samples per boundary, stop reason) |
-| `P/l<k>/refine/...` | founder refinement's records of level k ([founder refinement](founder_refinement.md#records-and-census)) |
-| `P/l<k>/refined` | level k after founder refinement (final role): components and refinement summary |
-| `P/final` | the stage product (final role): the last level's refined components with count calls, and the level records |
+| `P/final` | the stage product (final role): the last level's joined components with their latest join count calls, and the level records |
 
 Each record is written as soon as its step completes, so an interrupted assembly resumes from its
-last recorded step: completion, then each level's output, joined batch and refined level. A level
+last recorded step: completion, then each level's output and joined batches. A level
 whose records are present is decoded, not recomputed.
 
 ## Implementation and cost
@@ -597,7 +662,7 @@ whose records are present is decoded, not recomputed.
 | `assembly/linker/` | emissions, within-block scans, cubic transition kernels, EM |
 | `assembly/join/` | beam, binned emissions, objective, certification bounds, moves, proposals, count step, search |
 | `assembly/count_rule/` | the shared count rule: criterion, bound tests, geometry |
-| `assembly/founder_refinement/` | [founder refinement](founder_refinement.md) |
+| `assembly/founder_refinement/` | disabled source retained for the 2.8 rebuild; no pipeline or warm-up caller |
 | `model/components.py` | `PreparedPanel`, `FounderComponent`, `ComponentPanel`, `CountCall`, `materialise` |
 
 **Parallel structure.** Completion runs its blocks and then its boundary links in a pool of
@@ -610,7 +675,7 @@ overcommitting memory; this never changes a result.
 
 **Memory.** The contig's assembly evidence (`assembly/evidence.py`, `AssemblyEvidence`: the neutral float64
 likelihoods, their float32 copy and the observation mask) lives in shared memory from the start; completion,
-hierarchy and founder-refinement workers attach it instead of copying it, and a completion task copies only its
+hierarchy workers attach it instead of copying it, and a completion task copies only its
 blocks' columns. Constructing completion depth keys transiently decodes the int32 REF/ALT counts
 (8 bytes per sample/site), uses one int64 depth row plus a mask as scratch, and retains only
 32 key bytes per sample. Reconstruction planning and memory admission include that transient
@@ -634,29 +699,44 @@ When memory is tight, tasks wait for their reservations; results never depend on
 number of sites, K the largest working panel of a step (including temporary panels; not a
 biological founder count), B the components per batch (at most 10), m the join bins of a batch
 (about 2,000 at most), q the endpoint quota, |C| the candidate pool (O(q B K) paths) and I the linker
-iterations (at most 20). Nothing is exponential in K: the only exponential term is the site
-posterior's enumeration, capped at 2^10 configurations.
+E/M evaluations (at most 51: 50 updates plus the returned-iterate check). The table gives
+leading kernels, not a blanket bound on the whole
+search. Complete beam families have an explicit materialization bound in 2.7; the bin
+dependence of exact two-row certification needs the qualifications below.
 
 | Step | Work | Largest power of K |
 |---|---|---|
-| Completion EM, per block and iteration | O(N L K^2 + sum_l C_l), C_l at most 2^10 configurations or the uncertain-core support | K^2; O(N U^3) per site with U > 10 unresolved alleles |
-| Cavity fills, per block | O(N K^2) pair emissions per site; O(N K^2 + N 2^U) per site with U <= 10 unresolved alleles (exact carrier sensitivity O(U N 2^U)), O(N U^3) above | K^3 |
+| Completion EM, per block and iteration | O(N L K^2 + sum_l(K^2 + C_l r_l^2)); support construction O(N U^3) per growing-ball site | K^3; cubes and larger-radius balls have at most 1,024 assignments |
+| Cavity fills, per block | O(N L K^2) bin statistics; per site O(N 2^U K^2) in the worst-case cancellation fallback for U <= 10, O(N K^3) above; compact priors and marginals O(C r + K^2) | K^3; the small exact cube is constant-bounded |
+| Completion boundary links and occupancy | O((N + L) K^2 + K^2 log K) per boundary; O(N K L) occupancy per block with at most two atomic neighbours per row | At most K^3 |
 | Linker, per gap edge and iteration | O(N K^3) propagation and edge counts; within-block scans O(N L_b K^2) | K^3 |
 | Endpoint beam | O(n q K^2 G^2) path scores plus sorting (G the largest gap) | K^2 log K |
 | Tier-1 sweep | O(N m K^2 + K^2 B log K) | K^2 |
-| Tier-2 pass | O(N m K (\|C\| + K^2)) | K^3 |
+| Tier-2 pass | replacement bounds plus adaptive exact structural screening; see qualification below | structural screening O(N m^2 K^3), fixed m |
 | Count step | O(N m K \|C\|) bounds plus exact scores where a bound is open | K^2 for fixed q and B |
 
-Founder refinement's costs are listed on its own page ([founder refinement](founder_refinement.md#implementation-and-cost)).
-Search budgets that do not grow with K (16 exact scores per proposal kind per sweep, 9 duplicate
-seeds) change only the path to a certified panel: tier 2 bounds the whole neighbourhood.
+Exact suffix-exchange score reuse is cubic. Two-row screening chooses between direct forwards
+and an exact segment programme, giving a whole structural-screening-pass O(N m^2 K^3) bound
+without dropping candidates or changing the old screening/flat-neighbor rules. The quadratic
+bin dependence is explicit; finite K grids can still favor the direct route and show quartic
+trends. This does not bound entire search/count iteration counts. The
+[2.7 complexity narrative](assembly_performance.md) gives the separate dependencies and scope.
 
-**Memory.** The evidence view holds 37 N L bytes (float64 and float32 likelihoods and the observed
-mask), shared by every worker. A join's binned emissions hold 8 S sum_j K_j^2 m_j bytes (for example
-4.6 GB at S = 320, K = 30 and 2,000 bins), its exclusion forwards 8 S m bytes per excluded path (at
+Search budgets and incomplete families are reported explicitly. A search stopped at a
+computational bound is not certified by the work that was left unperformed.
+
+**Memory.** Completion's growing ball stores O(C r + K) support entries per site, plus
+O(K^2) pair statistics; it no longer stores O(C K) allele rows and shell flags. Cross-fit EM retains
+O(L K^2 + sum_l C_l r_l + N K^2) workspace, in addition to evidence. Cavity bin emissions retain
+the existing O(N K^2 min(L,50)) arrays. The evidence view holds 37 N L bytes (float64 and float32 likelihoods and the observed
+mask), shared by every worker. A join's packed binned emissions hold
+8 S sum_j [K_j(K_j+1)/2] m_j bytes (2.38GB at S=320, K=30 and2,000bins), its exclusion forwards 8 S m bytes per excluded path (at
 most K + 1 paths), its painting back pointers at most `AssemblyConfig.join.tensor_budget_mb = 256`
 MiB per sample chunk, and the pool-saturation step O(B q K^2) move and beam entries at its top rung.
-The linker keeps seven log emissions and seven weights per sample and proxy site.
+The linker keeps seven log emissions and seven weights per sample and proxy site. Exact pair
+segments additionally reserve 16 m Q + 17 m P bytes plus index arrays per active numerical
+thread when selected, Q=K(K+1)/2 and P the chunk's pair-query count; the direct route uses
+only its small pair index. Concurrent seed calls reserve separately.
 
 **Determinism.** Per-sample values are computed by one thread each and summed in sample order;
 concurrent refits are evaluated in seed order; caches never change values; bootstrap streams are
@@ -664,6 +744,9 @@ seeded from the decision keys. Results therefore do not depend on thread counts,
 completion order or memory pacing.
 
 ## Interpretation and limitations
+
+See [founder identity across joins](founder_identity.md) for the distinction between local allele
+accuracy, long-range correspondence, penalized score margins and released identity breaks.
 
 - A phase component is a stretch over which the data link founder labels; labels are row indices
   local to the component and say nothing about labels in other components. A break with the reason

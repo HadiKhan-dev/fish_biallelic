@@ -12,6 +12,7 @@ genome-wide completion is recorded in run.ckpt (complete/<stage>) only for full 
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
 import os
@@ -41,7 +42,6 @@ PRELOAD_MODULES = (
     "haplotype_reconstruction.assembly.join.search",
     "haplotype_reconstruction.assembly.join.beam",
     "haplotype_reconstruction.assembly.completion.stage",
-    "haplotype_reconstruction.assembly.founder_refinement.stage",
     "haplotype_reconstruction.painting.stage",
     "haplotype_reconstruction.pedigree.stage",
     "haplotype_reconstruction.founder_refit.stage",
@@ -50,6 +50,14 @@ PRELOAD_MODULES = (
     "haplotype_reconstruction.recombination.stage",
     "haplotype_reconstruction.simulation.source",
 )
+
+
+# Empirical runtime/retained-heap planning for reconstruction executed in the driver. The core term is a
+# planning envelope, calibrated to 21.643 GB at 76 cores; scaling to other core counts is unverified.
+# The minimum covers first use; this does not attribute the retained memory to individual threads.
+DRIVER_RESIDENT_MIN_BYTES = 1536 << 20
+DRIVER_RESIDENT_BASE_BYTES = 512 << 20
+DRIVER_RESIDENT_BYTES_PER_CORE = 272 << 20
 
 
 @dataclass(frozen=True)
@@ -154,6 +162,22 @@ def _check_store(paths: RunPaths, config: RunConfig, source) -> None:
     store = CheckpointStore(paths.checkpoints) if paths.checkpoints.is_dir() else None
     if store is not None:
         store.check_layout()
+        # Completed-stage shortcuts must not reuse products from the refined pipeline.
+        from ..assembly.stage import SCHEMA as ASSEMBLY_SCHEMA
+        from ..store.store import CheckpointMismatch
+        for contig in config.input.contigs:
+            file = store.contig(contig)
+            for key in file.keys("identity/"):
+                if key == "identity/assembly" or key.endswith("/assembly"):
+                    identity = file.get(key)
+                    settings = identity["config"]
+                    # The superseded completion-drop candidate also used schema 3,
+                    # but still refined FINAL paths; its CONTEXT omitted completion.
+                    if (identity.get("schema") != ASSEMBLY_SCHEMA or "refinement" in settings
+                            or "completion" not in settings):
+                        raise CheckpointMismatch(
+                            f"{file.label}: assembly checkpoint is not from refinement-off assembly "
+                            f"with completion (schema {ASSEMBLY_SCHEMA}); use a new output/checkpoint root")
     if config.execution.process_contigs and config.input.kind == "simulation" and (
             store is None or not source.is_materialised(store)):
         raise RuntimeError("a shard ([execution] process_contigs) needs the simulated inputs of every contig recorded "
@@ -180,8 +204,24 @@ def run_pipeline(config: RunConfig, prepared: PreparedRun | None = None) -> RunR
                                   checkpoints=paths.checkpoints):
         print(f"Logging to: {log}", flush=True)
         write_config(config, paths.output / "config.toml")
-        with persistent_kernel_cache(cores):
-            return _run_stages(prepared)
+        with ExitStack() as driver_memory:
+            driver_resident = None
+
+            def ensure_driver_resident():
+                # Only direct reconstruction acquires this process-lifetime owner. It remains resident through
+                # later contigs and genome-wide stages, without marking idle retained pages as running work.
+                nonlocal driver_resident
+                if driver_resident is None:
+                    governor = execution.memory_governor()
+                    nbytes = max(DRIVER_RESIDENT_MIN_BYTES,
+                                 DRIVER_RESIDENT_BASE_BYTES + cores * DRIVER_RESIDENT_BYTES_PER_CORE)
+                    driver_resident = governor.request(nbytes, label="reconstruction driver")
+                    driver_memory.callback(driver_resident.release)
+                    driver_resident.wait()
+                    governor.rest(driver_resident.id)
+
+            with persistent_kernel_cache(cores):
+                return _run_stages(prepared, ensure_driver_resident)
 
 
 def _summary_record(summary) -> dict:
@@ -191,7 +231,7 @@ def _summary_record(summary) -> dict:
     return {key: value for key, value in vars(summary).items() if key != "prepared"}
 
 
-def _run_stages(prepared: PreparedRun) -> RunResult:
+def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
     from ..discovery import records as discovery_records
     from ..discovery.stage import run as discover_contigs
     from ..evidence import run_contig as prepare_evidence
@@ -234,7 +274,8 @@ def _run_stages(prepared: PreparedRun) -> RunResult:
                 discover_contigs(store, tuple(pending), configs.discovery, budget, prepare=prepare)
 
     if config.serial:
-        if not _run_serially(store, todo, discover, context, cores, config.execution.max_contigs):
+        if not _run_serially(store, todo, discover, context, cores, config.execution.max_contigs,
+                             len(sample_ids), ensure_driver_resident):
             return RunResult("stopped", "max_contigs", todo)
     discover(todo)
     if not shard:
@@ -246,7 +287,7 @@ def _run_stages(prepared: PreparedRun) -> RunResult:
         print("[STOP] discovery recorded; local selection, assembly and painting not started", flush=True)
         return RunResult("stopped", "discovery", todo)
 
-    _reconstruct(store, todo, context, cores, config, len(sample_ids), paths)
+    _reconstruct(store, todo, context, cores, config, len(sample_ids), paths, ensure_driver_resident)
     if not shard:
         _mark_when(store, "painting", contigs, lambda contig: contig_done(store, contig))
     if config.run.stop_after == "painting" or shard:
@@ -265,7 +306,8 @@ def _mark_when(store, stage, contigs, done) -> None:
     store.mark_stage_complete(stage)
 
 
-def _run_serially(store, contigs, discover, context, cores, max_contigs) -> bool:
+def _run_serially(store, contigs, discover, context, cores, max_contigs, n_samples,
+                  ensure_driver_resident) -> bool:
     """Discover, assemble and paint one contig at a time, each recorded before the next; True when all are done.
 
     ``max_contigs`` (> 0) caps the contigs finished in this invocation, a resumed partial one included.
@@ -278,7 +320,9 @@ def _run_serially(store, contigs, discover, context, cores, max_contigs) -> bool
     for done, contig in enumerate(selected, start=len(contigs) - len(pending) + 1):
         started = time.monotonic()
         discover([contig])
-        reconstruct_contig(store, contig, context, budget)
+        ensure_driver_resident()
+        with execution.reserve_memory(planning_bytes(store, contig, n_samples), label="reconstruction arrays"):
+            reconstruct_contig(store, contig, context, budget)
         execution.release_memory()   # return the contig's freed heap before the next one (driver RSS ratchet)
         print(f"  [SERIAL] {contig} painted in {time.monotonic() - started:.1f} s; {done} of {len(contigs)}",
               flush=True)
@@ -290,7 +334,7 @@ def _run_serially(store, contigs, discover, context, cores, max_contigs) -> bool
     return True
 
 
-def _reconstruct(store, contigs, context, cores, config, n_samples, paths) -> None:
+def _reconstruct(store, contigs, context, cores, config, n_samples, paths, ensure_driver_resident) -> None:
     from ..execution.contig_lanes import plan_lanes, run_lanes, run_sequentially, scan_concurrently
     pending = [not contig_done(store, contig) for contig in contigs]
     if not any(pending):
@@ -306,8 +350,9 @@ def _reconstruct(store, contigs, context, cores, config, n_samples, paths) -> No
                   log_directory=paths.logs / "contigs", phase_progress=PHASE_PROGRESS,
                   done=lambda contig: contig_done(store, contig))
     else:
+        ensure_driver_resident()
         run_sequentially(store, [c for c, flag in zip(contigs, pending) if flag], reconstruct_contig, context,
-                         cores=cores)
+                         cores=cores, task_bytes=lambda contig: planning_bytes(store, contig, n_samples))
 
 
 def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, output) -> None:

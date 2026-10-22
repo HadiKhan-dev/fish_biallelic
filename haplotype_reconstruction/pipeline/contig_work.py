@@ -26,15 +26,20 @@ PHASE_PROGRESS = {
     "feedback_l1_refine": 0.350, "feedback_round1": 0.363,
     "feedback_l2_preprocess": 0.407, "feedback_l2_hierarchy_l1": 0.418,
     "feedback_l2_hierarchy_l2": 0.454, "feedback_l2_refine": 0.494, "feedback_round2": 0.513,
-    "final_preprocess": 0.532, "final_hierarchy_l1": 0.543, "final_refinement_l1": 0.555,
-    "final_hierarchy_l2": 0.590, "final_refinement_l2": 0.614,
-    "final_hierarchy_l3": 0.736, "final_refinement_l3": 0.745,
-    "final_hierarchy_l4": 0.892, "final_refinement_l4": 0.896,
+    "final_preprocess": 0.532, "final_hierarchy_l1": 0.543,
+    "final_hierarchy_l2": 0.590,
+    "final_hierarchy_l3": 0.736,
+    "final_hierarchy_l4": 0.892,
     "painting": 0.989,
 }
 
 ASSEMBLY_SCOPE = "assembly"
 FINAL_ROUND = "l2"
+
+# Simultaneous selection/context arrays, checkpoint copies and block scratch. The named array subtotals are
+# 138 founder-site bytes during selection and 167 during the second context; 200 is a planning allowance,
+# not a hard bound on Python memos, decoded backing groups or all search trajectories.
+SELECTION_BYTES_PER_FOUNDER_SITE = 200
 
 
 @dataclass(frozen=True)
@@ -61,13 +66,23 @@ def contig_done(store, contig) -> bool:
 
 
 def planning_bytes(store, contig, n_samples: int) -> int:
-    """Lane planning size of a contig from record metadata: its discovery records plus twice its genotype
-    likelihoods, its observation mask and transient REF/ALT counts used to make completion depth keys."""
+    """Lane-owned evidence and selection arrays, estimated without decoding scientific tensors.
+
+    Raw/neutral float64 GLs, float32 scoring and three masks coexist (63NL). Discovery decoded bytes D
+    include at least13 bytes per selected founder-site; D/13 plus the existing search-growth allowance
+    estimates the founder-site width of overlapping selection generations, proposals and context arrays.
+    Counts can grow beyond this planning allowance; it is neither a founder cap nor an exact peak bound.
+    Pool copies, task scratch and process residence have separate owners and reservations.
+    """
+    from ..local_selection.rounds import SEARCH_GROWTH
     file = store.contig(contig)
     sites = len(file.get("evidence", items=("positions",))["positions"])
     discovered = sum(info.decoded_bytes for info in file.infos("discovery/"))
-    return (discovered + 2 * n_samples * sites * 3 * 8 + n_samples * sites
-            + 8 * n_samples * sites + 9 * sites + 32 * n_samples)
+    founder_sites = -(-discovered // 13) + SEARCH_GROWTH * sites
+    evidence = n_samples * sites * (2 * 3 * 8 + 3 * 4 + 3)
+    # The completion-keep control also retains transient REF/ALT depth-key construction.
+    completion_depth = 8 * n_samples * sites + 9 * sites + 32 * n_samples
+    return discovered + evidence + SELECTION_BYTES_PER_FOUNDER_SITE * founder_sites + completion_depth
 
 
 def final_assembly(store, contig, config, genetic_map, budget, *, view=None, queue=None):

@@ -28,7 +28,7 @@ import math
 import numpy as np
 
 from ..founder_alleles import site_posterior
-from . import dosage_statistics
+from . import dosage_statistics, support
 from .observation import (UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, row_classes,
                           unordered_pairs)
 
@@ -169,33 +169,20 @@ def _complete_site_state_scores(alleles, log_emission, observed, pairs):
 
 def _configurations_for_site(alleles, site, unknown, pairs, state_probability, log_emission,
                              observed, settings):
-    """Allowed assignments of a site's unresolved alleles, with their uniform prior.
-
-    Up to MAX_EXACT_BITS unresolved founders: every assignment (a cube). Above that, the
-    uncertain-core support of the shared site posterior under the first EM iteration's pair
-    posteriors (``site_posterior.completion_site``): certain founders at the mode and an exact
-    core or a Hamming ball. Returns (configurations int8[C, K], log prior float64[C], ball radius
-    (0 for a cube), shell flags or None, site-posterior diagnostics or None).
-    """
+    """The same cube/core/ball assignments, with a sparse ball representation."""
     fixed = alleles[:, site]
     log_prior = -unknown.size * math.log(2.0)
     if unknown.size <= site_posterior.MAX_EXACT_BITS:
-        n_configurations = 1 << int(unknown.size)
-        configurations = np.empty((n_configurations, alleles.shape[0]), dtype=np.int8)
-        for index in range(n_configurations):
-            configurations[index] = fixed
-            for offset, founder in enumerate(unknown):
-                configurations[index, founder] = (index >> offset) & 1
-        return configurations, np.full(n_configurations, log_prior), 0, None, None
+        configurations = support.cube(fixed, unknown)
+        return configurations, np.full(len(configurations), log_prior), 0, None
     evidence = np.ascontiguousarray(np.exp(log_emission[:, site, :]))
     informative = observed[:, site] & (np.ptp(evidence, axis=1) > UNIFORM_TOLERANCE)
-    rows, shell, _, info, _ = site_posterior.completion_site(
+    b, core, flips, sizes, _, info, _ = site_posterior.completion_site(
         evidence, informative, state_probability, pairs, np.ascontiguousarray(fixed),
         unknown, np.zeros(unknown.size), -1.0, settings)
-    configurations = np.repeat(fixed[None, :], len(rows), axis=0)
-    configurations[:, unknown] = rows
-    return (configurations, np.full(len(rows), log_prior), int(info[site_posterior.INFO_RADIUS]),
-            shell, info)
+    radius = int(info[site_posterior.INFO_RADIUS])
+    configurations = support.from_core(fixed, unknown, b, core, flips, sizes, radius)
+    return configurations, np.full(len(configurations), log_prior), radius, info
 
 
 def _site_probabilities(probabilities, offsets):
@@ -219,12 +206,12 @@ def _variational_em(pairs, configurations, log_priors, workspace, complete_score
     Returns the pair-state posteriors float64[N, S] and each site's configuration probabilities.
     Raises when the ELBO decreases by more than ``monotonic_tolerance`` (a numerical failure).
     """
-    evidence, alleles, offsets, packed_prior, cube = workspace
+    evidence, centres, indices, flips, sizes, offsets, packed_prior, cube = workspace
     state_probability = _softmax(complete_scores - math.log(pairs.shape[0]), axis=1)
-    initial = [np.full(values.shape[0], 1.0 / values.shape[0]) for values in configurations]
+    initial = [np.full(len(values), 1.0 / len(values)) for values in configurations]
     probability = np.concatenate(initial) if initial else np.empty(0)
     state_scores = evidence @ dosage_statistics.dosage_marginals(
-        alleles, pairs, offsets, probability, cube)
+        centres, indices, flips, sizes, pairs, offsets, probability, cube)
     site_probability = _site_probabilities(probability, offsets)
     previous = _elbo(state_scores, log_priors, site_probability, state_probability)
     for iteration in range(1, config.max_iterations + 1):
@@ -233,9 +220,9 @@ def _variational_em(pairs, configurations, log_priors, workspace, complete_score
         # the coordinate-update schedule. BLAS remains worker-local/one thread.
         statistics = state_probability.T @ evidence
         probability = dosage_statistics.configuration_probabilities(
-            statistics, alleles, pairs, offsets, packed_prior, cube)
+            statistics, centres, indices, flips, sizes, pairs, offsets, packed_prior, cube)
         state_scores = evidence @ dosage_statistics.dosage_marginals(
-            alleles, pairs, offsets, probability, cube)
+            centres, indices, flips, sizes, pairs, offsets, probability, cube)
         state_probability = _softmax(state_scores - math.log(pairs.shape[0]), axis=1)
         site_probability = _site_probabilities(probability, offsets)
         value = _elbo(state_scores, log_priors, site_probability, state_probability)
@@ -261,7 +248,7 @@ def _released_alleles(alleles, evidence, observed, config, settings):
     pairs = unordered_pairs(founders)
     complete_scores, _ = _complete_site_state_scores(alleles, log_emission, observed, pairs)
     first_state = None
-    configurations, log_priors, unknown_by_site, shell_flags = [], [], [], []
+    configurations, log_priors, unknown_by_site = [], [], []
     support_radius = np.zeros(sites, dtype=np.int64)
     site_info = np.zeros((site_posterior.INFO_FIELDS, sites), dtype=np.int64)
     site_info[site_posterior.INFO_CORE] = -1
@@ -270,9 +257,8 @@ def _released_alleles(alleles, evidence, observed, config, settings):
         if unknown.size > site_posterior.MAX_EXACT_BITS and first_state is None:
             # Pair posteriors of the first EM iteration.
             first_state = _softmax(complete_scores - math.log(pairs.shape[0]), axis=1)
-        site_configurations, log_prior, radius, flags, info = _configurations_for_site(
+        site_configurations, log_prior, radius, info = _configurations_for_site(
             alleles, site, unknown, pairs, first_state, log_emission, observed, settings)
-        shell_flags.append(flags)
         configurations.append(site_configurations)
         log_priors.append(log_prior)
         unknown_by_site.append(unknown)
@@ -289,10 +275,10 @@ def _released_alleles(alleles, evidence, observed, config, settings):
     shell = np.zeros(alleles.shape, dtype=np.float64)
     for site, (site_configurations, probability, unknown) in enumerate(
             zip(configurations, site_probability, unknown_by_site)):
-        for founder in unknown:
-            marginal[founder, site] = float(np.sum(probability * site_configurations[:, founder]))
-        if support_radius[site]:
-            shell[unknown, site] = site_posterior.shell_weights(probability, shell_flags[site])
+        sums, outer = support.allele_sums(site_configurations, probability)
+        marginal[unknown, site] = sums[unknown, 1]
+        shell[unknown, site] = outer[unknown]
+
 
     # Carrier support: the larger of the number of samples more likely than not
     # carrying the founder in this block and their summed carrier probability

@@ -24,9 +24,10 @@ from ...model.components import CountCall, CountStepDecision, FounderComponents,
 from ... import execution
 from .config import FounderRefinementConfig
 from .count import count_pass
+from .work_limit import WindowWorkLimit
 from .records import ComponentRefinement, LevelSummary, RefinementRecords
 from .search import SweepEngine
-from .workspace import ComponentWorkspace, component_bytes, component_evidence
+from .workspace import ComponentWorkspace, WORKER_RESIDENT_BYTES, component_bytes, component_evidence
 
 
 
@@ -208,7 +209,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
                                        min_sites_per_bin=settings.min_sites_per_bin,
                                        max_bins=settings.config.proposal_max_bins)
         engine = SweepEngine(workspace, context, settings.config, fit_records, f"component{number}",
-                             counter=counter, census_prefix=census_prefix)
+                             counter=counter, census_prefix=census_prefix,
+                             source_start=component.start)
     geometry = count_rule.RowGeometry.from_panels(panels)
     # S = the component's informative samples: founder-excluded (uniform) samples and samples
     # without evidence at a complete site score exactly 0 for every panel.
@@ -218,10 +220,37 @@ def refine_component(number, component, panels, evidence, context, settings, bud
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks),
                 int(founders)]
     alternative_starts, retained = _refinement_inputs(component, incoming)
-    with engine.memoized_windows(enabled=len(alternative_starts) > 1):
-        result = count_pass(engine, geometry, start_rows, cost, settings.count_rule, budget, seed_key,
-                            settings.additions, counter=counter, census_prefix=census_prefix,
-                            alternative_starts=alternative_starts)
+    count_started = time.perf_counter()
+    try:
+        with engine.memoized_windows(enabled=len(alternative_starts) > 1):
+            result = count_pass(engine, geometry, start_rows, cost, settings.count_rule, budget, seed_key,
+                                settings.additions, counter=counter, census_prefix=census_prefix,
+                                alternative_starts=alternative_starts)
+    except WindowWorkLimit:
+        # No interrupted direction, copy response, count fit or replay may enter a
+        # scientific comparison. Preserve the complete original component/families.
+        domains, work, window_seconds = engine.windows.work.snapshot()
+        family = dict(start=int(component.start), stop=int(component.stop),
+            source_level=int(settings.level), source_decision="component_refinement",
+            reason="window_work_bound", status="unperformed_window_search",
+            unresolved_search=True, panels=(), window_domains=domains,
+            window_domains_scope="observed work-limit witnesses; remaining component search unperformed",
+            domain_basis="unevaluated single-focal search domains; not biological alternatives")
+        refinement = ComponentRefinement(
+            component=int(number), start=int(component.start), stop=int(component.stop),
+            changed=False, reason="window_work_bound", founders_before=int(founders),
+            founders=int(founders), bin_size=int(workspace.bin_size),
+            coarse_units=engine.windows.coarse_units, cost=cost,
+            elapsed_seconds=time.perf_counter() - started, branch_evaluations=0,
+            branch_status="window_work_bound", input_alternatives=tuple(incoming),
+            release_alternatives=(*incoming, family),
+            phase_seconds=dict(engine._phase_seconds,
+                count_step=time.perf_counter() - count_started,
+                window_work_attempts=window_seconds),
+            work_counters=dict(engine._work_counters, selected_count_decisions=0,
+                               selected_fits=0, **work))
+        return replace(component, count_call=_count_call(refinement)), refinement
+    count_seconds = time.perf_counter() - count_started
     rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(
@@ -244,7 +273,10 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         selected_branch=result.selected_branch,
         count_continuations=result.count_continuations,
         count_branch_evaluations=result.count_branch_evaluations,
-        count_branch_seconds=result.count_branch_seconds)
+        count_branch_seconds=result.count_branch_seconds,
+        phase_seconds=dict(count_step=count_seconds, **engine._phase_seconds),
+        work_counters=dict(selected_count_decisions=len(result.decisions),
+                           selected_fits=len(result.fits), **engine._work_counters))
     refined = replace(component, rows=np.ascontiguousarray(rows, np.int32),
                       count_call=_count_call(refinement))
     return refined, refinement
@@ -303,7 +335,14 @@ def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds)
         count_cycles_undecided=undecided, best_f_replacements=replacements,
         weak_label_junctions=weak, deletions_without_sequence=without_sequence,
         decided_by_sequence_part=sequence_rejected, hidden_sequence_failures=hidden,
-        ambiguous_count_calls=tuple(ambiguous))
+        ambiguous_count_calls=tuple(ambiguous),
+        phase_seconds={name: sum(item.phase_seconds.get(name, 0.0) for item in refinements)
+                       for name in ("count_step", "messages", "refinement_windows", "acceptance",
+                                    "guarded_acceptance")},
+        work_counters={name: sum(item.work_counters.get(name, 0) for item in refinements)
+                       for name in ("selected_count_decisions", "selected_fits", "searches", "windows", "templates_solved",
+                                    "templates_reused", "dp", "fixing_dps",
+                                    "guard_shared_tests", "guard_traced_blocks")})
 
 
 def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: execution.CpuBudget,
@@ -349,10 +388,13 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
     samples = int(level.evidence.shape[0])
     sizes = [component_bytes(task[2], samples, min_sites_per_bin=settings.min_sites_per_bin,
                              max_bins=config.proposal_max_bins) for task in tasks]
-    per_component = max(sizes or [1])
-    workers = min(len(tasks), max(1, int(budget.threads())),
-                  max(1, int(execution.memory_governor().limit // per_component)))
     label = f"founder_refinement_l{level.level}"
+    planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
+    # Normal assembly passes its existing reference; direct array callers need one new shared copy.
+    if planned and level.evidence_ref is None:
+        planned[planned.index(max(planned))] += int(level.evidence.nbytes)
+    workers = min(len(tasks), execution.memory_worker_limit(
+        planned, min(len(tasks), max(1, int(budget.threads()))), label=label))
     if workers <= 1:
         functions = [lambda child, task=task: refine_component(
             task[0], task[1], task[2], component_evidence(level.evidence, task[2]), task[3],
@@ -363,11 +405,12 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
         # Largest components first: the level's tail is the smallest work.
         order = sorted(range(len(tasks)), key=lambda i: -sum(panel.sites for panel in tasks[i][2]))
         shared = level.evidence if level.evidence_ref is None else level.evidence_ref
-        with execution.BudgetedPool(budget, processes=workers, shared={"evidence": shared},
-                                    label=label) as pool:
-            for number, result in pool.imap_unordered(_component_task, [tasks[i] for i in order],
-                                                      task_bytes=[sizes[i] for i in order]):
-                record(number, result)
+        with execution.reserve_memory(workers * WORKER_RESIDENT_BYTES, label=f"{label} workers"):
+            with execution.BudgetedPool(budget, processes=workers, shared={"evidence": shared},
+                                        label=label) as pool:
+                for number, result in pool.imap_unordered(_component_task, [tasks[i] for i in order],
+                                                          task_bytes=[sizes[i] for i in order]):
+                    record(number, result)
     refinements = tuple(item[1] for item in results)
     summary = summarise(level.level, level.additions, settings.min_sites_per_bin, refinements,
                         time.perf_counter() - started)

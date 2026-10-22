@@ -30,6 +30,16 @@ class FounderRefinementConfig:
         L1); K = 30 synthetic and AulStu peaks (257 and 357 paths) are four orders of magnitude
         below it. The memory of large programmes is admitted by the run's memory governor
         (proposals.PROGRAMME_BUDGETS).
+    window_work_coefficient: positive integer C in the per-template charged-work bound
+        C * N * W * b^2 * max(K, R)^3. N is the full sample count, W the template's unit
+        count, b its largest actual bin count, K the current working founder count, and R
+        its largest actual alphabet. One account covers every focal and retry. Exhaustion
+        discards the entire component refinement/count attempt, preserves its original rows
+        and incoming families, and releases computationally unevaluated source domains.
+        The value 2^25 is the next power of two strictly above twice the largest
+        measured normalized charge in 98 realistic original component replays. The
+        factor-two margin was declared before those inference-only measurements. This
+        is not a biological threshold, FLOP count, or bound on component fits/windows.
     alternative_branches: complete same-level count continuations, including the
         ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class
         when its complete expansion would exceed the budget. Branches reuse
@@ -40,4 +50,5 @@ class FounderRefinementConfig:
     proposal_min_sites_per_bin: int = 200
     sweep_limit: int = 100
     frontier_bytes: int = 128 << 30
+    window_work_coefficient: int = 1 << 25
     alternative_branches: int = 16

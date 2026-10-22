@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.7.0 (draft, 22 October 2026)
+
+This release retains founder completion, removes founder-path refinement from assembly, and raises the linker EM
+update cap to 50. These owner-directed changes can alter scientific results. Final founder validation is pending.
+
+**Known limitation:** family phase, the recombination maps derived from it and phased-sample VCFs are known to be
+broken and are not validated in 2.7. Those stages still run by default, unchanged from 2.6. Validation stops after
+founder refit and assesses per-chromosome founder concordance, parent edges and TroMau pseudo-reference consistency.
+
+### Assembly and count reporting
+
+- Joined components and their own release alternatives pass directly between assembly levels and into the final
+  assembly product. Founder-path refinement is disabled; its source is retained outside the pipeline and kernel
+  warm-up for the 2.8 rebuild. Downstream founder allele refit remains active and is a distinct stage.
+- Count reports use the latest actual join, distinguish incomplete verification from demonstrated ambiguity, and
+  identify local panels that have never joined. The latest join is included only once in cycle totals. There is no
+  new final count-addition pass or heuristic dead band for near-zero count margins.
+- The final founder evaluation stage is `assembly`. Assembly schema 3 and its stored configuration reject refined
+  checkpoints before completed-stage shortcuts, including the superseded schema-3 completion-drop candidate.
+- Ambiguity records from every accepted seed reaching the selected canonical panel are retained. Accepted-seed
+  histories are promoted in founder-path order, so thread completion order does not order their witness families.
+  Two unused shadow-count helpers were removed; the separate full-site proof remains.
+- Discovery I6 remains a documented limitation, not a new inference rule. No unobserved founder allele is selected
+  by a new convention in this release.
+
+### Exact computational changes and limits
+
+- Packed symmetric emissions, reused splice and count-cover calculations, compact beam families and retained-work
+  memory accounting reduce selected costs without changing their numerical objectives. Refinement-only speed and
+  window-policy work is inactive; no refinement window limit governs the shipped assembly path.
+- Completion represents growing support with sparse flips instead of a configuration-by-founder matrix. At fixed
+  sample count and block length it is O(K^3); exact cubes with at most ten uncertain alleles are bounded by 1,024
+  configurations. The small-cube cavity cancellation fallback is O(N 2^U K^2). Independent focused benchmarks fit
+  EM dosage exponents 4.28 to 2.89, configuration updates 4.03 to 2.68 and cross-fit blocks 3.33 to 1.99. No measured
+  memory reduction at K<=30, or universal whole-pipeline speedup, is claimed. Full completion identity gates remain
+  pending until the std, K30 and TroMau comparisons finish.
+- Complete two-row exclusion domains use adaptive segment evaluation or direct forwards. At production bin counts
+  and K<=30 the direct route is used, and this term grows approximately as K^4 until K^2 is roughly 3m or larger.
+  The cubic segment route does not establish a cubic bound for every production workload or the whole join search.
+- Any binding beam allowance can change outputs. A constant family beyond the allowance releases the unsearched
+  anchor panel without masking, flagged in metadata; a nonconstant family retains the incumbent or leaves the inputs
+  unjoined. Earlier validation observed no binding. This remains a quality risk for the 2.8 work; it is not an exact
+  alternative to searching the domain.
+- A packaged kernel manifest supplements learned store signatures, compiling release overloads once in the warm-up
+  pool. Disabled or removed kernels are skipped and the 2.6 cache-signature check remains. The 508.9 s cold N80 result
+  belongs to c0 plus the W2 manifest change, not this final tree; no final-tree cold timing is claimed.
+
+### Linker convergence
+
+- The residual is checked at the returned transition matrix, adding an E-step per fit. W4's bounded fixtures used
+  2% to 29% more updates under that stopping rule. This correction can change outputs.
+- The owner raised the update cap from 20 to 50. Tolerance 0.001, initialization and damping remain unchanged; at most
+  51 E/M evaluations include the returned-iterate check. A fit at the cap may still be unconverged, and its residual
+  is reported honestly. On one saved K30 gap, the longer fit converged at update 34; this is not a whole-run guarantee.
+- Cap hits were common in the earlier cap-20 c2 keep matrix: 11,187/24,170 TroMau gap fits (46%), 417/561 K30 fits
+  (74%) and 6,470/24,875 std fits (26%) stopped above tolerance. These are not cap-50 frequencies. The final matrix
+  supplies the cap-50 census.
+
+### Validation and deferred work
+
+- [PENDING: the final founder-only runs on this tree (std, stress, K30, f3, backcross, the 22-chromosome s10000 and
+  s10001 simulations, and TroMau), which stop after founder refit.] Gates are pooled native-refit founder wrong-or-missing
+  at most +1%; no simulation's native wrong calls increasing both >5% and >200 cells; no new false parent edges;
+  and TroMau native-refit pseudo-reference mismatches at most +1%. TroMau consistency is not accuracy against known
+  parents or true founder haplotypes. Offspring genotype and phase-switch gates are excluded by the owner.
+- Per-chromosome founder concordance with the true generating haplotypes, s10000 and s10001 (22 chromosomes each, 6
+  true founders): with refinement on (the earlier candidate), every chromosome is one piece with all 6 founders found
+  and matched, and 953/159 (s10000) and 117/17 (s10001) wrong/missing alleles of 53,741,112, identical to 2.6.
+  [PENDING: the same tables for this refinement-off tree, and TroMau per-chromosome pseudo-reference tables.]
+- The earlier f3_fam matrix inherited eight false parent edges unchanged from 2.6. They were not new errors; the
+  final matrix must still report their identities and any new edges explicitly.
+- Export manifests contain wall-clock release diagnostics and are not byte reproducible; those diagnostics do not
+  alter VCF content. This does not validate the known-broken phased-sample outputs.
+- Release continuity, shared-junction effects in joins, missing K30 founders without additions, refinement redesign
+  and linker acceleration are deferred to 2.8. No W4 continuity fix or refinement-memory overlay is included here.
+
 ## 2.6.0 (21 October 2026)
 
 Release 2.6 speeds discovery and local selection, and separates the copying intensity from assembly's gap horizon.

@@ -416,7 +416,12 @@ def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, can
     while len(affected):
         lo, hi = max(0, p1 - width), min(blocks, p2 + width)
         if lo <= p:
-            f_lo, c_lo = local[lo], local_cnt[lo]
+            # Passed prefix alleles never change: reconstruct from the nearest
+            # carried-message checkpoint with the same block-normalized recursion.
+            anchor = (lo // JUNCTION_BATCH) * JUNCTION_BATCH
+            f_lo, c_lo = local[lo // JUNCTION_BATCH], local_cnt[lo // JUNCTION_BATCH]
+            if anchor != lo:
+                f_lo, c_lo = advance_lex(haps, logs, offsets, penalty, f_lo, c_lo, anchor, lo)
         else:
             ahead = _forward_to(ahead, p, lo, f, fcnt, haps, logs, offsets, penalty, True, acc)
             f_lo, c_lo = ahead.values[lo - ahead.start], ahead.counts[lo - ahead.start]
@@ -605,8 +610,8 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
     place, acc (ACC_KEYS) accumulated.
 
     State in: frontier0, the carried forward message f0 (counts fcnt0) at j0, gperm0 (current state
-    -> stored state), lab (proposal founder label -> current row), the guard's history `local` of
-    the carried messages at boundaries 0 .. j0 (filled here for j0 .. j1 - 1), the caches ahead0 /
+    -> stored state), lab (proposal founder label -> current row), the guard's sparse history `local` of
+    carried messages at multiples of JUNCTION_BATCH through j0 (extended here), the caches ahead0 /
     chain0 of the previous call. pristine0: no move has been accepted before j0 in a pass whose
     start panel has the forward messages start_fwd / start_fcnt (one-element placeholders
     otherwise); while nothing is accepted the carried forward message is read from them (the same
@@ -637,9 +642,9 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
     fcnt = fcnt0
     accepted_any = False
     for p in range(j0, j1):
-        if guarded:
-            local[p] = f
-            local_cnt[p] = fcnt
+        if guarded and p % JUNCTION_BATCH == 0:
+            local[p // JUNCTION_BATCH] = f
+            local_cnt[p // JUNCTION_BATCH] = fcnt
         accepted_here = False
         if p >= 1 and exchanges:
             first_look = True
@@ -837,9 +842,11 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
     count2 = np.zeros((1, 1), np.int64)
     count3 = np.zeros((1, 1, 1), np.int64)
     if guarded:
-        # Carried forward messages of the junctions passed (the guard's path tracing).
-        local = np.empty((blocks + 1, samples, states))
-        local_cnt = np.empty((blocks + 1, samples, states), np.int64)
+        # Sparse carried-message checkpoints. A guard query reconstructs at most
+        # JUNCTION_BATCH - 1 passed blocks; suffix edits cannot change that prefix.
+        checkpoints = (blocks - 1) // JUNCTION_BATCH + 1
+        local = np.empty((checkpoints, samples, states))
+        local_cnt = np.empty((checkpoints, samples, states), np.int64)
     else:
         local, local_cnt = np.zeros((1, 1, 1)), count3
     acc = np.zeros(len(ACC_KEYS))

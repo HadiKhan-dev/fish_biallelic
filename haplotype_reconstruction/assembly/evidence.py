@@ -1,9 +1,9 @@
 """The chromosome evidence assembly reads, built once per contig from the evidence record.
 
-Every assembly of a contig (the local-selection context assemblies and the final assembly) and
-founder refinement read the same view of the founder evidence (``ContigEvidence.founder_view``):
+Every assembly of a contig (the local-selection context assemblies and the final assembly)
+reads the same view of the founder evidence (``ContigEvidence.founder_view``):
 genotype likelihoods where a sample is observed at a discovery site, exactly 1/3 elsewhere.
-Completion and the linker read it in float64; the joins and founder refinement read one float32
+Completion and the linker read it in float64; the joins read one float32
 copy (made once, shared by every level and every component).
 
 The view's arrays live in POSIX shared memory from the start, so the completion and hierarchy pool
@@ -70,7 +70,7 @@ class AssemblyEvidence:
     neutral: float64[N, L, 3] founder-view genotype likelihoods (normalised) at observed discovery
         sites, exactly 1/3 at every other cell (unobserved, not a discovery site, or a sample the
         contamination QC excluded from founder construction).
-    scoring: float32[N, L, 3] the same values in float32 (joins and founder refinement).
+    scoring: float32[N, L, 3] the same values in float32 (joins).
     observed: bool[N, L] observed at a discovery site (False for excluded samples).
     kept: bool[L] the discovery sites.
     identity: identity of the evidence record the view was built from (join reuse keys).

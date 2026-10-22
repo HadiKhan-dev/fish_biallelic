@@ -45,6 +45,16 @@ Two acceptance tests check this on every release candidate:
   ambiguity. A residual difference marks a convention that still selects biology; the remaining ones are listed in
   [Remaining conventions](#remaining-conventions).
 
+## Near-zero founder-count margins (2.7 decision 3)
+
+Do not add a heuristic dead band. Existing numerical tie classes govern comparisons
+between candidates: retain a complete family or report its unresolved alternatives.
+Margins separated beyond the applicable quantum remain data. The `count_margin`
+ranking quantum is 2^-26 in units of founder cost; the effective-carrier point rule
+still tests both margins strictly above zero. Bootstrap ambiguity is a separate result,
+not a new acceptance threshold. Changing that rule requires harm demonstrated against
+simulation truth; cohort labels and assumed G0 parentage cannot supply that truth.
+
 ## Evaluating exported phase sets (2.3)
 
 The `export_phase_sets_v2` evaluation follows the sample VCF's phase-set identity: a new set starts at a component boundary or an explicit per-sample `phase_breaks` boundary. A displayed-undetermined site is unphased and contributes its unordered allele error, but it does not split the phased flanks unless an explicit boundary is present. Each set gets one strand alignment, including phased sites on both sides of such an unphased stretch. Sets with at least two phased called heterozygotes contribute to the reported count and span N50.
@@ -125,7 +135,6 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 | local selection | bank, refit cut and residual ties by content and order | the BIC tie set is kept whole; bank score caps admit complete overlapping endpoint families and tied NLL classes at unchanged caps; whole path-refit classes are retained (cap 16, overflow counted); residual ties give a consensus panel whose rows not shared by every alternative are withheld (`tied_alternatives`, `withheld_by_ties`) |
 | assembly ([assembly.md](assembly.md)) | left-anchored batching | orientation-symmetric batching |
 | assembly | join moves inside a log-likelihood tie class by path tuples or panel keys | the batch linker's path score decides before any label; painting-dependent proposals run under both traceback conventions and are merged |
-| founder refinement ([founder_refinement.md](founder_refinement.md)) | tied refits decided by content | members that disagree on K take the smaller K (prior); otherwise the member whose margin most strongly supports the decision; remaining equal-F alternatives are flagged (`ambiguous_k`, `alternatives`) |
 | founder refit ([founder_refit.md](founder_refit.md)) | the first acceptable move in row order | mutually exclusive tied moves release the affected cells unknown |
 | painting ([painting.md](painting.md)) | a switch inside a stretch of identical founders placed at the leftmost edge, and the bins named by the prior | the switch is released as an interval (`SWITCH_INTERVAL`), and the other track is gated on the pair-consistent posterior; the per-sample segments are published |
 | pedigree ([pedigree.md](pedigree.md)) | Parent1 is the lower sample name | parent slots follow recorded sexes (dam, sire); otherwise they are unordered (`ParentSlotBasis`) |
@@ -138,7 +147,7 @@ These decide exact ties. They are not reversed by the reversal test.
 
 | prior | where | reason |
 | --- | --- | --- |
-| fewer founders (smaller K) | discovery selection, the local-selection bank and round winner, founder refinement at an exact-zero count margin, count cycles | parsimony: at equal fit the data do not support the extra founder |
+| fewer founders (smaller K) | discovery selection, the local-selection bank and round winner, count cycles | parsimony: at equal fit the data do not support the extra founder |
 | fewer switches; fewer parents | the painting and family-phase Viterbi tie rule; the pedigree graph's replacement rows | at equal likelihood the recombination and transmission model already favours fewer events, because a switch probability is below 1/2 |
 | keep the current state inside a tie class | search climbs, keep-incumbent tests, the family MAP's acceptance (a gain must exceed the quantum) | an ascent moves only on evidence, so the optimum is a fixed point and noise cannot move it |
 | the conservative side of an exact threshold | release, supporter, carrier and unknown-count bands; the abundant-route test | at exactly the threshold, withhold rather than call |
@@ -178,6 +187,48 @@ differences are small and mixed, accepted without an accuracy-improvement claim;
 and empirical soft-hardening limits are in [discovery](discovery.md).
 
 Bounded v2.5 discovery analysis closes D9 with 0/5 released changes on three K30 simulated and two TroMau blocks despite 40/81 changed cut sets (28/81 changed best cut weights); the three simulated blocks retain 16,256 calls, 6 called errors and 1,750 wrong-or-missing cells out of 18,000 truth cells. D9p/D3/central sample order has 0/15 released changes in the fresh controls. Across four retained mean-field cases, 5/53 scored panels fail only in losers, with zero selected or nearest-competitor failures; a stricter solve clears 470 failed held-out/site cells with maximum score drift 3.13e-10 and no class, K, panel, alternative or call change. I6 remains analysis only: the captured TroMau binding class has 50 omitted starts, 44 assignment-masked content classes and 50 distinct full-state signatures, so this capture supports no all-future-context quotient. These are bounded evidence closures, not universal invariance or full-pipeline proofs.
+
+## Equivalent assembly seed witnesses (2.7)
+
+An accepted seed endpoint is an equivalence class of all evaluated seed witnesses
+with the same canonical settled panel. Their unresolved source families are retained
+as a union; the diagnostic seed chosen to name the endpoint cannot choose which
+ambiguity reaches release. This fixes the saved TroMau chr7 context-sidecar reversal
+case. It is exact panel equivalence, not equivalence inferred from a tied likelihood,
+and does not merge distinct endpoint continuations. See
+[assembly](assembly.md#equivalent-seed-histories-27) for the scope and consumer limits.
+
+## Scope of the 2.7 convention checks
+
+The saved 2.6 census covers 7,748 unique joins in TroMau, std, K20, K30 and f3.
+No recorded high-K seed group reaches the nine-seed cap; the largest has seven.
+This does not establish that every main-coverer choice is unique. Refined-shadow
+overflow is recorded in all five datasets: 223 calls, of which 181 remain unverified.
+Opposite conventional shadows in eight bounded examples change sequence diagnostics,
+but none changes the selected count outcome, selected ambiguity or incumbent panel.
+The full shadow families are not thereby verified.
+
+A per-rule refinement probe on f3 chr1 changes two path cells and 18 allele cells
+at the initial K7 fixed point, at equal objective. Following that initial choice
+through ordinary subsequent count/search rules returns the same K6 panel, four-panel
+terminal ambiguity family, count margins, bootstrap bands and released alleles.
+Branch histories and count-verification annotations differ. This isolates
+one initial choice; it does not exhaust later tied trajectories or close global
+refinement reversal. Unknown shadow verification stays unknown.
+
+A fixed-input K30 context-refit reversal attributes the known posterior changes to
+founder-allele conventions: maxima 0.00762084 at L1 and 0.08215804 at L2. These are
+substantial persisted diagnostic differences. All 80 proposal calls, support values
+and unknown-copy assignments remain unchanged. Local selection consumes the calls
+and their founder paths, not the stored `posterior_alt` field; no changed downstream
+input is demonstrated by that check. Retained template calls at low support must not
+be interpreted as high-confidence posterior refits.
+
+These checks distinguish exercised conventions, persisted diagnostics, retained
+ambiguity and biological release. An unrecorded alternative is not counted as an
+absent alternative. The seven join residues reported below remain a historical 2.2
+count, not seven demonstrated current defects. The integrated release matrix is a
+separate acceptance gate.
 
 ## Remaining conventions
 
@@ -318,7 +369,7 @@ The released ambiguity fields are:
 
 - discovery: `ambiguous`, `tied_alternatives`, `score_margin`, `tied_panels`, `tied_unknown`, `latent_unknown`;
 - local selection: `tied_alternatives`, `withheld_by_ties`;
-- refinement: `ambiguous_k`, `alternatives` and `prior` per count decision;
+- assembly: the latest join count call, including evaluated different-K alternatives and separately recorded unverified search;
 - founder refit: `ambiguous_alleles` (cells released unknown);
 - painting: `SWITCH_INTERVAL` segments, and switch-interval counts in the painting summary;
 - pedigree: `ParentSlotBasis`;

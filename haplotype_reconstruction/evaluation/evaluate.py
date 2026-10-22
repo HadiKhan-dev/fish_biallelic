@@ -10,7 +10,7 @@ API. Outputs, RUN/evaluation/:
   founder_matches.csv      the one-to-one row-to-founder matches behind founder_components
 
 Founder stages (pipeline order, the stage vocabulary): discovery blocks, the three local-selection rounds, the
-final assembly's levels 1-4, founder refinement (the final assembly product), painting (relabelled panels) and
+final assembly's joined levels 1-4, assembly (the final product), painting (relabelled panels) and
 founder refit. ``available`` evaluates the latest founder product of each contig plus whatever downstream
 products exist; ``all`` every founder product present; explicit stages require their products.
 """
@@ -23,7 +23,7 @@ import time
 import numpy as np
 
 FOUNDER_STAGES = ("discovery", "local_selection_initial", "local_selection_l1", "local_selection_l2",
-                  "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4", "founder_refinement",
+                  "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4", "assembly",
                   "painting", "founder_refit")
 EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
 PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
@@ -86,7 +86,7 @@ def founder_stage_present(file, stage: str) -> bool:
     if stage.startswith("assembly_l"):
         progress = assembly_records.progress(file)
         return progress["completion"] and _assembly_level(stage) in progress["levels"]
-    if stage == "founder_refinement":
+    if stage == "assembly":
         return assembly_records.complete(file)
     if stage == "painting":
         return painting_records.complete(file)
@@ -110,8 +110,8 @@ def founder_panels(file, stage: str) -> list[tuple[np.ndarray, np.ndarray]]:
     if stage.startswith("local_selection_"):
         return [(positions, calls) for positions, calls, _ in
                 selection_records.founder_panels(file, _local_round(stage))]
-    if stage.startswith("assembly_l") or stage == "founder_refinement":
-        level = None if stage == "founder_refinement" else _assembly_level(stage)
+    if stage.startswith("assembly_l") or stage == "assembly":
+        level = None if stage == "assembly" else _assembly_level(stage)
         panels = assembly_records.founder_panels(file, level=level)
     elif stage == "painting":
         panels = painting_records.founder_panels(file)
@@ -126,7 +126,7 @@ def founder_panels(file, stage: str) -> list[tuple[np.ndarray, np.ndarray]]:
 
 def _stage_bytes(file, stage: str) -> int:
     """Decoded bytes of the records a founder stage's reader decodes (record metadata only): the block records of
-    discovery and of a local-selection round; for the assembly-based stages (assembly levels, founder refinement,
+    discovery and of a local-selection round; for the assembly-based stages (assembly levels and final product,
     painting, founder refit) the prepared panels every component panel is materialised over."""
     from ..assembly import records as assembly_records
     if stage == "discovery":

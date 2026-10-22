@@ -18,12 +18,15 @@ every kernel reduces per sample in a fixed order, so proposals do not depend on 
 """
 from __future__ import annotations
 
+import math
+
 import numba
 import numpy as np
 from numba import njit, prange
 
 from ...maths import ties
 from .. import tie_rules
+from .emissions import pair_index
 from .objective import max_range
 
 
@@ -47,7 +50,7 @@ def prefix_scores(flat, block_start, block_haps, block_bins, local, candidates, 
             for b in range(common_prefix[index], blocks):
                 haps, bins = block_haps[b], block_bins[b]
                 c = candidates[candidate, b]
-                row = block_start[b] + (sample * haps + c) * haps * bins
+                row = block_start[b] + sample * (haps * (haps + 1) // 2) * bins
                 dp = prefix_dp[b + 1]
                 dp[:] = prefix_dp[b]
                 started = starts[b]
@@ -55,7 +58,7 @@ def prefix_scores(flat, block_start, block_haps, block_bins, local, candidates, 
                     switch_base = max_range(dp, 0, k + 1, -np.inf) - penalty
                     for mate in range(k + 1):
                         partner = local[mate, b] if mate < k else c
-                        e = flat[row + partner * bins + site]
+                        e = flat[row + pair_index(c, partner) * bins + site]
                         dp[mate] = (max(dp[mate], switch_base) if started else 0.) + e
                     started = True
             result[sample, candidate] = max_range(prefix_dp[blocks], 0, k + 1, -np.inf)
@@ -100,12 +103,12 @@ def block_restart_scores(flat, block_start, block_haps, block_bins, local, penal
             if bins == 0:
                 result[sample, b, c] = 0.
                 continue
-            row = block_start[b] + (sample * haps + c) * haps * bins
+            row = block_start[b] + sample * (haps * (haps + 1) // 2) * bins
             for site in range(bins):
                 switch_base = max_range(dp, 0, k + 1, -np.inf) - penalty if site else 0.
                 for mate in range(k + 1):
                     partner = local[mate, b] if mate < k else c
-                    e = flat[row + partner * bins + site]
+                    e = flat[row + pair_index(c, partner) * bins + site]
                     dp[mate] = (max(dp[mate], switch_base) if site else 0.) + e
             result[sample, b, c] = max_range(dp, 0, k + 1, -np.inf)
     return result
@@ -240,14 +243,14 @@ def boundary_proposals(gains, boundary, quota, kind):
 
 
 @njit(cache=True, parallel=True)
-def conditional_fields(emission, painted, local_paths, panel_size):
+def conditional_fields(emission, painted, local_paths, panel_size, local_k):
     """Per-path replacement deltas and pair correction for a suffix exchange.
 
     Use the same emission values as the float64 full-score tensor. Homozygous
     painting states replace BOTH copies once, rather than treating them as
     two independent replacements. Uniform/masked input has zero deltas.
     """
-    samples, local_k, _, bins = emission.shape
+    samples, _, bins = emission.shape
     unary = np.zeros((panel_size, local_k))
     pair = np.zeros((panel_size, panel_size))
     for founder in prange(panel_size):
@@ -259,16 +262,16 @@ def conditional_fields(emission, painted, local_paths, panel_size):
                 if first != founder and second != founder:
                     continue
                 a, b = local_paths[first], local_paths[second]
-                current = np.float64(emission[sample, a, b, site])
+                current = np.float64(emission[sample, pair_index(a, b), site])
                 for candidate in range(local_k):
                     aa = candidate if first == founder else a
                     bb = candidate if second == founder else b
-                    unary[founder, candidate] += np.float64(emission[sample, aa, bb, site]) - current
+                    unary[founder, candidate] += np.float64(emission[sample, pair_index(aa, bb), site]) - current
                 if first == founder and first != second:
                     # Only this ordered painting contributes here. Each
                     # unordered pair is symmetrized after the parallel pass.
-                    pair[first, second] += (2 * current - np.float64(emission[sample, a, a, site])
-                                            - np.float64(emission[sample, b, b, site]))
+                    pair[first, second] += (2 * current - np.float64(emission[sample, pair_index(a, a), site])
+                                            - np.float64(emission[sample, pair_index(b, b), site]))
     return unary, pair + pair.T
 
 
@@ -280,8 +283,8 @@ def fixed_paint_delta(emission, painted, old_local, new_local, panel_size):
         for site in range(painted.shape[1]):
             state = painted[sample, site]
             a, b = state // panel_size, state % panel_size
-            result += np.float64(emission[sample, new_local[a], new_local[b], site])
-            result -= np.float64(emission[sample, old_local[a], old_local[b], site])
+            result += np.float64(emission[sample, pair_index(new_local[a], new_local[b]), site])
+            result -= np.float64(emission[sample, pair_index(old_local[a], old_local[b]), site])
     return result
 
 
@@ -316,7 +319,7 @@ def _stream_static_gains(flat, start, haps, local, candidates, order, common, be
     reused, accumulated in block order as before; per candidate the samples are summed in order.
     Each task sums into rows of its own (the same chain per cell, from zero) and copies them
     out at the end: rows of tasks interleaved in candidate order would share cache lines.
-    Block b's totals are flat[start[b] + (sample * K_b + a) * K_b + c] (K_b = haps[b]).
+    Block b's totals use packed unordered pairs: flat[start[b] + sample * P_b + pair_index(a, c)].
     """
     samples, k = excluded.shape
     blocks = len(start)
@@ -339,13 +342,13 @@ def _stream_static_gains(flat, start, haps, local, candidates, order, common, be
                     diagonal[0] = 0.
                 for block in range(shared, blocks):
                     kb = haps[block]
-                    base = start[block] + sample * kb * kb
+                    base = start[block] + sample * (kb * (kb + 1) // 2)
                     c = candidates[candidate, block]
-                    diagonal[block + 1] = diagonal[block] + np.float64(flat[base + c * kb + c])
+                    diagonal[block + 1] = diagonal[block] + np.float64(flat[base + pair_index(c, c)])
                     for partner in range(k):
                         cross[block + 1, partner] = (
                             cross[block, partner]
-                            + np.float64(flat[base + c * kb + local[partner, block]]))
+                            + np.float64(flat[base + pair_index(c, local[partner, block])]))
                 row = cross[blocks]
                 winner = np.argmax(row)
                 first = row[winner]
@@ -373,21 +376,24 @@ def static_replacement_gains(local, candidates, *, totals, workspace):
     The N*M*K candidate/mate tensor is streamed in native code, preserving
     float64 block accumulation and the sample-reduction order; candidates
     sharing a prefix (workspace: prepare_candidate_scores' sorted order) share
-    its block sums; totals: the blocks' bin-summed emissions (S, K_b, K_b).
+    its block sums; totals: the blocks' bin-summed emissions (S, K_b(K_b + 1)/2).
     """
     samples = totals[0].shape[0]
     k = len(local)
     current = np.zeros((samples, k, k))
     for b, total in enumerate(totals):
         a = local[:, b]
-        current += total[:, a[:, None], a[None, :]]
+        high = np.maximum(a[:, None], a[None, :])
+        low = np.minimum(a[:, None], a[None, :])
+        current += total[:, high * (high + 1) // 2 + low]
     best, excluded = _exclusion_scores(current)
     _, order, common = workspace
     chunks = max(1, min(len(order), 4 * max(1, numba.get_num_threads())))
     # The kernel reads the block totals as one flat array: taking a block's array out of a
     # typed List in its inner loop would update that array's reference count, an atomic shared
     # by all threads, which made the kernel slower with more threads than with one.
-    haps = np.asarray([total.shape[1] for total in totals], dtype=np.int64)
+    haps = np.asarray([(math.isqrt(8 * total.shape[1] + 1) - 1) // 2 for total in totals],
+                      dtype=np.int64)
     start = np.zeros(len(totals), dtype=np.int64)
     start[1:] = np.cumsum([total.size for total in totals])[:-1]
     flat = np.concatenate([np.ascontiguousarray(total).ravel() for total in totals])

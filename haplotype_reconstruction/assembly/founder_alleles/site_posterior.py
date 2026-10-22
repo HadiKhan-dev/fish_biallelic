@@ -40,8 +40,10 @@ result is exact over the enumerated support only. Per site the work is
 O(N m^2) per BP iteration and per ascent step, O(N (m^2 + 2^10)) for a core cube
 and O(N m^3) for a radius-3 ball (Hamming-ball sizes are O(c^r)); configuration
 likelihoods come from per-sample local fields, O(N) per configuration of a
-bounded number of flips. The ascent and the recentring stop at reported
-backstops (SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP).
+bounded number of flips. Context refit and completion retain sparse flip sets through
+prior and marginal accumulation: O(c^3) support memory and bookkeeping for
+radius 3, without a dense configuration-by-founder table. The ascent and the
+recentring stop at reported backstops (SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP).
 
 The constants reach the kernels through their ``settings`` argument
 (``settings()``, a float64 vector indexed by the SETTING_* positions): Numba's
@@ -641,7 +643,7 @@ def _ball_weights(couplings, use, prior, b, core, flips, sizes, base, field,
 
 @njit(cache=True)
 def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, settings):
-    """Recentred Hamming ball over the core; b, base and field end at its centre."""
+    """Recentred sparse Hamming ball; b, base and field end at its centre."""
     radius = ball_radius(len(core), settings)
     limit = int(settings[SETTING_RECENTRE_BACKSTOP])
     flips, sizes = _ball_flips(len(core), radius)
@@ -691,14 +693,25 @@ def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, 
             centre += math.log(max(base[sample], _TINY))
     for config in range(count):
         log_likelihood[config] += centre
-    rows = np.empty((count, len(core)), np.int8)
-    for config in range(count):
-        for t in range(len(core)):
-            rows[config, t] = b[core[t]]
+    log_prior = _ball_log_prior(b, core, flips, sizes, prior)
+    return radius, flips, sizes, log_likelihood, log_prior, recentres, backstop
+
+
+@njit(cache=True)
+def _ball_log_prior(b, core, flips, sizes, prior):
+    """Core log prior from the centre and each sparse set of flips, O(B * radius)."""
+    centre = 0.0
+    for t in range(len(core)):
+        if b[core[t]]:
+            centre += prior[core[t]]
+    out = np.empty(len(sizes))
+    for config in range(len(sizes)):
+        value = centre
         for a in range(sizes[config]):
-            t = flips[config, a]
-            rows[config, t] = 1 - rows[config, t]
-    return radius, rows, sizes, log_likelihood, recentres, backstop
+            i = core[flips[config, a]]
+            value += (1.0 - 2.0 * b[i]) * prior[i]
+        out[config] = value
+    return out
 
 
 @njit(cache=True)
@@ -724,15 +737,12 @@ def _core_log_prior(rows, core, prior):
 
 
 @njit(cache=True)
-def core_support(constants, unaries, couplings, use, prior, settings):
+def _compact_core_support(constants, unaries, couplings, use, prior, settings):
     """Uncertain-core support of p(b) ~ exp(prior . b) prod_n Q_n(b) for m > MAX_EXACT_BITS.
 
-    Returns the mode (ball centre) b, the core founders, the support's core
-    assignments (rows), their outermost-shell flags (founders the ball's outer
-    shell flips relative to its centre), the absolute log likelihood
-    sum_n log Q_n and the core part of the log prior of each row, base/field
-    at b, and the int64 diagnostics; ``info[INFO_MULTIMODAL]`` set means the
-    caller must release nothing at the site.
+    The cube returns dense rows; the ball returns only sparse flips and sizes.
+    The unused representation is empty. Both return absolute log likelihoods,
+    core log priors and base/field at b. INFO_MULTIMODAL forbids a site release.
     """
     n, m = unaries.shape
     info = np.zeros(INFO_FIELDS, np.int64)
@@ -782,6 +792,9 @@ def core_support(constants, unaries, couplings, use, prior, settings):
             core[position] = i
             position += 1
     info[INFO_CORE] = c
+    rows = np.empty((0, 0), np.int8)
+    flips = np.empty((0, 0), np.int64)
+    sizes = np.empty(0, np.int64)
     if c <= settings[SETTING_EXACT_BITS]:
         info[INFO_METHOD] = METHOD_CORE_CUBE
         log_likelihood = _core_cube(constants, unaries, couplings, use, b, core)
@@ -790,17 +803,38 @@ def core_support(constants, unaries, couplings, use, prior, settings):
         for code in range(count):
             for t in range(c):
                 rows[code, t] = (code >> t) & 1
-        shell = np.zeros((count, c), np.bool_)
+        log_prior = _core_log_prior(rows, core, prior)
     else:
         info[INFO_METHOD] = METHOD_CORE_BALL
-        radius, rows, sizes, log_likelihood, recentres, hit = _core_ball(
+        radius, flips, sizes, log_likelihood, log_prior, recentres, hit = _core_ball(
             constants, unaries, couplings, use, prior, b, core, base, field, settings)
-        shell = _ball_shell(rows, sizes, radius, b, core)
         info[INFO_RADIUS] = radius
         info[INFO_RECENTRES] = recentres
         if hit:
             info[INFO_RECENTRE_BACKSTOP] = 1
-    log_prior = _core_log_prior(rows, core, prior)
+    return b, core, rows, flips, sizes, log_likelihood, log_prior, base, field, info
+
+
+@njit(cache=True)
+def core_support(constants, unaries, couplings, use, prior, settings):
+    """Dense diagnostic support API; production callers retain compact flip sets.
+
+    Context refit uses _compact_core_support directly and never expands a ball.
+    Returns b, core, rows, shell flags, likelihoods, core priors, base, field, info.
+    """
+    b, core, rows, flips, sizes, log_likelihood, log_prior, base, field, info = (
+        _compact_core_support(constants, unaries, couplings, use, prior, settings))
+    if info[INFO_METHOD] == METHOD_CORE_BALL:
+        rows = np.empty((len(sizes), len(core)), np.int8)
+        for config in range(len(sizes)):
+            for t in range(len(core)):
+                rows[config, t] = b[core[t]]
+            for a in range(sizes[config]):
+                t = flips[config, a]
+                rows[config, t] = 1 - rows[config, t]
+        shell = _ball_shell(rows, sizes, info[INFO_RADIUS], b, core)
+    else:
+        shell = np.zeros(rows.shape, np.bool_)
     return b, core, rows, shell, log_likelihood, log_prior, base, field, info
 
 
@@ -832,6 +866,36 @@ def support_marginals(b, core, rows, shell_flags, log_likelihood, log_prior):
             boundary += probability[row]
     for t in range(c):
         q[core[t]] = min(1.0, max(0.0, q[core[t]]))
+    return q, shell, boundary, probability
+
+
+@njit(cache=True)
+def _ball_marginals(b, core, flips, sizes, radius, log_likelihood, log_prior):
+    """Ball marginals and shell masses from flip sets, O(B * radius + m)."""
+    weight = log_likelihood + log_prior
+    probability = np.exp(weight - weight.max())
+    probability /= probability.sum()
+    flipped = np.zeros(len(core))
+    shell = np.zeros(len(b))
+    boundary = 0.0
+    for row in range(len(sizes)):
+        outer = sizes[row] == radius and sizes[row] > 0
+        mass = probability[row]
+        for a in range(sizes[row]):
+            t = flips[row, a]
+            flipped[t] += mass
+            if outer:
+                shell[core[t]] += mass
+        if outer:
+            boundary += mass
+    q = np.empty(len(b))
+    for i in range(len(b)):
+        q[i] = b[i]
+    for t in range(len(core)):
+        i = core[t]
+        # A centre-ALT founder is ALT exactly when it is not in the flip set.
+        value = 1.0 - flipped[t] if b[i] else flipped[t]
+        q[i] = min(1.0, max(0.0, value))
     return q, shell, boundary, probability
 
 
@@ -870,10 +934,14 @@ def site_release_marginals(gl, observed, weights, background_q, settings):
         return q, count, mass, np.zeros(k), info, 0.0, inside
     constants, unaries, couplings, use, count, mass, inside = _feedback_quadratics(
         gl, observed, weights, background_q, half_band)
-    b, core, rows, shell_flags, log_likelihood, log_prior, _, _, info = core_support(
-        constants, unaries, couplings, use, np.zeros(k), settings)
-    q, shell, boundary, _ = support_marginals(b, core, rows, shell_flags,
-                                              log_likelihood, log_prior)
+    b, core, rows, flips, sizes, log_likelihood, log_prior, _, _, info = (
+        _compact_core_support(constants, unaries, couplings, use, np.zeros(k), settings))
+    if info[INFO_METHOD] == METHOD_CORE_BALL:
+        q, shell, boundary, _ = _ball_marginals(
+            b, core, flips, sizes, info[INFO_RADIUS], log_likelihood, log_prior)
+    else:
+        q, shell, boundary, _ = support_marginals(
+            b, core, rows, np.zeros(rows.shape, np.bool_), log_likelihood, log_prior)
     return q, count, mass, shell, info, boundary, inside
 
 
@@ -884,10 +952,9 @@ def completion_site(evidence, use, weights, pairs, fixed, unknown, prior, sensit
 
     ``weights`` are per-sample probabilities of the unordered ``pairs``,
     ``fixed`` the called alleles and ``prior`` the log prior odds of the
-    unresolved founders. Returns the support's assignments of the unresolved
-    founders (rows; certain founders at the mode), their outermost-shell flags
-    (zero without a ball), each row's log likelihood sum_{n in use} log Q_n,
-    the diagnostics, and, when ``sensitivity_tolerance >= 0``, which used
+    unresolved founders. Returns the mode, ordered uncertain core, sparse ball
+    flips and sizes (empty for a bounded cube), each configuration's log
+    likelihood sum_{n in use} log Q_n, diagnostics, and, when ``sensitivity_tolerance >= 0``, which used
     samples' log likelihood changes by more than it when one founder flips
     somewhere in the support. Every support row differs from the mode only in
     core bits and Q_n is affine in each bit, so the mode and its single core
@@ -895,19 +962,10 @@ def completion_site(evidence, use, weights, pairs, fixed, unknown, prior, sensit
     """
     constants, unaries, couplings = completion_quadratics(
         evidence, use, weights, pairs, fixed, unknown)
-    b, core, core_rows, core_shell, log_likelihood, _, base, field, info = core_support(
+    b, core, _, flips, sizes, log_likelihood, _, base, field, info = _compact_core_support(
         constants, unaries, couplings, use, prior, settings)
     bits = len(unknown)
     c = len(core)
-    count = len(log_likelihood)
-    rows = np.empty((count, bits), np.int8)
-    shell = np.zeros((count, bits), np.bool_)
-    for row in range(count):
-        for i in range(bits):
-            rows[row, i] = b[i]
-        for t in range(c):
-            rows[row, core[t]] = core_rows[row, t]
-            shell[row, core[t]] = core_shell[row, t]
     n = len(evidence)
     sensitive = np.zeros((bits, n), np.bool_)
     if sensitivity_tolerance >= 0.0:
@@ -933,7 +991,7 @@ def completion_site(evidence, use, weights, pairs, fixed, unknown, prior, sensit
                     if abs(change) > sensitivity_tolerance:
                         sensitive[i, sample] = True
                         break
-    return rows, shell, log_likelihood, info, sensitive
+    return b, core, flips, sizes, log_likelihood, info, sensitive
 
 
 @njit(cache=True)

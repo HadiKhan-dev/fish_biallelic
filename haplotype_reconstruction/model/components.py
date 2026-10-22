@@ -2,7 +2,7 @@
 
 Assembly never copies founder alleles into new chromosome arrays. Its atomic unit is the
 prepared panel of one block (the path-selected local panel after founder completion); every
-assembly product (a joined batch, a hierarchy level, a refined component) is a row-path matrix
+assembly product (a joined batch, a hierarchy level, the final product) is a row-path matrix
 ``rows[f, b]`` naming, for founder ``f``, the local row of prepared panel ``b`` that the founder
 copies there. Chromosome-scale arrays are derived on demand by :func:`materialise`.
 
@@ -36,7 +36,7 @@ class PreparedPanel:
         fills (fills only at kept sites; calls at not-kept sites are carried as local selection
         released them).
     inference: int8[R, L] the frozen pre-fill snapshot: local-selection calls with not-kept sites
-        set to -1. Every likelihood of assembly, founder refinement and painting reads these, and so
+        set to -1. Every likelihood of assembly and painting reads these, and so
         does the count rule's row geometry (nearest rows, shadows, novelty), so a completion fill
         never feeds back into its own carrier evidence.
     alt_probability: float64[R, L] ALT pseudo-probability of each founder allele (local
@@ -70,7 +70,7 @@ class PreparedPanel:
 
     @cached_property
     def digest(self) -> str:
-        """SHA-256 of everything a join or refinement reads from the panel (site range, positions,
+        """SHA-256 of everything a join reads from the panel (site range, positions,
         kept mask, released and inference calls): the content identity used for join reuse."""
         digest = hashlib.sha256(f"prepared-panel:{int(self.site_start)}".encode())
         for array in (self.positions, self.kept, self.released, self.inference):
@@ -82,7 +82,7 @@ class PreparedPanel:
 
 @dataclass(frozen=True)
 class CountStepDecision:
-    """One decision of a component's final count step (founder refinement at the last level).
+    """One recorded count comparison from the component's latest join.
 
     kind: "deletion" or "addition".
     founders: panel size K when the round ran (the incumbent's founder count).
@@ -105,20 +105,22 @@ class CountStepDecision:
 
 @dataclass(frozen=True)
 class CountCall:
-    """How firmly one component's founder count is determined (its last count step).
+    """Count evidence from a component's latest join (carried through pass-through levels).
 
     founders / founders_before: K after / before the count step (None when no step ran).
-    ambiguous: some decision's band contains zero, the step cycled, or the restored best-F panel
-        fails its own deletion test (founder refinement's definition).
+    ambiguous: a recorded band contains zero, evaluated alternatives disagree on K, a count
+        cycle occurred, or final paths fail their deletion test. None means the search/verification
+        is incomplete without demonstrated ambiguity; computational limits are not biological ties.
     count_cycle: an addition was followed by a deletion of a row the same search created.
     cycle_undecided: that cycle began with a decided deletion and closed ambiguously.
     decisions: the step's decisions in order.
-    reason: why no count step ran ("single_block_or_founder"), else None.
+    reason: "join_search_unverified" when search/continuation is incomplete, else None.
+        A component never joined has no CountCall; its row count comes from its local panel.
     """
 
     founders: int | None
     founders_before: int | None
-    ambiguous: bool
+    ambiguous: bool | None
     count_cycle: bool
     cycle_undecided: bool
     decisions: tuple[CountStepDecision, ...]
@@ -132,12 +134,13 @@ class FounderComponent:
     start, stop: prepared-panel range [start, stop) (indices into the assembly's prepared panels).
     rows: int32[K, B], B = stop - start; ``rows[f, b]`` is the local row of prepared panel
         ``start + b`` that founder f copies. Founder labels are the row indices 0 .. K - 1.
-    break_before, break_after: reason of a data-unsupported phase break at the component's left /
+    break_before, break_after: reason of a phase break at the component's left /
         right boundary ("insufficient_joint_informative_samples": fewer than the configured number
-        of samples are informative on both sides); None at a chromosome end and at a boundary the
+        of samples are informative on both sides; "unresolved_beam_materialization": no full joined
+    incumbent was established within the complete-family beam bound); None at a chromosome end and at a boundary the
         hierarchy left unjoined for another reason (a batch edge at the last level, a batch without
         informative samples).
-    count_call: the last count step's call (final assembly, after founder refinement), else None.
+    count_call: the latest join's count evidence, or None for a component never joined.
     """
 
     start: int

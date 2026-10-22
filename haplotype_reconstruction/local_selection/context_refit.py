@@ -33,7 +33,7 @@ import numpy as np
 from numba import njit, prange
 
 from ..assembly.founder_alleles import site_posterior
-from ..execution import BudgetedPool, claim_threads
+from ..execution import BudgetedPool, claim_threads, memory_worker_limit, reserve_memory
 from ..maths.ties import census, census_enabled
 from .fit import unique_rows
 
@@ -43,6 +43,11 @@ from .fit import unique_rows
 BACKGROUND_COUNT_BAND = 2.0 ** -20
 # Census window of the carrier-probability band at 1/2 (diagnostics only).
 HALF_CENSUS_WINDOW = 1e-3
+
+# Private process/startup allowance: historical first-task incremental RSS reached 362 MB. Unlike the old
+# 256 MiB per-task kernel allowance, this remains reserved for the complete lifetime of each pool worker.
+# Sequential K30 post-trim private memory reached 116 MB; this also covers the supported cold path.
+WORKER_RESIDENT_BYTES = 512 << 20
 
 # Per site, a copy state's allele probability is 0 or 1 (a called founder) or the site
 # background (an uncalled founder or the background state): codes 0, 1, 2. The emission term of
@@ -278,15 +283,14 @@ def _combine_duplicates(posterior, support, inverse, count):
 def refit_task_bytes(samples: int, sites: int, blocks: int, founders: int) -> int:
     """Planned peak additional bytes of one component refit: its sites' GL and mask slices,
     the (N, B, S, S) emission / cavity array, each thread's (B, S, S) forward and emission
-    buffers, the refitted arrays and the site-posterior work (S = founders + 1), plus a fixed
-    0.25 GiB for a worker's first task, which also loads the kernels (measured on actm3 chr8:
-    first tasks up to 0.31 GB, later ones up to 0.07 GB)."""
+    buffers, the refitted arrays and the site-posterior work (S = founders + 1). Worker startup and
+    retained private memory are held separately for the pool lifetime."""
     s = int(founders) + 1
     slices = int(samples) * int(sites) * (3 * 8 + 1)
     grid = 8 * int(samples) * int(blocks) * s * s
     threads = 2 * 8 * int(blocks) * s * s * 4
     outputs = 3 * 8 * int(founders) * int(sites)
-    return slices + grid + threads + outputs + (256 << 20)
+    return slices + grid + threads + outputs
 
 
 def refit_component(h, gl, observed, starts, stops, centers, rate, config, unknown_mass, census_key=None):
@@ -437,7 +441,13 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
     if tasks:
         samples = evidence.likelihoods.shape[0]
         sizes = [refit_task_bytes(samples, len(task[2]), len(task[3]), len(task[1])) for task in tasks]
-        with BudgetedPool(budget, processes=min(int(budget.threads()), len(tasks)),
+        planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
+        # One shared evidence copy for the pool, counted once in the largest concurrent group.
+        largest = max(range(len(planned)), key=planned.__getitem__)
+        planned[largest] += evidence.likelihoods.nbytes + observed.nbytes
+        workers = memory_worker_limit(planned, min(int(budget.threads()), len(tasks)), label="context-refit")
+        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="context-refit workers"), \
+                BudgetedPool(budget, processes=workers,
                           shared=dict(likelihoods=evidence.likelihoods, observed=observed),
                           label="context-refit") as pool:
             for index, result, q, support, slots, _seconds, report in pool.imap_unordered(

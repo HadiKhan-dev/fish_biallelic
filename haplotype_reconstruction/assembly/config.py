@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 
 from .completion.config import CompletionConfig
 from .count_rule.config import CountRuleConfig
-from .founder_refinement.config import FounderRefinementConfig
 
 
 @dataclass(frozen=True)
@@ -19,20 +18,21 @@ class LinkerConfig:
 
     max_sites: linking proxies keep at most this many sites per input component (a stride over
         its usable sites); emissions marginalise unknown alleles at partial sites.
-    max_iterations: EM iterations per gap fit (convergence may stop earlier).
+    max_iterations: maximum damped updates per gap fit (convergence may stop earlier).
     robustness: genotype emission mixture P = (1 - r) P(g | pair) + r / 3 (no log floor).
     error_fraction, error_tract_bp: the within-block error-tract model of the micro HMM (a
         fraction of copying in error tracts of this mean length).
     min_log_probability, pseudo_count, uniform_mix: M-step regularisation (log floor of a
         transition before renormalising, pseudocount added to every edge count, robust uniform
         mixture of each fitted row).
-    min_change: EM stops when no (damped) transition probability or reverse summary changes by more.
+    min_change: stop when max(abs(M(T) - T)) is at most this value at the returned transitions,
+        where M is the undamped regularised forward M-step. A capped fit may remain unconverged.
     learning_rate_decay, minimum_learning_rate: damping of the M-step towards the previous
-        transitions, rate = max(decay^iteration, minimum) (base schedule; owner question B6).
+        transitions, rate = max(decay^iteration, minimum).
     """
 
     max_sites: int = 2000
-    max_iterations: int = 20
+    max_iterations: int = 50
     robustness: float = 0.01
     error_fraction: float = 0.01
     error_tract_bp: float = 20000.0
@@ -81,7 +81,7 @@ class AssemblyConfig:
     recombination_tolerance: dimensionless span budget in the maximum-gap rule; divided
         by the mean component span in Morgans times gap_horizon_scale.
     cost_scale: scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B
-        (count_rule.founder_cost) of the join and founder refinement.
+        (count_rule.founder_cost) of the join.
     """
 
     batch_size: int = 10
@@ -94,4 +94,3 @@ class AssemblyConfig:
     join: JoinConfig = field(default_factory=JoinConfig)
     completion: CompletionConfig = field(default_factory=CompletionConfig)
     count_rule: CountRuleConfig = field(default_factory=CountRuleConfig)
-    refinement: FounderRefinementConfig = field(default_factory=FounderRefinementConfig)

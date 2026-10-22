@@ -560,19 +560,19 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `min_boundary_informative_samples` | `4` | a boundary between adjacent components becomes a phase break (never joined) when fewer samples are informative on both sides. |
 | `gap_horizon_scale` | `3` | inverse-Morgan scale of the linker and beam's maximum transition gap at levels >= 2: max(1, 1 + floor(recombination_tolerance / (mean component span in Morgans x gap_horizon_scale))). Level 1 uses every gap. This search-horizon control is independent of local selection's copying intensity. |
 | `recombination_tolerance` | `0.5` | dimensionless span budget in the maximum-gap rule; divided by the mean component span in Morgans times gap_horizon_scale. |
-| `cost_scale` | `0.5` | scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B (count_rule.founder_cost) of the join and founder refinement. |
+| `cost_scale` | `0.5` | scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B (count_rule.founder_cost) of the join. |
 | **linker** (LinkerConfig) |  | The distance-aware sum-product linker that fits dense haploid transitions between blocks. |
 | `linker.max_sites` | `2000` | linking proxies keep at most this many sites per input component (a stride over its usable sites); emissions marginalise unknown alleles at partial sites. |
-| `linker.max_iterations` | `20` | EM iterations per gap fit (convergence may stop earlier). |
+| `linker.max_iterations` | `50` | maximum damped updates per gap fit (convergence may stop earlier). |
 | `linker.robustness` | `0.01` | genotype emission mixture P = (1 - r) P(g \| pair) + r / 3 (no log floor). |
 | `linker.error_fraction` | `0.01` | the within-block error-tract model of the micro HMM (a fraction of copying in error tracts of this mean length). |
 | `linker.error_tract_bp` | `20000.0` | the within-block error-tract model of the micro HMM (a fraction of copying in error tracts of this mean length). |
 | `linker.min_log_probability` | `-10.0` | M-step regularisation (log floor of a transition before renormalising, pseudocount added to every edge count, robust uniform mixture of each fitted row). |
 | `linker.pseudo_count` | `0.1` | M-step regularisation (log floor of a transition before renormalising, pseudocount added to every edge count, robust uniform mixture of each fitted row). |
 | `linker.uniform_mix` | `0.01` | M-step regularisation (log floor of a transition before renormalising, pseudocount added to every edge count, robust uniform mixture of each fitted row). |
-| `linker.min_change` | `0.001` | EM stops when no (damped) transition probability or reverse summary changes by more. |
-| `linker.learning_rate_decay` | `0.9` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum) (base schedule; owner question B6). |
-| `linker.minimum_learning_rate` | `0.1` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum) (base schedule; owner question B6). |
+| `linker.min_change` | `0.001` | stop when max(abs(M(T) - T)) is at most this value at the returned transitions, where M is the undamped regularised forward M-step. A capped fit may remain unconverged. |
+| `linker.learning_rate_decay` | `0.9` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). |
+| `linker.minimum_learning_rate` | `0.1` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). |
 | **join** (JoinConfig) |  | The endpoint beam and the certified panel search of one joined batch. |
 | `join.paths_per_endpoint` | `16` | beam quota of candidate chromosome paths per endpoint haplotype (16); the pool-saturation ladder doubles it up to quota 256, and up to 1024 once a move was accepted at the 256 rung. |
 | `join.full_scores_per_kind` | `16` | exact scores per proposal kind per tier-1 sweep. |
@@ -618,18 +618,12 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `completion.occupancy.minimum_same_sample_continuity` | `0.72` |  |
 | `completion.occupancy.minimum_rare_continuity_samples` | `2` |  |
 | `completion.maximum_discovery_unknown_mass` | `0.0` | a block whose local selection left more unknown-copy mass (``LocalPanel.unknown_mass``) than this releases no fill (base 0.0: any unexplained copy vetoes fills in that block). |
-| **count_rule** (CountRuleConfig) |  | Constants of the effective-carrier count rule, shared by the join and founder refinement. |
+| **count_rule** (CountRuleConfig) |  | Constants of the effective-carrier count rule, used by the assembly join. |
 | `count_rule.bootstrap_resamples` | `2000` | the sample bootstrap behind the ambiguity band of a count decision (percentile interval of min(m_d, m_q)); a call is ambiguous when the band contains zero in its interior. The point decision stands either way. |
 | `count_rule.bootstrap_level` | `0.95` | the sample bootstrap behind the ambiguity band of a count decision (percentile interval of min(m_d, m_q)); a call is ambiguous when the band contains zero in its interior. The point decision stands either way. |
-| `count_rule.ranked_refits` | `9` | at most this many count candidates are refitted per decision (founder refinement's deletion and addition rounds, the join's duplicate-seed births); above it the candidates are ranked by cheap screens. A K-sized budget: every candidate is refitted while K <= 9. |
-| `count_rule.near_identity` | `0.01` | called-site mismatch rate at or below which the join treats two paths as the same sequence (a path that close to another owns no sequence: q = 0). Founder refinement does not use it: its sequence part is an exact shadow score. |
+| `count_rule.ranked_refits` | `9` | at most this many duplicate-seed birth candidates are refitted per decision; above it the candidates are ranked by cheap screens. A K-sized budget: every candidate is refitted while K <= 9. |
+| `count_rule.near_identity` | `0.01` | called-site mismatch rate at or below which the join treats two paths as the same sequence (a path that close to another owns no sequence: q = 0). |
 | `count_rule.shadow_combinations` | `2048` | evaluate a complete nearest-row sequence-shadow family up to this many configurations. Larger families retain the incumbent evaluated decision and record count_unverified; this is separate from the shared sixteen-leaf higher-level continuation allowance. |
-| **refinement** (FounderRefinementConfig) |  | Founder refinement settings. |
-| `refinement.proposal_max_bins` | `2000` | the binned window surrogate of a component has at most this many bins per component: bin size >= ceil(component sites / proposal_max_bins). |
-| `refinement.proposal_min_sites_per_bin` | `200` | smallest surrogate bin (sites). Levels 1 and 2 share the chromosome's resolution, max(this, ceil(chromosome sites / proposal_max_bins)), so the many small early components do not each get a chromosome's bin budget. The surrogate decides which moves are proposed; acceptance always scores every site exactly. |
-| `refinement.sweep_limit` | `100` | sweeps per fixed-K search. A search that reaches it is reported (and warned) as not converged; it never stops silently. |
-| `refinement.frontier_bytes` | `137438953472` | the largest frontier one window programme may hold (bytes, counted as the frontier_limit formula: four copies of S x (Q + K + bins + 2) float64 per kept path); a programme that would exceed it keeps its incumbent (a reported fallback). A fixed constant, the same on every machine, so results never depend on free memory: 128 GiB is above base's own memory-derived cap on every reference node (at most a quarter of the available memory, about 120 GB), where base never fell back (largest frontier 76,776 paths, sim_s10001 chr3 L1); K = 30 synthetic and AulStu peaks (257 and 357 paths) are four orders of magnitude below it. The memory of large programmes is admitted by the run's memory governor (proposals.PROGRAMME_BUDGETS). |
-| `refinement.alternative_branches` | `16` | complete same-level count continuations, including the ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class when its complete expansion would exceed the budget. Branches reuse labelled fixed-K fits on identical inputs and run sequentially. |
 
 ### PaintingConfig
 

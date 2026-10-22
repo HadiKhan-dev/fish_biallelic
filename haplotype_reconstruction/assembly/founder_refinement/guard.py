@@ -371,3 +371,21 @@ def shared_savings(rem_sample, rem_offsets, rem_events, saved, focal, first, sec
         if count:
             total += min(saved[rem_sample[i]], count)
     return total
+
+
+def traceback_bytes(samples: int, sites: int, founders: int, threads: int) -> int:
+    """Conservative peak of one guard's full-width tracing beyond its message arrays.
+
+    Both old/new int64 event tensors coexist (48 N L bytes). Up to N L removed
+    events add 24 N L. shared_savings expands each event into at most four
+    transitions: five int64 entry arrays, two interval coordinates and an order
+    index add 256 N L, and two masks add 2 N L. Canonicalisation, sorting and
+    one-sample FIFO scratch are covered by another 200 L bytes. Each active thread
+    holds bool[L,Q] traceback flags and an int64[L] predecessor vector, while
+    boundary, reconstructed-prefix and per-thread messages/counts add 64 N Q. Width may grow to
+    the entire component; using the whole width in admission is deliberate.
+    """
+    states = founders * (founders + 1) // 2
+    active = min(samples, max(1, threads))
+    return int((330 * samples + 200) * sites + active * sites * (states + 8)
+               + 64 * samples * states)

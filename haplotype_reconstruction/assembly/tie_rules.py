@@ -1,11 +1,11 @@
 """Tie quanta, canonical founder order and tie-class orders of the assembly stage (release 2.1, design 5.1-5.4).
 
-Assembly decides on float sums over its float32 evidence (the joins, the endpoint beam and founder refinement) and on
+Assembly decides on float sums over its float32 evidence (the joins and the endpoint beam) and on
 the fitted linker transitions. A tiny input perturbation moves such a sum without changing its meaning, so a discrete
 choice must never follow from which of two values that differ by less than that motion happens to be larger, nor from
 array order. The rules (``maths.ties``, owner-reviewed 18 Oct):
 
-* **Canonical founder order** (5.1): the founders (row paths) of every joined component, every refinement fit and the
+* **Canonical founder order** (5.1): the founders (row paths) of every joined component and the
   join search's own panel are kept in lexicographic order of their prepared-row index paths (prepared rows are in
   lexicographic order of their fitted alleles, so this is a content order). Every downstream tie-break that falls back
   to a founder slot or a pool index is then a content rule. Likelihoods do not change; founder labels do.
@@ -30,7 +30,7 @@ import numpy as np
 from ..maths import ties
 
 # (floor, relative factor of the scale) per assembly decision kind: q = power of two >= max(floor, factor x |scale|).
-#   refine_F      founder refinement totals F (log units): the refit picked at a count step, forward vs reverse
+#   refine_F      retained for disabled founder refinement: totals F (log units), count-step refits, forward/reverse
 #                 search, best-F keep/restore, addition copy gains; scale = the incumbent's F. Also the per-sample
 #                 band of the zero-gain cleanup (floor only).
 #   join_ll       join log likelihoods and exact gains of one-move alternatives (nats): tier-1 and tier-2 winners,
@@ -41,7 +41,7 @@ from ..maths import ties
 #                 of chimera-trap indicators): proposal cuts and novelty ranking; scale = the cut's largest |score|.
 #                 The floor alone is the band of the novelty test at its exact zero.
 #   beam          endpoint-beam path scores (sums of mean log transitions); scale = the largest |score| of the cut.
-#   count_margin  effective-carrier point margins in units of the founder cost (refinement shortlists); no scale.
+#   count_margin  retained for disabled refinement shortlists: effective-carrier margins in founder-cost units.
 #   paint         the join painting's Viterbi traceback (proposal generation only): relative to the bin's best
 #                 per-sample score (factor only; floor 2^-30 nats).
 # Valley census (design A-8; fixed l2 panels of actm3 chr8/13/19, std_n80 chr8/13/18 and TroMau chr18/chr3, test tree

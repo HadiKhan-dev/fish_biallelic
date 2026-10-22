@@ -53,8 +53,9 @@ from ...maths import ties
 from .. import tie_rules
 from . import emissions, objective
 from .certify import PanelForwards
+from .beam import CartesianBeamFamily, UnresolvedBeam
 from .count_step import CountStep, main_coverer
-from .moves import (MOVES_PER_CHUNK, REPLACE, Moves, best_improvement, lower_bounds,
+from .moves import (MOVES_PER_CHUNK, REPLACE, SPLICE, Moves, best_improvement, lower_bounds,
                     replaced_row)
 from .proposals import (ScoredEdits, boundary_proposals, boundary_vote_matrix, candidate_novelty,
                         conditional_fields, cycle_permutations, fixed_paint_delta,
@@ -225,6 +226,9 @@ class JoinSummary:
     pool_backstop: bool
     events: tuple[dict, ...] = field(default=(), repr=False)
     tie_events: dict = field(default_factory=dict)
+    # Count time is included in join_search; counters never decide scientific results.
+    phase_seconds: dict = field(default_factory=dict)
+    work_counters: dict = field(default_factory=dict)
 
     @property
     def ladder_extended(self) -> bool:
@@ -256,7 +260,8 @@ class JoinSummary:
             pool_sizes=dict(original=self.pool_original, final=self.pool_final,
                             largest=self.pool_largest),
             certified=self.certified, backstop_reached=self.backstop_reached,
-            pool_backstop=self.pool_backstop, tie_events=_plain(self.tie_events))
+            pool_backstop=self.pool_backstop, tie_events=_plain(self.tie_events),
+            phase_seconds=_plain(self.phase_seconds), work_counters=_plain(self.work_counters))
 
     def records(self) -> list[dict]:
         """Every record of the search in order, the closing record last (one reports-table row
@@ -295,7 +300,9 @@ class JoinSummary:
             backstop_reached=bool(record["backstop_reached"]),
             pool_backstop=bool(record["pool_backstop"]),
             events=tuple(_plain(event) for event in record.get("events", ())),
-            tie_events=_plain(record.get("tie_events", {})))
+            tie_events=_plain(record.get("tie_events", {})),
+            phase_seconds=_plain(record.get("phase_seconds", {})),
+            work_counters=_plain(record.get("work_counters", {})))
 
 
 @dataclass(frozen=True)
@@ -478,7 +485,16 @@ class PanelSearch:
         self._local = threading.local()
         self.blocks = len(inputs.blocks)
         self.samples = int(inputs.sample_count)
-        candidates = _paths(beam)
+        self.initial_family = beam if isinstance(beam, CartesianBeamFamily) else None
+        self.initial_unresolved = beam if isinstance(beam, UnresolvedBeam) else None
+        self.beam_stopped = self.initial_family is not None or self.initial_unresolved is not None
+        if self.initial_family is not None:
+            # Exactly the old first-covering anchor trials, without enumerating the
+            # other Cartesian members. These seed paths are not a truncated pool.
+            candidates = list(dict.fromkeys(beam.first_covering(block, row)
+                              for block, count in enumerate(beam.founders) for row in range(count)))
+        else:
+            candidates = _paths(beam.incumbent_paths if self.initial_unresolved is not None else beam)
         if not candidates:
             raise ValueError("a join needs at least one beam path")
         site_counts = [len(block.positions) for block in inputs.blocks]
@@ -540,7 +556,12 @@ class PanelSearch:
         for anchor in range(self.blocks):
             seen = set()
             trial = []
-            for path in candidates:
+            anchor_candidates = (candidates if self.initial_family is None else
+                                 [self.initial_family.first_covering(anchor, row)
+                                  for row in (range(self.initial_family.founders[anchor] - 1, -1, -1)
+                                              if self.initial_family.reverse else
+                                              range(self.initial_family.founders[anchor]))])
+            for path in anchor_candidates:
                 if path[anchor] not in seen:
                     trial.append(path)
                     seen.add(path[anchor])
@@ -564,8 +585,27 @@ class PanelSearch:
         # path without sequence of its own (count_rule.pre_cycle_count).
         self.sizes = [self.start_size]
         self.cleanup_steps = set()
-        self.static_totals = [self.layout.block(j).sum(axis=3) for j in range(self.blocks)]
+        self.static_totals = [self.layout.block(j).sum(axis=2) for j in range(self.blocks)]
         self._set_pool(self.original_pool)
+        if self.beam_stopped:
+            self._record_beam_bound(beam, 'initial')
+
+    def _record_beam_bound(self, beam, source, bound=None):
+        """Preserve the complete unevaluated path domain; keep the current incumbent."""
+        domain = (dict(kind='constant_cartesian', founders=list(beam.founders),
+                       cardinality=beam.cardinality, score=beam.score, reverse=beam.reverse,
+                       bound=(2 * self.config.paths_per_endpoint * max(self.block_sizes)
+                              if bound is None else bound))
+                  if isinstance(beam, CartesianBeamFamily) else beam.record())
+        self.beam_stopped = True
+        record = dict(reason='beam_materialization_bound',
+                      source_decision=f'beam/{source}', status='unresolved_beam_materialization',
+                      unresolved_search=True, panels=[], beam_domain=domain,
+                      representative_prior='retain_incumbent',
+                      incumbent_panel=tie_rules.panel_key(self.selected))
+        self.release_families.append(record)
+        self.events.append(dict(stage='beam_materialization_bound', source=source,
+                                beam_domain=domain, incumbent_founders=len(self.selected)))
 
     # -- tie classes -----------------------------------------------------------------------------
 
@@ -782,7 +822,14 @@ class PanelSearch:
             if len(self.beam_cache) >= BEAM_RUNS_KEPT:
                 self.beam_cache.clear()
             started = time.perf_counter()
-            paths = dict.fromkeys(_paths(self.beam_runner(quota, overrides)))
+            beam = self.beam_runner(quota, overrides)
+            if isinstance(beam, (CartesianBeamFamily, UnresolvedBeam)):
+                self._record_beam_bound(beam, f'quota{quota}',
+                    max(2 * sum(overrides.get((block, row), quota) for row in range(count))
+                        for block, count in enumerate(self.block_sizes)))
+                self.beam_seconds += time.perf_counter() - started
+                return self.candidates
+            paths = dict.fromkeys(_paths(beam))
             self.beam_cache[key] = self.original_pool + [path for path in paths
                                                          if path not in self.original_set]
             self.beam_seconds += time.perf_counter() - started
@@ -824,8 +871,14 @@ class PanelSearch:
 
     # -- tier 2 and the saturation rungs ----------------------------------------------------------
 
-    def _certify(self, panel, pool, pool_offset, structural, pool_capacity, panel_ll=None,
-                 slots=None, refit_scores=None, key=None):
+    def _certify(self, *args, **kwargs):
+        # A lazily built splice table belongs to this pass, including seed refits.
+        # Reserve its bytes until the pass ends; return only copied sample vectors.
+        with ExitStack() as held:
+            return self._certify_moves(*args, **kwargs, held=held)
+
+    def _certify_moves(self, panel, pool, pool_offset, structural, pool_capacity, panel_ll=None,
+                       slots=None, refit_scores=None, key=None, *, held):
         """Bound every same-count move of N(P, pool) (or only replacements by pool paths).
 
         slots: a seed refit; only moves changing these rows, which are exempt from the
@@ -855,6 +908,7 @@ class PanelSearch:
         combined = self.candidates if not pool_offset else self.candidates + list(pool)
         cache = {}
         sparse = dict(scores=0, samples=0)
+        splice_work = dict(tables=0, scores=0, seconds=0.0)
 
         scored_changes = []
 
@@ -865,6 +919,25 @@ class PanelSearch:
             return result
 
         def _exact_move(trial, move):
+            if moves.kind[move] == SPLICE:
+                from ...execution import reserve_memory
+                from .splice import pair_column, splice_scores, workspace_bytes
+                if "splice" not in cache:
+                    threads = self._claim()
+                    held.enter_context(reserve_memory(
+                        workspace_bytes(self.samples, self.blocks, len(panel),
+                                        max(self.layout.bins), threads),
+                        label="join suffix-exchange scores"))
+                    table_started = time.perf_counter()
+                    cache["splice"] = splice_scores(self.layout, rows, self.penalty)
+                    splice_work["seconds"] += time.perf_counter() - table_started
+                    splice_work["tables"] += 1
+                _, first, second, boundary, _ = moves.canonical[move]
+                column = pair_column(len(panel), int(first), int(second))
+                values = cache["splice"][:, int(boundary) - 1, column].copy()
+                splice_work["scores"] += 1
+                trial_ll = float(values.sum())
+                return -2.0 * trial_ll, (trial_ll, values, 'splice')
             # A survivor replacing one path is scored exactly per sample where its bound exceeds
             # V_s(P minus f) (PanelForwards.replacement_scores); other moves by the full score.
             from collections import Counter
@@ -880,7 +953,7 @@ class PanelSearch:
                 found = refit_scores.get(shared)
                 if found is not None:
                     return found
-            if not cache:
+            if 'removal' not in cache:
                 cache['removal'] = forwards.removal_scores()
             self._claim()
             # The bound's original slot is useful only for the same unique replacement.
@@ -918,6 +991,15 @@ class PanelSearch:
                                                  exempt),
             reach=2.0 * ties.WIDE_CLASS_QUANTA * q_ll, choose=choose,
             observe=observe if slots is None else None)
+        if (best_move is not None and len(best_move[4]) == 3
+                and best_move[4][2] == 'splice'):
+            # Prefix/suffix scores rank all exchanges cheaply. Count support needs a
+            # consistent forward-scored baseline: tiny cancellation noise at zero
+            # otherwise changes bootstrap effective-carrier ratios. Score only this
+            # selected panel before any continuation, including duplicate-seed fits.
+            # The local payload tag survives a duplicate move replacing its witness.
+            score, payload = self._exact(tie_rules.sort_panel(best_move[3]))
+            best_move = (score + 2.0 * panel_ll, *best_move[1:4], payload)
         if best_move is None and slots is None:
             # Keep only known flat neighbors. Seed-local proposals are not final
             # panels, and bounds are deliberately not widened for this fallback.
@@ -929,6 +1011,8 @@ class PanelSearch:
                       neighbourhood=moves.counts(), moves=len(moves), survivors=int(survivors),
                       exact_scores=int(exact_scores), sparse_exact_scores=sparse['scores'],
                       sparse_exact_samples=sparse['samples'],
+                      splice_exact_scores=splice_work["scores"],
+                      splice_tables=splice_work["tables"], splice_seconds=splice_work["seconds"],
                       observed_plateau_neighbours=len(flat) if best_move is None else 0,
                       recomputed_exclusions_per_sample=float(forwards.recomputed_per_sample),
                       accepted=None if best_move is None else str(moves.description(best_move[2])),
@@ -988,7 +1072,8 @@ class PanelSearch:
         corrections = []
         for b in range(blocks):
             painting = np.ascontiguousarray(painted[:, offsets[b]:offsets[b + 1]])
-            unary, pair = conditional_fields(self.layout.block(b), painting, local[:, b], k)
+            unary, pair = conditional_fields(self.layout.block(b), painting, local[:, b], k,
+                                              int(self.layout.founders[b]))
             fields.append(unary)
             corrections.append(pair)
         gains = np.zeros((k, len(candidates)))
@@ -1427,9 +1512,18 @@ class PanelSearch:
             self.events.append(dict(stage='count_revisit', source=source, panel_size=len(new_panel)))
             return False
         if source == 'seed':
-            prefix = f"c{self._count_steps}/seed{new_record['seed']}"
-            self.release_families.extend(family for key, families in self._seed_families.items()
-                                         if key == prefix for family in families)
+            # Equivalent settled endpoints can have different unresolved source histories.
+            # Keep every accepted witness of this exact panel: selecting one seed's
+            # diagnostic record must not select which ambiguity reaches release.
+            selected_key = tie_rules.panel_key(new_panel)
+            accepted_seeds = sorted(
+                {candidate[3]['seed'] for candidate in candidates
+                 if tie_rules.panel_key(candidate[1]) == selected_key},
+                key=lambda seed: (self.selected[seed], seed))
+            # Seed histories arrive concurrently; release them in founder-path content order.
+            self.release_families.extend(
+                family for seed in accepted_seeds
+                for family in self._seed_families.get(f"c{self._count_steps}/seed{seed}", ()))
         old = set(self.selected)
         if len(new_panel) > len(self.selected):
             count['decisions'] += 1
@@ -1570,6 +1664,9 @@ class PanelSearch:
         largest_pool = len(self.candidates)
         final_forwards = None
         while True:
+            if self.beam_stopped:
+                backstop_reached = pool_backstop = True
+                break
             if phase_sweeps >= self.sweep_backstop:
                 backstop_reached = True
                 print(f"  [panel search] sweep backstop {self.sweep_backstop} reached "
@@ -1594,6 +1691,9 @@ class PanelSearch:
             pool_before = len(self.candidates)
             beam_before = self.beam_seconds
             pool = self._extension_pool(quota, self.selected)
+            if self.beam_stopped:
+                backstop_reached = pool_backstop = True
+                break
             if pool is not self.candidates:
                 self._set_pool(pool)
                 largest_pool = max(largest_pool, len(self.candidates))
@@ -1643,6 +1743,8 @@ class PanelSearch:
                 beam_before = self.beam_seconds
                 doubled = [path for path in self._extension_pool(level, self.selected)
                            if path not in checked]
+                if self.beam_stopped:
+                    break
                 best_move, record, level_forwards = self._certify(
                     self.selected, doubled, len(self.candidates), False,
                     len(self.candidates) + len(doubled), key=f"sat{saturation_steps}")
@@ -1656,6 +1758,9 @@ class PanelSearch:
                 elif doubled and self._count_step(level_forwards, pool=doubled):
                     self.count['ladder_births'] += 1
                     accepted = True
+            if self.beam_stopped:
+                backstop_reached = pool_backstop = True
+                break
             if not accepted:
                 if self._continue_terminal_family():
                     # No fresh sweep/backstop/quota budget and no improvement
@@ -1687,7 +1792,10 @@ class PanelSearch:
             pool_original=len(self.original_pool), pool_final=len(self.candidates),
             pool_largest=largest_pool, certified=certified, backstop_reached=backstop_reached,
             pool_backstop=pool_backstop, events=tuple(_plain(event) for event in self.events),
-            tie_events=self.tie_counter.record())
+            tie_events=self.tie_counter.record(),
+            phase_seconds={"count_step": float(self.count["seconds"])},
+            work_counters={"beam_materialization_bounds": sum(
+                event.get("stage") == "beam_materialization_bound" for event in self.events)})
         return JoinOutcome(paths=np.asarray(self.selected, dtype=np.int32).reshape(-1, self.blocks),
                            log_likelihood=float(self.likelihood), summary=summary,
                            release_alternatives=tuple(self.release_families))

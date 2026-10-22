@@ -29,6 +29,7 @@ import numpy as np
 from numba import njit, prange
 
 from ...maths import ties
+from .emissions import pair_index
 
 
 @njit(cache=True, inline="always")
@@ -204,7 +205,7 @@ def _gather_states(flat, base, haps, bins, rows, first, second, block, gathered)
     """gathered[t, z]: the emissions of states z (pairs first[z] <= second[z] of panel paths) at
     every bin t of one block, contiguous per bin (base: the block's first value of the sample)."""
     for z in range(len(first)):
-        at = base + (rows[first[z], block] * haps + rows[second[z], block]) * bins
+        at = base + pair_index(rows[first[z], block], rows[second[z], block]) * bins
         for marker in range(bins):
             gathered[marker, z] = flat[at + marker]
 
@@ -243,7 +244,7 @@ def forward(flat, block_start, block_haps, block_bins, rows, first, second, pena
     t = 0
     for block in range(len(block_start)):
         haps, bins = block_haps[block], block_bins[block]
-        _gather_states(flat, block_start[block] + sample * haps * haps * bins, haps, bins, rows,
+        _gather_states(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins, rows,
                        first, second, block, gathered)
         for marker in range(bins):
             if t == 0:
@@ -274,7 +275,7 @@ def score_samples(flat, block_start, block_haps, block_bins, rows, penalty, samp
         t = 0
         for block in range(len(block_start)):
             haps, bins = block_haps[block], block_bins[block]
-            _gather_states(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+            _gather_states(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins,
                            rows, first, second, block, gathered)
             for marker in range(bins):
                 if t == 0:
@@ -317,7 +318,7 @@ def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop,
         t = 0
         for block in range(len(block_start)):
             haps, bins = block_haps[block], block_bins[block]
-            _gather_states(flat, block_start[block] + sample * haps * haps * bins, haps, bins, rows,
+            _gather_states(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins, rows,
                            first, second, block, gathered)
             for marker in range(bins):
                 if t == 0:
@@ -416,7 +417,7 @@ def minimum_switches(flat, block_start, block_haps, block_bins, rows, penalty, s
         started = False
         for block in range(len(block_start)):
             haps, bins = block_haps[block], block_bins[block]
-            base = block_start[block] + sample * haps * haps * bins
+            base = block_start[block] + sample * (haps * (haps + 1) // 2) * bins
             for marker in range(bins):
                 best = -np.inf
                 fewest = np.iinfo(np.int64).max
@@ -431,7 +432,7 @@ def minimum_switches(flat, block_start, block_haps, block_bins, rows, penalty, s
                     if started and (switch > stay or (switch == stay and fewest + 1 < counts[state])):
                         values[state] = switch
                         counts[state] = fewest + 1
-                    at = base + (rows[first[state], block] * haps + rows[second[state], block]) * bins
+                    at = base + pair_index(rows[first[state], block], rows[second[state], block]) * bins
                     values[state] += flat[at + marker]
                 started = True
         best = np.max(values)

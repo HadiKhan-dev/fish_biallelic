@@ -1,7 +1,7 @@
 """Independent-block shadow envelopes and proof-only count certificates.
 
-Refinement uses this proof after its enumeration budget is exceeded. A global
-shadow chooses one allowed local row per
+The retained refinement code calls this proof after exceeding its enumeration budget;
+that caller is disabled in 2.7. A global shadow chooses one allowed local row per
 (founder, block); choices cannot change inside a block. Maximizing block transfer
 messages over its LOCAL products gives the exact per-sample maximum over all global
 shadows. Different samples may select different maximizing shadows. This is a bound
@@ -63,8 +63,8 @@ def bounded_factor_plan(options, shape, site_counts, *, max_local_product, max_w
     """Decline before allocation if a local product or weighted work exceeds caller caps.
 
     Caps restrict this optional proof computation only; None leaves the ordinary
-    incumbent/unknown path intact. Site counts are the existing full-site counts
-    (refinement) or bin counts (join), without changing their scoring layout.
+    incumbent/unknown path intact. Site counts preserve the caller's scoring layout:
+    full-site counts for the disabled refinement caller, or bin counts for a join frame.
     """
     sizes, _ = factor_sizes(options, shape)
     work = sum(size * int(sites) for size, sites in zip(sizes, site_counts))
@@ -132,46 +132,6 @@ def full_site_envelope(leaves, site_offsets, logs, plan, penalty, center):
     """Exact per-sample envelope; transient dosage table size is local site work x Q."""
     dosages, dose_offsets = _dosages(leaves, site_offsets, plan.choices, plan.starts)
     return _full_site(logs, site_offsets, dosages, dose_offsets, plan.starts, penalty, center)
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def _join(flat, block_start, block_haps, block_bins, choices, starts, penalty, sample_ids):
-    founders = choices.shape[1]
-    states = founders * (founders + 1) // 2
-    result = np.empty(len(sample_ids), np.float64)
-    for index in prange(len(sample_ids)):
-        sample = sample_ids[index]
-        row = np.zeros(states)
-        trial = np.empty(states)
-        target = np.empty(states)
-        for block in range(len(starts) - 1):
-            target[:] = -np.inf
-            local_haps, bins = block_haps[block], block_bins[block]
-            base = block_start[block] + sample * local_haps * local_haps * bins
-            for choice in range(starts[block], starts[block + 1]):
-                trial[:] = row
-                for column in range(bins):
-                    switch = max_range(trial, 0, states, -np.inf) - penalty
-                    state = 0
-                    for first in range(founders):
-                        a = choices[choice, first]
-                        for second in range(first, founders):
-                            b = choices[choice, second]
-                            emit = flat[base + (a * local_haps + b) * bins + column]
-                            trial[state] = max(trial[state], switch) + emit
-                            state += 1
-                for state in range(states):
-                    target[state] = max(target[state], trial[state])
-            row[:] = target
-        result[index] = max_range(row, 0, states, -np.inf)
-    return result
-
-
-def join_envelope(layout, plan, penalty, sample_ids):
-    """Exact join envelope on its unchanged binned layout and sample cohort."""
-    return _join(*layout.arrays(), plan.choices, plan.starts, penalty,
-                 np.asarray(sample_ids, np.int64))
-
 
 
 def _carrier_ceiling(count):

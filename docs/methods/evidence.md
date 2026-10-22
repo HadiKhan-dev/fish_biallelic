@@ -208,7 +208,7 @@ pedigree misfits; they are not evidence of contamination.
 `ContigEvidence.founder_view()` treats it as effectively missing observations. The integrated
 memory implementation shares immutable counts and likelihoods, copies the observation mask,
 and marks excluded samples unobserved; consumers materialize neutral values where needed.
-Discovery, local selection, assembly, founder refinement and the founder refit read that view. The site axis, the discovery sites and the blocks are unchanged (they
+Discovery, local selection, assembly and the founder refit read that view. The site axis, the discovery sites and the blocks are unchanged (they
 are computed from all samples). Read calibration, painting, the pedigree, family phase and
 recombination use every sample's evidence, so flagged samples are still painted, phased and scored.
 

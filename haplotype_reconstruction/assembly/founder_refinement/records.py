@@ -111,6 +111,8 @@ class ComponentRefinement:
     count_continuations: tuple = ()
     count_branch_evaluations: int = 0
     count_branch_seconds: float = 0.0
+    phase_seconds: dict = field(default_factory=dict)
+    work_counters: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,8 @@ class LevelSummary:
     decided_by_sequence_part: int
     hidden_sequence_failures: int
     ambiguous_count_calls: tuple
+    phase_seconds: dict = field(default_factory=dict)
+    work_counters: dict = field(default_factory=dict)
 
     def line(self) -> str:
         """The level's census log line (backstops, cycles and ambiguity are never silent)."""

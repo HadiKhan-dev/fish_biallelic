@@ -10,7 +10,8 @@ Computational count verification flags only annotate the output. Legacy records 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import time
 
 import numpy as np
 
@@ -35,6 +36,8 @@ class FounderRelease:
     withheld_ambiguous: int
     metadata_status: str
     continuation_unverified_records: int = 0
+    phase_seconds: dict = field(default_factory=dict)
+    work_counters: dict = field(default_factory=dict)
 
 
 def load_alternatives(file):
@@ -156,6 +159,11 @@ def _continuation_record(family, common, lo, hi, panel, positions, offsets, fina
                 scope=dict(source_level=family.get("source_level"),
                            source_start=int(family["start"]), source_stop=int(family["stop"]),
                            source_decision=family.get("source_decision")),
+                **({'beam_domain': family['beam_domain']} if 'beam_domain' in family else {}),
+                **({'window_domains': family['window_domains'],
+                    'domain_basis': family.get('domain_basis'),
+                    'window_domains_scope': family.get('window_domains_scope')}
+                   if 'window_domains' in family else {}),
                 evaluated_source_panels=canonical,
                 evaluated_source_founder_counts=[len(value) for value in canonical],
                 local_disagreement_intervals=observed,
@@ -366,6 +374,7 @@ def release_founders(component_panels, panels, alternatives, *, unobserved_masks
     same axes after existing export masks. Withheld counts use the original carrier masks.
     The returned segment metadata includes rows on which r5 filling must remain disabled.
     """
+    started = time.perf_counter()
     released, counts, metadata = [], [], []
     total_breaks = total_hidden = 0
     unverified_sources = set()
@@ -536,4 +545,8 @@ def release_founders(component_panels, panels, alternatives, *, unobserved_masks
                                  withheld_ambiguous_alleles=newly_hidden,
                                  r5_withheld_rows=np.flatnonzero(no_fill).tolist()))
     return FounderRelease(tuple(released), tuple(counts), tuple(metadata), total_breaks,
-                          total_hidden, "recorded" if known else "legacy_unknown", len(unverified_sources))
+                          total_hidden, "recorded" if known else "legacy_unknown", len(unverified_sources),
+                          {"release": time.perf_counter() - started},
+                          dict(components=len(component_panels), families=len(alternatives),
+                               segments=len(released), continuity_breaks=total_breaks,
+                               withheld_alleles=total_hidden))

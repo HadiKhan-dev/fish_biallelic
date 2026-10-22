@@ -30,8 +30,8 @@ input panel; the occupancy gate decides which are released.
 
 Evidence normalisation follows base exactly: the block's likelihoods are normalised once for the
 focal-informative mask and the site posteriors, and the bin statistics and site posteriors
-normalise their (already normalised) input again (a no-op up to rounding, kept so the posteriors
-equal base's to the last bit).
+normalise their (already normalised) input again. Compact support changes summation order only;
+scientific identity, rather than bit identity, is the acceptance criterion.
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from scipy.special import logsumexp
 
 from ..founder_alleles import site_posterior
 from ..founder_alleles.polynomials import shared_sample_likelihoods
+from . import support
 from .observation import UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, unordered_pairs
 
 
@@ -253,11 +254,14 @@ def _core_site_posterior(q_site, evidence, informative, pairs, weights, unresolv
         log_ref_prior = np.log1p(-unresolved_q)
     with np.errstate(invalid="ignore"):
         prior_log_odds = log_alt_prior - log_ref_prior
-    assignments, shell_flags, log_likelihood, info, sensitive = site_posterior.completion_site(
+    b, core, flips, sizes, log_likelihood, info, sensitive = site_posterior.completion_site(
         np.ascontiguousarray(robust_evidence), np.ascontiguousarray(informative), weights, pairs,
         (q_site > 0.5).astype(np.int8), unresolved.astype(np.int64), prior_log_odds,
         float(tie_tolerance), settings)
-    log_prior = np.sum(np.where(assignments == 1, log_alt_prior, log_ref_prior), axis=1)
+    configurations = support.from_core(
+        b, np.arange(len(unresolved)), b, core, flips, sizes,
+        int(info[site_posterior.INFO_RADIUS]))
+    log_prior = support.log_priors(configurations, log_ref_prior, log_alt_prior)
     log_joint = log_prior + log_likelihood
     log_marginal = float(logsumexp(log_joint))
     finite_joint_mass = bool(np.isfinite(log_marginal))
@@ -269,18 +273,16 @@ def _core_site_posterior(q_site, evidence, informative, pairs, weights, unresolv
     log_odds = np.full(n_founders, np.nan, dtype=np.float64)
     supporters = np.zeros(n_founders, dtype=np.float64)
     carriers = carrier_probability(pairs, weights, n_founders)
+    sums, outer = support.allele_sums(configurations, assignment_probability)
+    log_sums, _ = support.allele_sums(configurations, log_joint, logarithmic=True)
     for bit, founder in enumerate(unresolved):
-        is_alt = assignments[:, bit] == 1
-        posterior_alt[founder] = float(np.clip(np.sum(assignment_probability[is_alt]), 0.0, 1.0))
+        posterior_alt[founder] = float(np.clip(sums[bit, 1], 0.0, 1.0))
         if finite_joint_mass:
-            # A certain founder keeps one allele on the whole support.
-            log_alt = float(logsumexp(log_joint[is_alt])) if np.any(is_alt) else -np.inf
-            log_ref = float(logsumexp(log_joint[~is_alt])) if np.any(~is_alt) else -np.inf
-            log_odds[founder] = log_alt - log_ref
+            log_odds[founder] = log_sums[bit, 1] - log_sums[bit, 0]
         selected = carriers[informative & sensitive[bit], founder]
         supporters[founder] = max(float(np.count_nonzero(selected > 0.5)), float(np.sum(selected)))
     shell = np.zeros(n_founders, dtype=np.float64)
-    shell[unresolved] = site_posterior.shell_weights(assignment_probability, shell_flags)
+    shell[unresolved] = outer
     return _SitePosterior(posterior_alt, log_odds, supporters, finite_joint_mass, shell, info)
 
 

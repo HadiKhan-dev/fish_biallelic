@@ -26,7 +26,7 @@ canonical founder order (rows sorted lexicographically, design 5.1): founder ind
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from collections import OrderedDict
 from contextlib import contextmanager
 import copy
@@ -43,7 +43,7 @@ from numba.typed import List
 from . import messages as kernels
 from .. import tie_rules
 from ...maths import ties
-from .acceptance import MOVE_COARSE, MOVE_FINE, accept_pass
+from .acceptance import JUNCTION_BATCH, MOVE_COARSE, MOVE_FINE, accept_pass
 from .objective import SWITCH_PENALTY, score_panel, score_switches_direct, selected_alleles
 from .proposals import WindowSolver
 from .workspace import sample_ranges
@@ -115,6 +115,8 @@ class FitSummary:
     tied_scores: tuple = ()
     tied_switches: tuple = ()
     minimum_switches: int | None = None
+    phase_seconds: dict = field(default_factory=dict)
+    work_counters: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -305,13 +307,14 @@ class SweepEngine:
     both orientations, fit records)."""
 
     def __init__(self, workspace, context, config, records=None, name="component", counter=None,
-                 census_prefix=None):
+                 census_prefix=None, source_start=0):
         self.workspace = workspace
         # Tie-class decisions of this component's fits (tie_rules.SharedCounter or None) and its census prefix.
         self.counter = counter
         self.census_prefix = census_prefix
         self.config = config
-        self.windows = WindowSolver(workspace.emissions, context, workspace.penalty)
+        self.windows = WindowSolver(workspace.emissions, context, workspace.penalty,
+                                    work_coefficient=config.window_work_coefficient, source_start=source_start)
         self.penalty = float(workspace.penalty)
         self.blocks = workspace.blocks
         # The shared-junction guard applies to coarse moves, which exist with an L1 context.
@@ -340,6 +343,11 @@ class SweepEngine:
         self.branch_key = None
         self._window_memo = None
         self._window_memo_statistics = {}
+        # Shallow branch copies share measured work; cached fits contribute no
+        # new work. Updates occur only once per directional search, under a lock.
+        self._profile_lock = threading.Lock()
+        self._phase_seconds = {}
+        self._work_counters = {}
 
     @contextmanager
     def memoized_windows(self, enabled):
@@ -416,6 +424,11 @@ class SweepEngine:
     def per_sample(self, panel, budget):
         """Per-sample exact scores F_s of the panel, over consecutive sample ranges at the budget's
         live share re-read before each range."""
+        # Completed fits already hold this exact score vector; do not rescore
+        # an original-input branch or count shadow that reaches the same panel.
+        cached = self._score_cache.get(tie_rules.panel_key(panel))
+        if cached is not None:
+            return cached
         ws = self.workspace
         with execution.numba_threads(max(1, int(budget.threads()))):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(panel, np.int64))
@@ -460,11 +473,19 @@ class SweepEngine:
         boundaries, and the pass transients per junction (f/g starts and ends of up to 3K candidates, the
         lookahead and backward chain: K30 map 3.2), plus 32 MiB."""
         states = founders * (founders + 1) // 2
-        arrays = 6 if self.guarded else 2
+        arrays = 4 if self.guarded else 2
         boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
+        if self.guarded:
+            boundaries += 2 * ((self.blocks - 1) // JUNCTION_BATCH + 1)
         samples = self.workspace.samples
         transients = 8 * samples * states * (3 * 3 * founders + 2 * 48)
-        return 8 * boundaries * samples * states + transients + (32 << 20)
+        trace = 0
+        if self.guarded:
+            import numba
+            from .guard import traceback_bytes
+            trace = traceback_bytes(samples, int(self.workspace.offsets[-1]), founders,
+                                    min(samples, numba.config.NUMBA_NUM_THREADS))
+        return 8 * boundaries * samples * states + transients + trace + (32 << 20)
 
     # ------------------------------------------------------------------ messages and proposals
     def _full_messages(self, X, lex, budget):
@@ -555,7 +576,8 @@ class SweepEngine:
             cache.store(spans, X, fwd, bwd, todo, computed)
         proposals = []
         stats = dict(windows=0, certified=0, dp=0, fixing_dps=0, max_frontier=0, fallbacks=0,
-                     changed=0, worker_cpu=0.0)
+                     changed=0, worker_cpu=0.0, templates_solved=len(todo),
+                     templates_reused=len(spans) - len(todo))
         for result, cpu in results:
             stats["worker_cpu"] += cpu
             for kind, a, c, k, rows, diagnostic in result:
@@ -632,10 +654,13 @@ class SweepEngine:
         # both conventions rather than a product of one (equal F with different panels: flagged tied_panels).
         # Their sweep-0 proposals then differ, so the start panel's inputs are not shared (2.1 computed them once).
         shared = None
+        # The initial exact objective is independent of direction/convention;
+        # only proposals and directional messages need separate computation.
+        initial_scores = self.per_sample(start, budget)
         searches = [None, None]
         for index, result in budget.concurrent(
                 [lambda child, first=first: self._converge_direction(start, label, first, child,
-                                                                     shared)
+                                                                     shared, initial_scores)
                  for first in ("fwd", "rev")], self.fit_bytes(len(start)),
                 label="founder_refinement searches"):
             searches[index] = result
@@ -686,7 +711,15 @@ class SweepEngine:
             worker_cpu=float(fwd["worker_cpu"] + rev["worker_cpu"]),
             thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]), tied_panels=tied_panels,
             tied_scores=tied_scores, tied_switches=tied_switches,
-            minimum_switches=minimum_switches)
+            minimum_switches=minimum_switches,
+            phase_seconds={name: sum(search.get("phase_seconds", {}).get(name, 0.0)
+                                     for search in (fwd, rev))
+                           for name in ("messages", "refinement_windows", "acceptance",
+                                        "guarded_acceptance")},
+            work_counters={name: sum(search.get("work_counters", {}).get(name, 0)
+                                     for search in (fwd, rev))
+                           for name in ("windows", "templates_solved", "templates_reused", "dp",
+                                        "fixing_dps", "guard_shared_tests", "guard_traced_blocks")})
         weak = tuple(WeakJunction(first, last, tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))),
                                   gain) for first, last, pair, gain in kept["weak_junctions"])
         variants = [Fit(X, summary, weak)]
@@ -714,7 +747,7 @@ class SweepEngine:
         self._fit_cache[token] = tuple(variants)
         return self._choose_fit(token, variants)
 
-    def _converge_direction(self, start, label, first, budget, shared=None):
+    def _converge_direction(self, start, label, first, budget, shared=None, initial_scores=None):
         """One search from start: sweeps until one accepts nothing (or the reported sweep limit);
         the first pass runs forward (first "fwd") or reversed ("rev"), later passes alternate.
         Records <label>.<first>.sweep<n> (that sweep's state and history entry) and .done. shared:
@@ -732,7 +765,7 @@ class SweepEngine:
         if shared is not None:
             F0, current = shared["F0"], shared["scores0"]
         else:
-            current = self.per_sample(X, budget)
+            current = self.per_sample(X, budget) if initial_scores is None else initial_scores
             F0 = float(current.sum())
         F, history, junctions, converged, sweep = F0, [], (), False, 0
         # The search's proposal cache (seeded by the shared sweep 0).
@@ -879,6 +912,34 @@ class SweepEngine:
                       wall=time.perf_counter() - started,
                       thread_cpu=time.thread_time() - started_cpu,
                       weak_junctions=[tuple(vars(item).values()) for item in junctions],
-                      history=history)
+                      history=history,
+                      # Sum of directional elapsed times, not component wall time. Guarded
+                      # acceptance includes scoring and bookkeeping; kernel timings are not
+                      # injected into the hot Numba loop. Guard tests/work are separate below.
+                      phase_seconds={name: sum(h[key] for h in history) for name, key in
+                                     (("messages", "message_wall"),
+                                      ("refinement_windows", "proposal_wall"),
+                                      ("acceptance", "pass_wall"))},
+                      work_counters={name: sum(h["proposals"].get(name, 0) for h in history)
+                                     for name in ("windows", "templates_solved", "templates_reused",
+                                                  "dp", "fixing_dps")})
+        record["phase_seconds"]["guarded_acceptance"] = (
+            record["phase_seconds"]["acceptance"] if self.guarded else 0.0)
+        for name in ("guard_shared_tests", "guard_traced_blocks"):
+            record["work_counters"][name] = sum(h.get(name, 0) for h in history)
+        fresh = history[resumed:]
+        phases = {name: sum(h[key] for h in fresh) for name, key in
+                  (("messages", "message_wall"), ("refinement_windows", "proposal_wall"),
+                   ("acceptance", "pass_wall"))}
+        phases["guarded_acceptance"] = phases["acceptance"] if self.guarded else 0.0
+        work = {name: sum(h["proposals"].get(name, 0) for h in fresh)
+                for name in ("windows", "templates_solved", "templates_reused", "dp", "fixing_dps")}
+        work.update(searches=1, guard_shared_tests=sum(h.get("guard_shared_tests", 0) for h in fresh),
+                    guard_traced_blocks=sum(h.get("guard_traced_blocks", 0) for h in fresh))
+        with self._profile_lock:
+            for name, value in phases.items():
+                self._phase_seconds[name] = self._phase_seconds.get(name, 0.0) + value
+            for name, value in work.items():
+                self._work_counters[name] = self._work_counters.get(name, 0) + value
         self._save(f"{label}.done", dict(rows=X.astype(np.int32), record=record))
         return X, record

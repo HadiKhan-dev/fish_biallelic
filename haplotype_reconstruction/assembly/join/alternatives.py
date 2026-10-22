@@ -177,7 +177,8 @@ def resolve_replays(replay, minimum_switches, *, report_switches=False, tie_even
     Terminal likelihoods are freshly classified on a common scale within each K; raw
     likelihood cannot choose between different counts. A complete replay consumes only
     the serialized choice families it actually continued. Candidate-internal seed
-    records are promoted by PanelSearch only when selected, so the planner's full
+    records are promoted by PanelSearch only for the selected endpoint's complete
+    class of accepted seed witnesses, so the planner's full
     excluded-seed diagnostics must not themselves become released ambiguity.
     """
     from ..alternatives import terminal_winners
@@ -200,7 +201,8 @@ def resolve_replays(replay, minimum_switches, *, report_switches=False, tie_even
     unverified = []
     for outcome in outcomes:
         for family in outcome.release_alternatives:
-            if family.get("count_unverified") or family.get("status") == "count_unverified":
+            if (family.get("count_unverified") or family.get("status") == "count_unverified"
+                    or "beam_domain" in family):
                 # Computational work left undone is neither a panel choice nor
                 # evidence for a count verdict. Preserve each branch's metadata
                 # verbatim; never consume it using a biological-choice identity.
@@ -251,6 +253,14 @@ def resolve_replays(replay, minimum_switches, *, report_switches=False, tie_even
                       count_exact_scores=sum(outcome.summary.count_exact_scores for outcome in outcomes),
                       count_exact_sample_scores=sum(outcome.summary.count_exact_sample_scores for outcome in outcomes),
                       beam_seconds=sum(outcome.summary.beam_seconds for outcome in outcomes),
+                      phase_seconds={name: sum(outcome.summary.phase_seconds.get(name, 0.0)
+                                               for outcome in outcomes)
+                                     for name in {key for outcome in outcomes
+                                                  for key in outcome.summary.phase_seconds}},
+                      work_counters={name: sum(outcome.summary.work_counters.get(name, 0)
+                                               for outcome in outcomes)
+                                     for name in {key for outcome in outcomes
+                                                  for key in outcome.summary.work_counters}},
                       tie_events=chosen.summary.tie_events if tie_events is None else tie_events,
                       events=(*chosen.summary.events, diagnostic))
     return replace(chosen, summary=summary, release_alternatives=tuple(families))

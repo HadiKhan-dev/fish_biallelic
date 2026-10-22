@@ -54,7 +54,7 @@ the same command resumes from the checkpoints. See [usage](docs/usage.md) for in
 | evidence | allele depths of biallelic SNPs, site and sample quality control, calibrated genotype likelihoods | `evidence/` |
 | discovery | missing-aware founder panels of 200-site blocks | `discovery/` |
 | local selection | path-selected local panels, refined after context assemblies through L1 and L1+L2 | `local_selection/` |
-| assembly | component-preserving founder chromosomes: completion, linker, joins, L1-L4 hierarchy, founder refinement after each level | `assembly/` |
+| assembly | component-preserving founder chromosomes: completion, linker, joins and hierarchy; joined paths flow directly to final release | `assembly/` |
 | painting | diploid founder mosaics of every sample, with an explicit unknown state | `painting/` |
 | pedigree | observed-parent calls (M0/M1/M2), parent identities, support tiers and ambiguity | `pedigree/` |
 | founder refit | founder alleles refitted from the painted carriers | `founder_refit/` |

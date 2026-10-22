@@ -10,9 +10,11 @@ the critical path. This module keeps the compiled kernels between runs and compi
   run-local cache, published by an atomic rename: concurrent runs read only complete snapshots, and the last
   publication of a key wins. Only the KEEP_KEYS most recently used keys are kept.
 * Manifest: ``manifest.pkl`` lists the (module, function, signature) overloads of the latest publication and
-  their compile seconds. Before a run starts its pools, the listed overloads the run-local cache lacks (all of
-  them for a new key) are compiled in a pool of the run's cores: one task per function (so each Numba index file
-  has a single writer), longest first.
+  their compile seconds. The package's release manifest supplies reference-run overloads even for an empty
+  store or a new release. Before a run starts its scientific pools, the union of both manifests' overloads
+  that the run-local cache lacks is compiled in a pool of the run's cores: one task per function, longest
+  first. After parallel compilation, a fresh single worker loads the complete union through the existing
+  signature check, repairing entries lost or overwritten when parallel tasks compiled shared callees.
 
 Every ``@njit(cache=True)`` kernel of the package takes part automatically (kernels are found from Numba's index
 files); kernels defined inside functions are skipped. A run publishes its cache when it ends (also after a
@@ -156,6 +158,9 @@ def _cached_overloads(cache_directory: Path, target=None) -> dict:
             if not function or not line.isdigit() or "locals" in function.split("."):
                 continue
             module = package if module == "__init__" else f"{package}.{module}"
+            from .kernel_manifest import active_module
+            if not active_module(module):
+                continue
             try:
                 with open(cache_directory / subdirectory / name, "rb") as handle:
                     if pickle.load(handle) != numba.__version__:
@@ -173,7 +178,9 @@ def _read_manifest(store: Path):
     try:
         with open(store / _MANIFEST, "rb") as handle:
             manifest = pickle.load(handle)
-        return dict(manifest["overloads"]), dict(manifest["seconds"])
+        from .kernel_manifest import active_module
+        return ({key: value for key, value in manifest["overloads"].items() if active_module(key[0])},
+                {key: value for key, value in manifest["seconds"].items() if active_module(key[0])})
     except FileNotFoundError:
         return {}, {}
     except Exception as error:
@@ -187,7 +194,8 @@ def _compile_function(task, shared, budget):
     A manifest written by older code may name functions or signatures that no longer exist; those are skipped
     (counted by the caller).
     """
-    module, function, signatures = task
+    module, function, encoded_signatures = task
+    signatures = pickle.loads(encoded_signatures)
     started = time.perf_counter()
     try:
         dispatcher = functools.reduce(getattr, function.split("."), importlib.import_module(module))
@@ -206,9 +214,13 @@ def _compile_function(task, shared, budget):
 
 def _warm_up(missing: dict, seconds: dict, cores: int):
     """Compile the missing overloads, one function per task, longest first."""
+    from numba.core.serialize import dumps
     from .pools import BudgetedPool
     tasks = sorted(((module, function, tuple(signatures)) for (module, function), signatures in missing.items()),
                    key=lambda task: (-seconds.get(task[:2], 0.0), -len(task[2]), task[:2]))
+    # Numba types can contain dynamic ctypes templates (the site-QC special functions).
+    # Encode with Numba's own cache serializer before the pool pickles the task.
+    tasks = [(module, function, dumps(signatures)) for module, function, signatures in tasks]
     processes = max(1, min(cores, len(tasks)))
     compiled, timings = 0, {}
     with BudgetedPool(cores, processes=processes, label="kernel-warm-up") as pool:
@@ -221,7 +233,7 @@ def _warm_up(missing: dict, seconds: dict, cores: int):
 
 @timed_stage("kernel_warm_up")
 def _prepare(cores: int):
-    """Seed the run-local cache and compile what the manifest lists beyond it."""
+    """Seed the run-local cache and compile the release and learned manifests' union."""
     started = time.perf_counter()
     key = numba_code_key()
     cache_directory = Path(os.environ.get("NUMBA_CACHE_DIR", ""))
@@ -238,6 +250,14 @@ def _prepare(cores: int):
         print(f"  [kernel cache] could not read {snapshot}: {error}", flush=True)
     baseline = _listing(cache_directory)
     listed, seconds = _read_manifest(store)
+    from .kernel_manifest import read_release_manifest
+    release, release_seconds = read_release_manifest()
+    learned_count = sum(map(len, listed.values()))
+    for function, signatures in release.items():
+        listed[function] = set(listed.get(function, ())) | signatures
+    seconds = {**release_seconds, **seconds}
+    print(f"  [kernel cache] release manifest {sum(map(len, release.values()))} overloads; "
+          f"learned manifest {learned_count}; union {sum(map(len, listed.values()))}", flush=True)
     from numba.core.registry import cpu_target
     present = _cached_overloads(cache_directory, cpu_target.target_context.codegen().magic_tuple())
     missing = {}
@@ -248,11 +268,22 @@ def _prepare(cores: int):
     requested = sum(map(len, missing.values()))
     compiled, processes, timings = _warm_up(missing, seconds, cores) if missing else (0, 0, {})
     seconds.update(timings)
+    verified = sum(map(len, listed.values()))
+    if requested:
+        # Parallel tasks can race while saving different overloads of a shared callee. Index presence
+        # alone cannot detect a wrong-signature payload. A fresh serial worker loads every request
+        # through bootstrap's existing signature guard and recompiles misses without competing writers.
+        check_started = time.perf_counter()
+        verified, _, _ = _warm_up(listed, seconds, 1)
+        print(f"  [kernel cache] serial cache check loaded or compiled {verified} of "
+              f"{sum(map(len, listed.values()))} manifest overloads in "
+              f"{time.perf_counter() - check_started:.1f} s", flush=True)
     print(f"  [kernel cache] key {key}: {seeded} files from {store}; warm-up compiled {compiled} of {requested} "
           f"manifest overloads missing here ({requested - compiled} skipped: no longer in this code) with "
           f"{processes} processes in {time.perf_counter() - started:.1f} s", flush=True)
     return dict(key=key, cache_directory=cache_directory, store=store, baseline=baseline,
-                published=snapshot.is_file(), stale=compiled < requested, seconds=seconds)
+                published=snapshot.is_file(),
+                stale=compiled < requested or verified < sum(map(len, listed.values())), seconds=seconds)
 
 
 @timed_stage("kernel_publish")
@@ -282,10 +313,10 @@ def _publish(state: dict) -> None:
             temporary.unlink(missing_ok=True)
         print(f"  [kernel cache] published {len(files)} files ({snapshot.stat().st_size / 2**20:.0f} MB) "
               f"as {snapshot}", flush=True)
-    _write_atomically(store / _MANIFEST, pickle.dumps(dict(
+    from numba.core.serialize import dumps
+    _write_atomically(store / _MANIFEST, dumps(dict(
         overloads={function: tuple(signatures) for function, signatures in overloads.items()},
-        seconds={function: value for function, value in state["seconds"].items() if function in overloads}),
-        protocol=pickle.HIGHEST_PROTOCOL))
+        seconds={function: value for function, value in state["seconds"].items() if function in overloads})))
     recent = []
     for path in store.glob(f"*/{_SNAPSHOT}"):
         try:

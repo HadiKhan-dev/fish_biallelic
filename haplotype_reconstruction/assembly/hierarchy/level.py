@@ -25,13 +25,16 @@ import time
 import numpy as np
 
 from ...execution.batch_queue import BatchKind
-from ...model.components import FounderComponent
+from ...model.components import CountCall, CountStepDecision, FounderComponent
 from ...store.identity import canonical_json, code_identity, jsonable
 from .. import records as assembly_records
 from .batch import (BatchTask, JoinResult, JoinSettings, batch_digest, join_batch, run_batch,
                     team_size)
 from .batches import LevelPartition, partition, informative_masks
 
+# Private worker residence retained between tasks, including loaded kernels, runtime and heap retention.
+# Measured normal post-trim private maximum 1.994 GB includes retained task state; hold once per pool worker.
+WORKER_RESIDENT_BYTES = 2048 << 20
 MAX_TASKS_PER_WORKER = 4                 # base WORKER_MAXTASKS: recycle workers to return freed memory
 BUNDLE_EVIDENCE_BYTES = 256 << 20        # batch queue: evidence transported per bundle (about)
 BUNDLE_TASKS = 64                        # batch queue: tasks per bundle at most
@@ -75,7 +78,7 @@ def batch_memory_bytes(task: BatchTask) -> int:
     transient copies (the search's flat emission layout while it is built). Linker scans keep seven
     float32 log emissions and seven float64 weights per sample and proxy site, plus uint8 pair codes per
     proxy site; its concurrent gap fits keep forward and backward pair messages (2 x 8 S K_b^2 per
-    block and gap). The search keeps float64 binned emissions (S, K_b, K_b, m_b) with their static
+    block and gap). The search keeps float64 binned emissions (S, K_b * (K_b + 1) // 2, m_b) with their static
     totals (counted 1.25 times: the batch's peak is close to it when it dominates), an int32 painting
     (S, sum m_b), painting back pointers bounded by tensor_budget_mb, its exclusion forwards
     (S, sum m_b) per excluded row (at most K + 1), one chunk of per-sample bounds, and move arrays and
@@ -84,7 +87,7 @@ def batch_memory_bytes(task: BatchTask) -> int:
     bytes (join.search). The linker's concurrent steps reserve nothing beyond this estimate.
     Measured / estimate (tests/T4/k_scaling, estimate_ratios.py): K = 30, S = 320: L1 0.50-0.51, L2
     0.37-0.40, L3 0.55, L3 at 2,000 bins 0.80, a pool at quota 1024 (backstop counted) 0.69; AulStu chr3
-    proxy L1 (K 8-16, S 290): 0.43-0.79. A process's first batch also loads its cached kernels (+0.3 GB).
+    proxy L1 (K 8-16, S 290): 0.43-0.79. Worker private residence is held separately for the pool lifetime.
     """
     if task.branches:
         return max(batch_memory_bytes(replace(task, components=branch, branches=()))
@@ -112,7 +115,7 @@ def batch_memory_bytes(task: BatchTask) -> int:
         bins = math.ceil(sites / spb)
         total_bins += bins
         total += (samples * proxy_sites * 7 * 12 + proxy_sites * (ordered + folded)
-                  + 10 * samples * ordered * (bins + 1) + 4 * samples * bins)
+                  + 10 * samples * folded * (bins + 1) + 4 * samples * bins)
     rows = max(founders)
     quota = config.paths_per_endpoint * 2 ** join_search.POOL_QUOTA_DOUBLINGS
     fits = (len(task.components) - 1) * 16 * samples * sum(k * k for k in founders)
@@ -131,10 +134,45 @@ def _task(index, components, prepared, samples, settings) -> BatchTask:
 
 
 def _encode_join(result: JoinResult) -> dict:
-    return dict(schema=assembly_records.SCHEMA, rows=np.ascontiguousarray(result.rows, np.int32),
-                log_likelihood=float(result.log_likelihood), summary=result.summary.record(),
+    return dict(schema=assembly_records.SCHEMA,
+                rows=None if result.rows is None else np.ascontiguousarray(result.rows, np.int32),
+                log_likelihood=result.log_likelihood,
+                summary=None if result.summary is None else result.summary.record(),
+                retained_inputs=result.retained_inputs,
                 seconds=float(result.seconds), release_alternatives=result.release_alternatives,
                 minimum_switches=result.minimum_switches, shadow=result.shadow)
+
+
+def join_count_call(summary, alternatives=(), *, continuation_unverified=False) -> CountCall:
+    """Count evidence of the latest actual join, without inventing a final count pass.
+
+    Explicit death comparisons and accepted pool births retain their recorded margins.
+    Seed/bound work remains in the join census. Evaluated different-K alternatives are
+    count ambiguity; unperformed verification is recorded separately as an unknown call.
+    """
+    decisions = []
+    for event in summary.events:
+        stage = event.get("stage")
+        if stage not in ("count_death", "count_birth") or "margin" not in event:
+            continue
+        death = stage == "count_death"
+        decisions.append(CountStepDecision(
+            kind="deletion" if death else "addition", founders=int(event["panel_size"]),
+            accept_larger=not event["deleted"] if death else event.get("accepted") is not None,
+            skipped_by_bound=False, margin=float(event["margin"]),
+            band=tuple(event["band"]), ambiguous=bool(event["ambiguous"])))
+    different_k = any(len({len(panel) for panel in family.get("panels", ())}) > 1
+                      for family in alternatives if not family.get("count_unverified", False))
+    ambiguous = (any(decision.ambiguous for decision in decisions) or different_k
+                 or bool(summary.count.cycles) or bool(summary.count.final_paths_failing_death_test))
+    unverified = (continuation_unverified or not summary.certified or summary.count.count_backstop_reached
+                  or any(family.get("count_unverified", False) or family.get("unresolved_search", False)
+                         for family in alternatives))
+    return CountCall(founders=summary.final_panel_size, founders_before=summary.count.start_size,
+                     ambiguous=True if ambiguous else None if unverified else False,
+                     count_cycle=bool(summary.count.cycles),
+                     cycle_undecided=bool(summary.count.cycles_undecided), decisions=tuple(decisions),
+                     reason="join_search_unverified" if unverified else None)
 
 
 def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_size: int,
@@ -208,24 +246,26 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
             # Queue results are keyed by bundle number: another task subset is another stage.
             key = hashlib.sha256(json.dumps([key, sorted(results)]).encode()).hexdigest()
         for result in map_batches(HIERARCHY_BATCHES, pending, (evidence.scoring,), budget, queue=queue,
-                                  key=key, worker_memory_gb=max(estimates) / 1024 ** 3):
+                                  key=key, worker_memory_gb=(max(estimates) + WORKER_RESIDENT_BYTES) / 1024 ** 3):
             record(result)
     elif len(pending) == 1:
         from ...execution import reserve_memory
         with reserve_memory(estimates[0], label="hierarchy", envelope=True):
             record(run_batch(pending[0], evidence.scoring, budget))
     elif pending:
-        from ...execution import BudgetedPool, memory_worker_limit
-        workers = memory_worker_limit(estimates, min(len(pending), int(budget.threads())),
-                                      label="hierarchy")
+        from ...execution import BudgetedPool, memory_worker_limit, reserve_memory
+        workers = memory_worker_limit([size + WORKER_RESIDENT_BYTES for size in estimates],
+                                      min(len(pending), int(budget.threads())), label="hierarchy")
         reference = evidence.shared.scoring
-        with BudgetedPool(budget, processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
-                          label="hierarchy") as pool:
-            for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
-                                              task_bytes=estimates, envelope=True):
-                record(result)
+        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="hierarchy workers"):
+            with BudgetedPool(budget, processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+                              label="hierarchy") as pool:
+                for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
+                                                  task_bytes=estimates, envelope=True):
+                    record(result)
     output, joins, likelihoods, release_alternatives = [], [], [], retained
     shadows = []
+    final_plan = list(plan)
     for index, (first, end) in enumerate(split.ranges):
         inputs = split.components[first:end]
         if index not in tasks:
@@ -237,12 +277,31 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
         release_alternatives.extend(dict(item, start=inputs[0].start + int(item["start"]),
                                           stop=inputs[0].start + int(item["stop"]))
                                     for item in payload.get("release_alternatives", ()))
+        if payload.get('retained_inputs', False):
+            release_alternatives.extend(family for family in consumable
+                if inputs[0].start <= family['start'] and family['stop'] <= inputs[-1].stop)
+            reason = 'unresolved_beam_materialization'
+            output.extend(replace(component,
+                                  break_before=component.break_before if at == 0 else reason,
+                                  break_after=component.break_after if at + 1 == len(inputs) else reason)
+                          for at, component in enumerate(inputs))
+            # Reports use None to count all unchanged inputs. The attempted join
+            # stays cached under its original digest with its diagnostic sidecar.
+            final_plan[index] = (first, end, None)
+            continue
+        summary = JoinSummary.from_record(payload["summary"])
         output.append(FounderComponent(
             start=inputs[0].start, stop=inputs[-1].stop, rows=payload["rows"],
-            break_before=inputs[0].break_before, break_after=inputs[-1].break_after))
-        joins.append(JoinSummary.from_record(payload["summary"]))
+            break_before=inputs[0].break_before, break_after=inputs[-1].break_after,
+            count_call=join_count_call(
+                summary, payload.get("release_alternatives", ()),
+                continuation_unverified=any(
+                    family.get("unresolved_search", False)
+                    and int(family["start"]) < inputs[-1].stop
+                    and int(family["stop"]) > inputs[0].start for family in retained))))
+        joins.append(summary)
         likelihoods.append(float(payload["log_likelihood"]))
-    return LevelOutput(components=tuple(output), plan=plan, joins=tuple(joins),
+    return LevelOutput(components=tuple(output), plan=tuple(final_plan), joins=tuple(joins),
                        log_likelihoods=tuple(likelihoods), reused=reused, partition=split,
                        elapsed_seconds=time.perf_counter() - started,
                        release_alternatives=tuple(release_alternatives), shadows=tuple(shadows))
@@ -287,14 +346,18 @@ def _execute(payload, cpus):
     tasks = payload["tasks"]
     (scoring,) = payload["arrays"]
     estimates = [batch_memory_bytes(task) for task in tasks]
-    workers = memory_worker_limit(estimates, min(cpus, len(tasks)), label="hierarchy-queue")
+    planned = [size + WORKER_RESIDENT_BYTES for size in estimates]
+    # This executor creates one shared scoring copy; include it once in every nonempty worker plan.
+    planned[planned.index(max(planned))] += int(scoring.nbytes)
+    workers = memory_worker_limit(planned, min(cpus, len(tasks)), label="hierarchy-queue")
     with reserve_memory(scoring.nbytes, label="hierarchy-queue evidence"):
         handle, reference = create_shared_array(scoring, copy_threads=cpus)
         try:
-            with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
-                              label="hierarchy-queue") as pool:
-                return list(pool.imap_unordered(join_batch, [(reference, task) for task in tasks],
-                                                task_bytes=estimates, envelope=True))
+            with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="hierarchy-queue workers"):
+                with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+                                  label="hierarchy-queue") as pool:
+                    return list(pool.imap_unordered(join_batch, [(reference, task) for task in tasks],
+                                                    task_bytes=estimates, envelope=True))
         finally:
             close_shared_memory([handle], unlink=True)
 

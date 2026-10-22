@@ -261,7 +261,7 @@ released as calls by themselves.
 
 **Context assembly.** Round `l1` assembles the `initial` panels through level 1 and round `l2`
 assembles the `l1` panels through levels 1 and 2, with assembly's role CONTEXT: the same assembly
-and completion as the final assembly, without founder refinement (see [assembly](assembly.md)).
+and completion as the final assembly (see [assembly](assembly.md)).
 
 **Coverage.** A context component covers a block when its sites are exactly the sites of whole
 consecutive blocks. Every covering component is refitted, whatever its founder count; a component
@@ -408,7 +408,7 @@ does not justify a remedy for these two conventions and does not establish invar
 The global hook also reverses assembly conventions. It changes one TroMau L2 context-assembly
 `release_alternatives` record and some K30 context-proposal probabilities; neither effect occurs
 under winner-only reversal, and neither changes the released local calls or decisions in these
-checks. The [assembly follow-up](assembly.md#context-assembly-convention-follow-up) is separate
+checks. The [assembly follow-up](assembly.md#equivalent-seed-histories-27) is separate
 from the two local-selection conventions. Final assembly, painting, pedigree, phase and exported
 outputs are outside the propagation check.
 
@@ -488,11 +488,12 @@ trajectories of one lane block per thread, not of every sample, in one scratch b
 sorting a structured data type.
 
 Every task reserves its planned peak memory with the run's memory governor before it starts. A block task
-(`local_selection/rounds.py`, `block_task_bytes`) plans `local_selection.rounds.TASK_BASE_BYTES = 335544320`
-(320 MiB), the block's evidence slices and emission tables, the trajectory scratch for the largest panel the search
+(`local_selection/rounds.py`, `block_task_bytes`) plans `local_selection.rounds.TASK_WORKSPACE_BASE_BYTES = 2147483648`
+(2 GiB), the block's evidence slices and emission tables, the trajectory scratch for the largest panel the search
 may reach (its start panel plus `local_selection.rounds.SEARCH_GROWTH = 8` rows, one lane block per thread), the
 release batches, the candidate bank's discovery workspace (context rounds) and its likelihood memo with room to
-grow. A context refit (`local_selection/context_refit.py`, `refit_task_bytes`) plans its sites' slices, the
+grow. The pool separately holds `local_selection.rounds.WORKER_RESIDENT_BYTES = 805306368` (768 MiB)
+per worker until it joins. A context refit (`local_selection/context_refit.py`, `refit_task_bytes`) plans its sites' slices, the
 (N, B, S, S) emission array, each thread's (B, S, S) buffers, its outputs and 256 MiB for a worker's first task.
 Blocks run longest first (by sites x states^2), so a round's tail holds the small blocks; cross-node bundles carry
 the same estimates. The order and the pacing change only when work runs, never its result.

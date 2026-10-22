@@ -64,12 +64,20 @@ def sites_per_bin(site_counts: Sequence[int], max_bins: int) -> int:
     return max(bin_size(site_counts), math.ceil(sum(int(n) for n in site_counts) / max_bins))
 
 
+@njit(cache=True, inline="always")
+def pair_index(first, second):
+    """Packed index of an unordered local-row pair, independent of the block's row count."""
+    high = max(first, second)
+    return high * (high + 1) // 2 + min(first, second)
+
+
 class EmissionLayout:
     """The binned emissions of one join in one flat float64 array.
 
     Element (s, a, c, t) of block j (sample s of the batch, local rows a and c of block j, bin t) is
-    ``flat[start[j] + ((s * K_j + a) * K_j + c) * bins_j + t]``; :meth:`block` gives block j's
-    (samples, K_j, K_j, bins_j) view. The search's kernels read the flat array (taking a block's
+    ``flat[start[j] + (s * P_j + pair_index(a, c)) * bins_j + t]``, where
+    P_j = K_j(K_j + 1)/2; :meth:`block` gives block j's (samples, P_j, bins_j) view.
+    The search's kernels read the flat array (taking a block's
     array out of a typed List inside a kernel updated its reference count, an atomic shared by all
     threads, which stopped the kernels scaling with threads).
 
@@ -82,7 +90,7 @@ class EmissionLayout:
         self.samples = int(samples)
         self.founders = np.asarray(founders, dtype=np.int64)
         self.bins = np.asarray(bins, dtype=np.int64)
-        sizes = self.samples * self.founders ** 2 * self.bins
+        sizes = self.samples * (self.founders * (self.founders + 1) // 2) * self.bins
         self.start = np.zeros(len(sizes), dtype=np.int64)
         self.start[1:] = np.cumsum(sizes)[:-1]
         self.offsets = np.zeros(len(self.bins) + 1, dtype=np.int64)
@@ -94,11 +102,12 @@ class EmissionLayout:
         return int(self.offsets[-1])
 
     def block(self, j: int) -> np.ndarray:
-        """Block j's (samples, K_j, K_j, bins_j) view of the flat array."""
+        """Block j's (samples, K_j(K_j + 1)/2, bins_j) packed-pair view."""
         founders, bins = int(self.founders[j]), int(self.bins[j])
         start = int(self.start[j])
-        return self.flat[start:start + self.samples * founders * founders * bins].reshape(
-            (self.samples, founders, founders, bins))
+        pairs = founders * (founders + 1) // 2
+        return self.flat[start:start + self.samples * pairs * bins].reshape(
+            (self.samples, pairs, bins))
 
     def arrays(self):
         """(flat, start, founders, bins): the arrays every join kernel takes first."""
@@ -119,7 +128,7 @@ def _binned_log_emissions(flat, start, likelihoods, offset, alleles, source_rows
     """
     founders, sites = alleles.shape
     bins = (sites + sites_per_bin - 1) // sites_per_bin
-    width = founders * founders * bins
+    width = (founders * (founders + 1) // 2) * bins
     for sample in prange(likelihoods.shape[0]):
         base = start + sample * width
         for index in range(width):
@@ -140,9 +149,7 @@ def _binned_log_emissions(flat, start, likelihoods, offset, alleles, source_rows
                     allele = alleles[first, site]
                     for second in range(first, founders):
                         value = logs[allele + alleles[second, site]]
-                        flat[base + (first * founders + second) * bins + column] += value
-                        if first != second:
-                            flat[base + (second * founders + first) * bins + column] += value
+                        flat[base + pair_index(first, second) * bins + column] += value
             else:
                 for code in range(7):
                     logs[code] = robust_log_likelihood(predictive_likelihood(p0, p1, p2, code)) - CENTER
@@ -150,9 +157,7 @@ def _binned_log_emissions(flat, start, likelihoods, offset, alleles, source_rows
                     for second in range(first, founders):
                         value = logs[pair_code(alleles[first, site], alleles[second, site],
                                                source_rows[first, site] == source_rows[second, site])]
-                        flat[base + (first * founders + second) * bins + column] += value
-                        if first != second:
-                            flat[base + (second * founders + first) * bins + column] += value
+                        flat[base + pair_index(first, second) * bins + column] += value
 
 
 def binned_emissions(inputs, sites_per_bin: int, budget) -> EmissionLayout:
@@ -163,7 +168,7 @@ def binned_emissions(inputs, sites_per_bin: int, budget) -> EmissionLayout:
     team is re-read from ``budget`` before each block.
     """
     blocks = inputs.blocks
-    likelihoods = np.ascontiguousarray(inputs.gl)
+    likelihoods = inputs.gl
     layout = EmissionLayout(inputs.sample_count, [block.founders for block in blocks],
                             [math.ceil(len(block.positions) / sites_per_bin) for block in blocks])
     for j, block in enumerate(blocks):

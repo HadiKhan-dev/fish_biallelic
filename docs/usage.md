@@ -165,7 +165,7 @@ A run checks everything it can before computing anything:
 | [evidence](methods/evidence.md) | contig | allele depths, site and sample QC, calibrated genotype likelihoods, 200-site blocks |
 | [discovery](methods/discovery.md) | 200-site block | missing-aware local founder panels |
 | [local selection](methods/local_selection.md) | contig | path-selected local panels, refined twice with context assemblies |
-| [assembly](methods/assembly.md) | contig | component-preserving founder chromosomes (L1-L4 hierarchy, [founder refinement](methods/founder_refinement.md) after each level) |
+| [assembly](methods/assembly.md) | contig | component-preserving founder chromosomes (hierarchical joins, whose paths and alternatives flow directly to final release) |
 | [painting](methods/painting.md) | contig | diploid founder mosaics of every sample |
 | [pedigree](methods/pedigree.md) | genome | observed-parent calls with support tiers |
 | [founder refit](methods/founder_refit.md) | contig | founder alleles refitted from the painted carriers |
@@ -207,15 +207,30 @@ Cores, lanes, memory pacing, serial mode, shards and batch helpers change when w
 Parallel kernels reduce per-sample (or per-site) rows in a fixed order, so results do not depend on thread counts
 or on how work was distributed, and ties between equally supported alternatives are decided by fixed conventions
 ([ties](methods/ties.md)). These settings are outside every checkpoint identity and may differ between the
-invocations of one run. Every search limit that bounds memory is a fixed constant (for example founder
-refinement's window-frontier budget), never the memory that happens to be free.
+invocations of one run. Search materialization limits are fixed constants, never the memory
+that happens to be free.
 
 ### Compiled kernels
 
-The numerical kernels are compiled once per code version and kept between runs in
-`~/.cache/haplotype-reconstruction/numba` (or under `$XDG_CACHE_HOME`); a run of a new code version compiles its
-kernels in parallel before its first pool. Nothing needs to be configured; see
-[performance.md](performance.md#compiled-kernels).
+Runs reuse compiled numerical kernels from `~/.cache/haplotype-reconstruction/numba`, or beneath
+`$XDG_CACHE_HOME` when set. `NUMBA_CACHE_DIR` selects the base of the run-local cache. No cache settings are
+required. At startup, the run requests the union of release reference signatures and signatures learned by the
+persistent store, using its CPU budget before scientific pools start. An empty store still requests the packaged
+signatures; the first run can therefore spend time compiling before the first scientific stage.
+
+After warm-up has requested missing overloads, its parallel workers finish and one fresh worker checks every
+listed signature through the existing cache guard, compiling misses serially before science starts. This
+single pass repairs cache entries affected by concurrent warm-up writers. If the initial index shows no
+missing requests, the serial check is skipped; index presence alone does not establish that all compiled
+payloads can load. The usual signature check and compilation on first use remain active.
+
+The package ships exact Numba type signatures, including site-quality special-function pointer types,
+not compiled machine code. Compilation uses the current CPU and
+code key, with the existing cached-argument signature guard. New or incompatible signatures retain compilation
+on first use; shared callees can also compile in more than one warm-up task. Cache problems are logged and cost
+compilation time, without changing the scientific model or outputs. Preserve scientific checkpoints separately
+from these compiled caches. See [compiled kernels](performance.md#compiled-kernels) for cache behavior and the
+[release regeneration procedure](performance.md#regenerating-release-signatures).
 
 ## Short allocations
 
@@ -272,7 +287,7 @@ allocation; the package submits no jobs and moves no shell between nodes. Severa
 helper exits after `--idle-seconds` (120) without work, so start helpers while batches are available. The
 coordinator executes work too, and only the coordinator writes checkpoint records; results keep their task
 identities and scientific batch boundaries, so they do not depend on who computed them. Everything else
-(discovery, founder refinement, painting and the genome-wide stages) runs in the coordinator's allocation.
+(discovery, painting and the genome-wide stages) runs in the coordinator's allocation.
 
 Transport files are temporary: a bundle's input is deleted once its result is used, and a completed stage leaves
 nothing in the queue. An interrupted hierarchy step keeps its finished results (and failed bundles their inputs
@@ -288,7 +303,6 @@ interruption loses only the work in progress since the last record:
 - the discovered blocks of a contig since its last saved chunk (64 blocks per chunk);
 - the current chunk of a local-selection round;
 - the hierarchy batches being joined (each completed join is saved, and shared by every assembly of the contig);
-- the components being refined (long components also save their converged fits and every sweep);
 - each contig being painted, and each contig in progress in the pedigree preparation, scoring and exclusion,
   founder refit, family phase or recombination;
 - up to about two minutes of family-phase iterations.

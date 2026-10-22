@@ -15,6 +15,7 @@ from numba.typed import List
 
 from ...maths.emissions import (CENTER, normalised_likelihoods, pair_code, predictive_likelihood,
                                 robust_log_likelihood)
+from ..join.emissions import pair_index
 from .objective import SWITCH_PENALTY, is_skipped, prepare_log_evidence
 
 # A search's messages and per-sample scores run over consecutive sample ranges and re-read its
@@ -41,7 +42,7 @@ def sample_ranges(samples, budget):
 @njit(cache=True, parallel=True, nogil=True)
 def binned_emissions(evidence, offsets, alleles, keeps, full, bin_size, outputs):
     """Binned surrogate emissions of every block and pair of its local rows, into the zeroed
-    outputs[b] float64 (S, R_b, R_b, bins_b) (symmetric in the two rows).
+    outputs[b] float64 (S, R_b(R_b + 1)/2, bins_b) (symmetric in the two rows).
 
     The model of the join's binned scorer: per kept site with informative evidence the robust
     emission max(log(0.99 P + 0.01/3), -2) - log(1/3), P the pair's genotype likelihood (hard
@@ -78,9 +79,7 @@ def binned_emissions(evidence, offsets, alleles, keeps, full, bin_size, outputs)
                         code = pair_code(local[first, site], local[second, site], first == second)
                     value = logs[code]
                     bin_index = site // bin_size
-                    out[sample, first, second, bin_index] += value
-                    if first != second:
-                        out[sample, second, first, bin_index] += value
+                    out[sample, pair_index(first, second), bin_index] += value
 
 
 @njit(cache=True, nogil=True)
@@ -101,19 +100,22 @@ def informative_samples(logs):
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
 COMPONENT_BASE_BYTES = 64 << 20
+# Private process residence survives task completion: loaded kernels, runtime and retained heap.
+# Measured settled-idle/private post-trim maxima 3.551/3.692 GB; held once per worker for the pool lifetime.
+WORKER_RESIDENT_BYTES = 3584 << 20
 
 
 def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
     """Peak bytes of one component's workspace (the component task's memory reservation, execution.memory): the
     robust log evidence and the reversed orientation's copy (2 x 24 S L float64), a gathered evidence copy when the
-    panels are not adjacent (12 S L float32), the binned emissions (8 S R_b^2 bins_b per block) and the leaves
+    panels are not adjacent (12 S L float32), the binned emissions (8 S R_b(R_b + 1)/2 bins_b per block) and the leaves
     (R_b x L_b int8), plus COMPONENT_BASE_BYTES. The fits' message arrays, the window solves and the score tables
     reserve their own bytes (additive estimates); calibrated on K30's map (founder_refinement.md 3.2-3.3)."""
     sites = sum(panel.sites for panel in panels)
     bin_size = max(int(min_sites_per_bin), math.ceil(sites / max_bins))
     starts = [panel.site_start for panel in panels]
     adjacent = all(b == a + panel.sites for a, b, panel in zip(starts, starts[1:], panels))
-    emissions = sum(8 * samples * panel.rows * panel.rows * ((panel.sites + bin_size - 1) // bin_size)
+    emissions = sum(8 * samples * (panel.rows * (panel.rows + 1) // 2) * ((panel.sites + bin_size - 1) // bin_size)
                     for panel in panels)
     leaves = sum(panel.rows * panel.sites for panel in panels)
     return (48 * samples * sites + (0 if adjacent else 12 * samples * sites) + emissions + leaves
@@ -144,7 +146,7 @@ class ComponentWorkspace:
         samples the count rule reads (count_rule.founder_cost's S); None when every sample is
         informative (or, degenerate, none is: every score is then 0 and every row is kept).
     bin_size: surrogate bin (sites) = max(min_sites_per_bin, ceil(L_c / max_bins)).
-    emissions: per block float64 (S, R_b, R_b, bins_b) binned surrogate emissions.
+    emissions: per block float64 (S, R_b(R_b + 1)/2, bins_b) binned surrogate emissions.
     """
 
     def __init__(self, panels, evidence, *, min_sites_per_bin, max_bins):
@@ -182,7 +184,7 @@ class ComponentWorkspace:
             keeps.append(np.ascontiguousarray(kept & np.any(called, axis=0)))
             alleles.append(np.ascontiguousarray(panel.inference, np.int8))
             bins = (panel.sites + self.bin_size - 1) // self.bin_size
-            outputs.append(np.zeros((self.samples, panel.rows, panel.rows, bins), np.float64))
+            outputs.append(np.zeros((self.samples, panel.rows * (panel.rows + 1) // 2, bins), np.float64))
         binned_emissions(self.evidence, self.offsets, alleles, keeps, np.asarray(full, np.bool_),
                          self.bin_size, outputs)
         return list(outputs)

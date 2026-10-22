@@ -11,6 +11,9 @@ are decided by the count step. :func:`lower_bounds` turns the two-region bounds 
 from __future__ import annotations
 
 import numpy as np
+import numba
+from ...execution import reserve_memory
+from .pair_segments import workspace_bytes as segment_workspace_bytes
 
 from .certify import structural_bounds
 from .objective import column_sums
@@ -252,10 +255,16 @@ def structural_move_bounds(forwards, moves, local_new, offsets, keep, limit=MOVE
         splice = np.full((k, k, blocks), -1, dtype=np.int64)
         mask = group_kind == SPLICE
         splice[founder[chosen][mask], partner[chosen][mask], position[chosen][mask]] = columns[mask]
-        values = structural_bounds(
-            *forwards.layout.arrays(), forwards.rows, forwards.penalty, forwards.total_bins,
-            forwards.forward, forwards.index, forwards.excluded, forwards.second, forwards.pairs,
-            offsets, active, moves_local, onesided, splice, len(chosen))
+        # At most one segment scratch set per active sample thread. Concurrent seed
+        # calls reserve separately; the enclosing batch envelope lends available bytes.
+        query_pairs = int(np.count_nonzero(np.any(splice >= 0, axis=2)))
+        scratch = segment_workspace_bytes(k, forwards.total_bins, query_pairs)
+        scratch *= min(forwards.layout.samples, numba.get_num_threads())
+        with reserve_memory(scratch, label="join pair segments"):
+            values = structural_bounds(
+                *forwards.layout.arrays(), forwards.rows, forwards.penalty, forwards.total_bins,
+                forwards.forward, forwards.index, forwards.excluded, forwards.second, forwards.pairs,
+                offsets, active, moves_local, onesided, splice, len(chosen))
         sums = column_sums(values)
         result[chosen] = sums
         for column in np.flatnonzero(keep(sums)).tolist():

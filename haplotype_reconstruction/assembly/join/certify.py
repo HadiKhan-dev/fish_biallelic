@@ -32,6 +32,8 @@ import numba
 import numpy as np
 from numba import njit, prange
 
+from .emissions import pair_index
+from .pair_segments import choose_segments, regions as segment_regions
 from .objective import (column_sums, forward, max_range, pair_lists, score_samples,
                         widest_block)
 
@@ -121,22 +123,22 @@ def _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, r
         if x == removed_a or x == removed_b:
             continue
         source = rows[x, block]
-        at = base + (r1 * haps + source) * bins
+        at = base + pair_index(r1, source) * bins
         for marker in range(bins):
             gathered[marker, z] = flat[at + marker]
         z += 1
         if pair:
-            at = base + (r2 * haps + source) * bins
+            at = base + pair_index(r2, source) * bins
             for marker in range(bins):
                 gathered[marker, z] = flat[at + marker]
             z += 1
-    at = base + (r1 * haps + r1) * bins
+    at = base + pair_index(r1, r1) * bins
     for marker in range(bins):
         gathered[marker, z] = flat[at + marker]
     z += 1
     if pair:
-        at = base + (r1 * haps + r2) * bins
-        other = base + (r2 * haps + r2) * bins
+        at = base + pair_index(r1, r2) * bins
+        other = base + pair_index(r2, r2) * bins
         for marker in range(bins):
             gathered[marker, z] = flat[at + marker]
             gathered[marker, z + 1] = flat[other + marker]
@@ -156,7 +158,7 @@ def _two_region(flat, block_start, block_haps, block_bins, rows, penalty, sample
         haps, bins = block_haps[block], block_bins[block]
         r1 = new_paths[new_first, block]
         r2 = new_paths[new_second, block] if pair else r1
-        count = _gather_move(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+        count = _gather_move(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins,
                              r1, r2, pair, rows, block, removed_a, removed_b, gathered)
         for marker in range(bins):
             if t == 0:
@@ -325,7 +327,8 @@ def structural_bounds(flat, block_start, block_haps, block_bins, rows, penalty, 
         # The sample's first value of every block in the EmissionLayout.
         base = np.empty(blocks, np.int64)
         for block in range(blocks):
-            base[block] = block_start[block] + sample * block_haps[block] ** 2 * block_bins[block]
+            pairs_in_block = block_haps[block] * (block_haps[block] + 1) // 2
+            base[block] = block_start[block] + sample * pairs_in_block * block_bins[block]
         allowed = np.ones(k, np.bool_)
         unused_singles = np.zeros(1, np.bool_)
         unused_pairs = np.zeros((1, 1), np.bool_)
@@ -385,6 +388,28 @@ def structural_bounds(flat, block_start, block_haps, block_bins, rows, penalty, 
                     column = onesided_table[f, g, block]
                     if column >= 0:
                         result[sample, column] = _meet(prefix[f, block - 1], beta, k)
+        # Complete source-2 query domain for this sample and structural chunk.
+        pair_slots = np.full((k, k), -1, np.int64)
+        query_count = 0
+        for f in range(k):
+            for g in range(f + 1, k):
+                if splice_any[f, g]:
+                    source, _ = region_source(index, second, pairs, sample, f, g, k)
+                    if source == 2:
+                        pair_slots[f, g] = query_count
+                        query_count += 1
+        segments = choose_segments(k, total_bins, query_count)
+        segment_values = np.empty((0, 0))
+        if segments:
+            qa = np.empty(query_count, np.int64)
+            qb = np.empty(query_count, np.int64)
+            for f in range(k):
+                for g in range(f + 1, k):
+                    at = pair_slots[f, g]
+                    if at >= 0:
+                        qa[at], qb[at] = f, g
+            segment_values = segment_regions(flat, block_start, block_haps, block_bins,
+                                             rows, penalty, sample, qa, qb)
         count = 2 * (k - 2) + 3
         for f in range(k):
             for g in range(f + 1, k):
@@ -394,6 +419,8 @@ def structural_bounds(flat, block_start, block_haps, block_bins, rows, penalty, 
                 has_pair = source != 3
                 if source == 1:
                     region = excluded[slot]
+                elif source == 2 and segments:
+                    region = segment_values[:, pair_slots[f, g]]
                 elif source == 2:
                     allowed[f] = False
                     allowed[g] = False
@@ -461,10 +488,10 @@ def _gather_flat(flat, base, haps, bins, r1, rows, block, gathered):
     states' emissions, contiguous per bin."""
     k = rows.shape[0]
     for x in range(k):
-        at = base + (r1 * haps + rows[x, block]) * bins
+        at = base + pair_index(r1, rows[x, block]) * bins
         for marker in range(bins):
             gathered[marker, x] = flat[at + marker]
-    at = base + (r1 * haps + r1) * bins
+    at = base + pair_index(r1, r1) * bins
     for marker in range(bins):
         gathered[marker, k] = flat[at + marker]
 
@@ -501,7 +528,7 @@ def birth_bounds(flat, block_start, block_haps, block_bins, rows, penalty, forwa
             shared = 0 if i == lo else min(common[i], blocks - 1)
             for block in range(shared, blocks):
                 haps, bins = block_haps[block], block_bins[block]
-                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                _gather_flat(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins,
                              paths[i, block], rows, block, gathered)
                 if block == 0:
                     a_value = -np.inf
@@ -596,7 +623,7 @@ def replace_bounds(flat, block_start, block_haps, block_bins, rows, penalty, ind
             shared = 0 if p == 0 else prefix_common[p]
             for block in range(shared, split):
                 haps, bins = block_haps[block], block_bins[block]
-                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                _gather_flat(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins,
                              prefixes[p, block], rows, block, gathered)
                 for rg in range(nreg):
                     region = excluded[index[sample, regions[rg]]]
@@ -623,7 +650,7 @@ def replace_bounds(flat, block_start, block_haps, block_bins, rows, penalty, ind
             shared = 0 if q == 0 else suffix_common[q]
             for block in range(blocks - 1 - shared, split - 1, -1):
                 haps, bins = block_haps[block], block_bins[block]
-                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                _gather_flat(flat, block_start[block] + sample * (haps * (haps + 1) // 2) * bins, haps, bins,
                              suffixes[q, block - split], rows, block, gathered)
                 for rg in range(nreg):
                     region = excluded[index[sample, regions[rg]]]

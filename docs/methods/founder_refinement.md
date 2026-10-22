@@ -1,4 +1,10 @@
-# Founder refinement
+# Founder refinement (disabled in 2.7)
+
+Founder-path refinement does not run in 2.7 and has no configuration or command-line option.
+The pipeline passes joined components and their alternatives directly between levels and to
+[final assembly](assembly.md). The source is retained, unreferenced by the pipeline and kernel
+warm-up, for the planned 2.8 rebuild. The remainder of this page records the historical
+implementation; its settings, checkpoint keys and behavior are not part of the active pipeline.
 
 Founder refinement (`assembly/founder_refinement/`) runs after every executed level of the final
 [assembly](assembly.md), never in the context assemblies of local selection. It re-chooses each
@@ -90,7 +96,7 @@ A sweep that accepts nothing certifies the fit: every proposal of that sweep was
 the final panel and every move of the move set was scored exactly against it, so the panel is a
 local optimum of F under this move set. F is non-convex and no global optimum is claimed. The window
 proposals optimise a binned surrogate, so the certificate is relative to them; acceptance always
-scores individual sites. A search that reaches `AssemblyConfig.refinement.sweep_limit = 100` sweeps
+scores individual sites. A search that reaches `assembly.founder_refinement.config.FounderRefinementConfig.sweep_limit = 100` sweeps
 is reported (warned, and recorded as not converged), never silently accepted.
 
 **Best of two.** Every fit runs this search twice from the same start, concurrently: once with its
@@ -102,11 +108,11 @@ This applies to every start fit and every count refit.
 
 **Surrogate bins.** The window surrogate cuts each prepared block's sites into bins of
 max(b_min, ceil(L_c / 2000)) sites for a component of L_c sites
-(`AssemblyConfig.refinement.proposal_max_bins = 2000`) and sums over a bin's discovery sites the
+(`assembly.founder_refinement.config.FounderRefinementConfig.proposal_max_bins = 2000`) and sums over a bin's discovery sites the
 robust emission of the join's binned model: hard dosages where every row of the block is called at
 its discovery sites, otherwise the predictive pair classes with unknown alleles marginalised (so the
 surrogate also reads sites that F leaves out). At levels 3 and above, b_min is
-`AssemblyConfig.refinement.proposal_min_sites_per_bin = 200`; at levels 1 and 2, b_min is
+`assembly.founder_refinement.config.FounderRefinementConfig.proposal_min_sites_per_bin = 200`; at levels 1 and 2, b_min is
 max(200, ceil(chromosome sites / 2000)), shared by all the components of the level, so the many
 small early components do not each receive a chromosome's bin budget.
 
@@ -125,7 +131,7 @@ partial paths restarts with tighter pruning (Lagrangian suffix bounds and the be
 the incumbent, a 16-wide beam and the dual's decoded paths); pruning keeps every path within the
 margin of a feasible value, so the optimum and the canonical answer are unchanged.
 
-The frontier is capped by a fixed byte budget, `AssemblyConfig.refinement.frontier_bytes = 137438953472`
+The frontier is capped by a fixed byte budget, `assembly.founder_refinement.config.FounderRefinementConfig.frontier_bytes = 137438953472`
 (128 GiB), the same on every machine: a kept partial path holds 8 S (Q + K + bins + 2) bytes and a programme holds
 up to four times its frontier. A programme that would exceed the cap stops and keeps the incumbent for that window;
 such a fallback is counted per fit and per level, warned and shown in the level's census line. The memory of a
@@ -369,16 +375,17 @@ cubic in K. The frontier F is data-dependent: in the worst case it grows as R^W 
 units (W = 8 fine blocks or 4 coarse spans), which the box bound, dominance pruning, the restart and
 the fixed frontier cap keep in check; the largest frontier and every fallback are reported.
 
-**Memory.** Per search: O(B N Q) float64 message arrays (two, and six with the coarse-move guard:
-switch counts and the guard's forward history), plus the boundaries the proposal cache keeps. Per
+**Memory.** Per search: O(B N Q) message arrays (two unguarded, four with the
+coarse-move guard), plus two carried-history arrays at every16th block boundary and the
+boundaries the proposal cache keeps. Values are float64; switch counts are int64. Per
 component: the float64 log evidence of its complete sites (24 N L bytes) and a reversed copy for
-reversed passes, and the surrogate emissions (8 N sum_b R_b^2 bins_b bytes). Per window programme:
+reversed passes, and the surrogate emissions (8 N sum_b [R_b(R_b+1)/2] bins_b bytes). Per window programme:
 up to four times its frontier of 8 N (Q + K + bins + 2)-byte entries, within its current budget. Guard
 tracebacks allocate per affected sample an events array and a site-by-state traceback over a window
 that doubles until the paths with and without the move agree (at worst the whole component).
 
-**Determinism.** Every kernel uses the same inline max-plus site steps, so message updates, scores
-and candidate gains agree bitwise; per-sample values are summed in sample order; refits and seeds
+**Determinism.** Kernels preserve the same max-plus model and released decisions; mathematically
+equivalent floating-point reduction orders need not produce identical bits; per-sample values are summed in sample order; refits and seeds
 are evaluated in candidate order; bootstrap streams are seeded from the component's span and the
 decision's round.
 
@@ -399,3 +406,10 @@ decision's round.
 - More likelihood, or more called alleles, does not by itself establish a better biological
   reconstruction.
 - A window that reaches the frontier cap keeps its incumbent; every such fallback is reported.
+
+
+Release2.7 packs symmetric emissions and retains carried guard history every16blocks,
+reconstructing intermediate boundaries exactly. Full-width traceback and event-matching
+workspace is included in admission. This reduces resident memory but can add guard runtime.
+See [assembly work and memory](assembly_performance.md) for diagnostics, measured scope and
+the distinction between a frontier memory cap and a cubic bound on actual window work.

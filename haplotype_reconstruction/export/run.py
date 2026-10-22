@@ -308,7 +308,9 @@ def _export_task(task, shared, budget):
     if ambiguous is not None:
         entry["refit_ambiguous_alleles"] = ambiguous
     if release is not None:
-        entry.update(founder_continuity_breaks=release.breaks,
+        entry.update(assembly_release_phase_seconds=release.phase_seconds,
+                     assembly_release_work_counters=release.work_counters,
+                     founder_continuity_breaks=release.breaks,
                      assembly_ambiguous_alleles=release.withheld_ambiguous,
                      assembly_ambiguity_metadata=release.metadata_status,
                      assembly_continuation_unverified_records=release.continuation_unverified_records,

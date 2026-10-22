@@ -37,18 +37,24 @@ import traceback
 
 from .budget import CpuBudget
 from .chromosome_workers import ChromosomeExecutor
-from .memory import headroom_bytes, memory_governor, release_memory
+from .memory import headroom_bytes, memory_governor, release_memory, reserve_memory
+from .pools import task_sizes
 from .run_log import run_log
 from .run_record import record_product, timed_stage, worker_stages
 
-# Narrow lanes need fewer core-seconds: the same contig at 16 threads took 7% fewer than at 32-37 (N=320 chr19 and
-# chr8 shards; path selection scales fully, hierarchy, refinement tails and serial checkpoint phases do not).
+# Historical refinement-enabled measurements: the same contig at 16 threads took 7% fewer core-seconds than at
+# 32-37 (N=320 chr19/chr8 shards). Path selection scaled fully; hierarchy, refinement tails and serial checkpoints
+# did not. Refinement is disabled in 2.7; these measurements have not been recalibrated for that pipeline.
 CONTIG_LANE_CORES = 16
 
-# Resident bytes of a lane per planning byte of its contig (contig_work.planning_bytes: discovery records, two
-# genotype-likelihood copies and the observation mask): the coordinator's decoded evidence and records. Its pools,
+# Resident arrays of a lane per planning byte (contig_work.planning_bytes): decoded evidence, records and
+# overlapping selection/context arrays. Retained process memory is held separately below. Its pools,
 # executors and concurrent tasks reserve their own memory (shared arrays included) as they start.
 LANE_RESIDENT_FACTOR = 1.0
+# Native post-phase private memory reached 18.401 GB on the long K30 run (76-core maximum lease).
+# This empirical runtime/heap allowance is held once per lane process until the executor joins, including tails.
+# It is not an attribution to compiled code alone and is not a bound for the sequential driver.
+LANE_WORKER_RESIDENT_BYTES = 17664 << 20
 # The resident bytes of concurrent lanes may take at most this share of the memory limit (the rest is for the work
 # inside the lanes, which the governor paces).
 LANE_RESIDENT_SHARE = 0.5
@@ -87,7 +93,8 @@ def plan_lanes(sizes, pending, *, cores: int, requested: int | None, available: 
     if lanes < 2:
         return 1, None
     weights = [float(size) if flag else 0. for size, flag in zip(sizes, pending)]
-    residents = sorted((lane_resident_bytes(size) for size, flag in zip(sizes, pending) if flag), reverse=True)
+    residents = sorted((lane_resident_bytes(size) + LANE_WORKER_RESIDENT_BYTES
+                        for size, flag in zip(sizes, pending) if flag), reverse=True)
     memory = memory_governor().limit if available is None else max(0, available - headroom_bytes(available))
     allowance = LANE_RESIDENT_SHARE * memory
     group = total = 0
@@ -127,7 +134,9 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
         print(f"    {contig} log: {logs[contig]}", flush=True)
     common = dict(root=store.root, work=work, context=context, logs=logs)
     try:
-        results = _run_executor(executor, common)
+        with reserve_memory(executor.worker_count * LANE_WORKER_RESIDENT_BYTES,
+                            label="reconstruction workers"):
+            results = _run_executor(executor, common)
     except RuntimeError as error:
         message = _failure_message(str(error), partitions, logs, done or (lambda contig: False))
         print(f"  [FAILED] {message}", flush=True)
@@ -142,14 +151,18 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     return summaries
 
 
-def run_sequentially(store, contigs, work, context, *, cores: int):
+def run_sequentially(store, contigs, work, context, *, cores: int, task_bytes=None):
     """The one-lane route: every contig in this process with the whole ceiling (freed heap pages are returned
-    after each contig, as the lane executor does after each of its tasks)."""
+    after each contig, as the lane executor does after each of its tasks). ``task_bytes`` reserves the contig's
+    arrays independently of the caller's process-lifetime residence; accepts the same forms as the executor."""
     print(f"  Contigs run sequentially with a {cores}-core ceiling", flush=True)
     budget = CpuBudget.fixed(cores)
+    contigs = tuple(contigs)
+    sizes = task_sizes(task_bytes, contigs)
     results = []
-    for contig in contigs:
-        results.append(work(store, contig, context, budget))
+    for contig, size in zip(contigs, sizes):
+        with reserve_memory(size, label="reconstruction arrays"):
+            results.append(work(store, contig, context, budget))
         release_memory()
     return results
 

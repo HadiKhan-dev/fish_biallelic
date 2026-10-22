@@ -5,6 +5,13 @@ stage names and output names changed; this page maps each old form to the new on
 [changelog](../CHANGELOG.md) lists the behaviour changes. Checkpoints of 1.0 are refused: start every run in a new
 output root.
 
+## 2.7 assembly checkpoints
+
+The completion-retained, refinement-off pipeline requires a new output root for any earlier
+refinement-enabled run. Preflight checks both assembly schema 3 and its configuration: a prior
+experimental completion-drop candidate also used schema 3, so the number alone does not identify
+this pipeline. Historical results remain readable with their original version of the package.
+
 ## Commands
 
 The four reconstruction commands are one `run` command; a dataset is a configuration (`preset`), not a command.
@@ -71,7 +78,7 @@ metadata = "data/AsAc_metadata.xlsx"
 | `--site-quality-filter` / `--no-site-quality-filter` | `--set quality.site_filter=on` / `off` |
 | `--sample-quality-filter` / `--no-sample-quality-filter` | `--set quality.sample_filter=on` / `off` |
 | `--pedigree-calibration predictive\|off` | `--set pedigree.evidence_calibration=predictive` / `off` |
-| `--founder-refinement on\|off` | none: founder refinement always runs |
+| `--founder-refinement on\|off` | none: founder-path refinement is disabled in 2.7 |
 | `--recombination-map FILE` | `--set genetic_map.file=FILE` |
 | `--rate-cm-per-mb X` | `--set genetic_map.rate_cm_per_mb=X` |
 | `--shared-family-evidence` / `--no-shared-family-evidence` | `--set recombination.shared_family_evidence=true` / `false` |
@@ -103,7 +110,7 @@ and sections are errors (1.0 ignored them silently), so a 1.0 file must be conve
 | eligibility designs built into the tropheops and astcal drivers | `[pedigree.eligibility] policy = "cohorts"`, `parent_generations`, `opposite_sex_pairs` (in the presets) |
 | `[run] read_calibration`, `[run] site_quality_filter`, `[run] sample_quality_filter` | `[quality] read_calibration`, `[quality] site_filter`, `[quality] sample_filter` |
 | `[run] pedigree_calibration` | `[pedigree] evidence_calibration` |
-| `[run] founder_refinement` | none (always on) |
+| `[run] founder_refinement` | none (disabled in 2.7) |
 | `[recombination] rate_cm_per_mb`, `[recombination] recombination_map` | `[genetic_map] rate_cm_per_mb`, `[genetic_map] file` |
 | `[recombination] shared_family_evidence`, `[recombination] order_breakpoints` | `[recombination] shared_family_evidence`, `[recombination] order_breakpoints` |
 | environment `BHD_FAMILY_PHASE_PROTECTED_INTERVALS` | `[family_phase] protected_intervals` |
@@ -129,7 +136,7 @@ No setting is read from the environment any more; every one is in the configurat
 | `HAPLOTYPES_*` settings (`OUTPUT_DIR`, `CHECKPOINT_DIR`, `VCF`, `CONTIGS`, `TEMPLATES`, `METADATA`, `METADATA_SHEET`, `ELIGIBILITY`, `STOP_AFTER_STAGE`, `BATCH_QUEUE`, `CONTIG_WORKERS`, `SERIAL_CONTIGS`, `MAX_CONTIGS`, `READ_CALIBRATION`, `SITE_QUALITY_FILTER`, `SAMPLE_QUALITY_FILTER`, `PEDIGREE_CALIBRATION`, `FOUNDER_REFINEMENT`, `GENERATIONS`, `SIMULATION_DESIGN`, `READ_MODEL`) | the corresponding TOML key or `--set` |
 | `BHD_*` settings (`NUM_PROCESSES`, `RECOMBINATION_MAP`, `RECOMBINATION_RATE_CM_PER_MB`, `RECOMBINATION_SHARED_FAMILY`, `RECOMBINATION_ORDER_BREAKPOINTS`, `SIMULATION_SEED`, `SIM_READ_DEPTH`, `SIM_CONTIGS`, `SIM_STOP_AFTER_STAGE`, `SIM_CHECKPOINT_DIR`, `SIM_OUTPUT_DIR`, `SIMULATION_RECOMBINATION_MAP`, `SIMULATION_RECOMBINATION_RATE_CM_PER_MB`) | the corresponding TOML key or `--set` |
 | `BHD_FAMILY_PHASE_PROTECTED_INTERVALS` | `[family_phase] protected_intervals` |
-| `HAPREC_COARSE_MOVE_GUARD` | none: founder refinement's coarse-move guard is fixed (shared-junction guard) |
+| `HAPREC_COARSE_MOVE_GUARD` | none: founder-path refinement is disabled in 2.7 |
 | `BHD_HIER_PROFILE`, `BHD_HIER_PROFILE_MIN_L`, `BHD_DYNTHREAD_LOG` | `[execution] profile = true` |
 | `BHD_MALLOC_TRIM_RSS_MB`, `BHD_MALLOC_TRIM_EVERY_BLOCKS` | none: heap trimming happens at fixed phase boundaries |
 | `NUMBA_THREADING_LAYER_OVERRIDE` | none: the threading layer is OpenMP |
@@ -147,7 +154,7 @@ evaluation stage.
 | `block_discovery` (stop point, evaluation stage) | `discovery` |
 | record `discovery/prepared` (evidence inside discovery) | stage `evidence`, record `evidence` |
 | `feedback/initial`, `feedback/l1`, `feedback/l2`; evaluation `feedback_initial`, `feedback_l1`, `feedback_l2` | stage `local_selection`, records `local_selection/initial`, `local_selection/l1`, `local_selection/l2`; evaluation `local_selection_initial`, `local_selection_l1`, `local_selection_l2` |
-| `assembly`, `assembly_l1` ... `assembly_l4`, `founder_refinement` | unchanged: `assembly`, `assembly_l1` ... `assembly_l4`, `founder_refinement` |
+| `assembly`, `assembly_l1` ... `assembly_l4`, `founder_refinement` | `assembly` is the final joined product; `assembly_l1` ... `assembly_l4` are joined levels; `founder_refinement` is no longer offered |
 | `allele_refit` | `founder_refit` |
 | `refinement` (package), `phase_correction` (outputs) | `family_phase` |
 | `recombination_map` (outputs) | `recombination` |

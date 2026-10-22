@@ -44,10 +44,13 @@ class Transitions:
         fitted probability. Rows sum to 1 in probability; every entry is finite (the uniform mixture keeps
         probabilities positive). Release 2.1 keeps float64 (base FastMesh rounded to float32, so a one-ulp change
         of one entry under a tiny input perturbation reordered the endpoint beam; design 5.4, review r8).
+    diagnostics: one plain convergence record per fitted gap, in gap order. The hierarchy persists these as
+        linker_em search events; old records without the events have unmeasured convergence, not zero residual.
     """
 
     founders: np.ndarray
     log_forward: tuple[tuple[np.ndarray, ...], ...]
+    diagnostics: tuple[dict, ...] = ()
 
     @property
     def blocks(self) -> int:
@@ -156,27 +159,19 @@ def _messages(scans, founders, log_forward, gap, budget):
     return results[0], results[1]
 
 
-def _m_step(forward_scores, backward_scores, log_forward, gap, learning_rate, config, budget):
-    """Damped regularised transitions of every edge of the gap from the posterior homologue edge counts.
+def _m_step(forward_scores, backward_scores, log_forward, gap, config, budget):
+    """Undamped regularised forward transitions from posterior homologue edge counts.
 
-    Returns (forward, reverse): forward[i] the new (K_i, K_{i+g}) transition probabilities, reverse[i] the
-    (K_{i+g}, K_i) column-normalised summaries of the same regularised edge evidence at block i + g. The reverse
-    summaries are not backward operators; they enter only the EM stop rule (base behaviour, owner question B6).
+    This is the fixed-point map M(T). Damping belongs to the iteration, not its convergence residual.
     """
     log_pseudo = math.log(config.pseudo_count)
-    forward, reverse = [], []
+    forward = []
     for i, log_t in enumerate(log_forward):
         _apply_threads(budget)
         log_counts = edge_log_counts(np.ascontiguousarray(forward_scores[i]),
                                      np.ascontiguousarray(backward_scores[i + gap]), np.ascontiguousarray(log_t))
-        target = regularised_rows(log_counts, log_pseudo, config.min_log_probability, config.uniform_mix)
-        # Damping toward the previous forward transitions (base schedule).
-        probabilities = (1.0 - learning_rate) * np.exp(log_t) + learning_rate * target
-        log_row_mass = np.logaddexp.reduce(np.logaddexp(log_counts, log_pseudo), axis=1)
-        log_joint = log_row_mass[:, None] + np.log(probabilities)
-        reverse.append(np.exp((log_joint - np.logaddexp.reduce(log_joint, axis=0)[None, :]).T))
-        forward.append(probabilities)
-    return forward, reverse
+        forward.append(regularised_rows(log_counts, log_pseudo, config.min_log_probability, config.uniform_mix))
+    return forward
 
 
 def _largest_change(old, new):
@@ -191,35 +186,44 @@ def _largest_change(old, new):
 
 
 def _fit_gap(scans, founders, gap, config: LinkerConfig, budget, label=None):
-    """EM of one gap's transitions; returns the fitted forward probabilities float64[K_i, K_{i+g}] per edge.
+    """Fit one gap; return forward probabilities per edge and the actual returned-iterate residual.
 
-    Starts from uniform transitions; each iteration runs the E-step under the current transitions, the damped
-    M-step at rate max(decay^iteration, minimum) and stops when no forward transition or reverse summary moved
-    by more than ``min_change`` (Class-B note (assembly B6): the stop rule sees damped steps and the otherwise
-    unused reverse summaries; ported as base). label: the batch's census label; with the valley census on, the
-    signed distances change - min_change of the last two iterations (the ones that decide the stop) are recorded
-    (kind ``linker_em_stop``, design A-9(b)).
+    Start from uniform transitions. At each iterate T, evaluate the regularised target M(T) once and stop
+    when max(abs(M(T) - T)) <= min_change, or after max_iterations damped updates. Otherwise apply the same
+    rate max(decay^iteration, minimum). Evaluating the final returned iterate avoids reporting the residual
+    at the previous iterate as convergence. Reverse summaries are not parameters of this fixed-point problem.
+    label: the batch's census label; record the last two residual-minus-tolerance distances when enabled.
     """
     n = len(scans)
     forward = [np.full((founders[i], founders[i + gap]), 1 / founders[i + gap]) for i in range(n - gap)]
-    reverse = [np.full((founders[i + gap], founders[i]), 1 / founders[i]) for i in range(n - gap)]
-    changes = []
-    for iteration in range(config.max_iterations):
+    residual_history = []
+    last_change = None
+    for updates in range(config.max_iterations + 1):
         _apply_threads(budget)
-        learning_rate = max(config.learning_rate_decay ** iteration, config.minimum_learning_rate)
         log_forward = [entrywise_log(table) for table in forward]
         forward_scores, backward_scores = _messages(scans, founders, log_forward, gap, budget)
-        new_forward, new_reverse = _m_step(forward_scores, backward_scores, log_forward, gap, learning_rate,
-                                           config, budget)
-        change = max(_largest_change(forward, new_forward), _largest_change(reverse, new_reverse))
-        forward, reverse = new_forward, new_reverse
-        changes.append(change)
-        if change <= config.min_change:
+        target = _m_step(forward_scores, backward_scores, log_forward, gap, config, budget)
+        residuals = [_largest_change((table,), (value,)) for table, value in zip(forward, target)]
+        residual = max(residuals, default=0.0)
+        residual_history.append(residual)
+        converged = residual <= config.min_change
+        if converged or updates == config.max_iterations:
             break
+        learning_rate = max(config.learning_rate_decay ** updates, config.minimum_learning_rate)
+        new_forward = [(1.0 - learning_rate) * table + learning_rate * value
+                       for table, value in zip(forward, target)]
+        last_change = _largest_change(forward, new_forward)
+        forward = new_forward
     if label is not None and ties.census_enabled():
         ties.census("assembly.linker_em_stop", f"{label}/g{gap}",
-                    [value - config.min_change for value in changes[-2:]])
-    return forward
+                    [value - config.min_change for value in residual_history[-2:]])
+    diagnostic = dict(gap=int(gap), iterations=updates, max_iterations=int(config.max_iterations),
+                      iteration_cap_reached=updates == config.max_iterations,
+                      cap_hit=not converged, converged=converged,
+                      stop_rule="undamped_forward_residual", tolerance=float(config.min_change),
+                      last_damped_change=last_change, undamped_residual=residual, edge_residuals=residuals,
+                      residual_evaluations=len(residual_history))
+    return forward, diagnostic
 
 
 def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, config: LinkerConfig,
@@ -248,10 +252,13 @@ def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, con
     del blocks, tasks
     fits = [partial(_fit_gap, scans, founders, gap, config, label=label) for gap in range(1, last_gap + 1)]
     fitted = [None] * len(fits)
-    for index, forward in budget.concurrent(fits, 0, label="linker fits"):
+    diagnostics = [None] * len(fits)
+    for index, (forward, diagnostic) in budget.concurrent(fits, 0, label="linker fits"):
         fitted[index] = forward
+        diagnostics[index] = diagnostic
     malloc_trim()
     return Transitions(
         founders=np.asarray(founders, dtype=np.int64),
         log_forward=tuple(tuple(np.ascontiguousarray(entrywise_log(table), dtype=np.float64) for table in forward)
-                          for forward in fitted))
+                          for forward in fitted),
+        diagnostics=tuple(diagnostics))

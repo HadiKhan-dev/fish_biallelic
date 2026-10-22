@@ -111,7 +111,9 @@ all kept, and exact duplicates are emitted once. Nearest-row ties use the union 
 
 **Released ambiguity.** A founder allele that no positive-weight carrier observes is unknown:
 `DiscoveredBlock.latent_unknown` marks it (`latent` keeps a binary value only as the fit's initial value; `calls`
-withholds it), and local selection, completion and export release '.' there. Release 2.3 cavity-scores every panel
+withholds it). Local selection refits binary starts under its own path model and releases alleles from that
+model's evidence; a discovery carrier mask is not a permanent downstream exclusion. Sites observed by no
+eligible sample remain unknown in discovery and local selection. Release 2.3 cavity-scores every panel
 of each K's leading NLL class. Members of the winning cavity class after the smaller-K prior that differ at an
 observed allele are released together as `tied_panels` (`tied_panel_k`, `tied_panel_nll`, `tied_unknown`); local
 selection takes them as proposals, so neighbouring blocks decide. Raw calls are conservative across the complete
@@ -176,6 +178,49 @@ discovery site in the block is assigned two unknown copies and is left out of th
 Discovery pools the compatible evidence of all carriers of a founder at each site, so a founder
 allele can be called where some carriers are missing and others are informative. Positions without
 sufficient support stay unknown (-1); missingness never counts as an allele match.
+
+## Candidate equivalence gate (I6)
+
+A missing allele is a release statement, not proof that every binary value used internally is
+interchangeable during search. The archive already collapses same-K panels with identical
+carrier-observed row multisets before its budget cut; materialisation removes duplicate released
+alternatives (`discovery/search.py`, `_Archive`; `discovery/release.py`, `materialise`). The archive
+keeps the lower switching NLL outside the numerical tie quantum. Its carrier-mask identity must
+not be moved to an earlier proposal budget as a proof of objective or continuation equivalence.
+
+For fixed-K data factors, a sufficient equivalence is equality of the panel's row multiset on
+sites observed by any eligible sample. Differences confined to globally unobserved sites then
+leave every state's emission unchanged. Keep the original K, L, bin boundaries, row multiplicities
+and prior masses; do not remove columns, merge projected rows, or alias a founder to the unknown-copy
+state. A pre-fit collapse additionally requires the same complete fitted and proposal successor
+families. The existing binary-content proposals and update schedules do not establish that property
+from the projection alone. A partial representation must preserve unknown cells explicitly and
+must be supported by the local-selection consumer before replacing its binary starts.
+
+Zero stationary responsibility is a weaker condition. Such a row has no conditional H-step
+evidence and releases unknown, but its states remain available to the binned switching objective
+and to later fits. In the bounded I6 counterexample, two K=2 fixed points have identical stationary
+memberships, carrier-masked panels, raw release and cavity score; changing the unused row changes
+the switching NLL by 50 nats. Deleting that row or choosing its alleles by convention is therefore
+not an exact collapse. Retain K; a reduction of K remains an explicitly scored death move.
+
+The saved 2.6 census covers 43,758 informative blocks across TroMau, std, K30, f3 and N80/N160/N320/N640.
+It found no globally unobserved discovery sites, no duplicate retained carrier-masked panels and no
+called carrier-unknown cells. The only selected wholly unknown row, TroMau chr14 block 402, has
+200 unknown calls, probability 0.5 and support zero. Four bounded omitted-replacement-class probes
+also found no global-projection duplicates. Weaker carrier-mask groups can have unequal switching
+NLLs; their zero-NLL-span groups are not certified continuation classes either. These are the
+`V7/codex/I6/{CENSUS,DESIGN}.md`, `objective_checks.json` and `omitted_probe.json` results. Saved
+records omit losing candidate content, so the probes do not measure all possible conditional
+equivalences or their downstream effects.
+
+No certified budget-relevant class has been established, so the design's diagnostic gate selects
+no new collapse implementation. This does not prove that no such class can exist. The current
+unknown release is retained: call -1, probability 0.5 and support zero where no eligible sample
+observes a site, and for a row with no positive stationary responsibility in discovery. No speedup
+or scientific improvement is claimed. A future collapse must first certify all affected factors
+and successor families, then validate released identity where admission is unchanged and apply
+the declared simulation and TroMau gates where admission changes.
 
 ## Fixed-K model
 
@@ -705,13 +750,15 @@ recorded in chunks of up to 64 with the completion-driven elapsed-time flush des
 above. An interrupted contig resumes with blocks absent from committed chunks.
 
 Each block task reserves its planned peak memory with the run's memory governor before it starts
-(`discovery/stage.py`, `block_task_bytes`): a fixed `discovery.stage.TASK_BASE_BYTES = 536870912` (512 MiB), the
+(`discovery/stage.py`, `block_task_bytes`): a fixed `discovery.stage.TASK_BASE_BYTES = 1342177280` (1,280 MiB), the
 block's evidence slices and the workspace estimate of `discovery/fixed_k/workspace.py` (`search_bytes`: the
 evidence tables, the bin-pattern tables at their full 1,024 slots per bin, the entry-bounded caches and the
 fixed-point set) for panels of up to `discovery.stage.ESTIMATE_FOUNDERS = 32` rows. Panels and cache keys are
 bit-packed, the search archive keeps per K only the panels the search reads (its beam), and duplicate rows are
 found with a lexsort over byte rows, never by sorting a structured data type. Block workers return freed heap
 pages to the system every 32 blocks, or as soon as their resident set reaches 1.5 GiB.
+The pool separately holds `discovery.stage.WORKER_RESIDENT_BYTES = 536870912` (512 MiB) per worker
+until it joins, including residence between tasks and contigs.
 
 In the earlier implementation benchmark on the package's K-ladder simulation (N = 320), a block took 4.3, 12.1 and
 33.4 CPU seconds at K = 12, 20 and 30 (cavity scoring 73% of it at K = 30), with a worker peak of 0.70 GiB at K = 30

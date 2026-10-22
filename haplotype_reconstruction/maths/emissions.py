@@ -1,4 +1,4 @@
-"""Genotype emissions of founder pairs with hard or unknown alleles (assembly's linker, joins and founder refinement).
+"""Genotype emissions of founder pairs with hard or unknown alleles (assembly's linker and joins).
 
 ``pair_code`` classifies an ordered founder pair at a site and ``predictive_likelihood`` gives the probability of a
 sample's genotype likelihood triple under that class. Unknown founder alleles (-1 in the pre-fill calls) have a
@@ -14,7 +14,7 @@ Seven classes (codes) suffice:
     5         two unknown alleles of different latent rows
     6         two copies of one unknown latent allele
 
-The joins and founder refinement score a site by the robust, floored, centred log likelihood
+The joins score a site by the robust, floored, centred log likelihood
 
     e = max(log(0.99 P + 0.01 / 3), -2) - log(1 / 3)        (robust_log_likelihood(P) - CENTER)
 

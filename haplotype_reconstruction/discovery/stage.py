@@ -19,7 +19,8 @@ import time
 import numpy as np
 
 from ..evidence import records as evidence_records
-from ..execution import BudgetedPool, claim_threads, malloc_trim, release_memory, resident_bytes
+from ..execution import (BudgetedPool, claim_threads, malloc_trim, memory_governor, memory_worker_limit,
+                         release_memory, reserve_memory, resident_bytes)
 from . import records
 
 from .config import DiscoveryConfig
@@ -85,7 +86,12 @@ def discover_block(evidence: BlockEvidence, config: DiscoveryConfig) -> Discover
 # bit-packed). Calibrated on AulStu chr3 (N 290, L 200, one thread): measured peak above the
 # worker's baseline 0.73 GB at K 25 (block 2058), estimate 0.85 GB.
 ESTIMATE_FOUNDERS = 32
-TASK_BASE_BYTES = 512 << 20
+# Historical TroMau ordinary-task incremental RSS exceeded its plan by 752 MB; the added 768 MiB
+# covers that measured active-workspace shortfall by 53 MB. Worker residence is owned separately.
+TASK_BASE_BYTES = 1280 << 20
+# Total private worker residence after native trim reached 486 MB in the long K30 measurement. This remains
+# owned between tasks and contigs; the task base above still covers Python search/hierarchy workspace.
+WORKER_RESIDENT_BYTES = 512 << 20
 
 
 def clustering_matrix_bytes(samples: int, config: DiscoveryConfig | None = None) -> int:
@@ -237,14 +243,20 @@ def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
     contigs = list(contigs)
     if not contigs:
         return
-    with BudgetedPool(budget, processes=max(1, int(budget.threads())),
-                      label="discovery", yield_to_waiters=True) as pool, \
-            ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
-        upcoming = preparer.submit(prepare, contigs[0])
-        for index, contig in enumerate(contigs):
-            evidence = upcoming.result()
-            if index + 1 < len(contigs):
-                upcoming = preparer.submit(prepare, contigs[index + 1])
-            _discover_contig(store, contig, config, pool, evidence)
-            del evidence
-            release_memory()
+    # Pool residence is owned between contigs; task workspaces remain individually paced.
+    workers = max(1, int(budget.threads()))
+    workers = memory_worker_limit([WORKER_RESIDENT_BYTES] * workers, workers, label="discovery workers")
+    # On an exception, terminate/join the pool and release its residence before waiting for the preparer.
+    with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
+        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="discovery workers"), BudgetedPool(
+                budget, processes=workers, label="discovery", yield_to_waiters=True) as pool:
+            upcoming = preparer.submit(prepare, contigs[0])
+            for index, contig in enumerate(contigs):
+                # The helper thread has its own memory context; this caller is waiting for that work.
+                with memory_governor().suspended():
+                    evidence = upcoming.result()
+                if index + 1 < len(contigs):
+                    upcoming = preparer.submit(prepare, contigs[index + 1])
+                _discover_contig(store, contig, config, pool, evidence)
+                del evidence
+                release_memory()

@@ -1,5 +1,10 @@
 # Performance and resource use
 
+The current 2.7 pipeline disables founder-path refinement. Measurements below that include
+refinement describe the historical implementation or earlier candidates; they do not measure
+this refinement-off pipeline. The retained refinement source and its work budgets are inactive.
+See [assembly](methods/assembly.md) for the current path.
+
 ## Discovery measurements for 2.6
 
 Discovery keeps canonical birth-proposal keys and descriptors until fitting needs panel arrays,
@@ -211,7 +216,7 @@ discovery. No inference was rerun for this attribution.
 | evidence | contig (metadata scan, then direct shared-array decode in parallel windows); at most one contig ahead of discovery | site/sample QC, read-model fits; 33 bytes per retained cell, plus phase scratch |
 | discovery | block, in one persistent pool for all pending contigs | fixed-K fits and the reversible K search per block |
 | local selection | block (path fits), component (context refits), inside a contig lane | path-model fits and the candidate bank; two context assemblies |
-| assembly | joined batch (hierarchy), component (founder refinement), inside a contig lane | linker EM and certified panel searches; converged refinement fits and count decisions |
+| assembly | block (completion), joined batch (hierarchy), inside a contig lane | completion, linker EM and certified panel searches with join count decisions |
 | painting | sample block, inside a contig lane | binned emissions and the diploid HMM |
 | pedigree | chromosome (preparation, scoring, exclusion); genome-wide decisions are a barrier | pair scoring on the fixed candidate panel; bootstrap and leave-one-chromosome-out resampling |
 | founder refit, family phase, recombination | chromosome | coordinate sweeps; family message passing and polishing; per-meiosis decoding |
@@ -283,52 +288,195 @@ threads are recorded under their own name) and per-contig summaries.
 
 ## Memory
 
-One memory governor per run (`execution/memory.py`) keeps every process of the run within a memory limit by
-admission, never by failing:
+One memory governor per run (`execution/memory.py`) admits work using estimated memory ownership and current
+available memory. Its limit is a planning limit: a measured peak can exceed an estimate, and the progress rules
+below can admit work over the limit.
 
-- **Limit.** The memory available when the run starts (the node's available memory, every enclosing cgroup's limit
-  minus its working set, and the Slurm job's memory) minus a headroom of `execution.memory.HEADROOM_FRACTION = 0.1`
-  (at least 4 GiB, at most half), and at most `[execution] memory_limit` when set.
-- **Reservations.** Pools, chromosome executors, contig lanes and concurrent fits reserve each task's estimated
-  peak bytes before starting it and release them when it ends; a pool's shared arrays are reserved for the pool's
-  lifetime. A task starts when its bytes fit next to the reservations already held and into the memory the node has
-  at that moment; otherwise it waits. Waiting requests nested in running work are served first (finishing started
-  work before starting new work), then in arrival order; a smaller request may pass a waiting larger one only when
-  both fit, so large tasks are not starved. Work nested d levels deep may fill the ledger only up to the limit minus
-  `execution.memory.NESTED_HEADROOM_FRACTION = 0.2` / 2^(d - 1) of it (80% at the first level, 90% at the second,
-  95% at the third, ...), so outer work that waits for its sub-tasks always leaves room for them.
-- **Progress.** A task larger than the limit runs alone when nothing else holds memory; if every holder is itself
-  waiting, the first waiting request is admitted over the limit so that work continues. Both are logged; the
-  governor never deadlocks and never signals a process.
-- **Shared memory of killed runs.** Every shared-memory segment the run creates is named after the run, and a new
-  run removes this user's ledgers and segments of runs that have died (no live process holds them) before it reads
-  the available memory, so a run killed with its allocation leaves no memory behind in `/dev/shm`.
-- **Lanes.** While a lane works on a contig it holds about the contig's planning size (its discovery records, two
-  copies of its genotype likelihoods and its observation mask); the lanes running together may hold at most
-  `execution.contig_lanes.LANE_RESIDENT_SHARE = 0.5` of the limit, and everything inside a lane reserves its own
-  bytes.
-- **Stage estimates.** Each stage supplies per-task byte estimates from its inputs, conservative where unsure;
-  kernels with large temporaries tile them under fixed byte budgets, so their results do not depend on free
-  memory. The memory summary lines at the end of the run log and the run record's `memory` entry report the limit, reservations, waits and wait time,
-  the peak reserved and peak used memory, and each task kind's estimate against its measured peak.
-- **Phases.** Within a contig, local selection and assembly release their pools and arrays before painting starts,
-  so their memory and painting's never overlap; executors return freed heap to the system (`malloc_trim`) after
-  each task and at phase boundaries.
+- **Limit.** At startup, available memory is the minimum of node availability, enclosing cgroup limits minus their
+  working sets, and the job allowance. Headroom is `HEADROOM_FRACTION = 0.1` (at least 4 GiB, at most half);
+  `[execution] memory_limit` can lower the resulting limit.
+- **Task workspaces.** Pools, chromosome executors and concurrent fits reserve estimated active workspace before
+  dispatch, releasing it after the result. Nested work borrows an enclosing task's envelope where the existing
+  path declares one. Worker and caller residence is accounted separately. New pool-owned shared arrays are held
+  once for the pool lifetime; attaching an existing `SharedArrayRef` adds no new allocation.
+- **Worker residence.** Discovery, local selection, context refit, hierarchy and founder refinement reserve
+  measured private-memory allowances from pool creation through worker join, including idle tails. Worker-count
+  planning includes each allowance once. These terms cover imports, loaded kernels, compiler/runtime state and
+  retained heap; they are neither measurements of machine code alone nor universal upper bounds. Task workspace
+  and shared-array terms remain separate. Existing trimming and recycling policies are unchanged.
+- **Contig arrays.** For N samples, L sites and D decoded discovery-record bytes, the estimate is
+  `D + 63*N*L + 200*(ceil(D/13) + SEARCH_GROWTH*L)`. The 63-byte term covers raw and neutral float64 genotype
+  likelihoods, float32 scoring likelihoods and three observation masks. The extra founder-site allowance covers
+  overlapping selection generations, context proposals and checkpoint copies. Named array subtotals reach
+  138 bytes per founder-site in selection and 167 in the second context; 200 is a planning allowance, not an exact
+  bound on every Python object, memo or decoded backing buffer. `SEARCH_GROWTH = 8` estimates growth and does not
+  cap founder counts. Pool-owned evidence copies remain additional reservations.
+- **Caller residence.** Each concurrent lane also holds a process allowance until its executor joins. A driver
+  executing reconstruction directly holds its allowance across later contigs and genome-wide stages, through
+  cache publication. Both serial and planned one-lane routes additionally reserve each contig's arrays. The driver
+  allowance is a resident token, so retained pages do not masquerade as active computation during admission waits.
+- **Admission.** A request starts when its bytes fit alongside existing reservations and current availability;
+  otherwise it waits. Nested waiting work takes precedence, then arrival order. A smaller request passes a larger
+  waiting one only if both fit. At depth d, the ledger ceiling is the limit minus
+  `NESTED_HEADROOM_FRACTION = 0.2 / 2**(d-1)` of it. Lane residence plus its input-array plan can use up to
+  `LANE_RESIDENT_SHARE = 0.5` of the limit. These rules pace memory use without changing CPU ceilings or scientific
+  decisions.
+- **Progress.** A task larger than the limit can run alone when nothing else holds memory. If all holders are
+  waiting, the first waiter can be admitted over the limit to make progress. Both cases are logged. The governor
+  does not terminate processes.
+- **Measurements.** Run records report reservations, waits, forced/run-alone admissions, available-memory fall and
+  incremental task RSS high-water marks. Available-memory fall is a live-use proxy, not process PSS; incremental
+  task RSS includes first-use work and can include nested/shared mappings. Scientific phase boundaries release
+  arrays and pools, but runtime and allocator pages can remain resident after `gc.collect` and `malloc_trim`.
+  Retained memory can overlap subsequent phases.
+- **Shared memory of ended runs.** Segments are named for their run. Before measuring availability, a new run
+  cleans this user's segments and ledgers for runs with no live holders.
 
-Pacing changes when work runs, never what it computes.
+Pacing changes when work runs. The estimates do not alter likelihoods, convergence, founder counts, release rules,
+phase, pedigree or recombination models.
+
+### Calibration in 2.7
+
+The allowances below come from the six completed W1 cases and targeted full-node and bounded measurements.
+Observations use decimal GB/MB unless GiB/MiB is written. These terms are empirical planning envelopes.
+
+| Owner | Allowance | Observed basis and limitation |
+| --- | ---: | --- |
+| Discovery worker | 512 MiB | 486 MB private memory after native trim; mixed runtime and retained heap |
+| Discovery active workspace base | 1280 MiB | Historical TroMau ordinary-task incremental RSS exceeded its old plan by 752 MB; the added 768 MiB leaves 53 MB margin |
+| Local-selection worker | 768 MiB | 674 MB private memory after native trim in a bounded first-use K29 fixture |
+| Local-selection active workspace base | 2048 MiB | Historical TroMau first-task incremental RSS 3.023 GB; named workspace 356 MB and a 106 MB bounded starting-private projection leave 180 MB margin with residence; historical starting-private memory is unavailable |
+| Context-refit worker | 512 MiB | Replaces the old 256 MiB per-task startup allowance; historical first-task incremental RSS reached 362 MB, current warm private endpoint 116 MB |
+| Hierarchy worker | 2048 MiB | Sequential K30 normal post-trim private maximum 1.994 GB includes current task state; captured settled-idle maximum 1.480 GB does not establish that the larger endpoint disappears after return |
+| Refinement worker | 3584 MiB | Sequential K30 settled-idle private maximum 3.551 GB and normal post-trim maximum 3.692 GB; current task state remains live at normal trim |
+| Lane process | 17664 MiB (17.25 GiB) | Long K30 native post-painting private endpoint 18.401 GB at a maximum 76-core lease; 121 MB margin. The last lane joined before a settled-idle sample; earlier lanes retained less |
+| Sequential driver | `max(1536 MiB, 512 MiB + 272 MiB * cores)` | Five-contig post-trim private endpoints rose 15.366→19.395→20.285→21.256→21.570 GB; cache-publication endpoint 21.643 GB. Calibrated at 76 cores with 570 MB margin; core-count scaling and longer sequential lists are unvalidated, and no plateau was established |
+
+The long resource fixture has 80 samples, 30 synthetic founder rows per template block, and 322,664 sites across
+three contigs spanning about 137 Mb on a full 76-CPU SL4 node. Only coordinates come from TroMau; alleles are
+resampled K30 template blocks with fixed row identities. Repeated blocks make this a resource fixture, not a
+representative genome model. Three contigs do not meet the unchanged five-chromosome Tier-B eligibility criterion,
+so parent-conditioned family-phase memory is not stressed.
+
+The long run completed all stages and three exports in 12,510.105 s (12,552.568 s including observation).
+Released founder counts were 30, 30 and 29 across 41.031, 52.304 and 43.842 Mb components; all three visited K30
+in final refinement. Whole-tree sampled PSS peaked at 70.223 GiB and forkserver-worker PSS at 69.461 GiB.
+Native governor reservations peaked at 391.619 GiB, with no waits, forced admissions or run-alone events.
+There were 2,520 samples at a median five-second interval. CPU-delta measurements give a lower bound of 63.693
+occupied cores on average; a 60-second window reached 75.699 of the 76 available cores.
+
+The corrected terms preserve all eight recorded lane ceilings, and 624 logged local/hierarchy groups fit their
+stated outer ownership. A simultaneous late-L3 graph would, however, exceed the full planning limit by 2.485 GB
+when given all three worst-case lane allowances. That is a pacing risk, not an admission replay or a runtime
+prediction. The estimates retain the CPU ceiling and existing admission policy; integrated measurements must
+report any resulting waits and runtime change.
+
+The separate sequential K30 run completed five 8000-site contigs with reconstructed K28–30 in 2221.121 s on
+76 CPUs. Whole-tree sampled PSS peaked at 40.607 GiB; native governor reservations peaked at 46.631 GiB, with no
+waits, forced admissions or run-alone events. End-of-run private retention exceeded 20 GiB despite native
+collection and trimming, motivating a driver owner that persists into later stages. The 32.059 GiB individual
+active driver PSS peak is not used as the retained baseline.
+
+PSS/USS samples cover verified descendants about every 5 seconds. A sweep reads processes sequentially, and the
+sampled peak is a lower bound. Summed RSS counts shared mappings repeatedly. Concurrent phase maxima overlap and
+must not be added. The original long observer captured all descendant PSS but lacked some nested task/trim hooks;
+worker roles are recoverable from ancestry, missing boundary observations are not. Corrected bounded and
+sequential probes provide direct task and native-trim measurements. Historical six-run comparisons have 30-second
+RSS samples rather than PSS. Their outer family-phase ratios and VCF window RSS do not establish an unreserved
+private-memory deficit: nested reservations and separately owned shared output pages also contribute, and their
+simultaneous historical ledger was not recorded.
+
+Warm repeated-task fixtures preserve released scientific fields with unchanged cache contents. Their retained
+memory is far below some first-use and full-run endpoints, so a warm-only constant would miss supported cold paths.
+Native trimming returns some pages, but finite repeats do not prove a universal plateau or identify allocator
+ownership. No recycling-policy change is made.
 
 ## Compiled kernels
 
 Every `@njit(cache=True)` kernel compiles into a cache directory per code version: the key covers the whole
 package source and its location, the Python, NumPy, Numba and llvmlite versions, the code-generation settings and
-the CPU model, because Numba's own cache checks only each kernel's file timestamp. Workers of a run share the
-directory. Between runs, compiled kernels persist in `~/.cache/haplotype-reconstruction/numba` (under
-`$XDG_CACHE_HOME` when set; the `execution.kernel_cache.KEEP_KEYS = 6` most recently used code versions are kept):
-a run starts from the stored snapshot of its code version, and for a new version it compiles every listed kernel
-in a pool of the run's cores before its first scientific pool, longest first. A run publishes its cache when it
-ends if it compiled anything. These are disposable compiled kernels, not scientific checkpoints; a store failure
-costs only compilation time and is logged. `NUMBA_CACHE_DIR` sets the base of the per-version directories
-([configuration.md](configuration.md#environment)).
+the CPU model. Numba's own cache checks only each kernel's file timestamp. Workers of a run share the directory.
+Compiled kernels persist between runs in `~/.cache/haplotype-reconstruction/numba`, or beneath `$XDG_CACHE_HOME`
+when set. The `execution.kernel_cache.KEEP_KEYS = 6` most recently used code versions are kept.
+`NUMBA_CACHE_DIR` sets the base of the run's per-version directories
+([configuration.md](configuration.md#environment)). Normal runs need no cache configuration.
+
+A run first loads the stored compiled snapshot for its code key, when one exists. Before scientific pools
+start, it requests the union of the package's release signatures and the persistent store's learned
+`manifest.pkl` signatures, excluding overloads already cached for the current code-generation target. With
+compatible dependencies, an empty persistent store still warms the release signatures. A source or CPU change
+gets its own code key; the release list requests compilation on the current machine and ships no compiled
+machine code.
+
+Warm-up uses the run's CPU budget, with one task per function and its requested signatures, longest expected
+compile time first. Timing hints affect scheduling only. Different functions can compile shared callees, so
+some compilation can still be repeated across warm-up workers. The cached-argument signature check introduced
+in 2.6 remains: an entry whose compiled argument types differ from the requested overload is a cache miss and
+is compiled again. Release warm-up does not bypass the code key, current-target check or signature guard.
+
+When at least one manifest overload is missing at startup, the parallel pool closes before a fresh single
+worker checks the full release/learned union. It loads each listed signature through the same argument guard
+and compiles misses without competing warm-up writers. This repairs entries lost or mismatched when parallel
+tasks save overloads of shared callees. The check makes one pass over the finite manifest; it does not repeat
+until every entry succeeds or introduce another cache format. Unsupported signatures retain lazy fallback.
+If the initial cache index shows no missing requests, this serial check does not run. Index presence alone
+is not proof that every payload can load; the first-use signature guard and lazy compilation still apply.
+
+A run publishes its compiled cache and observed signatures when it gains kernels, including after a scientific
+failure. New signatures absent from the release list compile on first use and can enter the learned manifest.
+Unavailable functions or signatures are skipped during warm-up; unreadable manifests and store failures are
+logged and retain compilation on first use. The cache is disposable compilation state, not scientific
+checkpoints. Changing when compilation occurs does not change the numerical kernels, model, thresholds or
+scientific outputs; release validation compares scientific decisions and continuous drift, not compiled bytes.
+
+### Regenerating release signatures
+
+After integrating the final candidate, collect learned `manifest.pkl` files from its completed reference runs
+and regenerate the release list with that candidate on `PYTHONPATH`:
+
+```bash
+PYTHONPATH="$CANDIDATE" python -m haplotype_reconstruction.execution.kernel_manifest \
+  reference-a/manifest.pkl reference-b/manifest.pkl
+```
+
+Here `CANDIDATE` is the final source-tree directory. The default output is that imported candidate's
+`haplotype_reconstruction/execution/kernel_manifest.json`; `--output` selects another destination. The tool
+unions the reference signatures, resolves their current importable package dispatchers, skips removed functions
+and writes entries in sorted order. Regenerate after later source changes so new kernels from those references
+can participate; copying an earlier release list does not discover their signatures.
+
+The shipped file is text JSON. Each entry contains a readable argument-type description and a base85-encoded
+pickle of the exact Numba signature. The pickle preserves literals, omitted defaults, array layout/read-only
+flags, named tuples and typed containers; the readable description is not a type parser. The file records
+the generator's Numba version. Signatures use Numba's cache serializer, including the dynamic ctypes
+function-pointer types used by site-quality kernels. Warm-up transports those types as serialized bytes,
+and the learned manifest uses the same serializer; standard pickle readers remain compatible. No
+function pointer address or compiled machine code is shipped. Type portability still
+depends on compatible Python/Numba types and importable names. Signatures that cannot be decoded or compiled in
+the current environment are skipped and keep the usual lazy-compilation fallback.
+
+Reference coverage is finite. A new input dtype, configuration, kernel or dependency version can require an
+unseen signature; a release manifest cannot guarantee that all future scientific workers avoid compilation.
+Validate warm-up with a fresh persistent store and run-local cache, and report requested/skipped overloads and
+any signatures first observed after warm-up alongside the scientific comparison. The learned/release union
+extends coverage without changing inference or treating missing coverage as permission to load another overload.
+
+A fresh-cache, five-contig N80 validation on 76 Xeon 8368Q CPUs completed in 508.917 s of raw run-record wall
+time, including 0.114 s of measured pre-science cache inventory. Warm-up took 63.383 s, including the 4.8 s
+serial check. All 749 shipped signatures were present after warm-up and after science, with no runtime additions.
+The complete c0 scientific comparison covered 7,887,042 records per side with zero differences or observed drift;
+all 3,263 discovery blocks were unchanged. With matching science configuration and 76 Xeon 8368Q CPUs, the c0
+reference took 523.916 s and W3's warm run took 447.168 s: this candidate was 61.749 s slower than W3's warm run.
+These are single attempts on separate nodes; W3 uses different scientific source and the runs have different
+manifest coverage, so the timings do not isolate the effect of this cache change.
+
+The interim TroMau integration completed inference but exposed a cache-publication failure: standard pickle
+could not serialize a dynamic `CFuncPtr` type. Its post-run inventory contained three site-quality overloads
+absent from the 758-signature warm-up inventory. The release serializer now matches Numba's own serializer;
+regeneration includes these observed types. A fresh two-worker test compiles both affected special-function
+kernels during warm-up, loads them through the unchanged signature guard in fresh workers without cache
+misses, and reproduces the SciPy reference values. Publication and reload pass. This focused result does
+not replace the final merged matrix's cold-cache coverage check.
 
 ## Checkpoint I/O
 
@@ -345,10 +493,8 @@ Results do not depend on the number of cores, lanes, workers or helpers, on memo
 parallel kernels add per-sample (or per-site) rows in a fixed order instead of team-size-dependent reductions;
 pools return results in task order (or in an order their callers do not depend on); random streams are fixed
 before scheduling. The only intended randomness is a simulation with `seed = "random"`, whose realised seed is
-recorded. Search limits that bound memory are fixed constants, never the memory that happens to be free: founder
-refinement's window programmes, for example, are solved within growing budgets reserved from the governor up to a
-fixed cap (`AssemblyConfig.refinement.frontier_bytes = 137438953472`, 128 GiB), and a solve within a budget computes
-exactly what a solve at the cap computes. The same configuration and inputs therefore give the same records at any
+recorded. Search materialization limits are fixed constants, never the memory that happens to be free.
+The join's complete-beam materialization bound is independent of the governor's memory pacing. The same configuration and inputs therefore give the same records at any
 allocation size.
 
 ## Founder counts

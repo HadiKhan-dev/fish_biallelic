@@ -79,6 +79,7 @@ class JoinResult:
     release_alternatives: tuple = ()
     minimum_switches: int | None = None
     shadow: dict | None = None
+    retained_inputs: bool = False
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -116,7 +117,15 @@ def join_inputs(task: BatchTask, scoring: np.ndarray, budget) -> JoinInputs:
     offsets = np.zeros(len(blocks) + 1, dtype=np.int64)
     np.cumsum([len(block.positions) for block in blocks], out=offsets[1:])
     numba.set_num_threads(team_size(budget))
-    gl = gather_evidence(scoring, task.samples, sites)
+    # A slice preserves the shared evidence for contiguous cohorts and genomic spans.
+    # Nonadjacent rows or sites still require one gathered array in local input order.
+    samples = np.asarray(task.samples)
+    if (len(samples) and len(sites)
+            and np.all(samples[1:] == samples[:-1] + 1)
+            and np.all(sites[1:] == sites[:-1] + 1)):
+        gl = scoring[int(samples[0]):int(samples[-1]) + 1, int(sites[0]):int(sites[-1]) + 1]
+    else:
+        gl = gather_evidence(scoring, samples, sites)
     return JoinInputs(blocks=blocks, gl=gl, offsets=offsets, samples=task.samples)
 
 
@@ -133,6 +142,8 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
     started = time.perf_counter()
     settings = task.settings
     inputs = join_inputs(task, scoring, budget)
+    phase_seconds = {"input": time.perf_counter() - started}
+    phase_started = time.perf_counter()
     # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
     label = batch_digest(task, context="", evidence_identity="")[:16]
     gap = None if settings.level_one else join_beam.max_gap(
@@ -140,22 +151,55 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
         settings.recombination_tolerance)
     transitions = linker_em.fit_transitions(inputs, settings.genetic_map, max_gap=gap,
                                             config=settings.linker, budget=budget, label=label)
+    phase_seconds["linker"] = time.perf_counter() - phase_started
+    linker_event = dict(stage="linker_em", gaps=list(transitions.diagnostics))
+    phase_started = time.perf_counter()
     numba.set_num_threads(team_size(budget))
     # Tie-class decisions of the beam and the search (the join summary's tie_events).
     counter = SharedCounter()
-    beam = join_beam.endpoint_beam(transitions, quota=settings.join.paths_per_endpoint,
-                                   max_gap=gap, counter=counter, label=label)
+    def bounded_beam(quota, overrides=None):
+        result = join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides,
+                                         max_gap=gap, counter=counter, label=label,
+                                         compact=True, bounded=True)
+        if isinstance(result, join_beam.CartesianBeamFamily):
+            limit = join_beam.materialization_limit(transitions, quota, overrides)
+            if result.cardinality <= limit:
+                return result.materialize(limit)
+        return result
+
+    beam = bounded_beam(settings.join.paths_per_endpoint)
+    phase_seconds["initial_beam"] = time.perf_counter() - phase_started
 
     def beam_runner(quota, overrides):
         # Pool extension and saturation re-runs of this batch's beam.
-        return join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides, max_gap=gap,
-                                       counter=counter, label=label)
+        return bounded_beam(quota, overrides)
 
+    if isinstance(beam, join_beam.UnresolvedBeam) and not beam.incumbent_paths:
+        # No complete joined path was established. The incoming components are
+        # the only incumbent; preserve their alleles and avoid fabricating alignment.
+        family = dict(start=0, stop=len(task.prepared), panels=[],
+                      reason='beam_materialization_bound', source_decision='beam/initial_forward',
+                      status='unresolved_beam_materialization', unresolved_search=True,
+                      representative_prior='retain_unjoined_input_components',
+                      beam_domain=dict(beam.record(), input_rows=[block.rows.tolist() for block in inputs.blocks]))
+        diagnostic = dict(reason='beam_materialization_bound', events=(linker_event,),
+                          phase_seconds=phase_seconds,
+                          work_counters=dict(beam_materialization_bounds=1, samples=inputs.sample_count,
+                                             sites=int(inputs.offsets[-1]), blocks=len(inputs.blocks)))
+        return JoinResult(task.index, None, None, None, time.perf_counter() - started,
+                          release_alternatives=(family,), shadow=diagnostic, retained_inputs=True)
+
+    phase_started = time.perf_counter()
     outcome = join_search.search_panel(
         inputs, beam, beam_runner, config=settings.join, count_rule=settings.count_rule,
         cost_scale=settings.cost_scale, budget=budget, label=label, counter=counter,
         linkage=join_beam.path_linkage(transitions, gap), report_switches=report_switches,
         max_branches=max_branches)
+    phase_seconds["join_search"] = time.perf_counter() - phase_started
+    # Count work is an inclusive subset of join_search, not an additional phase.
+    phase_seconds["count_step"] = float(outcome.summary.phase_seconds.get(
+        "count_step", outcome.summary.count.seconds))
+    phase_started = time.perf_counter()
     paths = np.asarray(outcome.paths, dtype=np.int64)
     rows = np.concatenate([block.rows[paths[:, j]] for j, block in enumerate(inputs.blocks)],
                           axis=1).astype(np.int32)
@@ -165,9 +209,26 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
         panels = [np.concatenate([block.rows[np.asarray(panel, np.int64)[:, j]]
                                   for j, block in enumerate(inputs.blocks)], axis=1).astype(np.int32)
                   for panel in family["panels"]]
-        release_alternatives.append(dict(family, start=0, stop=len(task.prepared), panels=panels))
+        release_family = dict(family, start=0, stop=len(task.prepared), panels=panels)
+        if 'beam_domain' in family:
+            release_family['beam_domain'] = dict(family['beam_domain'],
+                                                  input_rows=[block.rows.tolist() for block in inputs.blocks])
+        release_alternatives.append(release_family)
+    phase_seconds["join_release"] = time.perf_counter() - phase_started
+    work_counters = dict(samples=inputs.sample_count, sites=int(inputs.offsets[-1]),
+                         blocks=len(inputs.blocks), linker_gaps=transitions.gaps,
+                         beam_paths=(beam.cardinality if isinstance(beam, join_beam.CartesianBeamFamily)
+                                     else beam.retained_count if isinstance(beam, join_beam.UnresolvedBeam)
+                                     else len(beam)),
+                         beam_materialization_bounds=outcome.summary.work_counters.get(
+                             'beam_materialization_bounds', 0),
+                         full_scores=outcome.summary.total_full_scores,
+                         count_scores=outcome.summary.count_exact_scores,
+                         count_sample_scores=outcome.summary.count_exact_sample_scores)
+    summary = replace(outcome.summary, phase_seconds=phase_seconds, work_counters=work_counters,
+                      events=(linker_event, *outcome.summary.events))
     return JoinResult(index=task.index, rows=rows, log_likelihood=float(outcome.log_likelihood),
-                      summary=outcome.summary, seconds=time.perf_counter() - started,
+                      summary=summary, seconds=time.perf_counter() - started,
                       release_alternatives=tuple(release_alternatives),
                       minimum_switches=outcome.minimum_switches)
 
@@ -196,6 +257,30 @@ def run_batch(task: BatchTask, scoring: np.ndarray, budget) -> JoinResult:
         # Unperformed inner histories remain explicit source uncertainty.
         results.append(_run_single(branch, scoring, budget, report_switches=True,
                                    max_branches=1))
+    if any(result.retained_inputs for result in results):
+        # A complete incoming family cannot be ranked after one branch failed to
+        # establish a joined panel. Keep its nominal input components and sources.
+        families = [family for result in results for family in result.release_alternatives]
+        phase_seconds, work_counters = {}, {}
+        linker_events = []
+        for index, result in enumerate(results):
+            events = (result.summary.events if result.summary is not None
+                      else (result.shadow or {}).get('events', ()))
+            linker_events.extend(dict(event, input_branch=index) for event in events
+                                 if event.get('stage') == 'linker_em')
+            diagnostic = (dict(phase_seconds=result.summary.phase_seconds,
+                               work_counters=result.summary.work_counters)
+                          if result.summary is not None else result.shadow or {})
+            for name, value in diagnostic.get('phase_seconds', {}).items():
+                phase_seconds[name] = phase_seconds.get(name, 0.0) + value
+            for name, value in diagnostic.get('work_counters', {}).items():
+                work_counters[name] = work_counters.get(name, 0) + value
+        return JoinResult(task.index, None, None, None, time.perf_counter() - started,
+                          release_alternatives=tuple(families), retained_inputs=True,
+                          shadow=dict(reason='beam_materialization_bound', combinations=len(results),
+                                      complete=False, retained_input_branches=len(task.branches),
+                                      phase_seconds=phase_seconds, work_counters=work_counters,
+                                      events=tuple(linker_events)))
     survivors = terminal_winners(results)
     chosen = min(survivors, key=lambda result: (len(result.rows), result.minimum_switches,
                                                panel_key(result.rows)))
@@ -222,19 +307,30 @@ def run_batch(task: BatchTask, scoring: np.ndarray, budget) -> JoinResult:
                       branch_LL=[result.log_likelihood for result in results],
                       survivors=len(survivors), resolved=len(survivors) == 1 and not families,
                       additional_seconds=max(0.0, time.perf_counter() - started - results[0].seconds))
+    phase_seconds, work_counters = {}, {}
+    for result in results:
+        for name, value in result.summary.phase_seconds.items():
+            phase_seconds[name] = phase_seconds.get(name, 0.0) + value
+        for name, value in result.summary.work_counters.items():
+            work_counters[name] = work_counters.get(name, 0) + value
     summary = replace(chosen.summary,
+                      phase_seconds=phase_seconds, work_counters=work_counters,
                       total_full_scores=sum(result.summary.total_full_scores for result in results),
                       count_exact_scores=sum(result.summary.count_exact_scores for result in results),
                       count_exact_sample_scores=sum(result.summary.count_exact_sample_scores for result in results),
                       beam_seconds=sum(result.summary.beam_seconds for result in results),
-                      events=(*chosen.summary.events, dict(stage="parent_shadow_join", **diagnostic)))
+                      events=(*(dict(event, input_branch=index)
+                                for index, result in enumerate(results) for event in result.summary.events
+                                if event.get("stage") == "linker_em"),
+                              *(event for event in chosen.summary.events if event.get("stage") != "linker_em"),
+                              dict(stage="parent_shadow_join", **diagnostic)))
     return replace(chosen, summary=summary, seconds=time.perf_counter() - started,
                    release_alternatives=tuple(families), shadow=diagnostic)
 
 
 def join_batch(packed, shared, budget) -> JoinResult:
     """Hierarchy pool task ``(scoring reference, BatchTask)``: join one batch on the float32 evidence,
-    attached from shared memory for the task (the join copies its samples' columns at the start)."""
+    attached from shared memory for the task (contiguous sample/site spans remain views)."""
     reference, task = packed
     handle, scoring = attach_shared_array(reference)
     try:

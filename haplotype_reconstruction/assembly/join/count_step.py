@@ -151,14 +151,16 @@ class CountStep:
         return decision
 
     def _shadow_decision(self, larger_panel, smaller_panel, focal, larger, smaller, kind, key,
-                         forwards=None):
+                         forwards=None, cover=None):
         """Evaluate a whole shadow family or retain its incumbent evaluated verdict.
 
+        ``cover`` may reuse the unchanged smaller panel's covered rows across births.
         Computational overflow is not a competing count outcome. It records unperformed
         verification without changing the nominal test, biological ambiguity, or release.
         The smaller-K prior applies only to actually opposed evaluated verdicts.
         """
-        cover = count_rule.covered_rows(np.asarray(smaller_panel, np.int64))
+        if cover is None:
+            cover = count_rule.covered_rows(np.asarray(smaller_panel, np.int64))
         choices, lost = shadow_choices(larger_panel[focal], cover, self.geometry)
         combinations = math.prod(map(len, choices))
         total_passes = count_rule.passes(larger - smaller, self.cost, self.samples)
@@ -344,7 +346,7 @@ class CountStep:
             larger = self._sparse(larger_panel, base, bounds[:, index])
             decision, lost, shadow_details = self._shadow_decision(
                 larger_panel, panel, len(panel), larger, base, 'addition',
-                None if key is None else f"{key}/add{index}/margin", forwards=forwards)
+                None if key is None else f"{key}/add{index}/margin", forwards=forwards, cover=cover)
             record['exact'] += 1
             if shadow_details['unresolved'] or shadow_details.get('count_unverified', False):
                 unresolved_births.append((float((larger - base).sum()), larger_panel, shadow_details))
