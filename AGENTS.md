@@ -1028,8 +1028,11 @@ as `TMPDIR=/rds/user/ahk39/hpc-work/codex-runner-tmp.gKhMfcvc`.
 
 ## 8. Delegation and orchestration
 
-Use several agents when that improves reasoning, implementation, validation or elapsed time. No concurrency or depth
-cap is set here, beyond the resource rules.
+Use several agents when that improves reasoning, implementation, validation or elapsed time. No concurrency cap is set
+here beyond the resource rules, but delegation is one level deep.
+- **Delegated agents do their work themselves and never spawn their own sub-agents** (owner, 21 October 2026).
+  Their reviews and checks are their own explicit second pass. Where the tool supports it, launch delegated agents
+  with sub-agent spawning disabled.
 - **Decompose** around concrete biological, mathematical, implementation, code-path or validation questions. Roles
   such as scientific-modeler, code-path-explorer, scientific-validator and pragmatic-implementer help.
 - **Every brief carries** the task contract (§4.1), the scientific assumptions, the paths, the acceptance criteria and
@@ -1039,7 +1042,8 @@ cap is set here, beyond the resource rules.
   - SL4 only (§6.2);
   - no Git history operations (§4.8);
   - start checks and fail-fast tasks (§5.3);
-  - cancelling superseded validation (§5.5).
+  - cancelling superseded validation (§5.5);
+  - no sub-agents (above).
 - **Delegation changes neither the scope nor the threat model.** Agents' proposals still meet the defect threshold
   and the validation rules.
 - **The coordinator** synthesizes the results, reconciles conflicting assumptions, separates evidence from inference,
