@@ -1,10 +1,4 @@
-# Founder refinement (disabled in 2.7)
-
-Founder-path refinement does not run in 2.7 and has no configuration or command-line option.
-The pipeline passes joined components and their alternatives directly between levels and to
-[final assembly](assembly.md). The source is retained, unreferenced by the pipeline and kernel
-warm-up, for the planned 2.8 rebuild. The remainder of this page records the historical
-implementation; its settings, checkpoint keys and behavior are not part of the active pipeline.
+# Founder refinement
 
 Founder refinement (`assembly/founder_refinement/`) runs after every executed level of the final
 [assembly](assembly.md), never in the context assemblies of local selection. It re-chooses each
@@ -96,7 +90,7 @@ A sweep that accepts nothing certifies the fit: every proposal of that sweep was
 the final panel and every move of the move set was scored exactly against it, so the panel is a
 local optimum of F under this move set. F is non-convex and no global optimum is claimed. The window
 proposals optimise a binned surrogate, so the certificate is relative to them; acceptance always
-scores individual sites. A search that reaches `assembly.founder_refinement.config.FounderRefinementConfig.sweep_limit = 100` sweeps
+scores individual sites. A search that reaches `AssemblyConfig.refinement.sweep_limit = 100` sweeps
 is reported (warned, and recorded as not converged), never silently accepted.
 
 **Best of two.** Every fit runs this search twice from the same start, concurrently: once with its
@@ -108,11 +102,11 @@ This applies to every start fit and every count refit.
 
 **Surrogate bins.** The window surrogate cuts each prepared block's sites into bins of
 max(b_min, ceil(L_c / 2000)) sites for a component of L_c sites
-(`assembly.founder_refinement.config.FounderRefinementConfig.proposal_max_bins = 2000`) and sums over a bin's discovery sites the
+(`AssemblyConfig.refinement.proposal_max_bins = 2000`) and sums over a bin's discovery sites the
 robust emission of the join's binned model: hard dosages where every row of the block is called at
 its discovery sites, otherwise the predictive pair classes with unknown alleles marginalised (so the
 surrogate also reads sites that F leaves out). At levels 3 and above, b_min is
-`assembly.founder_refinement.config.FounderRefinementConfig.proposal_min_sites_per_bin = 200`; at levels 1 and 2, b_min is
+`AssemblyConfig.refinement.proposal_min_sites_per_bin = 200`; at levels 1 and 2, b_min is
 max(200, ceil(chromosome sites / 2000)), shared by all the components of the level, so the many
 small early components do not each receive a chromosome's bin budget.
 
@@ -131,7 +125,7 @@ partial paths restarts with tighter pruning (Lagrangian suffix bounds and the be
 the incumbent, a 16-wide beam and the dual's decoded paths); pruning keeps every path within the
 margin of a feasible value, so the optimum and the canonical answer are unchanged.
 
-The frontier is capped by a fixed byte budget, `assembly.founder_refinement.config.FounderRefinementConfig.frontier_bytes = 137438953472`
+The frontier is capped by a fixed byte budget, `AssemblyConfig.refinement.frontier_bytes = 137438953472`
 (128 GiB), the same on every machine: a kept partial path holds 8 S (Q + K + bins + 2) bytes and a programme holds
 up to four times its frontier. A programme that would exceed the cap stops and keeps the incumbent for that window;
 such a fallback is counted per fit and per level, warned and shown in the level's census line. The memory of a

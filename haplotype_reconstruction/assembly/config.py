@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from .completion.config import CompletionConfig
 from .count_rule.config import CountRuleConfig
+from .founder_refinement.config import FounderRefinementConfig
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ class AssemblyConfig:
     recombination_tolerance: dimensionless span budget in the maximum-gap rule; divided
         by the mean component span in Morgans times gap_horizon_scale.
     cost_scale: scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B
-        (count_rule.founder_cost) of the join.
+        (count_rule.founder_cost) of the join and founder refinement.
     """
 
     batch_size: int = 10
@@ -94,3 +95,4 @@ class AssemblyConfig:
     join: JoinConfig = field(default_factory=JoinConfig)
     completion: CompletionConfig = field(default_factory=CompletionConfig)
     count_rule: CountRuleConfig = field(default_factory=CountRuleConfig)
+    refinement: FounderRefinementConfig = field(default_factory=FounderRefinementConfig)

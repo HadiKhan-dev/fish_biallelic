@@ -6,7 +6,7 @@ and sample-switch tables of one painted chromosome.
                                pooled candidates (tracks the reads cannot separate between identical rows)
   founder_support_windows.tsv  the same per 200-site window
   assembly_search.tsv          every record of the final assembly's join searches (level, span, record fields)
-  founder_counts.tsv           per component: how firmly its founder count is determined (latest join count evidence,
+  founder_counts.tsv           per component: how firmly its founder count is determined (final count step,
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.tsv          painted switches per sample relative to the cohort median
   sample_segments.tsv          the released painting per sample: runs of bins with one release (status, named
@@ -132,13 +132,15 @@ def founder_support_tables(painting, sites, observed, searches, *, window_sites=
 def founder_count_table(painting, searches, feedback) -> list[dict]:
     """One row per component: how firmly its founder count is determined.
 
-    CountSource is the latest actual join, or local_panel when no join ran. Join comparisons,
-    cycles and evaluated different-K alternatives supply the CountStep fields; no additional
-    final count pass runs. FounderCountAmbiguous is empty when verification is incomplete
-    without demonstrated ambiguity. CountStepReason records that computational limitation.
-    Join* columns cover all overlapping final-assembly joins, Feedback* the context joins.
-    UndecidedCountCycles sums those two disjoint histories: the latest join is already included
-    in Join*, so its CountStepCycleUndecided is not counted twice.
+    FounderCountAmbiguous is the final count step's call (the converged count pass of the last assembly level,
+    which decides the reported count): True if any of its decisions has a bootstrap band containing zero, if it
+    cycled (an addition whose deletion round then deleted), or if a restored best-F panel fails its own deletion
+    test. Count cycles (a row that an addition of the same search created is deleted again) keep the deletion; a
+    cycle is undecided when that deletion is ambiguous and the cycle began with a decided deletion: the data could
+    not tell the two counts apart. Join* columns count the final assembly's join cycles, undecided cycles and
+    count decisions whose band contains zero over the component; Feedback* the same for the local-selection
+    context assemblies, whose panels shape the final assembly's input. UndecidedCountCycles sums the undecided
+    cycles of all three. Empty values: no count step or no join search covers the component.
     """
     rows = []
     for component_index, component in enumerate(painting.components):
@@ -148,12 +150,10 @@ def founder_count_table(painting, searches, feedback) -> list[dict]:
         join = _count_calls(searches, first, last)
         fed = _count_calls(feedback, first, last)
         decisions = None if call is None else call.decisions
-        parts = [join[1], fed[1]]
+        parts = [None if call is None else int(call.cycle_undecided), join[1], fed[1]]
         rows.append(dict(
             Component=component_index, FirstVariant1Based=first, LastVariant1Based=last,
             FounderRows=int(panel.released.shape[0]),
-            CountSource="local_panel" if call is None else "join",
-            CountStepReason="no_join" if call is None else call.reason,
             FounderCountAmbiguous=None if call is None else call.ambiguous,
             UndecidedCountCycles=(None if all(part is None for part in parts)
                                   else sum(part or 0 for part in parts)),

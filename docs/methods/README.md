@@ -12,7 +12,7 @@ fails if a cited value differs from the code.
 | discovery | [discovery.md](discovery.md) | founder panels of each 200-site block from the pooled sample evidence, with missing alleles kept unknown |
 | local selection | [local_selection.md](local_selection.md) | the local panel of each block under a diploid copying-path model, refined twice with candidates from context assemblies |
 | assembly | [assembly.md](assembly.md) | completion of missing founder alleles, linking and joining panels into chromosome-scale founder components over the L1-L4 hierarchy |
-| archived | [founder_refinement.md](founder_refinement.md) | disabled founder-path refinement; source retained for the 2.8 rebuild |
+| | [founder_refinement.md](founder_refinement.md) | converged refinement of the founder paths and founder counts after every final assembly level |
 | painting | [painting.md](painting.md) | label continuity across atomic spans, then each sample as a diploid mosaic of the founders with an explicit unknown state |
 | pedigree | [pedigree.md](pedigree.md) | observed-parent configurations from the paintings and genotype likelihoods, with direction, family evidence and support tiers |
 | founder refit | [founder_refit.md](founder_refit.md) | founder alleles refitted from the painted carriers |

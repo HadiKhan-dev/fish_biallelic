@@ -630,11 +630,12 @@ class MemoryGovernor:
                            queued=queued, parent=(held[0] if held else 0) if parent is None else parent,
                            envelope=envelope)
 
-    def presence(self, label: str, depth: int, parent: int | None = None) -> Reservation:
+    def presence(self, label: str, depth: int, parent: int | None = None, *, queued: bool = False) -> Reservation:
         """A granted zero-byte token marking running work without an estimate (so that the progress rule sees it);
-        release it when the work ends (its measured peak is recorded under ``label``)."""
+        release it when the work ends (its measured peak is recorded under ``label``). ``queued``: the work starts
+        later (`start` marks it running)."""
         held = held_context()
-        token = Reservation(self, 0, label, depth, presence=True,
+        token = Reservation(self, 0, label, depth, presence=True, queued=queued,
                             parent=(held[0] if held else 0) if parent is None else parent)
         token.poll()
         return token

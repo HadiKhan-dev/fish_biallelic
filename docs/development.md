@@ -12,7 +12,7 @@ the rules for changing the code. Paths are relative to the package `haplotype_re
 | `store/` | the checkpoint store: `store/codec.py` (payload encoding), `store/container.py` (append-only files), `store/store.py` (run file, contig files, work states, record scopes), `store/identity.py` (canonical digests, code and stage identities), `store/registry.py` (stage names in pipeline order) |
 | `execution/` | process set-up and parallel work: `execution/bootstrap.py`, `execution/resources.py`, `execution/budget.py` (CPU leases), `execution/pools.py`, `execution/shared_arrays.py`, `execution/chromosome_workers.py`, `execution/contig_lanes.py`, `execution/memory.py` (memory governor, heap trimming), `execution/kernel_cache.py`, `execution/batch_queue.py`, `execution/run_record.py`, `execution/run_log.py` |
 | `model/` | types shared by several stages: `model/evidence.py` (ContigReads, ContigEvidence), `model/local_panels.py` (LocalPanel), `model/components.py` (prepared panels, founder components, component panels, count calls), `model/genetic_map.py` |
-| `maths/` | numerical kernels shared by stages: `maths/logspace.py` (log-space sums), `maths/chains.py` (binary-hypercube chain kernels: two-state and two-bit four-state forward-backward and Viterbi, the max-product butterfly step, run contraction; family phase and recombination), `maths/emissions.py` (founder-pair genotype classes and the robust log emission with its normalisation and skip rule; the linker and the joins) |
+| `maths/` | numerical kernels shared by stages: `maths/logspace.py` (log-space sums), `maths/chains.py` (binary-hypercube chain kernels: two-state and two-bit four-state forward-backward and Viterbi, the max-product butterfly step, run contraction; family phase and recombination), `maths/emissions.py` (founder-pair genotype classes and the robust log emission with its normalisation and skip rule; the linker, the joins and founder refinement) |
 | `evidence/` ... `recombination/`, `export/` | the ten stages (below) |
 | `simulation/` | generating code only: design, pedigree and meiosis, reads, the observation source, truth records |
 | `pipeline/` | the driver (`pipeline/driver.py`), observation sources, the sample table and eligibility, one contig's work (`pipeline/contig_work.py`), status, published-table hook |
@@ -106,7 +106,7 @@ whole package source for provenance.
 | evidence | `evidence` (positions, counts, likelihoods, observed mask, discovery sites, founder exclusion, blocks, report) |
 | discovery | `discovery/plan`, `discovery/blocks/<n:06d>` (chunks of 64 blocks in completion order) |
 | local_selection | `local_selection/<round>/blocks/<n:06d>`, `.../memos/<n:06d>`, `.../proposals`, `.../selected`, `.../assembly/...` for rounds `initial`, `l1`, `l2` |
-| assembly | `assembly/completion`, `assembly/l<k>/plan`, `assembly/l<k>/join`, `assembly/final` (schema 3, refinement disabled); `joins/<digest>` shared by every assembly of the contig |
+| assembly | `assembly/completion`, `assembly/l<k>/plan`, `assembly/l<k>/join`, `assembly/l<k>/refine/...`, `assembly/l<k>/refined`, `assembly/final`; `joins/<digest>` shared by every assembly of the contig |
 | painting | `painting/summary`, `painting` |
 | pedigree | `pedigree/prepared`, `pedigree/screen`, `pedigree/scores`, `pedigree/exclusion` |
 | founder_refit | `founder_refit` |

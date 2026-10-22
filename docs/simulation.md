@@ -149,8 +149,9 @@ haplotypes evaluate RUN --contigs chr3 chr10 --stages discovery local_selection_
 `--stages available` (default) evaluates the latest founder product of each contig and every downstream product
 present; `all` every founder product present; explicit stages require their products. The founder stages, in
 pipeline order, are `discovery` (raw blocks), `local_selection_initial`, `local_selection_l1`,
-`local_selection_l2`, `assembly_l1` ... `assembly_l4` (the final assembly's joined levels),
-`assembly` (the final joined product; no founder-path refinement runs), `painting` (the panels after label continuity) and `founder_refit`; the downstream stages
+`local_selection_l2`, `assembly_l1` ... `assembly_l4` (the final assembly's levels, after their founder refinement),
+`founder_refinement` (the final assembly product, including the last count step, which can differ from the
+`assembly_l4` snapshot), `painting` (the panels after label continuity) and `founder_refit`; the downstream stages
 are `pedigree`, `family_phase` and `recombination`. A hierarchy level that did not run is not evaluated.
 `--cores` is the evaluation's CPU budget; chromosomes run in parallel within memory estimates.
 

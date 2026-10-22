@@ -261,7 +261,7 @@ released as calls by themselves.
 
 **Context assembly.** Round `l1` assembles the `initial` panels through level 1 and round `l2`
 assembles the `l1` panels through levels 1 and 2, with assembly's role CONTEXT: the same assembly
-and completion as the final assembly (see [assembly](assembly.md)).
+and completion as the final assembly, without founder refinement (see [assembly](assembly.md)).
 
 **Coverage.** A context component covers a block when its sites are exactly the sites of whole
 consecutive blocks. Every covering component is refitted, whatever its founder count; a component

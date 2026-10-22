@@ -17,12 +17,6 @@ import pickle
 RELEASE_MANIFEST = Path(__file__).with_name("kernel_manifest.json")
 
 
-def active_module(module: str) -> bool:
-    """The retained 2.8 refinement source is not part of 2.7 execution or warm-up."""
-    return not (module == "haplotype_reconstruction.assembly.founder_refinement"
-                or module.startswith("haplotype_reconstruction.assembly.founder_refinement."))
-
-
 def read_release_manifest(path: Path = RELEASE_MANIFEST) -> tuple[dict, dict]:
     """Read packaged requests, skipping signatures unavailable in this dependency/code version."""
     try:
@@ -35,8 +29,6 @@ def read_release_manifest(path: Path = RELEASE_MANIFEST) -> tuple[dict, dict]:
     overloads, seconds = {}, {}
     skipped = 0
     for entry in data["overloads"]:
-        if not active_module(entry["module"]):
-            continue
         function = entry["module"], entry["function"]
         signatures = set()
         for signature in entry["signatures"]:
@@ -73,9 +65,6 @@ def generate(manifests: list[Path], output: Path = RELEASE_MANIFEST) -> dict:
             seconds[function] = max(seconds.get(function, 0.0), elapsed)
     entries, skipped = [], []
     for (module, function), signatures in sorted(overloads.items()):
-        if not active_module(module):
-            skipped.append(dict(module=module, function=function, reason="disabled_in_2.7"))
-            continue
         try:
             if not module.startswith("haplotype_reconstruction."):
                 raise ImportError("not a package kernel")

@@ -36,12 +36,13 @@ never depend on the thread count or the batching.
 from __future__ import annotations
 
 from collections import namedtuple
+from contextlib import nullcontext
 
 import numpy as np
-from numba import njit, prange
+from numba import config as numba_config, njit, prange
 
 from .gains import candidate_gains, candidate_gains_lex, exchange_gains, exchange_pairs, transposition
-from .guard import canonical_sites, path_switch_events, removed_events, shared_savings
+from .guard import canonical_sites, path_switch_events, removed_events, shared_savings, traceback_bytes
 from .messages import advance, advance_lex, backward_chain, backward_chain_lex, forward_chain, forward_chain_lex
 from .objective import unordered_pairs
 from ... import execution
@@ -867,19 +868,26 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
     junction_gain = np.full(blocks + 1, -np.inf)
     junction_pair = np.zeros((blocks + 1, 2), np.int64)
     frontier, p = 0, 0
-    while p < blocks:
-        stop = min(blocks, p + JUNCTION_BATCH)
-        with execution.numba_threads(max(1, int(budget.threads()))):
-            (jg, jp, gperm, f, fcnt, frontier, accepted, ahead, chain) = pass_chunk(
-                haps, X, orientation.leaves, orientation.logs, orientation.offsets, float(penalty),
-                p, stop, frontier, f, fcnt, local, local_cnt, stored,
-                stored_cnt if guarded else count3, stored_scale, gperm, lab, *cands, pa, pb,
-                bool(guarded), bool(exchanges), acc, ahead, chain, start_fwd, start_fcnt, pristine, tie_q,
-                bool(ties.reverse_conventions() if reverse is None else reverse))
-        pristine = pristine and not accepted
-        junction_gain[p:stop] = jg
-        junction_pair[p:stop] = jp
-        p = stop
+    # Trace/event scratch exists only while guarded acceptance can run. Retain the
+    # full component width and maximum configured team: windows can expand to the
+    # whole component, and the live thread share can grow between chunks.
+    trace = (traceback_bytes(samples, int(orientation.offsets[-1]), founders,
+                             min(samples, numba_config.NUMBA_NUM_THREADS)) if guarded else 0)
+    with (execution.reserve_memory(trace, label="founder_refinement guard")
+          if guarded else nullcontext()):
+        while p < blocks:
+            stop = min(blocks, p + JUNCTION_BATCH)
+            with execution.numba_threads(max(1, int(budget.threads()))):
+                (jg, jp, gperm, f, fcnt, frontier, accepted, ahead, chain) = pass_chunk(
+                    haps, X, orientation.leaves, orientation.logs, orientation.offsets, float(penalty),
+                    p, stop, frontier, f, fcnt, local, local_cnt, stored,
+                    stored_cnt if guarded else count3, stored_scale, gperm, lab, *cands, pa, pb,
+                    bool(guarded), bool(exchanges), acc, ahead, chain, start_fwd, start_fcnt, pristine, tie_q,
+                    bool(ties.reverse_conventions() if reverse is None else reverse))
+            pristine = pristine and not accepted
+            junction_gain[p:stop] = jg
+            junction_pair[p:stop] = jp
+            p = stop
     record = {key: (int(round(value)) if key in INTEGER_KEYS else float(value))
               for key, value in zip(ACC_KEYS, acc.tolist())}
     return record, junction_gain, junction_pair

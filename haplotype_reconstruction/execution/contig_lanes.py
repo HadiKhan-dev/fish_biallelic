@@ -42,9 +42,8 @@ from .pools import task_sizes
 from .run_log import run_log
 from .run_record import record_product, timed_stage, worker_stages
 
-# Historical refinement-enabled measurements: the same contig at 16 threads took 7% fewer core-seconds than at
-# 32-37 (N=320 chr19/chr8 shards). Path selection scaled fully; hierarchy, refinement tails and serial checkpoints
-# did not. Refinement is disabled in 2.7; these measurements have not been recalibrated for that pipeline.
+# Narrow lanes need fewer core-seconds: the same contig at 16 threads took 7% fewer than at 32-37 (N=320 chr19 and
+# chr8 shards; path selection scales fully, hierarchy, refinement tails and serial checkpoint phases do not).
 CONTIG_LANE_CORES = 16
 
 # Resident arrays of a lane per planning byte (contig_work.planning_bytes): decoded evidence, records and

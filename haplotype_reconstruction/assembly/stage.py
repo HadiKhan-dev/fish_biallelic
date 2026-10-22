@@ -1,21 +1,27 @@
 """Assembly of path-selected local panels into chromosome-scale founder components.
 
-Founder completion freezes evidence-supported local panels (published calls plus completion
-fills and the pre-fill inference snapshot). The hierarchy joins adjacent components level by
-level, never across a boundary with too few jointly informative samples. Joined paths and the
-level's release alternatives flow directly to the next level and final output. Founder-path
-refinement is disabled in 2.7; its source is retained only for the planned 2.8 rebuild.
+Science (unchanged from base 92b3daf): founder completion freezes evidence-supported local
+panels (prepared panels: published calls with completion fills plus the pre-fill inference
+snapshot); the hierarchy then joins batches of adjacent components level by level (a
+distance-aware linker fits dense haploid transitions, an endpoint beam enumerates candidate
+chromosome paths, a certified panel search chooses the panel and its founder count by the
+effective-carrier count rule), never across a boundary where too few samples are informative on
+both sides. In the final assembly founder refinement re-chooses every component's founders as
+paths of original prepared rows after each level (founder additions only at the last level).
 
 Two roles of the same computation:
-* ``Role.FINAL``: the contig product; levels continue while they reduce the component count
-  and more than one component remains (see AssemblyConfig.minimum_levels).
-* ``Role.CONTEXT``: a local-selection feedback context through one or two levels.
+* ``Role.FINAL``: the contig's assembly product. Levels continue while they reduce the component
+  count and more than one component remains (see AssemblyConfig.minimum_levels); founder
+  refinement runs after every level.
+* ``Role.CONTEXT``: a local-selection feedback context, through a fixed number of levels (1 or 2),
+  without founder refinement.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import enum
 import hashlib
+import time
 
 import numpy as np
 
@@ -25,7 +31,7 @@ from . import records as assembly_records
 from .config import AssemblyConfig
 from .evidence import AssemblyEvidence
 
-SCHEMA = 3
+SCHEMA = 2
 
 
 class Role(enum.Enum):
@@ -67,7 +73,8 @@ class LevelRecord:
         read them); log_likelihoods: per joined batch, the chosen panel's join objective (nats);
     reused_joins: joined batches whose join record already existed (any assembly of the contig);
     boundary_joint: samples informative on both sides of each input boundary;
-    elapsed_seconds: wall time of the hierarchy.
+    refinement: founder refinement's level summary as a plain record (final role), else None;
+    elapsed_seconds / refinement_elapsed_seconds: wall time of the hierarchy and refinement.
     """
 
     level: int
@@ -80,7 +87,9 @@ class LevelRecord:
     log_likelihoods: tuple
     reused_joins: int
     boundary_joint: tuple
+    refinement: dict | None = None
     elapsed_seconds: float = 0.0
+    refinement_elapsed_seconds: float | None = None
     shadows: tuple = ()
 
     def record(self) -> dict:
@@ -91,8 +100,9 @@ class LevelRecord:
                     plan=[list(item) for item in self.plan],
                     joins=[summary.record() for summary in self.joins],
                     log_likelihoods=list(self.log_likelihoods), reused_joins=self.reused_joins,
-                    boundary_joint=list(self.boundary_joint), elapsed_seconds=self.elapsed_seconds,
-                    shadows=self.shadows)
+                    boundary_joint=list(self.boundary_joint), refinement=self.refinement,
+                    elapsed_seconds=self.elapsed_seconds,
+                    refinement_elapsed_seconds=self.refinement_elapsed_seconds, shadows=self.shadows)
 
     @classmethod
     def from_record(cls, record: dict) -> "LevelRecord":
@@ -106,7 +116,8 @@ class LevelRecord:
                    log_likelihoods=tuple(record["log_likelihoods"]),
                    reused_joins=record["reused_joins"],
                    boundary_joint=tuple(record["boundary_joint"]),
-                   elapsed_seconds=record["elapsed_seconds"],
+                   refinement=record["refinement"], elapsed_seconds=record["elapsed_seconds"],
+                   refinement_elapsed_seconds=record["refinement_elapsed_seconds"],
                    shadows=tuple(record.get("shadows", ())))
 
 
@@ -140,9 +151,12 @@ def assembly_identity(inputs: AssemblyInputs, config: AssemblyConfig, role: Role
                       levels: int | None) -> dict:
     """The identity of one assembly: stage config, role, upstream identities, code identity.
 
-    Schema 3 identifies assembly without founder-path refinement in both roles.
+    A context assembly never refines, so its identity leaves the refinement settings out (changing
+    them does not invalidate the contexts' records, as in base).
     """
     settings = jsonable(config)
+    if role is Role.CONTEXT:
+        settings.pop("refinement")
     identity = stage_identity("assembly", schema=SCHEMA, config=settings, upstream={
         "evidence": inputs.evidence.identity,
         "local_panels": (inputs.panels_identity if inputs.panels_identity is not None
@@ -188,7 +202,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
     records: the section's ``store.RecordScope`` (final: ``RecordScope(file, "assembly")``, written by
         the driver's contig wrapper; contexts: the caller's scope) or None (nothing recorded or
         resumed). The identity is bound first; completion, every level's plan and output, every
-        joined batch (``joins/<digest>``, shared by all assemblies of the
+        refined level and every joined batch (``joins/<digest>``, shared by all assemblies of the
         contig) are recorded as they complete, and a rerun with identical inputs resumes from them.
     budget: the CPU budget (``execution.CpuBudget``, or a thread count) of this contig's assembly.
     queue: the cross-node batch queue directory (``[execution] batch_queue``) or None (local pool).
@@ -226,6 +240,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
                     for index, panel in enumerate(prepared))
     level_records = []
     release_alternatives = []
+    l1_context = None
     level = 0
     while True:
         level += 1
@@ -265,6 +280,17 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
         release_alternatives = list(level_alternatives)
         _log_level(role, record)
         working = output
+        if role is Role.FINAL:
+            working, record, refined_alternatives = _refine(
+                level, record, working, prepared, evidence, l1_context, config,
+                records, _phase(budget, role, levels, f"refinement_l{level}"),
+                release_alternatives=release_alternatives)
+            release_alternatives = list(refined_alternatives)
+            if level == 1:
+                # Refined paths feed the next level; both refined and unrefined L1 alternatives stay
+                # available to the refinement's coarse moves, so an early local optimum cannot erase
+                # a useful chromosome-wide move.
+                l1_context = (*working, *output)
         level_records.append(record)
         if record.stop_reason is not None:
             break
@@ -276,6 +302,38 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
     return AssemblyResult(prepared=prepared, components=working, levels=tuple(level_records),
                           identity=canonical_json(jsonable(identity)),
                           release_alternatives=tuple(release_alternatives))
+
+
+def _refine(level, record, components, prepared, evidence, l1_context, config, records, budget,
+            *, release_alternatives=()):
+    """Founder refinement after a final level (resumed from ``l<k>/refined`` when recorded)."""
+    from dataclasses import replace
+    from .founder_refinement import LevelInput, refine_level
+    stored = None if records is None else records.load(assembly_records.refined_key(level))
+    if stored is not None:
+        refined = assembly_records.decode_components(stored["components"])
+        return refined, replace(record, refinement=stored["summary"],
+                                refinement_elapsed_seconds=stored["elapsed_seconds"]), tuple(
+                                    stored.get("release_alternatives", ()))
+    started = time.perf_counter()
+    result = refine_level(
+        LevelInput(level=level, prepared=prepared, components=tuple(components),
+                   evidence=evidence.scoring, l1_context=l1_context, cost_scale=config.cost_scale,
+                   additions=record.stop_reason is not None, count_rule=config.count_rule,
+                   release_alternatives=tuple(release_alternatives),
+                   evidence_ref=None if evidence.shared is None else evidence.shared.scoring),
+        config.refinement, budget,
+        None if records is None else records.scoped(assembly_records.refine_scope(level), nthreads=1))
+    elapsed = time.perf_counter() - started
+    summary = jsonable(result.summary)
+    release_alternatives = tuple(result.release_alternatives)
+    if records is not None:
+        records.save(assembly_records.refined_key(level), dict(
+            schema=assembly_records.SCHEMA,
+            components=assembly_records.encode_components(result.components), summary=summary,
+            elapsed_seconds=elapsed, release_alternatives=release_alternatives))
+    return tuple(result.components), replace(record, refinement=summary,
+                                             refinement_elapsed_seconds=elapsed), release_alternatives
 
 
 def _log_level(role: Role, record: LevelRecord) -> None:

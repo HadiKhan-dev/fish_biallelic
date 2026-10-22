@@ -1,6 +1,83 @@
 # Changelog
 
-## 2.7.0 (draft, 22 October 2026)
+## 2.7.1 (22 October 2026)
+
+This release restores founder-path refinement in assembly, which 2.7.0 removed.
+
+**Why.** With refinement off, the 2.7.0 founder-only validation on simulations with known truth failed its gate. Pooled
+native-refit founder wrong-or-missing rose from 394,278 to 671,099 (+70%; gate at most +1%):
+
+| Case | 2.6 | 2.7.0 | Change |
+|---|---|---|---|
+| std | 13,592 | 30,670 | +126% |
+| stress | 6,066 | 81,868 | +1,250% |
+| f3 | 282,925 | 437,777 | +55% |
+| backcross | 25,444 | 53,668 | +111% |
+| K30 | 66,251 | 67,116 | +1.3% |
+
+- **Cause:** surplus founder rows left by the joins survived. Several chromosomes ended with K = 7-9 where the truth
+  has 6, which split true founders across rows; refinement's count step removes them.
+- **f3:** gained one new false parent edge.
+- **TroMau:** native pseudo-reference mismatches fell (615,274 -> 470,063). That is consistency with a dependent
+  pseudo-reference, not accuracy: extra founder rows match its eight G0 haplotypes more easily.
+
+**What 2.7.1 keeps from 2.7.0:**
+- Founder completion's exact O(K^3) reorganisation, with identical released results. W3's identity runs on std, K30
+  and TroMau were identical with refinement on.
+- The linker EM update cap of 50. Fits that stopped at the old cap of 20 can change.
+- Deterministic seed-family promotion order in joins, and removal of the unused `shadow_bounds._join` and
+  `join_envelope`.
+
+**What 2.7.1 restores from 2.6:**
+- The 2.6 refinement model, with its count step, records and reports: `founder_counts.tsv` comes from refinement's
+  count pass again.
+- The 2.6 documentation of these.
+
+A new refinement is being designed for 2.8.
+
+**Resume:** assembly code identity changes, so 2.7.0 output roots are recomputed from assembly onward, not resumed.
+
+**Operational fix: a memory-governor deadlock in founder refinement.**
+- **Symptom:** 22-contig runs with refinement on could stall indefinitely. Reservations sat near the limit while real
+  memory was free, and waiters asked for 0.01-0.03 GiB with almost no CPU in use.
+- **Cause, present since 2.6:** a concurrent task whose memory was granted while it still waited for a CPU slot was
+  marked as running work. That disabled the governor's rule of admitting the head of the queue when every holder is
+  waiting.
+- **Why 2.7 exposed it:** larger refinement memory estimates (the guard traceback term) and long-held worker
+  reservations made the state reachable.
+- **Fix, scheduling only:**
+  - granted-but-unstarted tasks stay queued until they start (`execution/budget.py`, `execution/memory.py`);
+  - guard scratch is reserved only around guarded acceptance (`assembly/founder_refinement/{search,acceptance}.py`).
+  Both change when work is admitted, never what is computed. The guard-scratch change was checked identical on
+  backcross, N640 and TroMau, and a bounded reproducer hangs before the fix and completes after it.
+
+
+**Known limitation, unchanged:** family phase, the recombination maps derived from it and phased-sample VCFs are known
+to be broken and are not validated.
+
+### Validation
+
+Founder-only matrix (runs stop after founder refit; family phase excluded), against 2.6. Each cell is founder_refit
+wrong / missing alleles.
+
+| Case | 2.7.1 | 2.6 |
+|---|---|---|
+| std | 8,385 / 5,207 | identical |
+| stress | 3,914 / 2,152 | identical |
+| backcross | 21,518 / 3,926 | identical |
+| s10000 (22 contigs) | 953 / 159 | identical |
+| s10001 (22 contigs) | 117 / 17 | identical |
+| f3 | 282,249 / 770 | 282,150 / 775 |
+| K30 | 9,048 / 57,339 | 9,109 / 57,142 |
+
+- Every s10000 and s10001 chromosome has K = 6 in one piece.
+- Pooled wrong-or-missing over the seven simulations: +0.06%. No new false parent edges; f3 keeps 2.6's eight.
+- The f3 and K30 differences come from the linker cap of 50.
+- TroMau native pseudo-reference mismatches: 596,014 against 615,274 (−3.1%; consistency only, not accuracy).
+- The governor-deadlock fix changes scheduling only. std and TroMau rerun with it are identical, per chromosome, to the
+  matrix runs above.
+
+## 2.7.0 (22 October 2026; superseded by 2.7.1, do not use)
 
 This release retains founder completion, removes founder-path refinement from assembly, and raises the linker EM
 update cap to 50. These owner-directed changes can alter scientific results. Final founder validation is pending.
@@ -60,15 +137,15 @@ founder refit and assesses per-chromosome founder concordance, parent edges and 
 
 ### Validation and deferred work
 
-- [PENDING: the final founder-only runs on this tree (std, stress, K30, f3, backcross, the 22-chromosome s10000 and
-  s10001 simulations, and TroMau), which stop after founder refit.] Gates are pooled native-refit founder wrong-or-missing
+- Final founder-only runs on this refinement-off tree FAILED the pooled gate (+70% founder wrong-or-missing; see
+  2.7.1). Gates are pooled native-refit founder wrong-or-missing
   at most +1%; no simulation's native wrong calls increasing both >5% and >200 cells; no new false parent edges;
   and TroMau native-refit pseudo-reference mismatches at most +1%. TroMau consistency is not accuracy against known
   parents or true founder haplotypes. Offspring genotype and phase-switch gates are excluded by the owner.
 - Per-chromosome founder concordance with the true generating haplotypes, s10000 and s10001 (22 chromosomes each, 6
   true founders): with refinement on (the earlier candidate), every chromosome is one piece with all 6 founders found
   and matched, and 953/159 (s10000) and 117/17 (s10001) wrong/missing alleles of 53,741,112, identical to 2.6.
-  [PENDING: the same tables for this refinement-off tree, and TroMau per-chromosome pseudo-reference tables.]
+  The refinement-off tree did not reach these: see 2.7.1.
 - The earlier f3_fam matrix inherited eight false parent edges unchanged from 2.6. They were not new errors; the
   final matrix must still report their identities and any new edges explicitly.
 - Export manifests contain wall-clock release diagnostics and are not byte reproducible; those diagnostics do not

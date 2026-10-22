@@ -667,10 +667,12 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
     depth = depth_below(held_context())
 
     def reserve(index):
-        """The task's memory request; a task without an estimate runs under a zero-byte presence token."""
+        """The task's memory request; a task without an estimate runs under a zero-byte presence token. Both are
+        QUEUED until the task starts: a granted request whose task still waits for a CPU slot is not running work,
+        so the governor's progress rule must not count it as such."""
         if not sizes[index]:
-            return governor.presence(label, depth)
-        return governor.request(sizes[index], label=label, depth=depth, envelope=envelope)
+            return governor.presence(label, depth, queued=True)
+        return governor.request(sizes[index], label=label, depth=depth, envelope=envelope, queued=True)
 
     # The workqueue layer is not safe for concurrent parallel regions.
     if (_threading_layer_is_workqueue() or len(functions) <= 1
@@ -678,6 +680,7 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
         for index, function in enumerate(functions):
             request = reserve(index)
             request.wait()
+            governor.start(request.id)
             try:
                 with adopted(request.held), budget_context(budget), numba_threads(budget.threads()):
                     value = function(budget)
@@ -689,6 +692,7 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
 
     def execute(index, request):
         slots.start(index)
+        governor.start(request.id)
         try:
             own = SlotBudget(slots, index)
             with adopted(request.held), budget_context(own), numba_threads(own.threads()):

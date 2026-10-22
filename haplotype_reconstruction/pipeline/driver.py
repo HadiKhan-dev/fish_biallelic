@@ -42,6 +42,7 @@ PRELOAD_MODULES = (
     "haplotype_reconstruction.assembly.join.search",
     "haplotype_reconstruction.assembly.join.beam",
     "haplotype_reconstruction.assembly.completion.stage",
+    "haplotype_reconstruction.assembly.founder_refinement.stage",
     "haplotype_reconstruction.painting.stage",
     "haplotype_reconstruction.pedigree.stage",
     "haplotype_reconstruction.founder_refit.stage",
@@ -162,22 +163,6 @@ def _check_store(paths: RunPaths, config: RunConfig, source) -> None:
     store = CheckpointStore(paths.checkpoints) if paths.checkpoints.is_dir() else None
     if store is not None:
         store.check_layout()
-        # Completed-stage shortcuts must not reuse products from the refined pipeline.
-        from ..assembly.stage import SCHEMA as ASSEMBLY_SCHEMA
-        from ..store.store import CheckpointMismatch
-        for contig in config.input.contigs:
-            file = store.contig(contig)
-            for key in file.keys("identity/"):
-                if key == "identity/assembly" or key.endswith("/assembly"):
-                    identity = file.get(key)
-                    settings = identity["config"]
-                    # The superseded completion-drop candidate also used schema 3,
-                    # but still refined FINAL paths; its CONTEXT omitted completion.
-                    if (identity.get("schema") != ASSEMBLY_SCHEMA or "refinement" in settings
-                            or "completion" not in settings):
-                        raise CheckpointMismatch(
-                            f"{file.label}: assembly checkpoint is not from refinement-off assembly "
-                            f"with completion (schema {ASSEMBLY_SCHEMA}); use a new output/checkpoint root")
     if config.execution.process_contigs and config.input.kind == "simulation" and (
             store is None or not source.is_materialised(store)):
         raise RuntimeError("a shard ([execution] process_contigs) needs the simulated inputs of every contig recorded "

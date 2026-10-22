@@ -11,8 +11,10 @@ assembly: ``assembly``; a local-selection context assembly: the scope its caller
                                the SHA-256 of its explicit inputs: rows over prepared panels,
                                panel log likelihood, search summary
 ``P/l<k>/join``                level k's hierarchy output: components (row paths) + level record
-``P/final``                    the stage product (final role): the last level's joined components,
-                               with the count calls from each component's latest join
+``P/l<k>/refine/...``          founder refinement's own records of level k (founder_refinement.records)
+``P/l<k>/refined``             level k after founder refinement (final role): components + summary
+``P/final``                    the stage product (final role): the last level's refined components,
+                               with count calls
 
 Prepared panels are decoded from ``P/completion``. Records are plain dicts of numpy arrays and
 builtins (encoded and decoded here), not pickled classes. Readers for other stages and the
@@ -29,11 +31,19 @@ FINAL_PREFIX = "assembly"     # the final assembly's section; context sections a
 JOINS = "joins/"              # contig-wide joined batches, shared by every assembly of the contig
 COMPLETION = "completion"
 FINAL = "final"
-SCHEMA = 3
+SCHEMA = 2
 
 
 def level_key(level: int) -> str:
     return f"l{level}/join"
+
+
+def refine_scope(level: int) -> str:
+    return f"l{level}/refine"
+
+
+def refined_key(level: int) -> str:
+    return f"l{level}/refined"
 
 
 def load_joins(file, digests) -> dict:
@@ -57,8 +67,10 @@ def progress(file, prefix: str = FINAL_PREFIX) -> dict:
     names = [key[len(prefix) + 1:] for key in file.keys(prefix + "/")]
     levels = sorted({int(name.split("/")[0][1:]) for name in names
                      if name.startswith("l") and name.endswith("/join")})
-    return dict(completion=COMPLETION in names, levels=levels, final=FINAL in names)
-
+    refined = sorted({int(name.split("/")[0][1:]) for name in names
+                      if name.startswith("l") and name.endswith("/refined")})
+    return dict(completion=COMPLETION in names, levels=levels, refined_levels=refined,
+                final=FINAL in names)
 
 
 # ----------------------------------------------------------------------------- prepared panels
@@ -173,11 +185,14 @@ def founder_panels(file, level: int | None = None, prefix: str = FINAL_PREFIX):
     """One contig's founder panels of an assembly product, as ComponentPanels (positions, released
     calls, founder labels 0..K-1 = row indices), or None while the product is absent.
 
-    level k: that level's joined product (``assembly_l<k>``); None: the final product (``assembly``).
+    level k: the level-k product (after founder refinement when it ran, else the hierarchy output;
+    base stage ``assembly_l<k>``); None: the final product (base stage ``founder_refinement``).
     """
     from ..model.components import materialise
     if level is None:
         key = FINAL
+    elif file.has(f"{prefix}/{refined_key(level)}"):
+        key = refined_key(level)
     else:
         key = level_key(level)
     if not file.has(f"{prefix}/{key}") or not file.has(f"{prefix}/{COMPLETION}"):
@@ -223,7 +238,7 @@ def join_searches(file, prefix: str = FINAL_PREFIX) -> tuple:
 
 def level_records(file, prefix: str = FINAL_PREFIX) -> tuple:
     """The executed levels of an assembly section as ``stage.LevelRecord`` (plan, join summaries in
-    the order of the joined batches, log likelihoods, stop reason), with each
+    the order of the joined batches, log likelihoods, stop reason, refinement summary), with each
     joined batch's span recoverable from the plan and the level's input components; for reports
     (assembly_search.tsv, founder_counts.tsv join and feedback columns)."""
     from .stage import LevelRecord
@@ -231,6 +246,11 @@ def level_records(file, prefix: str = FINAL_PREFIX) -> tuple:
     level = 1
     while file.has(f"{prefix}/{level_key(level)}"):
         record = LevelRecord.from_record(file.get(f"{prefix}/{level_key(level)}", items=("record",))["record"])
+        if file.has(f"{prefix}/{refined_key(level)}"):
+            refined = file.get(f"{prefix}/{refined_key(level)}", items=("summary", "elapsed_seconds"))
+            from dataclasses import replace
+            record = replace(record, refinement=refined["summary"],
+                             refinement_elapsed_seconds=refined["elapsed_seconds"])
         result.append(record)
         level += 1
     return tuple(result)

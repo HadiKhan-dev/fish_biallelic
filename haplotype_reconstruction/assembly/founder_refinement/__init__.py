@@ -1,9 +1,4 @@
-"""DISABLED IN 2.7: retained source for the planned 2.8 refinement rebuild.
-
-No pipeline, configuration, or warm-up entry imports this package. The documentation
-below describes the historical implementation, not an available pipeline mode.
-
-Historical final founder-path refinement (one entry: ``refine_level``).
+"""Final founder-path refinement of the assembly (one entry: ``refine_level``).
 
 Called by the assembly level loop after every level of the final L1-L4 assembly. Each phase
 component's founders are re-chosen as paths of original prepared local rows to maximise the

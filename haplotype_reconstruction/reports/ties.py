@@ -13,7 +13,7 @@ decoding only the summary entries of the records; it never feeds back into infer
                        recorded ambiguity flags: discovery blocks whose selection was taken inside a tie
                        (``ambiguous``, ``tied_alternatives``) and the margin of each block's founder-count choice
                        (``score_margin``); final founder-count calls marked ambiguous or closing a count cycle, and
-                       incomplete join count verification
+                       refinement count decisions whose tied refits disagree
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .tables import write_json, write_rows
 FIELDS = ("decisions", "inside_tie", "wide", "boundary")
 STAGE_ORDER = ("discovery", "local_selection", "assembly", "painting", "pedigree")
 # Record groups that hold tie_events: (key pattern, stage, top-level entries decoded). assembly/final repeats the
-# join summaries of assembly/l*/join and is read only for the final count calls; the
+# join summaries of assembly/l*/join and is read only for the final count calls; refinement fit checkpoints and the
 # digest-keyed joins/ records are not read (no events, or the same joins again).
 GROUPS = (
     (re.compile(r"discovery/blocks/\d+"), "discovery", ("blocks",)),
@@ -38,6 +38,7 @@ GROUPS = (
     (re.compile(r"local_selection/[^/]+/assembly/l\d+/join"), "local_selection", ("record",)),
     (re.compile(r"assembly/completion"), "assembly", ("summary",)),
     (re.compile(r"assembly/l\d+/join"), "assembly", ("record",)),
+    (re.compile(r"assembly/l\d+/refine/\d+"), "assembly", ("refinement",)),
     (re.compile(r"painting"), "painting", ("label_continuity",)),
 )
 FINAL_ASSEMBLY = "assembly/final"
@@ -85,7 +86,7 @@ class _Ambiguity:
         self.mean_field_measured_blocks = 0
         self.selected_mean_field_failures = self.other_mean_field_failures = 0
         self.count_calls = self.ambiguous_calls = self.count_cycles = self.undecided_cycles = 0
-        self.unverified_calls = 0
+        self.tied_refits = self.disagreeing_refits = 0
 
     def discovery(self, payload) -> None:
         from ..discovery.search import backstop_counts
@@ -111,12 +112,18 @@ class _Ambiguity:
             if math.isfinite(margin):
                 self.margins.append(margin)
 
+    def refinement(self, payload) -> None:
+        for decision in (payload.get("refinement") or {}).get("decisions") or ():
+            agree = decision.get("tie_decisions_agree")
+            if agree is not None:
+                self.tied_refits += 1
+                self.disagreeing_refits += int(not agree)
+
     def final_calls(self, payload) -> None:
         for call in (payload.get("components") or {}).get("count_call") or ():
             if call is None:
                 continue
             self.count_calls += 1
-            self.unverified_calls += int(call.get("reason") == "join_search_unverified")
             self.ambiguous_calls += int(bool(call.get("ambiguous", False)))
             self.count_cycles += int(bool(call.get("count_cycle", False)))
             self.undecided_cycles += int(bool(call.get("cycle_undecided", False)))
@@ -148,7 +155,8 @@ class _Ambiguity:
                     median=margins[len(margins) // 2] if margins else None)),
             assembly=dict(
                 count_calls=self.count_calls, ambiguous=self.ambiguous_calls, count_cycles=self.count_cycles,
-                undecided_count_cycles=self.undecided_cycles, unverified_count_calls=self.unverified_calls))
+                undecided_count_cycles=self.undecided_cycles, tied_refit_decisions=self.tied_refits,
+                tied_refits_disagree=self.disagreeing_refits))
 
 
 def _rows(contig, group, stage, events) -> list[dict]:
@@ -172,6 +180,8 @@ def _contig(store, contig):
         add_events(payload, groups.setdefault((stage, group), {}))
         if stage == "discovery":
             ambiguity.discovery(payload)
+        elif group.startswith("assembly/") and group.endswith("/refine"):
+            ambiguity.refinement(payload)
     rows = []
     for (stage, group), events in sorted(groups.items(),
                                          key=lambda item: (STAGE_ORDER.index(item[0][0]), item[0][1])):
@@ -244,7 +254,7 @@ def write_ties(output, store, contigs, pedigree_events: dict | None = None) -> l
           f"inside a tie: {discovery['ambiguous']:,} of {discovery['blocks']:,}; computational search limits: "
           f"{discovery['search_incomplete']:,} blocks ({discovery['unresolved']:,} with no incumbent); "
           f"founder-count calls ambiguous: "
-          f"{assembly['ambiguous']:,} of {assembly['count_calls']:,}; unverified count calls: "
-          f"{assembly['unverified_count_calls']:,}. Tables: {directory}",
+          f"{assembly['ambiguous']:,} of {assembly['count_calls']:,}; tied refits that disagree: "
+          f"{assembly['tied_refits_disagree']:,} of {assembly['tied_refit_decisions']:,}. Tables: {directory}",
           flush=True)
     return written

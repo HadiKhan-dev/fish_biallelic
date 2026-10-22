@@ -26,10 +26,10 @@ PHASE_PROGRESS = {
     "feedback_l1_refine": 0.350, "feedback_round1": 0.363,
     "feedback_l2_preprocess": 0.407, "feedback_l2_hierarchy_l1": 0.418,
     "feedback_l2_hierarchy_l2": 0.454, "feedback_l2_refine": 0.494, "feedback_round2": 0.513,
-    "final_preprocess": 0.532, "final_hierarchy_l1": 0.543,
-    "final_hierarchy_l2": 0.590,
-    "final_hierarchy_l3": 0.736,
-    "final_hierarchy_l4": 0.892,
+    "final_preprocess": 0.532, "final_hierarchy_l1": 0.543, "final_refinement_l1": 0.555,
+    "final_hierarchy_l2": 0.590, "final_refinement_l2": 0.614,
+    "final_hierarchy_l3": 0.736, "final_refinement_l3": 0.745,
+    "final_hierarchy_l4": 0.892, "final_refinement_l4": 0.896,
     "painting": 0.989,
 }
 

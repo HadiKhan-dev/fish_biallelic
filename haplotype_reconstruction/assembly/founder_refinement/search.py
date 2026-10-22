@@ -471,7 +471,8 @@ class SweepEngine:
         """Memory of one fixed-K search (its reservation, execution.memory): the message arrays its pass holds
         (stored backward values, + counts and the forward history of the guard), its proposal cache's
         boundaries, and the pass transients per junction (f/g starts and ends of up to 3K candidates, the
-        lookahead and backward chain: K30 map 3.2), plus 32 MiB."""
+        lookahead and backward chain: K30 map 3.2), plus 32 MiB. Guard traceback scratch is
+        reserved separately during acceptance; it is not resident during window proposals."""
         states = founders * (founders + 1) // 2
         arrays = 4 if self.guarded else 2
         boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
@@ -479,13 +480,7 @@ class SweepEngine:
             boundaries += 2 * ((self.blocks - 1) // JUNCTION_BATCH + 1)
         samples = self.workspace.samples
         transients = 8 * samples * states * (3 * 3 * founders + 2 * 48)
-        trace = 0
-        if self.guarded:
-            import numba
-            from .guard import traceback_bytes
-            trace = traceback_bytes(samples, int(self.workspace.offsets[-1]), founders,
-                                    min(samples, numba.config.NUMBA_NUM_THREADS))
-        return 8 * boundaries * samples * states + transients + trace + (32 << 20)
+        return 8 * boundaries * samples * states + transients + (32 << 20)
 
     # ------------------------------------------------------------------ messages and proposals
     def _full_messages(self, X, lex, budget):

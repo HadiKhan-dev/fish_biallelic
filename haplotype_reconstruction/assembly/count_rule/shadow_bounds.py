@@ -1,7 +1,7 @@
 """Independent-block shadow envelopes and proof-only count certificates.
 
-The retained refinement code calls this proof after exceeding its enumeration budget;
-that caller is disabled in 2.7. A global shadow chooses one allowed local row per
+Refinement uses this proof after its enumeration budget is exceeded. A global
+shadow chooses one allowed local row per
 (founder, block); choices cannot change inside a block. Maximizing block transfer
 messages over its LOCAL products gives the exact per-sample maximum over all global
 shadows. Different samples may select different maximizing shadows. This is a bound
@@ -63,8 +63,8 @@ def bounded_factor_plan(options, shape, site_counts, *, max_local_product, max_w
     """Decline before allocation if a local product or weighted work exceeds caller caps.
 
     Caps restrict this optional proof computation only; None leaves the ordinary
-    incumbent/unknown path intact. Site counts preserve the caller's scoring layout:
-    full-site counts for the disabled refinement caller, or bin counts for a join frame.
+    incumbent/unknown path intact. Site counts are the existing full-site counts
+    (refinement) or bin counts (join), without changing their scoring layout.
     """
     sizes, _ = factor_sizes(options, shape)
     work = sum(size * int(sites) for size, sites in zip(sizes, site_counts))

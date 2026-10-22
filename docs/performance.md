@@ -1,10 +1,5 @@
 # Performance and resource use
 
-The current 2.7 pipeline disables founder-path refinement. Measurements below that include
-refinement describe the historical implementation or earlier candidates; they do not measure
-this refinement-off pipeline. The retained refinement source and its work budgets are inactive.
-See [assembly](methods/assembly.md) for the current path.
-
 ## Discovery measurements for 2.6
 
 Discovery keeps canonical birth-proposal keys and descriptors until fitting needs panel arrays,
@@ -216,7 +211,7 @@ discovery. No inference was rerun for this attribution.
 | evidence | contig (metadata scan, then direct shared-array decode in parallel windows); at most one contig ahead of discovery | site/sample QC, read-model fits; 33 bytes per retained cell, plus phase scratch |
 | discovery | block, in one persistent pool for all pending contigs | fixed-K fits and the reversible K search per block |
 | local selection | block (path fits), component (context refits), inside a contig lane | path-model fits and the candidate bank; two context assemblies |
-| assembly | block (completion), joined batch (hierarchy), inside a contig lane | completion, linker EM and certified panel searches with join count decisions |
+| assembly | joined batch (hierarchy), component (founder refinement), inside a contig lane | linker EM and certified panel searches; converged refinement fits and count decisions |
 | painting | sample block, inside a contig lane | binned emissions and the diploid HMM |
 | pedigree | chromosome (preparation, scoring, exclusion); genome-wide decisions are a barrier | pair scoring on the fixed candidate panel; bootstrap and leave-one-chromosome-out resampling |
 | founder refit, family phase, recombination | chromosome | coordinate sweeps; family message passing and polishing; per-meiosis decoding |
@@ -315,6 +310,11 @@ below can admit work over the limit.
   executing reconstruction directly holds its allowance across later contigs and genome-wide stages, through
   cache publication. Both serial and planned one-lane routes additionally reserve each contig's arrays. The driver
   allowance is a resident token, so retained pages do not masquerade as active computation during admission waits.
+- **Refinement guard scratch.** Whole-component traceback/event storage is reserved only during guarded
+  acceptance, with the unchanged full-width and maximum-thread bound. Directional search messages, proposal
+  caches and sparse carried history remain reserved across proposal waits; worker/lane residence and live
+  availability checks are unchanged. Moving the scratch hold changes admission timing, not the guard or
+  scientific decisions.
 - **Admission.** A request starts when its bytes fit alongside existing reservations and current availability;
   otherwise it waits. Nested waiting work takes precedence, then arrival order. A smaller request passes a larger
   waiting one only if both fit. At depth d, the ledger ceiling is the limit minus
@@ -493,8 +493,10 @@ Results do not depend on the number of cores, lanes, workers or helpers, on memo
 parallel kernels add per-sample (or per-site) rows in a fixed order instead of team-size-dependent reductions;
 pools return results in task order (or in an order their callers do not depend on); random streams are fixed
 before scheduling. The only intended randomness is a simulation with `seed = "random"`, whose realised seed is
-recorded. Search materialization limits are fixed constants, never the memory that happens to be free.
-The join's complete-beam materialization bound is independent of the governor's memory pacing. The same configuration and inputs therefore give the same records at any
+recorded. Search limits that bound memory are fixed constants, never the memory that happens to be free: founder
+refinement's window programmes, for example, are solved within growing budgets reserved from the governor up to a
+fixed cap (`AssemblyConfig.refinement.frontier_bytes = 137438953472`, 128 GiB), and a solve within a budget computes
+exactly what a solve at the cap computes. The same configuration and inputs therefore give the same records at any
 allocation size.
 
 ## Founder counts

@@ -1,10 +1,5 @@
 # Assembly work and memory in 2.7
 
-The current 2.7 pipeline disables founder-path refinement. Measurements below that include
-refinement describe the historical implementation or earlier candidates; they do not measure
-this refinement-off pipeline. The retained refinement source and its work budgets are inactive.
-See [assembly](assembly.md) for the current path.
-
 The instrumentation separates elapsed time from scientific decisions. Join records expose
 `phase_seconds` for input gathering, linker, initial beam, join search, the inclusive count step,
 and row-path release. Refinement records expose the inclusive count pass, message construction,
@@ -54,8 +49,12 @@ prefix from the preceding checkpoint. This preserves messages, counts and label 
 including after accepted suffix exchanges. It reduces resident carried history by approximately
 16-fold and adds at most15 block recursions per reconstruction. A bounded rejection fixture
 shows a runtime cost as well as a memory benefit; this is not advertised as a speedup. Memory
-admission now includes full-width guard tracebacks and event matching, since a guard can expand
-to the whole component. Completed fit scores and the initial bidirectional score are reused.
+admission includes full-width guard tracebacks and event matching, since a guard can expand
+to the whole component. This scratch is reserved only during guarded acceptance, with the maximum
+configured thread team, and released when the pass returns or raises. Directional searches retain
+their message, cache and sparse-history reservations while waiting for window proposals; they do
+not retain an allowance for inactive traceback scratch. Resident worker/lane memory remains
+separately reserved. Completed fit scores and the initial bidirectional score are reused.
 
 The dual sweep computes each sample/bin maximum over candidate rows once, then reuses it
 for all background states. Candidate order, maxima and suffix arithmetic are unchanged. Across
@@ -191,7 +190,7 @@ No blanket cubic bound, general elapsed-time improvement or general peak-memory 
 ## Whole-component stop for window work
 
 The recalibrated window candidate gives each actual fine or coarse template the fixed account
-`B = C N W b² H³`, with `assembly.founder_refinement.config.FounderRefinementConfig.window_work_coefficient = 33554432`,
+`B = C N W b² H³`, with `AssemblyConfig.refinement.window_work_coefficient = 33554432`,
 `H = max(K, R)`, actual working founder count K, largest actual unit alphabet R, actual unit count W,
 full evidence sample count N and largest actual bin count b. Temporary copy founders and every
 coarse context path contribute to these dimensions. No dimension is clipped at 30. The coefficient

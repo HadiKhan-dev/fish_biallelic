@@ -135,6 +135,7 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 | local selection | bank, refit cut and residual ties by content and order | the BIC tie set is kept whole; bank score caps admit complete overlapping endpoint families and tied NLL classes at unchanged caps; whole path-refit classes are retained (cap 16, overflow counted); residual ties give a consensus panel whose rows not shared by every alternative are withheld (`tied_alternatives`, `withheld_by_ties`) |
 | assembly ([assembly.md](assembly.md)) | left-anchored batching | orientation-symmetric batching |
 | assembly | join moves inside a log-likelihood tie class by path tuples or panel keys | the batch linker's path score decides before any label; painting-dependent proposals run under both traceback conventions and are merged |
+| founder refinement ([founder_refinement.md](founder_refinement.md)) | tied refits decided by content | members that disagree on K take the smaller K (prior); otherwise the member whose margin most strongly supports the decision; remaining equal-F alternatives are flagged (`ambiguous_k`, `alternatives`) |
 | founder refit ([founder_refit.md](founder_refit.md)) | the first acceptable move in row order | mutually exclusive tied moves release the affected cells unknown |
 | painting ([painting.md](painting.md)) | a switch inside a stretch of identical founders placed at the leftmost edge, and the bins named by the prior | the switch is released as an interval (`SWITCH_INTERVAL`), and the other track is gated on the pair-consistent posterior; the per-sample segments are published |
 | pedigree ([pedigree.md](pedigree.md)) | Parent1 is the lower sample name | parent slots follow recorded sexes (dam, sire); otherwise they are unordered (`ParentSlotBasis`) |
@@ -147,7 +148,7 @@ These decide exact ties. They are not reversed by the reversal test.
 
 | prior | where | reason |
 | --- | --- | --- |
-| fewer founders (smaller K) | discovery selection, the local-selection bank and round winner, count cycles | parsimony: at equal fit the data do not support the extra founder |
+| fewer founders (smaller K) | discovery selection, the local-selection bank and round winner, founder refinement at an exact-zero count margin, count cycles | parsimony: at equal fit the data do not support the extra founder |
 | fewer switches; fewer parents | the painting and family-phase Viterbi tie rule; the pedigree graph's replacement rows | at equal likelihood the recombination and transmission model already favours fewer events, because a switch probability is below 1/2 |
 | keep the current state inside a tie class | search climbs, keep-incumbent tests, the family MAP's acceptance (a gain must exceed the quantum) | an ascent moves only on evidence, so the optimum is a fixed point and noise cannot move it |
 | the conservative side of an exact threshold | release, supporter, carrier and unknown-count bands; the abundant-route test | at exactly the threshold, withhold rather than call |
@@ -369,7 +370,7 @@ The released ambiguity fields are:
 
 - discovery: `ambiguous`, `tied_alternatives`, `score_margin`, `tied_panels`, `tied_unknown`, `latent_unknown`;
 - local selection: `tied_alternatives`, `withheld_by_ties`;
-- assembly: the latest join count call, including evaluated different-K alternatives and separately recorded unverified search;
+- refinement: `ambiguous_k`, `alternatives` and `prior` per count decision;
 - founder refit: `ambiguous_alleles` (cells released unknown);
 - painting: `SWITCH_INTERVAL` segments, and switch-interval counts in the painting summary;
 - pedigree: `ParentSlotBasis`;

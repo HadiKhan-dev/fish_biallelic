@@ -158,9 +158,6 @@ def _cached_overloads(cache_directory: Path, target=None) -> dict:
             if not function or not line.isdigit() or "locals" in function.split("."):
                 continue
             module = package if module == "__init__" else f"{package}.{module}"
-            from .kernel_manifest import active_module
-            if not active_module(module):
-                continue
             try:
                 with open(cache_directory / subdirectory / name, "rb") as handle:
                     if pickle.load(handle) != numba.__version__:
@@ -178,9 +175,7 @@ def _read_manifest(store: Path):
     try:
         with open(store / _MANIFEST, "rb") as handle:
             manifest = pickle.load(handle)
-        from .kernel_manifest import active_module
-        return ({key: value for key, value in manifest["overloads"].items() if active_module(key[0])},
-                {key: value for key, value in manifest["seconds"].items() if active_module(key[0])})
+        return dict(manifest["overloads"]), dict(manifest["seconds"])
     except FileNotFoundError:
         return {}, {}
     except Exception as error:

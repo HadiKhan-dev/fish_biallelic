@@ -29,7 +29,7 @@ Nothing downstream feeds back into the painting or the assembly.
 
 Each founder row of an assembled component is a path through the local rows of consecutive atomic blocks (the
 prepared panels). Next to stretches where rows are locally interchangeable (identical copies inside a founder's
-run of homozygosity, haplotypes shared between founders), linking can let two rows exchange founder
+run of homozygosity, haplotypes shared between founders), linking and refinement can let two rows exchange founder
 identity at a link point, the boundary between two atomic blocks. The alleles at every site remain right as a set,
 but painting reads label continuity as haplotype continuity: every sample carrying either haplotype across the
 point pays a track switch there, or keeps its labels by exchanging its two tracks, which flips a parent's phase
@@ -305,20 +305,16 @@ the painted panel.
   sites (the last window may be shorter).
 - `assembly_search.tsv`: every record of the final assembly's join searches (one row per search event and a closing
   row per search), with the assembly level and the first and last variant of the joined batch.
-- `founder_counts.tsv`, one row per component: `FounderRows` and the count evidence from its latest actual join.
-  `CountSource` is `join`, or `local_panel` when the component never joined; no additional final count pass runs.
-  `CountStepDecisions` lists recorded join comparisons (kind, founder count, outcome, margin, band and ambiguity).
-  `FounderCountAmbiguous` is true when a recorded band contains zero, evaluated alternatives disagree on K,
-  a count cycle occurred, or the final paths fail their deletion test. It is empty when verification is
-  incomplete without demonstrated ambiguity, or when no join supplied a count call; empty does not mean false.
-  `CountStepReason` is `join_search_unverified` for unfinished search or verification, `no_join` for an unjoined
-  panel, and empty otherwise. Demonstrated ambiguity remains true even when verification is also unfinished.
-  A count cycle (a row added by a search and deleted again) keeps the deletion; it is undecided when that
-  deletion is ambiguous and the cycle began with a decided deletion. `JoinCountCycles`, `JoinUndecidedCycles`
-  and `JoinAmbiguousCountCalls` cover overlapping final-assembly joins; the `FeedbackJoin*` columns cover
-  local-selection context joins. `UndecidedCountCycles` sums the final and context histories once: the latest
-  join's `CountStepCycleUndecided` is already included in `JoinUndecidedCycles`. Empty history cells mean no
-  corresponding join search covers the component.
+- `founder_counts.tsv`, one row per component: `FounderRows` and how firmly that count is determined.
+  `FounderCountAmbiguous` is the final count step's call (the converged count pass of the last assembly level,
+  which decides the reported count): true when one of its decisions has a bootstrap band containing zero, when it
+  cycled, or when a restored best-F panel fails its own deletion test. `CountStepDecisions` lists the decisions
+  (kind, founder count, outcome, margin, band). A count cycle (a row added by a search and deleted again) keeps the
+  deletion; it is undecided when that deletion is ambiguous and the cycle began with a decided deletion.
+  `JoinCountCycles`, `JoinUndecidedCycles` and `JoinAmbiguousCountCalls` count the final assembly's join searches
+  over the component, the `FeedbackJoin*` columns those of the local-selection context assemblies, and
+  `UndecidedCountCycles` sums the undecided cycles of all three. Empty cells mean no count step or no join search
+  covers the component.
 - `sample_switches.tsv`, one row per sample: `PaintedSwitches` (the painter's switch counts summed over
   components), `PaintedComponents`, the cohort median over painted samples (not split by generation) and the ratio
   to it.
@@ -328,7 +324,7 @@ a homozygous named carrier counts once per sample and site, and pooled candidate
 site in their own columns, never attributed to an arbitrary row. Missing founder alleles get no support. Related
 carriers are not independent lineages, and a called allele without a direct named carrier is not necessarily
 wrong. The assembly-search rows describe the particular join searches of the assembly hierarchy (each level's
-search supplies that level's joined product), not a posterior over final paths: a small scored gap, an
+search precedes that level's founder refinement), not a posterior over final paths: a small scored gap, an
 accepted boundary proposal or a reached backstop is a reason to inspect a region, and a large gap among evaluated
 proposals cannot certify alternatives that were never generated. A sample far above the cohort median of switches
 is one the panel does not explain as a founder mosaic (for example foreign reads or a missing haplotype), or it

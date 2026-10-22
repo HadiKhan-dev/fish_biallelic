@@ -5,10 +5,6 @@ sequenced parent, and a generation label does not establish parentage. Two compo
 have no implied correspondence. Within a component, the inferred correspondence can also be wrong
 or unresolved even when the local allele sets are accurate.
 
-Assembly founder-path refinement is disabled in 2.7. The refinement examples below are historical
-results and research questions for 2.8; they do not describe an active 2.7 stage. Downstream founder
-allele refit remains a separate stage.
-
 ## Shared paths and long-range evidence
 
 Two chromosome paths can copy different rows in early child components, the same row through one
@@ -54,18 +50,16 @@ difference distinguishes long-range correspondence from local allele-set quality
 identify a unique causal join. Follow the source row paths through the hierarchy and recover the
 actual selected incoming branch, its shared usable-site masks and its sample cohort before replay.
 A nominal child representative may differ from the branch that produced a saved parent.
-In 2.7, joined paths flow directly to the next assembly level and final output; downstream founder
-allele refit is separate. For historical refinement-enabled runs, distinguish the raw join from
-fixed-count refinement, subsequent count decisions and founder refit. Refinement could change a
-correspondence that the raw join preserved, so a raw-panel swap score does not assess a different
-historical refined panel.
+Distinguish the raw join from its fixed-count refinement, subsequent count decisions and final
+founder refit. A correspondence can change during refinement even when the raw join preserves it;
+a swap score on the raw panel is not a confidence margin for a different refined panel.
 
 Score the selected panel and a competing correspondence on that fixed frame, retaining per-sample
 contributions and both objective and linkage margins. A better feasible panel under the same
 objective demonstrates a search opportunity; it does not show that the model preferred the wrong
-panel. Check whether the correction belongs to the evaluated search neighbourhood before
-attributing it to a guard or a convergence rule. Historical refinement used fine/coarse proposals;
-its certification was relative to that neighbourhood, not a claim of global optimality.
+panel. Check whether the correction belongs to the fine/coarse proposal neighbourhood before
+attributing it to a guard or a convergence rule. Certification is relative to that neighbourhood,
+not a claim of global optimality.
 
 Use simulation truth for accuracy and missing-inclusive founder metrics. Real-data pseudo-reference
 comparisons measure consistency, especially when the reference shares evidence with inference.
@@ -80,7 +74,7 @@ sidecar alone does not perform that inference.
 
 ## Shared inherited crossovers during refinement
 
-The historical refinement model scored each observed sample with its own switching penalty. Descendants can inherit
+Refinement scores each observed sample with its own switching penalty. Descendants can inherit
 one ancestral crossover, so many samples can support the same suffix exchange without representing
 many independent recombination events. Their reads still provide separate emission evidence; the
 problem is repeated switching regularization, not duplication of those reads.
@@ -93,7 +87,7 @@ remain in final assembly. This is a concrete limitation of the objective even th
 is strong and survives removal of any one positive contributor. Objective robustness under an
 independent-sample calculation is therefore not sufficient evidence of biological correctness.
 
-The retained refinement code's coarse-content guard protects against some absorption of shared crossovers. Extending
+The existing coarse-content guard protects against some absorption of shared crossovers. Extending
 it directly to suffix exchanges is not a validated repair: on saved before/after panels it rejects
 both the f3 error and a beneficial N80 exchange. A veto would favor the incumbent correspondence;
 it would not establish that correspondence or release uncertainty. A historical guard disagreement
@@ -104,8 +98,8 @@ continuity. An export annotation alone does not provide these inference semantic
 break criterion must establish which correspondence is unresolved, propagate that withdrawal through
 downstream stages, and report lost continuity as well as errors. Projecting one fitted component
 into pieces must not present its full-span count decision as independently verified local counts.
-The shared-junction diagnostic does not supply such a validated criterion. Refinement is disabled
-in 2.7; this limitation remains a design question for 2.8, with no gain or contributor cutoff adopted.
+The shared-junction diagnostic does not yet supply such a validated criterion. The current model
+remains in use with this limitation; no gain or contributor cutoff is introduced.
 
 ## Evaluating accepted refinement moves
 
@@ -173,13 +167,10 @@ a distinct ancestral event. Nor does the founder-count criterion automatically a
 same-K comparison: its cost and private-sequence shadow concern adding or removing a founder.
 A useful replacement must specify its ancestry assumptions, account for related samples and
 adaptive endpoint selection, and pass independent downstream validation. The investigated
-constraint is not adopted. The historical refinement model's preference remains conditional on its
-documented assumptions; its persistent failure is an unresolved question for the 2.8 rebuild.
+constraint is not adopted; the current model's preference remains conditional on its documented
+assumptions, with this persistent failure unresolved.
 
 ## Separating rollback evidence from refinement acceptance
-
-The following comparisons concern saved refinement-enabled runs and candidate rollback policies,
-not the refinement-off 2.7 pipeline.
 
 A computational stop can retain a component's incoming panel and its previously evaluated
 alternatives. That intervention is useful for diagnosis, but the work limit is not evidence that

@@ -25,7 +25,7 @@ import time
 import numpy as np
 
 from ...execution.batch_queue import BatchKind
-from ...model.components import CountCall, CountStepDecision, FounderComponent
+from ...model.components import FounderComponent
 from ...store.identity import canonical_json, code_identity, jsonable
 from .. import records as assembly_records
 from .batch import (BatchTask, JoinResult, JoinSettings, batch_digest, join_batch, run_batch,
@@ -143,38 +143,6 @@ def _encode_join(result: JoinResult) -> dict:
                 minimum_switches=result.minimum_switches, shadow=result.shadow)
 
 
-def join_count_call(summary, alternatives=(), *, continuation_unverified=False) -> CountCall:
-    """Count evidence of the latest actual join, without inventing a final count pass.
-
-    Explicit death comparisons and accepted pool births retain their recorded margins.
-    Seed/bound work remains in the join census. Evaluated different-K alternatives are
-    count ambiguity; unperformed verification is recorded separately as an unknown call.
-    """
-    decisions = []
-    for event in summary.events:
-        stage = event.get("stage")
-        if stage not in ("count_death", "count_birth") or "margin" not in event:
-            continue
-        death = stage == "count_death"
-        decisions.append(CountStepDecision(
-            kind="deletion" if death else "addition", founders=int(event["panel_size"]),
-            accept_larger=not event["deleted"] if death else event.get("accepted") is not None,
-            skipped_by_bound=False, margin=float(event["margin"]),
-            band=tuple(event["band"]), ambiguous=bool(event["ambiguous"])))
-    different_k = any(len({len(panel) for panel in family.get("panels", ())}) > 1
-                      for family in alternatives if not family.get("count_unverified", False))
-    ambiguous = (any(decision.ambiguous for decision in decisions) or different_k
-                 or bool(summary.count.cycles) or bool(summary.count.final_paths_failing_death_test))
-    unverified = (continuation_unverified or not summary.certified or summary.count.count_backstop_reached
-                  or any(family.get("count_unverified", False) or family.get("unresolved_search", False)
-                         for family in alternatives))
-    return CountCall(founders=summary.final_panel_size, founders_before=summary.count.start_size,
-                     ambiguous=True if ambiguous else None if unverified else False,
-                     count_cycle=bool(summary.count.cycles),
-                     cycle_undecided=bool(summary.count.cycles_undecided), decisions=tuple(decisions),
-                     reason="join_search_unverified" if unverified else None)
-
-
 def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_size: int,
               min_informative: int, records=None, budget, queue=None,
               release_alternatives=()) -> LevelOutput:
@@ -289,17 +257,10 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
             # stays cached under its original digest with its diagnostic sidecar.
             final_plan[index] = (first, end, None)
             continue
-        summary = JoinSummary.from_record(payload["summary"])
         output.append(FounderComponent(
             start=inputs[0].start, stop=inputs[-1].stop, rows=payload["rows"],
-            break_before=inputs[0].break_before, break_after=inputs[-1].break_after,
-            count_call=join_count_call(
-                summary, payload.get("release_alternatives", ()),
-                continuation_unverified=any(
-                    family.get("unresolved_search", False)
-                    and int(family["start"]) < inputs[-1].stop
-                    and int(family["stop"]) > inputs[0].start for family in retained))))
-        joins.append(summary)
+            break_before=inputs[0].break_before, break_after=inputs[-1].break_after))
+        joins.append(JoinSummary.from_record(payload["summary"]))
         likelihoods.append(float(payload["log_likelihood"]))
     return LevelOutput(components=tuple(output), plan=tuple(final_plan), joins=tuple(joins),
                        log_likelihoods=tuple(likelihoods), reused=reused, partition=split,
