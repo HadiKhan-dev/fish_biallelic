@@ -745,9 +745,6 @@ class MemoryGovernor:
         with ledger.locked() as h:
             limit, used = int(h[_LIMIT]), int(h[_LIVE_BYTES])
             soft, hard = int(MEMORY_SOFT_FRACTION * limit), int(MEMORY_HARD_FRACTION * limit)
-            active = ledger.t_id != 0
-            running = bool((ledger.t_state[active] == RUNNING).any())
-            queued_to_start = bool((ledger.t_state[active] == QUEUED).any())
             observed = int(h[_SAMPLE_NS]) - int(h[_OUTER_START_NS]) >= _SAMPLE_NS_INTERVAL
             # Existing work must be able to finish and free memory, including above HARD. An independent
             # pool/contig task is outer work even when its scheduler belongs to an existing contig.
@@ -772,8 +769,11 @@ class MemoryGovernor:
                 head = int(queued[np.lexsort((ledger.w_id[queued], -ledger.w_depth[queued]))[0]])
                 is_head = head == request._waiter
                 admit = fits and (not request.outer or is_head)
-                if not admit and is_head and not running and not queued_to_start:
-                    admit = forced = True
+                if not admit and is_head:
+                    # Progress exception only: scan the token table here, not on every admission.
+                    active = ledger.t_id != 0
+                    if not (ledger.t_state[active] == RUNNING).any() and not (ledger.t_state[active] == QUEUED).any():
+                        admit = forced = True
                 since = int(ledger.w_since[request._waiter])
                 if not admit:
                     request.waited = True

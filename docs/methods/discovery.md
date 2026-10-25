@@ -648,13 +648,14 @@ write or fsync. The schema remains 1; normal source/configuration identity rules
 
 | module | role |
 | --- | --- |
-| `discovery/stage.py` | pool over blocks, one contig ahead on a helper thread; `discover_block` for one block in memory |
+| `discovery/stage.py` | one pool and one block queue over all contigs, evidence one contig ahead on a helper thread; `discover_block` for one block in memory |
 | `discovery/fixed_k/` | workspace (evidence-only tables and fit caches), A step, H step, frontier fitting of many starts |
 | `discovery/cavity.py`, `discovery/cavity_kernels.py` | cavity score |
 | `discovery/moves.py`, `discovery/residual_births.py`, `discovery/search.py` | proposals and the reversible search |
 | `discovery/release.py`, `discovery/records.py` | release, product, records |
 
-Blocks are independent. One process pool serves every block of every contig, and the next contig's
+Blocks are independent. One process pool serves every block of every contig from one queue in contig order, so
+the next contig's blocks start as workers free up from the current contig's last ones, and the next contig's
 evidence is prepared on a helper thread while the current contig is discovered. Within a block, the
 fixed-K fits of many starts advance together as frontiers over the two memoised schedule maps
 (equal A states and untied transitions are evaluated once) and use up to `discovery.fixed_k.fit.FIT_MAX_THREADS = 16`

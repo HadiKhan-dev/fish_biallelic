@@ -1,5 +1,62 @@
 # Changelog
 
+## 2.9.0 (25 October 2026)
+
+This release changes how three parts of a run are scheduled, and nothing they compute: memory admission scans its
+task table only when it needs to, contig lanes take their contigs from one shared queue, and discovery runs every
+contig's blocks from one queue without draining its pool between contigs.
+
+**Memory admission** (`execution/memory.py`): the scan of the 4,096-slot task table for running and queued work runs
+only on the progress-exception branch (a head waiter that does not otherwise fit), not on every admission. Decisions
+are unchanged. Contended admission takes 54 instead of 95 microseconds per call (-44%), with 36% less CPU.
+
+**Contig lanes** (`execution/chromosome_workers.py`, `execution/contig_lanes.py`): each lane starts with one of the
+longest contigs, and a lane that finishes a contig takes the next from one queue, longest first; 2.8.0 fixed each
+lane's contigs at the start. Lease growth counts a queued contig's own work, and a recycled lane worker's
+replacement continues from the queue. The lane log line names the starting contigs and the queue, and a failure
+message lists each lane's contigs and the contigs no lane started. Replayed on recorded lane times, TroMau's lanes
+take 5,225 s instead of 6,100 s (-14%) and the 22-contig N = 320 simulations' 4-10% less. With few contigs whose
+work estimates are mis-ranked it can be slower (+3.6% on a 4-contig test).
+
+**Discovery** (`discovery/stage.py`): one pool batch takes every contig's blocks in contig order, so the next contig's
+blocks start as workers free up from the current contig's last ones; 2.8.0 drained the pool at the end of each
+contig. Evidence is still prepared one contig ahead on one helper thread (`discovery.stage.PREPARE_AHEAD = 1`). On a
+failure, the completed blocks of every unfinished contig are kept, so a rerun discovers only the missing blocks, as
+before. On 8 TroMau contigs, discovery takes 5% less time.
+
+**Resume:** the discovery package's code identity changes, so an output root of 2.8.0 raises CheckpointMismatch at
+discovery; run 2.9.0 into a new output root.
+
+**Measured, not changed:** checkpoint writes (about 0.2% of lane time); evidence site-quality fits (no exact
+arithmetic speedup); memory admission at N = 320 (2.8.0 paces nothing there: 107,884 admissions, none paced); and
+the fixed four-batch worker cap of assembly pools (no measurable gain). 2.8.0's measured admission removes 2.7.1's
+false pacing on partial nodes (a 64-core node with about 211 GiB: 2.7.1's governor paced 15,015 tasks on 260 GiB of
+predicted peaks with 23 GiB in use; lane phase 1,261 s with it, 770 s with 2.8.0). Why 2.8.0's whole runs are slower
+on full nodes is left to the 2.9 whole-genome matrix.
+
+**2.8.0 notes corrected:** their whole-run times are runs to the end of painting, not founder refit.
+
+### Validation
+Each change was tested alone against 2.8.0, both arms back to back on one node, with the outputs compared record by
+record: called and released founders, assembly completion and final panels, paintings, and local selection and
+discovery blocks by index.
+
+| Change | Test | Result |
+|---|---|---|
+| Memory admission | 80-sample simulation, chr19 | identical (15.7 M values, 2,728 blocks) |
+| Contig lanes | 40-sample simulation, 4 contigs, 2 lanes | identical (46.1 M values, 11,248 blocks) |
+| Discovery | TroMau, 8 contigs, to discovery | identical (3,999 blocks, 5.5 M values) |
+| All three | 40-sample simulation, 4 contigs, 2 lanes, 32 cores | identical (46,087,180 values, 11,248 blocks; largest drift 0) |
+
+Together, timed on the same test with 64 cores, both arms back to back on one node, a run takes 789 s instead of
+818 s (-3.5%): contig lanes 617 instead of 642 s, discovery 90 instead of 94 s. Peak memory is 17.4 GiB (2.8.0:
+17.2 GiB), no admission is paced, and the results are identical. Four contigs on two lanes leave the lane queue
+little to reorder; the replays above estimate its effect on whole genomes.
+
+- A discovery failure part-way through a contig keeps the same completed blocks as 2.8.0, and the rerun discovers
+  only the missing ones.
+- Not run: the whole-genome matrix (TroMau, the 22-contig simulations, std, stress, f3, K30) on full nodes.
+
 ## 2.8.0 (25 October 2026)
 
 This release rebuilds founder-path refinement in assembly: a robust maximum-path objective of a per-homologue
@@ -90,7 +147,7 @@ rescues and fresh identifiable harms, and per-component count-unverified outcome
 Refinement time on the equal-resource benchmark: 1.93-1.96x 2.6 in two measurements (limit 2x). On whole-pipeline runs
 with production warm-up and 2.7.1's memory admission, refinement level walls summed over contigs are 2.14x 2.7.1's
 (std 2.47x, stress 2.11x, f3 2.04x, K30 1.92x; backcross 2.10x and TroMau 2.26x measured on a near-identical variant).
-Whole runs (to the end of founder refit) take 1.17-1.58x 2.7.1's with this release (std 1,953 s vs 1,236 s, stress
+Whole runs (to the end of painting) take 1.17-1.58x 2.7.1's with this release (std 1,953 s vs 1,236 s, stress
 1,751 vs 1,131, f3 1,823 vs 1,173, K30 1,765 vs 1,512) and 1.14-1.34x with the refinement alone: measured-memory
 admission does not hold these runs back (no paced admission without memory pressure), but cores stay idle for
 longer; the cause is not yet isolated. The 22-contig simulations (refinement alone) take 1.30x and 1.70x 2.7.1's.

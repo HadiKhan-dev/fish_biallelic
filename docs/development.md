@@ -62,7 +62,7 @@ Every stage package has the same parts:
   per component or block, for evaluation and export).
 
 The driver (`pipeline/driver.py`) runs: checks -> run start (cores, memory governor, kernel cache, log, run record,
-`config.toml`) -> simulated inputs -> evidence and discovery (one block pool for all pending contigs, the next
+`config.toml`) -> simulated inputs -> evidence and discovery (one block pool and one block queue for all pending contigs, the next
 contig's evidence prepared on a helper thread) -> per contig in lanes: local selection -> final assembly ->
 painting -> pedigree -> founder refit -> family phase -> recombination -> export (`[export] enabled`). The reports
 layer writes the published tables at fixed points (`pipeline/outputs.py`); nothing reads them back. The export's
@@ -132,7 +132,8 @@ observed and generated pedigrees), `complete/<stage>`, the pedigree product `ped
 - **Pools and executors.** `BudgetedPool` is the one process pool (forkserver, non-daemonic so tasks may open
   pools; shared arrays copied once into shared memory and attached by every worker). `ChromosomeExecutor` runs one
   task per chromosome in persistent workers that keep per-chromosome state across phases. `execution/contig_lanes.py`
-  runs concurrent contig lanes on top of it.
+  runs concurrent contig lanes on top of it, in its dynamic mode: each worker starts with one of the longest tasks
+  and takes the next from one queue, longest first.
 - **Memory** (`execution/memory.py`). One governor per run keeps a ledger of the planned peak bytes of all running
   work in every process; constructs reserve their tasks' bytes and wait while they do not fit, so memory paces work
   instead of ending the run ([performance.md](performance.md#memory)). Stage code that allocates large memory

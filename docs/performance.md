@@ -209,7 +209,7 @@ discovery. No inference was rerun for this attribution.
 | stage | parallel unit | main cost |
 | --- | --- | --- |
 | evidence | contig (metadata scan, then direct shared-array decode in parallel windows); at most one contig ahead of discovery | site/sample QC, read-model fits; 33 bytes per retained cell, plus phase scratch |
-| discovery | block, in one persistent pool for all pending contigs | fixed-K fits and the reversible K search per block |
+| discovery | block, in one persistent pool and one block queue for all pending contigs | fixed-K fits and the reversible K search per block |
 | local selection | block (path fits), component (context refits), inside a contig lane | path-model fits and the candidate bank; two context assemblies |
 | assembly | joined batch (hierarchy), component (founder refinement), inside a contig lane | linker EM and certified panel searches; converged refinement fits and count decisions |
 | painting | sample block, inside a contig lane | binned emissions and the diploid HMM |
@@ -261,9 +261,9 @@ contig lane -> pool -> worker), never exceeded by the product of processes and t
 - **Contig lanes.** After discovery, contigs are reconstructed in concurrent lanes: one lane per
   `execution.contig_lanes.CONTIG_LANE_CORES = 16` cores (narrow lanes use fewer core-seconds per contig, because
   path selection scales fully but hierarchy tails, refinement tails and serial checkpoint phases do not), at most one
-  per pending contig, limited by memory. Each lane takes its contigs longest first. Leases start in proportion to
-  each lane's work and grow as finished lanes release theirs: at contig starts, at the phase starts the stages mark,
-  and inside pool phases.
+  per pending contig, limited by memory. Lanes start with the longest contigs, one each; a lane that finishes a
+  contig takes the next from one shared queue, longest first. Leases start in proportion to each lane's work and grow
+  as finished lanes release theirs: at contig starts, at the phase starts the stages mark, and inside pool phases.
 - **Pools.** A pool task claims `floor(total / active)` threads plus a share of the remainder at its numerical
   boundaries; during a batch's start-up every worker has one thread until the batch's workers have started.
   Freed threads move to surviving tasks at their next boundary; a running Numba kernel never changes its team. Discovery

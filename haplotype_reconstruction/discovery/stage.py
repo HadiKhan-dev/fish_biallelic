@@ -11,6 +11,7 @@ task reserves its planned peak memory with the run's memory governor (``block_ta
 """
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 import math
@@ -21,6 +22,7 @@ import numpy as np
 from ..evidence import records as evidence_records
 from ..execution import (BudgetedPool, claim_threads, malloc_trim, memory_governor, memory_worker_limit,
                          release_memory, reserve_memory, resident_bytes)
+from ..execution.memory import adopted, held_context
 from . import records
 
 from .config import DiscoveryConfig
@@ -136,6 +138,11 @@ def block_task_bytes(evidence: BlockEvidence, config: DiscoveryConfig | None = N
             + clustering_matrix_bytes(samples, config))
 
 
+# Contigs whose evidence is prepared ahead of the block queue, on as many helper threads. Each helper uses the
+# run's full CPU budget beside the block pool, so more than one would oversubscribe the cores without an explicit
+# CPU split between the helpers and the pool.
+PREPARE_AHEAD = 1
+
 # Block workers return freed heap pages every this many blocks, or whenever their resident set
 # reaches this size (glibc keeps arenas otherwise; per-block temporaries add up across a contig).
 _TRIM_EVERY_BLOCKS = 32
@@ -158,30 +165,44 @@ def _discover_task(task, shared, budget):
     return evidence.block, result
 
 
-class _TimedTasks:
-    """Retain the known batch size for the pool's existing startup/share policy."""
-
-    def __init__(self, tasks):
-        self.tasks = tasks
-
-    def __len__(self):
-        return len(self.tasks)
-
-    def __iter__(self):
-        # Drawn after a worker slot opens, before its memory reservation. perf_counter
-        # uses the same monotonic clock in parent and child processes on supported hosts.
-        for evidence, config in self.tasks:
-            yield evidence, config, time.perf_counter()
+def _queued_task(task, shared, budget):
+    """Pool task of the one-queue route: (contig position, block evidence, config, dispatch time) -> (contig
+    position, block, result) (worker side)."""
+    position, evidence, config, dispatched_at = task
+    block, result = _discover_task((evidence, config, dispatched_at), shared, budget)
+    return position, block, result
 
 
-def _discover_contig(store, contig, config, pool, evidence=None) -> None:
-    """Discover one contig's pending blocks; ``evidence``: its ContigEvidence when the caller has
-    it in memory (else decoded from the record)."""
+class _Contig:
+    """One contig's discovery bookkeeping. The dispatch thread fills it before the contig's first task is sent;
+    the calling thread records results (its chunk writer) and finishes the contig."""
+
+    def __init__(self, contig, file, empty, sizes, started):
+        self.contig, self.file, self.started = contig, file, started
+        self.empty = empty              # uninformative blocks: recorded as None by the calling thread
+        self.sizes = sizes              # block -> planned task bytes (diagnostic)
+        self.total = len(sizes)         # informative tasks
+        self.received = 0
+        self.writer = None
+        self.done = False
+
+    def record(self, block, result) -> None:
+        if self.writer is None:
+            self.writer = records.ChunkWriter(self.file)
+            for empty in self.empty:
+                self.writer.add(empty, None)
+        if block is not None:
+            self.writer.add(block, result)
+            self.received += 1
+
+
+def _start_contig(store, contig, config, evidence):
+    """Dispatch-thread preparation of one contig: (bookkeeping or None if it is complete, its block tasks)."""
     file = store.contig(contig)
     records.bind(store, file, config)
     if records.complete(file):
         print(f"\n  Discovery of {contig}: every block recorded earlier", flush=True)
-        return
+        return None, []
     if evidence is None:
         evidence = evidence_records.load(file)
     evidence = evidence.founder_view()
@@ -195,25 +216,19 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
     pending = [block for block in range(evidence.n_blocks) if block not in recorded]
     print(f"\n  Discovering {contig}..."
           + (f" ({len(recorded)} blocks recorded earlier)" if recorded else ""), flush=True)
-    started = time.monotonic()
-    writer = records.ChunkWriter(file)
-    tasks = []
-    try:
-        for block in pending:
-            block_input = block_evidence(evidence, block)
-            if block_input.informative:
-                tasks.append((block_input, config))
-            else:
-                writer.add(block, None)
-        # Plan bytes before dispatch, as for the original eager task list; the
-        # cheap lookup still lets _TimedTasks timestamp each task before admission.
-        sizes = {block_input.block: block_task_bytes(block_input, config) for block_input, _config in tasks}
-        for index, result in pool.imap_unordered(
-                _discover_task, _TimedTasks(tasks),
-                task_bytes=lambda task: sizes[task[0].block]):
-            writer.add(index, result)
-    finally:
-        writer.flush()
+    inputs = [block_evidence(evidence, block) for block in pending]
+    tasks = [block_input for block_input in inputs if block_input.informative]
+    empty = [block_input.block for block_input in inputs if not block_input.informative]
+    sizes = {block_input.block: block_task_bytes(block_input, config) for block_input in tasks}
+    return _Contig(contig, file, empty, sizes, time.monotonic()), tasks
+
+
+def _finish_contig(state) -> None:
+    """Calling thread: flush the contig's records, check them complete and report it."""
+    state.record(None, None)             # creates the writer and records the uninformative blocks if needed
+    state.writer.flush()
+    state.done = True
+    file, contig = state.file, state.contig
     if not records.complete(file):
         raise RuntimeError(f"{contig}: block discovery records are incomplete")
     blocks = [block for block in records.load(file) if block is not None]
@@ -230,33 +245,60 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
     print(f"    [Discovery] {contig}: {len(blocks)} blocks"
           + (f", founders/block: min={min(counts)}, max={max(counts)}, mean={np.mean(counts):.1f}"
              if counts else "")
-          + f" in {time.monotonic() - started:.1f}s; backstop hits {limits}"
+          + f" in {time.monotonic() - state.started:.1f}s; backstop hits {limits}"
           + f"; search incomplete {incomplete}/{len(blocks)}, unresolved {unresolved},"
           + f" omission blocks by cause {omission_causes}", flush=True)
 
 
 def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
-    """Discover every contig's pending blocks with one block pool; blocks are recorded as they
-    complete. ``prepare(contig) -> ContigEvidence | None`` makes the contig's evidence record (the
-    evidence stage) and returns the evidence in memory (None: decode the record); it is called one
-    contig ahead on a helper thread so the pool never idles between contigs."""
+    """Discover every contig's pending blocks with one block pool and one queue across contigs (a contig's
+    last blocks run beside the next contig's first, so the pool never drains between contigs); blocks are
+    recorded as they complete. ``prepare(contig) -> ContigEvidence | None`` makes the contig's evidence record
+    (the evidence stage) and returns the evidence in memory (None: decode the record); it is called up to
+    PREPARE_AHEAD contigs ahead on helper threads. Every block's result depends only on its own evidence."""
     contigs = list(contigs)
     if not contigs:
         return
     # Pool residence is owned between contigs; task workspaces remain individually paced.
     workers = max(1, int(budget.threads()))
     workers = memory_worker_limit([WORKER_RESIDENT_BYTES] * workers, workers, label="discovery workers")
+    states = [None] * len(contigs)
+    caller = held_context()
+
+    def tasks():
+        """The block tasks of every contig in contig order, prepared one contig ahead (pool dispatch thread)."""
+        upcoming = deque(preparer.submit(prepare, contig) for contig in contigs[:PREPARE_AHEAD])
+        for index, contig in enumerate(contigs):
+            # The calling thread waits for this work: its reservation counts as waiting meanwhile.
+            with adopted(caller), memory_governor().suspended():
+                evidence = upcoming.popleft().result()
+            if index + PREPARE_AHEAD < len(contigs):
+                upcoming.append(preparer.submit(prepare, contigs[index + PREPARE_AHEAD]))
+            states[index], blocks = _start_contig(store, contig, config, evidence)
+            del evidence
+            for block_input in blocks:
+                yield index, block_input, config, time.perf_counter()
+            blocks = block_input = None      # block views keep the whole contig's evidence alive
+
     # On an exception, terminate/join the pool and release its residence before waiting for the preparer.
-    with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
+    with ThreadPoolExecutor(PREPARE_AHEAD, thread_name_prefix="discovery-prepare") as preparer:
         with BudgetedPool(
                 budget, processes=workers, label="discovery", yield_to_waiters=True) as pool:
-            upcoming = preparer.submit(prepare, contigs[0])
-            for index, contig in enumerate(contigs):
-                # The helper thread has its own memory context; this caller is waiting for that work.
-                with memory_governor().suspended():
-                    evidence = upcoming.result()
-                if index + 1 < len(contigs):
-                    upcoming = preparer.submit(prepare, contigs[index + 1])
-                _discover_contig(store, contig, config, pool, evidence)
-                del evidence
-                release_memory()
+            try:
+                for index, block, result in pool.imap_unordered(
+                        _queued_task, tasks(), task_bytes=lambda task: states[task[0]].sizes[task[1].block]):
+                    state = states[index]
+                    state.record(block, result)
+                    if state.received == state.total:
+                        _finish_contig(state)
+                        release_memory()
+            except BaseException:
+                # Keep the blocks completed so far (a rerun discovers only the missing ones); unfinished contigs
+                # are not finished or reported.
+                for state in states:
+                    if state is not None and not state.done and state.writer is not None:
+                        state.writer.flush()
+                raise
+            for state in states:
+                if state is not None and not state.done:
+                    _finish_contig(state)

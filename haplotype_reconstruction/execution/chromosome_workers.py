@@ -12,12 +12,15 @@ executor closes). A worker waiting for memory hands its lease's CPUs to its peer
 is measured for the run's statistics. A worker process that holds no task state is recycled after a task when
 its private memory has grown by more than the executor's threshold since its first task (execution.pools): it
 reports the phase's results so far and exits, and a fresh worker continues its partition (results unchanged).
+A one-phase executor without retained state may be ``dynamic``: workers start with the largest tasks and then
+take the next-largest unstarted task from one shared queue (results stay in task order).
 """
 from __future__ import annotations
 
 import math
 import operator
 import traceback
+from collections import deque
 from multiprocessing.connection import wait
 
 from . import bootstrap
@@ -98,11 +101,32 @@ def _numba_capacity() -> int:
     return min(affinity_cpus(), int(numba.config.NUMBA_NUM_THREADS))
 
 
-def _worker(connection, partition, weights, handler, state, index, progress, settings, label, recycle_bytes=0):
+def _tasks(connection, partition, weights, after, first_position, dynamic):
+    """(position, (weight, (task_index, task), work left after it)) of a phase: the partition's tasks from
+    ``first_position``; then, with ``dynamic``, one task at a time from the executor's shared queue until it is
+    empty (a dynamic task's remaining work is its own)."""
+    for position, item in enumerate(zip(weights, partition, after)):
+        if position >= first_position:
+            yield position, item
+    if dynamic:
+        position = len(partition)
+        while True:
+            connection.send(("next", None))
+            kind, value = connection.recv()
+            if kind != "task":
+                return
+            task_index, task, weight = value
+            yield position, (weight, (task_index, task), 0.0)
+            position += 1
+
+
+def _worker(connection, partition, weights, handler, state, index, progress, settings, label, recycle_bytes=0,
+            dynamic=False):
     """An executor worker: run every phase's tasks of its partition in order (a phase command names the first
-    one), keeping their states. Holding no state, it retires after a task once its private memory exceeds its
-    baseline (after its first task) by ``recycle_bytes``: it sends ("recycle", (results so far, next position))
-    and exits, keeping its lease claim for its replacement."""
+    one), keeping their states; with ``dynamic`` (one-phase executors without retained state) it then takes
+    further tasks from the executor's shared queue. Holding no state, it retires after a task once its private
+    memory exceeds its baseline (after its first task) by ``recycle_bytes``: it sends ("recycle", (results so
+    far, next position)) and exits, keeping its lease claim for its replacement."""
     import numba
     bootstrap.apply_worker_settings(settings)
     states = {task_index: None for task_index, _ in partition}
@@ -130,9 +154,11 @@ def _worker(connection, partition, weights, handler, state, index, progress, set
                 # The exact initial allocation applies before any growth.
                 numba.set_num_threads(int(state.claims[index]))
                 results = []
-                for position, (weight, (task_index, task), left) in enumerate(zip(weights, partition, after)):
-                    if position < first_position:     # done by a retired predecessor in this phase
-                        continue
+                # Positions before first_position were done by a retired predecessor in this phase.
+                for position, (weight, (task_index, task), left) in _tasks(connection, partition, weights, after,
+                                                                           first_position, dynamic):
+                    if position >= len(partition):    # a queued task: its own work is this worker's remainder
+                        seat.finish_task(weight)
                     _, threads = seat.grow()
                     request, resumed = memory.acquire(task_index, sizes[task_index], seat=seat)
                     threads = resumed or threads
@@ -142,7 +168,7 @@ def _worker(connection, partition, weights, handler, state, index, progress, set
                     start = task_peak_start()
                     try:
                         with adopted(memory.held(task_index, request)):
-                            states[task_index], result = handler(task, states[task_index], phase, common,
+                            states[task_index], result = handler(task, states.get(task_index), phase, common,
                                                                  LeaseBudget())
                     except BaseException:
                         request.release()
@@ -188,6 +214,8 @@ class ChromosomeExecutor:
     and Numba's pool size; there are at most min(tasks, budget, max_workers) persistent processes.
     ``frontload`` apportions initial leases by each partition's first task; later growth still follows its
     remaining total work. This gives long first tasks their cores before short queued tasks begin.
+    ``dynamic`` (one phase, no retained state): partitions start with one task each and grow as workers take the
+    next-largest unstarted task, so no worker waits behind another's mis-weighted tasks.
     ``weights`` are nonnegative workload estimates in task order: the largest tasks go first to the
     least-loaded partition, and every phase starts each worker with a lease proportional to its partition's
     work. ``phase_progress`` maps phase names that handlers pass to ``budget.phase(name)`` to the fraction of a
@@ -200,7 +228,7 @@ class ChromosomeExecutor:
 
     def __init__(self, tasks, handler, *, budget, weights=None, max_workers=None, label="CHROMOSOME",
                  phase_progress=None, task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None,
-                 frontload=False):
+                 frontload=False, dynamic=False):
         self.tasks = tuple(tasks)
         self.handler = handler
         self.label = label
@@ -220,10 +248,16 @@ class ChromosomeExecutor:
             raise ValueError("weights must be finite nonnegative values in task order")
         self.partitions = [[] for _ in range(self.worker_count)]
         self._loads = [0.0] * self.worker_count
-        for task_index in sorted(range(len(self.tasks)), key=lambda i: (-values[i], i)):
+        order = sorted(range(len(self.tasks)), key=lambda i: (-values[i], i))
+        # dynamic: each worker starts with one of the largest tasks; the rest wait in one queue, longest first,
+        # and a worker that finishes takes the next (a static partition strands work behind a mis-weighted task).
+        self.dynamic = bool(dynamic) and self.worker_count > 1
+        self._queue = deque(order[self.worker_count:]) if self.dynamic else deque()
+        for task_index in order[:self.worker_count] if self.dynamic else order:
             owner = min(range(self.worker_count), key=lambda i: (self._loads[i], len(self.partitions[i]), i))
             self.partitions[owner].append((task_index, self.tasks[task_index]))
             self._loads[owner] += values[task_index]
+        self._ran = False
         self._weights = values
         self._initial_loads = ([values[partition[0][0]] for partition in self.partitions]
                                if frontload and self.tasks else None)
@@ -262,7 +296,7 @@ class ChromosomeExecutor:
             target=_worker,
             args=(child, partition, [self._weights[task_index] for task_index, _ in partition], self.handler,
                   self._state, index, self.phase_progress, bootstrap.worker_settings(), self.label,
-                  self.recycle_bytes))
+                  self.recycle_bytes, self.dynamic))
         try:
             with main_module_guard():
                 process.start()
@@ -314,12 +348,21 @@ class ChromosomeExecutor:
                     raise RuntimeError(f"chromosome worker {index} closed its pipe") from error
                 if kind == "error":
                     raise RuntimeError(f"chromosome worker {index} failed:\n{value}")
+                if kind == "next" and expected == "result" and self.dynamic:
+                    if self._queue:
+                        task_index = self._queue.popleft()
+                        self.partitions[index].append((task_index, self.tasks[task_index]))
+                        connection.send(("task", (task_index, self.tasks[task_index], self._weights[task_index])))
+                    else:
+                        connection.send(("done", None))
+                    continue
                 if kind == "recycle" and expected == "result":
                     done, position = value
                     partial[index].extend(done)
                     self._replace(index)
                     replaced.add(index)
-                    if position < len(self.partitions[index]):
+                    # A dynamic replacement skips the tasks done so far and continues from the shared queue.
+                    if self.dynamic or position < len(self.partitions[index]):
                         self._connections[index].send(self._command + (position,))
                         continue
                     value = []
@@ -338,6 +381,10 @@ class ChromosomeExecutor:
             raise RuntimeError("run requires an open chromosome executor context")
         if not self.tasks:
             return []
+        if self.dynamic:                    # task-to-worker assignment is decided while the phase runs
+            if self._ran:
+                raise RuntimeError("a dynamic chromosome executor runs one phase")
+            self._ran = True
         sizes = self.task_bytes if task_bytes is None else task_sizes(task_bytes, self.tasks)
         caller = held_context()
         depth, parent = depth_below(caller), caller[0] if caller else 0

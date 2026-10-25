@@ -88,7 +88,7 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     """
     contigs = tuple(contigs)
     executor = ChromosomeExecutor(contigs, _lane_contig, budget=cores, weights=weights, max_workers=lanes,
-                                  label=label.upper(), phase_progress=phase_progress,
+                                  label=label.upper(), phase_progress=phase_progress, dynamic=True,
                                   task_bytes=None if weights is None else [lane_resident_bytes(w) for w in weights])
     if executor.worker_count < 2:
         return run_sequentially(store, contigs, work, context, cores=cores)
@@ -96,16 +96,20 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     logs = {contig: os.path.join(log_directory, f"{label}_{contig}_{stamp}_{os.getpid()}.log")
             for contig in contigs}
-    partitions = [[contig for _, contig in partition] for partition in executor.partitions]
+    first = [contig for partition in executor.partitions for _, contig in partition]
+    queued = [contigs[index] for index in executor._queue]
     print(f"  Contigs: {executor.worker_count} concurrent lanes share {executor.cpu_budget} cores (leases in "
-          "proportion to work, growing at contig and phase starts and inside pool phases); longest first per "
-          "lane: " + "; ".join(", ".join(partition) for partition in partitions), flush=True)
+          "proportion to work, growing at contig and phase starts and inside pool phases); lanes start with "
+          f"{', '.join(first)}, then take the next of {', '.join(queued) or 'none'} (longest first)", flush=True)
     for contig in contigs:
         print(f"    {contig} log: {logs[contig]}", flush=True)
     common = dict(root=store.root, work=work, context=context, logs=logs)
     try:
         results = _run_executor(executor, common)
     except RuntimeError as error:
+        # Each lane's contigs so far (its last is the one it was running), then the contigs no lane started.
+        partitions = [[contig for _, contig in partition] for partition in executor.partitions]
+        partitions.append([contigs[index] for index in executor._queue])
         message = _failure_message(str(error), partitions, logs, done or (lambda contig: False))
         print(f"  [FAILED] {message}", flush=True)
         raise RuntimeError(message) from error
