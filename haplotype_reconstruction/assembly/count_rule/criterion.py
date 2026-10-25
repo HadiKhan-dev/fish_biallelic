@@ -1,11 +1,11 @@
 """Founder-count decisions between two panels that differ by one founder row.
 
 The criterion compares a larger panel X+ with a smaller panel X- (one row fewer) through
-per-sample scores (founder refinement: each sample's full-site Potts Viterbi score F_s; the
+per-sample scores (founder refinement: each sample's robust max-path score F_s, founder_refinement/objective.py; the
 assembly join: its per-sample panel likelihood) and the per-founder cost c of
 :func:`founder_cost`, c = scale x (mean sites per block / 200) x S x B. S counts the informative
 samples only, the samples whose score can depend on the panel (the join's batch samples; in
-founder refinement the samples with evidence at a complete site of the component): a sample whose
+founder refinement the samples with evidence at one of the component's objective sites): a sample whose
 score is identically zero carries no evidence for any count decision, so it neither scales the
 cost nor enters the bootstrap population. Every per-sample vector passed here has length S. Let
 d_s = F_s(X+) - F_s(X-) and L = sum_s d_s / c (in units of c).

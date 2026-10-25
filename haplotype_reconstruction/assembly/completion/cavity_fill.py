@@ -11,7 +11,8 @@ including the target.
 Quadratic dosage coefficients reduce the likelihood table to
 ``O(N*K**2 + N*2**U)``; exact carrier-sensitivity diagnostics retain
 ``O(U*N*2**U)`` worst-case work. Near-zero polynomial values use the
-direct positive mixture to avoid cancellation. Working memory is
+direct positive mixture to avoid cancellation, giving a worst-case
+``O(N*2**U*K**2)`` cost at U <= MAX_EXACT_BITS. Working memory is
 ``O(N*K**2 + (N+U)*2**U)``. Above MAX_EXACT_BITS unresolved founders the
 uncertain-core support replaces the enumeration (O(N U**3) per site); in
 its Hamming-ball regime the shell guard withholds releases near the

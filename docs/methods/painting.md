@@ -306,7 +306,8 @@ the painted panel.
 - `assembly_search.tsv`: every record of the final assembly's join searches (one row per search event and a closing
   row per search), with the assembly level and the first and last variant of the joined batch.
 - `founder_counts.tsv`, one row per component: `FounderRows` and how firmly that count is determined.
-  `FounderCountAmbiguous` is the final count step's call (the converged count pass of the last assembly level,
+  With founder refinement enabled (including the 2.7.1 default), `FounderRows` is the refined panel's row
+  count. `FounderCountAmbiguous` is the final count step's call (the converged refinement count pass of the last assembly level,
   which decides the reported count): true when one of its decisions has a bootstrap band containing zero, when it
   cycled, or when a restored best-F panel fails its own deletion test. `CountStepDecisions` lists the decisions
   (kind, founder count, outcome, margin, band). A count cycle (a row added by a search and deleted again) keeps the
@@ -314,7 +315,8 @@ the painted panel.
   `JoinCountCycles`, `JoinUndecidedCycles` and `JoinAmbiguousCountCalls` count the final assembly's join searches
   over the component, the `FeedbackJoin*` columns those of the local-selection context assemblies, and
   `UndecidedCountCycles` sums the undecided cycles of all three. Empty cells mean no count step or no join search
-  covers the component.
+  covers the component. Without refinement, `FounderRows` still describes the painted panel, but the
+  refinement count-call columns are empty when no call was recorded; join diagnostics remain separate.
 - `sample_switches.tsv`, one row per sample: `PaintedSwitches` (the painter's switch counts summed over
   components), `PaintedComponents`, the cohort median over painted samples (not split by generation) and the ratio
   to it.

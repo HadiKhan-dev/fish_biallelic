@@ -178,7 +178,7 @@ def run_pipeline(config: RunConfig, prepared: PreparedRun | None = None) -> RunR
     paths.output.mkdir(parents=True, exist_ok=True)
     paths.logs.mkdir(parents=True, exist_ok=True)
     execution.start_run(cores, preload=PRELOAD_MODULES, profile=config.execution.profile,
-                        memory_limit=memory_limit(config))
+                        memory_limit=memory_limit(config), memory_diagnostics=paths.logs)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log = paths.logs / f"run_{stamp}_{os.getpid()}.log"
     from ..execution.kernel_cache import persistent_kernel_cache
@@ -397,7 +397,7 @@ def rerun_recombination(config: RunConfig, run_directory) -> None:
     cores = resolve_cores(config)
     configs = stages.stage_configs(config)
     execution.start_run(cores, preload=PRELOAD_MODULES, profile=config.execution.profile,
-                        memory_limit=memory_limit(config))
+                        memory_limit=memory_limit(config), memory_diagnostics=paths.logs)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log = paths.logs / f"recombination_{stamp}_{os.getpid()}.log"
     paths.logs.mkdir(parents=True, exist_ok=True)

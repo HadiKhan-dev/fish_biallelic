@@ -192,7 +192,9 @@ completion's EM the support of every site is fixed for the whole EM (chosen unde
 posteriors), so the evidence lower bound stays a lower bound.
 
 Completion retains this support as a centre, an ordered core and sparse flip sets. No growing
-ball is expanded to a configuration-by-founder matrix. Quadratic scores use the value and local
+ball is expanded to a configuration-by-founder matrix. Flip indices and support sizes use signed int8:
+indices are -1 (padding) or 0..K-1, sizes are 0..K, hence neither can overflow at K <= 30.
+Configuration counts and packed offsets retain int64. Quadratic scores use the value and local
 fields at the centre plus the couplings among the flipped bits. Pair-dosage probabilities use
 single- and joint-flip masses. Their work is O(K^2 + C r^2) per site and update, where C is the
 support size and r its radius. Allele and shell marginals cost O(C r + K^2); cavity log odds use
@@ -278,22 +280,27 @@ samples.
   not a reverse conditional). The M-step takes the posterior homologue edge counts, adds the
   pseudocount `AssemblyConfig.linker.pseudo_count = 0.1`, normalises each row, floors it at log
   probability `AssemblyConfig.linker.min_log_probability = -10.0`, renormalises and mixes in a
-  uniform row, (1 - u) p + u/K_{i+g} with `AssemblyConfig.linker.uniform_mix = 0.01`. The update is
-  damped toward the previous transitions: T becomes (1 - eta) T + eta T_target with
-  eta = max(0.9^t, 0.1) at iteration t = 0, 1, ... (`AssemblyConfig.linker.learning_rate_decay = 0.9`,
-  `AssemblyConfig.linker.minimum_learning_rate = 0.1`), so the first update is undamped. The EM
+  uniform row, (1 - u) p + u/K_{i+g} with `AssemblyConfig.linker.uniform_mix = 0.01`. The default
+  takes the full regularised M-step: T becomes T_target. The numerical rate remains
+  eta = max(decay^t, minimum), with `AssemblyConfig.linker.learning_rate_decay = 1.0` and
+  `AssemblyConfig.linker.minimum_learning_rate = 0.1`; a smaller decay can reproduce damped
+  iteration for numerical comparisons. The EM
   stops when the undamped fixed-point residual `max(abs(M(T) - T))` at the returned forward
   transitions is at most `AssemblyConfig.linker.min_change = 0.001`, with M the regularised
   forward M-step, or after `AssemblyConfig.linker.max_iterations = 50` applied updates. The
-  cap increases from 20 to 50 in 2.7; tolerance and damping are unchanged. The higher cap
-  allows further fitting but does not guarantee convergence. Column-normalised reverse summaries no
-  longer enter the stopping rule: they are not parameters of this fixed-point problem. A uniform
-  starting point that already satisfies the criterion takes zero updates.
+  cap increased from 20 to 50 in 2.7. Full steps replace the decaying rate in 2.8 without
+  changing the M-map, uniform initialization or stopping tolerance. Finite-tolerance answers
+  and downstream decisions can change, especially for previously capped fits. Neither
+  satisfying the residual criterion nor using a higher cap proves a unique fixed point.
+  Column-normalised reverse summaries no longer enter the stopping rule: they are not parameters
+  of this fixed-point problem. A uniform starting point that already satisfies the criterion
+  takes zero updates.
 
 Each fitted gap persists a `linker_em` event in its join search summary (or the retained-input
 shadow record when the beam cannot establish a joined panel). It records the number of
 updates, whether the iteration cap was reached, whether the fit exhausted the cap without satisfying
-the stopping rule, the last damped **forward** change (absent for zero updates), and the undamped
+the stopping rule, the last applied **forward** change (the historical `last_damped_change`
+field, absent for zero updates), and the undamped
 fixed-point residual (also per edge). Each iterate's target is computed once and reused for its
 update; there are updates + 1 E/M evaluations, including the final stopping evaluation. `converged`
 means the returned residual is within tolerance; reaching the cap alone does not establish this.
@@ -318,15 +325,17 @@ to right and keeps, at every block, at most q paths per endpoint founder
 every kept path tries every founder at block k with the rest fixed, and the pooled candidates are
 selected with the same endpoint quota. Every path selected at any step is archived, so full paths
 through interior states survive; the archive, sorted by score, is the batch's candidate pool C0
-(bounded complete families in 2.7; see below). Candidates are ranked by
+(bounded proposals in 2.8; see below). Candidates are ranked by
 anchored score tie classes with content ordering inside each class; scores accumulate in float64 in
 past-block order. The panel search's tie rules downstream depend on this order.
 
-Release2.7 represents constant-transition Cartesian families without enumeration and stops a
-complete oversized frontier without first-N deletion. A current incumbent is retained and the
-family is released as unresolved continuation. An initial nonconstant forward overflow retains
-the input components unjoined because no joined incumbent yet exists. The binding policy is
-output-changing; [assembly work and memory](assembly_performance.md) describes its bound and gates.
+Release 2.8 bounds every endpoint by its quota, splitting cut-score tie classes in
+canonical prepared-row content order. Constant-transition families always use the existing
+first-covering members (O(B K) paths), without Cartesian expansion. Search continues on that
+proposal pool; there is no beam-bound stop or unjoined-input fallback. These are declared
+proposal approximations, including for ties that fit the former materialization allowance.
+Equal linkage scores do not imply equal genotype likelihood or released alleles. See
+[assembly performance](assembly_performance.md#polynomial-beam-proposals-28).
 
 At level 1 every gap enters a step. At later levels the maximum gap is
 max(1, 1 + floor(t / s)), where s is the mean genetic span of the batch's components in
@@ -549,7 +558,8 @@ scores (the join's V_s, refinement's F_s), the total gain is d_s = score_s(X+) -
 sequence part is q_s = score_s(X+) - score_s(X+^sigma). The shadow X+^sigma replaces every cell
 (block, row) of X+ that a reference panel does not use by the reference's row at that block nearest
 in Hamming distance over sites called in both; the reference is X- in the
-join, and in refinement X+ without f for a deletion or the incumbent for an addition. A founder
+join, and in refinement (2.8) X+ without each member of its own canonical death class, in both
+directions ([symmetric null](founder_refinement.md#symmetric-sequence-null)). A founder
 without a private cell is a pure mosaic of the others and has q = 0 exactly, so switch savings
 alone never justify a founder.
 
@@ -557,8 +567,8 @@ alone never justify a founder.
 for a span of B blocks and S samples, i.e. c = s S L / 200 for a span of L sites, with
 `AssemblyConfig.cost_scale = 0.5` as s. In the join the blocks are the batch's input components and
 S counts its informative samples; in founder refinement the blocks are the component's prepared
-panels and S counts the component's informative samples (samples with evidence at one of its complete
-sites). With n_eff = (sum_s d_s+)^2 / sum_s (d_s+)^2, the
+panels and S counts the component's informative samples (samples with evidence at one of its
+objective's sites). With n_eff = (sum_s d_s+)^2 / sum_s (d_s+)^2, the
 participation ratio of the positive differences, a difference vector passes when
 m = sum_s d_s / c - n_eff / (2S) > 0 and m' > 0, where m' is the same margin with the sample of
 largest d_s left out (S unchanged). The cost is thus charged only to a founder's effective carriers
@@ -588,7 +598,8 @@ may produce one. Founder refinement does not use this shortcut (it scores the sh
 
 **Count cycles.** Deleting a path that an addition of the same search created closes a count cycle:
 the rule, called against different panels, has both added and deleted that row. The deletion
-stands; the join then adds no further births, and refinement ends its additions. A cycle is
+stands and the join then adds no further births (refinement's symmetric null decides both directions
+alike, so its count pass runs no check deletion and closes no cycle). A cycle is
 undecided when its closing deletion is ambiguous and it began with a decided deletion (not with an
 addition, and not with the deletion of a path without sequence of its own, which is not a
 decision); undecided cycles are counted in the census and published in `founder_counts.tsv`.
@@ -703,7 +714,7 @@ biological founder count), B the components per batch (at most 10), m the join b
 (about 2,000 at most), q the endpoint quota, |C| the candidate pool (O(q B K) paths) and I the linker
 E/M evaluations (at most 51: 50 updates plus the returned-iterate check). The table gives
 leading kernels, not a blanket bound on the whole
-search. Complete beam families have an explicit materialization bound in2.7; refinement
+search. Beam frontiers and constant-family proposals are polynomially bounded in 2.8; refinement
 frontiers and the bin dependence of exact two-row certification need the qualifications below.
 
 | Step | Work | Largest power of K |

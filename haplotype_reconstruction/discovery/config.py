@@ -67,15 +67,9 @@ class ResidualBirthConfig:
     min_soft_responsibility: minimum expected copies of a subtracted row for a residual record.
     min_unique_sample_support: distinct samples behind an emitted consensus.
     min_effective_sample_support: responsibility-weighted samples behind an emitted consensus.
-    max_alternative_groups: soft count budget of alternative residual groups (maximal cliques),
+    max_alternative_groups: soft count budget of alternative residual groups (edge-cover cliques),
         ranked by whole size classes. Admit a straddling class through twice this budget;
         omit it whole beyond that. Strictly smaller classes are ranked truncation.
-    max_clique_enumeration: maximum actual number of maximal cliques per connected component.
-        An oversized component contributes no alternatives. Exact union/join decomposition
-        can establish oversized output without materializing a large Cartesian product.
-    max_clique_calls: legacy Python reference traversal performance switch. The compiled
-        exact traversal counts complete output directly and does not use this work threshold.
-        This never changes the admitted clique set; actual output count decides.
     """
 
     # Bounded proposal geometry; zero explicitly selects the dense reference path.
@@ -93,8 +87,6 @@ class ResidualBirthConfig:
     min_unique_sample_support: int = 2
     min_effective_sample_support: float = 1.50
     max_alternative_groups: int = 64
-    max_clique_enumeration: int = 10_000_000
-    max_clique_calls: int = 200_000
 
 
 @dataclass(frozen=True)

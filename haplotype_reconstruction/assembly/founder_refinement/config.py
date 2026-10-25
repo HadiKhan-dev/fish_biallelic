@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Release 2.8 switch model: map-derived per-homologue reset probabilities.
+DEFAULT_GENOTYPE_ERROR = 0.01
+DEFAULT_RESET_RATE = 1.0
+MAP_PROBABILITY_FLOOR = 1e-15
+
 
 @dataclass(frozen=True)
 class FounderRefinementConfig:
@@ -34,7 +39,7 @@ class FounderRefinementConfig:
         C * N * W * b^2 * max(K, R)^3. N is the full sample count, W the template's unit
         count, b its largest actual bin count, K the current working founder count, and R
         its largest actual alphabet. One account covers every focal and retry. Exhaustion
-        discards the entire component refinement/count attempt, preserves its original rows
+        during the count pass discards the entire component refinement/count attempt, preserves its original rows
         and incoming families, and releases computationally unevaluated source domains.
         The value 2^25 is the next power of two strictly above twice the largest
         measured normalized charge in 98 realistic original component replays. The
@@ -44,6 +49,21 @@ class FounderRefinementConfig:
         ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class
         when its complete expansion would exceed the budget. Branches reuse
         labelled fixed-K fits on identical inputs and run sequentially.
+    genotype_error: the robust emission's uniform-genotype mixture (0.01: max(log(0.99 P + 0.01/3),
+        -2)); recorded, not varied.
+    reset_rate: ancestry-reset opportunities per Morgan per homologue (1.0): a physical edge of
+        d Morgans has hazard reset_rate x d (objective.py; workspace.map_hazards).
+    map_probability_floor: smallest per-edge reset probability before gap composition (1e-15), so
+        sites at equal map positions still have a finite switch cost.
+    polish: after the count pass, refit the decided panel (and its same-K equal-F alternatives)
+        once more, by one forward-first search, with three extra move families at every ordinary fixed
+        point: a beam escape (the
+        window-beam proposer on the map-aware binned surrogate, beam.WindowBeam, then one exact
+        acceptance pass over its bank), long one-founder moves with one private correction
+        (search.LONG_WINDOW) and fine-window/suffix bridges. Count-pass fits use 2.6's exact window
+        programmes only. K is never changed by the polish, and the count decisions are not re-evaluated on
+        the polished panel. A polish that exhausts the window work account (window_work_coefficient) keeps
+        the count pass's panel unpolished (warned; recorded as the refinement record's polish status).
     """
 
     proposal_max_bins: int = 2000
@@ -52,3 +72,7 @@ class FounderRefinementConfig:
     frontier_bytes: int = 128 << 30
     window_work_coefficient: int = 1 << 25
     alternative_branches: int = 16
+    genotype_error: float = DEFAULT_GENOTYPE_ERROR
+    reset_rate: float = DEFAULT_RESET_RATE
+    map_probability_floor: float = MAP_PROBABILITY_FLOOR
+    polish: bool = True

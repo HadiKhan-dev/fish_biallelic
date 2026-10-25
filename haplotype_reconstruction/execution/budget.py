@@ -712,14 +712,17 @@ def _completed_tasks(budget: CpuBudget, functions, bytes_per_task, label, envelo
                 # are still being admitted (the shares then sum to the budget).
                 starting = []
                 while queued and len(running) + len(starting) < limit:
+                    # A pressure progress grant must have a CPU seat: otherwise an unstarted task could
+                    # own the only progress permit while its running sibling waits for nested memory.
+                    if not slots.admit(queued[0]):
+                        break
                     if pending is None:
                         pending = reserve(queued[0])
                     if not pending.poll():
                         if running or starting:
+                            slots.finish(queued[0])
                             break
                         pending.wait()      # nothing of ours runs: wait here (the governor guarantees progress)
-                    if not slots.admit(queued[0]):
-                        break
                     starting.append((queued.pop(0), pending))
                     pending = None
                 for index, request in starting:

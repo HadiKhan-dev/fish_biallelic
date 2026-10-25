@@ -484,6 +484,44 @@ def constants_section() -> list[str]:
     return lines
 
 
+def pressure_section() -> list[str]:
+    from haplotype_reconstruction.execution import config
+    meanings = {
+        "MEMORY_SOFT_FRACTION": "One outer start per full observed sampling interval at/above this fraction.",
+        "MEMORY_HARD_FRACTION": "Stop outer starts except one progress task if no work runs or is queued to start.",
+        "MEMORY_SAMPLE_SECONDS": "Shared working-set sample period and slow-start observation interval in seconds.",
+    }
+    lines = ["## Memory pressure policy", "",
+             "Execution-only constants in `execution/config.py`; no scientific identity or decision changes. "
+             "Admission uses only the measured job cgroup working set (usage minus inactive file cache), "
+             "with MemAvailable as fallback. Below SOFT there is no memory throttle. From SOFT to HARD, "
+             "each outer start waits for a sample taken at least one full interval after the previous outer "
+             "admission. At HARD, only the single progress exception may admit outer work. Nested continuations "
+             "of admitted work always proceed, including above HARD, so existing work can finish. Independent "
+             "pool tasks and contigs count as outer work. QUEUED tokens never count as RUNNING. "
+             "No estimate, predicted peak, held reservation or per-task learned predictor enters admission. "
+             "Legacy requested byte sizes remain only as diagnostics and buffer/batch-size bounds in painting "
+             "and family orientation scratch. Sampling cannot guarantee that arbitrarily delayed allocations "
+             "or a single indivisible task will fit physical capacity.", "",
+             "| constant | value | meaning |", "| --- | --- | --- |"]
+    return lines + [f"| `{name}` | `{getattr(config, name)}` | {meaning} |" for name, meaning in meanings.items()] + [""]
+
+
+def runtime_constants_section() -> list[str]:
+    from haplotype_reconstruction.execution import config
+    return ["## Execution runtime constants", "",
+            "Declared in `execution/config.py`; these change failure detection, never the scientific model.", "",
+            "| constant | default | meaning |", "| --- | --- | --- |",
+            f"| `MEMORY_STALL_MINUTES` | `{config.MEMORY_STALL_MINUTES}` | Minutes with waiters and unchanged grant/release counters (also starts where recorded) before checking for a stalled run. |",
+            f"| `MEMORY_STALL_POLL_SECONDS` | `{config.MEMORY_STALL_POLL_SECONDS}` | Owner-process sampling interval in seconds; aligned int64 header reads never take the ledger lock. |",
+            f"| `MEMORY_STALL_CPU_CORES` | `{config.MEMORY_STALL_CPU_CORES}` | Failure also requires less than this many CPU-seconds per second across the run process tree over the same window. |", "",
+            "Process turnover or unreadable CPU evidence restarts the observation window. A fatal stall writes "
+            "the decoded ledger and per-process CPU to a JSON diagnostic and stderr, then stops the owner's "
+            "verified descendants and exits nonzero without waiting on ledger or pool finalizers. Pipeline "
+            "diagnostics are saved under the run's logs directory; other entry points default to the ledger "
+            "directory. Checkpoints are kept for resume; unfinished units must be rerun.", ""]
+
+
 # --------------------------------------------------------------------------------------------- environment
 def environment_section() -> list[str]:
     lines = ["## Environment", "",
@@ -513,7 +551,7 @@ def render() -> str:
              "`--set 'input.contigs=[\"chr1\", \"chr2\"]'`; a value that is not valid TOML is read as a string.",
              "", "Contents:", ""]
     sections = [command_line_section(), toml_section(), rules_section(), presets_section(),
-                constants_section(), environment_section()]
+                constants_section(), pressure_section(), runtime_constants_section(), environment_section()]
     for section in sections:
         title = section[0].removeprefix("## ")
         lines.append(f"- [{title}](#{anchor(title)})")

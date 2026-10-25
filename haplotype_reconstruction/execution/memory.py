@@ -1,50 +1,17 @@
-"""Run memory: one governor that paces work so that planned peaks fit, and heap trimming at phase boundaries.
+"""Admission from measured job memory, shared by all processes of a run.
 
-The memory governor (blueprint 11.14). No run may die of memory because too much work was admitted at once:
-when memory gets tight, work waits (fewer concurrent tasks) instead of failing. There is one governor per run,
-shared by every process of the run (the driver, contig-lane coordinators, pool and executor workers, and their
-threads) through a small ledger in node-local shared memory (/dev/shm):
+The job cgroup working set (usage minus inactive file cache; MemAvailable fallback) is sampled once per run
+per MEMORY_SAMPLE_SECONDS. Below SOFT, outer starts are unrestricted by memory. From SOFT to HARD, an outer
+start must wait for a measurement taken at least one full sampling interval after the previous outer admission.
+At HARD, no new outer work starts except one progress task when no work is running or already queued to start.
+Nested continuations of admitted work never wait for memory; independent pool/contig tasks are outer work.
+QUEUED never counts as RUNNING, and concurrent tasks acquire CPU seats before their admission. Waiting parents
+do not count as running, so the progress rule can always admit the next task needed to finish and free memory.
+Admission never signals processes; the owner watchdog aborts a stalled run with a diagnostic.
 
-* Limit: the bytes the run may plan to use at once = the memory available when the governor starts
-  (`resources.available_memory_bytes`: MemAvailable, every enclosing cgroup's limit minus its working set,
-  SLURM_MEM_PER_NODE) minus a headroom of 10% (at least 4 GiB, at most half), and at most the configured
-  ``[execution] memory_limit``.
-* Ledger: the planned peak bytes of every running task (a *reservation*). A request is admitted when its bytes
-  fit next to the reservations already held (ledger <= limit) and into the memory the node has right now (live
-  available memory minus the headroom, minus the part of the held reservations not yet visible as used memory);
-  otherwise it waits until enough is released (a waiter notices a release within WAKE_SECONDS).
-* Flexible requests (``minimum``): "up to nbytes, at least minimum" (e.g. a batch size that adapts) are granted
-  as much as fits when they are admitted, never less than the minimum; their claim in the queue is the minimum.
-* Envelopes: estimates are additive by default (a nested request adds to its parent's). A reservation made with
-  ``envelope=True`` covers the work nested inside it: nested requests first borrow its unused bytes (granted at
-  once, no ledger traffic) and take only the excess from the ledger.
-* Graded headroom: a request at depth d may fill the ledger only to limit x (1 - NESTED_HEADROOM_FRACTION /
-  2^(d-1)), so the top of the limit stays for deeper (nested) requests: outer work that waits for its own sub-tasks
-  cannot leave them without room (they would otherwise only progress by forced admissions). When the only holders
-  are retained states (`rest`: no work that could make nested requests), the first waiting request may use that
-  room at once, within the limit.
-* Order: waiting requests are served deepest first (a request made inside running work, e.g. a pool task inside
-  a contig lane, finishes what is started before new work starts), then first come, first served. A later
-  request may overtake the first waiting one only if both fit, so small tasks never starve a large one.
-* Progress: a request too large to fit even alone runs alone (when no reservation is held); if every holder of a
-  reservation is itself waiting (for memory, or for its own sub-tasks; tasks granted but not started do not count
-  as running) for PROGRESS_SECONDS, the first waiting
-  request is admitted over the limit so that work continues, one such task at a time (when it ends and every
-  holder still waits, the next one follows at once). Both are logged; nothing else is ever admitted over the
-  limit, and the governor never deadlocks. Reservations of processes that exited without releasing them (a
-  terminated pool) are released by the next waiter. The governor never signals a process.
-* Killed runs: a new governor removes this user's ledgers and shared-memory segments (SEGMENT_PREFIX, named after
-  the run's driver) that no process holds open (liveness marks: open-file-description locks, valid across PID
-  namespaces) and whose named process is dead, before it reads the available memory.
-
-Pacing changes when work runs, never what it computes: every construct returns results in task order, or in an
-order its callers already accept, and thread counts never change results.
-
-The parallel constructs reserve through the governor: BudgetedPool tasks (``task_bytes``) and shared arrays,
-ChromosomeExecutor tasks (``task_bytes``; contig lanes reserve each contig's resident bytes), CpuBudget.concurrent
-and thread_map. Stage code that allocates large memory outside them wraps it in `reserve_memory`. Statistics
-(waits, wait seconds, peak reserved and peak live use, estimates against measured peak RSS per task label) go to
-the log and the run record.
+No estimate enters admission and no bytes are reserved. Compatibility byte fields stay zero. Requested sizes
+remain only for legacy estimate diagnostics and flexible buffer/batch sizing; they never delay a start.
+The request/presence/start/release/reserve_memory APIs, heap trimming and stale-ledger cleanup are retained.
 """
 from __future__ import annotations
 
@@ -65,23 +32,18 @@ import uuid
 
 import numpy as np
 
-from .resources import available_memory_bytes
+from .resources import memory_pressure
+from .config import MEMORY_SOFT_FRACTION, MEMORY_HARD_FRACTION, MEMORY_SAMPLE_SECONDS
 
 GIB = 1 << 30
 HEADROOM_FRACTION = 0.10
 HEADROOM_MIN_BYTES = 4 * GIB
-# How long every holder must be waiting before the first waiting request is admitted over the limit.
-PROGRESS_SECONDS = 2.0
-# Graded headroom for nested work (15 Oct 36b stall): a request at depth d may fill the ledger only up to
-# limit x (1 - NESTED_HEADROOM_FRACTION / 2^(d-1)) - 80% at depth 1, 90% at 2, 95% at 3, ... - so suspended outer
-# work (lane residents, pool tasks waiting for their searches) never takes the room their nested work needs.
-NESTED_HEADROOM_FRACTION = 0.20
 # Longest pause between full re-checks of a waiting request (the first re-checks come sooner); between them a
 # waiter looks every WAKE_SECONDS, without the lock, whether anything was released and then re-checks at once.
 POLL_SECONDS = 0.5
 WAKE_SECONDS = 0.02
 # A process re-reads the live available memory at most this often outside waits.
-LIVE_CACHE_SECONDS = 0.2
+LIVE_CACHE_SECONDS = MEMORY_SAMPLE_SECONDS
 # Waiters look for reservations of exited processes at most this often.
 PURGE_SECONDS = 2.0
 # A process logs a waiting task label at most this often.
@@ -90,7 +52,7 @@ LOG_SECONDS = 30.0
 TOKENS = 4096
 WAITERS = 4096
 LABELS = 256
-_MAGIC = 0x48_41_50_4D_45_4D_33        # "HAPMEM3"
+_MAGIC = 0x48_41_50_4D_45_4D_34        # "HAPMEM4": pressure admission
 
 # Token states: its holder runs, waits for its own sub-tasks, waits for memory, or the task it was reserved for
 # has not started yet (a pool task granted by the parent until its worker picks it up). Only RUNNING counts as
@@ -100,13 +62,13 @@ RUNNING, SUSPENDED, WAITING, QUEUED, RESIDENT = 1, 2, 3, 4, 5      # RESIDENT: r
 # Header: one int64 per field, by index (fast scalar access from every process).
 _FIELDS = ("magic", "limit", "configured", "headroom", "live_headroom", "start_available", "next_id", "reserved",
            "waiting", "peak_reserved", "peak_used", "largest", "requests", "waits", "wait_ns", "alone", "forced",
-           "purged", "blocked_since", "created_ns", "released", "purge_ns")
+           "purged", "blocked_since", "created_ns", "released", "purge_ns",
+           "live_bytes", "sample_ns", "starts", "available_bytes", "outer_start_ns")
 (_MAGIC_AT, _LIMIT, _CONFIGURED, _HEADROOM, _LIVE_HEADROOM, _START, _NEXT_ID, _RESERVED, _WAITING, _PEAK_RESERVED,
  _PEAK_USED, _LARGEST, _REQUESTS, _WAITS, _WAIT_NS, _ALONE, _FORCED, _PURGED, _BLOCKED_SINCE, _CREATED,
- _RELEASED, _PURGE_NS) = range(len(_FIELDS))
+ _RELEASED, _PURGE_NS, _LIVE_BYTES, _SAMPLE_NS, _STARTS, _AVAILABLE_BYTES, _OUTER_START_NS) = range(len(_FIELDS))
 _HEADER_SLOTS = 32
-# A token's ledger bytes plus what it borrowed from an envelope ancestor (lender) are what it holds; an envelope
-# lends its unused bytes (bytes + borrowed - lent) to the requests nested under it (parent links).
+# Retain the token layout for diagnostics/watchdog compatibility; byte/lending fields are always zero.
 _TOKEN = np.dtype([("id", "<i8"), ("pid", "<i8"), ("started", "<i8"), ("bytes", "<i8"), ("granted", "<i8"),
                    ("depth", "<i8"), ("state", "<i8"), ("label", "<i8"), ("forced", "<i8"), ("parent", "<i8"),
                    ("envelope", "<i8"), ("lent", "<i8"), ("borrowed", "<i8"), ("lender", "<i8")])
@@ -115,7 +77,7 @@ _WAITER = np.dtype([("id", "<i8"), ("pid", "<i8"), ("started", "<i8"), ("bytes",
 _LABEL = np.dtype([("name", "S56"), ("tasks", "<i8"), ("estimate_sum", "<f8"), ("estimate_max", "<i8"),
                    ("measured", "<i8"), ("measured_sum", "<f8"), ("measured_max", "<i8"), ("under", "<i8"),
                    ("ratio_max", "<f8"), ("waits", "<i8"), ("wait_ns", "<i8"), ("alone", "<i8"),
-                   ("forced", "<i8")])
+                   ("forced", "<i8"), ("live_peak", "<i8")])
 _TOKENS_AT = 8 * _HEADER_SLOTS
 _WAITERS_AT = _TOKENS_AT + TOKENS * _TOKEN.itemsize
 _LABELS_AT = _WAITERS_AT + WAITERS * _WAITER.itemsize
@@ -126,7 +88,7 @@ _PREFIX = "haplotypes-memory-"
 # the node removes the segments of a run that was killed before it unlinked them (they would hold RAM).
 SEGMENT_PREFIX = "haplotypes-shm-"
 _SEGMENT_DIRECTORY = Path("/dev/shm")
-_PROGRESS_NS = int(PROGRESS_SECONDS * 1e9)
+_SAMPLE_NS_INTERVAL = int(MEMORY_SAMPLE_SECONDS * 1e9)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -402,19 +364,20 @@ class _Ledger:
 # ---------------------------------------------------------------------------------------------------------------
 
 class Reservation:
-    """A request for ``nbytes`` of the run's memory: queued until granted (`poll` / `wait`), then held until
-    `release`. Requests of zero bytes are granted at once and take no ledger entry."""
+    """An admission/progress token. ``nbytes`` is diagnostic or flexible-buffer metadata, never reserved."""
 
     __slots__ = ("governor", "nbytes", "minimum", "label", "depth", "id", "granted", "waited", "closed",
-                 "queued", "presence", "parent", "envelope", "_waiter", "_slot", "_label", "_logged")
+                 "queued", "presence", "parent", "envelope", "outer", "_waiter", "_slot", "_label", "_logged")
 
     def __init__(self, governor: "MemoryGovernor", nbytes: int, label: str, depth: int, minimum: int | None = None,
-                 *, queued: bool = False, presence: bool = False, parent: int = 0, envelope: bool = False):
+                 *, queued: bool = False, presence: bool = False, parent: int = 0, envelope: bool = False,
+                 outer: bool = False):
         self.governor = governor
         self.nbytes = max(0, int(nbytes))
         # parent: the token this request is nested under (0: none); envelope: it covers its nested requests.
         self.parent = int(parent or 0)
         self.envelope = bool(envelope)
+        self.outer = bool(outer) or not self.parent
         # queued: granted for a task that has not started (state QUEUED until its executor marks it running);
         # presence: a zero-byte token that only marks running work (tasks without an estimate).
         self.queued = bool(queued)
@@ -425,7 +388,7 @@ class Reservation:
         self.label = label
         self.depth = int(depth)
         self.id = 0
-        self.granted = self.nbytes == 0 and not self.presence
+        self.granted = False
         self.waited = False
         self.closed = False
         self._waiter = -1
@@ -510,11 +473,6 @@ def _gib(value) -> str:
     return f"{value / GIB:.2f} GiB"
 
 
-def graded_limit(limit: int, depth: int) -> int:
-    """The ledger total that a request at ``depth`` may fill (see NESTED_HEADROOM_FRACTION)."""
-    return limit - (int(limit * NESTED_HEADROOM_FRACTION) >> max(0, int(depth) - 1))
-
-
 def headroom_bytes(available: int) -> int:
     """The headroom kept free of reservations: 10% of ``available``, at least 4 GiB, at most half."""
     return min(available // 2, max(HEADROOM_MIN_BYTES, int(available * HEADROOM_FRACTION)))
@@ -528,17 +486,16 @@ class MemoryGovernor:
         self._owner = owner
         self._labels: dict[str, int] = {}
         self._slots: dict[int, int] = {}          # token id -> slot, for tokens this process touched
-        self._live_value: int | None = None
-        self._live_time = -1.0
-        self._live_lock = threading.Lock()
         self._purged_at = 0.0
         self._logged: dict[str, float] = {}
+        self._sample_stop = threading.Event()
+        self._sampler = None
+        self._watchdog = None
 
     # ------------------------------------------------------------------ creation
     @classmethod
-    def create(cls, memory_limit: int | None = None) -> "MemoryGovernor":
-        """A new ledger owned by this process: limit = available memory now minus headroom, at most
-        ``memory_limit`` bytes (None: no configured limit)."""
+    def create(cls, memory_limit: int | None = None, *, diagnostic_directory=None) -> "MemoryGovernor":
+        """New run ledger: job memory capacity, capped by ``memory_limit`` when supplied."""
         global _STALE_SEGMENTS
         directory = _directory()
         _remove_stale(directory, _PREFIX)
@@ -547,21 +504,24 @@ class MemoryGovernor:
         pid, started = _identity()
         path = directory / f"{_PREFIX}{os.getuid()}-{pid}-{started}-{uuid.uuid4().hex[:8]}"
         ledger = _Ledger(path, create=True)
-        available = available_memory_bytes()
-        if available is None:                  # nothing known about the node: only a configured limit binds
-            headroom, node_limit, available = 0, 1 << 62, -1
-        else:
-            headroom = headroom_bytes(available)
-            node_limit = max(0, available - headroom)
-        limit = node_limit if memory_limit is None else min(node_limit, max(0, int(memory_limit)))
+        sample = memory_pressure()
+        used, node_limit, available = (0, 1 << 62, -1) if sample is None else sample
+        limit = node_limit if memory_limit is None else min(node_limit, max(1, int(memory_limit)))
         with ledger.locked() as h:
             h[_MAGIC_AT] = _MAGIC
             h[_LIMIT] = limit
             h[_CONFIGURED] = -1 if memory_limit is None else int(memory_limit)
-            h[_HEADROOM] = h[_LIVE_HEADROOM] = headroom
+            h[_HEADROOM] = h[_LIVE_HEADROOM] = int(limit * (1 - MEMORY_HARD_FRACTION))
             h[_START] = available
+            h[_LIVE_BYTES] = h[_PEAK_USED] = used
+            h[_AVAILABLE_BYTES] = available
+            h[_SAMPLE_NS] = time.monotonic_ns()
             h[_CREATED] = time.time_ns()
         governor = cls(ledger, owner=True)
+        governor._sampler = threading.Thread(target=governor._sample_loop, name="memory-pressure", daemon=True)
+        governor._sampler.start()
+        from .memory_watchdog import LedgerWatchdog
+        governor._watchdog = LedgerWatchdog(governor, diagnostic_directory=diagnostic_directory)
         atexit.register(governor.close)
         return governor
 
@@ -585,8 +545,13 @@ class MemoryGovernor:
 
     def close(self) -> None:
         """The owner removes the ledger file (attached processes keep their mappings until they exit)."""
-        if self._owner:
+        if self._owner and self.owner[0] == os.getpid():
+            if self._watchdog is not None:
+                self._watchdog.close()
             self._owner = False
+            self._sample_stop.set()
+            if self._sampler is not None:
+                self._sampler.join(timeout=2 * MEMORY_SAMPLE_SECONDS)
             try:
                 os.unlink(self._ledger.path)
             except OSError:
@@ -595,7 +560,7 @@ class MemoryGovernor:
     # ------------------------------------------------------------------ properties
     @property
     def limit(self) -> int:
-        """Bytes the run may hold in reservations at once."""
+        """Capacity against which measured working-set pressure is compared."""
         return int(self._ledger.h[_LIMIT])
 
     @property
@@ -604,13 +569,13 @@ class MemoryGovernor:
 
     @property
     def reserved(self) -> int:
-        """Bytes currently held in reservations (all processes of the run)."""
+        """Compatibility counter: zero, since admission never reserves bytes."""
         return int(self._ledger.h[_RESERVED])
 
     def describe(self) -> str:
         h = self._ledger.h
         configured, start = int(h[_CONFIGURED]), int(h[_START])
-        text = (f"memory limit {_gib(self.limit)} for planned peaks (available at start "
+        text = (f"memory limit {_gib(self.limit)} for measured pressure (available at start "
                 f"{'unknown' if start < 0 else _gib(start)}, headroom {_gib(self.headroom)}")
         text += f", configured {_gib(configured)})" if configured >= 0 else ")"
         if self._owner and _STALE_SEGMENTS[0]:
@@ -620,30 +585,39 @@ class MemoryGovernor:
 
     # ------------------------------------------------------------------ requests
     def request(self, nbytes: int, *, label: str = "task", depth: int | None = None, minimum: int | None = None,
-                queued: bool = False, parent: int | None = None, envelope: bool = False) -> Reservation:
-        """A queued request (not yet granted): `poll` / `wait`, then `release`. ``depth`` and ``parent`` default to
-        one below / the calling thread's innermost reservation; ``minimum`` makes it flexible and ``envelope`` makes
-        it cover its nested requests (see the module docstring); ``queued``: it is reserved for a task that starts
-        later (`start` marks it running)."""
+                queued: bool = False, parent: int | None = None, envelope: bool = False,
+                outer: bool = False) -> Reservation:
+        """Request a start; `poll` / `wait`, then `release` when done.
+
+        ``outer`` marks an independent contig or pool task; nested continuations never wait for memory.
+        ``queued`` remains QUEUED until `start`. Requested bytes do not affect admission; ``minimum``
+        allows a smaller buffer/batch size after admission. ``envelope`` is accepted for API compatibility.
+        """
         held = held_context()
         return Reservation(self, nbytes, label, depth_below(held) if depth is None else depth, minimum,
                            queued=queued, parent=(held[0] if held else 0) if parent is None else parent,
-                           envelope=envelope)
+                           envelope=envelope, outer=outer)
 
-    def presence(self, label: str, depth: int, parent: int | None = None, *, queued: bool = False) -> Reservation:
+    def presence(self, label: str, depth: int, parent: int | None = None, *, queued: bool = False,
+                 outer: bool = False) -> Reservation:
         """A granted zero-byte token marking running work without an estimate (so that the progress rule sees it);
         release it when the work ends (its measured peak is recorded under ``label``). ``queued``: the work starts
         later (`start` marks it running)."""
         held = held_context()
         token = Reservation(self, 0, label, depth, presence=True, queued=queued,
-                            parent=(held[0] if held else 0) if parent is None else parent)
-        token.poll()
+                            parent=(held[0] if held else 0) if parent is None else parent, outer=outer)
+        if not queued:
+            token.wait()
         return token
 
     def start(self, token: int) -> None:
-        """The task a QUEUED token was reserved for has started: the token now marks running work."""
+        """Mark an admitted task RUNNING only when it actually begins (never while it waits for a CPU slot)."""
         if token:
-            self._set_states([token], RUNNING)
+            with self._ledger.locked() as h:
+                slot = self._slot(token)
+                if slot >= 0 and self._ledger.t_state[slot] == QUEUED:
+                    self._ledger.t_state[slot] = RUNNING
+                    h[_STARTS] += 1
 
     def rest(self, token: int) -> None:
         """A token now holds resident memory only (retained state between calls), not running work."""
@@ -652,9 +626,10 @@ class MemoryGovernor:
 
     @contextmanager
     def reserve(self, nbytes: int, *, label: str = "task", minimum: int | None = None, envelope: bool = False):
-        """Wait until ``nbytes`` fit (or, with ``minimum``, as much as fits now but at least ``minimum``), then hold
-        them for the block as the calling thread's innermost reservation; the granted bytes are ``.nbytes``.
-        ``envelope``: the bytes cover what the block's nested requests reserve (they borrow them first)."""
+        """Admit a block from measured pressure, keeping only a progress token for its lifetime.
+
+        A flexible request gets ``.nbytes`` between ``minimum`` and the requested estimate. Envelopes are ignored.
+        """
         reservation = self.request(nbytes, label=label, minimum=minimum, envelope=envelope)
         reservation.wait()
         entry = [reservation.id, reservation.depth, True]
@@ -684,26 +659,8 @@ class MemoryGovernor:
                 self._set_states(ids, RUNNING)
 
     def worker_limit(self, estimates, workers: int, *, label: str, available: int | None = None) -> int:
-        """How many of the largest ``workers`` concurrent tasks (peak bytes ``estimates``) fit in the limit
-        (or in ``available`` bytes minus headroom); at least one. Tasks then reserve their bytes as they run."""
-        estimates = [max(0, int(value)) for value in estimates]
-        if not estimates:
-            return 1
-        usable = (graded_limit(self.limit, depth_below(held_context())) if available is None
-                  else max(0, int(available) - headroom_bytes(int(available))))
-        total = count = 0
-        for estimate in sorted(estimates, reverse=True)[:max(1, int(workers))]:
-            if total + estimate > usable:
-                break
-            total += estimate
-            count += 1
-        if not count:
-            print(f"[memory] {label}: the largest task ({_gib(max(estimates))}) exceeds the memory limit "
-                  f"({_gib(usable)}); one worker", flush=True)
-            return 1
-        print(f"[memory] {label}: {count} concurrent workers; largest concurrent peak {_gib(total)} of "
-              f"{_gib(usable)}", flush=True)
-        return count
+        """Keep the CPU/task bound; measured pressure controls dispatch, not estimated lifetime peaks."""
+        return max(1, min(int(workers), len(estimates))) if hasattr(estimates, "__len__") else max(1, int(workers))
 
     def note(self, label: str, estimate: int, measured: int | None) -> None:
         """Record the statistics of a finished task that held no reservation (its estimate was zero)."""
@@ -716,13 +673,32 @@ class MemoryGovernor:
         """How many releases the ledger has seen (read without the lock: an aligned 8-byte load)."""
         return int(self._ledger.h[_RELEASED])
 
-    def _live(self, fresh: bool) -> int | None:
-        now = time.monotonic()
-        with self._live_lock:
-            if fresh or now - self._live_time > LIVE_CACHE_SECONDS:
-                self._live_value = available_memory_bytes()
-                self._live_time = now
-            return self._live_value
+    def _sample_loop(self):
+        while not self._sample_stop.wait(MEMORY_SAMPLE_SECONDS):
+            self._sample_pressure()
+
+    def _sample_pressure(self) -> None:
+        """One shared working-set sample at most every 0.5 s; observations are not task progress."""
+        now = time.monotonic_ns()
+        ledger = self._ledger
+        if now - int(ledger.h[_SAMPLE_NS]) < _SAMPLE_NS_INTERVAL:
+            return
+        with ledger.locked() as h:
+            if now - int(h[_SAMPLE_NS]) < _SAMPLE_NS_INTERVAL:
+                return
+            sample = memory_pressure()
+            if sample is None:
+                return
+            used, _, available = sample
+            # A lower configured limit measures this same job working set, not growth since run start.
+            used = max(used, int(h[_LIMIT]) - available)
+            h[_LIVE_BYTES] = used
+            h[_AVAILABLE_BYTES] = available
+            h[_PEAK_USED] = max(int(h[_PEAK_USED]), used)
+            for label in np.unique(ledger.t_label[ledger.t_id != 0]):
+                ledger.l["live_peak"][label] = max(int(ledger.l["live_peak"][label]), used)
+            # The timestamp follows the read, so a slow-start grant has a full interval of observation.
+            h[_SAMPLE_NS] = time.monotonic_ns()
 
     def _label_index(self, label: str) -> int:
         index = self._labels.get(label)
@@ -756,176 +732,99 @@ class MemoryGovernor:
                 self._slots.pop(token, None)
         return slot
 
-    def _lender(self, token: int) -> tuple[int, int]:
-        """(slot, spare bytes) of the nearest envelope with spare bytes on the parent chain of ``token`` (-1, 0 if
-        none); call with the ledger locked."""
-        ledger = self._ledger
-        for _ in range(64):
-            slot = self._slot(token)
-            if slot < 0:
-                return -1, 0
-            if ledger.t_envelope[slot]:
-                spare = int(ledger.t_bytes[slot]) + int(ledger.t_borrowed[slot]) - int(ledger.t_lent[slot])
-                if spare > 0:
-                    return slot, spare
-            token = int(ledger.t_parent[slot])
-            if not token:
-                return -1, 0
-        return -1, 0
-
-    def _give_back(self, slot: int) -> None:
-        """Return what the token in ``slot`` borrowed to its lender (call with the ledger locked)."""
-        ledger = self._ledger
-        borrowed = int(ledger.t_borrowed[slot])
-        if borrowed:
-            lender = self._slot(int(ledger.t_lender[slot]))
-            if lender >= 0:
-                ledger.t_lent[lender] = max(0, int(ledger.t_lent[lender]) - borrowed)
-            ledger.t_borrowed[slot] = 0
-
     def _admit(self, request: Reservation, fresh: bool) -> bool:
-        """One admission attempt (see the module docstring for the rules)."""
-        ledger = self._ledger
-        live = self._live(fresh)
+        """Only measured pressure and a fresh observation gate outer starts; nested work continues."""
+        self._sample_pressure()
         if fresh:
             self._purge()
+        ledger = self._ledger
         if request._label < 0:
             request._label = self._label_index(request.label)
-        nbytes, minimum = request.nbytes, request.minimum
         now = time.monotonic_ns()
-        alone = forced = False
+        forced = False
         with ledger.locked() as h:
-            # What the nearest envelope above the request can lend: taken first, the rest comes from the ledger.
-            lender, borrow = self._lender(request.parent) if request.parent and nbytes else (-1, 0)
-            borrow = min(borrow, nbytes)
-            need, need_min = nbytes - borrow, max(0, minimum - borrow)
-            committed, limit, start = int(h[_RESERVED]), int(h[_LIMIT]), int(h[_START])
-            usable = graded_limit(limit, request.depth)
-            # Reserved bytes not yet visible as used memory (their tasks may not have allocated yet).
-            pending = committed
-            if live is not None and start >= 0:
-                used = max(0, start - live)
-                if used > h[_PEAK_USED]:
-                    h[_PEAK_USED] = used
-                pending = max(0, committed - used)
-            room = None if live is None else live - int(h[_LIVE_HEADROOM]) - pending
-
-            def take(extra, ceiling=usable):
-                """Ledger bytes this request takes next to ``extra`` claimed bytes (None: it does not fit)."""
-                if need <= 0:
-                    return 0
-                free = ceiling - committed - extra
-                if room is not None:
-                    free = min(free, room - extra)
-                if free >= need:
-                    return need
-                return free if free >= max(need_min, 1) else None
-
-            grant = take(0) if request._waiter < 0 and (not h[_WAITING] or need <= 0) else None
-            if request.presence:
-                admit, since, grant = True, now, 0               # marks running work; holds no memory
-            elif grant is not None:
-                admit = True                                     # it fits and nothing queued (or its envelope
-                since = now                                      # covers it): no queue
+            limit, used = int(h[_LIMIT]), int(h[_LIVE_BYTES])
+            soft, hard = int(MEMORY_SOFT_FRACTION * limit), int(MEMORY_HARD_FRACTION * limit)
+            active = ledger.t_id != 0
+            running = bool((ledger.t_state[active] == RUNNING).any())
+            queued_to_start = bool((ledger.t_state[active] == QUEUED).any())
+            observed = int(h[_SAMPLE_NS]) - int(h[_OUTER_START_NS]) >= _SAMPLE_NS_INTERVAL
+            # Existing work must be able to finish and free memory, including above HARD. An independent
+            # pool/contig task is outer work even when its scheduler belongs to an existing contig.
+            fits = not request.outer or (used < hard and (used < soft or observed))
+            if fits and (not request.outer or used < soft or not h[_WAITING]):
+                admit = True
+                since = int(ledger.w_since[request._waiter]) if request._waiter >= 0 else now
             else:
-                if request._waiter < 0:                          # join the queue
+                if request._waiter < 0:
                     slot = int(ledger.w_id.argmin())
                     if ledger.w_id[slot]:
                         raise RuntimeError("the memory ledger's request table is full")
-                    pid, started = _identity()
                     request.id = int(h[_NEXT_ID]) + 1
                     h[_NEXT_ID] = request.id
+                    pid, started = _identity()
                     (ledger.w_id[slot], ledger.w_pid[slot], ledger.w_started[slot], ledger.w_bytes[slot],
                      ledger.w_since[slot], ledger.w_depth[slot], ledger.w_label[slot]) = (
-                        request.id, pid, started, need_min, now, request.depth, request._label)
-                    h[_WAITING] += 1
+                        request.id, pid, started, 0, now, request.depth, request._label)
                     request._waiter = slot
-                ledger.w_bytes[request._waiter] = need_min      # its claim (borrowing can change it)
+                    h[_WAITING] += 1
                 queued = np.flatnonzero(ledger.w_id)
-                head = int(queued[np.lexsort((ledger.w_id[queued], ledger.w_since[queued],
-                                              -ledger.w_depth[queued]))[0]])
+                head = int(queued[np.lexsort((ledger.w_id[queued], -ledger.w_depth[queued]))[0]])
                 is_head = head == request._waiter
-                grant = take(0 if is_head else int(ledger.w_bytes[head]))
-                admit = grant is not None
-                if not admit and is_head:
-                    active = ledger.t_id != 0
-                    if not active.any():
-                        admit = alone = True             # a flexible request: what fits now, >= its minimum
-                        grant = max(need_min, min(need, limit - committed, need if room is None else room))
-                    elif (ledger.t_state[active] == RUNNING).any():
-                        h[_BLOCKED_SINCE] = 0
-                    elif (ledger.t_state[active] == RESIDENT).all() and (grant := take(0, limit)) is not None:
-                        admit = True                     # only retained states are held (no work that could need
-                                                         # nested room): the head may use the whole limit at once
-                    elif not h[_BLOCKED_SINCE]:
-                        h[_BLOCKED_SINCE] = now
-                    elif now - int(h[_BLOCKED_SINCE]) >= _PROGRESS_NS:
-                        admit = forced = True
-                        grant = need_min
+                admit = fits and (not request.outer or is_head)
+                if not admit and is_head and not running and not queued_to_start:
+                    admit = forced = True
                 since = int(ledger.w_since[request._waiter])
-                if admit:
+                if not admit:
+                    request.waited = True
+            if admit:
+                if request._waiter >= 0:
                     ledger.w_id[request._waiter] = 0
                     h[_WAITING] -= 1
                     request._waiter = -1
-                else:
-                    request.waited = True
-                waiting = int(queued.size)
-            if admit:
-                ledger_bytes = int(grant)
-                if not nbytes:
-                    borrow = 0
-                request.nbytes = borrow + ledger_bytes
-                slot = int(ledger.t_id.argmin())
-                if ledger.t_id[slot]:
-                    raise RuntimeError("the memory ledger's reservation table is full")
                 if not request.id:
                     request.id = int(h[_NEXT_ID]) + 1
                     h[_NEXT_ID] = request.id
+                slot = int(ledger.t_id.argmin())
+                if ledger.t_id[slot]:
+                    raise RuntimeError("the memory ledger's reservation table is full")
                 pid, started = _identity()
                 (ledger.t_id[slot], ledger.t_pid[slot], ledger.t_started[slot], ledger.t_bytes[slot],
                  ledger.t_granted[slot], ledger.t_depth[slot], ledger.t_state[slot], ledger.t_label[slot],
                  ledger.t_forced[slot], ledger.t_parent[slot], ledger.t_envelope[slot], ledger.t_lent[slot],
                  ledger.t_borrowed[slot], ledger.t_lender[slot]) = (
-                    request.id, pid, started, ledger_bytes, now, request.depth,
+                    request.id, pid, started, 0, now, request.depth,
                     QUEUED if request.queued else RUNNING, request._label, int(forced), request.parent,
-                    int(request.envelope), 0, borrow, int(ledger.t_id[lender]) if borrow else 0)
-                if borrow:
-                    ledger.t_lent[lender] += borrow
-                self._slots[request.id] = slot
-                request._slot = slot
+                    int(request.outer), 0, 0, 0)
+                self._slots[request.id] = request._slot = slot
                 request.granted = True
-                nbytes = request.nbytes
-                h[_RESERVED] = committed + ledger_bytes
-                if committed + ledger_bytes > h[_PEAK_RESERVED]:
-                    h[_PEAK_RESERVED] = committed + ledger_bytes
-                if nbytes > h[_LARGEST]:
-                    h[_LARGEST] = nbytes
+                if request.outer:
+                    h[_OUTER_START_NS] = time.monotonic_ns()
+                # These sizes remain for buffer batching and diagnostics only, after admission is decided.
+                if request.minimum < request.nbytes:
+                    request.nbytes = min(request.nbytes, max(request.minimum, soft - used))
+                h[_LARGEST] = max(int(h[_LARGEST]), request.nbytes)
                 h[_REQUESTS] += 1
                 if not request.queued:
-                    h[_BLOCKED_SINCE] = 0
+                    h[_STARTS] += 1
                 labels = ledger.l
+                labels["live_peak"][request._label] = max(int(labels["live_peak"][request._label]), used)
                 if request.waited:
                     h[_WAITS] += 1
                     h[_WAIT_NS] += now - since
                     labels["waits"][request._label] += 1
                     labels["wait_ns"][request._label] += now - since
-                if alone:
-                    h[_ALONE] += 1
-                    labels["alone"][request._label] += 1
                 if forced:
                     h[_FORCED] += 1
                     labels["forced"][request._label] += 1
         if admit:
-            if (alone or forced) and self._first_in_a_while(("alone" if alone else "forced", request.label)):
-                reason = ("does not fit even alone; it runs alone" if alone else
-                          "is admitted over the limit because every holder of memory is waiting")
-                print(f"[memory] WARNING {request.label}: {_gib(nbytes)} {reason} (reserved {_gib(committed)} of "
-                      f"{_gib(limit)}; available now {'unknown' if live is None else _gib(live)}; further cases "
-                      f"of this label are counted in the summary)", flush=True)
+            if forced and self._first_in_a_while(("progress", request.label)):
+                print(f"[memory] progress {request.label}: no running task; live {_gib(used)} of {_gib(limit)}",
+                      flush=True)
             return True
         if not request._logged:
             request._logged = True
-            self._log_wait(request, committed, limit, live, waiting)
+            self._log_wait(request, limit, used, int(h[_WAITING]))
         return False
 
     def _first_in_a_while(self, key) -> bool:
@@ -936,11 +835,12 @@ class MemoryGovernor:
         self._logged[key] = now
         return True
 
-    def _log_wait(self, request, committed, limit, live, waiting):
+    def _log_wait(self, request, limit, live, waiting):
         if not self._first_in_a_while(("wait", request.label)):
             return
-        print(f"[memory] pacing {request.label}: waits for {_gib(request.nbytes)} (reserved {_gib(committed)} of "
-              f"{_gib(limit)}; available now {'unknown' if live is None else _gib(live)}; {waiting} waiting)",
+        print(f"[memory] pacing {request.label}: live {_gib(live)} of {_gib(limit)}, "
+              f"{'hard pressure' if live >= MEMORY_HARD_FRACTION * limit else 'awaiting next measured sample'}; "
+              f"{waiting} waiting",
               flush=True)
 
     def _release(self, request: Reservation, measured, estimate: int, record: bool) -> None:
@@ -958,16 +858,8 @@ class MemoryGovernor:
             self._slots.pop(request.id, None)
             if ledger.t_id[slot] != request.id:
                 return                               # already released by a purge
-            h[_RESERVED] = max(0, int(h[_RESERVED]) - int(ledger.t_bytes[slot]))
-            forced = bool(ledger.t_forced[slot])
-            self._give_back(slot)
             ledger.t_id[slot] = 0
             h[_RELEASED] += 1
-            if forced:
-                active = ledger.t_id != 0
-                if active.any() and not (ledger.t_state[active] == RUNNING).any():
-                    # Every holder still waits: the next waiting request may follow over the limit at once.
-                    h[_BLOCKED_SINCE] = time.monotonic_ns() - _PROGRESS_NS
             if record:
                 self._record(request._label, estimate, measured)
 
@@ -977,17 +869,7 @@ class MemoryGovernor:
             slot = request._slot
             if ledger.t_id[slot] != request.id:
                 return
-            # Keep the borrowed part first (up to nbytes), then ledger bytes.
-            borrowed = int(ledger.t_borrowed[slot])
-            keep_borrowed = min(borrowed, nbytes)
-            keep_ledger = min(int(ledger.t_bytes[slot]), nbytes - keep_borrowed)
-            if keep_borrowed < borrowed:
-                lender = self._slot(int(ledger.t_lender[slot]))
-                if lender >= 0:
-                    ledger.t_lent[lender] = max(0, int(ledger.t_lent[lender]) - (borrowed - keep_borrowed))
-                ledger.t_borrowed[slot] = keep_borrowed
-            h[_RESERVED] = max(0, int(h[_RESERVED]) - (int(ledger.t_bytes[slot]) - keep_ledger))
-            ledger.t_bytes[slot] = keep_ledger
+            # Retained state is already part of the measured working set.
             h[_RELEASED] += 1
             self._record(request._label, estimate, measured)
 
@@ -1009,8 +891,7 @@ class MemoryGovernor:
                 labels["under"][index] += 1
 
     def _set_states(self, ids, state: int) -> None:
-        """Mark tokens (the progress clock is reset only by an admission attempt that sees a running token, so a
-        holder that resumes for a moment between two waits does not keep restarting it)."""
+        """Mark actual executing/waiting state; samples and burst expiry never count as task progress."""
         if not ids:
             return
         ledger = self._ledger
@@ -1046,8 +927,6 @@ class MemoryGovernor:
                 if (int(ledger.t_pid[slot]), int(ledger.t_started[slot])) in dead:
                     released.append((int(ledger.t_pid[slot]), int(ledger.t_bytes[slot]),
                                      self._label_name(int(ledger.t_label[slot]))))
-                    h[_RESERVED] = max(0, int(h[_RESERVED]) - int(ledger.t_bytes[slot]))
-                    self._give_back(int(slot))
                     ledger.t_id[slot] = 0
             for slot in np.flatnonzero(ledger.w_id):
                 if (int(ledger.w_pid[slot]), int(ledger.w_started[slot])) in dead:
@@ -1078,23 +957,26 @@ class MemoryGovernor:
                 measured_max_bytes=int(row["measured_max"]) if measured else None,
                 measured_over_estimate_max=float(row["ratio_max"]) if measured else None,
                 underestimated_tasks=int(row["under"]), waits=int(row["waits"]),
-                wait_seconds=int(row["wait_ns"]) / 1e9, alone=int(row["alone"]), forced=int(row["forced"]))
+                wait_seconds=int(row["wait_ns"]) / 1e9, alone=int(row["alone"]), forced=int(row["forced"]), peak_live_use_bytes=int(row["live_peak"]))
         return dict(
             limit_bytes=header["limit"], configured_bytes=None if header["configured"] < 0 else header["configured"],
             headroom_bytes=header["headroom"],
             available_at_start_bytes=None if header["start_available"] < 0 else header["start_available"],
             reserved_bytes=header["reserved"], peak_reserved_bytes=header["peak_reserved"],
             peak_live_use_bytes=header["peak_used"], largest_request_bytes=header["largest"],
+            live_bytes=header["live_bytes"], sample_ns=header["sample_ns"], outer_start_ns=header["outer_start_ns"],
+            starts=header["starts"], waiting=header["waiting"],
+            burst_bytes=header["reserved"], soft_fraction=MEMORY_SOFT_FRACTION, hard_fraction=MEMORY_HARD_FRACTION,
             reservations=header["requests"], waits=header["waits"], wait_seconds=header["wait_ns"] / 1e9,
             alone=header["alone"], forced=header["forced"], purged=header["purged"], labels=labels)
 
     def summary_lines(self) -> list[str]:
         """The statistics as log lines: totals, then one line per task label."""
         data = self.statistics()
-        lines = [f"[memory] {self.describe()}; peak reserved {_gib(data['peak_reserved_bytes'])}, peak live use "
-                 f"{_gib(data['peak_live_use_bytes'])}; {data['reservations']} reservations, {data['waits']} paced "
+        lines = [f"[memory] {self.describe()}; peak live use "
+                 f"{_gib(data['peak_live_use_bytes'])}; {data['reservations']} admissions, {data['waits']} paced "
                  f"({data['wait_seconds']:.1f} s waiting), {data['alone']} ran alone, {data['forced']} admitted "
-                 f"over the limit for progress"]
+                 f"for progress"]
         for label, row in sorted(data["labels"].items()):
             if label.endswith(" worker recycled"):         # pools' recycle events (execution.pools)
                 lines.append(f"[memory]   {label}: {row['tasks']} workers replaced; private memory at retirement "
@@ -1104,7 +986,7 @@ class MemoryGovernor:
                         f"; measured peak max {_gib(row['measured_max_bytes'])} (max measured/estimate "
                         f"{row['measured_over_estimate_max']:.2f}, {row['underestimated_tasks']} above estimate)")
             lines.append(f"[memory]   {label}: {row['tasks']} tasks, estimate max {_gib(row['estimate_max_bytes'])}"
-                         f"{measured}; {row['waits']} paced ({row['wait_seconds']:.1f} s)")
+                         f"{measured}; observed job peak {_gib(row['peak_live_use_bytes'])}; {row['waits']} paced ({row['wait_seconds']:.1f} s)")
         return lines
 
 
@@ -1129,10 +1011,10 @@ def memory_governor() -> MemoryGovernor:
     return governor
 
 
-def start_governor(memory_limit: int | None = None) -> MemoryGovernor:
+def start_governor(memory_limit: int | None = None, *, diagnostic_directory=None) -> MemoryGovernor:
     """A new governor for this process tree (run start), replacing any earlier one of this process."""
     global _GOVERNOR
-    governor = MemoryGovernor.create(memory_limit)
+    governor = MemoryGovernor.create(memory_limit, diagnostic_directory=diagnostic_directory)
     with _GOVERNOR_LOCK:
         previous, _GOVERNOR = _GOVERNOR, governor
     if previous is not None:
@@ -1169,10 +1051,10 @@ def segment_name() -> str:
 
 
 def reserve_memory(nbytes: int, *, label: str = "task", minimum: int | None = None, envelope: bool = False):
-    """``with reserve_memory(n, label=...) as r:`` hold ``n`` bytes of the run's memory for the block (waits while
-    they do not fit). For large allocations of stage code outside the parallel constructs. With ``minimum`` the
-    block gets as much as fits now (``r.nbytes``), at least ``minimum`` (e.g. to size batches); with ``envelope``
-    the bytes also cover the requests nested in the block."""
+    """Admit a block under measured pressure; ``nbytes`` never affects admission.
+
+    ``r.nbytes`` is the admitted allocation size, at least ``minimum`` when supplied; no peak is held until exit.
+    """
     return memory_governor().reserve(nbytes, label=label, minimum=minimum, envelope=envelope)
 
 

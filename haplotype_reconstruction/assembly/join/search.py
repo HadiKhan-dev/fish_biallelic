@@ -53,7 +53,7 @@ from ...maths import ties
 from .. import tie_rules
 from . import emissions, objective
 from .certify import PanelForwards
-from .beam import CartesianBeamFamily, UnresolvedBeam
+from .beam import CartesianBeamFamily
 from .count_step import CountStep, main_coverer
 from .moves import (MOVES_PER_CHUNK, REPLACE, SPLICE, Moves, best_improvement, lower_bounds,
                     replaced_row)
@@ -486,15 +486,13 @@ class PanelSearch:
         self.blocks = len(inputs.blocks)
         self.samples = int(inputs.sample_count)
         self.initial_family = beam if isinstance(beam, CartesianBeamFamily) else None
-        self.initial_unresolved = beam if isinstance(beam, UnresolvedBeam) else None
-        self.beam_stopped = self.initial_family is not None or self.initial_unresolved is not None
         if self.initial_family is not None:
-            # Exactly the old first-covering anchor trials, without enumerating the
-            # other Cartesian members. These seed paths are not a truncated pool.
+            # The constant family's bounded first-covering proposal pool. Other
+            # Cartesian combinations are outside this declared search approximation.
             candidates = list(dict.fromkeys(beam.first_covering(block, row)
                               for block, count in enumerate(beam.founders) for row in range(count)))
         else:
-            candidates = _paths(beam.incumbent_paths if self.initial_unresolved is not None else beam)
+            candidates = _paths(beam)
         if not candidates:
             raise ValueError("a join needs at least one beam path")
         site_counts = [len(block.positions) for block in inputs.blocks]
@@ -587,25 +585,10 @@ class PanelSearch:
         self.cleanup_steps = set()
         self.static_totals = [self.layout.block(j).sum(axis=2) for j in range(self.blocks)]
         self._set_pool(self.original_pool)
-        if self.beam_stopped:
-            self._record_beam_bound(beam, 'initial')
-
-    def _record_beam_bound(self, beam, source, bound=None):
-        """Preserve the complete unevaluated path domain; keep the current incumbent."""
-        domain = (dict(kind='constant_cartesian', founders=list(beam.founders),
-                       cardinality=beam.cardinality, score=beam.score, reverse=beam.reverse,
-                       bound=(2 * self.config.paths_per_endpoint * max(self.block_sizes)
-                              if bound is None else bound))
-                  if isinstance(beam, CartesianBeamFamily) else beam.record())
-        self.beam_stopped = True
-        record = dict(reason='beam_materialization_bound',
-                      source_decision=f'beam/{source}', status='unresolved_beam_materialization',
-                      unresolved_search=True, panels=[], beam_domain=domain,
-                      representative_prior='retain_incumbent',
-                      incumbent_panel=tie_rules.panel_key(self.selected))
-        self.release_families.append(record)
-        self.events.append(dict(stage='beam_materialization_bound', source=source,
-                                beam_domain=domain, incumbent_founders=len(self.selected)))
+        if self.initial_family is not None:
+            self.events.append(dict(stage='beam_covering_proposals',
+                represented_paths=self.initial_family.cardinality,
+                proposed_paths=len(candidates), complete=False))
 
     # -- tie classes -----------------------------------------------------------------------------
 
@@ -823,12 +806,8 @@ class PanelSearch:
                 self.beam_cache.clear()
             started = time.perf_counter()
             beam = self.beam_runner(quota, overrides)
-            if isinstance(beam, (CartesianBeamFamily, UnresolvedBeam)):
-                self._record_beam_bound(beam, f'quota{quota}',
-                    max(2 * sum(overrides.get((block, row), quota) for row in range(count))
-                        for block, count in enumerate(self.block_sizes)))
-                self.beam_seconds += time.perf_counter() - started
-                return self.candidates
+            if isinstance(beam, CartesianBeamFamily):
+                beam = beam.covering()
             paths = dict.fromkeys(_paths(beam))
             self.beam_cache[key] = self.original_pool + [path for path in paths
                                                          if path not in self.original_set]
@@ -1664,9 +1643,6 @@ class PanelSearch:
         largest_pool = len(self.candidates)
         final_forwards = None
         while True:
-            if self.beam_stopped:
-                backstop_reached = pool_backstop = True
-                break
             if phase_sweeps >= self.sweep_backstop:
                 backstop_reached = True
                 print(f"  [panel search] sweep backstop {self.sweep_backstop} reached "
@@ -1691,9 +1667,6 @@ class PanelSearch:
             pool_before = len(self.candidates)
             beam_before = self.beam_seconds
             pool = self._extension_pool(quota, self.selected)
-            if self.beam_stopped:
-                backstop_reached = pool_backstop = True
-                break
             if pool is not self.candidates:
                 self._set_pool(pool)
                 largest_pool = max(largest_pool, len(self.candidates))
@@ -1743,8 +1716,6 @@ class PanelSearch:
                 beam_before = self.beam_seconds
                 doubled = [path for path in self._extension_pool(level, self.selected)
                            if path not in checked]
-                if self.beam_stopped:
-                    break
                 best_move, record, level_forwards = self._certify(
                     self.selected, doubled, len(self.candidates), False,
                     len(self.candidates) + len(doubled), key=f"sat{saturation_steps}")
@@ -1758,9 +1729,6 @@ class PanelSearch:
                 elif doubled and self._count_step(level_forwards, pool=doubled):
                     self.count['ladder_births'] += 1
                     accepted = True
-            if self.beam_stopped:
-                backstop_reached = pool_backstop = True
-                break
             if not accepted:
                 if self._continue_terminal_family():
                     # No fresh sweep/backstop/quota budget and no improvement
@@ -1794,8 +1762,7 @@ class PanelSearch:
             pool_backstop=pool_backstop, events=tuple(_plain(event) for event in self.events),
             tie_events=self.tie_counter.record(),
             phase_seconds={"count_step": float(self.count["seconds"])},
-            work_counters={"beam_materialization_bounds": sum(
-                event.get("stage") == "beam_materialization_bound" for event in self.events)})
+            work_counters={"beam_materialization_bounds": 0})
         return JoinOutcome(paths=np.asarray(self.selected, dtype=np.int32).reshape(-1, self.blocks),
                            log_likelihood=float(self.likelihood), summary=summary,
                            release_alternatives=tuple(self.release_families))

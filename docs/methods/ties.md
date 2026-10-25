@@ -108,7 +108,8 @@ must hold under every sample permutation of the original fixed bootstrap draws.
   - **Boundary guard.** A gap near a quantum is reported.
 
   The members of a class are the tied set. They are carried forward, decided by a prior, or flagged. They are never
-  ranked by content, except as a canonical label of an equal answer.
+  ranked by content, except for the explicitly bounded proposal conventions below
+  (the residual edge cover and assembly beam cut) or a canonical label of an equal answer.
 - **Threshold bands.** A value within a band of a threshold, for example a probability of exactly 1/2 or a
   contribution of exactly 0, is given the threshold's conservative side (a stated prior).
 - **Reversal hook.** `maths.ties.reverse_conventions` reads `HAPLOTYPES_TIE_REVERSE`. The helpers `conv_key`,
@@ -121,7 +122,7 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 
 | stage | convention addressed | treatment |
 | --- | --- | --- |
-| discovery ([discovery.md](discovery.md)) | HDBSCAN merges of equal-weight links ordered by a content key; complete linkage on noise | every tie resolution of the residual clustering is carried as a candidate (level-wise condensed-tree groups and maximal-clique alternatives of the noise, with order-invariant bounds); the block score decides |
+| discovery ([discovery.md](discovery.md)) | HDBSCAN merges of equal-weight links ordered by a content key; complete linkage on noise | level-wise condensed-tree groups and a polynomial maximal edge-clique cover supply candidates; the cover retains every compatible pair before per-component size budgets, but not every larger group; D13 reverses greedy content order; the block score decides |
 | discovery | NLL-tied panels decided by panel bytes | the tied panels are released with the block (`tied_panels`) and offered to local selection; archive beams keep whole NLL classes |
 | discovery | founder alleles no carrier observes: the seed's allele | released unknown (`latent_unknown`) |
 | discovery and candidate bank | tied A-step states assigned by row order or reduced to their meet | uniform fractional evidence over every tied state in the winning fewest-unknown-copy category; weighted H fields, cavity hold-out and release |
@@ -157,7 +158,8 @@ These decide exact ties. They are not reversed by the reversal test.
 | fewest unknown copies first; fewest flips first | discovery's A-step band; the local-selection site posterior | the explanation that needs fewer unknown copies or changes is preferred at equal cost |
 | pure-mosaic deaths first; flips before swaps | assembly count steps; founder refit | simpler explanations first |
 
-Canonical row orders, panel keys used as identities and the gauge of the two tracks are labels, not choices.
+Canonical row orders and panel keys used solely as identities, and the gauge of the two
+tracks, are labels. The bounded proposal content orders are declared separately below.
 
 ## Status is not ambiguity
 
@@ -342,9 +344,10 @@ Combined-candidate truth, stability and full-run resource gates remain separate.
 ### Search bounds and retained incumbents
 
 Discovery's nominal class budgets admit a straddling class when the total remains at most twice
-the budget; a larger class is omitted whole. Actual maximal-clique counts, not traversal order or
-a worst-case bound, decide the clique gate. Strictly worse classes after the boundary are counted
-as ranked truncation and do not make the search incomplete. Replacement ranking and its
+the budget; a larger class is omitted whole. Residual edge-cover groups are counted exactly
+after lifting and deduplication, with a separate 64/128 size-class budget per connected
+alternative component. No maximal-clique enumeration gate remains. Strictly worse classes
+after the boundary are counted as ranked truncation and do not make the search incomplete. Replacement ranking and its
 ordinary R = 48 / ceiling 96 and optional escalated R = 96 / ceiling 192 bounds are described in [discovery](discovery.md#replacement-admission); larger-budget
 sensitivity must be reported for the adopted ranking.
 
@@ -401,7 +404,25 @@ For each child, retain every eligible parent within 60 existing information-temp
 
 M2 includes every eligible unordered pair of retained identities, with no top-20/40 cap or partial tied class. The existing full eligible-pair denominator remains. This assumes individually plausible parents suffice; a weak M1 parent can complement another in a strong raw M2 trio. G4 diagnostics found such raw-likelihood cases, but no fitted or resampled G2 M2 winner used an excluded parent. This is not a universal false-negative guarantee. `parents_per_child` is legacy-only. Dense raw M1 and explicit floor rows remain in this reference; no near-linear claim follows from panel admission alone.
 
-Residual discovery uses exact compiled clique counts by size, preserving the existing complete-class and straddling-class rules. The legacy `max_clique_calls` parameter controls only the Python reference traversal strategy. The actual-clique cap and omission counts retain their original meaning.
+### Polynomial proposal conventions (2.8)
+
+Residual discovery grows one maximal clique from every compatible edge, greedily in
+hard-call byte order (REF, ALT, then missing at each successive site). This is convention
+**D13**: `rev("d13")` reverses that order under `HAPLOTYPES_TIE_REVERSE=1`;
+`HAPLOTYPES_TIE_REVERSE_KEEP=d13` holds it at default for attribution. Names and record
+indices do not choose the order. Duplicate nonisolated rows are true twins, so their
+relative order cannot affect membership. Reversal can change the proposed maximal
+cliques and downstream births; it is a proposal approximation, not an equivalence claim.
+The old `max_clique_enumeration` and `max_clique_calls` gates are removed. Exact counts
+of deduplicated lifted cover groups drive the complete-class and straddling-class rule
+within each connected component; a flooded component cannot suppress another's groups.
+Where the former shared budget did not bind, changing its scope leaves groups unchanged.
+
+Assembly's endpoint beam retains at most q paths, including within a score tie, by
+canonical label-free content order under the central reversal hook. Constant Cartesian
+families contribute only their first-covering members. These bounded proposal choices
+may change the search pool even when the final fitted join is unchanged; they neither
+enumerate the full tied family nor claim exhaustive ambiguity over it.
 
 ### Landmark proposal classes (2.3)
 

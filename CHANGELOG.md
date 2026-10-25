@@ -1,5 +1,128 @@
 # Changelog
 
+## 2.8.0 (25 October 2026)
+
+This release rebuilds founder-path refinement in assembly: a robust maximum-path objective of a per-homologue
+founder-switching model with map-derived switch costs that reads partially called sites, a symmetric count null,
+polynomial per-sweep bounds on every search step, and a final polish of the decided panel with a wider move set.
+Outside refinement it adds measured-memory admission, full linker EM steps, a stall watchdog and bounded discovery
+and join proposals (**Outside refinement**, below).
+
+**Why.** 2.6/2.7.1 refinement scored panels with a uniform 20-nat penalty per diplotype change and read only sites where
+every local row was called; at K = 30 that ignored 18-25% of a component's sites, and the count step missed a founder
+the data support (a K = 30 simulation component with 30 true founders: 28 called, 19,744 wrong-or-missing alleles;
+2.8 calls 29, 12,589). Its window
+programmes had no polynomial bound, and its count null depended on which panel was the incumbent.
+
+**Objective** (`objective.py`, `workspace.py`):
+- Each homologue follows its own founder chain; between a sample's consecutive informative sites it resets with
+  probability rho = 1 - exp(-h), h = `refinement.reset_rate` (1 per Morgan per homologue) times the genetic-map length
+  crossed, and a change costs w = log(1 - rho (1 - 1/K)) - log(rho / K) per homologue. Exact on the K(K+1)/2 unordered
+  pairs, O(Q + K) per site. Panel-independent normalisers are added where fits of different K are compared.
+- Sites: kept discovery sites with at least one called local row (2.7.1: every local row called). A pair with an
+  uncalled row emits the predictive class of the unknown allele(s) under a uniform allele prior; the same uncalled
+  row twice is one latent allele.
+
+**Search** (`acceptance.py`, `search.py`, `proposals.py`):
+- At most four full re-rankings and four suffix exchanges per junction and pass, then one-at-a-time re-scoring in the
+  last ranking's order: every pass is at most cubic in K (2.7.1's rescoring was quartic in the worst case). The
+  restarted window programme keeps at most 512 children per unit. Binding bounds are counted and warned.
+- Lexicographic (guard) messages: a search's first sweep, and every sweep after one that read switch costs, is
+  lexicographic; other sweeps run plain and are rerun lexicographically at the first coarse move above the
+  tolerance. Decisions are identical to fully lexicographic sweeps.
+
+**Count step** (`count.py`): the sequence part of every decision uses the larger panel's own canonical death class
+(every member evaluated; disagreement or an unresolved member gives the smaller K with ambiguity), so the same two
+endpoints get the same call whichever was the incumbent. Accepted additions need no check deletion round; no count
+cycle arises.
+
+**Polish** (`stage.py`, `search.py`, `beam.py`): after the count pass, the decided panel and its same-K equal-F
+alternatives are refitted once more (one forward-first search) with three move families at every fixed point: a window-beam escape on a
+map-aware surrogate, long one-founder moves (64-block beam offers, width 16) with one private correction, and
+fine-window/suffix bridges. The polish
+never changes K; count decisions are not re-evaluated on the polished panel (recorded). A polish that reaches the
+window work bound keeps the count pass's panel.
+
+**Records:** refinement records gain `polish` (status, pre-polish fit and F, gain); fit labels `polish`,
+`polish.alt<i>`; new work counters (`content_rounds`, `round_cap`, `stale_evaluated`, `exchange_cap`, `lex_items`,
+`lex_abort`, escape and long-repair counters). `count_cycle` is always false.
+
+**Resume:** the discovery, local selection and assembly code identities change, so an output root of an earlier
+version raises CheckpointMismatch at discovery; run 2.8.0 into a new output root.
+
+**Outside refinement** (integrated from the 23 October 2.8 components and validated together with the refinement;
+see Validation):
+- **Linker:** full regularised EM steps (`AssemblyConfig.linker.learning_rate_decay = 1.0`). Uniform initialization,
+  the 50-update cap, the fixed-point residual tolerance and the regularisation are unchanged. Finite-iteration
+  transition estimates and downstream decisions may change.
+- **Measured memory admission:** work is admitted from actual job memory pressure, with no reservations or predicted
+  peaks. Below 80% of capacity outer starts are unrestricted; from 80% to 90% each waits for a full observed 0.5 s
+  sampling interval; above 90% only the progress exception admits new outer work. Nested continuations proceed so
+  admitted work can finish. Scheduling rules only; a delayed or indivisible allocation can still exceed capacity.
+- **Tidy-up and watchdog:** lossless int8 sparse flip indices and sizes in completion and founder-allele posteriors
+  (K <= 30); unused dense diagnostic helpers removed; abandoned optional memo requests released promptly. A watchdog
+  fails a run after 30 minutes of frozen grant/start/release counters with waiters and under one CPU core of activity,
+  keeping checkpoints.
+- **Discovery proposals:** maximal-clique enumeration is replaced by a content-ordered packed edge-clique cover. Every
+  compatible pair is covered before the existing size-class budget, applied per component; larger compatible groups
+  can be omitted. The unchanged downstream scoring decides which proposed rows survive.
+- **Join proposals:** at most q paths per endpoint, cut ties split in canonical content order; constant-transition
+  families use a covering set instead of a Cartesian expansion; the beam-materialization/unjoined fallback is removed.
+  These are declared proposal approximations and can change selected or released founders.
+
+### Validation
+Component replays: 36 native components, including the six pieces of the equal-resource benchmark, refined from
+the same incoming panels as 2.6:
+
+| Component | 2.6 | 2.8 |
+|---|---|---|
+| K30 m5 (L2; truth 30 founders) | 19,744 / K28 | 12,589 / K29 |
+| f3 (L4) | 136,843 | 135,891 |
+| stress chr19 [460, 904) | 3,493 | 731 |
+| intermediate_K | K7 | K6 (truth 6) |
+| K30 L1 / L2 | 2,846 / 11,428 | 2,843 / 11,425 |
+| K30 L3 (also the k30_m2 diagnosis ID), m4 | 5,048, 19,187 | 5,053, 19,191 |
+| all other 27 component IDs | | same WOM and K |
+
+Validation does not meet the frozen release requirements: f3 per-case and pooled whole-pipeline WOM, fixture trap
+rescues and fresh identifiable harms, and per-component count-unverified outcomes (rule 4) fail.
+
+Refinement time on the equal-resource benchmark: 1.93-1.96x 2.6 in two measurements (limit 2x). On whole-pipeline runs
+with production warm-up and 2.7.1's memory admission, refinement level walls summed over contigs are 2.14x 2.7.1's
+(std 2.47x, stress 2.11x, f3 2.04x, K30 1.92x; backcross 2.10x and TroMau 2.26x measured on a near-identical variant).
+Whole runs (to the end of founder refit) take 1.17-1.58x 2.7.1's with this release (std 1,953 s vs 1,236 s, stress
+1,751 vs 1,131, f3 1,823 vs 1,173, K30 1,765 vs 1,512) and 1.14-1.34x with the refinement alone: measured-memory
+admission does not hold these runs back (no paced admission without memory pressure), but cores stay idle for
+longer; the cause is not yet isolated. The 22-contig simulations (refinement alone) take 1.30x and 1.70x 2.7.1's.
+
+Founder-only whole-pipeline matrix (runs stop after founder refit), founder_refit wrong / missing alleles:
+
+| Case | 2.8.0 | 2.6 |
+|---|---|---|
+| std | 7,120 / 5,208 | 8,385 / 5,207 |
+| stress | 1,372 / 2,154 | 3,914 / 2,152 |
+| backcross (refinement alone) | 12,409 / 3,927 | 21,518 / 3,926 |
+| K30 | 9,068 / 57,203 | 9,109 / 57,142 |
+| f3 | 303,129 / 778 | 282,150 / 775 |
+| 22 contigs, seed 10000 (refinement alone) | 162 / 159 | 953 / 159 |
+| 22 contigs, seed 10001 (refinement alone) | 117 / 17 | 117 / 17 |
+
+- The 22-contig simulations have 320 samples (20 F1, 100 F2, 200 F3). Seed 10000 differs from 2.6 and 2.7.1 on one
+  contig (chr3: 1,044 to 253 wrong or missing); K = 6 on all 22 contigs of both seeds, as in 2.6 and 2.7.1.
+- The outside-refinement changes alter founder_refit wrong-or-missing alleles by +1 (std), 0 (stress), -179 (K30)
+  and +5 (f3); final K is unchanged on every contig.
+- f3 is 7.4% worse: on chr2 two founder rows are relabelled across one junction, a labelling that a crossover
+  shared by 21 related samples makes the objective prefer (the correct labelling scores 184 nats lower). 2.7.1's
+  search reached the correct panel through a different join.
+- No new false parent edges (std, stress, K30 and f3 with this release; backcross with the refinement alone). TroMau
+  (refinement alone) keeps 2.7.1's founder count on all 22 chromosomes.
+- Forced memory pressure (std with a 40 GiB limit, against an unforced peak of about 68 GiB): identical results and no
+  stall; the peak reached 44.3 GiB, because admitted work is allowed to finish.
+- Fixtures: trap rescues 20/36; identifiable correct-start harms 0/123 (original) and 1/118 (fresh); all
+  correct-start harms 99/528 and 81/512 (2.7.1: 233/528 and 220/512); F72 72/72.
+- Not rerun with the outside-refinement changes: backcross, TroMau and the 22-contig simulations. Not run: held-out
+  simulations, TroMau pseudo-reference consistency.
+
 ## 2.7.1 (22 October 2026)
 
 This release restores founder-path refinement in assembly, which 2.7.0 removed.

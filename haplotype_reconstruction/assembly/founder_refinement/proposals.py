@@ -22,7 +22,12 @@ chooses f's later rows freely but pays zero-sum multipliers lam_s(unit, row), wh
 common path; the multipliers come from block-coordinate sweeps that equalise the samples'
 max-marginals) and the best feasible value among the incumbent, a beam and the dual's decoded
 consensus paths. Pruning keeps every path within the margin of a feasible value, so the optimum and
-the canonical answer are unchanged. A programme whose frontier would exceed the fixed cap
+the canonical answer are unchanged — except where the restarted programme's BEAM_CAP binds (release
+2.8): there it keeps the BEAM_CAP best children per unit, so its answer (and a canonical
+restricted programme's reachability test) is approximate; every such unit is counted
+(beam_truncations in the window receipts, sweep statistics and fit/component work counters), and a
+main programme that loses its feasible witness that way keeps the incumbent with status BEAM_LIMIT
+(a reported beam fallback, never retried at a larger memory budget). A programme whose frontier would exceed the fixed cap
 FounderRefinementConfig.frontier_bytes (frontier_limit) stops and keeps the incumbent (a reported
 fallback; it binds at no reference size). Large programmes take memory from the run's memory
 governor as they grow (programme_budgets): a solve that passes a budget is repeated within the next
@@ -78,6 +83,15 @@ NO_FLOOR2 = np.empty((0, 0))
 # any zero-sum multipliers give valid bounds, so the limit never decides an answer.
 EXPLORE_FRONTIER = 256
 BEAM_WIDTH = 16
+# Restart 2.8 (c0): a programme past the Lagrangian restart keeps at most BEAM_CAP partial paths per
+# unit (in its existing child order: prefix value, incumbent row first, parent, row) instead of an
+# unbounded frontier, so no programme's frontier grows exponentially. The cap is above every
+# tightened post-dominance frontier measured on the native set (at most 270). A binding cap makes that
+# programme approximate (the best path the beam keeps; proposals only, acceptance stays exact): every
+# unit where it dropped a child whose bound still reached the programme's floor is counted
+# (beam_truncations in the window receipts and sweep proposal stats), and a main programme that loses
+# its feasible witness that way keeps the incumbent as a reported fallback (solve_focal).
+BEAM_CAP = 512
 DUAL_SWEEPS = 100
 
 # Window templates: fine windows of FINE_WINDOW prepared blocks every FINE_STRIDE blocks (plus the
@@ -87,8 +101,10 @@ FINE_STRIDE = 4
 COARSE_WINDOW = 4
 COARSE_STRIDE = 2
 
-# solve_focal statuses
+# solve_focal statuses (BEAM_LIMIT: the beam-capped main programme lost its witness; the
+# incumbent is kept and reported, and a larger memory budget would not help, so it is not retried)
 UNCHANGED, CHANGED, FRONTIER_LIMIT, LOST = 0, 1, 2, 3
+BEAM_LIMIT = 5
 
 # Artifact-only numerical work account; caller supplies an explicit budget, default off.
 WORK_LIMIT = 4
@@ -1230,11 +1246,14 @@ def _rows2(buffer, rows, a):
 @njit(cache=True, nogil=True)
 def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, penalty,
               start_n, start_c, unit0, end, upper, lower, margin, dom_tol, backstop,
-              store_limit, fz, bg, prefixes, suffixes, segs, work):
+              store_limit, fz, bg, prefixes, suffixes, segs, work, beam=0):
     """Exact maximum of H over f's rows on units unit0.. from one partial path.
 
-    Returns (status, value, path of units unit0.., maximum frontier). status 1: no
-    path reaches lower - margin; status 2: the frontier exceeded `backstop`.
+    Returns (status, value, path of units unit0.., maximum frontier, truncated units). status 1:
+    no path reaches lower - margin; status 2: the frontier exceeded `backstop`. With beam > 0
+    at most `beam` children are kept per unit (existing child order); truncated counts the units
+    where the cut dropped a child whose bound still reached lower - margin: the result is then
+    approximate (the best path the beam found), recorded in work[21] when the account has it.
     The all-state programme (tests) with the same child order, bound pruning, dominance
     decisions and kept messages: children are formed per parent from the shared
     background (O(S (t K + t^2)) each instead of O(S t Q)); a child's full message is
@@ -1252,8 +1271,8 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
     if width == 0:
         value = _join(start_n, start_c, end)
         if value < lower - margin:
-            return INFEASIBLE, value, path, 1
-        return OK, value, path, 1
+            return INFEASIBLE, value, path, 1, 0
+        return OK, value, path, 1, 0
     founders = len(fz)
     nb = len(bg)
     # The frontier (`parents` paths) and the paths kept on the current unit (`count`) live in
@@ -1269,6 +1288,7 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
     history_cho = np.empty(64, np.int64)
     history_off = np.zeros(width + 1, np.int64)
     max_frontier = 1
+    truncated = 0
     p_a0 = np.empty((0, samples, founders))
     p_bg = np.empty((0, samples, states))
     no_background = np.empty((0, states))
@@ -1376,7 +1396,7 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
             if bounds[i] >= lower - margin:
                 alive += 1
         if alive == 0:
-            return INFEASIBLE, -np.inf, path, max_frontier
+            return INFEASIBLE, -np.inf, path, max_frontier, truncated
         levels = 1
         power = 2
         while power < children:
@@ -1411,6 +1431,14 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
         mat_c = np.empty(samples)
         cell_cost = states * (bins + 1) + bins * founders + bins * bins + 1
         for position in range(children):
+            if beam > 0 and count >= beam:
+                for later in range(position, children):
+                    if bounds[order[later]] >= lower - margin:
+                        truncated += 1
+                        if len(work) > 21:
+                            work[21] += 1
+                        break
+                break
             _debit(work, 6, 128, samples, cell_cost)
             i = order[position]
             if bounds[i] < lower - margin:
@@ -1596,7 +1624,7 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
             kept_s[count] = cur_s
             count += 1
             if count > backstop:
-                return BACKSTOP, -np.inf, path, count
+                return BACKSTOP, -np.inf, path, count, truncated
         # A kept child may be dominated by one kept after it (later in the order).
         _debit(work, 9, 128, count + 1, samples * (states + founders + bins + 1) + width + 1)
         remove = np.zeros(count, np.bool_)
@@ -1660,12 +1688,12 @@ def window_dp(emissions, cols, cands, offsets, focal, incumbent, first, second, 
             best_value = value
             best = x
     if best_value < lower - margin:
-        return INFEASIBLE, best_value, path, max_frontier
+        return INFEASIBLE, best_value, path, max_frontier, truncated
     index = best
     for step in range(width - 1, -1, -1):
         path[step] = history_cho[history_off[step] + index]
         index = history_par[history_off[step] + index]
-    return OK, best_value, path, max_frontier
+    return OK, best_value, path, max_frontier, truncated
 
 
 @njit(cache=True, nogil=True)
@@ -1695,6 +1723,19 @@ def _closed_start(start, penalty):
         for z in range(states):
             out[s, z] = max(start[s, z] - m, -penalty)
     return out, top
+
+@njit(cache=True, nogil=True)
+def _closed_end(end, penalty):
+    """The closed end message: per sample max(end - max(end), -penalty) (maximum 0, entries >=
+    -penalty), the stored backward message's Potts closure."""
+    samples, states = end.shape
+    out = np.empty((samples, states))
+    for s in range(samples):
+        m = row_max(end[s])
+        for z in range(states):
+            out[s, z] = max(end[s, z] - m, -penalty)
+    return out
+
 
 @njit(cache=True, nogil=True)
 def _beam_value(emissions, cols, cands, offsets, focal, first, second, penalty, start_n, start_c,
@@ -2120,21 +2161,21 @@ def _restricted_programme(emissions, cols, cands, offsets, focal, incumbent, fir
     found, tail, frontier, upper, slack, tightened)."""
     _charge_window(work, 14, emissions, cols, offsets)
     limit = backstop if tightened else min(backstop, EXPLORE_FRONTIER)
-    status, found, tail, reached = window_dp(
+    status, found, tail, reached, _ = window_dp(
         emissions, cols, alphabet, alphabet_offsets, focal, incumbent, first, second, penalty,
         prefix_n.copy(), prefix_c.copy(), unit0, end, upper, target,
         1e-9 * max(1.0, abs(target)) + slack, 0.0, limit, store_limit, fz, bg, prefixes, suffixes,
-        segs, work)
+        segs, work, BEAM_CAP if tightened else 0)
     if status == BACKSTOP and not tightened and backstop > EXPLORE_FRONTIER:
         upper, slack, _, _, _ = _dual_bounds(
             emissions, cols, cands, offsets, focal, incumbent, first, second, penalty, start_n,
             start_c, end, optimum, tol, fz, bg, prefixes, suffixes, segs, work)
         tightened = True
-        status, found, tail, again = window_dp(
+        status, found, tail, again, _ = window_dp(
             emissions, cols, alphabet, alphabet_offsets, focal, incumbent, first, second, penalty,
             prefix_n.copy(), prefix_c.copy(), unit0, end, upper, target,
             1e-9 * max(1.0, abs(target)) + slack, 0.0, backstop, store_limit, fz, bg, prefixes,
-            suffixes, segs, work)
+            suffixes, segs, work, BEAM_CAP)
         if again > reached:
             reached = again
     return status, found, tail, reached, upper, slack, tightened
@@ -2286,7 +2327,7 @@ def solve_focal(emissions, cols, cands, offsets, focal, incumbent, first, second
         return UNCHANGED, rows, True, False, 0, 0
     lower = incumbent_value
     margin = tol + (units + 1) * DOMINANCE_TOLERANCE + 1e-9 * max(1.0, abs(lower))
-    status, value, path, frontier = window_dp(
+    status, value, path, frontier, truncated = window_dp(
         emissions, cols, cands, offsets, focal, incumbent, first, second, penalty, start_n,
         start_c, 0, end, upper, lower, margin, DOMINANCE_TOLERANCE, min(backstop, EXPLORE_FRONTIER),
         store_limit, fz, bg, prefixes, suffixes, segs, work)
@@ -2299,14 +2340,18 @@ def solve_focal(emissions, cols, cands, offsets, focal, incumbent, first, second
         upper, lower, margin, slack = _tighten(
             emissions, cols, cands, offsets, focal, incumbent, first, second, penalty, start_n,
             start_c, end, upper, lower, tol, fz, bg, prefixes, suffixes, segs, work)
-        status, value, path, reached = window_dp(
+        status, value, path, reached, truncated = window_dp(
             emissions, cols, cands, offsets, focal, incumbent, first, second, penalty, start_n,
             start_c, 0, end, upper, lower, margin, DOMINANCE_TOLERANCE, backstop, store_limit, fz,
-            bg, prefixes, suffixes, segs, work)
+            bg, prefixes, suffixes, segs, work, BEAM_CAP)
         if reached > frontier:
             frontier = reached
     if status == BACKSTOP:
         return FRONTIER_LIMIT, rows, False, True, frontier, 0
+    if status != OK and truncated:
+        # A capped programme that lost its feasible witness keeps the incumbent (a reported beam
+        # fallback) instead of claiming infeasibility.
+        return BEAM_LIMIT, rows, False, True, frontier, 0
     if status != OK:
         return LOST, rows, False, True, frontier, 0
     if incumbent_value >= value - tol:
@@ -2336,9 +2381,16 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
     cols[u, k] is founder k's row on unit u (the focal's incumbent); the alphabet of
     unit u is 0..sizes[u]-1. backstop: the largest frontier a programme may hold.
     Returns per focal (status, rows, box_certified, dp, frontier, fixing_dps) as arrays.
+
+    Release 2.8: the flanks are the exact objective's messages (per-homologue transitions), whose
+    entries can lie more than `penalty` below their maximum (a change of both homologues costs 2c).
+    The surrogate's bounds assume Potts-closed flanks, so both the start (_closed_start) and the end
+    (_closed_end) are closed here: the surrogate is a Potts window between relaxed flanks
+    (proposals only; a no-op for 2.6's own Potts messages, which are closed by construction).
     """
     if work is None:
         work = np.empty(0, np.int64)
+    end = _closed_end(end, penalty)
     _charge_window(work, 0, emissions, cols, sizes)
     units = len(emissions)
     founders = cols.shape[1]
@@ -2525,7 +2577,8 @@ def _new_work(work_budget, samples, width, founders, rows, bins, frontier):
         raise ValueError("window work budget exceeds scaled int64 accounting range")
     if max(_work_shape_terms(samples, width, founders, rows, bins, frontier)) >= 2 ** 63:
         raise ValueError("window work shape exceeds supported int64 accounting")
-    work = np.zeros(21, np.int64)
+    # work[21]: beam-truncated programme units (approximate window solves).
+    work = np.zeros(22, np.int64)
     work[0], work[20] = budget >> shift, shift
     return work
 
@@ -2536,7 +2589,8 @@ def _work_receipt(work, budget):
     phases = tuple(map(int, work[4:20]))
     return dict(account_scope="template", work_budget=int(budget),
                 work_used=int(work[1]) << shift, phase_work=tuple(p << shift for p in phases),
-                work_quantum=1 << shift, work_used_units=int(work[1]), phase_work_units=phases)
+                work_quantum=1 << shift, work_used_units=int(work[1]), phase_work_units=phases,
+                beam_truncations=int(work[21]) if len(work) > 21 else 0)
 
 
 from .work_limit import WindowWorkState
@@ -2605,6 +2659,12 @@ class WindowSolver:
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
         unit's bins). Returns [(focal, unit choices or None, diagnostic)]; a frontier fallback
         keeps the incumbent."""
+        # Release 2.8: the exact objective's backward messages end with a per-homologue transition
+        # (up to 2c below the maximum, c map-derived), while the surrogate's bounds and dominance
+        # assume a flank closed under its own flat switch (entries >= max - penalty, as 2.6's
+        # stored messages always were). Close the end flank under the surrogate's switch, as
+        # _closed_start does for the start flank; proposals only (acceptance stays exact).
+        end = np.maximum(end, end.max(axis=1, keepdims=True) - self.penalty)
         # Dimensions are those of this actual fine/coarse problem, including temporary
         # copy-response founders and all distinct context paths. Python-int products
         # precede scaled native accounting; there is no small-K cap or off mode.
@@ -2667,6 +2727,7 @@ class WindowSolver:
             out.append((int(k), rows if status == CHANGED else None,
                         dict(certified=bool(box), dp=bool(dp), frontier=int(frontier),
                              fixing_dps=int(fixing), fallback=bool(status == FRONTIER_LIMIT),
+                             beam_fallback=bool(status == BEAM_LIMIT),
                              status=int(status), work_limit=False, work_retries=step)))
         if out:
             out[0][2].update(_work_receipt(work, work_budget),

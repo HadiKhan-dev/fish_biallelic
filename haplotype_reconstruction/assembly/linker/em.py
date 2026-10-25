@@ -6,7 +6,7 @@ residue-class chains (blocks i, i + g, i + 2g, ...). Each chain is a hidden Mark
 founder pair: within a block the normal/error-tract scan (``linker.scan``), between consecutive blocks of the
 chain both homologues move independently through one haploid transition matrix T_i (K_i x K_{i+g}). EM fits
 every T_i of the gap from the posterior homologue edge counts (``linker.kernels``) with pseudocounts, a log
-floor and a robust uniform mixture, damping each update toward the previous transitions at a decaying rate.
+floor and a robust uniform mixture. The default takes full M-steps; configured damping uses a decaying rate.
 Each gap is its own EM; all gaps of a batch share the blocks' emissions and cached zero-prior scans.
 
 Inputs are the batch's input components (their linking proxies: at most ``LinkerConfig.max_sites`` sites per
@@ -189,9 +189,10 @@ def _fit_gap(scans, founders, gap, config: LinkerConfig, budget, label=None):
     """Fit one gap; return forward probabilities per edge and the actual returned-iterate residual.
 
     Start from uniform transitions. At each iterate T, evaluate the regularised target M(T) once and stop
-    when max(abs(M(T) - T)) <= min_change, or after max_iterations damped updates. Otherwise apply the same
-    rate max(decay^iteration, minimum). Evaluating the final returned iterate avoids reporting the residual
-    at the previous iterate as convergence. Reverse summaries are not parameters of this fixed-point problem.
+    when max(abs(M(T) - T)) <= min_change, or after max_iterations updates. Otherwise apply
+    rate max(decay^iteration, minimum), which is 1 at the default decay of 1. Evaluating the final returned
+    iterate avoids reporting the residual at the previous iterate as convergence. Reverse summaries are not
+    parameters of this fixed-point problem.
     label: the batch's census label; record the last two residual-minus-tolerance distances when enabled.
     """
     n = len(scans)

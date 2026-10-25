@@ -73,6 +73,11 @@ class ComponentRefinement:
     branches. They are subsets of the overall branch counters.
     elapsed_seconds: wall time of the component's refinement. tie_events: maths.ties.TieCounter record of
     the component's tie-class decisions ({kind: {decisions, inside_tie, wide, boundary}}, release 2.1).
+    polish (release 2.8): status "done" when the decided panel was polished (FounderRefinementConfig.polish),
+    "window_work_bound" when the polish reached the window work bound (the count pass's panel is kept unpolished),
+    or "off"; with the count pass's final fit (from_fit) and F (F_before), the polished F (F_after), gain,
+    whether the panel or its equal-F family changed (changed), the polish fits' labels and count_reevaluated = False: the count decisions,
+    bands and best-F restoration above were taken on the pre-polish panel and are not re-evaluated.
     """
 
     component: int
@@ -113,6 +118,7 @@ class ComponentRefinement:
     count_branch_seconds: float = 0.0
     phase_seconds: dict = field(default_factory=dict)
     work_counters: dict = field(default_factory=dict)
+    polish: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

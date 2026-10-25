@@ -339,11 +339,10 @@ def _execute_bundle(payload, cpus):
     # The pool's shared copy is one allocation, not one copy per worker. Preserve graded headroom.
     planned[planned.index(max(planned))] += int(likelihoods.nbytes + observed.nbytes)
     workers = max(1, min(workers, memory_worker_limit(planned, workers, label="local-fit-bundle")))
-    with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="local-fit-bundle workers"):
-        with BudgetedPool(CpuBudget.fixed(cpus), processes=workers,
-                          shared=dict(likelihoods=likelihoods, observed=observed),
-                          label="local-fit-bundle") as pool:
-            return list(pool.imap_unordered(_select_task, tasks, task_bytes=sizes))
+    with BudgetedPool(CpuBudget.fixed(cpus), processes=workers,
+                      shared=dict(likelihoods=likelihoods, observed=observed),
+                      label="local-fit-bundle") as pool:
+        return list(pool.imap_unordered(_select_task, tasks, task_bytes=sizes))
 
 
 LOCAL_FIT = BatchKind(name="local_fit", bundles=_bundles, execute=_execute_bundle)
@@ -399,9 +398,8 @@ def run_round(round_scope, tasks, settings, evidence, budget, *, queue=None, lab
 
 def _pooled(budget, workers, shared, payloads, sizes):
     # Both resources start on first iteration; closing an unstarted generator owns no pool or hold.
-    with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="local-selection workers"):
-        with BudgetedPool(budget, processes=workers, shared=shared, label="local-selection") as pool:
-            yield from pool.imap_unordered(_select_task, payloads, task_bytes=sizes)
+    with BudgetedPool(budget, processes=workers, shared=shared, label="local-selection") as pool:
+        yield from pool.imap_unordered(_select_task, payloads, task_bytes=sizes)
 
 
 def _report(selections, label):

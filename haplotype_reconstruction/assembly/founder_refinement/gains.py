@@ -3,8 +3,13 @@
 A content move replaces founder k's rows on blocks [p1, p2); its exact per-sample gain is
 max_q [f(p1) (x) T_new[p1, p2) (x) g(p2)] + new normalisers - max_q [f(p1) + g(p1)] - old
 normalisers, from the current messages at its two ends (messages.py). A suffix exchange of
-founders a < b at a junction relabels the suffix states, so its gain needs the messages at the
-junction only.
+founders a < b at a junction relabels the suffix states (the per-homologue transition is
+founder-symmetric), so its gain needs the messages at the junction only.
+
+Release 2.8: under the per-homologue transition every state's switch term reads the founder maxima
+R[x], which include the moved founder's states, so 2.6's background fast path (only the K focal
+states advance while the leader is a background state) does not carry over; the candidate kernels
+run the all-state recursion (O(Q + K) per site).
 """
 from __future__ import annotations
 
@@ -12,8 +17,7 @@ import numpy as np
 from numba import njit, prange
 
 from .messages import segments
-from .objective import (forward_sites, forward_sites_lex, is_skipped, lex_switch, normalise, pick,
-                        site_emissions, unordered_pairs)
+from .objective import forward_sites, forward_sites_lex, normalise, pair_code7, unordered_pairs
 
 
 @njit(cache=True, nogil=True)
@@ -133,7 +137,7 @@ def item_dosages(haps, leaves, offsets, k, rows, row_start, b0, b1, first, secon
     states = len(first)
     lo = offsets[b0]
     hi = offsets[b1]
-    allele = np.empty(hi - lo, np.int8)
+    allele = np.empty(hi - lo, np.int16)
     for b in range(b0, b1):
         r = rows[row_start + b - b0]
         leaf = leaves[b]
@@ -145,26 +149,26 @@ def item_dosages(haps, leaves, offsets, k, rows, row_start, b0, b1, first, secon
         for q in range(states):
             a = first[q]
             e = second[q]
-            out[j - lo, q] = ((allele[j - lo] if a == k else haps[a, j])
-                              + (allele[j - lo] if e == k else haps[e, j]))
+            out[j - lo, q] = pair_code7(allele[j - lo] if a == k else haps[a, j],
+                                        allele[j - lo] if e == k else haps[e, j])
     return out
 
 
 @njit(inline="always")
-def dense_blocks(dos, lo, logs, offsets, penalty, row, b0, b1, s, scale):
+def dense_blocks(dos, lo, logs, offsets, costs, row, R, b0, b1, s, scale):
     """The all-state recursion of sample s over blocks [b0, b1) on a candidate's dosage table, in
     place on row; returns scale plus the blocks' normalisers, added in block order."""
     for b in range(b0, b1):
-        forward_sites(row, dos, lo, logs, s, offsets[b], offsets[b + 1], penalty)
+        forward_sites(row, dos, lo, logs, s, offsets[b], offsets[b + 1], costs, R)
         scale += normalise(row)
     return scale
 
 
 @njit(inline="always")
-def dense_blocks_lex(dos, lo, logs, offsets, penalty, row, cnt, b0, b1, s, scale):
-    """dense_blocks() with the lexicographic switch counts."""
+def dense_blocks_lex(dos, lo, logs, offsets, costs, row, cnt, R, Rc, b0, b1, s, scale):
+    """dense_blocks() with the lexicographic switch costs."""
     for b in range(b0, b1):
-        forward_sites_lex(row, cnt, dos, lo, logs, s, offsets[b], offsets[b + 1], penalty)
+        forward_sites_lex(row, cnt, dos, lo, logs, s, offsets[b], offsets[b + 1], costs, R, Rc)
         scale += normalise(row)
     return scale
 
@@ -182,7 +186,7 @@ def max_close(row, g):
 def lex_close(row, cnt, g, gcnt):
     """The lexicographic maximum of (row + g, cnt + gcnt) over the states."""
     best = -np.inf
-    best_cnt = 0
+    best_cnt = 0.0
     for q in range(len(row)):
         v = row[q] + g[q]
         n = cnt[q] + gcnt[q]
@@ -193,9 +197,8 @@ def lex_close(row, cnt, g, gcnt):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def candidate_gains(haps, leaves, logs, offsets, penalty, f_start, g_start, focal, first_block,
-                    end_block, rows, row_offsets, g_end, scale_sum, site_max, site_lead, block_max,
-                    block_lead, chain_block, chain_values):
+def candidate_gains(haps, leaves, logs, offsets, costs, f_start, g_start, focal, first_block,
+                    end_block, rows, row_offsets, g_end, scale_sum):
     """Exact per-sample F gains (count x S) of one-founder content moves.
 
     Candidate i replaces the rows of founder focal[i] on blocks [first_block[i], end_block[i])
@@ -203,40 +206,20 @@ def candidate_gains(haps, leaves, logs, offsets, penalty, f_start, g_start, foca
     With f_start[i] / g_start[i] the current normalised forward / backward messages at
     first_block[i], g_end[i] the current backward message at end_block[i] and scale_sum[i] the
     backward normalisers of those blocks, the gain of sample s is max_q [f_start (x) T_new (x)
-    g_end] + new normalisers - max_q [f_start + g_start] - scale_sum.
-
-    Only the K states containing the moved founder k see new emissions; the others (the
-    background) change only through the switch term max(row) - penalty. The current panel's
-    forward chain from block chain_block (messages.forward_chain: messages chain_values at block
-    boundaries through every end_block[i], leaders site_max / site_lead per site, block_max /
-    block_lead per block) gives that term. While the chain's leader is a background state and the
-    new focal states do not exceed it, the switch terms and block normalisers are the chain's, so
-    the background states equal the chain's and only the focal states advance: O(K) instead of
-    O(Q) per site, the same arithmetic. Where a sample's leader contains k, or its new focal states
-    would lead, inside block b, the all-state recursion resumes at boundary b from the chain's
-    background states and the focal states held there (the same values as the all-state
-    recursion from the start).
-
-    Candidates are scored one after another, their samples in parallel, on per-segment dosage
-    tables (item_dosages; a window candidate is normally one segment); each sample's state carries
-    from segment to segment.
-    """
+    g_end] + new normalisers - max_q [f_start + g_start] - scale_sum. The all-state recursion runs
+    on per-segment dosage tables (item_dosages; a window candidate is normally one segment); each
+    sample's state carries from segment to segment. Candidates one after another, their samples in
+    parallel."""
     first, second = unordered_pairs(len(haps))
     founders = len(haps)
     states = len(first)
     samples = logs.shape[0]
     count = len(focal)
     gains = np.empty((count, samples))
-    focal_all_states = focal_states(first, second, founders)
-    site_base = offsets[chain_block]
-    focal_all = np.empty((samples, founders))
-    held_all = np.empty((samples, founders))
     row_all = np.empty((samples, states))
     scale_all = np.empty(samples)
-    dense_all = np.zeros(samples, np.bool_)
     for i in range(count):
         k = focal[i]
-        fs = focal_all_states[k]
         start, stop = first_block[i], end_block[i]
         bounds = segments(offsets[start:stop + 1], states)
         for u in range(len(bounds) - 1):
@@ -245,120 +228,39 @@ def candidate_gains(haps, leaves, logs, offsets, penalty, f_start, g_start, foca
             dos = item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
                                first, second)
             for s in prange(samples):
-                xf = focal_all[s]
-                held = held_all[s]
+                R = np.empty(founders)
                 row = row_all[s]
                 if b0 == start:
-                    for t in range(founders):
-                        xf[t] = f_start[i, s, fs[t]]
+                    row[:] = f_start[i, s]
                     scale = 0.0
-                    dense = False
                 else:
                     scale = scale_all[s]
-                    dense = dense_all[s]
-                b = b0
-                if not dense:
-                    while b < b1:
-                        held[:] = xf
-                        fast = True
-                        for j in range(offsets[b], offsets[b + 1]):
-                            if is_skipped(logs, s, j):
-                                continue
-                            lead = site_lead[s, j - site_base]
-                            top = site_max[s, j - site_base]
-                            if first[lead] == k or second[lead] == k:
-                                fast = False
-                                break
-                            for t in range(founders):
-                                if xf[t] > top:
-                                    fast = False
-                            if not fast:
-                                break
-                            sw = top - penalty
-                            e0, e1, e2 = site_emissions(logs, s, j)
-                            for t in range(founders):
-                                xf[t] = max(xf[t], sw) + pick(dos[j - lo, fs[t]], e0, e1, e2)
-                        m = 0.0
-                        if fast:
-                            lead = block_lead[b - chain_block, s]
-                            m = block_max[b - chain_block, s]
-                            if first[lead] == k or second[lead] == k:
-                                fast = False
-                            for t in range(founders):
-                                if xf[t] > m:
-                                    fast = False
-                        if not fast:
-                            xf[:] = held
-                            break
-                        scale += m
-                        for t in range(founders):
-                            xf[t] -= m
-                        b += 1
-                    if b < b1:
-                        # The candidate's states at boundary b: background from the chain, focal
-                        # held; the all-state recursion takes over from there.
-                        if b == start:
-                            row[:] = f_start[i, s]
-                        else:
-                            row[:] = chain_values[b - chain_block, s]
-                        for t in range(founders):
-                            row[fs[t]] = xf[t]
-                        dense = True
-                if dense:
-                    scale = dense_blocks(dos, lo, logs, offsets, penalty, row, b, b1, s, scale)
+                scale = dense_blocks(dos, lo, logs, offsets, costs, row, R, b0, b1, s, scale)
                 scale_all[s] = scale
-                dense_all[s] = dense
                 if b1 == stop:
                     old = max_close(f_start[i, s], g_start[i, s])
-                    if not dense:
-                        row[:] = chain_values[stop - chain_block, s]
-                        for t in range(founders):
-                            row[fs[t]] = xf[t]
                     gains[i, s] = max_close(row, g_end[i, s]) + scale - old - scale_sum[i, s]
     return gains
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def candidate_gains_lex(haps, leaves, logs, offsets, penalty, f_start, fcnt_start, g_start,
+def candidate_gains_lex(haps, leaves, logs, offsets, costs, f_start, fcnt_start, g_start,
                         gcnt_start, focal, first_block, end_block, rows, row_offsets, g_end,
-                        gcnt_end, scale_sum, chain_values, chain_counts, site_max, site_lead,
-                        block_max, block_lead, site_cnt, chain_block, chain_end):
-    """candidate_gains() plus the per-sample change of the lexicographic switch count.
-
-    The background fast path for the lexicographic pair (score, switch count): the current
-    panel's lexicographic forward chain from block chain_block (messages.forward_chain_lex;
-    first_block[i] >= chain_block) has messages and counts at boundaries chain_block..chain_end,
-    per site the lexicographic maximum (site_max, site_cnt) before the site's update and the first
-    state attaining it (site_lead), per block the maximum before the normalisation and its first
-    state. While the site leader is a background state (not containing the moved founder k) and no
-    new focal state exceeds its score or ties it with fewer switches, the candidate's
-    lexicographic maximum is the chain's, so the switch terms, the background states' scores and
-    counts are the chain's; while the block leader is a background state and no focal state
-    exceeds the block maximum, so is the block normaliser. Only the K focal states are then
-    advanced. Where this fails inside block b (or the chain ends at b), the all-state recursion
-    resumes at boundary b from the chain's background states and the focal states held there.
-    Every value is the all-state recursion's. Returns (gains, switch-count changes), count x S.
-    """
+                        gcnt_end, scale_sum):
+    """candidate_gains() plus the per-sample change of the lexicographic maximum path's switch
+    cost. Returns (gains, switch-cost changes), count x S."""
     first, second = unordered_pairs(len(haps))
     founders = len(haps)
     states = len(first)
     samples = logs.shape[0]
     count = len(focal)
     gains = np.empty((count, samples))
-    switches = np.empty((count, samples), np.int64)
-    focal_all_states = focal_states(first, second, founders)
-    site_base = offsets[chain_block]
-    focal_all = np.empty((samples, founders))
-    focal_cnt_all = np.empty((samples, founders), np.int64)
-    held_all = np.empty((samples, founders))
-    held_cnt_all = np.empty((samples, founders), np.int64)
+    switches = np.empty((count, samples))
     row_all = np.empty((samples, states))
-    cnt_all = np.empty((samples, states), np.int64)
+    cnt_all = np.empty((samples, states))
     scale_all = np.empty(samples)
-    dense_all = np.zeros(samples, np.bool_)
     for i in range(count):
         k = focal[i]
-        fs = focal_all_states[k]
         start, stop = first_block[i], end_block[i]
         bounds = segments(offsets[start:stop + 1], states)
         for u in range(len(bounds) - 1):
@@ -367,89 +269,22 @@ def candidate_gains_lex(haps, leaves, logs, offsets, penalty, f_start, fcnt_star
             dos = item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
                                first, second)
             for s in prange(samples):
-                xf = focal_all[s]
-                xc = focal_cnt_all[s]
-                held_f = held_all[s]
-                held_c = held_cnt_all[s]
+                R = np.empty(founders)
+                Rc = np.empty(founders)
                 row = row_all[s]
                 cnt = cnt_all[s]
                 if b0 == start:
-                    for t in range(founders):
-                        xf[t] = f_start[i, s, fs[t]]
-                        xc[t] = fcnt_start[i, s, fs[t]]
+                    row[:] = f_start[i, s]
+                    cnt[:] = fcnt_start[i, s]
                     scale = 0.0
-                    dense = False
                 else:
                     scale = scale_all[s]
-                    dense = dense_all[s]
-                b = b0
-                if not dense:
-                    while b < min(b1, chain_end):
-                        held_f[:] = xf
-                        held_c[:] = xc
-                        fast = True
-                        for j in range(offsets[b], offsets[b + 1]):
-                            if is_skipped(logs, s, j):
-                                continue
-                            lead = site_lead[s, j - site_base]
-                            if first[lead] == k or second[lead] == k:
-                                fast = False
-                                break
-                            m = site_max[s, j - site_base]
-                            c = site_cnt[s, j - site_base]
-                            for t in range(founders):
-                                if xf[t] > m or (xf[t] == m and xc[t] < c):
-                                    fast = False
-                            if not fast:
-                                break
-                            sw = m - penalty
-                            e0, e1, e2 = site_emissions(logs, s, j)
-                            for t in range(founders):
-                                lex_switch(xf, xc, t, sw, c)
-                                xf[t] += pick(dos[j - lo, fs[t]], e0, e1, e2)
-                        m = 0.0
-                        if fast:
-                            lead = block_lead[b - chain_block, s]
-                            m = block_max[b - chain_block, s]
-                            if first[lead] == k or second[lead] == k:
-                                fast = False
-                            for t in range(founders):
-                                if xf[t] > m:
-                                    fast = False
-                        if not fast:
-                            xf[:] = held_f
-                            xc[:] = held_c
-                            break
-                        scale += m
-                        for t in range(founders):
-                            xf[t] -= m
-                        b += 1
-                    if b < b1:
-                        # The all-state recursion from boundary b: background states from the chain.
-                        if b == start:
-                            row[:] = f_start[i, s]
-                            cnt[:] = fcnt_start[i, s]
-                        else:
-                            row[:] = chain_values[b - chain_block, s]
-                            cnt[:] = chain_counts[b - chain_block, s]
-                        for t in range(founders):
-                            row[fs[t]] = xf[t]
-                            cnt[fs[t]] = xc[t]
-                        dense = True
-                if dense:
-                    scale = dense_blocks_lex(dos, lo, logs, offsets, penalty, row, cnt, b, b1, s,
-                                             scale)
+                scale = dense_blocks_lex(dos, lo, logs, offsets, costs, row, cnt, R, Rc, b0, b1, s,
+                                         scale)
                 scale_all[s] = scale
-                dense_all[s] = dense
                 if b1 == stop:
                     old, old_cnt = lex_close(f_start[i, s], fcnt_start[i, s], g_start[i, s],
                                              gcnt_start[i, s])
-                    if not dense:
-                        row[:] = chain_values[stop - chain_block, s]
-                        cnt[:] = chain_counts[stop - chain_block, s]
-                        for t in range(founders):
-                            row[fs[t]] = xf[t]
-                            cnt[fs[t]] = xc[t]
                     best, best_cnt = lex_close(row, cnt, g_end[i, s], gcnt_end[i, s])
                     gains[i, s] = best + scale - old - scale_sum[i, s]
                     switches[i, s] = best_cnt - old_cnt

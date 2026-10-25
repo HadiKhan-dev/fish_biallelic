@@ -45,11 +45,10 @@ class RunSection:
 class ExecutionSection:
     cores: int | str = setting("auto", "cores", "Total CPU ceiling (processes x threads); auto = CPU affinity.")
     contig_lanes: int | str = setting("auto", "cores", "Contigs reconstructed concurrently; auto = one lane per 16 "
-                                      "cores, limited by memory; 1 = one contig at a time with all cores.")
-    memory_limit: int | str = setting("auto", "memory", "Memory the run may plan to use at once (the memory "
-                                      "governor paces work to fit; results never depend on it): a size such as "
-                                      "\"200G\" (binary units), or auto = memory available at start minus a 10% "
-                                      "headroom.")
+                                      "cores, paced by measured memory pressure; 1 = one contig at a time with all cores.")
+    memory_limit: int | str = setting("auto", "memory", "Capacity for measured job memory pressure: a size such as "
+                                      "\"200G\" (binary units), or auto = job cgroup capacity. SOFT/HARD "
+                                      "thresholds and sampling interval are in execution/config.py; affects scheduling only.")
     serial: bool = setting(False, "bool", "Discover, assemble and paint one contig at a time, each recorded "
                            "before the next (short allocations).")
     max_contigs: int = setting(0, "int", "Finish at most this many more contigs in this invocation, then stop "

@@ -5,7 +5,8 @@ updates its previous sweep's messages in place, recomputing per sample only the 
 pass changed and those whose start message changed; over consecutive sample ranges); (ii) computes
 the window proposals of the panel at the start of the sweep (proposals.py; a window whose inputs
 are bitwise unchanged since the search last solved it reuses that solve): for every founder and
-every fine window the canonical exact maximiser of the binned surrogate, and where an L1 context
+every fine window the canonical maximiser of the binned surrogate (exact unless a beam-capped
+programme truncates: counted as beam_truncations), and where an L1 context
 exists for every founder and every coarse window the same over L1 span tuples; (iii) runs one exact
 acceptance pass (acceptance.py), its direction alternating between sweeps; (iv) recomputes the
 exact F, which must equal the start F plus the accepted gains. A sweep that accepts nothing stops
@@ -40,21 +41,49 @@ import warnings
 import numpy as np
 from numba.typed import List
 
+from . import gains as gains_kernels
 from . import messages as kernels
 from .. import tie_rules
 from ...maths import ties
-from .acceptance import JUNCTION_BATCH, MOVE_COARSE, MOVE_FINE, accept_pass
+from .acceptance import AHEAD_BLOCKS, JUNCTION_BATCH, MOVE_COARSE, MOVE_FINE, TOL, accept_pass
 from .objective import SWITCH_PENALTY, score_panel, score_switches_direct, selected_alleles
 from .proposals import WindowSolver
 from .workspace import sample_ranges
 from ... import execution
 
-# Junctions whose best suffix exchange costs less than one switch are reported as weak.
+# Precursor content scoring of the bridge search runs in batches of at most this many message bytes.
+BRIDGE_BATCH_BYTES = 256 << 20
+# Polish: long one-founder moves, beam offers on LONG_WINDOW-block windows at LONG_STRIDE, each
+# also tried with one private correction of LONG_CORRECTION blocks (SweepEngine.long_repair).
+LONG_WINDOW = 64
+LONG_STRIDE = 16
+LONG_CORRECTION = 8
+# Donors of a long offer's corrections: the LONG_DONORS founders whose rows agree with the offer on most blocks of
+# its changed span (ties: founder order), plus the incumbent's own rows; O(1) per offer keeps long_repair cubic in K.
+LONG_DONORS = 2
+# Acceptance counters of the polish's escape and long-repair passes merged into their sweep's counters.
+_POLISH_PASS_KEYS = ("evaluated", "false_positive", "exchange_tie", "content_tie", "tie_wide", "round_cap",
+                     "exchange_cap", "content_rounds", "stale_evaluated", "guard_shared_tests", "guard_rejected",
+                     "guard_traced_blocks", "guard_relaxed", "guard_shared_switches", "lex_items")
+# Beam width of the long windows' offers (the ordinary escape keeps beam.BEAM_WIDTH).
+LONG_BEAM_WIDTH = 16
+# Junctions whose best suffix exchange costs less than one switch are reported as weak (a fixed
+# reporting margin of 20 nats, 2.6's diplotype switch penalty; 2.8 switch costs are
+# map-derived).
 WEAK_JUNCTION_MARGIN = SWITCH_PENALTY
 _MOVE_CODES = {"fine": MOVE_FINE, "coarse": MOVE_COARSE}
-_TOTAL_KEYS = ("fine", "coarse", "exchange", "fine_gain", "coarse_gain", "exchange_gain",
+_TOTAL_KEYS = ("fine", "coarse", "exchange", "bridge", "escape", "long", "fine_gain", "coarse_gain",
+               "exchange_gain", "bridge_gain", "escape_gain", "long_gain", "long_offers", "escape_offers",
+               "escape_windows", "escape_beam_cut", "escape_beam_binding", "long_windows", "long_beam_cut",
+               "long_beam_binding", "long_candidates",
                "evaluated", "false_positive", "guard_rejected", "guard_shared_tests",
-               "guard_relaxed", "guard_shared_switches", "guard_traced_blocks", "changed_blocks")
+               "guard_relaxed", "guard_shared_switches", "guard_traced_blocks", "changed_blocks",
+               "content_rounds", "round_cap", "stale_evaluated", "exchange_cap", "lex_items", "lex_abort")
+# Acceptance, escape and long-repair counters reported with every fit's work counters.
+_WORK_KEYS = ("guard_shared_tests", "guard_traced_blocks", "content_rounds", "round_cap",
+              "stale_evaluated", "exchange_cap", "escape_windows", "escape_beam_cut",
+              "escape_beam_binding", "long_windows", "long_beam_cut", "long_beam_binding", "long_candidates",
+              "lex_items", "lex_abort")
 
 
 @dataclass(frozen=True)
@@ -82,7 +111,7 @@ class FitSummary:
     converged: the kept search ended with a sweep that accepted nothing (else it reached
     FounderRefinementConfig.sweep_limit). sweeps: sweeps of the kept search.
     first: "fwd" | "rev", the kept search after objective and minimum-switch comparison.
-    F_fwd, F_rev: both results.
+    F_fwd, F_rev: both results (F_rev None for a polish fit, which runs the forward-first search only).
     max_frontier: largest window-programme frontier; frontier_fallbacks: window programmes that
     kept the incumbent because their frontier exceeded FounderRefinementConfig.frontier_bytes.
     accepted: totals over the kept search's sweeps (fine, coarse, exchange moves and gains,
@@ -103,7 +132,7 @@ class FitSummary:
     sweeps: int
     first: str
     F_fwd: float
-    F_rev: float
+    F_rev: float | None
     max_frontier: int
     frontier_fallbacks: int
     accepted: dict
@@ -134,6 +163,7 @@ class Orientation:
     def __init__(self, workspace, reverse):
         sites = int(workspace.offsets[-1])
         self.reverse = reverse
+        self.workspace = workspace
         if reverse:
             self.logs = kernels.reverse_sites(workspace.logs)
             self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
@@ -148,6 +178,10 @@ class Orientation:
     def haps(self, panel):
         """int8 (K, L) alleles of the panel (K x B rows in this orientation's block order)."""
         return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
+
+    def costs(self, founders):
+        """float32 (S, L) switch costs of K = founders in this orientation's site order."""
+        return self.workspace.costs(founders, self.reverse)
 
 
 # Only components with multiple incoming roots retain these optional window results.
@@ -293,7 +327,7 @@ def _weak_junctions(gains, pairs, reverse, blocks):
 
 
 def _totals(history):
-    return {key: sum(entry[key] for entry in history) for key in _TOTAL_KEYS}
+    return {key: sum(entry.get(key, 0) for entry in history) for key in _TOTAL_KEYS}
 
 
 # The pair-dosage table (L x Q int8) of the exact score is built up to this size, else the direct
@@ -317,6 +351,13 @@ class SweepEngine:
                                     work_coefficient=config.window_work_coefficient, source_start=source_start)
         self.penalty = float(workspace.penalty)
         self.blocks = workspace.blocks
+        # The window-beam proposer on the map-aware binned surrogate for the polish
+        # fits (converge(polish=True)); count-pass fits use the window programmes only.
+        self.beam = None
+        if getattr(config, "polish", False):
+            from .beam import WindowBeam
+            self.beam = WindowBeam(workspace, context, workspace.genetic_map, workspace.reset_rate,
+                                   workspace.map_probability_floor)
         # The shared-junction guard applies to coarse moves, which exist with an L1 context.
         self.guarded = context is not None
         self.forward = Orientation(workspace, False)
@@ -374,6 +415,10 @@ class SweepEngine:
                 governor.rest(request.id)
                 memo = _WindowMemo()
                 self._window_memo = memo
+            else:
+                # This optional request will never be polled again. Remove its queue claim now,
+                # before the search can make nested requests behind it.
+                request.release()
             yield memo
         finally:
             self._window_memo = None
@@ -430,10 +475,13 @@ class SweepEngine:
         if cached is not None:
             return cached
         ws = self.workspace
+        founders = len(panel)
         with execution.numba_threads(max(1, int(budget.threads()))):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(panel, np.int64))
-            return np.asarray(score_panel(alleles, ws.logs, ws.penalty,
-                                          sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES))
+            scores = np.asarray(score_panel(alleles, ws.logs, ws.costs(founders),
+                                            sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES))
+        # The panel-independent terms of K (start and stay): scores of different K compare.
+        return scores + ws.normalisers(founders)
 
     def score(self, panel, budget):
         return float(self.per_sample(panel, budget).sum())
@@ -448,9 +496,10 @@ class SweepEngine:
         with execution.numba_threads(max(1, int(budget.threads()))):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.asarray(key, np.int64))
         total = 0
+        costs = ws.costs(len(alleles))
         for s0, s1, threads in sample_ranges(ws.samples, budget):
             with execution.numba_threads(threads):
-                _, counts = score_switches_direct(alleles, ws.logs[s0:s1], ws.penalty)
+                _, counts = score_switches_direct(alleles, ws.logs[s0:s1], costs[s0:s1])
             total += int(counts.sum())
         self._minimum_switches[key] = total
         return total
@@ -467,19 +516,21 @@ class SweepEngine:
         self._score_cache[key] = scores
         return scores
 
-    def fit_bytes(self, founders):
+    def fit_bytes(self, founders, polish=False):
         """Memory of one fixed-K search (its reservation, execution.memory): the message arrays its pass holds
         (stored backward values, + counts and the forward history of the guard), its proposal cache's
         boundaries, and the pass transients per junction (f/g starts and ends of up to 3K candidates, the
         lookahead and backward chain: K30 map 3.2), plus 32 MiB. Guard traceback scratch is
-        reserved separately during acceptance; it is not resident during window proposals."""
+        reserved separately during acceptance; it is not resident during window proposals. A polish fit's chains
+        and lookahead can span a long repair's LONG_WINDOW blocks."""
         states = founders * (founders + 1) // 2
         arrays = 4 if self.guarded else 2
         boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
         if self.guarded:
             boundaries += 2 * ((self.blocks - 1) // JUNCTION_BATCH + 1)
         samples = self.workspace.samples
-        transients = 8 * samples * states * (3 * 3 * founders + 2 * 48)
+        span = max(48, LONG_WINDOW) if polish else 48
+        transients = 8 * samples * states * (3 * 3 * founders + 2 * span)
         return 8 * boundaries * samples * states + transients + (32 << 20)
 
     # ------------------------------------------------------------------ messages and proposals
@@ -487,6 +538,7 @@ class SweepEngine:
         """messages(_lex) of panel X: (fwd, bwd, fcnt, bcnt, fscale, bscale), counts None without
         lex; over consecutive sample ranges at the budget's live share."""
         logs, offsets = self.workspace.logs, self.forward.offsets
+        costs = self.forward.costs(len(X))
         with execution.numba_threads(max(1, int(budget.threads()))):
             haps = self.forward.haps(X)
         arrays = kernels.message_arrays(len(X), self.blocks, len(logs), lex)
@@ -494,26 +546,35 @@ class SweepEngine:
         for s0, s1, n in sample_ranges(len(logs), budget):
             with execution.numba_threads(n):
                 if lex:
-                    kernels.messages_lex(haps, logs, offsets, self.penalty, s0, s1, fwd, bwd, fcnt,
+                    kernels.messages_lex(haps, logs, offsets, costs, s0, s1, fwd, bwd, fcnt,
                                          bcnt, fscale, bscale)
                 else:
-                    kernels.messages(haps, logs, offsets, self.penalty, s0, s1, fwd, bwd, fscale,
+                    kernels.messages(haps, logs, offsets, costs, s0, s1, fwd, bwd, fscale,
                                      bscale)
         return arrays
 
-    def _messages(self, X, budget, held=None):
-        """The messages of panel X (with switch counts under the guard) and their wall time.
+    def _messages(self, X, budget, held=None, lex=None):
+        """The messages of panel X (with switch counts when lex, default: under the guard) and their
+        wall time.
 
         held: (panel, messages) of an earlier panel, owned by the caller: updated in place to X's
         where X differs from that panel (update_messages(_lex), bitwise the full computation); a
-        held backward half of None is computed whole."""
+        held backward half of None is computed whole. Held messages without switch
+        counts are not updated to lexicographic ones (computed whole); held counts are dropped
+        when lex is False (the scores of both recursions are the same)."""
         started = time.perf_counter()
+        lex = self.guarded if lex is None else bool(lex)
+        if held is not None and lex and held[1][2] is None:
+            held = None
         if held is None:
-            return self._full_messages(X, self.guarded, budget), time.perf_counter() - started
+            return self._full_messages(X, lex, budget), time.perf_counter() - started
         logs, offsets = self.workspace.logs, self.forward.offsets
+        costs = self.forward.costs(len(X))
         with execution.numba_threads(max(1, int(budget.threads()))):
             haps = self.forward.haps(X)
         panel, (fwd, bwd, fcnt, bcnt, fscale, bscale) = held
+        if not lex:
+            fcnt = bcnt = None
         known = bwd is not None
         if not known:
             bwd, bscale = np.zeros_like(fwd), np.zeros_like(fscale)
@@ -521,11 +582,11 @@ class SweepEngine:
         changed = np.any(panel != X, axis=0)
         for s0, s1, n in sample_ranges(len(logs), budget):
             with execution.numba_threads(n):
-                if self.guarded:
-                    kernels.update_messages_lex(haps, logs, offsets, self.penalty, changed, fwd, bwd,
+                if lex:
+                    kernels.update_messages_lex(haps, logs, offsets, costs, changed, fwd, bwd,
                                                 fcnt, bcnt, fscale, bscale, known, s0, s1)
                 else:
-                    kernels.update_messages(haps, logs, offsets, self.penalty, changed, fwd, bwd,
+                    kernels.update_messages(haps, logs, offsets, costs, changed, fwd, bwd,
                                             fscale, bscale, known, s0, s1)
         return (fwd, bwd, fcnt, bcnt, fscale, bscale), time.perf_counter() - started
 
@@ -572,7 +633,7 @@ class SweepEngine:
         proposals = []
         stats = dict(windows=0, certified=0, dp=0, fixing_dps=0, max_frontier=0, fallbacks=0,
                      changed=0, worker_cpu=0.0, templates_solved=len(todo),
-                     templates_reused=len(spans) - len(todo))
+                     templates_reused=len(spans) - len(todo), beam_truncations=0, beam_fallbacks=0)
         for result, cpu in results:
             stats["worker_cpu"] += cpu
             for kind, a, c, k, rows, diagnostic in result:
@@ -582,6 +643,8 @@ class SweepEngine:
                 stats["fixing_dps"] += diagnostic["fixing_dps"]
                 stats["max_frontier"] = max(stats["max_frontier"], diagnostic["frontier"])
                 stats["fallbacks"] += int(diagnostic["fallback"])
+                stats["beam_truncations"] += int(diagnostic.get("beam_truncations", 0))
+                stats["beam_fallbacks"] += int(diagnostic.get("beam_fallback", False))
                 if rows is not None:
                     stats["changed"] += 1
                     proposals.append((kind, a, c, k, np.asarray(rows, np.int64)))
@@ -603,29 +666,316 @@ class SweepEngine:
             lambda span: self.windows.fine(Y, fwd, bwd, span[0], span[1], frontier_bytes,
                                            focals=(copy,)), fine, item_bytes=sizes,
             label="founder_refinement window solves")
-        props, windows = {}, 0
+        props, windows, truncations, fallbacks = {}, 0, 0, 0
         for result in solved:
-            for _, a, c, _, rows, _ in result:
+            for _, a, c, _, rows, diagnostic in result:
                 windows += 1
+                # The programmes' approximation receipts (proposals.BEAM_CAP).
+                truncations += int(diagnostic.get("beam_truncations", 0))
+                fallbacks += int(diagnostic.get("beam_fallback", False))
                 if rows is not None:
                     props.setdefault(a, []).append((MOVE_FINE, c, copy, np.asarray(rows, np.int64)))
         acc, _, _ = accept_pass(self.forward, np.ascontiguousarray(Y, np.int64).copy(), bwd, None,
-                                bscale, props, self.penalty, False, budget, exchanges=False,
-                                start_fwd=fwd)
+                                bscale, props, self.forward.costs(len(Y)), False, budget,
+                                exchanges=False, start_fwd=fwd)
         return float(acc["fine_gain"]), dict(windows=windows,
                                              proposals=int(sum(map(len, props.values()))),
-                                             accepted=int(acc["fine"]), gain=float(acc["fine_gain"]))
+                                             accepted=int(acc["fine"]), gain=float(acc["fine_gain"]),
+                                             beam_truncations=truncations, beam_fallbacks=fallbacks,
+                                             round_cap=int(acc["round_cap"]),
+                                             stale_evaluated=int(acc["stale_evaluated"]))
 
-    def _sweep_inputs(self, X, budget, cache, held=None, convention=None):
+    def beam_escape(self, X, F, budget, convention):
+        """Polish: one exact acceptance pass over the beam bank of panel X at an ordinary fixed point (forward
+        orientation, the search's content convention). Returns (panel or None, its per-sample scores, exact
+        gain, record, the bank's fine offers as bridge precursors).
+
+        The pass runs on the panel's canonical founder order (rows sorted by content, ties by index) and its
+        outcome is mapped back, so an escape depends on the panel only up to founder labels (the objective is
+        label-invariant: max-plus messages; per-sample scores are exact under relabelling)."""
+        founders = len(X)
+        order = sorted(range(founders), key=lambda f: (tuple(int(x) for x in X[f]), f))
+        canonical = np.ascontiguousarray(np.asarray(X, np.int64)[order])
+        Yc, scores, gain, record, fine = self._beam_escape_canonical(canonical, F, budget, convention)
+        Y = None
+        if Yc is not None:
+            Y = np.empty_like(Yc)
+            Y[order] = Yc
+        fine = [(a, c, order[k], rows) for a, c, k, rows in fine]
+        return Y, scores, gain, record, fine
+
+    def _beam_escape_canonical(self, X, F, budget, convention):
+        """beam_escape on a panel in canonical founder order."""
+        offers, beam_stats = self.beam.generate(X, budget, convention)
+        fine = [(a, c, k, rows) for kind, a, c, k, rows in offers if kind == "fine"]
+        record = dict(offers=len(offers), windows=int(beam_stats["windows"]),
+                      certified=int(beam_stats["certified"]), beam_cut=int(beam_stats["beam_cut"]),
+                      beam_binding=int(beam_stats["beam_binding"]),
+                      box_max_gap=float(beam_stats["box_max_gap"]), beam_wall=float(beam_stats["wall"]),
+                      accepted=0)
+        if not offers:
+            return None, None, 0.0, record, fine
+        props = {}
+        for kind, a, c, k, rows in offers:
+            props.setdefault(a, []).append((_MOVE_CODES[kind], c, k, rows))
+        Xo = np.ascontiguousarray(X, np.int64).copy()
+        # This message set is held beside the search's own (fit_bytes).
+        with execution.reserve_memory(self.message_bytes(len(X), self.guarded),
+                                      label="founder_refinement beam escape messages"):
+            fwd, bwd, fcnt, bcnt, fscale, bscale = self._full_messages(X, self.guarded, budget)
+            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, self.forward.costs(len(X)),
+                                    self.guarded, budget, start_fwd=fwd, start_fcnt=fcnt, scale=abs(F),
+                                    reverse=convention)
+            del fwd, bwd, fcnt, bcnt, fscale, bscale
+        accepted = int(acc["fine"] + acc["coarse"] + acc["exchange"])
+        predicted = float(acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"])
+        record.update(accepted=accepted, fine=int(acc["fine"]), coarse=int(acc["coarse"]),
+                      exchange=int(acc["exchange"]), predicted=predicted,
+                      guard_rejected=int(acc["guard_rejected"]), round_cap=int(acc["round_cap"]),
+                      exchange_cap=int(acc["exchange_cap"]), content_rounds=int(acc["content_rounds"]),
+                      stale_evaluated=int(acc["stale_evaluated"]), guard_shared_tests=int(acc["guard_shared_tests"]),
+                      guard_traced_blocks=int(acc["guard_traced_blocks"]), guard_relaxed=int(acc["guard_relaxed"]),
+                      guard_shared_switches=float(acc["guard_shared_switches"]), lex_items=int(acc["lex_items"]),
+                      evaluated=int(acc["evaluated"]), false_positive=int(acc["false_positive"]),
+                      exchange_tie=int(acc["exchange_tie"]), content_tie=int(acc["content_tie"]),
+                      tie_wide=int(acc["tie_wide"]))
+        if not accepted:
+            return None, None, 0.0, record, fine
+        scores = self.per_sample(Xo, budget)
+        actual = float(scores.sum()) - F
+        record.update(full_delta=actual)
+        if abs(actual - predicted) > 1e-9 * max(1.0, abs(F)) + 1e-6 * accepted:
+            raise RuntimeError(f"founder refinement {self.name}: beam escape gains {predicted} do not match "
+                               f"the full rescoring {actual}")
+        if not actual > TOL:
+            # The fully rescored gain must clear the acceptance band too (as bridges).
+            raise RuntimeError(f"founder refinement {self.name}: beam escape's full rescoring {actual} is not "
+                               f"above the acceptance threshold {TOL}")
+        return Xo, scores, actual, record, fine
+
+    def long_repair(self, X, F, budget, convention):
+        """Polish only: long one-founder moves at an ordinary fixed point.
+
+        WindowBeam offers on LONG_WINDOW-block windows (stride LONG_STRIDE; the window's best path that differs from
+        the incumbent per founder, offered when its surrogate gain exceeds the tie quantum). Each offer, and every
+        variant of it whose rows on one LONG_CORRECTION-block window inside its changed span are replaced by one of
+        LONG_DONORS screened founders' rows or the incumbent's (one private correction: a long surrogate optimum is
+        often exact-F negative only through a short stretch), is a one-founder content candidate on the offer's
+        window, scored exactly from the panel's messages (gains.candidate_gains). Per offer the best candidate
+        above TOL (content order on ties) enters ONE acceptance pass as a coarse move, so the shared-junction guard
+        applies; accepted gains are verified by full rescoring and must clear TOL. Candidates per offer
+        O(window), each O(S L_w Q). Returns (panel or None, its per-sample scores, exact gain, record)."""
+        founders, blocks = X.shape
+        X = np.ascontiguousarray(X, np.int64)
+        starts = sorted(set(range(0, max(1, blocks - LONG_WINDOW + 1), LONG_STRIDE)) | {max(0, blocks - LONG_WINDOW)})
+        templates = [("fine", a, min(blocks, a + LONG_WINDOW)) for a in starts]
+        offers, beam_stats = self.beam.generate(X, budget, convention, templates=templates, width=LONG_BEAM_WIDTH)
+        record = dict(offers=len(offers), windows=int(beam_stats["windows"]), beam_cut=int(beam_stats["beam_cut"]),
+                      beam_binding=int(beam_stats["beam_binding"]), beam_wall=float(beam_stats["wall"]),
+                      candidates=0, repaired=0, accepted=0)
+        cands = []
+        for kind, a, c, k, rows in offers:
+            base = np.asarray(rows, np.int64)
+            changed = np.flatnonzero(base != X[k, a:c])
+            if not len(changed):
+                continue
+            c0, c1 = a + int(changed[0]), a + int(changed[-1]) + 1
+            agree = [(-int(np.count_nonzero(X[d, c0:c1] == base[c0 - a:c1 - a])), d) for d in range(founders) if d != k]
+            donors = [k] + [d for _, d in sorted(agree)[:LONG_DONORS]]
+            variants = {tuple(base.tolist()): base}
+            for u in range(c0, max(c0 + 1, c1 - LONG_CORRECTION + 1), max(1, LONG_CORRECTION // 2)):
+                v = min(c, u + LONG_CORRECTION)
+                for d in donors:
+                    r = base.copy()
+                    r[u - a:v - a] = X[d, u:v]
+                    if not np.array_equal(r, X[k, a:c]):
+                        variants.setdefault(tuple(r.tolist()), r)
+            cands.extend((int(a), int(c), int(k), r) for r in variants.values())
+        record["candidates"] = len(cands)
+        if not cands:
+            return None, None, 0.0, record
+        # Held while scoring: one full message set, the batched gathers and the candidate rows built above.
+        nbytes = (self.message_bytes(founders, self.guarded) + min(BRIDGE_BATCH_BYTES, 24 * self.workspace.samples
+                  * founders * (founders + 1) // 2 * len(cands)) + sum(r.nbytes + 160 for _, _, _, r in cands))
+        with execution.reserve_memory(nbytes, label="founder_refinement long repair"):
+            fwd, bwd, fcnt, bcnt, fscale, bscale = self._full_messages(X, self.guarded, budget)
+            orient = self.forward
+            costs = orient.costs(founders)
+            threads = max(1, int(budget.threads()))
+            with execution.numba_threads(threads):
+                haps = orient.haps(X)
+            gains = []
+            chunk = max(1, BRIDGE_BATCH_BYTES // max(1, 24 * self.workspace.samples * fwd.shape[2]))
+            for m0 in range(0, len(cands), chunk):
+                part = cands[m0:m0 + chunk]
+                fb = np.asarray([a for a, _, _, _ in part], np.int64)
+                eb = np.asarray([c for _, c, _, _ in part], np.int64)
+                focal = np.asarray([k for _, _, k, _ in part], np.int64)
+                ro = np.zeros(len(part) + 1, np.int64)
+                ro[1:] = np.cumsum(eb - fb)
+                rows = np.concatenate([r for _, _, _, r in part])
+                sums = np.zeros((len(part), self.workspace.samples))
+                for m, (a, c, _, _) in enumerate(part):
+                    for b in range(a, c):
+                        sums[m] += bscale[b]
+                with execution.numba_threads(threads):
+                    per = gains_kernels.candidate_gains(
+                        haps, orient.leaves, self.workspace.logs, orient.offsets, costs,
+                        np.ascontiguousarray(fwd[fb]), np.ascontiguousarray(bwd[fb]), focal, fb, eb, rows, ro,
+                        np.ascontiguousarray(bwd[eb]), sums)
+                gains.extend(float(sum(per[m])) for m in range(len(part)))
+            best = {}
+            for (a, c, k, r), gain in zip(cands, gains):
+                key = (-gain, tuple(r.tolist()))
+                if gain > TOL and ((a, c, k) not in best or key < best[(a, c, k)][0]):
+                    best[(a, c, k)] = (key, r)
+            record["repaired"] = len(best)
+            if not best:
+                return None, None, 0.0, record
+            props = {}
+            for (a, c, k), (_, r) in sorted(best.items()):
+                props.setdefault(a, []).append((MOVE_COARSE, c, k, r))
+            Xo = X.copy()
+            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, costs, self.guarded, budget,
+                                    start_fwd=fwd, start_fcnt=fcnt, scale=abs(F), reverse=convention)
+            del fwd, bwd, fcnt, bcnt, fscale, bscale
+        accepted = int(acc["fine"] + acc["coarse"] + acc["exchange"])
+        predicted = float(acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"])
+        record.update(accepted=accepted, predicted=predicted, guard_rejected=int(acc["guard_rejected"]),
+                      guard_shared_tests=int(acc["guard_shared_tests"]), round_cap=int(acc["round_cap"]),
+                      exchange_cap=int(acc["exchange_cap"]), content_rounds=int(acc["content_rounds"]),
+                      stale_evaluated=int(acc["stale_evaluated"]), guard_traced_blocks=int(acc["guard_traced_blocks"]),
+                      guard_relaxed=int(acc["guard_relaxed"]), guard_shared_switches=float(acc["guard_shared_switches"]),
+                      lex_items=int(acc["lex_items"]), evaluated=int(acc["evaluated"]),
+                      false_positive=int(acc["false_positive"]), exchange_tie=int(acc["exchange_tie"]),
+                      content_tie=int(acc["content_tie"]), tie_wide=int(acc["tie_wide"]))
+        if not accepted:
+            return None, None, 0.0, record
+        scores = self.per_sample(Xo, budget)
+        actual = float(scores.sum()) - F
+        record.update(full_delta=actual)
+        if abs(actual - predicted) > 1e-9 * max(1.0, abs(F)) + 1e-6 * accepted:
+            raise RuntimeError(f"founder refinement {self.name}: long repair gains {predicted} do not match "
+                               f"the full rescoring {actual}")
+        if not actual > TOL:
+            raise RuntimeError(f"founder refinement {self.name}: long repair's full rescoring {actual} is not "
+                               f"above the acceptance threshold {TOL}")
+        return Xo, scores, actual, record
+
+    def message_bytes(self, founders, lex):
+        """Bytes of one full message set of a panel of `founders` rows (messages.message_arrays)."""
+        states = founders * (founders + 1) // 2
+        samples = self.workspace.samples
+        return 8 * samples * ((self.blocks + 1) * states * (4 if lex else 2) + 2 * self.blocks)
+
+    def bridge(self, X, fine_props, budget, convention=None):
+        """bridge_search under a reservation of its transients: a full message set,
+        the precursor batches' three S x Q gathers and one window's local forward/backward chains."""
+        if not fine_props:
+            return None
+        founders = len(X)
+        states = founders * (founders + 1) // 2
+        per = 24 * self.workspace.samples * states
+        span = max(c - a for a, c, _, _ in fine_props) + 1
+        nbytes = (self.message_bytes(founders, False) + min(BRIDGE_BATCH_BYTES, per * len(fine_props))
+                  + 2 * span * 8 * self.workspace.samples * states)
+        with execution.reserve_memory(nbytes, label="founder_refinement bridge"):
+            return self.bridge_search(X, fine_props, budget, convention)
+
+    def bridge_search(self, X, fine_props, budget, convention=None):
+        """The best fine-window/suffix bridge of panel X (forward block order), or None.
+
+        At an ordinary fixed point the fine proposals of the sweep (the surrogate's window
+        maximisers, rejected by exact acceptance) are bridge precursors whatever the sign of their
+        exact gain: per fine window the precursor of largest exact gain (content order on ties) is
+        applied privately, and every founder-pair suffix exchange at every cut inside the window
+        is scored exactly from the private panel's local messages (prefix and suffix outside the
+        window unchanged). The offer is precursor gain + exchange gain; the largest above TOL is
+        returned (ties: content order of (cut, pair, window, founder, rows)) as (panel, predicted
+        exact gain, record). The caller verifies the gain by full rescoring. (The 2.8 design prototype's fine-bridge
+        family on the 2.6 engine's proposals.)"""
+        ws = self.workspace
+        founders, blocks = X.shape
+        X = np.ascontiguousarray(X, np.int64)
+        fwd, bwd, _, _, _, bscale = self._full_messages(X, False, budget)
+        orient = self.forward
+        costs = orient.costs(founders)
+        logs, offsets, leaves = ws.logs, orient.offsets, orient.leaves
+        threads = max(1, int(budget.threads()))
+        with execution.numba_threads(threads):
+            haps = orient.haps(X)
+        focal = np.asarray([k for _, _, k, _ in fine_props], np.int64)
+        fb = np.asarray([a for a, _, _, _ in fine_props], np.int64)
+        eb = np.asarray([c for _, c, _, _ in fine_props], np.int64)
+        row_offsets = np.zeros(len(fine_props) + 1, np.int64)
+        row_offsets[1:] = np.cumsum([c - a for a, c, _, _ in fine_props])
+        rows = np.concatenate([np.asarray(r, np.int64) for _, _, _, r in fine_props])
+        content = []
+        # Bounded batches: three S x Q message copies per precursor.
+        chunk = max(1, BRIDGE_BATCH_BYTES // max(1, 24 * ws.samples * fwd.shape[2]))
+        for m0 in range(0, len(fine_props), chunk):
+            m1 = min(len(fine_props), m0 + chunk)
+            sums = np.zeros((m1 - m0, ws.samples))
+            for m in range(m0, m1):
+                a, c = fine_props[m][0], fine_props[m][1]
+                for b in range(a, c):
+                    sums[m - m0] += bscale[b]
+            ro = row_offsets[m0:m1 + 1] - row_offsets[m0]
+            with execution.numba_threads(threads):
+                per = gains_kernels.candidate_gains(
+                    haps, leaves, logs, offsets, costs, np.ascontiguousarray(fwd[fb[m0:m1]]),
+                    np.ascontiguousarray(bwd[fb[m0:m1]]), focal[m0:m1], fb[m0:m1], eb[m0:m1],
+                    rows[row_offsets[m0]:row_offsets[m1]], ro, np.ascontiguousarray(bwd[eb[m0:m1]]), sums)
+            content.extend(float(sum(per[m])) for m in range(m1 - m0))
+        best = {}
+        for m, (a, c, k, r) in enumerate(fine_props):
+            key = (-content[m], int(k), tuple(int(x) for x in r))
+            if (a, c) not in best or key < best[(a, c)][0]:
+                best[(a, c)] = (key, m)
+        pa, pb = gains_kernels.exchange_pairs(founders)
+        ident = np.arange(fwd.shape[2], dtype=np.int64)
+        chosen = None
+        evaluated = 0
+        for (a, c), (_, m) in sorted(best.items()):
+            k = int(focal[m])
+            r = rows[row_offsets[m]:row_offsets[m + 1]]
+            Y = X.copy()
+            Y[k, a:c] = r
+            with execution.numba_threads(threads):
+                haps_y = orient.haps(Y)
+                local_f = kernels.forward_boundaries(haps_y, logs, offsets, costs,
+                                                     np.ascontiguousarray(fwd[a]), a, c)
+                local_b, _ = kernels.backward_chain(haps_y, logs, offsets, costs,
+                                                    np.ascontiguousarray(bwd[c]), ident, a, c)
+                for cut in range(max(1, a), min(blocks - 1, c) + 1):
+                    swap = gains_kernels.exchange_gains(np.ascontiguousarray(local_f[cut - a]),
+                                                        np.ascontiguousarray(local_b[cut - a]))
+                    evaluated += len(swap)
+                    p = int(np.argmax(swap))
+                    gain = content[m] + float(swap[p])
+                    key = (-gain, cut, int(pa[p]), int(pb[p]), a, c, k, tuple(int(x) for x in r))
+                    if gain > TOL and (chosen is None or key < chosen[0]):
+                        chosen = (key, Y, cut, int(pa[p]), int(pb[p]), gain, m)
+        if chosen is None:
+            return None
+        _, Y, cut, u, v, gain, m = chosen
+        Y = Y.copy()
+        Y[[u, v], cut:] = Y[[v, u], cut:]
+        record = dict(window=[int(fb[m]), int(eb[m])], founder=int(focal[m]),
+                      precursor_gain=float(content[m]), cut=int(cut), pair=[u, v],
+                      predicted=float(gain), windows=len(best), exchanges_evaluated=int(evaluated))
+        return Y, float(gain), record
+
+    def _sweep_inputs(self, X, budget, cache, held=None, convention=None, lex=None):
         """The messages of panel X and its window proposals (pure functions of the panel and the convention)."""
-        message_state, message_wall = self._messages(X, budget, held)
+        message_state, message_wall = self._messages(X, budget, held, lex)
         started = time.perf_counter()
         proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention)
         return dict(messages=message_state, proposals=proposals, stats=stats,
                     message_wall=message_wall, proposal_wall=time.perf_counter() - started)
 
     # ------------------------------------------------------------------ fixed-K fit
-    def converge(self, start, label, budget):
+    def converge(self, start, label, budget, polish=False):
         """C(start): the better of the forward-first search (default content-order convention) and the
         reverse-first search (reversed convention) (module docstring). Both run concurrently, each with its share
         of the budget; the higher exact F is kept (tie classes of F; within a class the canonically smaller panel,
@@ -652,30 +1002,45 @@ class SweepEngine:
         # The initial exact objective is independent of direction/convention;
         # only proposals and directional messages need separate computation.
         initial_scores = self.per_sample(start, budget)
-        searches = [None, None]
-        for index, result in budget.concurrent(
-                [lambda child, first=first: self._converge_direction(start, label, first, child,
-                                                                     shared, initial_scores)
-                 for first in ("fwd", "rev")], self.fit_bytes(len(start)),
-                label="founder_refinement searches"):
-            searches[index] = result
-        (X_fwd, fwd), (X_rev, rev) = searches
-        # Tie classes of the two exact F (quantum at |F|); within a class the canonically smaller
-        # panel (sorted rows, compared as row tuples) is kept.
-        values = [float(fwd["F"]), float(rev["F"])]
-        contents = [tie_rules.panel_key(X_fwd), tie_rules.panel_key(X_rev)]
-        scale = max(abs(v) for v in values)
-        quantum = tie_rules.quantum("refine_F", scale)
-        result = ties.tie_classes(values, quantum, content=contents, descending=True)
-        tie_rules.add_decision(self.counter, "assembly.refine_converge", result, values, quantum,
-                               tie_rules.motion("refine_F", scale), descending=True)
-        if self.census_prefix is not None:
-            tie_rules.census("assembly.refine_converge", f"{self.census_prefix}/{label}", [-v for v in values])
-        chosen = ("fwd", "rev")[result.winner]
+        if polish:
+            # Polish fits run the forward-first search only, with the whole budget (its extra move families
+            # dominate its cost; the count pass's fits keep the best of two). No reverse search runs: the
+            # summary aggregates the executed search only and records F_rev as None.
+            for _, result in budget.concurrent(
+                    [lambda child: self._converge_direction(start, label, "fwd", child, shared, initial_scores,
+                                                            polish)], self.fit_bytes(len(start), polish=True),
+                    label="founder_refinement searches"):
+                X_fwd, fwd = result
+            X_rev, rev = None, None
+        else:
+            searches = [None, None]
+            for index, result in budget.concurrent(
+                    [lambda child, first=first: self._converge_direction(start, label, first, child,
+                                                                         shared, initial_scores, polish)
+                     for first in ("fwd", "rev")], self.fit_bytes(len(start)),
+                    label="founder_refinement searches"):
+                searches[index] = result
+            (X_fwd, fwd), (X_rev, rev) = searches
+        executed = (fwd,) if rev is None else (fwd, rev)
+        chosen = "fwd"
         tied_panels = ()
         tied_scores = tied_switches = ()
         minimum_switches = None
-        if result.tied_winner and contents[0] != contents[1]:
+        result = None
+        if rev is not None:
+            # Tie classes of the two exact F (quantum at |F|); within a class the canonically smaller
+            # panel (sorted rows, compared as row tuples) is kept.
+            values = [float(fwd["F"]), float(rev["F"])]
+            contents = [tie_rules.panel_key(X_fwd), tie_rules.panel_key(X_rev)]
+            scale = max(abs(v) for v in values)
+            quantum = tie_rules.quantum("refine_F", scale)
+            result = ties.tie_classes(values, quantum, content=contents, descending=True)
+            tie_rules.add_decision(self.counter, "assembly.refine_converge", result, values, quantum,
+                                   tie_rules.motion("refine_F", scale), descending=True)
+            if self.census_prefix is not None:
+                tie_rules.census("assembly.refine_converge", f"{self.census_prefix}/{label}", [-v for v in values])
+            chosen = ("fwd", "rev")[result.winner]
+        if result is not None and result.tied_winner and contents[0] != contents[1]:
             tied_panels = tuple(sorted(contents))
             counts = [self.minimum_switches(X, budget) for X in (X_fwd, X_rev)]
             minimum_switches = min(counts)
@@ -699,22 +1064,23 @@ class SweepEngine:
         summary = FitSummary(
             label=label, founders=int(kept["founders"]), F0=float(kept["F0"]), F=float(kept["F"]),
             converged=bool(kept["converged"]), sweeps=int(kept["sweeps"]), first=chosen,
-            F_fwd=float(fwd["F"]), F_rev=float(rev["F"]), max_frontier=int(kept["max_frontier"]),
+            F_fwd=float(fwd["F"]), F_rev=None if rev is None else float(rev["F"]),
+            max_frontier=int(kept["max_frontier"]),
             frontier_fallbacks=int(kept["frontier_fallbacks"]), accepted=dict(kept["accepted"]),
             max_deviation=float(kept["max_deviation"]),
             wall=time.perf_counter() - started,
-            worker_cpu=float(fwd["worker_cpu"] + rev["worker_cpu"]),
-            thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]), tied_panels=tied_panels,
+            worker_cpu=float(sum(search["worker_cpu"] for search in executed)),
+            thread_cpu=float(sum(search["thread_cpu"] for search in executed)), tied_panels=tied_panels,
             tied_scores=tied_scores, tied_switches=tied_switches,
             minimum_switches=minimum_switches,
             phase_seconds={name: sum(search.get("phase_seconds", {}).get(name, 0.0)
-                                     for search in (fwd, rev))
+                                     for search in executed)
                            for name in ("messages", "refinement_windows", "acceptance",
                                         "guarded_acceptance")},
             work_counters={name: sum(search.get("work_counters", {}).get(name, 0)
-                                     for search in (fwd, rev))
+                                     for search in executed)
                            for name in ("windows", "templates_solved", "templates_reused", "dp",
-                                        "fixing_dps", "guard_shared_tests", "guard_traced_blocks")})
+                                        "fixing_dps", "beam_truncations", "beam_fallbacks") + _WORK_KEYS})
         weak = tuple(WeakJunction(first, last, tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))),
                                   gain) for first, last, pair, gain in kept["weak_junctions"])
         variants = [Fit(X, summary, weak)]
@@ -742,7 +1108,8 @@ class SweepEngine:
         self._fit_cache[token] = tuple(variants)
         return self._choose_fit(token, variants)
 
-    def _converge_direction(self, start, label, first, budget, shared=None, initial_scores=None):
+    def _converge_direction(self, start, label, first, budget, shared=None, initial_scores=None,
+                            polish=False):
         """One search from start: sweeps until one accepts nothing (or the reported sweep limit);
         the first pass runs forward (first "fwd") or reversed ("rev"), later passes alternate.
         Records <label>.<first>.sweep<n> (that sweep's state and history entry) and .done. shared:
@@ -769,6 +1136,11 @@ class SweepEngine:
         # the next sweep: (panel, messages); a reversed pass keeps their forward half only, so the
         # search holds no more message arrays than its forward passes do.
         held = None
+        # Lazy lexicographic sweeps: a guarded sweep runs its pass on plain messages
+        # unless the previous sweep read switch costs; the plain pass stops at the first coarse
+        # item above TOL and the sweep is then run guarded (same decisions, see accept_pass). A
+        # search's first sweep starts lexicographic (it reads switch costs in ~95% of searches).
+        lex_next = True
         limit = self.config.sweep_limit
         resumed = 0
         while sweep < limit:
@@ -806,13 +1178,16 @@ class SweepEngine:
                 else:
                     owned = False
             else:
-                inputs = self._sweep_inputs(X, budget, cache, held, convention=(first == "rev"))
+                inputs = self._sweep_inputs(X, budget, cache, held, convention=(first == "rev"),
+                                            lex=self.guarded and lex_next)
             held = None
+            lex = inputs["messages"][2] is not None
             fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
             proposals, stats = inputs["proposals"], inputs["stats"]
             message_wall, proposal_wall = inputs["message_wall"], inputs["proposal_wall"]
             del inputs
             reverse = (sweep % 2 == 1) if first == "fwd" else (sweep % 2 == 0)
+            fine_props = [(a, c, k, rows) for kind, a, c, k, rows in proposals if kind == "fine"]
             props = {}
             for kind, a, c, k, rows in proposals:
                 if reverse:
@@ -821,29 +1196,47 @@ class SweepEngine:
                 else:
                     props.setdefault(a, []).append((_MOVE_CODES[kind], c, k, rows))
             pass_started = time.perf_counter()
-            with execution.numba_threads(max(1, int(budget.threads()))):
-                if reverse:
-                    # The reversed pass stores the clamped forward messages; their per-block
-                    # normalisers are the forward ones in reversed block order.
-                    orientation = self._reversed
-                    if self.guarded:
-                        stored, stored_cnt = kernels.clamp_reverse_lex(fwd, fcnt, self.penalty)
+            lex_aborts = 0
+            while True:
+                with execution.numba_threads(max(1, int(budget.threads()))):
+                    if reverse:
+                        # The reversed pass stores the clamped forward messages; their per-block
+                        # normalisers are the forward ones in reversed block order.
+                        orientation = self._reversed
+                        forward_costs = self.forward.costs(founders)
+                        if lex:
+                            stored, stored_cnt = kernels.clamp_reverse_lex(
+                                fwd, fcnt, self.forward.logs, forward_costs, self.forward.offsets)
+                        else:
+                            stored, stored_cnt = kernels.clamp_reverse(
+                                fwd, self.forward.logs, forward_costs, self.forward.offsets), None
+                        stored_scale = np.ascontiguousarray(fscale[::-1])
+                        Xo = np.ascontiguousarray(X[:, ::-1])
+                        start_fwd = start_fcnt = None
+                        kept = (fwd, None, fcnt, None, fscale, None)
                     else:
-                        stored, stored_cnt = kernels.clamp_reverse(fwd, self.penalty), None
-                    stored_scale = np.ascontiguousarray(fscale[::-1])
-                    Xo = np.ascontiguousarray(X[:, ::-1])
-                    start_fwd = start_fcnt = None
-                    kept = (fwd, None, fcnt, None, fscale, None)
-                else:
-                    orientation, stored, stored_cnt, stored_scale = self.forward, bwd, bcnt, bscale
-                    Xo = X.copy()
-                    start_fwd, start_fcnt = fwd, fcnt
-                    kept = (fwd, bwd, fcnt, bcnt, fscale, bscale)
+                        orientation, stored, stored_cnt, stored_scale = self.forward, bwd, bcnt, bscale
+                        Xo = X.copy()
+                        start_fwd, start_fcnt = fwd, fcnt
+                        kept = (fwd, bwd, fcnt, bcnt, fscale, bscale)
+                acc, gains, pairs = accept_pass(orientation, Xo, stored, stored_cnt, stored_scale, props,
+                                                orientation.costs(founders), lex, budget,
+                                                start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F),
+                                                reverse=(first == "rev"), optimistic=self.guarded and not lex)
+                if not acc["lex_abort"]:
+                    break
+                # The plain pass met a coarse candidate above TOL: the sweep's lexicographic messages.
+                lex_aborts += 1
+                del stored, stored_cnt, stored_scale, start_fwd, start_fcnt, kept, Xo
+                del fwd, bwd, fcnt, bcnt, fscale, bscale
+                message_state, extra_wall = self._messages(X, budget, None, lex=True)
+                message_wall += extra_wall
+                fwd, bwd, fcnt, bcnt, fscale, bscale = message_state
+                del message_state
+                lex = True
             del fwd, bwd, fcnt, bcnt, fscale, bscale
-            acc, gains, pairs = accept_pass(orientation, Xo, stored, stored_cnt, stored_scale, props,
-                                            self.penalty, self.guarded, budget,
-                                            start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F),
-                                            reverse=(first == "rev"))
+            lex_next = lex and acc["lex_items"] > 0
+            acc["lex_abort"] = lex_aborts
             del stored, stored_cnt, stored_scale, start_fwd, start_fcnt
             if sweep == 0 and shared is not None:
                 # Run one after the other (a one-thread or memory-limited budget), the other search
@@ -873,6 +1266,71 @@ class SweepEngine:
                 raise RuntimeError(
                     f"founder refinement {self.name}.{label}:{sweep}: exact F changed by "
                     f"{F_new - F}, accepted local gains {accounted}")
+            acc.update(bridge=0, bridge_gain=0.0, escape=0, escape_gain=0.0, escape_offers=0,
+                       escape_windows=0, escape_beam_cut=0, escape_beam_binding=0, long=0, long_gain=0.0,
+                       long_offers=0, long_windows=0, long_beam_cut=0, long_beam_binding=0, long_candidates=0)
+            bridge_record = None
+            if accepted == 0 and polish:
+                # Polish: a beam escape pass at the ordinary fixed point (beam_escape); its fine
+                # offers are the bridge precursors.
+                escape_started = time.perf_counter()
+                Y, scores, gain, escape_record, fine_props = self.beam_escape(X, F_new, budget, first == "rev")
+                acc.update(escape_offers=escape_record["offers"], escape_windows=escape_record["windows"],
+                           escape_beam_cut=escape_record["beam_cut"],
+                           escape_beam_binding=escape_record["beam_binding"])
+                # The escape pass's own cap and guard counters join the sweep's.
+                for name in _POLISH_PASS_KEYS:
+                    acc[name] = acc.get(name, 0) + escape_record.get(name, 0)
+                if Y is not None:
+                    X, current, F_new = Y, scores, float(scores.sum())
+                    acc.update(escape=int(escape_record["accepted"]), escape_gain=gain)
+                    accepted = int(escape_record["accepted"])
+                    accounted += gain
+                escape_wall = time.perf_counter() - escape_started
+                pass_wall += escape_wall
+                stats = dict(stats, escape_wall=escape_wall, escape=escape_record)
+            if accepted == 0 and polish:
+                # Polish: long one-founder moves with one private correction (long_repair).
+                long_started = time.perf_counter()
+                Y, scores, gain, long_record = self.long_repair(X, F_new, budget, first == "rev")
+                acc.update(long_offers=long_record["offers"], long_windows=long_record["windows"],
+                           long_beam_cut=long_record["beam_cut"], long_beam_binding=long_record["beam_binding"],
+                           long_candidates=long_record["candidates"])
+                for name in _POLISH_PASS_KEYS:
+                    acc[name] = acc.get(name, 0) + long_record.get(name, 0)
+                if Y is not None:
+                    X, current, F_new = Y, scores, float(scores.sum())
+                    acc.update(long=int(long_record["accepted"]), long_gain=gain)
+                    accepted = int(long_record["accepted"])
+                    accounted += gain
+                long_wall = time.perf_counter() - long_started
+                pass_wall += long_wall
+                stats = dict(stats, long_wall=long_wall, long=long_record)
+            if accepted == 0 and polish and fine_props:
+                # Polish: fine-window/suffix bridges at an ordinary fixed point (bridge()).
+                bridge_started = time.perf_counter()
+                found = self.bridge(X, fine_props, budget, convention=(first == "rev"))
+                if found is not None:
+                    Y, predicted, bridge_record = found
+                    scores = self.per_sample(Y, budget)
+                    actual = float(scores.sum()) - F_new
+                    bridge_record.update(full_delta=actual, delta_error=actual - predicted)
+                    if abs(actual - predicted) > 1e-9 * max(1.0, abs(F_new)) + 1e-6:
+                        raise RuntimeError(
+                            f"founder refinement {self.name}.{label}:{sweep}: bridge gain "
+                            f"{predicted} does not match the full rescoring {actual}")
+                    if not actual > TOL:
+                        # The fully rescored gain must clear the acceptance band too.
+                        raise RuntimeError(
+                            f"founder refinement {self.name}.{label}:{sweep}: bridge's full rescoring "
+                            f"{actual} is not above the acceptance threshold {TOL}")
+                    X, current, F_new = Y, scores, float(scores.sum())
+                    acc.update(bridge=1, bridge_gain=actual)
+                    accepted = 1
+                    accounted += actual
+                bridge_wall = time.perf_counter() - bridge_started
+                pass_wall += bridge_wall
+                stats = dict(stats, bridge_wall=bridge_wall, bridge=bridge_record)
             junctions = _weak_junctions(gains, pairs, reverse, blocks)
             entry = dict(sweep=sweep, reverse=bool(reverse), F=F_new, dF=F_new - F,
                          dF_accounted=float(accounted), deviation=float(deviation),
@@ -894,6 +1352,26 @@ class SweepEngine:
         if fallbacks:
             warnings.warn(f"founder refinement {self.name}.{label}: {fallbacks} window programmes kept the "
                           "incumbent at the frontier cap (FounderRefinementConfig.frontier_bytes)", RuntimeWarning)
+        binding = sum(h.get("escape_beam_binding", 0) for h in history)
+        if binding:
+            warnings.warn(f"founder refinement {self.name}.{label}: {binding} beam-escape windows were cut at "
+                          f"beam.BEAM_WIDTH (approximate surrogate search; exact acceptance)", RuntimeWarning)
+        binding = sum(h.get("long_beam_binding", 0) for h in history)
+        if binding:
+            warnings.warn(f"founder refinement {self.name}.{label}: {binding} long-repair windows were cut at "
+                          f"search.LONG_BEAM_WIDTH = {LONG_BEAM_WIDTH} (approximate surrogate search; exact "
+                          "acceptance)", RuntimeWarning)
+        capped = sum(h.get("round_cap", 0) + h.get("exchange_cap", 0) for h in history)
+        if capped:
+            warnings.warn(f"founder refinement {self.name}.{label}: the acceptance round caps "
+                          f"(acceptance.CONTENT_FULL_ROUNDS, EXCHANGE_ROUNDS) changed the move order at {capped} "
+                          "junctions (exact gains; same fixed-point test)", RuntimeWarning)
+        beam_fallbacks = sum(h["proposals"].get("beam_fallbacks", 0) for h in history)
+        truncations = sum(h["proposals"].get("beam_truncations", 0) for h in history)
+        if beam_fallbacks or truncations:
+            warnings.warn(f"founder refinement {self.name}.{label}: the window beam cap (proposals.BEAM_CAP) "
+                          f"truncated {truncations} programme units ({beam_fallbacks} programmes kept the "
+                          "incumbent): those proposals are approximate", RuntimeWarning)
         if len(history) > resumed:
             self._fit_scores[label] = current
         record = dict(label=label, founders=int(founders), F0=float(F0), F=float(F),
@@ -917,10 +1395,11 @@ class SweepEngine:
                                       ("acceptance", "pass_wall"))},
                       work_counters={name: sum(h["proposals"].get(name, 0) for h in history)
                                      for name in ("windows", "templates_solved", "templates_reused",
-                                                  "dp", "fixing_dps")})
+                                                  "dp", "fixing_dps", "beam_truncations",
+                                                  "beam_fallbacks")})
         record["phase_seconds"]["guarded_acceptance"] = (
             record["phase_seconds"]["acceptance"] if self.guarded else 0.0)
-        for name in ("guard_shared_tests", "guard_traced_blocks"):
+        for name in _WORK_KEYS:
             record["work_counters"][name] = sum(h.get(name, 0) for h in history)
         fresh = history[resumed:]
         phases = {name: sum(h[key] for h in fresh) for name, key in
@@ -928,9 +1407,9 @@ class SweepEngine:
                    ("acceptance", "pass_wall"))}
         phases["guarded_acceptance"] = phases["acceptance"] if self.guarded else 0.0
         work = {name: sum(h["proposals"].get(name, 0) for h in fresh)
-                for name in ("windows", "templates_solved", "templates_reused", "dp", "fixing_dps")}
-        work.update(searches=1, guard_shared_tests=sum(h.get("guard_shared_tests", 0) for h in fresh),
-                    guard_traced_blocks=sum(h.get("guard_traced_blocks", 0) for h in fresh))
+                for name in ("windows", "templates_solved", "templates_reused", "dp", "fixing_dps",
+                             "beam_truncations", "beam_fallbacks")}
+        work.update(searches=1, **{name: sum(h.get(name, 0) for h in fresh) for name in _WORK_KEYS})
         with self._profile_lock:
             for name, value in phases.items():
                 self._phase_seconds[name] = self._phase_seconds.get(name, 0.0) + value

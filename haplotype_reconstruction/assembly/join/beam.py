@@ -6,16 +6,16 @@ block k from the earlier blocks within the maximum gap (a missing gap contribute
 to right and keeps, at every block, at most a quota of the best paths per endpoint founder. Pass 2 refines
 backwards: at each block k (n - 1 down to 0) every kept path tries every founder at k with the rest fixed (only the
 affected steps are rescored), and the pooled candidates are selected with the same endpoint quota. Every path
-selected at any refinement step is kept in an archive, so full paths through interior states survive. A first
-score class may exceed twice an endpoint's quota without limit. The opt-in compact API represents a complete
-Cartesian family without enumeration when every active transition matrix is constant.
+selected at any refinement step is kept in an archive, so full paths through interior states survive.
+Cut tie classes are split in canonical content order; every endpoint stays within its quota.
+Constant transition families use first-covering representatives without Cartesian enumeration.
 
 Arithmetic and ties (release 2.1, design 5.4): the log transitions are float64 (linker.em), scores accumulate in
 float64 in past-block order and divide by the transition count in float64, so a one-ulp change of a stored
 transition no longer reorders paths. Candidates are ranked by anchored tie classes of their scores
 (maths.ties rules; quantum ``tie_rules.quantum("beam", scale of the cut)``), the lexicographic path deciding inside
-a class; identical paths are kept once (their best score); an endpoint's quota keeps every path of the tie class it
-cuts unless a non-first class exceeds twice the quota. The archive is returned in the same tie-class order
+a class; identical paths are kept once (their best score); an endpoint's quota keeps at most q paths,
+including when it cuts a tie class. The archive is returned in the same tie-class order
 (descending score, content inside a class), so the panel search's pool order is a content order up to genuine
 score differences.
 """
@@ -41,9 +41,9 @@ class CartesianBeamFamily:
     """A complete Cartesian path family with one common linkage score.
 
     This is an exact representation of candidate membership, not a claim that the paths have
-    equal genotype evidence or released alleles. It deliberately has no iterator: a consumer
-    must request the entire family with an explicit materialization limit, or handle its
-    members implicitly. ``reverse`` preserves the beam's convention-reversal order.
+    equal genotype evidence or released alleles. Only O(B*K) first-covering members
+    become proposals; omitted combinations are not evaluated. ``reverse`` preserves
+    the beam's convention-reversal order.
     """
 
     founders: tuple[int, ...]
@@ -54,17 +54,6 @@ class CartesianBeamFamily:
     def cardinality(self) -> int:
         """The exact number of represented paths, without a fixed-width integer limit."""
         return math.prod(self.founders)
-
-    def path_at(self, index: int) -> tuple[int, ...]:
-        """One member in the explicit beam's content order, using O(blocks) work."""
-        if not 0 <= index < self.cardinality:
-            raise IndexError(index)
-        if self.reverse:
-            index = self.cardinality - 1 - index
-        path = [0] * len(self.founders)
-        for block in range(len(path) - 1, -1, -1):
-            index, path[block] = divmod(index, self.founders[block])
-        return tuple(path)
 
     def first_covering(self, block: int, founder: int) -> tuple[int, ...]:
         """The first old-order member covering one endpoint; no other members are selected."""
@@ -79,55 +68,11 @@ class CartesianBeamFamily:
         return len(path) == len(self.founders) and all(
             0 <= row < count for row, count in zip(path, self.founders))
 
-    def materialize(self, limit: int) -> list[tuple[tuple[int, ...], float]]:
-        """Expand the whole family only if it fits ``limit``; never take its first N paths."""
-        if self.cardinality > limit:
-            raise ValueError(f"beam family has {self.cardinality} paths, exceeding materialization limit {limit}")
-        return [(self.path_at(index), self.score) for index in range(self.cardinality)]
-
-
-@dataclass(frozen=True)
-class UnresolvedBeam:
-    """A complete retained frontier whose further explicit expansion was not performed.
-
-    Each member is (parent index, choice, score). ``operation`` appends the choice
-    to a prefix, replaces it at ``block``, or selects the full parent unchanged
-    (the archive union). These are proposal families, not interchangeable genotype
-    paths. A forward frontier has no completed incumbent; no suffix is invented.
-    """
-
-    phase: str
-    block: int
-    founders: tuple[int, ...]
-    bound: int
-    operation: str
-    parents: tuple[tuple[int, ...], ...]
-    members: tuple[tuple[int, int, float], ...]
-    incumbent_paths: list[tuple[tuple[int, ...], float]]
-
-    @property
-    def retained_count(self) -> int:
-        return len(self.members)
-
-    def record(self) -> dict:
-        """Plain compact membership for unresolved release and work diagnostics."""
-        return dict(kind="beam_materialization_bound", phase=self.phase, block=self.block,
-                    founders=list(self.founders), bound=self.bound, retained_count=self.retained_count,
-                    complete_frontier=True, continuation_evaluated=False,
-                    family_scope="prefixes" if self.phase == "forward" else "full_paths",
-                    operation=self.operation, parents=[list(path) for path in self.parents],
-                    members=[list(member) for member in self.members])
-
-
-def _endpoint_limit(transitions, block, quota, overrides):
-    return 2 * sum(int(overrides.get((block, row), quota)) if overrides else int(quota)
-                   for row in range(int(transitions.founders[block])))
-
-
-def materialization_limit(transitions: Transitions, quota: int, overrides=None) -> int:
-    """Largest per-step explicit beam allowance, including endpoint multiplicity overrides."""
-    return max(_endpoint_limit(transitions, block, quota, overrides)
-               for block in range(transitions.blocks))
+    def covering(self) -> list[tuple[tuple[int, ...], float]]:
+        """Distinct first-covering proposals, in canonical path content order."""
+        paths = {self.first_covering(block, row)
+                 for block, count in enumerate(self.founders) for row in range(count)}
+        return [(path, self.score) for path in sorted(paths, reverse=self.reverse)]
 
 
 def _ordered_archive(archive, blocks):
@@ -137,15 +82,6 @@ def _ordered_archive(archive, blocks):
     scores = np.asarray(list(archive.values()), dtype=np.float64)
     ranked, _, _, _ = _ranked(paths, scores)
     return [(tuple(int(row) for row in paths[i]), float(scores[i])) for i in ranked.tolist()]
-
-
-def _unresolved_frontier(transitions, phase, block, bound, parents, choices, scores, kept, archive=None):
-    """Factor a complete cut family over the preceding bounded scaffold set."""
-    return UnresolvedBeam(phase, block, tuple(int(k) for k in transitions.founders), bound,
-            "append" if phase == "forward" else "replace",
-            tuple(tuple(path) for path in parents.tolist()),
-            tuple((int(i) // choices, int(i) % choices, float(scores[i])) for i in kept.tolist()),
-            _ordered_archive(archive, transitions.blocks) if archive is not None else [])
 
 
 def _constant_family(transitions: Transitions, gap_limit: int) -> CartesianBeamFamily | None:
@@ -308,10 +244,10 @@ def _cut_boundaries(values, classes, cut_classes, q):
 def _endpoint_order(paths, scores, block, quota, overrides, *, counter=None, census_key=None):
     """Indices of the candidates kept at ``block``, in selection (decision) order.
 
-    Order: tie classes of the scores (descending), the lexicographic path inside a class; identical paths are kept
-    once; at most ``quota`` paths (or the endpoint's override) per founder at ``block``, extended by the paths of the
-    tie class an endpoint's quota cuts. A first class is retained without a size limit; a non-first class that
-    would exceed twice the quota is dropped whole."""
+    Order: descending score classes, canonical content inside each class. Identical
+    paths occur once. Keep at most the endpoint quota, splitting the cut class in
+    that content order. Prepared local row indices are canonical content ranks.
+    """
     ranked, in_order, wide, q = _ranked(paths, scores)
     endpoint = paths[ranked, block]
     kept = np.zeros(len(ranked), dtype=bool)
@@ -333,17 +269,8 @@ def _endpoint_order(paths, scores, block, quota, overrides, *, counter=None, cen
             continue
         cut = in_order[members[limit - 1]]
         cut_classes.add(int(cut))
-        # The whole class the quota cuts is kept, unless it would take the endpoint beyond twice its quota: then
-        # the whole class is dropped (release 2.2: order-invariant; 2.1 kept its first members in content order).
-        start = limit - 1
-        while start > 0 and in_order[members[start - 1]] == cut:
-            start -= 1
-        end = limit
-        while end < len(members) and in_order[members[end]] == cut:
-            end += 1
-        if end > limit:
-            inside = True
-        kept[members[:end] if (end <= 2 * limit or start == 0) else members[:start]] = True
+        inside |= in_order[members[limit]] == cut
+        kept[members[:limit]] = True
     boundary = _cut_boundaries(scores[ranked], in_order, cut_classes, q)
     count_vector_classes(counter, "assembly.beam_cut", in_order, wide, boundary, inside)
     return ranked[kept]
@@ -370,8 +297,8 @@ def path_linkage(transitions: Transitions, max_gap: int | None = None):
 def endpoint_beam(transitions: Transitions, *, quota: int,
                   overrides: Mapping[tuple[int, int], int] | None = None,
                   max_gap: int | None = None, counter: ties.TieCounter | None = None,
-                  label: str | None = None, compact: bool = False, bounded: bool = False
-                  ) -> list[tuple[tuple[int, ...], float]] | CartesianBeamFamily | UnresolvedBeam:
+                  label: str | None = None, compact: bool = False
+                  ) -> list[tuple[tuple[int, ...], float]] | CartesianBeamFamily:
     """Candidate paths of one batch with their scores, in tie-class order (descending score, the lexicographic path
     inside a class).
 
@@ -380,11 +307,10 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
     whose transitions enter a step (None: every fitted gap). Each item is (founder of each block, score); the
     score is the float64 sum of the path's step scores. counter: TieCounter of the batch (beam_cut decisions);
     label: the batch's census label (None: no census). ``compact=True`` returns a
-    CartesianBeamFamily for constant active transitions; consumers must support complete implicit
-    families or explicitly request bounded full materialization. ``bounded=True`` returns an
-    UnresolvedBeam if a complete endpoint family exceeds twice the sum of its endpoint quotas,
-    or the archive exceeds the sum of those per-block bounds. Within the bounds, membership,
-    scores and ordering are unchanged. No cut family is split. The default preserves the list API.
+    CartesianBeamFamily for constant active transitions; its covering() members
+    are the only proposals. Otherwise returns the explicit bounded archive.
+    The default list API also uses covering members for constant transitions.
+    Cut ties are a declared bounded proposal approximation, never a search abort.
     """
     num_blocks = transitions.blocks
     gap_limit = max_gap if max_gap is not None else num_blocks
@@ -394,14 +320,10 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
         signature = ",".join(f"{b}:{f}={v}" for (b, f), v in sorted((overrides or {}).items()))
         key = f"{label}/q{quota}/{signature}"
 
-    if compact:
-        family = _constant_family(transitions, gap_limit)
-        if family is not None:
-            _constant_family_cuts(family, transitions, gap_limit, quota, overrides, counter, key)
-            return family
-
-    archive_bound = (sum(_endpoint_limit(transitions, block, quota, overrides)
-                         for block in range(num_blocks)) if bounded else None)
+    family = _constant_family(transitions, gap_limit)
+    if family is not None:
+        _constant_family_cuts(family, transitions, gap_limit, quota, overrides, counter, key)
+        return family if compact else family.covering()
 
     # Pass 1 (forward): mean of the transitions into each new block.
     first_founders = int(transitions.founders[0])
@@ -424,11 +346,6 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
         paths[:, current] = np.tile(np.arange(choices, dtype=np.int64), len(beam_paths))
         kept = _endpoint_order(paths, scores, current, quota, overrides, counter=counter,
                                census_key=None if key is None else f"{key}/p1/b{current}")
-        if bounded:
-            limit = _endpoint_limit(transitions, current, quota, overrides)
-            if len(kept) > limit:
-                return _unresolved_frontier(transitions, "forward", current, limit,
-                                            beam_paths, choices, scores, kept)
         beam_paths, beam_scores = paths[kept], scores[kept]
 
     # Pass 2 (backward refinement of the forward paths as scaffolds, with cached step scores).
@@ -453,24 +370,12 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
         totals = totals.ravel()
         kept = _endpoint_order(paths, totals, refine_block, quota, overrides, counter=counter,
                                census_key=None if key is None else f"{key}/p2/b{refine_block}")
-        if bounded:
-            limit = _endpoint_limit(transitions, refine_block, quota, overrides)
-            if len(kept) > limit:
-                return _unresolved_frontier(transitions, "backward", refine_block, limit,
-                                            scaffold_paths, choices, totals, kept, archive)
         scaffold_paths = paths[kept]
         scaffold_steps = steps.reshape(-1, num_blocks)[kept]
         scaffold_totals = totals[kept]
         new_paths = list(map(tuple, scaffold_paths.tolist()))
-        exceeds_archive = bounded and len(archive) + sum(path not in archive for path in new_paths) > archive_bound
-        incumbent = _ordered_archive(archive, num_blocks) if exceeds_archive else []
         for path, total in zip(new_paths, scaffold_totals):
             archive[path] = total
-        if exceeds_archive:
-            members = tuple((i, 0, float(score)) for i, score in enumerate(archive.values()))
-            return UnresolvedBeam("archive", refine_block, tuple(int(k) for k in transitions.founders),
-                    archive_bound, "identity", tuple(archive), members,
-                    incumbent)
 
     return _ordered_archive(archive, num_blocks)
 

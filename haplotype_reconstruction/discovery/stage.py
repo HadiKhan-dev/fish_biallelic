@@ -248,7 +248,7 @@ def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
     workers = memory_worker_limit([WORKER_RESIDENT_BYTES] * workers, workers, label="discovery workers")
     # On an exception, terminate/join the pool and release its residence before waiting for the preparer.
     with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
-        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="discovery workers"), BudgetedPool(
+        with BudgetedPool(
                 budget, processes=workers, label="discovery", yield_to_waiters=True) as pool:
             upcoming = preparer.submit(prepare, contigs[0])
             for index, contig in enumerate(contigs):

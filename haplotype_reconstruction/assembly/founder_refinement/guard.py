@@ -3,10 +3,11 @@
 A long founder edit (a coarse move copying an L1 span) can raise F by letting several samples drop
 the switch of a crossover they share (descendants of one meiosis carry the same breakpoint),
 turning the founder into an artificial recombinant. A coarse move that lowers the genotype fit
-E = F + penalty x switches (of the samples' lexicographic maximum paths) is refused unless its F
-gain exceeds the acceptance tolerance once every saved switch at a shared one-way junction is
-uncredited: dF - penalty x N_shared > TOL, N_shared = sum over samples of min(switches the sample
-saves, its removed switch events at shared one-way junctions). A removed event is a founder
+E = F + switch cost (of the samples' lexicographic maximum paths) is refused unless its F gain
+exceeds the acceptance tolerance once every saved switch at a shared one-way junction is
+uncredited: dF - C_shared > TOL, C_shared = sum over samples of min(switch cost the sample saves,
+the cost of its removed switch events at shared one-way junctions). (Release 2.8: switch costs are
+the map-derived per-homologue costs of objective.py; an event changing both homologues costs 2c.) A removed event is a founder
 transition u -> v of one homologue; it is one-way unless it leaves the edited founder and the same
 path later rejoins it (an excursion of the founder's own carrier, the signature of a row that is
 wrong there: descendants sharing both breakpoints of a short double crossover is improbable under
@@ -28,38 +29,58 @@ import numpy as np
 from numba import njit, prange
 
 from ...maths.emissions import CENTER
-from .messages import lex_best_index
-from .objective import is_skipped, row_max, unordered_pairs
+from .objective import is_skipped, lex_better, pair_code7, row_max, unordered_pairs
+
+
+@njit(inline="always")
+def _lex_take(v, k, w, l, reverse):
+    """(v, k) replaces the running lexicographic maximum (w, l): strictly better, or (under the
+    convention reversal) exactly equal (the last state among exact ties)."""
+    return v > w or (v == w and (k < l or (reverse and k == l)))
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start, g_end, gcnt_end,
+def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, g_end, gcnt_end,
                        a, c, samples, focal, p1, p2, rows, reverse):
     """Switch events of each listed sample's lexicographic maximum path on blocks [a, c).
 
-    The path is the traceback of the accumulators of messages_lex (maximum score, then the fewest
-    switches among exact maxima, first state on ties) started from the current messages f_start /
-    fcnt_start at boundary a and closed by g_end / gcnt_end at boundary c (one row per listed
-    sample). With focal >= 0 founder focal's rows are replaced on blocks [p1, p2) by `rows`.
-    Returns the path's state at boundaries a and c, its whole switch count (prefix and suffix
-    counts from the messages), its number of events inside [a, c) and the events (site, state
-    before, state after)."""
-    first, second = unordered_pairs(len(haps))
+    The path is the traceback of the accumulators of messages_lex (maximum score, then the lowest
+    switch cost among exact maxima) started from the current messages f_start / fcnt_start at
+    boundary a and closed by g_end / gcnt_end at boundary c (one row per listed sample). With
+    focal >= 0 founder focal's rows are replaced on blocks [p1, p2) by `rows`. Per site and state
+    the traceback keeps the route taken (stay; one homologue from the founder maximum R[x] of the
+    state's first or second founder, whose partner is recorded; both from the overall maximum),
+    first state among exact ties (last under the convention reversal). Returns the path's state at
+    boundaries a and c, its whole switch cost (prefix and suffix costs from the messages), its
+    number of events inside [a, c), the events (site, state before, state after) and their costs
+    (c at the site per changed homologue)."""
+    founders = len(haps)
+    first, second = unordered_pairs(founders)
+    index = np.empty((founders, founders), np.int64)
+    for q in range(len(first)):
+        index[first[q], second[q]] = q
+        index[second[q], first[q]] = q
     states = len(first)
     n = len(samples)
     lo, hi = offsets[a], offsets[c]
     width = max(hi - lo, 1)
     start_state = np.empty(n, np.int64)
     end_state = np.empty(n, np.int64)
-    total = np.empty(n, np.int64)
+    total = np.empty(n)
     counts = np.zeros(n, np.int64)
     events = np.empty((n, width, 3), np.int64)
+    event_costs = np.empty((n, width))
     for i in prange(n):
         s = samples[i]
-        switched = np.zeros((width, states), np.bool_)
+        route = np.zeros((width, states), np.int8)
+        partner = np.empty((width, founders), np.int16)
         source = np.full(width, -1, np.int64)
+        site_cost = np.zeros(width)
+        R = np.empty(founders)
+        Rc = np.empty(founders)
+        Ry = np.zeros(founders, np.int64)
         row = f_start[i].copy()
-        cnt = fcnt_start[i].copy()
+        cst = fcnt_start[i].copy()
         for b in range(a, c):
             override = focal >= 0 and p1 <= b < p2
             r = rows[b - p1] if override else 0
@@ -68,68 +89,99 @@ def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start
             for j in range(offsets[b], offsets[b + 1]):
                 if is_skipped(logs, s, j):
                     continue
-                m, k, best = _lex_best_index(row, cnt, reverse)
-                sw = m - penalty
-                source[j - lo] = best
+                cj = costs[s, j]
+                if cj < np.inf:
+                    G = -np.inf
+                    Gc = 0.0
+                    Gq = 0
+                    for x in range(founders):
+                        R[x] = -np.inf
+                        Rc[x] = 0.0
+                    for q in range(states):
+                        x = first[q]
+                        y = second[q]
+                        v = row[q]
+                        k = cst[q]
+                        if _lex_take(v, k, G, Gc, reverse):
+                            G, Gc, Gq = v, k, q
+                        if _lex_take(v, k, R[x], Rc[x], reverse):
+                            R[x], Rc[x], Ry[x] = v, k, y
+                        if x != y and _lex_take(v, k, R[y], Rc[y], reverse):
+                            R[y], Rc[y], Ry[y] = v, k, x
+                    source[j - lo] = Gq
+                    site_cost[j - lo] = cj
+                    for x in range(founders):
+                        partner[j - lo, x] = Ry[x]
+                    both = G - 2.0 * cj
+                    both_c = Gc + 2.0 * cj
+                    for q in range(states):
+                        x = first[q]
+                        y = second[q]
+                        v = row[q]
+                        k = cst[q]
+                        taken = 0
+                        if _lex_take(R[y], Rc[y], R[x], Rc[x], reverse):
+                            w, wc, wr = R[y] - cj, Rc[y] + cj, 2
+                        else:
+                            w, wc, wr = R[x] - cj, Rc[x] + cj, 1
+                        if lex_better(w, wc, v, k):
+                            v, k, taken = w, wc, wr
+                        if lex_better(both, both_c, v, k):
+                            v, k, taken = both, both_c, 3
+                        row[q] = v
+                        cst[q] = k
+                        route[j - lo, q] = taken
                 for q in range(states):
-                    if sw > row[q] or (sw == row[q] and k + 1 < cnt[q]):
-                        row[q] = sw
-                        cnt[q] = k + 1
-                        switched[j - lo, q] = True
                     x = first[q]
                     y = second[q]
                     if override:
-                        d = ((leaf[r, j - base] if x == focal else haps[x, j])
-                             + (leaf[r, j - base] if y == focal else haps[y, j]))
+                        d = pair_code7(leaf[r, j - base] if x == focal else haps[x, j],
+                                       leaf[r, j - base] if y == focal else haps[y, j])
                     else:
-                        d = haps[x, j] + haps[y, j]
+                        d = pair_code7(haps[x, j], haps[y, j])
                     row[q] += logs[s, j, d] - CENTER
             m = row_max(row)
             for q in range(states):
                 row[q] -= m
         best_value = -np.inf
-        best_cnt = 0
+        best_cnt = 0.0
         end = 0
         for q in range(states):
             v = row[q] + g_end[i, q]
-            k = cnt[q] + gcnt_end[i, q]
+            k = cst[q] + gcnt_end[i, q]
             if v > best_value or (v == best_value and (k < best_cnt or (reverse and k == best_cnt))):
                 best_value = v
                 best_cnt = k
                 end = q
         q = end
         nev = 0
+        spent = 0.0
         for j in range(hi - 1, lo - 1, -1):
             if source[j - lo] < 0:
                 continue
-            if switched[j - lo, q]:
-                events[i, nev, 0] = j
-                events[i, nev, 1] = source[j - lo]
-                events[i, nev, 2] = q
-                nev += 1
-                q = source[j - lo]
+            taken = route[j - lo, q]
+            if taken == 0:
+                continue
+            x = first[q]
+            y = second[q]
+            if taken == 1:
+                before = index[x, partner[j - lo, x]]
+            elif taken == 2:
+                before = index[y, partner[j - lo, y]]
+            else:
+                before = source[j - lo]
+            events[i, nev, 0] = j
+            events[i, nev, 1] = before
+            events[i, nev, 2] = q
+            event_costs[i, nev] = site_cost[j - lo] * (2.0 if taken == 3 else 1.0)
+            spent += event_costs[i, nev]
+            nev += 1
+            q = before
         start_state[i] = q
         end_state[i] = end
         counts[i] = nev
-        total[i] = fcnt_start[i, q] + nev + gcnt_end[i, end]
-    return start_state, end_state, total, counts, events
-
-
-@njit(cache=True, nogil=True)
-def _lex_best_index(row, cnt, reverse):
-    """messages.lex_best_index (the lexicographic maximum: largest value, then fewest switches) with its switch
-    source among exact ties: the first state, or the last under the convention reversal."""
-    if not reverse:
-        return lex_best_index(row, cnt)
-    m = row[0]
-    c = cnt[0]
-    best = 0
-    for q in range(1, len(row)):
-        if row[q] > m or (row[q] == m and cnt[q] <= c):
-            m = row[q]
-            c = cnt[q]
-            best = q
-    return m, c, best
+        total[i] = fcnt_start[i, q] + spent + gcnt_end[i, end]
+    return start_state, end_state, total, counts, events, event_costs
 
 
 @njit(cache=True, nogil=True)
@@ -189,9 +241,9 @@ def transition_list(first, second, before, after, out):
 
 
 @njit(cache=True, nogil=True)
-def sorted_events(events, count):
-    """A path's switch events (site, before, after) as a lexicographically sorted copy."""
-    out = events[:count].copy()
+def event_order(events, count):
+    """Indices of a path's first `count` switch events (site, before, after) in lexicographic
+    order."""
     order = np.arange(count)
     for i in range(1, count):
         j = i
@@ -202,9 +254,7 @@ def sorted_events(events, count):
                 j -= 1
             else:
                 break
-    for i in range(count):
-        out[i] = events[order[i]]
-    return out
+    return order
 
 
 @njit(cache=True, nogil=True)
@@ -234,11 +284,11 @@ def canonical_sites(events, count, s, haps, leaves, logs, offsets, first, second
             if focal >= 0 and lo_override <= i < hi_override:
                 r = rows[b - p1]
                 own = leaves[b][r, i - offsets[b]]
-                d1 = (own if x1 == focal else haps[x1, i]) + (own if y1 == focal else haps[y1, i])
-                d2 = (own if x2 == focal else haps[x2, i]) + (own if y2 == focal else haps[y2, i])
+                d1 = pair_code7(own if x1 == focal else haps[x1, i], own if y1 == focal else haps[y1, i])
+                d2 = pair_code7(own if x2 == focal else haps[x2, i], own if y2 == focal else haps[y2, i])
             else:
-                d1 = haps[x1, i] + haps[y1, i]
-                d2 = haps[x2, i] + haps[y2, i]
+                d1 = pair_code7(haps[x1, i], haps[y1, i])
+                d2 = pair_code7(haps[x2, i], haps[y2, i])
             if d1 != d2:
                 lo = i
                 break
@@ -247,39 +297,62 @@ def canonical_sites(events, count, s, haps, leaves, logs, offsets, first, second
 
 
 @njit(cache=True, nogil=True)
-def removed_events(old_events, old_count, new_events, new_count):
-    """sorted(set(old) - set(new)) of two paths' switch events."""
-    a = sorted_events(old_events, old_count)
-    b = sorted_events(new_events, new_count)
-    keep = np.zeros(len(a), np.bool_)
+def removed_events(old_events, old_count, new_events, new_count, old_costs):
+    """sorted(set(old) - set(new)) of two paths' switch events, with each removed event's cost on
+    the old path (old_costs aligned with old_events)."""
+    oa = event_order(old_events, old_count)
+    ob = event_order(new_events, new_count)
+    keep = np.zeros(old_count, np.bool_)
     n = 0
     j = 0
-    for i in range(len(a)):
-        if i > 0 and a[i, 0] == a[i - 1, 0] and a[i, 1] == a[i - 1, 1] and a[i, 2] == a[i - 1, 2]:
-            continue  # set semantics
-        ka = (a[i, 0], a[i, 1], a[i, 2])
-        while j < len(b) and (b[j, 0], b[j, 1], b[j, 2]) < ka:
+    for i in range(old_count):
+        e = oa[i]
+        if i > 0:
+            p = oa[i - 1]
+            if (old_events[e, 0] == old_events[p, 0] and old_events[e, 1] == old_events[p, 1]
+                    and old_events[e, 2] == old_events[p, 2]):
+                continue  # set semantics
+        ka = (old_events[e, 0], old_events[e, 1], old_events[e, 2])
+        while j < new_count and (new_events[ob[j], 0], new_events[ob[j], 1], new_events[ob[j], 2]) < ka:
             j += 1
-        if j < len(b) and (b[j, 0], b[j, 1], b[j, 2]) == ka:
+        if j < new_count and (new_events[ob[j], 0], new_events[ob[j], 1], new_events[ob[j], 2]) == ka:
             continue
         keep[i] = True
         n += 1
     out = np.empty((n, 3), np.int64)
+    out_costs = np.empty(n)
     m = 0
-    for i in range(len(a)):
+    for i in range(old_count):
         if keep[i]:
-            out[m] = a[i]
+            out[m] = old_events[oa[i]]
+            out_costs[m] = old_costs[oa[i]]
             m += 1
-    return out
+    return out, out_costs
 
 
 @njit(cache=True, nogil=True)
-def shared_savings(rem_sample, rem_offsets, rem_events, saved, focal, first, second, haps, logs,
-                   total_sites):
-    """Uncredited saved switches of the guard on flattened removed events: sample rem_sample[i] has
-    the sorted events rem_events[rem_offsets[i]:rem_offsets[i + 1]]; saved[s] = net switches sample
-    s saves. Returns sum over samples of min(saved, its removed events at shared one-way
-    junctions)."""
+def shared_savings(rem_sample, rem_offsets, rem_events, rem_costs, saved, focal, first, second,
+                   haps, logs, total_sites):
+    """Uncredited saved switch cost of the guard on flattened removed events: sample rem_sample[i]
+    has the sorted events rem_events[rem_offsets[i]:rem_offsets[i + 1]] with costs rem_costs;
+    saved[s] = net switch cost sample s saves. Returns the sum over samples of min(saved, the cost
+    of its removed homologue transitions at shared one-way junctions).
+
+    Release 2.8: a removed event that changes one homologue is one transition
+    (cost c); one that changes both is two transitions of cost c each under one of its two
+    consistent pairings (x1 -> x2, y1 -> y2) or (x1 -> y2, y1 -> x2). Every transition is tested for
+    sharing separately, and a double change is charged c per shared transition of its better
+    pairing (at most 2c), never its whole 2c for one shared homologue.
+
+    Declared approximation: this is a CONSERVATIVE UPPER BOUND on the shared cost,
+    not an identified attribution. Each ambiguous double change picks its own best pairing and
+    other samples may match its other alternative (so the total can exceed every globally
+    consistent pairing), and events are compared as whole diplotype events (removed_events), so a
+    homologue transition that persists while the other homologue changes counts as removed. Both
+    errors only uncredit more, so the guard can reject more coarse moves than an exact attribution
+    would, never fewer; the extra rejections are counted (guard_rejected) and checked on the native
+    set. Unordered tracebacks do not identify homologue pairings, and resolving the pairings jointly
+    would be a combinatorial search."""
     trans = np.empty((4, 2), np.int64)
     # one-way events (FIFO pairing of the focal founder's excursions per sample)
     n_events = len(rem_events)
@@ -316,18 +389,22 @@ def shared_savings(rem_sample, rem_offsets, rem_events, saved, focal, first, sec
             if one_way[e]:
                 n_entries += transition_list(first, second, rem_events[e, 1], rem_events[e, 2], trans)
     if n_entries == 0:
-        return 0
+        return 0.0
     ent_sample = np.empty(n_entries, np.int64)
     ent_event = np.empty(n_entries, np.int64)
     ent_u = np.empty(n_entries, np.int64)
     ent_v = np.empty(n_entries, np.int64)
     ent_site = np.empty(n_entries, np.int64)
+    ev_first = np.full(n_events, -1, np.int64)
+    ev_count = np.zeros(n_events, np.int64)
     m = 0
     for i in range(len(rem_sample)):
         for e in range(rem_offsets[i], rem_offsets[i + 1]):
             if not one_way[e]:
                 continue
             n = transition_list(first, second, rem_events[e, 1], rem_events[e, 2], trans)
+            ev_first[e] = m
+            ev_count[e] = n
             for t in range(n):
                 ent_sample[m] = rem_sample[i]
                 ent_event[m] = e
@@ -349,7 +426,7 @@ def shared_savings(rem_sample, rem_offsets, rem_events, saved, focal, first, sec
                 j -= 1
             else:
                 break
-    shared = np.zeros(n_events, np.bool_)
+    shared = np.zeros(n_entries, np.bool_)
     for x in range(n_entries):
         a = order[x]
         for y in range(x + 1, n_entries):
@@ -360,16 +437,25 @@ def shared_savings(rem_sample, rem_offsets, rem_events, saved, focal, first, sec
                 break
             if ent_sample[a] != ent_sample[b] and max(intervals[a, 0], intervals[b, 0]) < min(
                     intervals[a, 1], intervals[b, 1]):
-                shared[ent_event[a]] = True
-                shared[ent_event[b]] = True
-    total = 0
+                shared[a] = True
+                shared[b] = True
+    total = 0.0
     for i in range(len(rem_sample)):
-        count = 0
+        cost = 0.0
         for e in range(rem_offsets[i], rem_offsets[i + 1]):
-            if shared[e]:
-                count += 1
-        if count:
-            total += min(saved[rem_sample[i]], count)
+            f = ev_first[e]
+            if f < 0:
+                continue
+            if ev_count[e] == 1:
+                if shared[f]:
+                    cost += rem_costs[e]
+            else:
+                # rem_costs[e] = 2c: c per shared transition of the better consistent pairing
+                pairing_a = int(shared[f]) + int(shared[f + 1])
+                pairing_b = int(shared[f + 2]) + int(shared[f + 3])
+                cost += 0.5 * rem_costs[e] * max(pairing_a, pairing_b)
+        if cost > 0.0:
+            total += min(saved[rem_sample[i]], cost)
     return total
 
 
@@ -381,11 +467,14 @@ def traceback_bytes(samples: int, sites: int, founders: int, threads: int) -> in
     transitions: five int64 entry arrays, two interval coordinates and an order
     index add 256 N L, and two masks add 2 N L. Canonicalisation, sorting and
     one-sample FIFO scratch are covered by another 200 L bytes. Each active thread
-    holds bool[L,Q] traceback flags and an int64[L] predecessor vector, while
-    boundary, reconstructed-prefix and per-thread messages/counts add 64 N Q. Width may grow to
-    the entire component; using the whole width in admission is deliberate.
+    holds int8[L,Q] traceback routes, int16[L,K] founder-maximum partners and int64 + float64[L]
+    source and cost vectors, while boundary, reconstructed-prefix and per-thread messages/costs add
+    64 N Q. Event costs add 24 N L (old and new traceback cost arrays and the flattened removed-event
+    costs), and the per-event transition index (ev_first, ev_count: 16 N L) and
+    per-transition shared flags (3 N L) another 19 N L. Width may grow to the entire component; using the whole width in admission is
+    deliberate.
     """
     states = founders * (founders + 1) // 2
     active = min(samples, max(1, threads))
-    return int((330 * samples + 200) * sites + active * sites * (states + 8)
+    return int((373 * samples + 200) * sites + active * sites * (states + 2 * founders + 16)
                + 64 * samples * states)

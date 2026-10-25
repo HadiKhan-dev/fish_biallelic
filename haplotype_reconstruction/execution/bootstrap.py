@@ -196,13 +196,14 @@ _RUN: RunSettings | None = None
 
 
 def start_run(cores: int, *, preload: tuple[str, ...] = (), profile: bool = False,
-              memory_limit: int | None = None) -> RunSettings:
+              memory_limit: int | None = None, memory_diagnostics: Path | None = None) -> RunSettings:
     """Apply a run's execution settings before any pool or executor exists.
 
     ``cores`` (<= affinity) becomes Numba's pool size here and, through the environment, in every child
     process, and the calling thread's Numba team. ``preload`` adds stage modules to the forkserver preload list
     (effective only before the forkserver starts, i.e. before the first pool). ``memory_limit`` (bytes; None =
-    the memory available now minus headroom) caps the run's memory governor, created here.
+    the job cgroup capacity) caps the run's pressure governor, created here.
+    ``memory_diagnostics`` holds fatal stall snapshots (default: beside the shared ledger); they also go to stderr.
     """
     global _RUN
     cores = int(cores)
@@ -219,7 +220,7 @@ def start_run(cores: int, *, preload: tuple[str, ...] = (), profile: bool = Fals
         pass
     _RUN = RunSettings(cores=cores, profile=bool(profile))
     from .memory import start_governor
-    start_governor(memory_limit)
+    start_governor(memory_limit, diagnostic_directory=memory_diagnostics)
     import numba as numba_module
     numba_module.set_num_threads(min(cores, numba_module.config.NUMBA_NUM_THREADS))
     _check_cached_kernel_signatures()

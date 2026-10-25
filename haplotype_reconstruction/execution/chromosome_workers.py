@@ -56,10 +56,10 @@ class _TaskMemory:
         not fit, handing the lease's CPUs to peers meanwhile. Returns (request, threads after a wait or None)."""
         state = self.states.get(task_index)
         held = state.nbytes if state is not None else 0
-        if task_bytes <= held:          # nothing more to reserve: a presence token marks the running call
-            return self.governor.presence(self.label, self.depth, parent=self.parent), None
-        request = self.governor.request(task_bytes - held, label=self.label, depth=self.depth, parent=self.parent,
-                                        envelope=self.envelope)
+        # Zero-byte calls use the same admission/CPU-yield path. Byte metadata never determines whether
+        # a waiting handler gives its CPU lease to a peer.
+        request = self.governor.request(max(0, task_bytes - held), label=self.label, depth=self.depth,
+                                       parent=self.parent, envelope=self.envelope, outer=True)
         if request.poll():
             return request, None
         if seat is None:

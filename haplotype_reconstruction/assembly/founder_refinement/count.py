@@ -4,8 +4,11 @@ Count rule (assembly/count_rule, shared with the join): a decision between a lar
 smaller X- keeps X+ iff the effective-carrier test passes on the total per-sample gain
 d_s = F_s(X+) - F_s(X-) AND on its sequence part q_s = F_s(X+) - F_s(X+^sigma). The shadow X+^sigma
 replaces every cell (block, row) of X+ that a reference panel does not use by the reference's row
-nearest to it at that block; the reference is X+ minus the decided founder f for a deletion (only
-f's private cells change) and the incumbent X- for an addition (every cell the refit added). A
+nearest to it at that block. Release 2.8 (symmetric null, _symmetric_decision): the reference is X+
+minus each member of its own canonical death tie class (its best unrefitted one-founder deletions,
+founders without a private cell first), in both directions, so the same two endpoints get the same
+decision whichever was the incumbent; X+ is kept only if every member's test keeps it, and a
+disagreement or an unresolved member family takes the smaller K with ambiguity. A
 founder without a private cell (every cell another founder uses at that block) owns no sequence:
 q = 0 exactly when X+ holds one. Otherwise q is the exact shadow difference; equally near
 replacements form a complete factored family. Families within the separate shadow budget
@@ -31,14 +34,12 @@ the main pass, founders that no sample uses are deleted as cleanup (declared mod
 a founder whose unrefitted deletion leaves every informative sample's score unchanged within the
 per-sample quantum (tie_rules.quantum("refine_F")) is removed (content order, re-checked one at a time),
 the reduced panel is refitted, and a "cleanup" record is kept; it is not a count decision (2.0 kept such
-a founder whenever the best-F tie-break examined another founder first). The best-F keep, the count cycle
-and the restore compare F with max(TOL, quantum).
+a founder whenever the best-F tie-break examined another founder first). The best-F keep and the restore
+compare F with max(TOL, quantum).
 At the final count step only (the last level), duplicate-seed addition rounds (seeds X plus a copy
 of founder f; with more than r founders the r seeds of largest exact copy best-response gain are
-refitted), each accepted addition followed by one deletion round that must reject, otherwise the
-call is a reported count cycle, resolved to the smaller K with the better-F of its two K panels and
-flagged undecided when the deletion round's call is ambiguous and the pass reached K by a decided
-deletion from K + 1 (count_rule.pre_cycle_count). An optimistic bound (upper_bound) may skip a round
+refitted); with the symmetric null an accepted addition needs no check deletion round, so no count
+cycle arises (2.7 checked every addition and reported cycles). An optimistic bound (upper_bound) may skip a round
 only when it proves the decision and its non-ambiguity for every candidate (a deletion round's
 bootstrap band through count_rule.deletion_bound_excludes' replicate-wise bound). The count rule
 reads the informative samples only (workspace.count_samples, count_rule.founder_cost's S): every
@@ -66,7 +67,7 @@ from ..count_rule import shadow_bounds
 from .. import tie_rules
 from ...maths import ties
 from .acceptance import TOL
-from .objective import CENTER, forward_sites, row_max, unordered_pairs
+from .objective import CENTER, forward_sites, pair_code7, row_max, unordered_pairs
 from ... import execution
 
 # Additions stop at the incoming count plus COUNT_LIMIT_MULTIPLE times it (reported when reached).
@@ -236,9 +237,10 @@ class CountPass:
 
 # ------------------------------------------------------------------ optimistic count bound
 @njit(cache=True)
-def _block_sample_scores(haps, logs, start, stop, penalty, removed):
+def _block_sample_scores(haps, logs, start, stop, costs, removed):
     """Per-sample optimistic scores of one block: its rows (minus row `removed` if >= 0) as a free
-    panel, every sample's chain started fresh at the block."""
+    panel with the target K's switch costs, every sample's chain started fresh at the block (the
+    transition into the block's first informative site is free: switch costs are >= 0)."""
     rows = np.arange(len(haps))
     if removed >= 0:
         rows = rows[rows != removed]
@@ -246,17 +248,18 @@ def _block_sample_scores(haps, logs, start, stop, penalty, removed):
     dos = np.empty((stop - start, len(first)), np.int8)
     for j in range(stop - start):
         for q in range(len(first)):
-            dos[j, q] = haps[rows[first[q]], j] + haps[rows[second[q]], j]
+            dos[j, q] = pair_code7(haps[rows[first[q]], j], haps[rows[second[q]], j])
     result = np.empty(logs.shape[0], np.float64)
+    R = np.empty(len(rows))
     for s in range(logs.shape[0]):
         row = np.zeros(len(first), np.float64)
-        forward_sites(row, dos, start, logs, s, start, stop, penalty)
+        forward_sites(row, dos, start, logs, s, start, stop, costs, R)
         result[s] = row_max(row)
     return result
 
 
 @njit(cache=True, parallel=True)
-def upper_bound(leaves, offsets, logs, penalty, target):
+def upper_bound(leaves, offsets, logs, costs, target):
     """Per-block optimistic scores bounding every panel with at most `target` distinct rows per
     block, and their per-sample form.
 
@@ -264,7 +267,10 @@ def upper_bound(leaves, offsets, logs, penalty, target):
     a block with target + 1 rows takes its best one-row deletion (exact for that block), any other
     block every local row (possibly more than target). Both relaxations enlarge the feasible set,
     so the sum over blocks bounds every chromosome panel with <= target founder paths drawn from
-    these prepared rows (same complete-site mask, emissions and penalty as fitting).
+    these prepared rows (same site mask, emissions and switch costs as fitting: costs are
+    the target K's; a free panel of more rows with the same per-change costs only enlarges the
+    path set). The panel-independent normalisers of the target K are not included (callers add
+    workspace.normalisers(target)).
     bounds[b] is the block's total over samples; per_sample[b] lets every sample drop a different
     row of a target+1-row block (a maximum of sums becomes a sum of maxima): summed over blocks it
     bounds each sample. constrained[b] = 1 for a target+1-row block."""
@@ -279,7 +285,7 @@ def upper_bound(leaves, offsets, logs, penalty, target):
         best = -np.inf
         best_sample = np.full(samples, -np.inf)
         for removed in range(len(haps) if deletion else 1):
-            scores = _block_sample_scores(haps, logs, offsets[block], offsets[block + 1], penalty,
+            scores = _block_sample_scores(haps, logs, offsets[block], offsets[block + 1], costs,
                                           removed if deletion else -1)
             total = 0.
             for sample in range(samples):
@@ -290,6 +296,57 @@ def upper_bound(leaves, offsets, logs, penalty, target):
         per_sample[block] = best_sample
         constrained[block] = int(deletion)
     return bounds, constrained, per_sample
+
+
+@njit(cache=True, nogil=True)
+def _shadow_codes(leaves, site_offsets, choices, starts):
+    """shadow_bounds._dosages on coded leaves: pair codes (pair_code7) of every local row choice."""
+    founders = choices.shape[1]
+    states = founders * (founders + 1) // 2
+    offsets = np.zeros(len(choices) + 1, np.int64)
+    for block in range(len(starts) - 1):
+        sites = site_offsets[block + 1] - site_offsets[block]
+        for choice in range(starts[block], starts[block + 1]):
+            offsets[choice + 1] = offsets[choice] + sites
+    codes = np.empty((offsets[-1], states), np.int8)
+    for block in range(len(starts) - 1):
+        leaf = leaves[block]
+        for choice in range(starts[block], starts[block + 1]):
+            for site in range(leaf.shape[1]):
+                state = 0
+                for first in range(founders):
+                    a = leaf[choices[choice, first], site]
+                    for second in range(first, founders):
+                        codes[offsets[choice] + site, state] = pair_code7(a, leaf[choices[choice, second], site])
+                        state += 1
+    return codes, offsets
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _full_site_costs(logs, site_offsets, dosages, dose_offsets, starts, costs, founders):
+    """shadow_bounds._full_site on the refinement objective (per-homologue transitions with the
+    switch costs of K = founders): per sample the maximum over every block's local row choices,
+    carried across blocks (an exact per-sample envelope of the shadow family, without the
+    normalisers)."""
+    samples, states = len(logs), dosages.shape[1]
+    result = np.empty(samples, np.float64)
+    for sample in prange(samples):
+        row = np.zeros(states)
+        trial = np.empty(states)
+        target = np.empty(states)
+        R = np.empty(founders)
+        for block in range(len(starts) - 1):
+            target[:] = -np.inf
+            lo, hi = site_offsets[block], site_offsets[block + 1]
+            for choice in range(starts[block], starts[block + 1]):
+                trial[:] = row
+                forward_sites(trial, dosages, lo - dose_offsets[choice], logs, sample, lo, hi, costs,
+                              R)
+                for state in range(states):
+                    target[state] = max(target[state], trial[state])
+            row[:] = target
+        result[sample] = row_max(row)
+    return result
 
 
 # ------------------------------------------------------------------ helpers
@@ -430,10 +487,12 @@ def _shadow_decision(engine, geometry, larger, larger_scores, smaller_scores, re
         ws = engine.workspace
         threads = max(1, int(budget.threads()))
         def upper_scores(plan):
+            founders = int(larger.shape[0])
             with execution.numba_threads(threads):
-                scores = shadow_bounds.full_site_envelope(
-                    ws.leaves, ws.offsets, ws.logs, plan, ws.penalty, CENTER)
-            return view(scores)
+                dosages, dose_offsets = _shadow_codes(ws.leaves, ws.offsets, plan.choices, plan.starts)
+                scores = _full_site_costs(ws.logs, ws.offsets, dosages, dose_offsets, plan.starts,
+                                          ws.costs(founders), founders)
+            return view(scores + ws.normalisers(founders))
         proof, audit = shadow_bounds.attempt_certificate(
             choices, larger.shape, np.diff(ws.offsets), view(larger_scores), view(smaller_scores),
             cost, incumbent=decision, config=rule, seed_key=seed_key, upper_scores=upper_scores,
@@ -472,9 +531,17 @@ def _loso_margin(criterion):
     return float(min(criterion["total"]["loso_margin"], criterion["sequence"]["loso_margin"]))
 
 
-def _death_candidate(engine, rows, budget):
-    """The join's death candidate of a panel without refits: founders without a private cell first,
-    then the largest unrefitted F(rows minus f) (tie classes of F; the founder's path inside a class)."""
+def _death_class(engine, rows, budget):
+    """Founders of the larger panel's canonical unrefitted death tie class (the symmetric null):
+    founders without a private cell first, otherwise all; the best tie class of unrefitted
+    F(rows minus f) by the refine_F quantum. Cached per panel on the engine."""
+    rows = np.ascontiguousarray(rows, np.int64)
+    token = (rows.shape, rows.tobytes())
+    cache = getattr(engine, "_death_class_cache", None)
+    if cache is None or len(cache) > 64:
+        cache = engine._death_class_cache = {}
+    if token in cache:
+        return cache[token]
     owns = _own_sequence(rows)
     pool = np.flatnonzero(~owns) if not owns.all() else np.arange(len(rows))
     totals = [engine.score(np.delete(rows, f, axis=0), budget) for f in pool.tolist()]
@@ -482,7 +549,47 @@ def _death_candidate(engine, rows, budget):
     result = ties.tie_classes(totals, tie_rules.quantum("refine_F", scale),
                               content=[tie_rules.path_key(rows[f]) for f in pool.tolist()], descending=True,
                               motion=tie_rules.motion("refine_F", scale))
-    return int(pool[result.winner])
+    members = [int(pool[int(i)]) for i in result.members(int(result.classes[result.winner]))]
+    cache[token] = members
+    return members
+
+
+def _symmetric_decision(engine, geometry, larger, larger_scores, smaller_scores, budget, cost, rule,
+                        seed_key, kind, view, *, decision_options=None):
+    """Symmetric count null (release 2.8): the sequence reference is the larger panel minus its own
+    canonical death candidate in either direction, so the same two endpoints get the same decision
+    whichever was the incumbent. Every member of the death tie class is evaluated; disagreement takes
+    smaller K with ambiguity (the existing nearest-shadow convention)."""
+    begun = time.perf_counter()
+    members = _death_class(engine, larger, budget)
+    outcomes = []
+    for founder in members:
+        family = []
+        decision, without, cells, detail = _shadow_decision(
+            engine, geometry, larger, larger_scores, smaller_scores, np.delete(larger, founder, axis=0),
+            budget, cost, rule, seed_key, kind, view, decision_options=family)
+        outcomes.append((founder, decision, without, cells, detail, family))
+    founder, decision, without, cells, detail, _ = min(
+        outcomes, key=lambda x: (x[1].accept_larger, x[1].margin, x[1].sequence.loso_margin,
+                                 tie_rules.path_key(larger[x[0]])))
+    detail = dict(detail)
+    disagree = len({x[1].accept_larger for x in outcomes}) > 1
+    # Any member whose own nearest-shadow family is unresolved keeps the ambiguity.
+    member_unresolved = any(bool(x[4].get("unresolved")) for x in outcomes)
+    if disagree or member_unresolved:
+        decision = replace(decision, accept_larger=False, ambiguous=True)
+    detail.update(unresolved=bool(disagree or member_unresolved), sequence_null="larger_minus_death_class",
+                  member_unresolved=tuple(bool(x[4].get("unresolved")) for x in outcomes),
+                  member_details=tuple(dict(founder=int(x[0]), accept_larger=bool(x[1].accept_larger),
+                                            margin=float(x[1].margin), unresolved=bool(x[4].get("unresolved")),
+                                            evaluated=int(x[4].get("evaluated", 0))) for x in outcomes),
+                  sequence_founder=int(founder), death_class=tuple(members),
+                  death_class_verdicts=tuple(bool(x[1].accept_larger) for x in outcomes),
+                  symmetric_seconds=time.perf_counter() - begun)
+    if decision_options is not None:
+        for x in outcomes:
+            decision_options.extend(x[5] or [x[1]])
+    return decision, without, cells, detail
 
 
 def _fit_many(engine, starts, labels, budget):
@@ -776,12 +883,10 @@ def _restored_comparisons(engine, geometry, budget, rows, scores, best_at, decis
             return None
         if kind == "deletion":
             larger, larger_scores, smaller = rows, scores, held[3]
-            founder = _death_candidate(engine, rows, budget)
-            reference = np.delete(rows, founder, axis=0)
         else:
-            larger, larger_scores, smaller, reference = held[1], held[3], scores, rows
-        decision, _, _, shadow_details = _shadow_decision(
-            engine, geometry, larger, larger_scores, smaller, reference, budget, cost, rule,
+            larger, larger_scores, smaller = held[1], held[3], scores
+        decision, _, _, shadow_details = _symmetric_decision(
+            engine, geometry, larger, larger_scores, smaller, budget, cost, rule,
             [*seed_key, "best_f", kind], kind, view)
         return dict(fit=held[2], founders=int(other), F=float(held[0]),
                     accept_larger=bool(decision.accept_larger), margin=float(decision.margin),
@@ -1093,9 +1198,10 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             # of the bound also proves the band (the decision's own bootstrap stream).
             with execution.numba_threads(max(1, int(budget.threads()))):
                 bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.logs,
-                                                          ws.penalty, K - 1)
-            per_sample_optimistic = per_block_sample.sum(axis=0)
-            optimistic = float(bounds.sum())
+                                                          ws.costs(K - 1), K - 1)
+            normalisers = ws.normalisers(K - 1)
+            per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
+            optimistic = float(bounds.sum() + normalisers.sum())
             tolerance = 1e-8 * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
             excluded, band_bound = count_rule.deletion_bound_excludes(
                 view(scores), view(per_sample_optimistic), cost, tolerance=tolerance, config=rule,
@@ -1134,8 +1240,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
         founder = chosen[pick]
         smaller_scores = engine.fit_scores(smaller.summary.label, smaller.rows, budget)
         observed = []
-        decision, _, shadow_cells, detail = _shadow_decision(
-            engine, geometry, X, scores, smaller_scores, np.delete(X, founder, axis=0),
+        decision, _, shadow_cells, detail = _symmetric_decision(
+            engine, geometry, X, scores, smaller_scores,
             budget, cost, rule, [*seed_key, label, "deletion"], "deletion", view, decision_options=observed)
         shadow_details = {pick: detail}
         shadow_options = {pick: observed}
@@ -1149,8 +1255,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             member = refits[position]
             member_scores = engine.fit_scores(member.summary.label, member.rows, budget)
             member_observed = []
-            member_decision, _, _, detail = _shadow_decision(
-                engine, geometry, X, scores, member_scores, np.delete(X, chosen[position], axis=0),
+            member_decision, _, _, detail = _symmetric_decision(
+                engine, geometry, X, scores, member_scores,
                 budget, cost, rule, [*seed_key, label, "deletion"], "deletion", view, decision_options=member_observed)
             shadow_details[position] = detail
             shadow_options[position] = member_observed
@@ -1209,9 +1315,10 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
         round_index += 1
         F = float(scores.sum())
         with execution.numba_threads(max(1, int(budget.threads()))):
-            bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.logs, ws.penalty,
-                                                      K + 1)
-        optimistic = float(bounds.sum())
+            bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.logs,
+                                                      ws.costs(K + 1), K + 1)
+        normalisers = ws.normalisers(K + 1)
+        optimistic = float(bounds.sum() + normalisers.sum())
         tolerance = 1e-8 * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
         if count_rule.addition_bound_excludes(optimistic, F, cost, count_samples,
                                               tolerance=tolerance):
@@ -1221,7 +1328,7 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
                 optimistic_score=optimistic, smaller_fit=smaller_fit), None, None, None
         # No sample's optimistic gain reaches the per-carrier cost c/(2S): no seed's refit (nor any
         # (K+1)-panel) can pass or make the call ambiguous, so the round is decided unrun.
-        per_sample_optimistic = per_block_sample.sum(axis=0)
+        per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
         tolerance = 1e-9 * max(1.0, abs(F), float(np.max(np.abs(per_sample_optimistic))))
         excluded, gain_bound, gain_sample = count_rule.addition_per_sample_bound_excludes(
             view(per_sample_optimistic), view(scores), cost, tolerance=tolerance)
@@ -1267,8 +1374,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
         # The refit may have moved any founder: its sequence part is the gain over the refit with
         # every cell the incumbent does not use replaced by the incumbent's nearest row.
         observed = []
-        decision, without, shadow_cells, detail = _shadow_decision(
-            engine, geometry, larger.rows, larger_scores, scores, X, budget, cost, rule,
+        decision, without, shadow_cells, detail = _symmetric_decision(
+            engine, geometry, larger.rows, larger_scores, scores, budget, cost, rule,
             [*seed_key, label, "addition"], "addition", view, decision_options=observed)
         shadow_details = {pick: detail}
         shadow_options = {pick: observed}
@@ -1282,8 +1389,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             member = refits[position]
             member_scores = engine.fit_scores(member.summary.label, member.rows, budget)
             member_observed = []
-            member_decision, _, _, detail = _shadow_decision(
-                engine, geometry, member.rows, member_scores, scores, X, budget, cost, rule,
+            member_decision, _, _, detail = _symmetric_decision(
+                engine, geometry, member.rows, member_scores, scores, budget, cost, rule,
                 [*seed_key, label, "addition"], "addition", view, decision_options=member_observed)
             shadow_details[position] = detail
             shadow_options[position] = member_observed
@@ -1365,34 +1472,12 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
         if not entry.accept_larger:
             break
         adopt(larger)
-        check, smaller, smaller_scores, check_pair = deletion_round(larger.rows, larger_scores,
-                                                                    larger.summary.label)
-        check = replace(check, after_addition=True)
-        decisions.append(check)
-        decided(check)
-        panels.append(check_pair)
-        if check.accept_larger:
-            final, X, scores = larger, larger.rows, larger_scores
-            adopt(final)
-            sizes.append(len(X))
-            continue
-        # Adding then deleting: a count cycle. The deletion round stands (the K+1 panel is not
-        # supported against its own best K refit) and the better-F of the two K panels (the
-        # incumbent and that refit) is kept; the call is reported as ambiguous, and as undecided
-        # when the deletion round's call is ambiguous and the cycle began with a decided deletion
-        # from K + 1.
-        cycle = True
-        origin = count_rule.pre_cycle_count(sizes + [len(larger.rows)], len(larger.rows),
-                                            cleanup_steps)
-        cycle_undecided = bool(origin >= len(larger.rows) and check.ambiguous)
-        if float(smaller_scores.sum()) > float(scores.sum()) + keep_margin(float(scores.sum())):
-            final, X, scores = smaller, smaller.rows, smaller_scores
-            adopt(final)
-        flags = dict(ambiguous=True, count_cycle=True, cycle_start_count=int(origin),
-                     cycle_undecided=cycle_undecided)
-        decisions[-2] = replace(entry, **flags)
-        decisions[-1] = replace(check, **flags)
-        break
+        # Release 2.8: additions and deletions use the same symmetric null on the same converged
+        # endpoints, so no check deletion round follows an accepted birth and no count cycle arises
+        # (count_cycle and cycle_undecided stay False in the records).
+        final, X, scores = larger, larger.rows, larger_scores
+        adopt(final)
+        sizes.append(len(X))
     replaced = None
     held = best_at[len(X)]
     if held[0] > float(scores.sum()) + keep_margin(float(scores.sum())):

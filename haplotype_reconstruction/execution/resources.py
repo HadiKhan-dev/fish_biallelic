@@ -87,3 +87,58 @@ def resident_bytes() -> int:
             return int(handle.readline().split()[1]) * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError, IndexError):
         return 0
+
+
+def memory_pressure() -> tuple[int, int, int] | None:
+    """(working set, capacity, available bytes) for this job, with MemAvailable fallback.
+
+    Prefer the enclosing Slurm job cgroup (including all steps), then the tightest bounded cgroup. Inactive file
+    cache is reclaimable and excluded, in both v1 and v2. Physical node availability remains an independent
+    bound when another job consumes memory. A configured lower run limit is applied by the governor.
+    """
+    info = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                info[key] = int(value.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    groups = []
+    try:
+        entries = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        entries = []
+    for entry in entries:
+        _, controllers, relative = entry.split(":", 2)
+        v1 = "memory" in controllers.split(",")
+        if not v1 and controllers:
+            continue
+        root = Path("/sys/fs/cgroup/memory" if v1 else "/sys/fs/cgroup")
+        directory = root / relative.lstrip("/")
+        while directory == root or root in directory.parents:
+            try:
+                cap = int((directory / ("memory.limit_in_bytes" if v1 else "memory.max")).read_text())
+                used = int((directory / ("memory.usage_in_bytes" if v1 else "memory.current")).read_text())
+                if 0 < cap < (1 << 60):
+                    used = max(0, used - _inactive_file_bytes(directory, v1))
+                    groups.append((directory.name.startswith("job_"), cap, used))
+            except (OSError, ValueError):
+                pass
+            if directory == root:
+                break
+            directory = directory.parent
+    if groups:
+        jobs = [g for g in groups if g[0]]
+        _, cap, used = min(jobs or groups, key=lambda g: g[1])
+        # Respect tighter enclosing step limits as well as the entire job's pressure.
+        available = min(c - u for _, c, u in groups)
+        available = min(available, info.get("MemAvailable", cap))
+        return max(used, cap - available), cap, max(0, available)
+    if "MemTotal" in info and "MemAvailable" in info:
+        cap, available = info["MemTotal"], info["MemAvailable"]
+        slurm = os.environ.get("SLURM_MEM_PER_NODE", "")
+        if slurm.isdigit() and int(slurm) > 0:
+            cap = min(cap, int(slurm) << 20)
+        return max(0, cap - available), cap, min(cap, available)
+    return None

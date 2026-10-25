@@ -20,8 +20,9 @@ def prepare(configurations, log_priors, log_emission, n_founders, support_radius
     centres = np.empty((len(counts), n_founders), np.int8)
     bit_index = np.full((len(counts), n_founders), -1, np.int64)
     width = max((value.flips.shape[1] for value in configurations), default=0)
-    flips = np.full((int(offsets[-1]), width), -1, np.int64)
-    sizes = np.zeros(int(offsets[-1]), np.int64)
+    # Flip indices (-1..K-1) and sizes (0..K) fit int8 for every supported K <= 30.
+    flips = np.full((int(offsets[-1]), width), -1, np.int8)
+    sizes = np.zeros(int(offsets[-1]), np.int8)
     for site, value in enumerate(configurations):
         centres[site] = value.centre
         bit_index[site, value.varying] = np.arange(len(value.varying))

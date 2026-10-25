@@ -7,13 +7,10 @@ a lane stay within it, so concurrent contigs never exceed the ceiling. Leases st
 work and grow, never inside a running kernel, as finished lanes release theirs: at contig starts, at the phase
 starts the stages mark (budget.phase), and inside pool phases (pools re-read their live budget every second).
 
-The plan: one lane per CONTIG_LANE_CORES cores (or the requested count), at most one per pending contig, then
-limited by memory: while a lane works on a contig it holds LANE_RESIDENT_FACTOR x the contig's planning bytes of
-the run's memory (execution.memory; the coordinator's resident contig data), and the lanes of the largest
-concurrent group may hold at most LANE_RESIDENT_SHARE of the memory limit. Everything else a lane runs (pools,
-executors, concurrent fits) reserves its own bytes as it starts, so memory paces the work inside lanes. A contig's
-computation never reads another contig's work in progress, and core counts and pacing are execution choices
-outside every scientific identity.
+The plan: one lane per CONTIG_LANE_CORES cores (or the requested count), at most one per pending contig.
+Measured pressure paces each contig's start; planning bytes are diagnostic metadata, never an admission input
+or a lifetime reservation. Pools and nested work share the same governor. Computation never reads another contig's work in
+progress, and core counts and pacing are execution choices outside every scientific identity.
 
 The first failing contig stops the run: the other lanes are stopped (SIGTERM) and keep their contigs' records for
 resume. A lane also stops as soon as the main process exits for any reason, so no lane keeps computing or writing
@@ -37,7 +34,7 @@ import traceback
 
 from .budget import CpuBudget
 from .chromosome_workers import ChromosomeExecutor
-from .memory import headroom_bytes, memory_governor, release_memory, reserve_memory
+from .memory import release_memory, reserve_memory
 from .pools import task_sizes
 from .run_log import run_log
 from .run_record import record_product, timed_stage, worker_stages
@@ -50,14 +47,6 @@ CONTIG_LANE_CORES = 16
 # overlapping selection/context arrays. Retained process memory is held separately below. Its pools,
 # executors and concurrent tasks reserve their own memory (shared arrays included) as they start.
 LANE_RESIDENT_FACTOR = 1.0
-# Native post-phase private memory reached 18.401 GB on the long K30 run (76-core maximum lease).
-# This empirical runtime/heap allowance is held once per lane process until the executor joins, including tails.
-# It is not an attribution to compiled code alone and is not a bound for the sequential driver.
-LANE_WORKER_RESIDENT_BYTES = 17664 << 20
-# The resident bytes of concurrent lanes may take at most this share of the memory limit (the rest is for the work
-# inside the lanes, which the governor paces).
-LANE_RESIDENT_SHARE = 0.5
-
 # Planning sizes come from record indexes that wait on shared-filesystem latency: contigs are scanned concurrently.
 SIZE_SCAN_THREADS = 16
 
@@ -79,32 +68,14 @@ def lane_resident_bytes(size) -> int:
 
 
 def plan_lanes(sizes, pending, *, cores: int, requested: int | None, available: int | None = None):
-    """Concurrent lanes and longest-first work weights per contig.
-
-    ``sizes``: planning bytes per contig; ``pending``: whether each contig still needs work. Automatic: one lane
-    per CONTIG_LANE_CORES cores, at most one per pending contig; memory then limits the concurrent group so that
-    its lanes' resident bytes fit LANE_RESIDENT_SHARE of the run's memory limit (or of ``available`` minus the
-    headroom when given); it never lowers the core ceiling. Returns (1, None) when lanes would not help.
-    """
+    """Concurrent lanes and longest-first work weights; live pressure paces dispatch, not the lane count."""
     count = sum(bool(flag) for flag in pending)
     limit = max(1, cores // CONTIG_LANE_CORES) if requested is None else requested
     lanes = min(count, limit, cores)
     if lanes < 2:
         return 1, None
     weights = [float(size) if flag else 0. for size, flag in zip(sizes, pending)]
-    residents = sorted((lane_resident_bytes(size) + LANE_WORKER_RESIDENT_BYTES
-                        for size, flag in zip(sizes, pending) if flag), reverse=True)
-    memory = memory_governor().limit if available is None else max(0, available - headroom_bytes(available))
-    allowance = LANE_RESIDENT_SHARE * memory
-    group = total = 0
-    for resident in residents[:lanes]:
-        if group and total + resident > allowance:
-            break
-        group += 1
-        total += resident
-    print(f"[memory] RECONSTRUCTION: {group} concurrent lanes (of {lanes} by cores); resident bytes of the "
-          f"largest group {total / 2**30:.1f} GiB of {allowance / 2**30:.1f} GiB (half the limit)", flush=True)
-    return (group, weights) if group >= 2 else (1, None)
+    return lanes, weights
 
 
 def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights, log_directory, phase_progress,
@@ -133,9 +104,7 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
         print(f"    {contig} log: {logs[contig]}", flush=True)
     common = dict(root=store.root, work=work, context=context, logs=logs)
     try:
-        with reserve_memory(executor.worker_count * LANE_WORKER_RESIDENT_BYTES,
-                            label="reconstruction workers"):
-            results = _run_executor(executor, common)
+        results = _run_executor(executor, common)
     except RuntimeError as error:
         message = _failure_message(str(error), partitions, logs, done or (lambda contig: False))
         print(f"  [FAILED] {message}", flush=True)

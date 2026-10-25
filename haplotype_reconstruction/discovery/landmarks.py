@@ -222,10 +222,11 @@ def seed_groups(likelihoods, budget, min_cluster_size, omissions=None):
 
 def residual_groups(hard_calls, budget, minimum_joint, config, omissions=None, scope='global', cache=None):
     from .residual_births import _cluster
+    from .conventions import rev
     from hashlib import blake2b
     value = np.ascontiguousarray(hard_calls)
     key = (budget, minimum_joint, config.max_cluster_hamming, config.max_alternative_groups,
-           config.max_clique_enumeration, config.max_clique_calls, scope, value.shape,
+           scope, rev("d13"), value.shape,
            blake2b(memoryview(value).cast("B"),digest_size=32).digest())
     if cache is not None and key in cache:
         groups, overflow, stats, details = cache[key]
@@ -240,7 +241,8 @@ def residual_groups(hard_calls, budget, minimum_joint, config, omissions=None, s
     edges = int(np.count_nonzero(matrix <= config.max_cluster_hamming+1e-12))-len(matrix)
     chosen.stats.update(anchor_edges=edges//2, anchor_edge_density=edges/pairs if pairs else 0.0)
     lifted, overflow = _cluster(matrix,config.max_cluster_hamming,config.max_alternative_groups,
-        config.max_clique_enumeration,config.max_clique_calls,details,
+        tuple(np.ascontiguousarray(row, dtype=np.int8).tobytes()
+              for row in chosen.rows[chosen.anchors]), details,
         lifted=(chosen.packed_membership(), len(hard_calls)))
     result = lifted, bool(overflow or chosen.stats['omitted_class']), chosen.stats
     if omissions is not None:

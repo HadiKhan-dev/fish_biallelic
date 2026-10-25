@@ -11,9 +11,9 @@ every task. Tasks apply their share at their own boundaries with `claim_threads(
 
 Dispatch: a batch's tasks are sent to the workers one by one by a dispatcher thread, at most about one per
 worker ahead of the results (so a task is handed out only when a worker is about to be free), in task order.
-Memory (execution.memory): the shared arrays are reserved for the pool's lifetime, and with ``task_bytes`` the
-dispatcher reserves each task's bytes before it sends the task (tasks start in task order as memory allows) and
-releases them when the task's result arrives; workers measure each task's peak RSS for the run's statistics.
+Memory (execution.memory): every dispatch receives a progress token using measured pressure before it is sent.
+No bytes are reserved. ``task_bytes`` remain diagnostic estimates, compared with workers' measured peak RSS;
+they do not affect admission or the number of outstanding dispatches.
 Pacing changes when tasks start, never their results.
 
 Worker recycling: a worker whose private memory (USS) has grown by more than the pool's recycle threshold since
@@ -184,7 +184,7 @@ def _run_task(packed):
     if held[0]:
         governor.start(held[0])
     else:
-        presence = governor.presence(label, held[1], parent=parent)
+        presence = governor.presence(label, held[1], parent=parent, outer=True)
         held = presence.held
     start = task_peak_start()
     try:
@@ -385,11 +385,10 @@ class BudgetedPool:
         """Run ``function(task, shared, budget)`` for every task; yield results in completion order.
 
         Each call is one batch with its own start-up gate. ``function`` must be importable (module level).
-        ``task_bytes`` are the tasks' peak bytes (execution.memory): None, an int for every task, one int per task
-        in task order, or a callable of the task; each task starts when its bytes fit the run's memory. ``tasks``
-        may be a lazy iterable: it is drawn from only as tasks are sent, and with an int or a sequence of sizes
-        only after the task's bytes are reserved (so a task's payload is built only once it can run).
-        ``envelope``: a task's bytes also cover what its nested constructs reserve (they borrow them first).
+        ``task_bytes`` are diagnostic estimates: None, an int for every task, one int per task in task order,
+        or a callable of the task. They do not affect admission. A lazy ``tasks`` iterable is drawn from only
+        when a worker dispatch slot is free; then measured pressure controls sending that task.
+        ``envelope`` is accepted for compatibility; no memory is reserved or lent.
         ``chunksize`` consecutive tasks are sent and run together.
         """
         return (result for _, result in self._batch(function, tasks, chunksize, task_bytes, envelope))
@@ -412,23 +411,20 @@ class BudgetedPool:
         if task_bytes is None or isinstance(task_bytes, (int, np.integer)):
             each = max(0, int(task_bytes or 0))
             size_at = lambda position: each        # noqa: E731
-            paced = each > 0
         elif callable(task_bytes):
-            size_at, paced = None, True
+            size_at = None
         else:
             sizes = [max(0, int(value)) for value in task_bytes]
             if count is not None and len(sizes) != count:
                 raise ValueError(f"task_bytes gives {len(sizes)} estimates for {count} tasks")
             count = len(sizes) if count is None else count
             size_at = lambda position: sizes[position] if position < len(sizes) else 0    # noqa: E731
-            paced = any(sizes)
         governor, counters, label = self._governor, self._counters, self.label
         caller = held_context()
         depth, parent = depth_below(caller), caller[0] if caller else 0
-        # Dispatched chunks without a result yet: one per worker; a batch without estimates also keeps a few more
-        # queued (look-ahead). A memory-paced batch has none, so every reservation is a task that runs or is about
-        # to (a granted task waiting behind busy workers would hold memory that no one uses).
-        free_slots = threading.Semaphore(self.processes + (0 if paced else 1 + self.processes // 4))
+        # At most one outstanding dispatch per worker, regardless of legacy diagnostic byte estimates.
+        # Every dispatch carries a QUEUED progress token until the worker actually starts it.
+        free_slots = threading.Semaphore(self.processes)
         stop = self._batch_stop = threading.Event()
         if self._stop.is_set():
             stop.set()
@@ -469,11 +465,9 @@ class BudgetedPool:
                 arrivals.put(("error", error))
 
         def reserve(nbytes):
-            """The chunk's reservation (None without bytes), or False if the batch stopped while waiting."""
-            if not nbytes:
-                return None
+            """The chunk's admission token (including zero-byte work), or False on cancellation."""
             request = governor.request(nbytes, label=label, depth=depth, queued=True, parent=parent,
-                                       envelope=envelope)
+                                       envelope=envelope, outer=True)
             if not request.poll():
                 # Memory paces this batch: no peer is about to start, so running tasks take the threads.
                 counters.open_gate()
@@ -492,27 +486,19 @@ class BudgetedPool:
                         if stop.is_set():
                             return
                     request = None
-                    if size_at is not None:                  # sizes known before the tasks are drawn
-                        width = chunksize if count is None else min(chunksize, count - position)
-                        if width <= 0:
-                            exhausted = True
-                            free_slots.release()
-                            return
-                        request = reserve(sum(size_at(position + offset) for offset in range(width)))
-                        if request is False:
-                            return
-                        chunk = list(islice(iterator, width))
-                    else:
-                        chunk = list(islice(iterator, chunksize))
-                        if chunk:
-                            request = reserve(sum(max(0, int(task_bytes(task))) for task in chunk))
-                            if request is False:
-                                return
+                    width = chunksize if count is None else min(chunksize, count - position)
+                    chunk = list(islice(iterator, width))
                     if not chunk:
                         exhausted = True
-                        if request:
-                            request.release()
                         free_slots.release()
+                        return
+                    # Payloads and their diagnostic sizes are ready before admission. A lazy iterator may
+                    # block; granting before it advances would start work against an obsolete sample and
+                    # could also queue a phantom request after the iterator is exhausted.
+                    nbytes = sum(size_at(position + offset) if size_at is not None
+                                 else max(0, int(task_bytes(task))) for offset, task in enumerate(chunk))
+                    request = reserve(nbytes)
+                    if request is False:
                         return
                     held = (0, depth)
                     if request:

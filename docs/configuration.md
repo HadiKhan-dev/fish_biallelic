@@ -13,6 +13,8 @@ Contents:
 - [Consistency rules](#consistency-rules)
 - [Presets](#presets)
 - [Internal model constants](#internal-model-constants)
+- [Memory pressure policy](#memory-pressure-policy)
+- [Execution runtime constants](#execution-runtime-constants)
 - [Environment](#environment)
 
 ## Command-line options
@@ -194,8 +196,8 @@ CPUs, lanes and shards (never part of results).
 | key | type | default | meaning |
 | --- | --- | --- | --- |
 | `cores` | "auto" or integer >= 1 | `"auto"` | Total CPU ceiling (processes x threads); auto = CPU affinity. |
-| `contig_lanes` | "auto" or integer >= 1 | `"auto"` | Contigs reconstructed concurrently; auto = one lane per 16 cores, limited by memory; 1 = one contig at a time with all cores. |
-| `memory_limit` | "auto", integer bytes, or a size with a binary unit (K, M, G, T), e.g. "200G" | `"auto"` | Memory the run may plan to use at once (the memory governor paces work to fit; results never depend on it): a size such as "200G" (binary units), or auto = memory available at start minus a 10% headroom. |
+| `contig_lanes` | "auto" or integer >= 1 | `"auto"` | Contigs reconstructed concurrently; auto = one lane per 16 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. |
+| `memory_limit` | "auto", integer bytes, or a size with a binary unit (K, M, G, T), e.g. "200G" | `"auto"` | Capacity for measured job memory pressure: a size such as "200G" (binary units), or auto = job cgroup capacity. SOFT/HARD thresholds and sampling interval are in execution/config.py; affects scheduling only. |
 | `serial` | boolean | `false` | Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). |
 | `max_contigs` | integer >= 0 | `0` | Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). |
 | `process_contigs` | array of strings | `[]` | Shard: process only these contigs (of [input] contigs) through painting; no genome-wide stages. |
@@ -504,9 +506,7 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `residual_births.min_soft_responsibility` | `0.25` | minimum expected copies of a subtracted row for a residual record. |
 | `residual_births.min_unique_sample_support` | `2` | distinct samples behind an emitted consensus. |
 | `residual_births.min_effective_sample_support` | `1.5` | responsibility-weighted samples behind an emitted consensus. |
-| `residual_births.max_alternative_groups` | `64` | soft count budget of alternative residual groups (maximal cliques), ranked by whole size classes. Admit a straddling class through twice this budget; omit it whole beyond that. Strictly smaller classes are ranked truncation. |
-| `residual_births.max_clique_enumeration` | `10000000` | maximum actual number of maximal cliques per connected component. An oversized component contributes no alternatives. Exact union/join decomposition can establish oversized output without materializing a large Cartesian product. |
-| `residual_births.max_clique_calls` | `200000` | legacy Python reference traversal performance switch. The compiled exact traversal counts complete output directly and does not use this work threshold. This never changes the admitted clique set; actual output count decides. |
+| `residual_births.max_alternative_groups` | `64` | soft count budget of alternative residual groups (edge-cover cliques), ranked by whole size classes. Admit a straddling class through twice this budget; omit it whole beyond that. Strictly smaller classes are ranked truncation. |
 | **release** (ReleaseRuleConfig) |  | Raw-discovery allele release (release.py): a founder allele is released when its capped fixed-assignment pseudo-probability reaches ``min_call_probability`` and at least ``min_supporters`` informative samples (of either direction) carry the founder there. |
 | `release.min_call_probability` | `0.85` |  |
 | `release.min_supporters` | `2` |  |
@@ -563,7 +563,7 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `cost_scale` | `0.5` | scale of the per-founder cost c = cost_scale x (mean sites per block / 200) x S x B (count_rule.founder_cost) of the join and founder refinement. |
 | **linker** (LinkerConfig) |  | The distance-aware sum-product linker that fits dense haploid transitions between blocks. |
 | `linker.max_sites` | `2000` | linking proxies keep at most this many sites per input component (a stride over its usable sites); emissions marginalise unknown alleles at partial sites. |
-| `linker.max_iterations` | `50` | maximum damped updates per gap fit (convergence may stop earlier). |
+| `linker.max_iterations` | `50` | maximum updates per gap fit (convergence may stop earlier). |
 | `linker.robustness` | `0.01` | genotype emission mixture P = (1 - r) P(g \| pair) + r / 3 (no log floor). |
 | `linker.error_fraction` | `0.01` | the within-block error-tract model of the micro HMM (a fraction of copying in error tracts of this mean length). |
 | `linker.error_tract_bp` | `20000.0` | the within-block error-tract model of the micro HMM (a fraction of copying in error tracts of this mean length). |
@@ -571,8 +571,8 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `linker.pseudo_count` | `0.1` | M-step regularisation (log floor of a transition before renormalising, pseudocount added to every edge count, robust uniform mixture of each fitted row). |
 | `linker.uniform_mix` | `0.01` | M-step regularisation (log floor of a transition before renormalising, pseudocount added to every edge count, robust uniform mixture of each fitted row). |
 | `linker.min_change` | `0.001` | stop when max(abs(M(T) - T)) is at most this value at the returned transitions, where M is the undamped regularised forward M-step. A capped fit may remain unconverged. |
-| `linker.learning_rate_decay` | `0.9` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). |
-| `linker.minimum_learning_rate` | `0.1` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). |
+| `linker.learning_rate_decay` | `1.0` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). The default decay of 1 takes full M-steps; smaller values retain damped iteration for numerical comparisons. |
+| `linker.minimum_learning_rate` | `0.1` | damping of the M-step towards the previous transitions, rate = max(decay^iteration, minimum). The default decay of 1 takes full M-steps; smaller values retain damped iteration for numerical comparisons. |
 | **join** (JoinConfig) |  | The endpoint beam and the certified panel search of one joined batch. |
 | `join.paths_per_endpoint` | `16` | beam quota of candidate chromosome paths per endpoint haplotype (16); the pool-saturation ladder doubles it up to quota 256, and up to 1024 once a move was accepted at the 256 rung. |
 | `join.full_scores_per_kind` | `16` | exact scores per proposal kind per tier-1 sweep. |
@@ -629,8 +629,12 @@ Stage `assembly`, `assembly/config.py`. Assembly of local panels into chromosome
 | `refinement.proposal_min_sites_per_bin` | `200` | smallest surrogate bin (sites). Levels 1 and 2 share the chromosome's resolution, max(this, ceil(chromosome sites / proposal_max_bins)), so the many small early components do not each get a chromosome's bin budget. The surrogate decides which moves are proposed; acceptance always scores every site exactly. |
 | `refinement.sweep_limit` | `100` | sweeps per fixed-K search. A search that reaches it is reported (and warned) as not converged; it never stops silently. |
 | `refinement.frontier_bytes` | `137438953472` | the largest frontier one window programme may hold (bytes, counted as the frontier_limit formula: four copies of S x (Q + K + bins + 2) float64 per kept path); a programme that would exceed it keeps its incumbent (a reported fallback). A fixed constant, the same on every machine, so results never depend on free memory: 128 GiB is above base's own memory-derived cap on every reference node (at most a quarter of the available memory, about 120 GB), where base never fell back (largest frontier 76,776 paths, sim_s10001 chr3 L1); K = 30 synthetic and AulStu peaks (257 and 357 paths) are four orders of magnitude below it. The memory of large programmes is admitted by the run's memory governor (proposals.PROGRAMME_BUDGETS). |
-| `refinement.window_work_coefficient` | `33554432` | positive integer C in the per-template charged-work bound C * N * W * b^2 * max(K, R)^3. N is the full sample count, W the template's unit count, b its largest actual bin count, K the current working founder count, and R its largest actual alphabet. One account covers every focal and retry. Exhaustion discards the entire component refinement/count attempt, preserves its original rows and incoming families, and releases computationally unevaluated source domains. The value 2^25 is the next power of two strictly above twice the largest measured normalized charge in 98 realistic original component replays. The factor-two margin was declared before those inference-only measurements. This is not a biological threshold, FLOP count, or bound on component fits/windows. |
+| `refinement.window_work_coefficient` | `33554432` | positive integer C in the per-template charged-work bound C * N * W * b^2 * max(K, R)^3. N is the full sample count, W the template's unit count, b its largest actual bin count, K the current working founder count, and R its largest actual alphabet. One account covers every focal and retry. Exhaustion during the count pass discards the entire component refinement/count attempt, preserves its original rows and incoming families, and releases computationally unevaluated source domains. The value 2^25 is the next power of two strictly above twice the largest measured normalized charge in 98 realistic original component replays. The factor-two margin was declared before those inference-only measurements. This is not a biological threshold, FLOP count, or bound on component fits/windows. |
 | `refinement.alternative_branches` | `16` | complete same-level count continuations, including the ordinary path and all incoming panels. The shared 16-leaf budget retains a whole unresolved class when its complete expansion would exceed the budget. Branches reuse labelled fixed-K fits on identical inputs and run sequentially. |
+| `refinement.genotype_error` | `0.01` | the robust emission's uniform-genotype mixture (0.01: max(log(0.99 P + 0.01/3), -2)); recorded, not varied. |
+| `refinement.reset_rate` | `1.0` | ancestry-reset opportunities per Morgan per homologue (1.0): a physical edge of d Morgans has hazard reset_rate x d (objective.py; workspace.map_hazards). |
+| `refinement.map_probability_floor` | `1e-15` | smallest per-edge reset probability before gap composition (1e-15), so sites at equal map positions still have a finite switch cost. |
+| `refinement.polish` | `True` | after the count pass, refit the decided panel (and its same-K equal-F alternatives) once more, by one forward-first search, with three extra move families at every ordinary fixed point: a beam escape (the window-beam proposer on the map-aware binned surrogate, beam.WindowBeam, then one exact acceptance pass over its bank), long one-founder moves with one private correction (search.LONG_WINDOW) and fine-window/suffix bridges. Count-pass fits use 2.6's exact window programmes only. K is never changed by the polish, and the count decisions are not re-evaluated on the polished panel. A polish that exhausts the window work account (window_work_coefficient) keeps the count pass's panel unpolished (warned; recorded as the refinement record's polish status). |
 
 ### PaintingConfig
 
@@ -789,6 +793,28 @@ Stage `simulation`, `simulation/design.py`. A known-pedigree simulation from fou
 | constant | default | meaning |
 | --- | --- | --- |
 | `mutation_rate_per_bp` | `1e-10` | per-site mutation probability per meiosis (internal constant). |
+
+## Memory pressure policy
+
+Execution-only constants in `execution/config.py`; no scientific identity or decision changes. Admission uses only the measured job cgroup working set (usage minus inactive file cache), with MemAvailable as fallback. Below SOFT there is no memory throttle. From SOFT to HARD, each outer start waits for a sample taken at least one full interval after the previous outer admission. At HARD, only the single progress exception may admit outer work. Nested continuations of admitted work always proceed, including above HARD, so existing work can finish. Independent pool tasks and contigs count as outer work. QUEUED tokens never count as RUNNING. No estimate, predicted peak, held reservation or per-task learned predictor enters admission. Legacy requested byte sizes remain only as diagnostics and buffer/batch-size bounds in painting and family orientation scratch. Sampling cannot guarantee that arbitrarily delayed allocations or a single indivisible task will fit physical capacity.
+
+| constant | value | meaning |
+| --- | --- | --- |
+| `MEMORY_SOFT_FRACTION` | `0.8` | One outer start per full observed sampling interval at/above this fraction. |
+| `MEMORY_HARD_FRACTION` | `0.9` | Stop outer starts except one progress task if no work runs or is queued to start. |
+| `MEMORY_SAMPLE_SECONDS` | `0.5` | Shared working-set sample period and slow-start observation interval in seconds. |
+
+## Execution runtime constants
+
+Declared in `execution/config.py`; these change failure detection, never the scientific model.
+
+| constant | default | meaning |
+| --- | --- | --- |
+| `MEMORY_STALL_MINUTES` | `30.0` | Minutes with waiters and unchanged grant/release counters (also starts where recorded) before checking for a stalled run. |
+| `MEMORY_STALL_POLL_SECONDS` | `60.0` | Owner-process sampling interval in seconds; aligned int64 header reads never take the ledger lock. |
+| `MEMORY_STALL_CPU_CORES` | `1.0` | Failure also requires less than this many CPU-seconds per second across the run process tree over the same window. |
+
+Process turnover or unreadable CPU evidence restarts the observation window. A fatal stall writes the decoded ledger and per-process CPU to a JSON diagnostic and stderr, then stops the owner's verified descendants and exits nonzero without waiting on ledger or pool finalizers. Pipeline diagnostics are saved under the run's logs directory; other entry points default to the ledger directory. Checkpoints are kept for resume; unfinished units must be rerun.
 
 ## Environment
 

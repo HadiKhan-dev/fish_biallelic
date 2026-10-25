@@ -3,11 +3,12 @@
 The pass walks the junctions p = 0 .. B - 1 of the panel X in one orientation (search.Orientation:
 forward or reversed site order). At every junction every founder-pair suffix exchange is scored
 exactly from the carried forward and the current stored backward messages and the best is applied
-while its gain exceeds TOL; then the content candidates anchored there (one founder's rows on
-[p1, p2): the blocks where a window proposal differs from the current panel) are scored exactly
-from the current messages at p1 and p2 (gains.py), best first, each applied while its gain exceeds
-TOL; coarse candidates also pass the shared-junction guard (guard.py); then the forward message
-advances one block.
+while its gain exceeds TOL (at most EXCHANGE_ROUNDS times); then the content candidates anchored
+there (one founder's rows on [p1, p2): the blocks where a window proposal differs from the current
+panel) are scored exactly from the current messages at p1 and p2 (gains.py), best first, each
+applied while its gain exceeds TOL (after CONTENT_FULL_ROUNDS acceptances the rest one at a time in
+the last full ranking's order); coarse candidates also pass the shared-junction guard (guard.py);
+then the forward message advances one block.
 
 Ties (release 2.1, design 5.3): "best" is the best tie class of the exact gains (anchored single
 linkage with the refinement quantum q_R = tie_rules.quantum("refine_F", F), maths.ties rules: a
@@ -51,7 +52,8 @@ from ..tie_rules import quantum as tie_quantum
 
 # A move is accepted while its exact F gain exceeds TOL (log units).
 TOL = 1e-4
-# A coarse move "lowers E" when gain + penalty x switch change < -GUARD_TOLERANCE.
+# A coarse move "lowers E" when gain + switch-cost change < -GUARD_TOLERANCE (E = F + the
+# switch cost of the samples' lexicographic maximum paths).
 GUARD_TOLERANCE = 1e-6
 # Forward messages of the current panel computed ahead of the pass position at a time.
 AHEAD_BLOCKS = 16
@@ -59,24 +61,43 @@ AHEAD_BLOCKS = 16
 JUNCTION_BATCH = 16
 # A tie class wider than this many quanta keeps value order (maths.ties.WIDE_CLASS_QUANTA).
 WIDE_QUANTA = 4.0
+# Release 2.8: K-independent bounds on rescoring at one junction, so a pass stays
+# O(K^3). Content candidates: the first CONTENT_FULL_ROUNDS acceptances rescore every remaining item
+# (best first); after that the remaining items of the last full ranking are rescored one at a time in
+# that ranking's order and each accepted while its own exact gain exceeds TOL (and the guard passes),
+# so a junction costs at most (CONTENT_FULL_ROUNDS + 1) x its candidates evaluations. Suffix
+# exchanges: at most EXCHANGE_ROUNDS accepted per junction and pass. A pass with no acceptance is
+# unaffected (every item is scored once), so the fit's fixed point is the same kind; the binding
+# counters (round_cap, exchange_cap) record every junction where a cap changed the search order.
+CONTENT_FULL_ROUNDS = 4
+EXCHANGE_ROUNDS = 4
 
 MOVE_FINE, MOVE_COARSE = 1, 2
-# Pass counters (the fit history's per-sweep record).
+# Pass counters (the fit history's per-sweep record). false_positive: candidates evaluated but never accepted
+# (once each); content_rounds: full rankings at junctions with candidates; round_cap: junctions where an item of
+# the last full ranking was rescored alone (a junction that reaches the cap with no positive untried item exits
+# without it); stale_evaluated: those single rescorings (their decisions compare one item, so content_tie does
+# not count ties there); exchange_cap: junctions left with a positive exchange after EXCHANGE_ROUNDS; lex_items:
+# coarse items rescored lexicographically; lex_abort: plain passes stopped for a guarded rerun.
 ACC_KEYS = ("fine", "coarse", "exchange", "fine_gain", "coarse_gain", "exchange_gain", "evaluated",
             "false_positive", "guard_rejected", "guard_shared_tests", "guard_relaxed",
             "guard_shared_switches", "guard_traced_blocks", "chain_blocks", "ahead_blocks",
-            "changed_blocks", "exchange_tie", "content_tie", "tie_wide")
-INTEGER_KEYS = frozenset(ACC_KEYS) - {"fine_gain", "coarse_gain", "exchange_gain"}
+            "changed_blocks", "exchange_tie", "content_tie", "tie_wide", "content_rounds",
+            "round_cap", "stale_evaluated", "exchange_cap", "lex_items", "lex_abort")
+INTEGER_KEYS = frozenset(ACC_KEYS) - {"fine_gain", "coarse_gain", "exchange_gain",
+                                      "guard_shared_switches"}
 (_A_FINE, _A_COARSE, _A_EXCHANGE, _A_FINE_GAIN, _A_COARSE_GAIN, _A_EXCHANGE_GAIN, _A_EVALUATED,
  _A_FALSE_POSITIVE, _A_GUARD_REJECTED, _A_GUARD_TESTS, _A_GUARD_RELAXED, _A_GUARD_SWITCHES,
  _A_TRACED, _A_CHAIN, _A_AHEAD, _A_CHANGED, _A_EXCHANGE_TIE, _A_CONTENT_TIE,
- _A_TIE_WIDE) = range(len(ACC_KEYS))
+ _A_TIE_WIDE, _A_ROUNDS, _A_ROUND_CAP, _A_STALE, _A_EXCHANGE_CAP, _A_LEX_ITEMS,
+ _A_LEX_ABORT) = range(len(ACC_KEYS))
 
 # Exact current backward messages on boundaries [start, end] (with counts under the guard) and the
 # normalisers of blocks [start, end); valid only when ok.
 Chain = namedtuple("Chain", ["ok", "start", "end", "values", "counts", "scales"])
-# Exact current forward messages on boundaries [start, valid] with the forward chain's leaders
-# (messages.forward_chain(_lex)); counts and site_cnt only under the guard.
+# Exact current forward messages on boundaries [start, valid] with the forward chain's founder maxima
+# (messages.forward_chain(_lex): site_max = R1, site_lead = P1, site_cnt = R2, each S x sites x K) and
+# block leaders; counts only under the guard.
 Ahead = namedtuple("Ahead", ["ok", "start", "valid", "values", "counts", "site_max", "site_lead",
                              "block_max", "block_lead", "site_cnt"])
 
@@ -90,7 +111,7 @@ def _stored_at(stored, x, gperm, permuted):
 
 
 @njit(cache=True, nogil=True)
-def _ensure_chain(chain, frontier, p, haps, logs, offsets, penalty, stored, stored_cnt, gperm,
+def _ensure_chain(chain, frontier, p, haps, logs, offsets, costs, stored, stored_cnt, gperm,
                   guarded, acc):
     """The backward chain exact on boundaries [p, frontier]. A chain that still ends at the frontier
     but starts right of p is extended over blocks [p, start) from its exact value at start (the
@@ -102,22 +123,22 @@ def _ensure_chain(chain, frontier, p, haps, logs, offsets, penalty, stored, stor
         ident = np.arange(chain.values.shape[2])
         counts = chain.counts
         if guarded:
-            head, head_cnt, head_scales = backward_chain_lex(haps, logs, offsets, penalty,
+            head, head_cnt, head_scales = backward_chain_lex(haps, logs, offsets, costs,
                                                              chain.values[0], chain.counts[0], ident,
                                                              p, chain.start)
             counts = np.concatenate((head_cnt[:-1], chain.counts))
         else:
-            head, head_scales = backward_chain(haps, logs, offsets, penalty, chain.values[0], ident,
+            head, head_scales = backward_chain(haps, logs, offsets, costs, chain.values[0], ident,
                                                p, chain.start)
         acc[_A_CHAIN] += chain.start - p
         return Chain(True, p, chain.end, np.concatenate((head[:-1], chain.values)), counts,
                      np.concatenate((head_scales, chain.scales)))
     counts = chain.counts
     if guarded:
-        values, counts, scales = backward_chain_lex(haps, logs, offsets, penalty, stored[frontier],
+        values, counts, scales = backward_chain_lex(haps, logs, offsets, costs, stored[frontier],
                                                     stored_cnt[frontier], gperm, p, frontier)
     else:
-        values, scales = backward_chain(haps, logs, offsets, penalty, stored[frontier], gperm, p,
+        values, scales = backward_chain(haps, logs, offsets, costs, stored[frontier], gperm, p,
                                         frontier)
     acc[_A_CHAIN] += frontier - p
     return Chain(True, p, frontier, values, counts, scales)
@@ -149,7 +170,7 @@ def _relabel_chain(chain, p, perm, guarded):
     relabelled = np.empty((boundaries, samples, states))
     relabelled_cnt = chain.counts
     if guarded:
-        relabelled_cnt = np.empty((boundaries, samples, states), np.int64)
+        relabelled_cnt = np.empty((boundaries, samples, states))
     values = chain.values
     counts = chain.counts
     for task in prange(boundaries * samples):
@@ -163,14 +184,14 @@ def _relabel_chain(chain, p, perm, guarded):
 
 
 @njit(cache=True, nogil=True)
-def _g_at(chain, x, p, frontier, haps, logs, offsets, penalty, stored, stored_cnt, gperm, permuted,
+def _g_at(chain, x, p, frontier, haps, logs, offsets, costs, stored, stored_cnt, gperm, permuted,
           guarded, acc):
     """Current backward message (and counts) at boundary x; returns (g, gc, chain)."""
     if x >= frontier:
         g = _stored_at(stored, x, gperm, permuted)
         gc = _stored_at(stored_cnt, x, gperm, permuted) if guarded else stored_cnt[0]
         return g, gc, chain
-    chain = _ensure_chain(chain, frontier, p, haps, logs, offsets, penalty, stored, stored_cnt, gperm,
+    chain = _ensure_chain(chain, frontier, p, haps, logs, offsets, costs, stored, stored_cnt, gperm,
                           guarded, acc)
     g = chain.values[x - chain.start]
     gc = chain.counts[x - chain.start] if guarded else stored_cnt[0]
@@ -178,7 +199,7 @@ def _g_at(chain, x, p, frontier, haps, logs, offsets, penalty, stored, stored_cn
 
 
 @njit(cache=True, nogil=True)
-def _forward_to(ahead, p, need, f, fcnt, haps, logs, offsets, penalty, guarded, acc):
+def _forward_to(ahead, p, need, f, fcnt, haps, logs, offsets, costs, guarded, acc):
     """The lookahead: current forward messages valid on boundaries [p, need] with the chain's
     leaders, extended from what is still valid (at least AHEAD_BLOCKS blocks ahead)."""
     blocks = len(offsets) - 1
@@ -195,10 +216,10 @@ def _forward_to(ahead, p, need, f, fcnt, haps, logs, offsets, penalty, guarded, 
         start_c = fcnt
     stop = min(blocks, max(need, p + AHEAD_BLOCKS))
     if guarded:
-        nv, nc, nsm, nsl, nbm, nbl, nsc = forward_chain_lex(haps, logs, offsets, penalty, start_v,
+        nv, nc, nsm, nsl, nbm, nbl, nsc = forward_chain_lex(haps, logs, offsets, costs, start_v,
                                                             start_c, a0, stop)
     else:
-        nv, nsm, nsl, nbm, nbl = forward_chain(haps, logs, offsets, penalty, start_v, a0, stop)
+        nv, nsm, nsl, nbm, nbl = forward_chain(haps, logs, offsets, costs, start_v, a0, stop)
         nc = ahead.counts
         nsc = ahead.site_cnt
     acc[_A_AHEAD] += stop - a0
@@ -271,37 +292,39 @@ def _active_items(q, X, lab, cand_start, cand_kind, cand_end, cand_k0, cand_row_
 
 @njit(cache=True, nogil=True)
 def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
-                 logs, offsets, penalty, stored, stored_cnt, stored_scale, gperm, permuted, guarded,
+                 logs, offsets, costs, stored, stored_cnt, stored_scale, gperm, permuted, guarded,
                  f, fcnt, chain, ahead, acc):
-    """Exact gains of the items at junction p: under the guard the coarse items with the
-    lexicographic kernel first, then the rest. Returns (total gains, total switch changes,
-    per-sample gains, per-sample switch changes, chain, ahead); totals are summed in sample order."""
+    """Exact gains of the items at junction p: every item with the plain kernel, then (lazy
+    lexicographic scoring) under the guard only the coarse items whose gain exceeds TOL again
+    with the lexicographic kernel, for their switch-cost changes (its gains equal the plain ones:
+    the lexicographic recursion's scores are the plain recursion's). Items at or below TOL are
+    never ranked, so the guard never reads their switch changes. Returns (total gains, total switch
+    changes, per-sample gains, per-sample switch changes, chain, ahead); totals are summed in
+    sample order."""
     samples, states = stored.shape[1], stored.shape[2]
     gain = np.zeros(n_items)
     switch = np.zeros(n_items)
     gains_s = np.zeros((n_items, samples))
-    switches_s = np.zeros((n_items, samples), np.int64)
+    switches_s = np.zeros((n_items, samples))
     for group in range(2):
         members = np.empty(n_items, np.int64)
         n_mem = 0
         for i in range(n_items):
-            if guarded:
-                if (group == 0) == (it_kind[i] == MOVE_COARSE):
-                    members[n_mem] = i
-                    n_mem += 1
-            elif group == 1:
+            if group == 0 or (guarded and it_kind[i] == MOVE_COARSE and gain[i] > TOL):
                 members[n_mem] = i
                 n_mem += 1
         if n_mem == 0:
             continue
-        lex = guarded and group == 0
+        lex = group == 1
+        if lex:
+            acc[_A_LEX_ITEMS] += n_mem
         members = members[:n_mem]
         # The lookahead covers every member's blocks: the background fast paths of both kernels
         # read the current chain up to the candidates' ends.
         last = it_p2[members[0]]
         for i in members:
             last = max(last, it_p2[i])
-        ahead = _forward_to(ahead, p, last, f, fcnt, haps, logs, offsets, penalty, guarded, acc)
+        ahead = _forward_to(ahead, p, last, f, fcnt, haps, logs, offsets, costs, guarded, acc)
         a0 = ahead.start
         focal = np.empty(n_mem, np.int64)
         first_block = np.empty(n_mem, np.int64)
@@ -325,16 +348,16 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
         g_end = np.empty((n_mem, samples, states))
         # Switch counts at the candidates' ends only for the lexicographic kernel.
         count_rows = n_mem if lex else 1
-        gc_start = np.zeros((count_rows, samples if lex else 1, states if lex else 1), np.int64)
-        gc_end = np.zeros((count_rows, samples if lex else 1, states if lex else 1), np.int64)
+        gc_start = np.zeros((count_rows, samples if lex else 1, states if lex else 1))
+        gc_end = np.zeros((count_rows, samples if lex else 1, states if lex else 1))
         for m in range(n_mem):
-            g, gc, chain = _g_at(chain, first_block[m], p, frontier, haps, logs, offsets, penalty,
+            g, gc, chain = _g_at(chain, first_block[m], p, frontier, haps, logs, offsets, costs,
                                  stored, stored_cnt, gperm, permuted, guarded, acc)
             g_start[m] = g
             if lex:
                 gc_start[m] = gc
         for m in range(n_mem):
-            g, gc, chain = _g_at(chain, end_block[m], p, frontier, haps, logs, offsets, penalty,
+            g, gc, chain = _g_at(chain, end_block[m], p, frontier, haps, logs, offsets, costs,
                                  stored, stored_cnt, gperm, permuted, guarded, acc)
             g_end[m] = g
             if lex:
@@ -345,7 +368,7 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
         for m in range(n_mem):
             lo_b, x = first_block[m], end_block[m]
             if lo_b < min(x, frontier):
-                chain = _ensure_chain(chain, frontier, p, haps, logs, offsets, penalty, stored,
+                chain = _ensure_chain(chain, frontier, p, haps, logs, offsets, costs, stored,
                                       stored_cnt, gperm, guarded, acc)
                 hi_b = min(x, frontier)
                 for r in range(lo_b - chain.start, hi_b - chain.start):
@@ -356,30 +379,27 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
                 for s in range(samples):
                     sums[m, s] += stored_scale[r, s]
         if lex:
-            fc_start = np.empty((n_mem, samples, states), np.int64)
+            fc_start = np.empty((n_mem, samples, states))
             for m in range(n_mem):
                 fc_start[m] = ahead.counts[first_block[m] - a0]
             member_gains, member_switches = candidate_gains_lex(
-                haps, leaves, logs, offsets, penalty, f_start, fc_start, g_start, gc_start, focal,
-                first_block, end_block, flat, row_offsets, g_end, gc_end, sums, ahead.values,
-                ahead.counts, ahead.site_max, ahead.site_lead, ahead.block_max, ahead.block_lead,
-                ahead.site_cnt, a0, ahead.valid)
+                haps, leaves, logs, offsets, costs, f_start, fc_start, g_start, gc_start, focal,
+                first_block, end_block, flat, row_offsets, g_end, gc_end, sums)
             for m in range(n_mem):
                 i = members[m]
                 total = 0.0
-                changes = 0
+                changes = 0.0
                 for s in range(samples):
                     total += member_gains[m, s]
                     changes += member_switches[m, s]
                 gain[i] = total
                 gains_s[i] = member_gains[m]
-                switch[i] = float(changes)
+                switch[i] = changes
                 switches_s[i] = member_switches[m]
         else:
             member_gains = candidate_gains(
-                haps, leaves, logs, offsets, penalty, f_start, g_start, focal, first_block, end_block,
-                flat, row_offsets, g_end, sums, ahead.site_max, ahead.site_lead, ahead.block_max,
-                ahead.block_lead, a0, ahead.values)
+                haps, leaves, logs, offsets, costs, f_start, g_start, focal, first_block, end_block,
+                flat, row_offsets, g_end, sums)
             for m in range(n_mem):
                 i = members[m]
                 total = 0.0
@@ -391,20 +411,21 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
 
 
 @njit(cache=True, nogil=True)
-def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, cand_rows, rs, gains_s,
+def _uncredited_switches(haps, leaves, logs, offsets, costs, p, k, p1, p2, cand_rows, rs, gains_s,
                          switches_s, frontier, local, local_cnt, stored, stored_cnt, gperm, permuted,
                          f, fcnt, first, second, chain, ahead, acc, reverse):
-    """N_shared of a coarse candidate (founder k's rows cand_rows[rs:] on [p1, p2)): the samples it
+    """C_shared of a coarse candidate (founder k's rows cand_rows[rs:] on [p1, p2)): the samples it
     affects are traced with and without it on a window around [p1, p2) that doubles until the two
     paths of a sample agree at both window ends (or the window is the whole component); their
-    removed switch events go to guard.shared_savings. Returns (N_shared, chain, ahead)."""
+    removed switch events (with their costs) go to guard.shared_savings. Returns (C_shared, chain,
+    ahead)."""
     samples = len(gains_s)
     blocks = len(offsets) - 1
     rows = cand_rows[rs:rs + p2 - p1].copy()
     n_aff = 0
     affected = np.empty(samples, np.int64)
     for s in range(samples):
-        if switches_s[s] != 0 or abs(gains_s[s]) > 1e-9:
+        if switches_s[s] != 0.0 or abs(gains_s[s]) > 1e-9:
             affected[n_aff] = s
             n_aff += 1
     affected = affected[:n_aff]
@@ -412,6 +433,7 @@ def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, can
     rem_sample = np.empty(samples, np.int64)
     rem_offsets = np.zeros(samples + 1, np.int64)
     rem_events = np.zeros((0, 3), np.int64)
+    rem_costs = np.zeros(0)
     n_rem = 0
     width = 2
     while len(affected):
@@ -422,24 +444,24 @@ def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, can
             anchor = (lo // JUNCTION_BATCH) * JUNCTION_BATCH
             f_lo, c_lo = local[lo // JUNCTION_BATCH], local_cnt[lo // JUNCTION_BATCH]
             if anchor != lo:
-                f_lo, c_lo = advance_lex(haps, logs, offsets, penalty, f_lo, c_lo, anchor, lo)
+                f_lo, c_lo = advance_lex(haps, logs, offsets, costs, f_lo, c_lo, anchor, lo)
         else:
-            ahead = _forward_to(ahead, p, lo, f, fcnt, haps, logs, offsets, penalty, True, acc)
+            ahead = _forward_to(ahead, p, lo, f, fcnt, haps, logs, offsets, costs, True, acc)
             f_lo, c_lo = ahead.values[lo - ahead.start], ahead.counts[lo - ahead.start]
-        g_hi, gc_hi, chain = _g_at(chain, hi, p, frontier, haps, logs, offsets, penalty, stored,
+        g_hi, gc_hi, chain = _g_at(chain, hi, p, frontier, haps, logs, offsets, costs, stored,
                                    stored_cnt, gperm, permuted, True, acc)
         fa = np.empty((len(affected), f_lo.shape[1]))
-        ca = np.empty((len(affected), f_lo.shape[1]), np.int64)
+        ca = np.empty((len(affected), f_lo.shape[1]))
         ga = np.empty((len(affected), f_lo.shape[1]))
-        gca = np.empty((len(affected), f_lo.shape[1]), np.int64)
+        gca = np.empty((len(affected), f_lo.shape[1]))
         for i in range(len(affected)):
             fa[i] = f_lo[affected[i]]
             ca[i] = c_lo[affected[i]]
             ga[i] = g_hi[affected[i]]
             gca[i] = gc_hi[affected[i]]
-        old = path_switch_events(haps, leaves, logs, offsets, penalty, fa, ca, ga, gca, lo, hi,
+        old = path_switch_events(haps, leaves, logs, offsets, costs, fa, ca, ga, gca, lo, hi,
                                  affected, -1, 0, 0, rows, reverse)
-        new = path_switch_events(haps, leaves, logs, offsets, penalty, fa, ca, ga, gca, lo, hi,
+        new = path_switch_events(haps, leaves, logs, offsets, costs, fa, ca, ga, gca, lo, hi,
                                  affected, k, p1, p2, rows, reverse)
         acc[_A_TRACED] += (hi - lo) * len(affected)
         everything = lo == 0 and hi == blocks
@@ -452,22 +474,23 @@ def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, can
                                         second, -1, 0, 0, rows, offsets[lo])
                 new_c = canonical_sites(new[4][i], new[3][i], s_i, haps, leaves, logs, offsets, first,
                                         second, k, p1, p2, rows, offsets[lo])
-                gone = removed_events(old_c, len(old_c), new_c, len(new_c))
+                gone, gone_costs = removed_events(old_c, len(old_c), new_c, len(new_c), old[5][i])
                 if len(gone):
                     rem_sample[n_rem] = affected[i]
                     rem_events = np.concatenate((rem_events, gone))
+                    rem_costs = np.concatenate((rem_costs, gone_costs))
                     rem_offsets[n_rem + 1] = len(rem_events)
                     n_rem += 1
         affected = affected[keep]
         width *= 2
-    saved = np.zeros(samples, np.int64)
+    saved = np.zeros(samples)
     for s in range(samples):
-        if switches_s[s] < 0:
+        if switches_s[s] < 0.0:
             saved[s] = -switches_s[s]
     if n_rem == 0:
-        return 0, chain, ahead
-    total = shared_savings(rem_sample[:n_rem], rem_offsets[:n_rem + 1], rem_events, saved, k, first,
-                           second, haps, logs, offsets[blocks])
+        return 0.0, chain, ahead
+    total = shared_savings(rem_sample[:n_rem], rem_offsets[:n_rem + 1], rem_events, rem_costs, saved,
+                           k, first, second, haps, logs, offsets[blocks])
     return total, chain, ahead
 
 
@@ -603,10 +626,10 @@ def _rank_moves(order, n_ranked, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, 
 
 # ------------------------------------------------------------------ the pass
 @njit(cache=True, nogil=True)
-def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, fcnt0, local,
+def pass_chunk(haps, X, leaves, logs, offsets, costs, j0, j1, frontier0, f0, fcnt0, local,
                local_cnt, stored, stored_cnt, stored_scale, gperm0, lab, cand_start, cand_kind,
                cand_end, cand_k0, cand_row_start, cand_rows, pa, pb, guarded, exchanges, acc, ahead0,
-               chain0, start_fwd, start_fcnt, pristine0, tie_q, reverse):
+               chain0, start_fwd, start_fcnt, pristine0, tie_q, reverse, optimistic):
     """Junctions [j0, j1) of one acceptance pass (module docstring); haps, X and lab are modified in
     place, acc (ACC_KEYS) accumulated.
 
@@ -620,7 +643,10 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
     are cand_start[q] .. cand_start[q + 1] - 1 in proposal order (kind, end block, founder label,
     rows cand_rows[cand_row_start[i]:] over [q, end)). Arrays of switch counts are one-element
     placeholders without the guard. tie_q: the tie quantum of the gains (module docstring). reverse: the
-    convention reversal (maths.ties.reverse_conventions(); content orders inverted).
+    convention reversal (maths.ties.reverse_conventions(); content orders inverted). optimistic
+    (unguarded only): stop at the first coarse item whose gain exceeds TOL (the first
+    point where a guarded pass reads switch costs) with acc[lex_abort] = 1; the caller discards the
+    pass and runs it guarded.
     Returns (junction_gain, junction_pair of the best exchange at each junction (first look), gperm,
     the forward message and counts at j1, frontier, whether a move was accepted, ahead, chain).
     """
@@ -649,8 +675,9 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
         accepted_here = False
         if p >= 1 and exchanges:
             first_look = True
+            n_exchanged = 0
             while True:
-                g, _, chain = _g_at(chain, p, p, frontier, haps, logs, offsets, penalty, stored,
+                g, _, chain = _g_at(chain, p, p, frontier, haps, logs, offsets, costs, stored,
                                     stored_cnt, gperm, permuted, guarded, acc)
                 gains = exchange_gains(f, np.ascontiguousarray(g))
                 if first_look:
@@ -665,6 +692,11 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                 best, tied, wide = _exchange_winner(gains, pa, pb, X, p, tie_q, TOL, reverse)
                 if best < 0:
                     break
+                if n_exchanged == EXCHANGE_ROUNDS:
+                    # a positive exchange remains; the next pass looks again (O(K^3) per junction)
+                    acc[_A_EXCHANGE_CAP] += 1
+                    break
+                n_exchanged += 1
                 if tied > 1:
                     acc[_A_EXCHANGE_TIE] += 1
                 if wide:
@@ -696,6 +728,9 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
             n_here = c1 - c0
             accepted = np.zeros(n_here, np.bool_)
             evaluated = np.zeros(n_here, np.bool_)
+            # rank of each candidate in the last full ranking (gain > TOL), -1 otherwise or once tried
+            stale_rank = np.full(n_here, -1, np.int64)
+            rounds = 0
             while True:
                 it_cand = np.empty(n_here, np.int64)
                 it_kind = np.empty(n_here, np.int64)
@@ -708,10 +743,40 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                                       it_p1, it_p2, it_rs)
                 if n_act == 0:
                     break
+                stale = rounds >= CONTENT_FULL_ROUNDS
+                if stale:
+                    # the untried item ranked first by the last full ranking, rescored alone
+                    pick = -1
+                    for i in range(n_act):
+                        rk = stale_rank[it_cand[i] - c0]
+                        if rk >= 0 and (pick < 0 or rk < stale_rank[it_cand[pick] - c0]):
+                            pick = i
+                    if pick < 0:
+                        break
+                    if rounds == CONTENT_FULL_ROUNDS:
+                        acc[_A_ROUND_CAP] += 1
+                    stale_rank[it_cand[pick] - c0] = -1
+                    it_cand[0] = it_cand[pick]
+                    it_kind[0] = it_kind[pick]
+                    it_k[0] = it_k[pick]
+                    it_p1[0] = it_p1[pick]
+                    it_p2[0] = it_p2[pick]
+                    it_rs[0] = it_rs[pick]
+                    n_act = 1
+                    acc[_A_STALE] += 1
+                else:
+                    acc[_A_ROUNDS] += 1
+                rounds += 1
                 act_gain, act_switch, act_gains_s, act_switches_s, chain, ahead = _score_items(
                     n_act, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
-                    logs, offsets, penalty, stored, stored_cnt, stored_scale, gperm, permuted,
+                    logs, offsets, costs, stored, stored_cnt, stored_scale, gperm, permuted,
                     guarded, f, fcnt, chain, ahead, acc)
+                if optimistic:
+                    for i in range(n_act):
+                        if it_kind[i] == MOVE_COARSE and act_gain[i] > TOL:
+                            acc[_A_LEX_ABORT] = 1.0
+                            return (junction_gain, junction_pair, gperm, np.ascontiguousarray(f),
+                                    np.ascontiguousarray(fcnt), frontier, accepted_any, ahead, chain)
                 # the best guard-passing candidate: tie classes of the gains, content order inside
                 order = np.empty(n_act, np.int64)
                 n_ranked = 0
@@ -724,21 +789,25 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                 class_size = np.ones(max(n_ranked, 1), np.int64)
                 _rank_moves(order, n_ranked, act_gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand,
                             tie_q, class_size, acc, reverse)
+                if not stale:
+                    stale_rank[:] = -1
+                    for r in range(n_ranked):
+                        stale_rank[it_cand[order[r]] - c0] = r
                 chosen = -1
                 chosen_rank = -1
                 for r in range(n_ranked):
                     i = order[r]
                     gain = act_gain[i]
                     if guarded and it_kind[i] == MOVE_COARSE and (
-                            gain + penalty * act_switch[i] < -GUARD_TOLERANCE):
-                        # the move lowers the genotype fit E = F + penalty x switches
+                            gain + act_switch[i] < -GUARD_TOLERANCE):
+                        # the move lowers the genotype fit E = F + switch cost
                         acc[_A_GUARD_TESTS] += 1
                         shared, chain, ahead = _uncredited_switches(
-                            haps, leaves, logs, offsets, penalty, p, it_k[i], it_p1[i], it_p2[i],
+                            haps, leaves, logs, offsets, costs, p, it_k[i], it_p1[i], it_p2[i],
                             cand_rows, it_rs[i], act_gains_s[i], act_switches_s[i], frontier, local,
                             local_cnt, stored, stored_cnt, gperm, permuted, f, fcnt, first, second,
                             chain, ahead, acc, reverse)
-                        if not gain - penalty * shared > TOL:
+                        if not gain - shared > TOL:
                             acc[_A_GUARD_SWITCHES] += shared
                             acc[_A_GUARD_REJECTED] += 1
                             continue
@@ -747,6 +816,8 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                     chosen_rank = r
                     break
                 if chosen < 0:
+                    if stale:
+                        continue
                     break
                 if class_size[chosen_rank] > 1:
                     acc[_A_CONTENT_TIE] += 1
@@ -787,9 +858,9 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                 if guarded:
                     fcnt = ahead.counts[p + 1 - ahead.start]
             elif guarded:
-                f, fcnt = advance_lex(haps, logs, offsets, penalty, f, fcnt, p, p + 1)
+                f, fcnt = advance_lex(haps, logs, offsets, costs, f, fcnt, p, p + 1)
             else:
-                f = advance(haps, logs, offsets, penalty, f, p, p + 1)
+                f = advance(haps, logs, offsets, costs, f, p, p + 1)
         if accepted_here:
             accepted_any = True
     return (junction_gain, junction_pair, gperm, np.ascontiguousarray(f), np.ascontiguousarray(fcnt),
@@ -818,13 +889,15 @@ def candidate_arrays(props, blocks):
             np.concatenate(rows) if rows else np.zeros(0, np.int64))
 
 
-def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty, guarded, budget,
-                exchanges=True, start_fwd=None, start_fcnt=None, scale=0.0, reverse=None):
+def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, costs, guarded, budget,
+                exchanges=True, start_fwd=None, start_fcnt=None, scale=0.0, reverse=None,
+                optimistic=False):
     """One exact acceptance pass on `orientation` (search.Orientation); X (K x B, that orientation's
     block order) is modified in place.
 
-    stored, stored_cnt, stored_scale: the stored backward messages, counts (guard only) and
-    normalisers of the pass's start panel in this orientation. props: the content proposals
+    stored, stored_cnt, stored_scale: the stored backward messages, switch costs (guard only) and
+    normalisers of the pass's start panel in this orientation. costs: float32 (S x L) switch costs
+    of the panel's K in this orientation (workspace.costs). props: the content proposals
     {junction: [(MOVE_FINE | MOVE_COARSE, end block, founder, rows)]}. guarded: the shared-junction
     guard applies to coarse moves (a search with an L1 context). exchanges=False scores and applies
     content proposals only (an addition round's copy-only pass). start_fwd / start_fcnt: the
@@ -833,6 +906,9 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
     (execution.CpuBudget), re-read before every JUNCTION_BATCH junctions. scale: |F| of the pass's
     start panel (the tie quantum's scale, tie_rules.quantum("refine_F", scale)). reverse: the content-order
     convention of the pass (default: maths.ties.reverse_conventions(); the fixed-K search passes its own).
+    optimistic (unguarded passes only): the pass stops, with counters["lex_abort"] = 1 and X
+    partly edited, at the first coarse item whose gain exceeds TOL; until then a guarded pass of the
+    same inputs makes exactly the same decisions (its gains and orders equal the plain ones).
     Returns (counters {ACC_KEYS}, junction_gain (B + 1), junction_pair (B + 1, 2)).
     """
     tie_q = float(tie_quantum("refine_F", scale))
@@ -840,25 +916,25 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
     samples, states = stored.shape[1], stored.shape[2]
     haps = orientation.haps(X)
     cands = candidate_arrays(props, blocks)
-    count2 = np.zeros((1, 1), np.int64)
-    count3 = np.zeros((1, 1, 1), np.int64)
+    count2 = np.zeros((1, 1))
+    count3 = np.zeros((1, 1, 1))
     if guarded:
         # Sparse carried-message checkpoints. A guard query reconstructs at most
         # JUNCTION_BATCH - 1 passed blocks; suffix edits cannot change that prefix.
         checkpoints = (blocks - 1) // JUNCTION_BATCH + 1
         local = np.empty((checkpoints, samples, states))
-        local_cnt = np.empty((checkpoints, samples, states), np.int64)
+        local_cnt = np.empty((checkpoints, samples, states))
     else:
         local, local_cnt = np.zeros((1, 1, 1)), count3
     acc = np.zeros(len(ACC_KEYS))
     f = np.zeros((samples, states))
-    fcnt = np.zeros((samples, states), np.int64) if guarded else count2
+    fcnt = np.zeros((samples, states)) if guarded else count2
     gperm = np.arange(states, dtype=np.int64)
     lab = np.arange(founders, dtype=np.int64)
     pa, pb = exchange_pairs(founders)
-    ahead = Ahead(False, 0, -1, np.zeros((1, 1, 1)), count3, np.zeros((1, 1)),
-                  np.zeros((1, 1), np.int32), np.zeros((1, 1)), np.zeros((1, 1), np.int32),
-                  np.zeros((1, 1), np.int32))
+    ahead = Ahead(False, 0, -1, np.zeros((1, 1, 1)), count3, np.zeros((1, 0)),
+                  np.zeros((1, 0), np.int32), np.zeros((1, 1)), np.zeros((1, 1), np.int32),
+                  np.zeros((1, 0)))
     chain = Chain(False, 0, 0, np.zeros((1, 1, 1)), count3, np.zeros((1, 1)))
     pristine = start_fwd is not None
     if start_fwd is None:
@@ -879,15 +955,18 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
             stop = min(blocks, p + JUNCTION_BATCH)
             with execution.numba_threads(max(1, int(budget.threads()))):
                 (jg, jp, gperm, f, fcnt, frontier, accepted, ahead, chain) = pass_chunk(
-                    haps, X, orientation.leaves, orientation.logs, orientation.offsets, float(penalty),
+                    haps, X, orientation.leaves, orientation.logs, orientation.offsets, costs,
                     p, stop, frontier, f, fcnt, local, local_cnt, stored,
                     stored_cnt if guarded else count3, stored_scale, gperm, lab, *cands, pa, pb,
                     bool(guarded), bool(exchanges), acc, ahead, chain, start_fwd, start_fcnt, pristine, tie_q,
-                    bool(ties.reverse_conventions() if reverse is None else reverse))
+                    bool(ties.reverse_conventions() if reverse is None else reverse),
+                    bool(optimistic and not guarded))
             pristine = pristine and not accepted
             junction_gain[p:stop] = jg
             junction_pair[p:stop] = jp
             p = stop
+            if acc[_A_LEX_ABORT]:
+                break
     record = {key: (int(round(value)) if key in INTEGER_KEYS else float(value))
               for key, value in zip(ACC_KEYS, acc.tolist())}
     return record, junction_gain, junction_pair

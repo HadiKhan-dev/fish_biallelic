@@ -6,7 +6,7 @@ row an expected copy count. Every row with at least ``min_soft_responsibility`` 
 in a sample is *subtracted* from that sample: the residual strand's ALT probability at an
 observed site is P(GL | subtracted allele + residual allele), normalised over the residual
 allele. Residual strands are called at ``residual_call_probability``, clustered by missing-aware
-Hamming distance (release 2.2: the level-wise HDBSCAN's clusters plus, as alternative groups, the maximal cliques of
+Hamming distance (release 2.2: the level-wise HDBSCAN's clusters plus, as alternative groups, an edge clique cover of
 its noise, of wider clusters and of the tied stragglers of multi-way merges; every group's diameter at
 most ``max_cluster_hamming``), globally and within each (subtracted row, dominant partner)
 route. Each cluster's consensus pools its samples' responsibility-weighted log odds with one
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import math
 from hashlib import blake2b
-from itertools import product
 
 import numpy as np
 from numba import njit
@@ -413,7 +412,7 @@ def level_hdbscan_labels(n, first, second, weight, min_cluster_size, allow_singl
 
 class _CliqueStats:
     """Diagnostics only (no effect on results): with HAPLOTYPES_DISCOVERY_CLIQUE_STATS set to a directory, every clustering appends
-    (alternative pool size, enumeration work units, overflow) to a per-process file there."""
+    (alternative pool size, packed intersection work units, overflow) to a per-process file there."""
 
     def __init__(self):
         self.path = None
@@ -430,267 +429,6 @@ class _CliqueStats:
 
 
 _CLIQUE_STATS = _CliqueStats()
-
-
-def _degeneracy_order(vertices, adjacent):
-    """(degeneracy, smallest-last vertex order) of a graph. The degeneracy is a graph invariant; the order (ties by
-    vertex label) only steers the enumeration, never its result."""
-    remaining = set(vertices)
-    degree = {vertex: len(adjacent[vertex] & remaining) for vertex in vertices}
-    order, degeneracy = [], 0
-    while remaining:
-        vertex = min(remaining, key=lambda u: (degree[u], u))
-        degeneracy = max(degeneracy, degree[vertex])
-        order.append(vertex)
-        remaining.discard(vertex)
-        for other in adjacent[vertex]:
-            if other in remaining:
-                degree[other] -= 1
-    return degeneracy, order
-
-
-def _moon_moser(size: int) -> float:
-    """The largest number of maximal independent sets of a graph on ``size`` vertices (Moon and Moser 1965)."""
-    if size <= 2:
-        return float(max(size, 1))
-    if size % 3 == 0:
-        return 3.0 ** (size // 3)
-    if size % 3 == 1:
-        return 4.0 * 3.0 ** ((size - 4) // 3)
-    return 2.0 * 3.0 ** ((size - 2) // 3)
-
-
-def clique_count_bound(vertices, adjacent) -> float:
-    """An order-invariant upper bound on the number of maximal cliques of a connected graph: the smaller of
-    Eppstein, Loeffler and Strash's (m - d) x 3^(d/3) (degeneracy d; tight for sparse graphs) and the product over the
-    complement's connected components of their Moon-Moser maxima (maximal cliques are the complement's maximal
-    independent sets; tight for dense graphs, e.g. 1 for a complete graph)."""
-    m = len(vertices)
-    if m == 0:
-        return 0.0
-    degeneracy, _ = _degeneracy_order(vertices, adjacent)
-    sparse = (m - degeneracy) * 3.0 ** (degeneracy / 3.0)
-    members = set(vertices)
-    unseen = set(vertices)
-    dense = 1.0
-    while unseen:
-        start = unseen.pop()
-        component, frontier = 1, [start]
-        while frontier:
-            current = frontier.pop()
-            others = (members - adjacent[current]) - {current}
-            fresh = others & unseen
-            unseen -= fresh
-            component += len(fresh)
-            frontier.extend(fresh)
-        dense *= _moon_moser(component)
-        if dense > sparse:
-            break
-    return min(sparse, dense)
-
-
-def _graph_components(vertices, adjacent, complement=False):
-    """Connected components, including isolated vertices, independent of vertex names."""
-    members = set(vertices)
-    unseen = set(vertices)
-    components = []
-    while unseen:
-        start = min(unseen)
-        unseen.remove(start)
-        component, frontier = {start}, [start]
-        while frontier:
-            vertex = frontier.pop()
-            neighbours = members - adjacent[vertex] - {vertex} if complement else adjacent[vertex]
-            fresh = neighbours & unseen
-            unseen -= fresh
-            component |= fresh
-            frontier.extend(fresh)
-        components.append(tuple(sorted(component)))
-    return components
-
-
-def _clique_plan(vertices, adjacent):
-    """Exact union/join decomposition and invariant (clique count, work) upper bounds.
-
-    Disconnected graphs union their components' maximal cliques. Disconnected complements
-    give a complete join, whose maximal cliques are Cartesian products of its parts' cliques.
-    The bounds are diagnostic only; neither may reject a component. Count one work unit
-    per recursive Bron-Kerbosch call or emitted join combination; this does not bound the
-    optional reverse-search fallback. Prime pieces use sum_v 2^min(d, degree(v)).
-    """
-    members = set(vertices)
-    degrees = [len(adjacent[vertex] & members) for vertex in vertices]
-    if all(degree == len(vertices) - 1 for degree in degrees):
-        return ("complete", tuple(vertices), ()), 1, 1
-    components = _graph_components(vertices, adjacent)
-    kind = "union"
-    if len(components) == 1:
-        components = _graph_components(vertices, adjacent, complement=True)
-        kind = "join"
-    if len(components) > 1:
-        children = [_clique_plan(component, adjacent) for component in components]
-        counts = [count for _, count, _ in children]
-        count = sum(counts) if kind == "union" else math.prod(counts)
-        work = sum(work for _, _, work in children) + (count if kind == "join" else 0)
-        return (kind, tuple(vertices), tuple(plan for plan, _, _ in children)), count, work
-    degeneracy, _ = _degeneracy_order(vertices, adjacent)
-    work = sum(1 << min(degeneracy, degree) for degree in degrees)
-    try:
-        count = int(math.ceil(clique_count_bound(vertices, adjacent)))
-    except OverflowError:
-        # This upper bound is diagnostic only; enumeration never consults it.
-        # All cliques are vertex subsets, so arbitrary-precision 2**n is valid
-        # when the tighter floating-point bound cannot be represented.
-        count = 1 << len(vertices)
-    return ("prime", tuple(vertices), ()), count, work
-
-
-def _reverse_search_cliques(vertices, adjacent, limit):
-    """Polynomial-delay maximal-clique enumeration using bitset lexicographic completion.
-
-    The parent/child reconstruction is Proposition 7 of Comin & Rizzi (2015),
-    https://arxiv.org/abs/1506.01082, Section 3. Each emitted clique has at most n
-    prospective children, each checked with two O(n) bitset completions. Child indices
-    strictly increase, so the stack depth is at most n. Labels steer traversal only;
-    the whole component is admitted iff its actual maximal-clique count <= limit.
-    """
-    vertices = tuple(sorted(vertices))
-    n = len(vertices)
-    slots = {vertex: i for i, vertex in enumerate(vertices)}
-    neighbours = [sum(1 << slots[other] for other in adjacent[vertex] if other in slots)
-                  for vertex in vertices]
-    universe = (1 << n) - 1
-
-    def complete(seed):
-        available = universe
-        remaining = seed
-        while remaining:
-            bit = remaining & -remaining
-            remaining ^= bit
-            available &= neighbours[bit.bit_length() - 1]
-        clique = seed
-        while available:
-            bit = available & -available
-            clique |= bit
-            available &= neighbours[bit.bit_length() - 1]
-        return clique
-
-    # Every stack entry is an actual, distinct maximal clique. There are no dead
-    # recursive search branches and no traversal-dependent scientific cutoff.
-    stack = [(complete(0), 0)]
-    cliques = []
-    work = 0
-    while stack:
-        parent, parent_index = stack.pop()
-        work += 1
-        if len(cliques) >= limit:
-            return None, work
-        cliques.append(tuple(vertices[i] for i in range(n) if parent & (1 << i)))
-        remaining = universe & ~parent & ~((parent_index << 1) - 1 if parent_index else 0)
-        while remaining:
-            bit = remaining & -remaining
-            remaining ^= bit
-            before = bit - 1
-            prefix = parent & before
-            seed = prefix & neighbours[bit.bit_length() - 1]
-            work += 1
-            if complete(seed) & before != prefix:
-                continue
-            child = complete(seed | bit)
-            if child & before == seed:
-                stack.append((child, bit))
-    return cliques, work
-
-
-def _bron_kerbosch_cliques(vertices, adjacent, limit, max_calls):
-    """Fast exact traversal, or a request to restart with the bounded-delay method.
-
-    ``max_calls`` only switches algorithm: it never rejects a graph. ``None`` for
-    cliques means the actual output limit was exceeded; ``restart`` means use RS.
-    """
-    _, order = _degeneracy_order(vertices, adjacent)
-    cliques = []
-    work = 0
-    restart = False
-    overflow = False
-
-    def expand(chosen, candidates, excluded):
-        nonlocal work, restart, overflow
-        work += 1
-        if work > max_calls:
-            restart = True
-            return
-        if not candidates and not excluded:
-            if len(cliques) >= limit:
-                overflow = True
-            else:
-                cliques.append(tuple(sorted(chosen)))
-            return
-        pivot = max(candidates | excluded, key=lambda u: (len(adjacent[u] & candidates), u))
-        for vertex in sorted(candidates - adjacent[pivot]):
-            expand(chosen | {vertex}, candidates & adjacent[vertex], excluded & adjacent[vertex])
-            if restart or overflow:
-                return
-            candidates = candidates - {vertex}
-            excluded = excluded | {vertex}
-
-    position = {vertex: index for index, vertex in enumerate(order)}
-    members = set(vertices)
-    for vertex in order:
-        neighbours = adjacent[vertex] & members
-        later = {u for u in neighbours if position[u] > position[vertex]}
-        expand({vertex}, later, neighbours - later)
-        if restart or overflow:
-            break
-    return None if overflow else cliques, work, restart
-
-
-def _enumerate_clique_plan(plan, adjacent, limit, max_calls):
-    kind, vertices, children = plan
-    if kind == "complete":
-        return ([tuple(sorted(vertices))] if limit >= 1 else None), 1
-    if children:
-        parts, work, count = [], 0, (0 if kind == "union" else 1)
-        for child in children:
-            child_limit = limit - count if kind == "union" else limit // count
-            groups, calls = _enumerate_clique_plan(child, adjacent, child_limit, max_calls)
-            work += calls
-            if groups is None:
-                return None, work
-            parts.append(groups)
-            count = count + len(groups) if kind == "union" else count * len(groups)
-        if kind == "union":
-            return [group for groups in parts for group in groups], work
-        cliques = [tuple(sorted(vertex for group in choice for vertex in group))
-                   for choice in product(*parts)]
-        return cliques, work + len(cliques)
-    # Same complete output/count policy; the packed compiled traversal replaces
-    # the Python fast-traversal/reverse-search performance switch only.
-    from ._cliques import maximal_cliques as packed_cliques
-    return packed_cliques(vertices, adjacent, limit)
-
-
-def maximal_cliques(vertices, adjacent, limit, max_calls=200_000, omissions=None):
-    """All maximal cliques, or omit the component if its actual count exceeds limit.
-
-    Exact union/join decomposition avoids materializing an oversized Cartesian product.
-    Prime pieces use exact compiled, pivoted bitset Bron--Kerbosch traversal.
-    Count first, materialize only when admitted. The legacy max_calls argument
-    remains compatible with reference callers; it cannot truncate scientific output.
-    No a-priori worst-case bound rejects a component.
-    """
-    if not vertices:
-        return [], 0
-    plan, _, _ = _clique_plan(vertices, adjacent)
-    cliques, work = _enumerate_clique_plan(plan, adjacent, int(limit), int(max_calls))
-    if cliques is None:
-        if omissions is not None:
-            omissions.append(dict(cause="residual_clique_enumeration_tie_class_at_budget",
-                                  kind="tie_class_at_budget", count=1,
-                                  scope=f"component with {len(vertices)} records; more than {limit} maximal cliques",
-                                  count_kind="exact"))
-        return None, work
-    return sorted(cliques), work
 
 
 def capped_by_size(groups, cap, omissions=None, *, cause="residual_group", scope="size classes", group_size=len):
@@ -939,21 +677,16 @@ def _diameter_within(distance, members, bound):
     return True
 
 
-def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=200_000, omissions=None, group_size=len, group_identity=None, lifted=None):
-    """(groups, overflow): cohesive groups of residual records, independent of the record and link order
-    (release 2.2; replaces one tie order's clusters plus complete linkage).
+def _cluster(distance, maximum_hamming, max_groups, content_keys, omissions=None, lifted=None):
+    """Density groups plus a content-ordered maximal edge-clique cover.
 
-    Core: every cluster of the level-wise HDBSCAN's condensed tree (:func:`level_hdbscan`; min cluster size 2, min
-    samples 1, single cluster allowed), selected or not, whose diameter is at most maximum_hamming. Alternatives:
-    every maximal clique (at least
-    two records) of the graph "distance <= maximum_hamming" on the records HDBSCAN leaves as noise, the records of
-    clusters wider than the bound and the stragglers of multi-way merges (which stay in their cluster too). Every
-    complete-linkage group at the bound, and every pair-up of tied stragglers within it, under any order, lies inside
-    one of these cliques: the tied resolutions are carried forward as candidates and the block score decides. Bound:
-    at most ``max_groups`` cliques, by whole size classes (capped_by_size), and no cliques at all when there are more
-    than ``max_enumeration``; either is reported as ``overflow``. Groups are sorted tuples of record indices, in
-    sorted order. With ``lifted=(anchor_membership_bits, original_record_count)``,
-    identities, size classes and returned tuples refer to original records."""
+    Every compatible alternative pair shares a group before size screening. A
+    larger complete-linkage subgroup need not be contained in any cover member.
+    Core density groups, lifting and sample weights are unchanged. The existing
+    size-class rule applies separately to each alternative graph component.
+    With lifted=(membership_bits, record_count), sizes/identities use original
+    records. Content keys are the hard-call descriptors on the distance axis.
+    """
     n = distance.shape[0]
     if n < 2:
         return (), False
@@ -995,10 +728,7 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
                 if float(distance[first, second]) <= bound:
                     adjacent[first].add(second)
                     adjacent[second].add(first)
-        cliques, work, enumerated = [], 0, True
-        components = []
-        compact = lifted is not None or (group_identity is None and group_size is len)
-        seen = set()
+        components, seen = [], set()
         for vertex in vertices:
             if vertex in seen:
                 continue
@@ -1010,53 +740,29 @@ def _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls=2
                         component.add(other)
                         frontier.append(other)
             seen |= component
-            if len(component) < 2:
-                continue
-            if compact:
+            if len(component) >= 2:
                 components.append(tuple(sorted(component)))
-                continue
-            found, calls = maximal_cliques(sorted(component), adjacent, int(max_enumeration), int(max_calls), omissions)
-            work += calls
-            if found is None:
-                enumerated = False
-                continue
-            cliques.extend(clique for clique in found if len(clique) >= 2)
-        if group_identity is not None:
-            unique = {}
-            for clique in cliques:
-                unique.setdefault(group_identity(clique), clique)
-            cliques = list(unique.values())
-        if lifted is not None:
-            from ._cliques import screened_lifted_components
-            kept, capped, enumerated, work, clique_count = screened_lifted_components(
-                components, adjacent, int(max_enumeration), int(max_groups),
-                lifted[0], lifted[1], omissions)
-        elif compact:
-            from ._cliques import screened_components
-            kept, capped, enumerated, work, clique_count = screened_components(
-                components, adjacent, int(max_enumeration), int(max_groups), omissions)
-        else:
-            kept, capped = capped_by_size(cliques, int(max_groups), omissions,
-                                          scope="residual alternative size classes", group_size=group_size)
-            clique_count = len(cliques)
-        overflow = capped or not enumerated
+        from ._cliques import screened_components
+        kept, overflow, work, clique_count = screened_components(
+            components, adjacent, content_keys, int(max_groups),
+            memberships=None if lifted is None else lifted[0],
+            records=None if lifted is None else lifted[1], omissions=omissions)
         known = set(groups)
         groups.extend(clique for clique in kept if clique not in known)
-        _CLIQUE_STATS.record(len(vertices), work, overflow, clique_count, enumerated)
+        _CLIQUE_STATS.record(len(vertices), work, overflow, clique_count)
     return tuple(sorted(set(groups))), overflow
 
 
-def _cluster_cached(distance, maximum_hamming, cache, max_groups=64, max_enumeration=10_000_000, max_calls=200_000,
-                    omissions=None):
-    # A fixed-size content digest avoids retaining another dense matrix per memo.
-    # Hash the contiguous buffer directly, without an R-by-R bytes temporary.
+def _cluster_cached(distance, maximum_hamming, cache, content_keys, max_groups=64, omissions=None):
+    # The greedy cover depends on content order as well as geometry.
     value = np.ascontiguousarray(distance)
-    key = (float(maximum_hamming), int(max_groups), int(max_enumeration), int(max_calls), value.shape,
+    content = blake2b(b"".join(content_keys), digest_size=32).digest()
+    key = (float(maximum_hamming), int(max_groups), rev("d13"), value.shape, content,
            blake2b(memoryview(value).cast("B"), digest_size=32).digest())
     result = cache.get(key)
     if result is None:
         details = []
-        groups, overflow = _cluster(distance, maximum_hamming, max_groups, max_enumeration, max_calls, details)
+        groups, overflow = _cluster(distance, maximum_hamming, max_groups, content_keys, details)
         result = cache[key] = (groups, overflow, tuple(details))
     if omissions is not None:
         omissions.extend(result[2])
@@ -1213,8 +919,10 @@ def _residual_pool_groups(pool, hard_calls, distance, minimum_joint, config,
         if local_distance is None:
             local_calls = hard_calls if pool is None else np.ascontiguousarray(hard_calls[list(pool)])
             local_distance = _hamming_distances(np.ascontiguousarray(local_calls), minimum_joint)
+        local_calls = hard_calls if pool is None else hard_calls[list(pool)]
+        content_keys = tuple(np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in local_calls)
         groups, overflow = _cluster_cached(local_distance, config.max_cluster_hamming, local_cluster,
-            config.max_alternative_groups, config.max_clique_enumeration, config.max_clique_calls, details)
+            content_keys, config.max_alternative_groups, details)
     if not isolated:
         return groups, overflow, details, None, None
     return (groups, overflow, details,
@@ -1239,7 +947,7 @@ def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, om
     # matrices are already covered by the block's clustering_matrix_bytes plan.
     # Executors, per-pool ledger entries and O(cache) copies cost more than these
     # small tasks. A landmark pool also runs inline when its live share is one;
-    # large lifted storage is still reserved by screened_lifted_components.
+    # large lifted storage is still reserved by screened_components.
     dense = not config.landmark_budget or records <= config.landmark_budget
     if dense or len(tasks) == 1 or current_budget().threads() <= 1:
         results = {}
@@ -1252,7 +960,7 @@ def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, om
             results[route] = groups, overflow
         return results
     # Record count estimates pool work before geometry exists. Component work is
-    # subsequently ordered by its clique plan, then by its actual output count.
+    # bounded by its edge count and packed cover size.
     order = sorted(range(len(tasks)), key=lambda index: (
         records if tasks[index][1] is None else len(tasks[index][1])), reverse=True)
     functions, sizes = [], []

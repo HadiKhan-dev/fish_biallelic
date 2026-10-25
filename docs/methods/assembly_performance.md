@@ -64,28 +64,26 @@ no extra arrays. This bounds one dual sweep, not the data-dependent window progr
 of windows and fits. Count-shadow decisions also reuse the already computed smaller-panel cover;
 there is no second cover scan and no change to shadow factors or the count criterion.
 
-## Complete beam families and computational bounds
+## Polynomial beam proposals (2.8)
 
 Constant transition matrices define a complete Cartesian path family; equal linkage does not
-prove equal genotype evidence. The production beam recognizes this family in O(B*G*K^2) work
-and O(B) family storage. Below the materialization allowance it expands the whole family and
-preserves the original search. Above the allowance the exact original first-covering anchor
-trials establish the initial incumbent, which is retained with unresolved continuation metadata.
+prove equal genotype evidence. Recognition costs O(B G K^2). The beam always proposes the
+existing first-covering members, at most 1+sum_b(K_b-1) paths, without materializing the
+Cartesian product. Join search proceeds on those representatives and may refine them. Its
+certificate remains relative to its stated neighbourhood and proposed pool.
 
-For other ties, a beam expansion starts with a bounded scaffold and retains the complete cut
-frontier as parent paths plus append/replacement edges. An oversized frontier stops before the
-next expansion. The allowance is twice the sum of endpoint quotas at that step; the archive
-allowance sums those bounds over blocks. With multiplicity overrides included, the actual
-quota sum must be included in the work estimate. No first-N subset is selected. If a search
-incumbent already exists, it stays. An initial forward overflow has no complete joined incumbent:
-the original input components remain unjoined, with computationally unresolved boundaries.
-The descriptor and status survive through assembly sidecars and released continuation metadata.
-This binding behavior changes the search and therefore requires the predeclared scientific gates;
-it is not claimed to reproduce an unbounded search. Bound-hit frequencies accompany validation.
+Other endpoint cuts keep at most the endpoint quota, breaking cut-score ties in canonical
+prepared-row content order. The forward/backward frontier is at most the sum of endpoint
+quotas; the archive is at most the sum of these per-block bounds. Multiplicity overrides
+are included in those sums. Path arrays and step rescoring have polynomial block-length
+cost. For fixed quotas and B, candidate expansion is quadratic in K; the current per-endpoint
+selection scans add a cubic term. No complete tie class can grow a frontier exponentially.
+There is no materialization-bound stop or unjoined-input fallback.
 
-The six-case standalone exact two-row arm contains 18,518 cached join records. All six case
-reports have zero beam-stop source records, distinct beam domains and propagated beam-stop occurrences. Cached joins are not a count of beam invocations. These full runs
-therefore do not exercise binding beam behavior; that behavior is covered by the bounded fixtures.
+This changes proposals inside cut ties and constant families; it is not an exact speedup.
+Small nonbinding cut ties can change too. Historical zero beam-stop records in 18,518 cached
+joins across six runs demonstrate only that the old stop did not bind, not equivalence of
+2.8's proposal pools. Focused tied fixtures and the integrated 2.8 matrix assess those changes.
 
 ## Limits of a cubic claim
 

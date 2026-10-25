@@ -284,7 +284,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
             working, record, refined_alternatives = _refine(
                 level, record, working, prepared, evidence, l1_context, config,
                 records, _phase(budget, role, levels, f"refinement_l{level}"),
-                release_alternatives=release_alternatives)
+                release_alternatives=release_alternatives, genetic_map=inputs.genetic_map)
             release_alternatives = list(refined_alternatives)
             if level == 1:
                 # Refined paths feed the next level; both refined and unrefined L1 alternatives stay
@@ -305,7 +305,7 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
 
 
 def _refine(level, record, components, prepared, evidence, l1_context, config, records, budget,
-            *, release_alternatives=()):
+            *, release_alternatives=(), genetic_map=None):
     """Founder refinement after a final level (resumed from ``l<k>/refined`` when recorded)."""
     from dataclasses import replace
     from .founder_refinement import LevelInput, refine_level
@@ -319,6 +319,7 @@ def _refine(level, record, components, prepared, evidence, l1_context, config, r
     result = refine_level(
         LevelInput(level=level, prepared=prepared, components=tuple(components),
                    evidence=evidence.scoring, l1_context=l1_context, cost_scale=config.cost_scale,
+                   genetic_map=genetic_map,
                    additions=record.stop_reason is not None, count_rule=config.count_rule,
                    release_alternatives=tuple(release_alternatives),
                    evidence_ref=None if evidence.shared is None else evidence.shared.scoring),

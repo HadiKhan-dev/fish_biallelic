@@ -588,8 +588,10 @@ def _ball_flips(core_size, radius):
     for size in range(radius + 1):
         count += _binomial(core_size, size)
     width = max(radius, 1)
-    flips = np.full((count, width), -1, np.int64)
-    sizes = np.zeros(count, np.int64)
+    # K <= 30: a flip index is -1 (padding) or 0..29, and a size is 0..30.
+    # int8 is lossless; configuration counts and offsets remain machine-width integers.
+    flips = np.full((count, width), -1, np.int8)
+    sizes = np.zeros(count, np.int8)
     combination = np.empty(width, np.int64)
     index = 1
     for size in range(1, radius + 1):
@@ -715,17 +717,6 @@ def _ball_log_prior(b, core, flips, sizes, prior):
 
 
 @njit(cache=True)
-def _ball_shell(rows, sizes, radius, b, core):
-    """Core founders flipped, relative to the ball's centre b, by its outermost-shell rows."""
-    shell = np.zeros(rows.shape, np.bool_)
-    for row in range(len(rows)):
-        if sizes[row] == radius:
-            for t in range(len(core)):
-                shell[row, t] = rows[row, t] != b[core[t]]
-    return shell
-
-
-@njit(cache=True)
 def _core_log_prior(rows, core, prior):
     """prior . b over the core bits of every support row (the rest is common to all rows)."""
     out = np.zeros(len(rows))
@@ -793,8 +784,8 @@ def _compact_core_support(constants, unaries, couplings, use, prior, settings):
             position += 1
     info[INFO_CORE] = c
     rows = np.empty((0, 0), np.int8)
-    flips = np.empty((0, 0), np.int64)
-    sizes = np.empty(0, np.int64)
+    flips = np.empty((0, 0), np.int8)
+    sizes = np.empty(0, np.int8)
     if c <= settings[SETTING_EXACT_BITS]:
         info[INFO_METHOD] = METHOD_CORE_CUBE
         log_likelihood = _core_cube(constants, unaries, couplings, use, b, core)
@@ -813,29 +804,6 @@ def _compact_core_support(constants, unaries, couplings, use, prior, settings):
         if hit:
             info[INFO_RECENTRE_BACKSTOP] = 1
     return b, core, rows, flips, sizes, log_likelihood, log_prior, base, field, info
-
-
-@njit(cache=True)
-def core_support(constants, unaries, couplings, use, prior, settings):
-    """Dense diagnostic support API; production callers retain compact flip sets.
-
-    Context refit uses _compact_core_support directly and never expands a ball.
-    Returns b, core, rows, shell flags, likelihoods, core priors, base, field, info.
-    """
-    b, core, rows, flips, sizes, log_likelihood, log_prior, base, field, info = (
-        _compact_core_support(constants, unaries, couplings, use, prior, settings))
-    if info[INFO_METHOD] == METHOD_CORE_BALL:
-        rows = np.empty((len(sizes), len(core)), np.int8)
-        for config in range(len(sizes)):
-            for t in range(len(core)):
-                rows[config, t] = b[core[t]]
-            for a in range(sizes[config]):
-                t = flips[config, a]
-                rows[config, t] = 1 - rows[config, t]
-        shell = _ball_shell(rows, sizes, info[INFO_RADIUS], b, core)
-    else:
-        shell = np.zeros(rows.shape, np.bool_)
-    return b, core, rows, shell, log_likelihood, log_prior, base, field, info
 
 
 @njit(cache=True)
@@ -1015,11 +983,6 @@ def guard_mask(q, shell, threshold, settings):
     alternate = (q >= threshold) & (q - guard * shell < threshold)
     reference = (1.0 - q >= threshold) & ((1.0 - q) - guard * shell < threshold)
     return (shell > 0.0) & (alternate | reference)
-
-
-def shell_weights(probabilities, shell_flags):
-    """Outermost-shell weight per founder column: the probability of the shell rows flipping it."""
-    return np.asarray(probabilities, dtype=np.float64) @ np.asarray(shell_flags, dtype=np.float64)
 
 
 SUMMARY_FIELDS = ("core_cube_sites", "core_ball_sites", "bp_nonconverged",

@@ -225,12 +225,11 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
         workers = memory_worker_limit([size + WORKER_RESIDENT_BYTES for size in estimates],
                                       min(len(pending), int(budget.threads())), label="hierarchy")
         reference = evidence.shared.scoring
-        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="hierarchy workers"):
-            with BudgetedPool(budget, processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
-                              label="hierarchy") as pool:
-                for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
-                                                  task_bytes=estimates, envelope=True):
-                    record(result)
+        with BudgetedPool(budget, processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+                          label="hierarchy") as pool:
+            for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
+                                              task_bytes=estimates, envelope=True):
+                record(result)
     output, joins, likelihoods, release_alternatives = [], [], [], retained
     shadows = []
     final_plan = list(plan)
@@ -314,11 +313,10 @@ def _execute(payload, cpus):
     with reserve_memory(scoring.nbytes, label="hierarchy-queue evidence"):
         handle, reference = create_shared_array(scoring, copy_threads=cpus)
         try:
-            with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="hierarchy-queue workers"):
-                with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
-                                  label="hierarchy-queue") as pool:
-                    return list(pool.imap_unordered(join_batch, [(reference, task) for task in tasks],
-                                                    task_bytes=estimates, envelope=True))
+            with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+                              label="hierarchy-queue") as pool:
+                return list(pool.imap_unordered(join_batch, [(reference, task) for task in tasks],
+                                                task_bytes=estimates, envelope=True))
         finally:
             close_shared_memory([handle], unlink=True)
 

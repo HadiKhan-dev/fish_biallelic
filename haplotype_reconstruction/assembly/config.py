@@ -19,7 +19,7 @@ class LinkerConfig:
 
     max_sites: linking proxies keep at most this many sites per input component (a stride over
         its usable sites); emissions marginalise unknown alleles at partial sites.
-    max_iterations: maximum damped updates per gap fit (convergence may stop earlier).
+    max_iterations: maximum updates per gap fit (convergence may stop earlier).
     robustness: genotype emission mixture P = (1 - r) P(g | pair) + r / 3 (no log floor).
     error_fraction, error_tract_bp: the within-block error-tract model of the micro HMM (a
         fraction of copying in error tracts of this mean length).
@@ -29,7 +29,8 @@ class LinkerConfig:
     min_change: stop when max(abs(M(T) - T)) is at most this value at the returned transitions,
         where M is the undamped regularised forward M-step. A capped fit may remain unconverged.
     learning_rate_decay, minimum_learning_rate: damping of the M-step towards the previous
-        transitions, rate = max(decay^iteration, minimum).
+        transitions, rate = max(decay^iteration, minimum). The default decay of 1 takes full
+        M-steps; smaller values retain damped iteration for numerical comparisons.
     """
 
     max_sites: int = 2000
@@ -41,7 +42,7 @@ class LinkerConfig:
     pseudo_count: float = 0.1
     uniform_mix: float = 0.01
     min_change: float = 0.001
-    learning_rate_decay: float = 0.9
+    learning_rate_decay: float = 1.0
     minimum_learning_rate: float = 0.1
 
 

@@ -158,14 +158,8 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
     # Tie-class decisions of the beam and the search (the join summary's tie_events).
     counter = SharedCounter()
     def bounded_beam(quota, overrides=None):
-        result = join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides,
-                                         max_gap=gap, counter=counter, label=label,
-                                         compact=True, bounded=True)
-        if isinstance(result, join_beam.CartesianBeamFamily):
-            limit = join_beam.materialization_limit(transitions, quota, overrides)
-            if result.cardinality <= limit:
-                return result.materialize(limit)
-        return result
+        return join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides,
+                                      max_gap=gap, counter=counter, label=label, compact=True)
 
     beam = bounded_beam(settings.join.paths_per_endpoint)
     phase_seconds["initial_beam"] = time.perf_counter() - phase_started
@@ -173,21 +167,6 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
     def beam_runner(quota, overrides):
         # Pool extension and saturation re-runs of this batch's beam.
         return bounded_beam(quota, overrides)
-
-    if isinstance(beam, join_beam.UnresolvedBeam) and not beam.incumbent_paths:
-        # No complete joined path was established. The incoming components are
-        # the only incumbent; preserve their alleles and avoid fabricating alignment.
-        family = dict(start=0, stop=len(task.prepared), panels=[],
-                      reason='beam_materialization_bound', source_decision='beam/initial_forward',
-                      status='unresolved_beam_materialization', unresolved_search=True,
-                      representative_prior='retain_unjoined_input_components',
-                      beam_domain=dict(beam.record(), input_rows=[block.rows.tolist() for block in inputs.blocks]))
-        diagnostic = dict(reason='beam_materialization_bound', events=(linker_event,),
-                          phase_seconds=phase_seconds,
-                          work_counters=dict(beam_materialization_bounds=1, samples=inputs.sample_count,
-                                             sites=int(inputs.offsets[-1]), blocks=len(inputs.blocks)))
-        return JoinResult(task.index, None, None, None, time.perf_counter() - started,
-                          release_alternatives=(family,), shadow=diagnostic, retained_inputs=True)
 
     phase_started = time.perf_counter()
     outcome = join_search.search_panel(
@@ -217,8 +196,7 @@ def _run_single(task: BatchTask, scoring: np.ndarray, budget, *, report_switches
     phase_seconds["join_release"] = time.perf_counter() - phase_started
     work_counters = dict(samples=inputs.sample_count, sites=int(inputs.offsets[-1]),
                          blocks=len(inputs.blocks), linker_gaps=transitions.gaps,
-                         beam_paths=(beam.cardinality if isinstance(beam, join_beam.CartesianBeamFamily)
-                                     else beam.retained_count if isinstance(beam, join_beam.UnresolvedBeam)
+                         beam_paths=(len(beam.covering()) if isinstance(beam, join_beam.CartesianBeamFamily)
                                      else len(beam)),
                          beam_materialization_bounds=outcome.summary.work_counters.get(
                              'beam_materialization_bounds', 0),
@@ -257,30 +235,6 @@ def run_batch(task: BatchTask, scoring: np.ndarray, budget) -> JoinResult:
         # Unperformed inner histories remain explicit source uncertainty.
         results.append(_run_single(branch, scoring, budget, report_switches=True,
                                    max_branches=1))
-    if any(result.retained_inputs for result in results):
-        # A complete incoming family cannot be ranked after one branch failed to
-        # establish a joined panel. Keep its nominal input components and sources.
-        families = [family for result in results for family in result.release_alternatives]
-        phase_seconds, work_counters = {}, {}
-        linker_events = []
-        for index, result in enumerate(results):
-            events = (result.summary.events if result.summary is not None
-                      else (result.shadow or {}).get('events', ()))
-            linker_events.extend(dict(event, input_branch=index) for event in events
-                                 if event.get('stage') == 'linker_em')
-            diagnostic = (dict(phase_seconds=result.summary.phase_seconds,
-                               work_counters=result.summary.work_counters)
-                          if result.summary is not None else result.shadow or {})
-            for name, value in diagnostic.get('phase_seconds', {}).items():
-                phase_seconds[name] = phase_seconds.get(name, 0.0) + value
-            for name, value in diagnostic.get('work_counters', {}).items():
-                work_counters[name] = work_counters.get(name, 0) + value
-        return JoinResult(task.index, None, None, None, time.perf_counter() - started,
-                          release_alternatives=tuple(families), retained_inputs=True,
-                          shadow=dict(reason='beam_materialization_bound', combinations=len(results),
-                                      complete=False, retained_input_branches=len(task.branches),
-                                      phase_seconds=phase_seconds, work_counters=work_counters,
-                                      events=tuple(linker_events)))
     survivors = terminal_winners(results)
     chosen = min(survivors, key=lambda result: (len(result.rows), result.minimum_switches,
                                                panel_key(result.rows)))

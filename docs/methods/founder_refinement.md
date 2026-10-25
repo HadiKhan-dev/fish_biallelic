@@ -4,9 +4,10 @@ Founder refinement (`assembly/founder_refinement/`) runs after every executed le
 [assembly](assembly.md), never in the context assemblies of local selection. It re-chooses each
 phase component's founders as paths of the original prepared local rows (one row per prepared
 block; the rows' alleles and evidence masks stay fixed), fitting them to a certified local optimum
-of a full-site cohort objective F, and it decides the component's founder count K between converged
+of a cohort likelihood objective F, and it decides the component's founder count K between converged
 fits with the pipeline's [founder-count rule](assembly.md#founder-count-rule). Every level may
-delete founders; only the last level (the final count step) may also add them. The refined
+delete founders; only the last level (the final count step) may also add them. After the count is
+decided, the decided panel is [polished](#polish) with a wider move set at the same K. The refined
 components feed the next hierarchy level, and after the last level they are the assembly product.
 No target founder count, pedigree, cohort label or simulation truth is supplied.
 
@@ -21,6 +22,8 @@ The assembly level loop calls `refine_level(LevelInput, config, budget, records)
 - from level 2 on, the L1 context: the refined level-1 components followed by the unrefined
   level-1 join components; inside every L1 span of a component, their distinct row paths (refined
   first) offer the coarse moves;
+- the contig's genetic map (the objective's switch costs; `[genetic_map]`, see
+  [genetic maps](../genetic_maps.md));
 - the cost scale (`AssemblyConfig.cost_scale = 0.5`), the count rule's settings and whether the
   level is the last one (additions allowed).
 
@@ -38,27 +41,50 @@ cap is a fixed constant ([window programmes](#window-programmes)), never the mem
 ## Objective
 
 For a panel X of K founder paths over a component's prepared blocks, F(X) = sum_s F_s(X), where
-F_s is the full-site Viterbi score of sample s in an unordered-diplotype Potts chain
-(`assembly/founder_refinement/objective.py`):
+F_s is a robust maximum-path score of sample s's diplotype: the Viterbi recursion of a per-homologue
+founder-switching model, with clipped and centred site emissions (below) and the model's normalisers, so it is a
+log-probability-like score rather than a literal log probability (`assembly/founder_refinement/objective.py`):
 
-- the states are the Q = K(K+1)/2 unordered founder pairs, and a state's dosage at a site is the sum
-  of the two founders' pre-fill calls;
-- a site emits max(log(0.99 p_d + 0.01/3), -2) - log(1/3) for the dosage d of the state, with p the
-  normalised genotype likelihoods of the sample;
-- every change of state costs `assembly.founder_refinement.objective.SWITCH_PENALTY = 20.0` at
-  every level (growing it with the component's length could prefer a poorer founder phase merely
-  because it saves sample switches); the start is free and there is no length scaling;
-- only complete informative sites count: discovery sites where every local row of the prepared
-  block is called, and evidence that is not exactly uniform. The mask is fixed across the candidate
-  rows, so a path cannot raise its score by hiding difficult sites.
+- each homologue follows its own chain over the K founders. Between consecutive informative sites of
+  the sample it keeps its founder with probability 1 - rho (1 - 1/K) and moves to any given other
+  founder with probability rho / K, where rho = 1 - exp(-h) and h is the reset hazard of the gap:
+  `AssemblyConfig.refinement.reset_rate = 1.0` per Morgan per homologue times the genetic-map length of
+  every physical edge the sample crosses (each edge at least -log(1 - floor), with
+  `AssemblyConfig.refinement.map_probability_floor = 1e-15`, so sites at one map position still cost a
+  finite switch);
+- relative to staying, a homologue that changes founder pays w = log(1 - rho (1 - 1/K)) - log(rho / K)
+  >= 0. Both homologues share rho, so the ordered K x K chain reduces exactly to the Q = K(K+1)/2
+  unordered founder pairs: U'{a,b} = max(U{a,b}, max(R[a], R[b]) - w, G - 2w) + e, with
+  R[x] = max_y U{x,y} and G = max U, which costs O(Q + K) per site;
+- the panel-independent terms (-2 log K at the sample's first informative site and
+  2 log(1 - rho (1 - 1/K)) at every later one) form the sample's normaliser. They cancel at a fixed K
+  and are included wherever fits of different K are compared. The uniform start charges every sample, carrier or
+  not, 2 log((K + 1) / K) per added founder (a total that grows with N); it can delete a rare true founder at a small
+  component (in the f3 simulation, one carried by 2 of 112 samples at L1). A free start (the starting pair
+  profiled out) was tested and not adopted: it recovered such L1 founders, but the whole-pipeline outcome was mixed
+  (std better by 565 wrong-or-missing alleles, backcross worse by 2,751 through a changed L2 join);
+- a site emits max(log(0.99 p + 0.01/3), -2) - log(1/3) for the state's pair class, with p the
+  normalised genotype likelihoods of the sample. The pair class is the dosage when both founders'
+  local rows are called; otherwise it is the predictive class of the uncalled allele(s) under a
+  uniform allele prior: one uncalled allele beside a called one gives (p0 + p1)/2 or (p1 + p2)/2, two
+  different uncalled rows (p0 + 2 p1 + p2)/4, and the same uncalled row twice (one latent allele)
+  (p0 + p2)/2;
+- the sites are the component's kept discovery sites with at least one called local row in their
+  prepared block (the assembly's usable sites, also the window surrogate's mask), where the sample's
+  evidence is not exactly uniform. The mask is fixed across candidate panels, so a panel cannot raise
+  its score by hiding sites. Until 2.7, F read only sites where every local row was called; that
+  fraction shrinks with more local rows (at K = 30, 18-25% of a test component's sites have an
+  uncalled local row).
 
-Symmetric genotype emissions and a uniform switch penalty make the reduction to unordered pairs
-exact for this model. It is an internal assembly objective, not the downstream homologue painter, a
-phase posterior, a genealogy model or a recombination-map estimate. Count decisions charge each
+2.6's objective charged a uniform 20 nats per diplotype change. The switch costs are now those of an
+explicit switching process, per sample and gap; the binned window surrogate keeps the uniform
+`assembly.founder_refinement.objective.SWITCH_PENALTY = 20.0` (it only proposes moves). F is an internal
+assembly objective, not the downstream homologue painter, a phase posterior, a genealogy model or a
+recombination-map estimate. Count decisions charge each
 founder the cost c = s x (mean prepared-panel sites / 200) x S x B of the count rule, for B prepared
-blocks and the S informative samples of the component: samples with evidence at one of its complete sites.
+blocks and the S informative samples of the component: samples with evidence at one of its sites.
 Every other sample (samples excluded from founder construction, whose evidence is uniform, or without a read at
-a complete site) scores exactly 0 for every panel, so it enters neither the cost nor the bootstrap population.
+one of its sites) scores exactly 0 for every panel, so it enters neither the cost nor the bootstrap population.
 The join's S is the batch's informative samples, the rows its evidence holds.
 
 ## Converged fixed-count fits
@@ -82,30 +108,47 @@ sweep:
    the proposals anchored at the junction (one founder's rows on the blocks where a proposal differs
    from the current panel) are re-scored exactly against the current panel and applied best first
    (earliest on ties) while their gain exceeds the same tolerance; coarse proposals must also pass
-   the [guard](#coarse-move-guard);
+   the [guard](#coarse-move-guard). After `assembly.founder_refinement.acceptance.CONTENT_FULL_ROUNDS = 4`
+   acceptances at one junction, the remaining proposals of the last full ranking are re-scored one at a
+   time in that order (each applied while its own gain exceeds the tolerance), and at most
+   `assembly.founder_refinement.acceptance.EXCHANGE_ROUNDS = 4` suffix exchanges are applied per junction and
+   pass. Both bounds keep a pass at most cubic in K; a binding bound is counted (`round_cap`,
+   `exchange_cap`) and warned, and neither changes the fixed-point test, because a pass that accepts
+   nothing scores every proposal once;
 4. recomputes F, which must equal the start of the sweep plus the accepted gains within
    1e-9 max(1, |F|) + 1e-6 per accepted move; a larger deviation stops the run with an error.
 
 A sweep that accepts nothing certifies the fit: every proposal of that sweep was computed against
-the final panel and every move of the move set was scored exactly against it, so the panel is a
-local optimum of F under this move set. F is non-convex and no global optimum is claimed. The window
+the final panel and every offered move was scored exactly against it, so no offered move gains more than
+the tolerance (under the guard and the proposals' screening); the panel is a local optimum of F under
+these offers, not under every move of the families. F is non-convex and no global optimum is claimed. The window
 proposals optimise a binned surrogate, so the certificate is relative to them; acceptance always
 scores individual sites. A search that reaches `AssemblyConfig.refinement.sweep_limit = 100` sweeps
 is reported (warned, and recorded as not converged), never silently accepted.
 
 **Best of two.** Every fit runs this search twice from the same start, concurrently: once with its
-first pass forward and once reversed (both then alternate; they share the first sweep's messages
-and proposals). Both are deterministic local searches. The existing F tie classes and count
-comparison criteria identify the surviving candidates; among remaining same-K ties the
-representative uses the exact minimum sample state-change count. Both results are recorded.
-This applies to every start fit and every count refit.
+first pass forward and the default content-order convention, once reversed with the reversed
+convention (both then alternate; each computes its own first-sweep inputs). Both are deterministic local
+searches. The existing F tie classes and count comparison criteria identify the surviving candidates;
+among remaining same-K ties the representative uses the exact minimum number of changed homologues over
+the samples' maximum-score paths. Both results are recorded.
+This applies to every start fit and every count refit; a polish fit runs the forward-first search only, with
+the whole budget.
+
+**Lexicographic sweeps.** The guard reads switch costs of maximum-score paths, computed by
+lexicographic messages (score, then the lower switch cost among exact score ties), which cost about
+three times the plain ones. A guarded search computes them only for sweeps that read them: a sweep
+whose predecessor read none runs its acceptance pass on plain messages and, at the first coarse
+proposal whose gain exceeds the tolerance, is run again on lexicographic messages from its start
+(a search's first sweep starts lexicographic). The plain and lexicographic scores are bitwise equal,
+so the decisions are those of a fully lexicographic search.
 
 **Surrogate bins.** The window surrogate cuts each prepared block's sites into bins of
 max(b_min, ceil(L_c / 2000)) sites for a component of L_c sites
 (`AssemblyConfig.refinement.proposal_max_bins = 2000`) and sums over a bin's discovery sites the
 robust emission of the join's binned model: hard dosages where every row of the block is called at
-its discovery sites, otherwise the predictive pair classes with unknown alleles marginalised (so the
-surrogate also reads sites that F leaves out). At levels 3 and above, b_min is
+its discovery sites, otherwise the predictive pair classes with unknown alleles marginalised (the same
+usable sites as F). At levels 3 and above, b_min is
 `AssemblyConfig.refinement.proposal_min_sites_per_bin = 200`; at levels 1 and 2, b_min is
 max(200, ceil(chromosome sites / 2000)), shared by all the components of the level, so the many
 small early components do not each receive a chromosome's bin budget.
@@ -123,7 +166,12 @@ first path (units left to right, each in the order incumbent row, then ascending
 programme whose frontier passes `assembly.founder_refinement.proposals.EXPLORE_FRONTIER = 256`
 partial paths restarts with tighter pruning (Lagrangian suffix bounds and the best feasible value of
 the incumbent, a 16-wide beam and the dual's decoded paths); pruning keeps every path within the
-margin of a feasible value, so the optimum and the canonical answer are unchanged.
+margin of a feasible value, so the optimum and the canonical answer are unchanged. The restarted
+programme keeps at most `assembly.founder_refinement.proposals.BEAM_CAP = 512` children per unit (2.8:
+a polynomial bound in place of an unbounded frontier); where the cap binds the answer is approximate,
+every truncated unit is counted (`beam_truncations` in the sweep, fit and level work counters) and
+warned, and a main programme that loses its feasible witness that way keeps the incumbent
+(`BEAM_LIMIT`, a reported fallback).
 
 The frontier is capped by a fixed byte budget, `AssemblyConfig.refinement.frontier_bytes = 137438953472`
 (128 GiB), the same on every machine: a kept partial path holds 8 S (Q + K + bins + 2) bytes and a programme holds
@@ -141,11 +189,13 @@ results depend neither on the budgets nor on pacing.
 A long founder edit can raise F by letting several samples drop the switch of a crossover they
 share (descendants of one meiosis carry the same breakpoint), turning the founder into an
 artificial recombinant. Coarse moves (L1-span proposals) therefore pass the shared-junction guard
-(`assembly/founder_refinement/guard.py`): a coarse move that lowers the genotype fit E = F + 20 x switches (switches of the
-samples' maximum-score paths with the fewest switches) is refused unless its F gain exceeds the
-acceptance tolerance once every saved switch at a shared one-way junction is uncredited,
-dF - 20 N_shared > TOL. N_shared sums over samples the smaller of the switches the sample saves and
-its dropped switch events at shared one-way junctions. A dropped event is a founder transition
+(`assembly/founder_refinement/guard.py`): a coarse move that lowers the genotype fit E = F + C (C the
+switch cost of the samples' maximum-score paths, the lowest among exact score ties) is refused unless
+its F gain exceeds the acceptance tolerance once every saved switch at a shared one-way junction is
+uncredited, dF - C_shared > TOL. C_shared sums over samples the smaller of the switch cost the sample
+saves and the cost of its dropped switch events at shared one-way junctions (w per changed
+homologue, 2w for an event changing both, at the event's site; for the better pairing of each
+transition: a conservative upper bound on the shared cost). A dropped event is a founder transition
 u -> v of one homologue that the move eliminates; it is one-way unless it leaves the edited founder
 and the same path later rejoins it (an excursion, the signature of a row that is wrong there), and
 shared when another sample's one-way dropped event is the same transition with an overlapping
@@ -153,6 +203,52 @@ evidence interval (the stretch between the sample's nearest informative sites wh
 differ). Moves that do not lower E, and moves whose gain comes from unshared junctions or
 excursions, pass. The guard applies only where coarse moves exist (levels 2 and above). It can
 withhold a true move; it is not a confidence threshold or a proof of biological correctness.
+
+## Polish
+
+The count pass decides K with fits of the search above. The decided panel, and each of its same-K
+equal-F alternatives, is then refitted once more (`AssemblyConfig.refinement.polish = True`; fit labels
+`polish`, `polish.alt<i>`) by one forward-first search with three more move families, tried in this order
+at every sweep that accepts nothing; when one accepts, ordinary sweeps resume:
+
+1. **Beam escape.** The window-beam proposer (`assembly/founder_refinement/beam.py`) solves every fine
+   and coarse window for every founder on the window programmes' binned emissions, but with
+   map-derived per-sample reset costs between bins and the surrogate's own flank messages. It keeps the
+   `assembly.founder_refinement.beam.BEAM_WIDTH = 64` best partial paths per unit (an approximate
+   search: cut windows are counted, `escape_beam_cut` and `escape_beam_binding`, and warned) and offers
+   each window's best path that differs from the incumbent when its surrogate gain exceeds the tie
+   quantum. One exact acceptance pass over these offers follows (coarse offers pass the guard where coarse
+   moves are guarded), and its gain is verified by full rescoring.
+2. **Long repair.** Beam offers on windows of `assembly.founder_refinement.search.LONG_WINDOW = 64` blocks
+   (every `LONG_STRIDE = 16`; beam width `assembly.founder_refinement.search.LONG_BEAM_WIDTH = 16`, cut
+   windows counted as `long_beam_cut` and `long_beam_binding` and warned). Each offer, and every variant of
+   it whose rows on one stretch of `LONG_CORRECTION = 8` blocks (starting inside the offer's changed span,
+   within the offer's window) are replaced by the incumbent's rows or those of one of the `LONG_DONORS = 2`
+   founders that agree with the offer on most blocks of that span (one private correction), is scored
+   exactly as a one-founder move. Per offer, the best variant whose gain exceeds the tolerance enters one
+   acceptance pass as a coarse move, so the shared-junction guard applies where coarse moves are guarded
+   (components with an L1 context, levels 2 and above); a guard rejection leaves the offer's other variants
+   untried. A long surrogate optimum can be exactly F-negative only over a short stretch; the ordinary
+   8-block windows do not reach such a move in one step (on the stress diagnosis component its 8-block
+   pieces each lose 34-105 nats).
+3. **Bridges.** For every fine window, the offered change of largest exact gain (one precursor per window,
+   from the escape's offers) is applied privately and every founder-pair suffix exchange at every cut
+   inside the window is scored exactly against it; the best combined gain above the tolerance is applied
+   after full rescoring. Bridges are not subject to the shared-junction guard.
+
+The best polished fit (tie classes of F) and its equal-F family then follow the count pass's own
+terminal rule (the fewest exact-optimal switches). The polish never changes K; the count decisions,
+their bands and the best-F restoration are those of the count pass. Each escape runs on the panel's
+canonical founder order (rows sorted by content) and maps its result back, so it depends on the panel
+only up to founder labels. The refinement record keeps the polish's status, the count pass's final fit and
+F, the polished F and gain. The count decisions, their bands and the best-F restoration were taken on the
+pre-polish panel and are not re-evaluated on the polished one (`count_reevaluated` false). A polish that
+reaches the component's window work bound keeps the count pass's panel unpolished (status
+`window_work_bound`, warned): the polish is a separate stage after a complete count pass.
+
+The count pass uses the ordinary search only: run in every count refit, the escape cost about five
+times 2.6's refinement time on the validation set, while as a polish it keeps those gains within
+twice 2.6's time.
 
 ## Founder-count decisions
 
@@ -166,8 +262,7 @@ r = `AssemblyConfig.count_rule.ranked_refits = 9` candidates, every candidate's 
 exactly without refitting and the r deletions with the smallest point margin (the smaller of m and
 m' on the total gain) are refitted; otherwise every candidate is. The refits converge concurrently,
 and the best-F refit (exact ties: the lower founder) is decided against the incumbent by the count
-rule. Its sequence part uses the shadow against the incumbent without the decided founder, so only
-that founder's private cells change; the shadow is scored exactly (refinement takes no near-identity
+rule. Its sequence part uses the [symmetric null](#symmetric-sequence-null); the shadow is scored exactly (refinement takes no near-identity
 shortcut, because its last level is final and no later level could re-split a merged pair). While
 some founder has no private cell, q = 0 and every round deletes one of those founders. A rejection
 ends the deletions, and panels of two founders are not reduced. A kept round also records the other founders
@@ -190,18 +285,28 @@ smallest threshold c/(2S), or no sample's optimistic gain reaches c/(2S), which 
 margin and every bootstrap replicate at or below zero (rejected and not ambiguous). Otherwise the
 seeds are the panel plus a duplicate of founder f, for every f; with more than r founders, the r
 seeds whose copy gains most from its exact best responses on all fine windows (one copy-only
-acceptance pass) are refitted. The best-F refit is decided against the incumbent; its shadow
-replaces every cell of the refit that the incumbent does not use by the incumbent's nearest row,
-because the refit may have moved any founder. An accepted addition is followed by one deletion
-round from the larger panel, which must reject; otherwise the pass closes a count cycle. Additions
-stop at a rejection, a skipped round, a cycle or twice the incoming founder count (a reported
-limit, `assembly.founder_refinement.count.COUNT_LIMIT_MULTIPLE = 1`).
+acceptance pass) are refitted. The best-F refit is decided against the incumbent with the same
+[symmetric null](#symmetric-sequence-null) as a deletion (the refit's own death class), so an accepted
+addition needs no check deletion round (2.7 ran one, against the incumbent's nearest rows). Additions stop at a
+rejection, a skipped round or twice the incoming founder count (a reported limit,
+`assembly.founder_refinement.count.COUNT_LIMIT_MULTIPLE = 1`).
 
-**Count cycles.** A cycle is resolved to the smaller count (the deletion round stands) with the
-better-F of its two panels at that count (the incumbent and the deletion refit). Both decisions are
-flagged ambiguous, and the cycle is undecided when the check round's call is ambiguous and the pass
-had reached the smaller count by a decided deletion from the larger one (not by an addition, and not
-by deleting a founder without a private cell, which is not a decision).
+### Symmetric sequence null
+
+A decision between a larger panel and a smaller one compares the larger
+panel with its own canonical death candidates: the members of the best tie class of its unrefitted
+one-founder deletions (founders without a private cell first, otherwise all). Every member is
+evaluated; the larger panel is accepted only if every member's test accepts it, a disagreement or a
+member whose nearest-shadow family is unresolved gives the smaller K with an ambiguous call, and the
+record keeps every member's verdict. The same two endpoints therefore get the same decision whichever
+of them was the incumbent.
+
+The optimistic deletion and addition bounds use the target K's switch costs and add its normalisers.
+
+**Count cycles.** Until 2.7 an accepted addition was checked by a deletion round from the larger panel,
+and a check that accepted the deletion closed a count cycle. With the symmetric null both directions
+decide the same two endpoints identically, so 2.8 runs no check round and no cycle arises; the records
+keep their `count_cycle` and `cycle_undecided` fields, always false.
 
 **Panel at the decided count.** The decisions choose K; the panel kept at K is the best-F converged
 fit computed at K during the pass. It differs from the last panel only when the pass returned to a
@@ -224,8 +329,8 @@ A selected fixed-K fit tie or tied count-choice panel can affect later deletion 
 addition decisions even if the returned fit has another label. Up to sixteen complete
 count-pass histories continue these choices from the original input, seed and count state. Cached fits are reused only when
 both their label and input panel agree. Terminal incoming join panels share this same
-sixteen-leaf budget, rather than each receiving a separate allowance. They use the existing common
-complete-site objective and informative cohort. The ordinary count bound remains twice
+sixteen-leaf budget, rather than each receiving a separate allowance. They use the component's common
+site mask, objective and informative cohort. The ordinary count bound remains twice
 each incoming root's founder count; it is not enlarged to obtain a preferred outcome.
 
 Completed same-K descendants are compared on the final F objective. Converged identical
@@ -308,7 +413,7 @@ unchanged. The ordinary per-direction proposal cache remains in use.
 | Key (under `assembly/l<k>/refine/`) | Content |
 |---|---|
 | `<n:05d>` | component n: the refined component (row paths and count call) and its refinement record: K before and after, F of the incoming and returned panels, changed cells, bin size, coarse units, cost, every count decision (bounds, ranking, refitted candidates and their F, the count rule's record, shadow cells, cycle flags), every converged fit (both searches' F, sweeps, convergence, largest frontier, fallbacks, accepted moves), the best-F replacement, weak label junctions and wall time |
-| `<n:05d>/fit/<label>` | resumable fit states of components with more than `assembly.founder_refinement.records.RECORD_FITS_ABOVE_BLOCKS = 100` prepared blocks: the fit (`<fit>.done`), each search (`<fit>.fwd.done`, `<fit>.rev.done`, with its sweep history stored once) and each sweep (`<fit>.<fwd or rev>.sweep<s>`); labels `start`, `r<i>.del<f>`, `r<i>.add<f>` |
+| `<n:05d>/fit/<label>` | resumable fit states of components with more than `assembly.founder_refinement.records.RECORD_FITS_ABOVE_BLOCKS = 100` prepared blocks: the fit (`<fit>.done`), each search (`<fit>.fwd.done`, `<fit>.rev.done`, with its sweep history stored once) and each sweep (`<fit>.<fwd or rev>.sweep<s>`); labels `start`, `r<i>.del<f>`, `r<i>.add<f>`, `polish`, `polish.alt<i>` |
 | `level` | the level summary; its presence marks the level complete |
 
 Each component is recorded as soon as it completes and a recorded level is decoded instead of
@@ -327,13 +432,14 @@ determined founder labels, never used downstream.
 | Module | Role |
 |---|---|
 | `assembly/founder_refinement/stage.py` | `refine_level`: component scheduling, surrogate bins, L1 context, count calls, census |
-| `assembly/founder_refinement/workspace.py` | a component's fixed inputs: evidence view, complete-site mask, log evidence, surrogate emissions |
+| `assembly/founder_refinement/workspace.py` | a component's fixed inputs: evidence view, site mask, coded leaves, log evidence of the pair codes, map hazards, switch costs and normalisers, surrogate emissions |
 | `assembly/founder_refinement/objective.py`, `assembly/founder_refinement/messages.py` | F, the shared max-plus site steps and the exact block messages |
 | `assembly/founder_refinement/gains.py` | exact gains of content moves and suffix exchanges |
 | `assembly/founder_refinement/acceptance.py` | the compiled Gauss-Seidel acceptance pass |
 | `assembly/founder_refinement/proposals.py` | window programmes, their frontier cap and memory budgets |
 | `assembly/founder_refinement/guard.py` | the coarse-move guard |
-| `assembly/founder_refinement/search.py` | converged fits (best of two) |
+| `assembly/founder_refinement/search.py` | converged fits (best of two), lexicographic sweeps, the polish's escape, long repair and bridges |
+| `assembly/founder_refinement/beam.py` | the polish's window-beam proposer |
 | `assembly/founder_refinement/count.py` | the count pass and its optimistic bounds |
 | `assembly/founder_refinement/records.py` | records and readers |
 
@@ -351,29 +457,36 @@ completion order, and results do not depend on thread counts, worker counts or m
 
 **Complexity.** K is the working founder count, Q = K(K+1)/2, N the samples, L the component's
 sites, B its prepared blocks, R the local rows per block offered to a founder, b the bins per window
-unit and F the frontier of a window programme. These are work factors, not biological constants.
+unit, F the frontier of a window programme and h = 64 the polish beam's width. These are work
+factors, not biological constants.
 
 | Work unit | Work |
 |---|---|
-| One full score, or the forward and backward messages of a sweep | O(N L K^2) (Potts transitions are O(Q) per site) |
-| Exact score of one proposal on its l sites | O(N l K) for samples whose leading state avoids the moved founder, O(l K^2) for each other sample |
-| All-junction suffix exchanges, per sweep | O(B N (K^2 log K + K^3)) |
-| Window programmes of all founders, per sweep | O(B N (b^2 K^3 + b K^2 F R)) plus dominance tests |
+| One full score, or the forward and backward messages of a sweep | O(N L (Q + K)) (per-homologue transitions are O(Q + K) per site) |
+| Exact score of one proposal on its l sites | O(N l K^2) |
+| All-junction suffix exchanges, per sweep | O(B N K^3) (at most five scans per junction) |
+| Content proposals at one junction | at most five evaluations per proposal (O(K) proposals) |
+| Window programmes of all founders, per sweep | O(B N (b^2 K^3 + b K^2 F R)) plus dominance tests; F is at most 512 per unit after a restart |
 | Guard traceback, per guarded coarse candidate | O(width x affected samples x K^2) |
-| One count decision | min(K, 9) converged fits, plus, with more than 9 candidates, the ranking: K unrefitted deletion scores, O(N L K^3), or K copy responses, O(B N b K^2 F R + N L K^3) |
+| Polish beam, per window and founder | O(W N (b^2 Q + h b (Q + R (K + b)) + h^2 Q)) for W units |
+| Long repair, per polish fixed point | O(B K / 16) offers, each with O(48) variants of O(N x 64 blocks x K^2) |
+| One count decision | min(K, 9) converged fits, more when a tie class straddles the cut (the whole class is kept, up to K), the death class's shadow decisions (at most K), plus, with more than 9 candidates, the ranking: K unrefitted deletion scores, O(N L K^3), or K copy responses |
 
-A count step that changes K by d costs at most 9 (d + 1) converged fits (and one check round per
-accepted addition); every fit is at most twice the work of one search. The number of sweeps per fit
-is data-dependent (100 is a reported limit). Apart from the window frontier, every term is at most
-cubic in K. The frontier F is data-dependent: in the worst case it grows as R^W for a window of W
-units (W = 8 fine blocks or 4 coarse spans), which the box bound, dominance pruning, the restart and
-the fixed frontier cap keep in check; the largest frontier and every fallback are reported.
+A count step that changes K by d costs about 9 (d + 1) converged fits, up to K (d + 1) when tie
+classes straddle the shortlist cut, plus count continuations; every fit is at most twice the work of one
+search, and the polish adds one single-direction fit per decided panel and equal-F alternative. The
+number of sweeps per fit is data-dependent (100 is a reported limit). Every per-sweep term is at most
+cubic in K for R = O(K) (the bound is per sweep; the number of sweeps, refits, rounds and continuations
+are data-dependent factors); the window frontier, which was data-dependent up to R^W, is capped by the
+restart's 512 children per unit, and every binding cap is reported.
 
-**Memory.** Per search: O(B N Q) message arrays (two unguarded, four with the
-coarse-move guard), plus two carried-history arrays at every16th block boundary and the
-boundaries the proposal cache keeps. Values are float64; switch counts are int64. Per
-component: the float64 log evidence of its complete sites (24 N L bytes) and a reversed copy for
-reversed passes, and the surrogate emissions (8 N sum_b [R_b(R_b+1)/2] bins_b bytes). Per window programme:
+**Memory.** Per search: O(B N Q) message arrays (two in plain sweeps, four in lexicographic ones), plus two carried-history arrays at every16th block boundary and the
+boundaries the proposal cache keeps. Values and lexicographic switch costs are float64. Per
+component: the float64 log evidence of the seven pair codes (56 N L bytes) and a reversed copy for
+reversed passes, the coded leaves (int16, both orientations), the surrogate emissions
+(8 N sum_b [R_b(R_b+1)/2] bins_b bytes) and, with the polish, the beam's per-bin table
+(8 N J (4 + R_max(R_max+1)/2) bytes for J bins); the polish's escape messages, bridge and long-repair
+batches and beam scratch are reserved when they run. Per window programme:
 up to four times its frontier of 8 N (Q + K + bins + 2)-byte entries, within its current budget. Guard
 tracebacks allocate per affected sample an events array and a site-by-state traceback over a window
 that doubles until the paths with and without the move agree (at worst the whole component).
@@ -385,8 +498,13 @@ decision's round.
 
 ## Interpretation and limitations
 
-- A converged fit is a certified local optimum of F under its move set and the surrogate's
-  proposals, not a global optimum; a different start or move set can reach a better panel.
+- A converged fit is a local optimum of F under its move set and the surrogate's proposals, not a
+  global optimum; a different start or move set can reach a better panel. The polished panel has no
+  offered improvement under a wider move set; the beams that propose those moves are approximate by design,
+  and only one variant per long offer and one precursor per bridge window are tried.
+- The count decisions compare fits of the ordinary search; only the decided panel (and its equal-F
+  alternatives) is polished, so a count call does not see what the polish might have found at the
+  other count.
 - With more than nine candidates, the ranking (unrefitted deletion margins, copy best responses)
   chooses which candidates are refitted, so a deletion or addition that only another candidate's
   refit would show can be missed.
@@ -394,12 +512,16 @@ decision's round.
   Rare founders carried by few samples may not pass the effective-carrier test; absent local alleles,
   unsampled ancestry, weak founder representation, founders missing from the local panels and
   long-range mislinking remain limitations. Ambiguous calls mark counts the data do not separate.
-- F counts only sites where every local row of the block is called. With more local rows per block
-  (larger K) that complete fraction shrinks under the same per-cell missingness, so F reads less of
-  the data at large K.
+- F reads a site where some local rows are uncalled through the predictive classes of the uncalled
+  alleles under a uniform allele prior, per observation; it does not infer one shared value of an
+  uncalled founder allele across samples. Sites where every local row is uncalled are not read.
+- The switch costs assume crossovers as a reset process along the genetic map at one reset per Morgan
+  per homologue; F is a maximum-path score, not a marginal likelihood, and it is not a recombination-map
+  estimate.
 - More likelihood, or more called alleles, does not by itself establish a better biological
   reconstruction.
-- A window that reaches the frontier cap keeps its incumbent; every such fallback is reported.
+- A window that reaches the frontier cap or loses its witness to the beam cap keeps its incumbent;
+  every such fallback is reported.
 
 
 Release2.7 packs symmetric emissions and retains carried guard history every16blocks,

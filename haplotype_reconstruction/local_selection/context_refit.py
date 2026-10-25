@@ -446,8 +446,7 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
         largest = max(range(len(planned)), key=planned.__getitem__)
         planned[largest] += evidence.likelihoods.nbytes + observed.nbytes
         workers = memory_worker_limit(planned, min(int(budget.threads()), len(tasks)), label="context-refit")
-        with reserve_memory(workers * WORKER_RESIDENT_BYTES, label="context-refit workers"), \
-                BudgetedPool(budget, processes=workers,
+        with BudgetedPool(budget, processes=workers,
                           shared=dict(likelihoods=evidence.likelihoods, observed=observed),
                           label="context-refit") as pool:
             for index, result, q, support, slots, _seconds, report in pool.imap_unordered(

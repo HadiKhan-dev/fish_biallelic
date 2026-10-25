@@ -24,8 +24,9 @@ listed in [configuration](../configuration.md).
 
 The adopted search uses an archive beam of six, parent-NLL-ranked replacement starts
 with nominal budget 48 and a whole-class straddler ceiling of 96, residual groups with
-nominal budget 64 and ceiling 128, and at most 256 proposal landmarks. These are the
-2.3/2.4 defaults, not a private trial. The 96 replacement ceiling is distinct from the
+nominal budget 64 and ceiling 128 per alternative graph component, and at most 256
+proposal landmarks. Budget values follow the 2.3/2.4 defaults; component scope changes
+in 2.8. The 96 replacement ceiling is distinct from the
 historical optional escalation's nominal 96 budget. All observations, including G0 rows,
 remain eligible for fitting and scoring subject to the evidence QC mask. Landmark
 geometry changes proposals above its activation threshold; it is not an exact replacement
@@ -75,27 +76,32 @@ links by NumPy's unstable sort (CPU-dependent: actm3 chr8 block 204 under OpenBL
 paths disabled), and release 2.1 by a fixed content key. Such ties are not confined to Hamming distances: with
 min_samples > 1 (the K = 1 seeds) mutual reachability ties links through shared core distances.
 
-**Tied resolutions carried forward (release 2.2).** A binary merge order decides what happens to records that fall out
-together at a multi-way merge: it can pair them into clusters of their own, or let them fall out of the growing
-cluster. Release 2.2 keeps both. The residual clustering's groups are every cluster of the level-wise HDBSCAN's
-condensed tree (all density levels, selected or not) within the diameter bound (`max_cluster_hamming`) plus, as
-alternatives, every maximal clique (at least two strands) of the graph
-"distance at most `max_cluster_hamming`" on the strands HDBSCAN leaves as noise, the strands of clusters wider than the
-bound, and the stragglers of multi-way merges (strands of at least two small components falling out where a big
-component continues; they stay in their cluster as well). Every complete-linkage group at the bound and every pair-up
-of tied stragglers within it, under any order, lies inside one of these cliques; complete linkage itself is not
-used. Each group's consensus is a candidate and the block's cavity score decides between the panels they produce. The
-budgets are order-invariant. A connected component is omitted only when its actual number of maximal cliques
-exceeds `max_clique_enumeration`. Disconnected original subgraphs union their clique sets; disconnected complements
-form complete joins, so their clique sets combine by Cartesian product. Exact child counts can establish an
-oversized product without materializing it. Prime pieces use an exact compiled, pivoted Bron–Kerbosch traversal on
-packed bitset adjacency rows. A first pass counts the actual maximal cliques, stopping at the limit plus one, so an
-oversized component is omitted whole whatever its labels or traversal order; only an admitted component is
-materialized, by a second identical traversal. Enumeration order determines work only, never the admitted
-alternatives. `max_clique_calls` applies only to the legacy Python reference traversal, where it switches to
-polynomial-delay bitset reverse search ([Comin and Rizzi (2015), section 3](https://arxiv.org/abs/1506.01082)); it
-never truncates scientific output. The former worst-case count/work bounds do not reject components. No prefix of
-traversal-selected cliques is released.
+**Residual alternatives (2.8).** The density hierarchy still contributes every condensed-tree
+cluster within `max_cluster_hamming`. On noise, wider clusters and tied stragglers, alternatives
+are now a polynomial edge clique cover. Vertices are ordered by their hard-call content,
+without sample names or record labels. Every compatible edge seeds one clique; packed
+common-neighbour intersections greedily extend it to maximality in that order. Exact duplicate
+groups are removed. Every within-bound pair lies in a cover member before size screening.
+An arbitrary compatible group of three or more need not lie in one emitted member: this is
+an explicit proposal approximation, replacing the complete maximal-clique family.
+
+No component is omitted because it has too many maximal cliques. The former
+`max_clique_enumeration` and `max_clique_calls` settings and enumeration routes are removed.
+The existing 64/128 whole-size-class rule applies independently to each connected
+alternative component after lifting and deduplication. A large class in one component
+cannot evict groups from another; the retained union is deduplicated again. A pool
+with C components can retain at most 128C alternatives. This changes admission only
+where the former shared budget bound. Pair coverage is not guaranteed after budgeting.
+Density/core groups remain outside the alternative budget. Consensus keeps the same per-sample caps, distinct/effective support,
+known-fraction and duplicate thresholds; the fitted block cavity score still selects panels.
+Missing a larger clique can therefore change birth candidates even where the old enumeration
+cap did not bind. Pair coverage alone does not establish candidate or founder equivalence.
+The content order is convention D13, reversed by `HAPLOTYPES_TIE_REVERSE` unless
+`HAPLOTYPES_TIE_REVERSE_KEEP` includes `d13`. The cover is a subset of the complete
+maximal-clique family; it can omit maximal groups but never creates a nonmaximal group.
+
+Equal nonisolated hard-call descriptors are adjacent true twins and enter every maximal
+extension together, making their within-content ordering immaterial.
 
 Residual groups are ranked by size, candidates by distinct sample support, and K = 1 seeds by cluster size.
 Replacement starts (each K + 1 birth minus one row) follow the ranking specified under
@@ -450,7 +456,7 @@ at least `DiscoveryConfig.residual_births.min_soft_responsibility = 0.25` expect
 is subtracted from it, leaving a residual strand whose ALT probability at an observed site is
 P(GL | subtracted allele + residual allele) normalised over the residual allele. Residual strands
 called at `DiscoveryConfig.residual_births.residual_call_probability = 0.8` are clustered by
-missing-aware Hamming distance (level-wise HDBSCAN, plus maximal cliques of its noise and tied stragglers as
+missing-aware Hamming distance (level-wise HDBSCAN, plus an edge clique cover of its noise and tied stragglers as
 alternative groups, see [Ties and order](#ties-and-order-releases-21-to-23); diameter at
 most `DiscoveryConfig.residual_births.max_cluster_hamming = 0.1` of the sites), over all strands and
 within each (subtracted row, dominant partner) route. A cluster's consensus pools its strands'
@@ -664,7 +670,7 @@ budget thread is available. Component jobs with at most 4,096 estimated traversa
 and at most 1 MiB scratch also run inline within the block workspace. Storage above
 1 MiB retains an explicit counted reservation. These thresholds affect execution only.
 Substantial independent pools and ordinary or lifted
-clique components use the concurrent path when spare budget threads can help. Estimated
+residual pools use the concurrent path when spare budget threads can help; each small packed cover is serial. Estimated
 work orders parallel tasks largest first; counted output sizes govern large-storage
 reservations and materialisation. There is no fixed core split or named-contig scheduling.
 Read-only cache snapshots feed parallel tasks; their deltas, omissions and sources merge
@@ -687,18 +693,15 @@ Cost in the founder count K, samples N and discovery sites L of one block:
   pool with R records has sorting and descriptor terms O(R L log R + A R log R),
   distances O(R A ceil(L/64)), and hierarchy/clique work F(A). Dense pools of size at
   most A retain exact quadratic geometry; explicit A=0 is the dense reference.
-- **Residual groups**: pair posteriors cost O(N K^2 L). Maximal-clique enumeration can
-  be exponential in A, independently of maximum-cut search. Exact anchor-clique counts
-  admit or omit whole components before lifting; factored sums/products avoid unnecessary
-  enumeration, and a prime-plan bound only orders work. Compiled traversal unions packed
-  original-record memberships, preserving nearest-anchor ties and descriptor multiplicity.
-  Deduplication checks every packed word on a hash collision, then counts unique lifted
-  sizes before the unchanged 64/128 whole-class rule. Only admitted alternative classes
-  become Python groups; core/hierarchy groups join separately outside that budget. This removes
-  base24's A256 limitation of constructing every admitted clique as a Python group before
-  lifted size screening. Packed storage still scales with admitted clique count C times
-  ceil(R/64), plus exact hash storage; traversal/lifting remains graph-dependent. The
-  output budget does not bound all pre-budget work or prove polynomial clique complexity.
+- **Residual groups**: pair posteriors cost O(N K^2 L). For A anchors, E edges and
+  W=ceil(A/64), the cover uses at most E greedy extensions of at most A packed
+  intersections: O(E A W), conservatively O(A^3 ceil(A/64)), with at most E groups.
+  Complete components use one group directly. This is polynomial in A; it does not
+  enumerate a Cartesian product or search tree. Packed lifting costs O(E A ceil(R/64))
+  for R original records; storage is O(E ceil(R/64)). Exact lifted identities and size
+  classes precede each component's 64/128 budget. Only admitted groups become Python tuples.
+  Core/hierarchy groups stay outside the alternative budget. At fixed A=256 the cover
+  adds no exponential K dependence; explicit dense A=0 remains polynomial in R.
 - **Search**: fixed-K work per expansion is roughly O(N L K^3) for O(K) starts at
   fixed proposal budgets/iteration counts. With a K-scaled expansion backstop this
   gives an O(N L K^4) fitting term, not a bound on total discovery: geometry, clique
@@ -821,12 +824,12 @@ class is omitted whole and recorded in search_incomplete with cause/count/scope.
 If the first class is too large, this proposal branch contributes no groups;
 other existing starts remain eligible. Such an omission is a computational limit.
 
-The existing hierarchy and complete maximal-clique family operate on the anchors.
+The existing hierarchy and the polynomial edge clique cover operate on the anchors.
 Every original record whose nearest-anchor class intersects a proposed group is
 included once in that group's consensus. All tied nearest anchors are retained.
 Original responsibilities and per-sample caps are unchanged; several alternative
 groups may contain the same observation without multiplying its weight within a
 group. Support ranking uses original membership sizes. Pools at or below the
-budget take the original exact route. The old density hierarchy is not preserved
+budget use dense geometry with the same edge cover. The old density hierarchy is not preserved
 for larger pools, so proposals and fitted outcomes can change. All observations
 remain in final fitting, held-out predictive scoring, and release.

@@ -15,15 +15,17 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 import time
+import warnings
 
 import numpy as np
 
 from .. import count_rule
 from .. import tie_rules
+from ...maths import ties
 from ...model.components import CountCall, CountStepDecision, FounderComponents, PreparedPanels
 from ... import execution
 from .config import FounderRefinementConfig
-from .count import count_pass
+from .count import _terminal_family, count_pass
 from .work_limit import WindowWorkLimit
 from .records import ComponentRefinement, LevelSummary, RefinementRecords
 from .search import SweepEngine
@@ -54,6 +56,8 @@ class LevelInput:
     additions: True at the last executed level (deletion and addition rounds); False: deletion
         rounds only.
     count_rule: the shared count rule's configuration.
+    genetic_map: the contig's model.genetic_map.ChromosomeGeneticMap: the objective's map-derived
+        switch costs.
     evidence_ref: optional execution.SharedArrayRef of a shared-memory segment holding ``evidence``
         (the caller keeps it alive during the call): pooled levels attach it instead of copying the
         evidence into a new segment (12 S L bytes saved per pooled level).
@@ -67,6 +71,7 @@ class LevelInput:
     cost_scale: float
     additions: bool
     count_rule: count_rule.CountRuleConfig
+    genetic_map: object = None
     evidence_ref: object | None = None
     release_alternatives: tuple = ()
 
@@ -98,6 +103,7 @@ class _Settings:
     additions: bool
     count_rule: count_rule.CountRuleConfig
     level: int = 0
+    genetic_map: object = None
 
 
 def bin_floor(level: int, prepared, config: FounderRefinementConfig) -> int:
@@ -166,6 +172,47 @@ def _refinement_inputs(component, incoming):
     return tuple(sorted(panels)), tuple(retained)
 
 
+def _polish(engine, result, budget):
+    """The polish refit (FounderRefinementConfig.polish) of the count pass's decided
+    panel and of its same-K equal-F alternatives (converge(polish=True): beam escapes and bridges at
+    every ordinary fixed point). The best polished fit (tie classes of F, content order) and its
+    equal-F family follow the count pass's own terminal rule (count._terminal_family). K is never
+    changed. Returns (the CountPass with the polished panel, the polish fits appended to its fits; the polish
+    record: the count pass's final fit and F, the polished F and gain, the polish fits' labels). The count pass's
+    decisions, bands and best-F restoration were taken on the pre-polish panel and are not re-evaluated
+    (count_reevaluated False)."""
+    panels = [np.asarray(result.rows, np.int64)]
+    seen = {tie_rules.panel_key(panels[0])}
+    for family in result.live_alternatives:
+        for panel in family["panels"]:
+            key = tie_rules.panel_key(np.asarray(panel))
+            if key not in seen:
+                seen.add(key)
+                panels.append(np.asarray(panel, np.int64))
+    fits = [engine.converge(panel, "polish" if i == 0 else f"polish.alt{i}", budget, polish=True)
+            for i, panel in enumerate(panels)]
+    values = [float(fit.summary.F) for fit in fits]
+    contents = [tie_rules.panel_key(fit.rows) for fit in fits]
+    classes = ties.tie_classes(values, tie_rules.quantum("refine_F", max(abs(v) for v in values)),
+                               content=contents, descending=True)
+    final = fits[classes.winner]
+    chosen, scores, live = _terminal_family(engine, fits, final, engine.per_sample(final.rows, budget),
+                                            budget)
+    recorded = (*result.fits, *(fit.summary for fit in fits))
+    unchanged = (tie_rules.panel_key(chosen.rows) == tie_rules.panel_key(result.rows)
+                 and live == result.live_alternatives)
+    record = dict(from_fit=result.final_fit, F_before=float(result.F),
+                  F_after=float(result.F if unchanged else scores.sum()),
+                  gain=0.0 if unchanged else float(scores.sum()) - float(result.F),
+                  changed=not unchanged, fits=tuple(fit.summary.label for fit in fits),
+                  starts=len(panels), count_reevaluated=False)
+    if unchanged:
+        return replace(result, fits=recorded), record
+    return replace(result, rows=chosen.rows, scores=scores, F=float(scores.sum()), fits=recorded,
+                   final_fit=chosen.summary.label, weak_junctions=chosen.weak_junctions,
+                   live_alternatives=live), record
+
+
 def _count_call(refinement: ComponentRefinement) -> CountCall:
     """The component's count call (founder_counts.tsv) from its refinement."""
     if refinement.reason is not None:
@@ -207,7 +254,11 @@ def refine_component(number, component, panels, evidence, context, settings, bud
     with execution.numba_threads(max(1, int(budget.threads()))):
         workspace = ComponentWorkspace(panels, evidence,
                                        min_sites_per_bin=settings.min_sites_per_bin,
-                                       max_bins=settings.config.proposal_max_bins)
+                                       max_bins=settings.config.proposal_max_bins,
+                                       genetic_map=settings.genetic_map,
+                                       genotype_error=settings.config.genotype_error,
+                                       reset_rate=settings.config.reset_rate,
+                                       map_probability_floor=settings.config.map_probability_floor)
         engine = SweepEngine(workspace, context, settings.config, fit_records, f"component{number}",
                              counter=counter, census_prefix=census_prefix,
                              source_start=component.start)
@@ -251,6 +302,22 @@ def refine_component(number, component, panels, evidence, context, settings, bud
                                selected_fits=0, **work))
         return replace(component, count_call=_count_call(refinement)), refinement
     count_seconds = time.perf_counter() - count_started
+    polish_seconds = 0.0
+    polish = dict(status="off")
+    if engine.beam is not None:
+        polish_started = time.perf_counter()
+        try:
+            result, record = _polish(engine, result, budget)
+            polish = dict(status="done", **record)
+        except WindowWorkLimit:
+            # The component's window-work account ran out during the polish: the count pass's complete,
+            # decided panel stands unpolished (declared policy: the polish is a separate stage after the count
+            # pass, whose decisions never depend on it; FounderRefinementConfig.window_work_coefficient).
+            polish = dict(status="window_work_bound", from_fit=result.final_fit, F_before=float(result.F),
+                          count_reevaluated=False)
+            warnings.warn(f"founder refinement component {number}: the polish reached the window work bound; "
+                          "the count pass's panel is kept unpolished", RuntimeWarning)
+        polish_seconds = time.perf_counter() - polish_started
     rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(
@@ -274,7 +341,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         count_continuations=result.count_continuations,
         count_branch_evaluations=result.count_branch_evaluations,
         count_branch_seconds=result.count_branch_seconds,
-        phase_seconds=dict(count_step=count_seconds, **engine._phase_seconds),
+        phase_seconds=dict(count_step=count_seconds, polish=polish_seconds, **engine._phase_seconds),
+        polish=polish,
         work_counters=dict(selected_count_decisions=len(result.decisions),
                            selected_fits=len(result.fits), **engine._work_counters))
     refined = replace(component, rows=np.ascontiguousarray(rows, np.int32),
@@ -337,12 +405,16 @@ def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds)
         decided_by_sequence_part=sequence_rejected, hidden_sequence_failures=hidden,
         ambiguous_count_calls=tuple(ambiguous),
         phase_seconds={name: sum(item.phase_seconds.get(name, 0.0) for item in refinements)
-                       for name in ("count_step", "messages", "refinement_windows", "acceptance",
+                       for name in ("count_step", "polish", "messages", "refinement_windows", "acceptance",
                                     "guarded_acceptance")},
         work_counters={name: sum(item.work_counters.get(name, 0) for item in refinements)
                        for name in ("selected_count_decisions", "selected_fits", "searches", "windows", "templates_solved",
                                     "templates_reused", "dp", "fixing_dps",
-                                    "guard_shared_tests", "guard_traced_blocks")})
+                                    "guard_shared_tests", "guard_traced_blocks", "beam_truncations",
+                                    "beam_fallbacks", "content_rounds", "round_cap", "stale_evaluated",
+                                    "exchange_cap", "escape_windows", "escape_beam_cut",
+                                    "escape_beam_binding", "long_windows", "long_beam_cut", "long_beam_binding",
+                                    "long_candidates", "lex_items", "lex_abort")})
 
 
 def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: execution.CpuBudget,
@@ -366,7 +438,8 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
     settings = _Settings(config=config, min_sites_per_bin=bin_floor(level.level, level.prepared,
                                                                        config),
                          cost_scale=float(level.cost_scale), additions=bool(level.additions),
-                         count_rule=level.count_rule, level=int(level.level))
+                         count_rule=level.count_rule, level=int(level.level),
+                         genetic_map=level.genetic_map)
     tasks = []
     for number, component in enumerate(level.components):
         if results[number] is not None:
@@ -405,12 +478,11 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
         # Largest components first: the level's tail is the smallest work.
         order = sorted(range(len(tasks)), key=lambda i: -sum(panel.sites for panel in tasks[i][2]))
         shared = level.evidence if level.evidence_ref is None else level.evidence_ref
-        with execution.reserve_memory(workers * WORKER_RESIDENT_BYTES, label=f"{label} workers"):
-            with execution.BudgetedPool(budget, processes=workers, shared={"evidence": shared},
-                                        label=label) as pool:
-                for number, result in pool.imap_unordered(_component_task, [tasks[i] for i in order],
-                                                          task_bytes=[sizes[i] for i in order]):
-                    record(number, result)
+        with execution.BudgetedPool(budget, processes=workers, shared={"evidence": shared},
+                                    label=label) as pool:
+            for number, result in pool.imap_unordered(_component_task, [tasks[i] for i in order],
+                                                      task_bytes=[sizes[i] for i in order]):
+                record(number, result)
     refinements = tuple(item[1] for item in results)
     summary = summarise(level.level, level.additions, settings.min_sites_per_bin, refinements,
                         time.perf_counter() - started)

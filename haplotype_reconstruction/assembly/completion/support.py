@@ -26,8 +26,8 @@ def cube(centre, varying):
     varying = np.asarray(varying, dtype=np.int64)
     centre[varying] = 0
     count = 1 << len(varying)
-    return SiteSupport(centre, varying, np.empty((count, 0), np.int64),
-                       np.zeros(count, np.int64), 0)
+    return SiteSupport(centre, varying, np.empty((count, 0), np.int8),
+                       np.zeros(count, np.int8), 0)
 
 
 def from_core(fixed, unknown, b, core, flips, sizes, radius):
