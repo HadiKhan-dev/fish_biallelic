@@ -1,14 +1,17 @@
 """Held-out read-model calibration of one contig and the application of the selected model.
 
-Every ``marker_stride``-th site enters per-sample histograms of (depth, ALT count) cells with
+About one kept site in ``marker_stride``, chosen by its position (``calibration_sites``), enters per-sample
+histograms of (depth, ALT count) cells with
 depth 1..``maximum_fit_depth``, split into four physical folds by ``fold_window_bp`` windows. The
 nested candidates of ``fit.py`` are fitted on folds 0/1; fold 2 selects the candidate with the
 highest predictive log likelihood (candidates within ``_SELECTION_TIE_NATS`` of the best are tied
 and the simplest of them wins; a fit that fails with an error cannot displace the shared model;
-optimiser convergence flags are diagnostics and decide nothing); fold 3 is a diagnostic only.
-The selected fit is applied to every cell of the contig without genotype-mixture priors. When
-calibration is disabled, a fold is empty, the shared model cannot be fitted or no candidate has a
-finite selection score, the fixed binomial model applies (``EvidenceConfig.fixed_error``).
+optimiser convergence flags are diagnostics and decide nothing); fold 3 is a diagnostic only (its
+score is unavailable when no fold-3 observation is admitted, e.g. on a contig spanning fewer than
+three fold windows). The selected fit is applied to every cell of the contig without
+genotype-mixture priors. When calibration is disabled, a training or selection fold is empty, the
+shared model cannot be fitted or no candidate has a finite selection score, the fixed binomial
+model applies (``EvidenceConfig.fixed_error``).
 No truth, pedigree or founder panel enters fitting.
 """
 from __future__ import annotations
@@ -39,8 +42,9 @@ class CalibrationReport:
     applied: a fitted model was applied (False: the fixed model, see fallback_reason).
     selected: name of the applied candidate (None when not applied). fits: every candidate that
     was fitted, by name in candidate order. scores: {name: (selection fold, diagnostic fold)}
-    predictive log likelihoods (nats). fold_observations: training/selection/diagnostic cell
-    counts per fold. Failures of the complex fits are kept as messages.
+    predictive log likelihoods (nats; the diagnostic score is None when fold 3 is empty).
+    fold_observations: training/selection/diagnostic cell counts per fold. Failures of the
+    complex fits are kept as messages.
     """
 
     applied: bool
@@ -50,10 +54,13 @@ class CalibrationReport:
     observations_used: int
     high_depth_excluded: int
     fits: Mapping[str, fits.ReadModelFit] = field(default_factory=dict)
-    scores: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    scores: Mapping[str, tuple[float, float | None]] = field(default_factory=dict)
     complex_fit_failure: str | None = None
     shared_fit_warning: str | None = None
     shared_fit_diagnostics: Mapping | None = None
+    # maths.ties.TieCounter record: ev.read_model.select.band, inside_tie when more than one eligible
+    # candidate lay within _SELECTION_TIE_NATS of the best selection score (the simplest was applied).
+    tie_events: Mapping = field(default_factory=dict)
 
     @property
     def selection_gain_over_shared(self) -> float | None:
@@ -63,7 +70,7 @@ class CalibrationReport:
 
     @property
     def diagnostic_gain_over_shared(self) -> float | None:
-        if self.selected is None:
+        if self.selected is None or self.scores[self.selected][1] is None:
             return None
         return self.scores[self.selected][1] - self.scores[fits.BINOMIAL][1]
 
@@ -75,7 +82,7 @@ class CalibrationReport:
                     high_depth_excluded=self.high_depth_excluded,
                     fits={name: value.record() for name, value in self.fits.items()},
                     scores={name: list(value) for name, value in self.scores.items()},
-                    complex_fit_failure=self.complex_fit_failure,
+                    complex_fit_failure=self.complex_fit_failure, tie_events=dict(self.tie_events),
                     **({} if self.shared_fit_warning is None else dict(
                         shared_fit_warning=self.shared_fit_warning,
                         shared_fit_diagnostics=self.shared_fit_diagnostics)))
@@ -92,16 +99,37 @@ class CalibrationReport:
                    scores={name: tuple(value) for name, value in record["scores"].items()},
                    complex_fit_failure=record["complex_fit_failure"],
                    shared_fit_warning=record.get("shared_fit_warning"),
-                   shared_fit_diagnostics=record.get("shared_fit_diagnostics"))
+                   shared_fit_diagnostics=record.get("shared_fit_diagnostics"),
+                   tie_events=record.get("tie_events", {}))
+
+
+def _position_priority(positions) -> np.ndarray:
+    """A fixed pseudo-random uint64 priority of every integer position (the splitmix64 finaliser)."""
+    with np.errstate(over="ignore"):
+        z = np.asarray(positions, dtype=np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        return z ^ (z >> np.uint64(31))
+
+
+def calibration_sites(positions, config: ReadModelConfig) -> np.ndarray:
+    """Indices of the calibration sites among the positions: each is used with probability 1/``marker_stride``,
+    decided by its position alone (its fixed priority lies in the lowest 1/``marker_stride`` of the uint64 range).
+
+    The sample is a uniform draw from the kept sites whatever their local density, so the fitted model describes the
+    sites it is applied to, and adding or removing a position changes no other position's use. Sites closer than a
+    read fragment can both be used, as with 2.3-2.10's every ``marker_stride``-th kept site."""
+    threshold = np.uint64((2**64 - 1) // config.marker_stride)
+    return np.flatnonzero(_position_priority(np.asarray(positions, dtype=np.int64)) <= threshold)
 
 
 def histograms(counts, positions, config: ReadModelConfig):
-    """Per-fold, per-sample histograms over the observed (depth, ALT) cells of the stride sites.
+    """Per-fold, per-sample histograms over the observed (depth, ALT) cells of the calibration sites.
 
     Returns (hist float64[4, N, C], depth int64[C], alt int64[C], observations_used,
     high_depth_excluded); C = cells with depth 1..maximum_fit_depth seen in any fold.
     """
-    indices = np.arange(0, len(positions), config.marker_stride)
+    indices = calibration_sites(positions, config)
     sampled = np.asarray(counts[:, indices], np.int64)
     depth = sampled.sum(axis=2)
     alt = sampled[:, :, 1]
@@ -134,10 +162,12 @@ def calibrate(counts, positions, config: ReadModelConfig, *, threads: int):
     fold_observations = tuple(int(fold.sum()) for fold in hist)
     report = dict(fold_observations=fold_observations, observations_used=used,
                   high_depth_excluded=high)
-    if any(fold.sum() == 0 for fold in hist):
+    if any(hist[fold].sum() == 0 for fold in (*_TRAIN_FOLDS, _SELECTION_FOLD)):
         return None, CalibrationReport(
             applied=False, selected=None,
-            fallback_reason="all four physical folds need calibration observations", **report)
+            fallback_reason="the training and selection folds need calibration observations", **report)
+    # The diagnostic fold decides nothing: a contig without admitted fold-3 observations is still calibrated.
+    diagnostic = hist[_DIAGNOSTIC_FOLD].sum() > 0
     training = hist[_TRAIN_FOLDS[0]] + hist[_TRAIN_FOLDS[1]]
     try:
         shared = fits.fit_shared(training, depth, alt, config)
@@ -168,10 +198,14 @@ def calibrate(counts, positions, config: ReadModelConfig, *, threads: int):
     except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
         complex_failure = str(error)
     scores = {name: (fits.score(hist[_SELECTION_FOLD], depth, alt, model),
-                     fits.score(hist[_DIAGNOSTIC_FOLD], depth, alt, model))
+                     fits.score(hist[_DIAGNOSTIC_FOLD], depth, alt, model) if diagnostic else None)
               for name, model in candidates.items()}
-    common = dict(fits=candidates, scores=scores, complex_fit_failure=complex_failure, **report)
     selected = select(scores)
+    eligible = [value[0] for value in scores.values() if np.isfinite(value[0])]
+    banded = sum(value >= max(eligible) - _SELECTION_TIE_NATS for value in eligible) if eligible else 0
+    tie_events = {"ev.read_model.select.band": dict(decisions=1, inside_tie=int(banded > 1), wide=0, boundary=0)}
+    common = dict(fits=candidates, scores=scores, complex_fit_failure=complex_failure, tie_events=tie_events,
+                  **report)
     if selected is None:
         return None, CalibrationReport(applied=False, selected=None,
                                        fallback_reason="no finite predictive fit", **common)

@@ -90,7 +90,8 @@ class SampleQualityConfig:
 class ReadModelConfig:
     """Held-out calibration of the observed-AD read model (``evidence/read_model``).
 
-    Fitting uses every ``marker_stride``-th site, cells of depth 1..``maximum_fit_depth``, and
+    Fitting uses about one kept site in ``marker_stride``, chosen by its position (``calibrate.calibration_sites``),
+    cells of depth 1..``maximum_fit_depth``, and
     four physical folds of ``fold_window_bp`` windows (folds 0/1 fit, fold 2 selects, fold 3 is
     diagnostic). The candidates are nested: shared binomial (EM from ``em_starts``), pooled
     sample binomial and sample beta-binomial heterozygotes (joint concentration); homozygotes are
@@ -99,6 +100,10 @@ class ReadModelConfig:
     """
 
     enabled: bool = True
+    # Calibration sites: each kept site is used with probability 1/marker_stride, decided by a fixed pseudo-random
+    # hash of its position alone, so the sample is drawn from the kept sites the model is applied to (as 2.3-2.10's
+    # every marker_stride-th kept site by index) and adding or removing a kept site changes no other site's use.
+    # A statistical sampling-design choice.
     marker_stride: int = 8
     maximum_fit_depth: int = 48
     fold_window_bp: int = 1_000_000

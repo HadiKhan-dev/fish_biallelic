@@ -82,10 +82,31 @@ heterozygotes, and c_l, the number of samples with reads. The clean-core rates a
 not fixed:
 
 - r3, among r1/r2-passing sites with N_l >= 1: clean W ~ Poisson(N eps0), artefact
-  W ~ NegBin(mean N eps1, shape k), fitted by EM with numerical M-steps;
+  W ~ NegBin(mean N eps1, shape k, clipped to [1e-3, 1e4]);
 - r4, among r1-r3-passing sites with H_l >= 1: clean A ~ Binomial(H, h0), artefact
-  A ~ beta-binomial(mean m, concentration c). The clean heterozygote ALT fraction h0 is also the
-  balance the sample QC uses.
+  A ~ beta-binomial(mean m, concentration c, clipped to [1e-2, 1e5]). The clean heterozygote ALT
+  fraction h0 is also the balance the sample QC uses.
+
+Both are fitted by EM: closed-form clean and mixing updates, and an artefact M-step that maximises
+the weighted artefact log likelihood over its two parameters (log rate and log shape; logit mean
+and log concentration) jointly within the box of those clips, by projected Newton steps with
+analytic gradients and Hessians. An M-step stops when the full Newton step moves no transformed
+parameter q by more than 1e-8 max(1, |q|); it is certified stationary when its projected gradient,
+divided by the artefact class's posterior weight, is then at most 1e-9 (a dispersion held at its
+clip needs only an outward gradient), and otherwise recorded as a small-step stop whose gradient
+certificate is unmet (`precision`). Each mixture records its M-step outcomes (`m_steps`:
+stationary, precision, line-search and iteration-cap counts, and the largest gradient over all
+its M-steps). On TroMau, 2,060 of 3,236 M-steps are certified and the rest are small-step stops
+(largest normalized gradient 3.1e-7); none fails its line search or reaches the cap. The EM stops when the summed parameter change
+falls below 1e-5 (r3) or 1e-6 (r4), or after 300 iterations. Where the data hold no artefact
+class (clean reads) the two components nearly coincide and the EM can run to its cap; each
+iteration then costs a few likelihood passes. Releases 2.10 and earlier searched the unbounded
+parameters with Nelder-Mead and then clipped the dispersion alone, which could leave the stored
+rate or mean non-stationary for the stored dispersion and miss the maximum by more than the EM
+tolerance, at about 100 likelihood passes per iteration. On TroMau the change moves the r3 flag
+of one site on each of five contigs, each with a clean posterior of about 1/2 (0.49995 to
+0.50002 in the comparisons); three of them become kept sites, each of which can also enter the
+calibration sample (below).
 
 A site is flagged by r3 or r4 when its posterior probability of the clean class is below
 `EvidenceConfig.site_quality.clean_posterior_level = 0.5`, and only when the artefact class
@@ -262,22 +283,32 @@ Bayesian inference, and it does not guarantee identifiability at low depth.
 
 ### Folds, selection and fallback
 
-Every `EvidenceConfig.read_model.marker_stride = 8`-th site (of the sites the filter keeps)
-contributes per-sample histograms of (depth, ALT) cells with depth 1 to
+Calibration uses about one kept site in `EvidenceConfig.read_model.marker_stride = 8`: every kept
+site has a fixed pseudo-random priority computed from its position alone (the splitmix64 finaliser), and
+a site is used when its priority lies in the lowest eighth of the range. Each used site contributes per-sample histograms of (depth, ALT) cells with depth 1 to
 `EvidenceConfig.read_model.maximum_fit_depth = 48`; deeper cells are left out of fitting only. The
 sites fall into four physical folds, floor(POS / `EvidenceConfig.read_model.fold_window_bp = 1000000`)
-mod 4. Folds 0 and 1 fit every candidate; fold 2 selects among the candidates with a finite
+mod 4. The sample is a uniform draw from the kept sites whatever their local density, so the fitted
+model describes the sites it is applied to, and adding or removing a kept site changes no other site's
+use (the per-contig fit, and so the likelihoods, can still change everywhere). Used sites closer than a
+sequenced fragment can share reads, so the observations are not independent. Releases 2.3 to 2.10 took
+every eighth kept site by index, so one inserted site changed the calibration sample for the rest of the
+contig. Thinning the kept sites to a minimum spacing would instead sample along the genome: on TroMau it
+over-represents sparse regions about threefold and lowers the fitted error rates systematically. On
+TroMau chr16 the sample holds 9,711 of 78,415 kept sites (the 2.10 stride: 9,802). Folds 0 and 1 fit every candidate; fold 2 selects among the candidates with a finite
 predictive log likelihood (each scored with its training genotype mixtures): candidates within one
 nat of the best (`evidence.read_model.calibrate._SELECTION_TIE_NATS = 1.0`) are tied and the
 simplest of them is applied, so a more complex model must predict the selection fold better by
 more than a likelihood ratio of e; fold 3 is an untouched diagnostic
-that never chooses parameters or the model. Every sample is calibrated, flagged samples included.
+that never chooses parameters or the model (a contig without admitted fold-3 observations but with
+populated training and selection folds, for example one spanning fewer than three fold windows, is
+still calibrated and its diagnostic score is unavailable). Every sample is calibrated, flagged samples included.
 
 The selected training fit is applied to every cell of the contig without a full-data refit, so
 some of the reads the likelihoods describe also trained the model: this is not out-of-fold
 application. The fixed binomial model, e = `EvidenceConfig.fixed_error = 0.02` and q = 1/2 for
-every sample, applies instead when calibration is disabled, when any fold lacks calibration
-observations (short or sparse contigs), when no shared EM start converges, or when no candidate
+every sample, applies instead when calibration is disabled, when a training or selection fold lacks
+calibration observations (short or sparse contigs), when no shared EM start converges, or when no candidate
 has a finite selection score; the reason is recorded. No truth, pedigree or founder panel
 enters estimation.
 
@@ -331,7 +362,7 @@ indices. These are the units of [discovery](discovery.md) and
 | loading | `evidence/vcf.py` | worker processes scan disjoint physical windows, then decode directly into one shared sample-major array | O(N M_in); two BCF passes, no count-array result transfers |
 | site filter | `evidence/site_quality.py` | per-site genotype EM parallel over sites; elementwise mixture terms in thread chunks | O(N M_in) (at most 60 EM iterations per site) plus O(M_in) per mixture iteration |
 | sample QC | `evidence/sample_quality.py` | vectorised | O(N M_in), then per-sample fits over private cells |
-| read model | `evidence/read_model/fit.py`, `evidence/read_model/calibrate.py` | per-sample fits in threads; objectives parallel over samples | histograms O(N M_kept / 8); each objective O(N C), C <= 1,224, independent of chromosome length |
+| read model | `evidence/read_model/fit.py`, `evidence/read_model/calibrate.py` | per-sample fits in threads; objectives parallel over samples | site selection O(M_kept); histograms O(N M_cal), M_cal about M_kept / 8; each objective O(N C), C <= 1,224, independent of chromosome length |
 | likelihoods | `evidence/read_model/emission.py` | samples in parallel; a lookup/prefix table per active sample | O(N M_kept) |
 
 The stage has no dependence on founder count K. Here N is sample count, M_in the input SNP count,
@@ -342,9 +373,9 @@ of whole-window results and concatenation/filter/transpose copies. Canonical sam
 requires a second count array while permuting, so source loading can peak at 16 N M_in bytes.
 
 Site selection writes one C-order count array. The driver releases input counts immediately after
-selection, before calibration/emission. Read-model histogram construction retains the stride-site
-int64 counts/depths and four square histograms, then a compact histogram copy: a conservative bound
-beyond kept counts is 27 N ceil(M_kept/8) + 32 N (49^2 + C) bytes. Fitting remains O(N C).
+selection, before calibration/emission. Read-model histogram construction retains the calibration
+sites' int64 counts/depths and four square histograms, then a compact histogram copy: a conservative
+bound beyond kept counts is 27 N M_cal + 32 N (49^2 + C) bytes for M_cal calibration sites. Fitting remains O(N C).
 Likelihood emission allocates its 24 N M_kept output once. Lookup storage is now
 24 T (cap+1)^2 bytes for T active samples, instead of 24 N (cap+1)^2; prefix tables use at most
 128 T (D+1) bytes for deepest cell D. Prefix sums and cell normalization retain their original
@@ -409,8 +440,10 @@ boundary at tau = 0.
   (chr22), with every selected model unchanged. Flat directions can still amplify rounding, so
   neither numerical uniqueness nor invariance of every downstream decision follows from this
   comparison. The one-nat selection rule is unchanged.
-- Optimiser bounds, starts, tolerances and the sampling stride are numerical choices, not
-  biological estimates.
+- Optimiser bounds, starts and tolerances are numerical choices, not biological estimates; the
+  calibration sampling rate (one kept site in eight) is a statistical sampling-design choice (it changes
+  which observations train the read model). The one-nat selection band is a preference
+  applied to summed marginal predictive scores, not a confidence level.
 - The site filter's depth rules cannot distinguish benign sample-specific missingness from mapping
   artefacts, and r5 removes sites without segregating information by design.
 - The contamination QC detects foreign DNA through private alleles only: contamination shared by

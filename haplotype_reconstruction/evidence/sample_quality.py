@@ -43,7 +43,7 @@ family phase and recombination use every sample's evidence.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping
 
 import numpy as np
@@ -112,6 +112,10 @@ class SampleQualityResult:
     counting_noise_sd: float | None
     segments: tuple[InheritedSegment, ...] = ()
     config: Mapping[str, Any] = field(default_factory=dict)
+    # maths.ties.TieCounter record: ev.qc.minor_allele counts, once per site, the sites whose minor allele
+    # can give near-private cells (the chosen minor allele does, or at equal REF/ALT totals either allele has
+    # one or two carriers) and, inside_tie, those with equal totals, where the convention chose.
+    tie_events: Mapping[str, Any] = field(default_factory=dict)
 
     _ARRAYS = ("flagged", "robust_z", "statistic", "low_fraction_events", "fitted_low_fraction",
                "private_events", "private_minor_read_fraction", "heterozygous_like_events",
@@ -123,7 +127,8 @@ class SampleQualityResult:
                       passing_sites=self.passing_sites, heterozygote_balance=self.heterozygote_balance,
                       cohort_median=self.cohort_median, cohort_robust_sd=self.cohort_robust_sd,
                       counting_noise_sd=self.counting_noise_sd, config=dict(self.config),
-                      segments=[asdict(segment) for segment in self.segments])
+                      segments=[asdict(segment) for segment in self.segments],
+                      tie_events=dict(self.tie_events))
         return record
 
     @classmethod
@@ -134,7 +139,8 @@ class SampleQualityResult:
                    heterozygote_balance=record["heterozygote_balance"],
                    cohort_median=record["cohort_median"], cohort_robust_sd=record["cohort_robust_sd"],
                    counting_noise_sd=record["counting_noise_sd"], config=record["config"],
-                   segments=tuple(InheritedSegment(**row) for row in record["segments"]), **values)
+                   segments=tuple(InheritedSegment(**row) for row in record["segments"]),
+                   tie_events=record.get("tie_events", {}), **values)
 
 
 def _truncated_binomial(k, d, p):
@@ -233,7 +239,7 @@ def _collect_near_private(tiles, n_samples, heterozygote_balance):
     """
     columns = [[] for _ in range(8)]
     observed = np.zeros(n_samples, np.int64)
-    passing_sites = 0
+    passing_sites = contributing = tied = 0
     for alt, dep, positions in tiles:
         passing_sites += len(positions)
         # At equal read totals ALT is minor by convention (REF under convention reversal).
@@ -245,6 +251,15 @@ def _collect_near_private(tiles, n_samples, heterozygote_balance):
         carriers = carrier.sum(axis=1)
         observed += (dep > 0).sum(axis=0)
         site, sample = np.nonzero(carrier & (carriers <= 2)[:, None])
+        has_cells = np.zeros(len(positions), bool)
+        has_cells[site] = True
+        # At equal totals either allele could have been chosen: count the tie whenever one of them would
+        # give near-private cells, so a convention that suppresses the cells still leaves its trace.
+        alt_carriers, ref_carriers = (alt > 0).sum(axis=1), ((dep - alt) > 0).sum(axis=1)
+        equal = (alt_total == ref_total) & (alt_total > 0) & (
+            ((alt_carriers >= 1) & (alt_carriers <= 2)) | ((ref_carriers >= 1) & (ref_carriers <= 2)))
+        contributing += int((has_cells | equal).sum())
+        tied += int(equal.sum())
         partner = np.full(len(site), -1, np.int64)
         first = np.flatnonzero((carriers[site] == 2) & np.r_[True, site[1:] != site[:-1]])
         partner[first] = sample[first + 1]
@@ -264,7 +279,8 @@ def _collect_near_private(tiles, n_samples, heterozygote_balance):
     dtypes = (float, float, float, np.int64, np.int64, np.int64, np.int64, np.int64)
     cells = tuple(np.concatenate(column) if column else np.empty(0, dtype)
                   for column, dtype in zip(columns, dtypes))
-    return passing_sites, observed, cells
+    minor_allele = {"ev.qc.minor_allele": dict(decisions=contributing, inside_tie=tied, wide=0, boundary=0)}
+    return passing_sites, observed, cells, minor_allele
 
 
 def assess_counts(counts, positions, passing, heterozygote_balance, config: SampleQualityConfig, *,
@@ -285,8 +301,9 @@ def assess_counts(counts, positions, passing, heterozygote_balance, config: Samp
             yield alt, dep, np.asarray(positions[selected], np.int64)
 
     n_samples = counts.shape[0]
-    passing_sites, observed, cells = _collect_near_private(tiles(), n_samples, heterozygote_balance)
-    return _assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config)
+    passing_sites, observed, cells, minor_allele = _collect_near_private(tiles(), n_samples, heterozygote_balance)
+    return replace(_assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config),
+                   tie_events=minor_allele)
 
 
 def assess(alt, dep, positions, heterozygote_balance, config: SampleQualityConfig) -> SampleQualityResult:
@@ -305,8 +322,9 @@ def assess(alt, dep, positions, heterozygote_balance, config: SampleQualityConfi
                    np.asarray(positions[start:stop], np.int64))
 
     n_samples = dep.shape[1]
-    passing_sites, observed, cells = _collect_near_private(tiles(), n_samples, heterozygote_balance)
-    return _assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config)
+    passing_sites, observed, cells, minor_allele = _collect_near_private(tiles(), n_samples, heterozygote_balance)
+    return replace(_assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config),
+                   tie_events=minor_allele)
 
 
 def _assess_cells(n_samples, passing_sites, observed, k, d, het, position, sample, partner,

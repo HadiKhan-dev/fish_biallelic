@@ -26,11 +26,12 @@ from pathlib import Path
 from .tables import write_json, write_rows
 
 FIELDS = ("decisions", "inside_tie", "wide", "boundary")
-STAGE_ORDER = ("discovery", "local_selection", "assembly", "painting", "pedigree")
+STAGE_ORDER = ("evidence", "discovery", "local_selection", "assembly", "painting", "pedigree")
 # Record groups that hold tie_events: (key pattern, stage, top-level entries decoded). assembly/final repeats the
 # join summaries of assembly/l*/join and is read only for the final count calls; refinement fit checkpoints and the
 # digest-keyed joins/ records are not read (no events, or the same joins again).
 GROUPS = (
+    (re.compile(r"evidence"), "evidence", ("report",)),
     (re.compile(r"discovery/blocks/\d+"), "discovery", ("blocks",)),
     (re.compile(r"local_selection/[^/]+/blocks/\d+"), "local_selection", ("summaries",)),
     (re.compile(r"local_selection/[^/]+/proposals"), "local_selection", ("summary",)),

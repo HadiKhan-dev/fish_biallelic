@@ -183,22 +183,30 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
         best_cost = np.empty(width, dtype=np.float64)
         best_state = np.empty(width, dtype=np.int64)
         best_previous = np.empty(width, dtype=np.float64)
+        switch_base = np.empty(width, dtype=np.float64)
         for panel in range(b_count):
             for t in range(width):
                 best_cost[t] = np.inf
                 best_state[t] = 0
+                best_previous[t] = -np.inf
             for state in range(n_states - 1):
                 shared = state_indices[panel, state]
                 for t in range(width):
                     candidate = -totals[shared, t]
                     if candidate < best_cost[t]:
                         best_cost[t] = candidate
-                    alpha[state, t] = emissions[shared, 0, t]
+                    value = emissions[shared, 0, t]
+                    alpha[state, t] = value
+                    if value > best_previous[t]:
+                        best_previous[t] = value
             for t in range(width):
                 s = start_sample + t
                 if ww_total_cost[s] < best_cost[t]:
                     best_cost[t] = ww_total_cost[s]
-                alpha[n_states - 1, t] = ww_bin_emissions[s, 0]
+                value = ww_bin_emissions[s, 0]
+                alpha[n_states - 1, t] = value
+                if value > best_previous[t]:
+                    best_previous[t] = value
                 threshold = best_cost[t] + tie
                 m0 = k
                 m1 = k
@@ -230,37 +238,35 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
                 assignments[panel, s, 0] = m0
                 assignments[panel, s, 1] = m1
                 unknown_slots[panel, s] = category_won
+            # Carry each bin's maximum as the alpha values are updated.
             for b in range(1, n_bins):
                 for t in range(width):
+                    switch_base[t] = best_previous[t] - penalty
                     best_previous[t] = -np.inf
-                for state in range(n_states):
-                    for t in range(width):
-                        if alpha[state, t] > best_previous[t]:
-                            best_previous[t] = alpha[state, t]
                 for state in range(n_states - 1):
                     shared = state_indices[panel, state]
                     for t in range(width):
-                        switch_base = best_previous[t] - penalty
                         stay = alpha[state, t]
                         e = emissions[shared, b, t]
-                        if stay > switch_base:
-                            alpha[state, t] = stay + e
+                        if stay > switch_base[t]:
+                            value = stay + e
                         else:
-                            alpha[state, t] = switch_base + e
+                            value = switch_base[t] + e
+                        alpha[state, t] = value
+                        if value > best_previous[t]:
+                            best_previous[t] = value
                 for t in range(width):
-                    switch_base = best_previous[t] - penalty
                     stay = alpha[n_states - 1, t]
                     e = ww_bin_emissions[start_sample + t, b]
-                    if stay > switch_base:
-                        alpha[n_states - 1, t] = stay + e
+                    if stay > switch_base[t]:
+                        value = stay + e
                     else:
-                        alpha[n_states - 1, t] = switch_base + e
+                        value = switch_base[t] + e
+                    alpha[n_states - 1, t] = value
+                    if value > best_previous[t]:
+                        best_previous[t] = value
             for t in range(width):
-                best_final = -np.inf
-                for state in range(n_states):
-                    if alpha[state, t] > best_final:
-                        best_final = alpha[state, t]
-                cost[panel, start_sample + t] = -best_final
+                cost[panel, start_sample + t] = -best_previous[t]
     return assignments, cost, unknown_slots, mask
 
 

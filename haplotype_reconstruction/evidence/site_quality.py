@@ -32,7 +32,6 @@ import numpy as np
 from numba import njit, prange, config as numba_config
 from numba.extending import get_cython_function_address
 from scipy import special
-from scipy.optimize import minimize
 
 from ..maths import ties
 from ..execution import numba_threads
@@ -48,7 +47,20 @@ QUALITY_RULES = RULES[:4]          # r1-r4; r5 is informativeness
 _SITE_EM_ITERATIONS = 60
 _MIXTURE_ITERATIONS = 300
 _HISTOGRAM_RANGE_PERCENTILES = (0.5, 99.5)
-_NELDER_MEAD_OPTIONS = dict(xatol=1e-4, fatol=1e-3, maxiter=200)
+# Artefact M-steps: projected Newton, stopped when the full Newton step moves no coordinate by more than _M_STEP_STEP
+# times max(1, |coordinate|) (log/logit scale); certified stationary when the projected gradient divided by the
+# artefact class's posterior weight is then at most _M_STEP_GRADIENT, else recorded as a small-step stop with the
+# gradient certificate unmet ("precision"). A step is accepted when the objective does not fall by more than
+# _M_STEP_ROUNDING times max(1, |objective|), or, for a Newton step, when it reduces the projected gradient while the
+# objective falls by at most _M_STEP_NOISE times that (near the maximum the summed objective's rounding exceeds the
+# remaining gain: large dispersions sum cancelling log-gamma terms).
+_M_STEP_GRADIENT = 1e-9
+_M_STEP_STEP = 1e-8
+_M_STEP_ROUNDING = 1e-13
+_M_STEP_NOISE = 1e-11
+_M_STEP_ITERATIONS = 100
+_M_STEP_CHUNKS = 256             # fixed site chunks: the sums do not depend on the thread count
+_POLYGAMMA_SHIFT = 16.0          # recurrence up to this argument before the asymptotic series
 _SITE_TILE_CELLS = 1 << 20
 _MAXIMUM_TILE_SITES = 4096
 _MINIMUM_CHUNK_SITES = 16384   # amortize thread dispatch for vectorized special functions
@@ -250,16 +262,23 @@ def _peak_core(x, smooth, integer=False):
         nb = int(np.clip((hi - lo) / max(width, 1e-12), 50, 2000))
     counts, edges = np.histogram(x, bins=nb, range=(lo, hi))
     centres = 0.5 * (edges[1:] + edges[:-1])
-    smoothed = np.convolve(counts, np.ones(smooth) / smooth, mode="same")
+    kernel = np.ones(smooth) / smooth
+    if nb >= smooth:
+        smoothed = np.convolve(counts, kernel, mode="same")
+    else:
+        # mode="same" returns the longer operand's length: keep the window centred on each of the nb bins.
+        smoothed = np.convolve(counts, kernel, mode="full")[(smooth - 1) // 2:(smooth - 1) // 2 + nb]
     # The mode bin: the first of exactly tied maxima (the last under the convention reversal, release 2.2).
     p = ties.conv_argmax(smoothed); top = smoothed[p]
 
     def cross(direction):
+        # Walk while the next bin exists (an interior mode stops where 2.10's walk did; a mode at an end of the
+        # histogram can now walk inwards, and the previous bin is never taken from beyond the other end).
         i = p
-        while 0 < i < len(smoothed) - 1 and smoothed[i] > top / 2:
+        while 0 <= i + direction < len(smoothed) and smoothed[i] > top / 2:
             i += direction
         j = i - direction
-        if smoothed[j] == smoothed[i]:
+        if not 0 <= j < len(smoothed) or smoothed[j] == smoothed[i]:
             return centres[i]
         return centres[j] + (top / 2 - smoothed[j]) * (centres[i] - centres[j]) / (smoothed[i] - smoothed[j])
     left, right = cross(-1), cross(+1)
@@ -267,17 +286,22 @@ def _peak_core(x, smooth, integer=False):
     density = top / (len(x) * (edges[1] - edges[0]))
     sd_left, sd_right = (centres[p] - left) / f, (right - centres[p]) / f
     return dict(mode=float(centres[p]), sd_left=float(sd_left), sd_right=float(sd_right),
-                peak_density=float(density),
+                peak_density=float(density), tied_mode=bool(np.count_nonzero(smoothed == top) > 1),
                 core_weight=float(density * np.sqrt(2 * np.pi) * 0.5 * (sd_left + sd_right)),
                 bins=nb, centres=centres, smooth=smoothed, n=len(x), width=float(edges[1] - edges[0]))
 
 
 def _bounds(core, level):
     """Window around the mode inside which the core's local posterior is >= level."""
+    if core["sd_left"] == 0.0 and core["sd_right"] == 0.0:
+        # Every value in one histogram bin: the core has no spread to bound, and nothing lies outside it.
+        return -np.inf, np.inf
     c = core["centres"]
     density = core["smooth"] / (core["n"] * core["width"])
     sd = np.where(c < core["mode"], core["sd_left"], core["sd_right"])
-    null = core["peak_density"] * np.exp(-0.5 * ((c - core["mode"]) / sd) ** 2)  # pi0*f0 anchored at the peak
+    # A side without spread (sd 0) has null density only at the mode itself.
+    z = np.divide(c - core["mode"], sd, out=np.where(c == core["mode"], 0.0, np.inf), where=sd > 0)
+    null = core["peak_density"] * np.exp(-0.5 * z ** 2)  # pi0*f0 anchored at the peak
     posterior = np.where(density > 0, np.clip(null / np.maximum(density, 1e-300), 0, 1), 1.0)
     p = int(np.argmin(np.abs(c - core["mode"])))
     i = p
@@ -387,10 +411,197 @@ class _Chunks:
         return lc + beta - special.betaln(a, b)
 
 
+# ---------------------------------------------------------------------------------------------
+# Exact artefact M-steps (release 2.11). Each maximises the weighted artefact log likelihood over its two
+# parameters on the log/logit scale, jointly within the box of the stored dispersion clips, by projected Newton steps
+# with analytic gradients and Hessians, and records whether the result is certified stationary. Releases 2.3-2.10
+# instead searched the unbounded parameters with Nelder-Mead (xatol 1e-4) and then clipped the dispersion alone, so
+# the stored rate or mean could be non-stationary for the stored dispersion; a different, not just more precise, M-step.
+# ---------------------------------------------------------------------------------------------
+
+@njit(cache=True)
+def _digamma(x):
+    out = 0.0
+    while x < _POLYGAMMA_SHIFT:
+        out -= 1.0 / x
+        x += 1.0
+    inv = 1.0 / x
+    z = inv * inv
+    return out + math.log(x) - 0.5 * inv - z * (1 / 12 - z * (1 / 120 - z * (1 / 252 - z * (1 / 240 - z * (
+        1 / 132 - z * (691 / 32760 - z * (1 / 12 - z * 3617 / 8160)))))))
+
+
+@njit(cache=True)
+def _trigamma(x):
+    out = 0.0
+    while x < _POLYGAMMA_SHIFT:
+        out += 1.0 / (x * x)
+        x += 1.0
+    inv = 1.0 / x
+    z = inv * inv
+    # psi'(x) ~ 1/x + 1/(2x^2) + sum_k B_2k / x^(2k+1)
+    return out + inv + 0.5 * z + inv * z * (1 / 6 - z * (1 / 30 - z * (1 / 42 - z * (1 / 30 - z * (
+        5 / 66 - z * (691 / 2730 - z * 7 / 6))))))
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _negative_binomial_terms(W, N, w, rate, k):
+    """Weighted sums over fixed site chunks of log NegBin(W | mean N rate, shape k) (without log W!) and its first
+    and second derivatives in (log rate, log k): rows of (value, gx, gy, hxx, hyy, hxy)."""
+    n = len(W)
+    out = np.zeros((_M_STEP_CHUNKS, 6))
+    log_k, digamma_k, trigamma_k, lgamma_k = math.log(k), _digamma(k), _trigamma(k), math.lgamma(k)
+    for chunk in prange(_M_STEP_CHUNKS):
+        s0 = s1 = s2 = s3 = s4 = s5 = 0.0
+        for i in range(chunk * n // _M_STEP_CHUNKS, (chunk + 1) * n // _M_STEP_CHUNKS):
+            if w[i] == 0.0:
+                continue
+            x, mu = W[i], N[i] * rate
+            km = k + mu
+            log_km = math.log(km)
+            d_mu = x / mu - (x + k) / km
+            d_k = _digamma(x + k) - digamma_k + log_k + 1.0 - log_km - (x + k) / km
+            s0 += w[i] * (math.lgamma(x + k) - lgamma_k + k * (log_k - log_km) + x * (math.log(mu) - log_km))
+            s1 += w[i] * d_mu * mu
+            s2 += w[i] * d_k * k
+            s3 += w[i] * ((-x / (mu * mu) + (x + k) / (km * km)) * mu * mu + d_mu * mu)
+            s4 += w[i] * ((_trigamma(x + k) - trigamma_k + 1.0 / k - 1.0 / km - (mu - x) / (km * km)) * k * k
+                          + d_k * k)
+            s5 += w[i] * (x - mu) / (km * km) * mu * k
+        out[chunk, 0], out[chunk, 1], out[chunk, 2] = s0, s1, s2
+        out[chunk, 3], out[chunk, 4], out[chunk, 5] = s3, s4, s5
+    return out
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _beta_binomial_terms(A, H, w, a, b):
+    """Weighted sums over fixed site chunks of the site parts of log B(A + a, H - A + b) and their derivatives in
+    (a, b): rows of (value, da, db, daa, dbb, dab)."""
+    n = len(A)
+    out = np.zeros((_M_STEP_CHUNKS, 6))
+    for chunk in prange(_M_STEP_CHUNKS):
+        s0 = s1 = s2 = s3 = s4 = s5 = 0.0
+        for i in range(chunk * n // _M_STEP_CHUNKS, (chunk + 1) * n // _M_STEP_CHUNKS):
+            if w[i] == 0.0:
+                continue
+            x, y, t = A[i] + a, H[i] - A[i] + b, H[i] + a + b
+            digamma_t, trigamma_t = _digamma(t), _trigamma(t)
+            s0 += w[i] * (math.lgamma(x) + math.lgamma(y) - math.lgamma(t))
+            s1 += w[i] * (_digamma(x) - digamma_t)
+            s2 += w[i] * (_digamma(y) - digamma_t)
+            s3 += w[i] * (_trigamma(x) - trigamma_t)
+            s4 += w[i] * (_trigamma(y) - trigamma_t)
+            s5 -= w[i] * trigamma_t
+        out[chunk, 0], out[chunk, 1], out[chunk, 2] = s0, s1, s2
+        out[chunk, 3], out[chunk, 4], out[chunk, 5] = s3, s4, s5
+    return out
+
+
+def _chunk_totals(rows):
+    total = np.zeros(rows.shape[1])
+    for row in rows:                 # fixed order
+        total += row
+    return total
+
+
+def _negative_binomial_objective(q, W, N, w, weight_total):
+    """Weighted artefact log likelihood of r3 at q = (log eps1, log k), its gradient and Hessian."""
+    total = _chunk_totals(_negative_binomial_terms(W, N, w, math.exp(q[0]), math.exp(q[1])))
+    return total[0], total[1:3], np.array([[total[3], total[5]], [total[5], total[4]]])
+
+
+def _beta_binomial_objective(q, A, H, w, weight_total):
+    """Weighted artefact log likelihood of r4 at q = (logit mean, log concentration), its gradient and Hessian."""
+    mean, concentration = 1.0 / (1.0 + math.exp(-q[0])), math.exp(q[1])
+    a, b = mean * concentration, (1.0 - mean) * concentration
+    total = _chunk_totals(_beta_binomial_terms(A, H, w, a, b))
+    value = total[0] - weight_total * (math.lgamma(a) + math.lgamma(b) - math.lgamma(concentration))
+    fa = total[1] - weight_total * (_digamma(a) - _digamma(concentration))
+    fb = total[2] - weight_total * (_digamma(b) - _digamma(concentration))
+    faa = total[3] - weight_total * (_trigamma(a) - _trigamma(concentration))
+    fbb = total[4] - weight_total * (_trigamma(b) - _trigamma(concentration))
+    fab = total[5] + weight_total * _trigamma(concentration)
+    d = concentration * mean * (1.0 - mean)          # da/du = -db/du for u = logit mean; da/dv = a, db/dv = b
+    gradient = np.array([(fa - fb) * d, fa * a + fb * b])
+    huu = (faa - 2 * fab + fbb) * d * d + (fa - fb) * d * (1.0 - 2.0 * mean)
+    huv = (faa * a + fab * (b - a) - fbb * b) * d + (fa - fb) * d
+    hvv = faa * a * a + 2 * fab * a * b + fbb * b * b + fa * a + fb * b
+    return value, gradient, np.array([[huu, huv], [huv, hvv]])
+
+
+def _newton_maximum(objective, start, lower, upper, scale):
+    """Projected Newton ascent of ``objective`` in the box [lower, upper]. A coordinate at a bound whose gradient points
+    outward is held (the Karush-Kuhn-Tucker condition there); the others take a Newton step where their Hessian is
+    negative definite, else a scaled gradient step, halved until the objective does not decrease beyond rounding.
+
+    Returns (q, status, gradient): status ``stationary`` (the certificate above), ``precision`` (the step tolerance
+    is met but the gradient certificate is not), ``line_search`` (no ascent along the step) or ``iterations`` (the
+    cap); gradient is the infinity norm of the free coordinates' gradient divided by ``scale`` (the artefact class's
+    posterior weight) at q.
+    """
+    def projected_gradient(q, gradient):
+        free = ~(((q <= lower) & (gradient < 0)) | ((q >= upper) & (gradient > 0)))
+        return free, (float(np.abs(gradient[free]).max()) / scale if free.any() else 0.0)
+
+    q = np.clip(np.asarray(start, float), lower, upper)
+    value, gradient, hessian = objective(q)
+    status = "iterations"
+    for _ in range(_M_STEP_ITERATIONS + 1):
+        free, projected = projected_gradient(q, gradient)
+        step = np.zeros(len(q))
+        newton = False
+        if free.any():
+            block = hessian[np.ix_(free, free)]
+            if np.linalg.eigvalsh(block).max() < 0:
+                step[free] = -np.linalg.solve(block, gradient[free])
+                newton = True
+            else:
+                step[free] = gradient[free] / max(1.0, float(np.abs(block).max()))
+        if not free.any() or (newton and np.all(np.abs(step) <= _M_STEP_STEP * np.maximum(1.0, np.abs(q)))):
+            status = "stationary" if projected <= _M_STEP_GRADIENT else "precision"
+            break
+        if _ == _M_STEP_ITERATIONS:
+            break
+        allowance = _M_STEP_ROUNDING * max(1.0, abs(value))
+        alpha, accepted = 1.0, False
+        for _halving in range(40):
+            candidate = np.clip(q + alpha * step, lower, upper)
+            candidate_value, candidate_gradient, candidate_hessian = objective(candidate)
+            if not np.isfinite(candidate_value):
+                alpha *= 0.5
+                continue
+            if candidate_value >= value - allowance or (
+                    newton and candidate_value >= value - _M_STEP_NOISE * max(1.0, abs(value))
+                    and projected_gradient(candidate, candidate_gradient)[1] < projected):
+                accepted = True
+                break
+            alpha *= 0.5
+        if not accepted:
+            status = "line_search"
+            break
+        q, value, gradient, hessian = candidate, candidate_value, candidate_gradient, candidate_hessian
+    return q, status, projected
+
+
+def _tally(statuses, status, gradient):
+    """Count an M-step's outcome; keep the largest returned gradient over all of the fit's M-steps, whatever their
+    status."""
+    statuses[status] = statuses.get(status, 0) + 1
+    statuses["worst_gradient"] = max(statuses.get("worst_gradient", 0.0), gradient)
+
+
+# Search boxes of the M-steps: the shape and concentration boxes are the clips of the fitted values; the rate and mean
+# boxes only keep the arithmetic finite.
+# np.log as for the M-steps' starts, so that a clipped dispersion starts exactly on its bound.
+_ERROR_LOWER, _ERROR_UPPER = np.log([1e-12, 1e-3]), np.log([10.0, 1e4])
+_BALANCE_LOWER, _BALANCE_UPPER = np.array([-30.0, np.log(1e-2)]), np.array([30.0, np.log(1e5)])
+
+
 def _error_mixture(W, N, evaluate):
     """Clean: W ~ Poisson(N eps0). Artefact: W ~ NegBin(mean N eps1, shape k). Returns parameters and P(clean)."""
     pi = 0.6; e0 = max(np.median(W / N) / 2, 1e-5); e1 = 10 * e0; k = 1.0
     lw = special.gammaln(W + 1)
+    m_steps = {}
 
     def artefact(rate, shape):
         return evaluate.negative_binomial(W, N, lw, rate, shape)
@@ -400,9 +611,13 @@ def _error_mixture(W, N, evaluate):
         pi2 = float(np.clip(wc.mean(), 1e-6, 1 - 1e-6)); e02 = float((wc * W).sum() / (wc * N).sum())
         wa = 1 - wc
         if wa.sum() > 1e-6:
-            o = minimize(lambda p: -(wa * artefact(np.exp(p[0]), np.exp(p[1]))).sum(),
-                         [np.log(e1), np.log(k)], method="Nelder-Mead", options=_NELDER_MEAD_OPTIONS)
-            e12, k2 = float(np.exp(o.x[0])), float(np.clip(np.exp(o.x[1]), 1e-3, 1e4))
+            weight = float(wa.sum())
+            with numba_threads(evaluate.budget.threads()):
+                q, status, gradient = _newton_maximum(
+                    lambda q: _negative_binomial_objective(q, W, N, wa, weight),
+                    [np.log(e1), np.log(k)], _ERROR_LOWER, _ERROR_UPPER, weight)
+            _tally(m_steps, status, gradient)
+            e12, k2 = float(np.exp(q[0])), float(np.clip(np.exp(q[1]), 1e-3, 1e4))
         else:
             e12, k2 = e1, k
         change = abs(e02 - e0) / e0 + abs(pi2 - pi) + abs(e12 - e1) / e1
@@ -411,13 +626,14 @@ def _error_mixture(W, N, evaluate):
             break
     wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, N * e0, lw),
                           np.log1p(-pi) + artefact(e1, k))
-    return dict(pi_clean=pi, eps0=e0, eps1=e1, shape=k, iterations=it + 1), wc
+    return dict(pi_clean=pi, eps0=e0, eps1=e1, shape=k, iterations=it + 1, m_steps=m_steps), wc
 
 
 def _balance_mixture(A, H, evaluate):
     """Clean: A ~ Binomial(H, h0). Artefact: beta-binomial with its own mean and concentration."""
     pi = 0.6; h0 = float(np.clip(A.sum() / H.sum(), 0.2, 0.8)); m1 = 0.75 * h0; c1 = 5.0
     lc = special.gammaln(H + 1) - special.gammaln(A + 1) - special.gammaln(H - A + 1)
+    m_steps = {}
 
     def artefact(mean, concentration):
         return evaluate.beta_binomial(A, H, lc, mean, concentration)
@@ -427,9 +643,13 @@ def _balance_mixture(A, H, evaluate):
         pi2 = float(np.clip(wc.mean(), 1e-6, 1 - 1e-6)); h02 = float((wc * A).sum() / (wc * H).sum())
         wa = 1 - wc
         if wa.sum() > 1e-6:
-            o = minimize(lambda p: -(wa * artefact(1 / (1 + np.exp(-p[0])), np.exp(p[1]))).sum(),
-                         [np.log(m1 / (1 - m1)), np.log(c1)], method="Nelder-Mead", options=_NELDER_MEAD_OPTIONS)
-            m12 = float(1 / (1 + np.exp(-o.x[0]))); c12 = float(np.clip(np.exp(o.x[1]), 1e-2, 1e5))
+            weight = float(wa.sum())
+            with numba_threads(evaluate.budget.threads()):
+                q, status, gradient = _newton_maximum(
+                    lambda q: _beta_binomial_objective(q, A, H, wa, weight),
+                    [np.log(m1 / (1 - m1)), np.log(c1)], _BALANCE_LOWER, _BALANCE_UPPER, weight)
+            _tally(m_steps, status, gradient)
+            m12 = float(1 / (1 + np.exp(-q[0]))); c12 = float(np.clip(np.exp(q[1]), 1e-2, 1e5))
         else:
             m12, c12 = m1, c1
         change = abs(h02 - h0) + abs(pi2 - pi) + abs(m12 - m1)
@@ -438,7 +658,8 @@ def _balance_mixture(A, H, evaluate):
             break
     wc = _posterior_clean(np.log(pi) + _log_binomial_pmf(A, H, h0, lc),
                           np.log1p(-pi) + artefact(m1, c1))
-    return dict(pi_clean=pi, h0=h0, artefact_mean=m1, artefact_concentration=c1, iterations=it + 1), wc
+    return dict(pi_clean=pi, h0=h0, artefact_mean=m1, artefact_concentration=c1, iterations=it + 1,
+                m_steps=m_steps), wc
 
 
 # ---------------------------------------------------------------------------------------------
@@ -505,7 +726,10 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
                 output[start:stop] = value
         del alt, dep, values
     parameters = dict(records=int(L), samples=int(S), snp=int(L))
+    # Decisions taken by a convention (tied histogram maxima), reported in OUTPUT/ties.
+    counter = ties.TieCounter()
     core = _peak_core(D, config.histogram_smoothing_bins, integer=True)
+    counter.note("ev.depth.mode", inside_tie=core["tied_mode"])
     lo, hi = _bounds(core, config.core_posterior_level)
     r1 = (D < lo) | (D > hi)
     parameters["depth"] = dict(_core_record(core), low=lo, high=hi,
@@ -527,37 +751,56 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
         expected = np.outer(D[start:stop] / mean_depth.sum(), mean_depth)
         X[start:stop] = ((depth - expected) ** 2 / np.maximum(expected, 1e-9)).sum(1) / (S - 1)
     del alt, dep, depth, expected
-    core = _peak_core(np.log(X[reference & (X > 0)]), config.histogram_smoothing_bins)
-    _, high = _bounds(core, config.core_posterior_level)
-    r2 = X > np.exp(high)
-    parameters["heterogeneity"] = dict(mode=float(np.exp(core["mode"])), sd_log_left=core["sd_left"],
-                                       sd_log_right=core["sd_right"], high=float(np.exp(high)),
-                                       core_weight=core["core_weight"])
+    dispersed = reference & (X > 0)
+    if dispersed.any():
+        core = _peak_core(np.log(X[dispersed]), config.histogram_smoothing_bins)
+        counter.note("ev.heterogeneity.mode", inside_tie=core["tied_mode"])
+        _, high = _bounds(core, config.core_posterior_level)
+        r2 = X > np.exp(high)
+        parameters["heterogeneity"] = dict(mode=float(np.exp(core["mode"])), sd_log_left=core["sd_left"],
+                                           sd_log_right=core["sd_right"], high=float(np.exp(high)),
+                                           core_weight=core["core_weight"])
+    else:
+        # Every reference site's depths are exactly proportional to the samples' mean depths: there is
+        # no heterogeneity to calibrate a core on, and no site exceeds one.
+        r2 = np.zeros(L, bool)
+        parameters["heterogeneity"] = dict(applied=False, reason="no reference site with depth heterogeneity")
     base = ~r1 & ~r2
     separation = config.minimum_artefact_separation
     # r3 wrong-allele reads in homozygotes
     m3 = base & (N >= 1)
+    r3 = np.zeros(L, bool)
+    r4 = np.zeros(L, bool)
     with ThreadPoolExecutor(threads) as pool:
-        error, clean = _error_mixture(W[m3], N[m3], _Chunks(pool, int(m3.sum()), threads))
-        error["applied"] = bool(error["eps1"] >= separation * error["eps0"])
-        r3 = np.zeros(L, bool)
-        if error["applied"]:
-            r3[np.where(m3)[0][clean < config.clean_posterior_level]] = True
+        if m3.any():
+            error, clean = _error_mixture(W[m3], N[m3], _Chunks(pool, int(m3.sum()), threads))
+            error["applied"] = bool(error["eps1"] >= separation * error["eps0"])
+            if error["applied"]:
+                r3[np.where(m3)[0][clean < config.clean_posterior_level]] = True
+        else:
+            error = dict(applied=False, reason="no site with expected homozygote reads >= 1")
         # r4 heterozygote allele balance
         m4 = base & ~r3 & (H >= 1)
-        balance, clean = _balance_mixture(A[m4], H[m4], _Chunks(pool, int(m4.sum()), threads))
-    typical = float(np.median(H[m4]))
-    balance["binomial_sd_at_median_reads"] = float(np.sqrt(balance["h0"] * (1 - balance["h0"]) / typical))
-    balance["artefact_sd"] = float(np.sqrt(balance["artefact_mean"] * (1 - balance["artefact_mean"])
-                                           / (balance["artefact_concentration"] + 1)))
-    balance["applied"] = bool(
-        balance["artefact_sd"] >= separation * balance["binomial_sd_at_median_reads"]
-        or abs(balance["artefact_mean"] - balance["h0"]) >= separation * balance["binomial_sd_at_median_reads"])
-    r4 = np.zeros(L, bool)
-    if balance["applied"]:
-        r4[np.where(m4)[0][clean < config.clean_posterior_level]] = True
+        if m4.any():
+            balance, clean = _balance_mixture(A[m4], H[m4], _Chunks(pool, int(m4.sum()), threads))
+    if m4.any():
+        typical = float(np.median(H[m4]))
+        balance["binomial_sd_at_median_reads"] = float(np.sqrt(balance["h0"] * (1 - balance["h0"]) / typical))
+        balance["artefact_sd"] = float(np.sqrt(balance["artefact_mean"] * (1 - balance["artefact_mean"])
+                                               / (balance["artefact_concentration"] + 1)))
+        balance["applied"] = bool(
+            balance["artefact_sd"] >= separation * balance["binomial_sd_at_median_reads"]
+            or abs(balance["artefact_mean"] - balance["h0"]) >= separation * balance["binomial_sd_at_median_reads"])
+        if balance["applied"]:
+            r4[np.where(m4)[0][clean < config.clean_posterior_level]] = True
+    else:
+        # No heterozygote evidence to fit a clean balance on: the sample QC uses the configured
+        # classification balance instead, and the record says so.
+        balance = dict(applied=False, reason="no site with expected heterozygote reads >= 1",
+                       h0=float(config.classification_heterozygote_alt), h0_source="classification balance")
     parameters["error"] = error
     parameters["balance"] = balance
+    parameters["tie_events"] = counter.record()
     # r5 expected carriers of a non-major genotype among covered samples
     r5 = covered * (1 - F.max(1)) < config.minimum_expected_carriers
     return dict(r1=r1, r2=r2, r3=r3, r4=r4, r5=r5), parameters

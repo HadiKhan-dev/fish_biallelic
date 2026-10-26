@@ -96,7 +96,8 @@ class ContigEvidence:
         zero-depth cell is exactly (1/3, 1/3, 1/3). No genotype prior is applied.
     observed: bool[N, L] positive read depth (REF + ALT > 0).
     discovery_sites: bool[L] sites the discovery search uses: total depth over all N samples at
-        least max(5, 0.02 N) (``evidence.config.DiscoverySiteRule``; base loader ``keep_flags``).
+        least ``DiscoverySiteRule.minimum_total_depth`` (5) reads, whatever the cohort size
+        (``evidence.config.DiscoverySiteRule``; base loader ``keep_flags``).
     founder_excluded: bool[N] samples flagged by the contamination QC on this contig (all False
         when the QC is off or did not apply). Founder construction sees them unobserved
         (:meth:`founder_view`); painting and later stages use every sample's evidence.

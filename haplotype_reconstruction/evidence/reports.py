@@ -101,12 +101,18 @@ def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
     site = report.site_quality
     if site.applied:
         parameters = site.parameters
+        error, balance = parameters['error'], parameters['balance']
+        # A rule with no eligible sites records why instead of fitted parameters.
+        error_text = (f"clean error {error['eps0']:.2e} (r3 applied {error['applied']})" if 'eps0' in error
+                      else f"r3 not fitted ({error['reason']})")
+        balance_text = (f"clean balance {balance['h0']:.4f} (r4 applied {balance['applied']})"
+                        if 'reason' not in balance
+                        else f"r4 not fitted ({balance['reason']}; QC balance {balance['h0']:.4f})")
         lines.append(
             f"    [Site quality] {summary.contig}: "
             + ", ".join(f"{rule} {count:,}" for rule, count in site.flagged.items())
             + f"; depth window [{parameters['depth']['low']:.0f}, {parameters['depth']['high']:.0f}], "
-            f"clean error {parameters['error']['eps0']:.2e} (r3 applied {parameters['error']['applied']}), "
-            f"clean balance {parameters['balance']['h0']:.4f} (r4 applied {parameters['balance']['applied']})")
+            f"{error_text}, {balance_text}")
     samples = site.sample_quality
     if samples is not None:
         lines.append(f"    [Sample quality] {summary.contig}: contamination flagged "
@@ -118,7 +124,9 @@ def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
     if calibration_report.applied:
         lines.append(f"    [Read model] {summary.contig}: {calibration_report.selected}; selection gain "
                      f"over shared {calibration_report.selection_gain_over_shared:.3f}; diagnostic gain "
-                     f"{calibration_report.diagnostic_gain_over_shared:.3f}")
+                     + ("unavailable (no admitted diagnostic-fold observations)"
+                        if calibration_report.diagnostic_gain_over_shared is None
+                        else f"{calibration_report.diagnostic_gain_over_shared:.3f}"))
     else:
         lines.append(f"    [Read model] {summary.contig}: fixed model ({calibration_report.fallback_reason})")
     if calibration_report.shared_fit_warning is not None:

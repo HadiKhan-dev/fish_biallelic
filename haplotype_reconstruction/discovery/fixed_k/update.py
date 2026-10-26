@@ -408,10 +408,11 @@ def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous,
     # the sample loop reads the cost and founder rows contiguously, and reuses the
     # expansion-sum scratch instead of allocating it for every founder/site pair.
     # Ordinary sums vectorize across sites; near an H-step boundary the expansion
-    # reference decides the allele. cost_bound=np.inf requests that reference throughout.
+    # reference decides the allele using terms recomputed only for that site.
+    # cost_bound=np.inf requests that reference throughout.
     n_samples, _, length = genotype_cost.shape
-    terms0 = np.empty((n_samples, length), dtype=np.float64)
-    terms1 = np.empty((n_samples, length), dtype=np.float64)
+    terms0 = np.empty(n_samples, dtype=np.float64)
+    terms1 = np.empty(n_samples, dtype=np.float64)
     partials = np.empty(n_samples, dtype=np.float64)
     counts1 = np.empty(length, dtype=np.int64)
     nll0 = np.empty(length, dtype=np.float64)
@@ -436,22 +437,37 @@ def fractional_sweep_one_thread(haplotypes, order, row_ptr, samples, homozygous,
             for site in range(length):
                 count1 = counts1[site]
                 count0 = end - begin - count1
-                terms0[entry - start, site] = ((h + count0) * genotype_cost[sample, 0, site]
-                                              + count1 * genotype_cost[sample, 1, site]
-                                              + u * unknown_cost[sample, 0, site]) / denominator[entry]
-                terms1[entry - start, site] = (count0 * genotype_cost[sample, 1, site]
-                                              + (h + count1) * genotype_cost[sample, 2, site]
-                                              + u * unknown_cost[sample, 1, site]) / denominator[entry]
-                nll0[site] += terms0[entry - start, site]
-                nll1[site] += terms1[entry - start, site]
+                term0 = ((h + count0) * genotype_cost[sample, 0, site]
+                         + count1 * genotype_cost[sample, 1, site]
+                         + u * unknown_cost[sample, 0, site]) / denominator[entry]
+                term1 = (count0 * genotype_cost[sample, 1, site]
+                         + (h + count1) * genotype_cost[sample, 2, site]
+                         + u * unknown_cost[sample, 1, site]) / denominator[entry]
+                nll0[site] += term0
+                nll1[site] += term1
         error = _fractional_sum_error(stop - start, cost_bound)
         for site in range(length):
             current = haplotypes[founder, site]
             value = _fractional_guard(nll0[site], nll1[site], current, tie, error)
             if value < 0:
-                # Construct strided column views only at an uncertified boundary.
+                # Sites are independent: earlier site updates cannot affect these terms.
+                # Only an uncertified site needs the sample terms for accurate summation.
+                for entry in range(start, stop):
+                    sample = samples[entry]
+                    count1 = 0
+                    begin, end = partner_ptr[entry], partner_ptr[entry + 1]
+                    for at in range(begin, end):
+                        count1 += haplotypes[partners[at], site]
+                    count0 = end - begin - count1
+                    h, u = int(homozygous[entry]), int(unknown[entry])
+                    terms0[entry - start] = ((h + count0) * genotype_cost[sample, 0, site]
+                                             + count1 * genotype_cost[sample, 1, site]
+                                             + u * unknown_cost[sample, 0, site]) / denominator[entry]
+                    terms1[entry - start] = (count0 * genotype_cost[sample, 1, site]
+                                             + (h + count1) * genotype_cost[sample, 2, site]
+                                             + u * unknown_cost[sample, 1, site]) / denominator[entry]
                 value = _fractional_allele(nll0[site], nll1[site], current, tie,
-                                           terms0[:stop - start, site], terms1[:stop - start, site],
+                                           terms0[:stop - start], terms1[:stop - start],
                                            partials, np.inf)
             haplotypes[founder, site] = value
             changes += value != current

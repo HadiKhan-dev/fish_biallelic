@@ -1,5 +1,90 @@
 # Changelog
 
+## 2.11.0 (26 October 2026)
+
+This release reworks the evidence stage's numerical fits, calibration sample and edge cases, and speeds discovery's
+fixed-K fits. The site filter's artefact mixtures are fitted exactly and much faster on clean data; the read model is
+calibrated on about one kept site in eight chosen by position instead of by index; contigs with no fitting data,
+constant coverage or very short histograms no longer fail or produce NaN parameters; short contigs are calibrated; and
+evidence-stage ties are reported. Results change: the calibration sample is new on every contig, and five site-filter
+decisions that sit at a posterior of 1/2 move on TroMau.
+
+**Read-model calibration sites** (`evidence/read_model/calibrate.py`, `evidence/config.py`): each kept site is used
+for calibration with probability 1/`ReadModelConfig.marker_stride` (8), decided by a fixed pseudo-random hash of its
+position alone, instead of every eighth kept site by index. Under the index stride one added or removed kept site (for
+example one site-filter decision) changed the calibration sample for the rest of the contig; now it changes no other
+site's use (the fitted model, and so the likelihoods, can still change across the contig). The sample is still a
+uniform draw from the kept sites, of the same expected size (TroMau chr16: 9,711 of 78,415 kept sites; the stride took
+9,802). On TroMau the per-sample error rates fitted on the new sample differ from 2.10's by no more than a redraw of
+2.10's own sample does (mean change on the logit scale over 22 contigs -0.017 +- 0.022; 2.10 with another stride offset:
++0.002 +- 0.021), and the selected model changes on five contigs (chr4 and chr14 to the sample binomial; chr10, chr19
+and chr22 to the sample joint model; the stride redraw changes seven). A thinning to sites at least 1 kb apart was tried
+first and rejected: it samples along the genome rather than among the kept sites (28-33% of its sites had at most two
+kept sites within 1 kb, against 11% of kept sites), and its fitted error rates were systematically lower (20 of 22
+TroMau contigs; mean -0.14 +- 0.03).
+
+**Site-filter mixture fits** (`evidence/site_quality.py`): the artefact M-steps of r3 (negative binomial) and r4
+(beta-binomial) maximise the weighted artefact log likelihood over their two parameters jointly within the dispersion
+clips, by projected Newton steps with analytic gradients and Hessians; each M-step stops when the full Newton step is
+at most 1e-8 of max(1, |q|) on the log/logit scale and is certified stationary when its projected gradient per unit
+artefact weight is at most 1e-9 (else recorded as a small-step stop); outcomes are recorded per mixture (`m_steps`).
+Releases up to 2.10 searched the unbounded parameters with Nelder-Mead and then clipped the dispersion alone, so the
+stored rate or mean could miss the maximum by more than the EM tolerance, at about 100 likelihood passes per EM
+iteration. Where reads hold no artefact class, both EMs ran to their 300-iteration cap: on a clean simulated 329,000-site
+contig with the filter on (N = 160) the filter took 866 s, now 14 s; on a 1.5-million-site contig over 25 minutes, now
+86 s. On TroMau the r3 flag moves at one site on each of chr1, chr6, chr7, chr16 and chr19, each with a clean posterior of
+about 1/2 (0.49995 to 0.50002); three become kept sites.
+
+**Edge cases** (`evidence/site_quality.py`, `evidence/sample_quality.py`, `evidence/reports.py`):
+- No reference site with depth heterogeneity (for example identical coverage everywhere): r2 is inactive with a reason
+  (was an IndexError).
+- No site eligible for r3 or r4: the rule is inactive with a reason, and the sample QC uses the configured
+  classification heterozygote balance, labelled `h0_source` (was NaN parameters, a NaN QC balance and 300 empty
+  iterations).
+- Depth and heterogeneity histograms with fewer bins than the smoothing width, or with the mode at an end: smoothing
+  covers the actual bins and the half-maximum walk stays inside the histogram (was an IndexError, or a walk that wrapped
+  to the far end and lost the upper bound); a side without spread is handled explicitly. Histograms with an interior
+  mode and enough bins are unchanged.
+
+**Calibration's diagnostic fold** (`evidence/read_model/calibrate.py`): a contig with training and selection
+observations but no admitted fold-3 observation (for example one spanning fewer than three 1-Mb windows) is calibrated,
+with its diagnostic score unavailable; 2.10 used the fixed binomial model.
+
+**Evidence ties** (`reports/ties.py`): the ties report gains the evidence stage: tied histogram modes of the depth and
+heterogeneity cores (`ev.depth.mode`, `ev.heterogeneity.mode`), sites whose equal REF/ALT totals leave the QC's minor
+allele to the convention (`ev.qc.minor_allele`, counted once per site wherever either allele could give near-private
+cells), and read-model selections with more than one candidate inside the one-nat band (`ev.read_model.select.band`).
+On TroMau the band decides on 14 of 22 contigs (the simplest candidate is applied); no other evidence tie occurs.
+
+**Discovery fixed-K fits** (`discovery/fixed_k/fit.py`, `discovery/fixed_k/update.py`): the assignment Viterbi carries
+each bin's maximum as it updates instead of rescanning the states, and per-sample allele terms are recomputed only at
+sites whose fast sum is not certified. Exact: TroMau evidence and discovery are identical on all 22 contigs; discovery
+takes 5% less time.
+
+**Resume:** the evidence and discovery code identities and the read-model configuration change, so an output root of
+2.10.0 is refused (VCF input: CheckpointMismatch at the evidence identity; simulations: at the simulation record); run
+2.11.0 into a new output root.
+
+**Investigated, not changed:** a replacement heterozygote-balance rule (two beta-binomials) removes nearly every site of
+clean data in negative controls and was not adopted; the shared-sequence discovery prior remains research; local
+selection, assembly and founder refinement have no exact speedup above about 2% of TroMau's lane time (lanes already
+keep 69-71 of 76 CPUs busy); f3's founder errors are chimeric labels at junctions where a recombinant haplotype shared by
+many relatives, or a weakly witnessed rare founder, decides the labelling (a model-level question for a later release).
+
+### Validation
+- Site filter: on TroMau the M-step change moves five r3 decisions, all at a clean posterior within 5e-5 of 1/2; every
+  M-step is certified stationary or stops on the step tolerance (none fails its line search or reaches the cap).
+- Discovery fixed-K speedup: TroMau evidence and discovery identical on all 22 contigs.
+- Calibration sample: sampling checks (membership depends on the position alone; rate 1/8 on random and regular
+  position axes; on TroMau the sample has the kept sites' density composition) and the TroMau fit comparison above.
+- Edge cases: fixtures for constant coverage, empty r2/r3/r4 domains, short and edge-mode histograms and contigs
+  without diagnostic-fold observations.
+- Resume: a 2.10.0 root is refused (VCF input at the evidence identity; simulations at the simulation record).
+- End to end with the rejected 1-kb thinning (all other 2.11 changes as released), against simulation truth to
+  painting: std 8 contigs, founder allele errors +7.0%, one chimeric relabelling on chr10 (2.10 with another stride
+  offset: +7.75%, the same event); f3 identical; backcross 1,262 -> 1,260. End-to-end runs of the released calibration
+  sample (simulations against truth; TroMau consistency with a pseudo-reference) were still running at release.
+
 ## 2.10.0 (26 October 2026)
 
 This release keeps a run's CPUs busy without changing what it computes. CPUs are rebalanced dynamically at every level:
