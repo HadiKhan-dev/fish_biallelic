@@ -61,8 +61,9 @@ KIND_TEXT = {
 # itself and its child processes.
 ENVIRONMENT_READ = (
     ("NUMBA_CACHE_DIR", "Base directory for compiled kernels; the package uses a subdirectory per code version "
-     "(package source, Python/NumPy/Numba/llvmlite versions, code-generation settings, CPU model). Default: a "
-     "node-local scratch directory per scheduler job (or run) and host."),
+     "(package source, Python/NumPy/Numba/llvmlite versions, code-generation settings, CPU model). Default: the "
+     "scheduler job's SLURM_TMPDIR when set, else /dev/shm when writable with at least 4 GiB free (private to the "
+     "run, removed when it ends), else the system temporary directory; per scheduler job (or run) and host."),
     ("XDG_CACHE_HOME", "Persistent kernel store `$XDG_CACHE_HOME/haplotype-reconstruction/numba` (default "
      "`~/.cache/haplotype-reconstruction/numba`); the six most recently used code versions are kept."),
     ("SLURM_JOB_ID", "Scheduler job identity: scopes the automatic kernel cache directory; recorded in batch-queue "

@@ -189,8 +189,16 @@ def _polish(engine, result, budget):
             if key not in seen:
                 seen.add(key)
                 panels.append(np.asarray(panel, np.int64))
-    fits = [engine.converge(panel, "polish" if i == 0 else f"polish.alt{i}", budget, polish=True)
-            for i, panel in enumerate(panels)]
+    labels = ["polish" if i == 0 else f"polish.alt{i}" for i in range(len(panels))]
+    if len(panels) < 2:
+        fits = [engine.converge(panels[0], labels[0], budget, polish=True)]
+    else:
+        # The alternatives' polish fits are independent: concurrent, in panel order (each search reserves its own).
+        fits = [None] * len(panels)
+        for index, fit in budget.concurrent([lambda child, panel=panel, label=label: engine.converge(
+                panel, label, child, polish=True) for panel, label in zip(panels, labels)], 0,
+                label="founder_refinement polish"):
+            fits[index] = fit
     values = [float(fit.summary.F) for fit in fits]
     contents = [tie_rules.panel_key(fit.rows) for fit in fits]
     classes = ties.tie_classes(values, tie_rules.quantum("refine_F", max(abs(v) for v in values)),

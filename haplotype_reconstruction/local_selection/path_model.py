@@ -17,7 +17,7 @@ Two kernels evaluate the model:
 * the release E-step: per-sample full posteriors for the release statistics (per-sample exact
   one-bit gains and carrier probabilities, copy occupancy, MAP unknown-copy counts).
 Every total over samples adds the samples one by one in ascending order, so no result depends
-on the thread count. Memory: forward trajectories of 64 samples x L x S(S+1)/2 per thread
+on the thread count. Memory: forward trajectories of up to 64 samples x L x S(S+1)/2 per thread
 (S = K + 1), in one buffer shared by the sequential fits of a block search
 (``WorkspaceBuffers``). A backward pass computes only the statistics its caller asks for
 (``COUNTS``, ``FLIPS`` or ``EXACT``): the exact one-bit gains cost about a third of a full pass
@@ -33,6 +33,10 @@ from ..execution import numba_threads
 # Maximum samples per lane block (a work split only). Wide blocks amortise loop overhead;
 # narrower blocks use a growing tail budget when every block fits in one parallel wave.
 LANE_WIDTH = 64
+# Lane blocks are balanced: as many blocks as the chosen width needs, each the samples' share rounded
+# up to a multiple of LANE_ALIGN, so padding lanes no longer widen every array a recursion walks
+# (2.10: 40 samples were laid out 64 wide).
+LANE_ALIGN = 8
 # Samples per parallel release E-step batch and elements per combine tile (memory bounds only).
 RELEASE_SAMPLE_BATCH = 128
 _COMBINE_TILE = 4096
@@ -798,6 +802,14 @@ def _ratio_tables(emissions, observed):
     return ratios, self_ratios
 
 
+def balanced_width(samples: int, width: int) -> int:
+    """The narrowest multiple of LANE_ALIGN (at most ``width``) that lays ``samples`` out in as many lane
+    blocks as ``width`` does."""
+    blocks = max(1, -(-int(samples) // width))
+    share = -(-int(samples) // blocks)
+    return min(width, max(LANE_ALIGN, -(-share // LANE_ALIGN) * LANE_ALIGN))
+
+
 class PreparedBlock:
     """Data-only tables of one block's copying model, shared by every score and fit of a block
     search: GLs and observation mask at the discovery sites, redraw probabilities between
@@ -830,6 +842,7 @@ class PreparedBlock:
                 if (self.samples + candidate - 1) // candidate <= threads:
                     width = candidate
                     break
+        width = balanced_width(self.samples, width)
         if width != self._lane_width:
             # Retain one layout. Repacking occurs only when the caller crosses
             # a lane-budget boundary, never during a numerical kernel.

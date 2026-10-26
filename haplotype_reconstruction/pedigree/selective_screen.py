@@ -58,7 +58,7 @@ def worker(contig,state,phase,common,budget):
         return state,dict(value=np.empty(0),timings={})
     if state is not None:components=state
     else:
-        store=CheckpointStore(common['root'],nthreads=execution.claim_threads())
+        store=CheckpointStore(common['root'],nthreads=budget)
         prepared=records.decode_prepared(store.contig(contig).get(records.PREPARED))
         components=prepare(prepared,common['eligibility'],common['config'])
         del prepared
@@ -95,7 +95,7 @@ def run(root,contigs,markers,eligibility,config,budget,*,batch_size=None,progres
     if method=="exact":
         return reference(root,contigs,markers,eligibility,config,budget)
     if method!="certified":raise ValueError(method)
-    store=CheckpointStore(root,nthreads=budget.threads());n=len(eligibility.children)
+    store=CheckpointStore(root,nthreads=budget);n=len(eligibility.children)
     estimates=[2*stage._scoring_bytes(store,c) for c in contigs]
     workers=execution.memory_worker_limit(estimates,len(contigs),label='PEDIGREE SELECTIVE')
     builder=CompactBuilder(n,markers,eligibility.parents.sum(1));costs=[];counts=[]
@@ -131,7 +131,7 @@ def run(root,contigs,markers,eligibility,config,budget,*,batch_size=None,progres
 
 
 def _reference_worker(contig,state,phase,common,budget):
-    store=CheckpointStore(common['root'],nthreads=execution.claim_threads())
+    store=CheckpointStore(common['root'],nthreads=budget)
     prepared=records.decode_prepared(store.contig(contig).get(records.PREPARED))
     screen,_=scoring.screen_chromosome(prepared,common['eligibility'],common['config'],execution.claim_threads)
     return None,(screen.pair_scores(),np.sum(np.stack([x.zero for x in screen.components]),axis=0))
@@ -139,7 +139,7 @@ def _reference_worker(contig,state,phase,common,budget):
 
 def reference(root,contigs,markers,eligibility,config,budget):
     """Dense exact reference behind the same API; deliberately O(C N^2) memory."""
-    store=CheckpointStore(root,nthreads=budget.threads())
+    store=CheckpointStore(root,nthreads=budget)
     estimates=[stage._scoring_bytes(store,c) for c in contigs]
     workers=execution.memory_worker_limit(estimates,len(contigs),label='PEDIGREE EXACT REFERENCE')
     with execution.ChromosomeExecutor(contigs,_reference_worker,budget=budget,max_workers=workers,

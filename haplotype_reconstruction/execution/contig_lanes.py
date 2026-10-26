@@ -4,8 +4,9 @@ Lane coordinators are persistent ChromosomeExecutor workers (non-daemonic forkse
 cores as leases. Each runs the per-contig work (a module-level function ``work(store, contig, context, budget)``)
 for its contigs, longest first, with its lease as the budget: pools, Numba teams and checkpoint compression inside
 a lane stay within it, so concurrent contigs never exceed the ceiling. Leases start in proportion to each lane's
-work and grow, never inside a running kernel, as finished lanes release theirs: at contig starts, at the phase
-starts the stages mark (budget.phase), and inside pool phases (pools re-read their live budget every second).
+work and are rebalanced at the lanes' boundaries, never inside a running kernel (execution.budget): a lane takes
+free CPUs up to its equal share of the cores, borrows idle ones while no other lane is short, and returns what it
+does not use when another lane is short.
 
 The plan: one lane per CONTIG_LANE_CORES cores (or the requested count), at most one per pending contig.
 Measured pressure paces each contig's start; planning bytes are diagnostic metadata, never an admission input
@@ -40,8 +41,11 @@ from .run_log import run_log
 from .run_record import record_product, timed_stage, worker_stages
 
 # Narrow lanes need fewer core-seconds: the same contig at 16 threads took 7% fewer than at 32-37 (N=320 chr19 and
-# chr8 shards; path selection scales fully, hierarchy, refinement tails and serial checkpoint phases do not).
-CONTIG_LANE_CORES = 16
+# chr8 shards; path selection scales fully, hierarchy, refinement tails and serial checkpoint phases do not), and
+# with more lanes one lane's serial steps leave fewer cores idle (2.10: 8 contigs on 64 cores, 8 lanes of 8 took
+# 8% less lane wall than 4 of 16 with identical results). Lanes take their contigs from one queue, longest first,
+# and grow their leases as other lanes finish, so the longest contig's tail regains the cores.
+CONTIG_LANE_CORES = 8
 
 # Resident arrays of a lane per planning byte (contig_work.planning_bytes): decoded evidence, records and
 # overlapping selection/context arrays. Retained process memory is held separately below. Its pools,
@@ -78,8 +82,8 @@ def plan_lanes(sizes, pending, *, cores: int, requested: int | None, available: 
     return lanes, weights
 
 
-def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights, log_directory, phase_progress,
-              done=None, label="reconstruction"):
+def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights, log_directory, done=None,
+              label="reconstruction"):
     """Run ``work(store, contig, context, budget)`` for every contig in ``lanes`` concurrent lanes.
 
     Returns the work results in contig order. Each lane writes its contig's stdout to
@@ -88,7 +92,7 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     """
     contigs = tuple(contigs)
     executor = ChromosomeExecutor(contigs, _lane_contig, budget=cores, weights=weights, max_workers=lanes,
-                                  label=label.upper(), phase_progress=phase_progress, dynamic=True,
+                                  label=label.upper(), dynamic=True,
                                   task_bytes=None if weights is None else [lane_resident_bytes(w) for w in weights])
     if executor.worker_count < 2:
         return run_sequentially(store, contigs, work, context, cores=cores)
@@ -99,7 +103,7 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     first = [contig for partition in executor.partitions for _, contig in partition]
     queued = [contigs[index] for index in executor._queue]
     print(f"  Contigs: {executor.worker_count} concurrent lanes share {executor.cpu_budget} cores (leases in "
-          "proportion to work, growing at contig and phase starts and inside pool phases); lanes start with "
+          "equal shares, rebalanced at every boundary: idle CPUs borrowed and returned); lanes start with "
           f"{', '.join(first)}, then take the next of {', '.join(queued) or 'none'} (longest first)", flush=True)
     for contig in contigs:
         print(f"    {contig} log: {logs[contig]}", flush=True)
@@ -235,7 +239,8 @@ def _lane_contig(contig, state, phase, common, budget):
         _parent_watch.start()
     previous = signal.signal(signal.SIGTERM, _stop)
     log = common["logs"][contig]
-    store = CheckpointStore(common["root"], nthreads=threads)
+    # Compression and decompression re-read the lane's lease at each record (it grows as other lanes finish).
+    store = CheckpointStore(common["root"], nthreads=budget)
     try:
         with run_log(log), worker_stages() as stages:
             print(f"[{contig}] lane pid {os.getpid()}: {threads}-core lease (phases may grow it)", flush=True)

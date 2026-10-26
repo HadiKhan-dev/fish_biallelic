@@ -1,5 +1,132 @@
 # Changelog
 
+## 2.10.0 (26 October 2026)
+
+This release keeps a run's CPUs busy without changing what it computes. CPUs are rebalanced dynamically at every level:
+every piece of work runs its fair share, work above its share returns the excess at its next boundary while others wait,
+and idle CPUs go to the work that can use them. Contig lanes' pool workers start with the package imported, compiled
+kernels load from memory-backed storage, lanes are narrower, fewer workers are replaced, independent founder-refinement
+scorings run concurrently, shadow families are scored in one pass, and local selection's copying model no longer pads
+small sample sets to 64 lanes.
+
+**Dynamic CPU rebalancing** (`execution/budget.py`, `execution/pools.py`, `execution/chromosome_workers.py`): one rule
+at every level. A pool task or concurrent in-process task runs its fair share of its CPUs, floor(total / (running +
+waiting)) plus the remainder in turn, capped where it cannot use more; a task above its share (it grew while it had
+fewer peers) returns the excess at its own next boundary, and as tasks finish the others' shares grow. With 80 CPUs and
+10 tasks every task runs 8, however they arrived (2.3 to 2.9 let a task that grew alone keep its CPUs while later tasks
+waited for one). A pool whose total grows while tasks wait starts more workers (closed again after the batch); its total
+follows its lane's lease both ways, re-read every `LIVE_TOTAL_SECONDS = 0.25` s. Contig lanes start with claims in
+proportion to their contigs' work and then share the CPUs equally among the running lanes; a lane borrows idle CPUs (of
+finished lanes, or of a lane waiting for memory) while no lane is short and returns them at its next boundary once one
+is. Two variants were measured and rejected: shares that followed estimated remaining work starved the critical contig's
+final refinement, and lanes that lent their CPUs over the serial steps between their parallel constructs got them back
+only at the borrowers' boundaries (both 3-7% slower contig lanes on three-contig runs). A lane's coordinator holds no
+CPU while it waits for its pool and takes one of the pool's CPUs while it works on a result. Discovery's evidence
+helper, which prepares the next contig's evidence beside the block pool, holds a quarter of the pool's CPUs while it
+runs instead of a second full budget. Checkpoint compression and decompression, painting's sample batches and
+refinement's beam (one thread during its serial preparation) follow the live share. Claims are taken only from free CPUs
+and returned by their holder at its own boundaries, so a running kernel never changes its team and the numerical teams'
+claims stay within the run's ceiling (worker start-up and a lane's serial steps between parallel constructs hold the
+claims they had). On a 64-CPU node, against this release's other changes alone (without rebalancing, the refinement
+concurrency and the copying-model change below), contig lanes take 650 instead of 705 s on 8 simulated contigs (busy
+CPUs in the lanes 52.3 -> 55.5 of 64) and 701 instead of 702 s and 485 instead of 500 s on two three-contig simulations.
+
+**Local selection's copying model** (`local_selection/path_model.py`): the E-step lays samples side by side in lane
+blocks; a block is now only as wide as its share of the samples needs, rounded up to `LANE_ALIGN = 8` (the number of
+blocks is unchanged): 40 samples use 40 lanes instead of 64, 80 samples two blocks of 40 instead of 64 + 16. Lanes are
+independent and totals add samples in order, so results are bitwise identical. One E-step at 40 samples takes 13-16%
+less time (5-8% at 80); on 8 simulated contigs (64 CPUs) contig lanes take 634 instead of 698 s.
+
+**Founder refinement concurrency** (`assembly/founder_refinement/count.py`, `stage.py`): the count pass's independent
+scorings (death-class totals, clean-up and deletion-ranking scores, terminal-family scores), the death-class members'
+decisions and the polish fits of equal-F alternatives run as concurrent in-process tasks instead of one after another;
+the scorings and decisions run in waves whose estimated transient memory is at most `COUNT_FANOUT_BYTES` (4 GiB; a
+single larger one runs alone), and results are collected in their original order. With rebalancing, five recorded
+refinement components (N = 80, N = 320, K = 30) replayed together on a 64-CPU node take 347 instead of 409 s (-15.2%)
+with identical results.
+
+**Worker start-up in contig lanes** (`execution/bootstrap.py`): every child process applies the run's forkserver
+preload list again. A contig lane is itself a forkserver child, and its own forkserver used to preload nothing, so
+every pool worker in a lane started by importing NumPy, Numba, SciPy and the stage modules itself (about 8 s from
+a warm filesystem, 34 s cold). On a 40-sample, 4-contig simulation with 64 cores, contig lanes take 385 instead of
+436 s (-11.8%), local selection's lane time falls by 26%, and busy cores in the lanes rise from 43.7 to 46.9 of 64.
+Compiled kernels still cannot be preloaded: loading a parallel kernel starts the OpenMP thread pool, after which a
+forkserver must not fork.
+
+**Kernel cache placement** (`execution/bootstrap.py`): every new pool worker loads its compiled kernels from the
+run-local cache. By default that cache is now in memory-backed `/dev/shm` when it is writable with at least
+`KERNEL_SCRATCH_FREE_BYTES` (4 GiB) free, unless a Slurm job provides `SLURM_TMPDIR`; otherwise the system temporary
+directory, as before. The memory-backed directory is private to the run, named after the process that created it and
+removed when that process exits; a later run on the host removes one whose creator has ended, before it checks the free
+space (a job's scratch or the temporary directory is kept, as before). An explicit `NUMBA_CACHE_DIR` is honoured. With
+2.9.0's code, moving the cache from a shared network filesystem to `/dev/shm` made the same simulation 12.5% faster (500
+instead of 572 s).
+
+**Narrower contig lanes** (`execution/contig_lanes.py`): `auto` lanes get one lane per `CONTIG_LANE_CORES = 8`
+cores (2.9.0: 16). On 8 simulated contigs with 64 cores, lanes take 736 instead of 803 s (-8.4%) with less total
+CPU; more contigs run at once, so peak memory rises (see Validation).
+
+**Fewer replaced workers** (`assembly/hierarchy/level.py`): hierarchy pools no longer retire workers after four
+batches. Workers are replaced when their private memory grows past the pool's threshold, as in the other pools;
+where private memory cannot be measured (no `/proc/self/smaps_rollup`), the four-batch cap remains.
+
+**Serial sections in local selection** (`local_selection/context_refit.py`, `local_selection/stage.py`,
+`pipeline/contig_work.py`): context refit finishes each component's proposals in its pool task instead of in the
+coordinator, final assembly uses the panels local selection has just returned instead of reading them back, and
+the proposals between rounds are written with the lane's thread share. Lanes take 1.3% less time.
+
+**Founder refinement** (`assembly/founder_refinement/`):
+- Shadow families are scored with one forward pass per family (`count.py`), bounded by a 1 GiB family-table
+  budget with the per-sample path as the fallback. On five recorded refinement components, refinement takes
+  265 instead of 310 s (-14.5%; an 80-sample level-3 component 23 instead of 58 s).
+- Long repairs and bridges re-read their thread share at each chunk, and window templates run largest first
+  (`search.py`).
+
+**Portability:** comments and documentation no longer name a particular cluster, filesystem or service level.
+
+**Resume** (`pipeline/driver.py`, `pipeline/contig_work.py`): records a run reuses without running their stage
+(completed discovery, local selection, final assembly and painting) are now checked against the current code and
+configuration first, as the stages check them; 2.9.0 skipped that check for completed stages, so a completed output root
+of another version could be reused unchecked. The discovery, local selection and assembly code identities change, so
+an output root of 2.9.0 raises CheckpointMismatch at discovery; run 2.10.0 into a new output root.
+
+**Failing fast** (`execution/pools.py`): a pool worker that dies during a task (killed, out of memory, crashed) now
+fails its batch within about a second, naming the worker and its exit code; 2.9.0 replaced the worker silently and its
+consumer waited for the lost result indefinitely. Closing or terminating a pool also ends a wait for its results.
+
+**Measured, not changed:** grouped candidate-move scoring, shared boundary messages and guard shortcuts in
+founder refinement (exact, but 0.4% on five recorded components: within noise); keeping each lane's pools alive
+between steps (2.3% less lane time, but 24.7 GiB more peak memory on 8 contigs and two defects found in review);
+short OpenMP spin-waiting between parallel regions and capping refinement's acceptance-pass team (no gain);
+splitting evidence preparation from discovery's workers; narrower sample lanes in path fits; dispatch look-ahead;
+precomputed item dosages in refinement (less than 0.3% of its CPU). Each was exact and gained nothing measurable,
+or was slower.
+
+### Validation
+Every test compares the released records (called and released founders, assembly completion and final panels,
+paintings, local selection and discovery blocks) value by value. Timed comparisons run both arms back to back on the
+same node; the capped 320-sample comparison uses the contigs both runs completed.
+
+| Test (2.10.0 against 2.9.0; exclusive 76-CPU node unless noted) | Outputs | Contig lanes, 2.9.0 -> 2.10 |
+|---|---|---|
+| 40-sample simulation, 8 contigs, 2.10 run first | identical (98.1 M values) | 770 -> 595 s (-22.7%), 72% -> 84% busy; whole run 970 -> 804 s, CPU -8.2% |
+| the same, 2.9.0 run first | identical | 775 -> 597 s (-23.0%), 72% -> 83% busy; whole run 955 -> 784 s, CPU -9.0% |
+| K = 30 simulation, 5 contigs | identical (21.1 M values) | 1,357 -> 1,112 s (-18.0%), 69% -> 81% busy; whole run 1,516 -> 1,255 s; peak live memory 55.0 -> 57.6 GiB |
+| three-generation families, 3 contigs (64-CPU node) | identical (64.3 M values) | 778 -> 691 s (-11.1%) |
+| backcross, 3 contigs (64-CPU node) | identical (55.3 M values) | 624 -> 487 s (-22.0%) |
+| refinement replays: 5 components at N = 80, N = 320 and K = 30 (64-CPU node) | identical (panels, scores, truth) | batch 474 -> 382 s (-19.5%), CPU -8% |
+| TroMau cross (real data, preset `tromau`), 22 contigs to painting | identical (189.9 M values) | 5,162 -> 4,478 s (-13.3%), 83% -> 92% busy; whole run 5,779 -> 4,982 s, CPU -3.1%; peak live memory 41.6 -> 54.4 GiB |
+| 320 samples, 22 contigs, each run stopped after 4 h | identical: discovery of all 22 contigs, released records of the 8 both completed (449 M values) | not compared (capped runs) |
+
+The release code itself (with the resume and fail-fast fixes) repeated the first test on the other dedicated node:
+identical, contig lanes 784 -> 603 s (-23.1%), 71% -> 83% busy.
+
+Before rebalancing, the same changes without it (concurrency fixes only) gave 805 -> 638 s and 790 -> 633 s on the
+8-contig test (both orders, -20%) and 1,335 -> 1,195 s on K = 30, peak memory 56.9 -> 57.8 GiB.
+
+The same 8-contig test with all kernel caches in memory also ran 2.7.1's admission (the 2.8 development baseline
+"f35"): its lanes took 785 s, so 2.8.0's slower full-node runs relative to it no longer appear (2.9.0: 766 s).
+
 ## 2.9.0 (25 October 2026)
 
 This release changes how three parts of a run are scheduled, and nothing they compute: memory admission scans its

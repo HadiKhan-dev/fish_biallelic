@@ -171,7 +171,7 @@ def hardening_fallbacks(likelihoods):
 # from the CPU (AVX-512 vs AVX2 kernels), and they differ from the scalar function by an ulp in ~0.3% (log) and ~5%
 # (exp) of values, so the same evidence gave different soft-residual candidates on different CPUs (actm3 chr8:204 under
 # env_haswell). The scalar functions, element-wise arithmetic and fixed-order sums give the same bits on every x86-64
-# CPU with FMA (all CSD3 node types); discovery makes no BLAS calls.
+# CPU with FMA (e.g. Intel Ice Lake and Sapphire Rapids); discovery makes no BLAS calls.
 @njit(cache=True, nogil=True)
 def scalar_log_floored(values, floor):
     """float64 array of log(max(value, floor)) for a C-contiguous float64 array (C library scalar log)."""

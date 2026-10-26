@@ -216,7 +216,7 @@ discovery. No inference was rerun for this attribution.
 | pedigree | chromosome (preparation, scoring, exclusion); genome-wide decisions are a barrier | pair scoring on the fixed candidate panel; bootstrap and leave-one-chromosome-out resampling |
 | founder refit, family phase, recombination | chromosome | coordinate sweeps; family message passing and polishing; per-meiosis decoding |
 
-Evidence-only allocation measurements for 2.4 (cpu-q-307, 18-core ceiling, base23 versus E2;
+Evidence-only allocation measurements for 2.4 (an 18-core ceiling, base23 versus E2;
 site/sample filters unchanged) are below. Values are peak parent RSS in decimal GB and include
 allocator/JIT overhead. They are per-phase peaks, not additive. The largest contig is TroMau chr3,
 N=116, 749,986 input SNPs, 127,172 kept, one flagged sample.
@@ -259,19 +259,26 @@ The run's ceiling is `[execution] cores` (default: the CPU affinity). It is divi
 contig lane -> pool -> worker), never exceeded by the product of processes and threads:
 
 - **Contig lanes.** After discovery, contigs are reconstructed in concurrent lanes: one lane per
-  `execution.contig_lanes.CONTIG_LANE_CORES = 16` cores (narrow lanes use fewer core-seconds per contig, because
+  `execution.contig_lanes.CONTIG_LANE_CORES = 8` cores (narrow lanes use fewer core-seconds per contig, because
   path selection scales fully but hierarchy tails, refinement tails and serial checkpoint phases do not), at most one
   per pending contig, limited by memory. Lanes start with the longest contigs, one each; a lane that finishes a
-  contig takes the next from one shared queue, longest first. Leases start in proportion to each lane's work and grow
-  as finished lanes release theirs: at contig starts, at the phase starts the stages mark, and inside pool phases.
-- **Pools.** A pool task claims `floor(total / active)` threads plus a share of the remainder at its numerical
-  boundaries; during a batch's start-up every worker has one thread until the batch's workers have started.
-  Freed threads move to surviving tasks at their next boundary; a running Numba kernel never changes its team. Discovery
-  enables an additional handoff at the owner's existing apply/claim boundary: when
-  memory-admitted block workers wait for their first CPU, a borrower caps its team at
-  max(1, floor(total / (active + waiting))). The same call resizes its Numba team; pure
-  budget queries retain running claims. Growth resumes as waiters drain. Other stages
-  keep the default policy, and memory admission/reservation rules are unchanged.
+  contig takes the next from one shared queue, longest first. Leases start in proportion to each lane's work;
+  every running lane's share is equal (remaining-work estimates can be far off inside a contig's long final
+  refinement, and a lane starved on that estimate became the run's critical path). At every boundary (contig and
+  phase starts, its coordinating thread's thread claims, and every 0.25 s through its open pool,
+  `execution.pools.LIVE_TOTAL_SECONDS`) a lane takes free CPUs up to that share, borrows idle CPUs beyond it while
+  no other lane is short, and returns borrowed CPUs it is not using once another lane is short. A lane keeps its
+  claim over the short serial steps between its parallel constructs: lent CPUs come back only at the borrowers'
+  boundaries, and on three-contig runs the critical lane restarted its next phase with a few CPUs (lanes 3-6%
+  slower than without lending). A lane waiting for memory lends all but one CPU until it resumes.
+- **Pools.** A pool task claims its fair share at its numerical boundaries: `floor(total / (active + waiting))`
+  threads plus a share of the remainder, capped where the task knows how many threads it can use. A task never grows
+  beyond its share, and a task above it (it grew while it had fewer peers) returns the excess at its next boundary
+  (80 CPUs and 10 tasks: 8 each, however the tasks arrived); as tasks finish, the others' shares grow. During a
+  batch's start-up every worker has one thread until the batch's workers have started. A running Numba kernel never
+  changes its team. A pool's total follows its live budget both ways, and when the total exceeds the workers while
+  tasks wait, the pool starts more workers (up to one per CPU and per waiting task), so the CPUs a lane gains go to
+  tasks, not only to wider teams.
 - **Shared arrays** are copied into shared memory once per pool, with at most
   `execution.shared_arrays.COPY_THREADS = 16` threads (the copy saturates memory bandwidth at about 16 threads).
 - **Serial mode** runs one contig at a time with every core: less throughput on a large node, smaller units of
@@ -353,7 +360,7 @@ Observations use decimal GB/MB unless GiB/MiB is written. These terms are empiri
 | Sequential driver | `max(1536 MiB, 512 MiB + 272 MiB * cores)` | Five-contig post-trim private endpoints rose 15.366→19.395→20.285→21.256→21.570 GB; cache-publication endpoint 21.643 GB. Calibrated at 76 cores with 570 MB margin; core-count scaling and longer sequential lists are unvalidated, and no plateau was established |
 
 The long resource fixture has 80 samples, 30 synthetic founder rows per template block, and 322,664 sites across
-three contigs spanning about 137 Mb on a full 76-CPU SL4 node. Only coordinates come from TroMau; alleles are
+three contigs spanning about 137 Mb on a full 76-CPU node. Only coordinates come from TroMau; alleles are
 resampled K30 template blocks with fixed row identities. Repeated blocks make this a resource fixture, not a
 representative genome model. Three contigs do not meet the unchanged five-chromosome Tier-B eligibility criterion,
 so parent-conditioned family-phase memory is not stressed.
@@ -395,7 +402,13 @@ ownership. No recycling-policy change is made.
 
 Every `@njit(cache=True)` kernel compiles into a cache directory per code version: the key covers the whole
 package source and its location, the Python, NumPy, Numba and llvmlite versions, the code-generation settings and
-the CPU model. Numba's own cache checks only each kernel's file timestamp. Workers of a run share the directory.
+the CPU model. Numba's own cache checks only each kernel's file timestamp. Workers of a run share the directory,
+and every new pool worker loads its kernels from it, so it belongs on local storage: by default a scheduler job's
+scratch directory (`SLURM_TMPDIR`) when set, else memory-backed `/dev/shm` when it is writable with at least
+`execution.bootstrap.KERNEL_SCRATCH_FREE_BYTES` (4 GiB) free, else the system temporary directory. A `/dev/shm`
+directory is private to the run, named after the process that created it and removed at that process's exit; a
+later run on the host removes one whose creator has ended. In 2.10's tests, a 40-sample, 4-contig simulation ran
+12.5% faster with this cache in `/dev/shm` than on a shared network filesystem, with identical results.
 Compiled kernels persist between runs in `~/.cache/haplotype-reconstruction/numba`, or beneath `$XDG_CACHE_HOME`
 when set. The `execution.kernel_cache.KEEP_KEYS = 6` most recently used code versions are kept.
 `NUMBA_CACHE_DIR` sets the base of the run's per-version directories

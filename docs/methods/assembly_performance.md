@@ -223,7 +223,7 @@ ambiguity mask. Binding can change downstream scientific output relative to comp
 ### Cost calibration and bounded weak-data measurement
 
 The exact main/two-row records contain aggregate template/programme counts, not per-template
-required work. Two full 76-CPU SL4 replays therefore counted original native component inputs with
+required work. Two full 76-CPU node replays therefore counted original native component inputs with
 an exact-integer account and unchanged focal/retry order. The 871,111 completed template executions
 cover 98 components selected solely because the old 2^21 policy bound there. All 98 final row arrays
 match their saved native endpoints; none hit the measurement ceiling. This is selected-component

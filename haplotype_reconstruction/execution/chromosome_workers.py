@@ -3,8 +3,8 @@
 Tasks and results are small descriptors; large chromosome tensors live in the handler's retained ``state`` and
 never cross the result pipe. A handler is a module-level callable
 ``(task, state, phase, common, budget) -> (state, result)``; ``budget`` is the worker's lease
-(execution.budget): it starts in proportion to the worker's work and grows, at the handler's boundaries, toward
-the worker's share of the work still remaining.
+(execution.budget): it starts in proportion to the worker's work and is rebalanced, at the handler's boundaries,
+toward an equal share of the executor's CPUs among the running workers.
 
 Memory (execution.memory): each handler call holds its task's ``task_bytes`` of the run's memory and starts when
 they fit; ``state_bytes`` of it stay reserved between calls while the task's retained state lives (until the
@@ -101,11 +101,10 @@ def _numba_capacity() -> int:
     return min(affinity_cpus(), int(numba.config.NUMBA_NUM_THREADS))
 
 
-def _tasks(connection, partition, weights, after, first_position, dynamic):
-    """(position, (weight, (task_index, task), work left after it)) of a phase: the partition's tasks from
-    ``first_position``; then, with ``dynamic``, one task at a time from the executor's shared queue until it is
-    empty (a dynamic task's remaining work is its own)."""
-    for position, item in enumerate(zip(weights, partition, after)):
+def _tasks(connection, partition, first_position, dynamic):
+    """(position, (task_index, task)) of a phase: the partition's tasks from ``first_position``; then, with
+    ``dynamic``, one task at a time from the executor's shared queue until it is empty."""
+    for position, item in enumerate(partition):
         if position >= first_position:
             yield position, item
     if dynamic:
@@ -115,12 +114,12 @@ def _tasks(connection, partition, weights, after, first_position, dynamic):
             kind, value = connection.recv()
             if kind != "task":
                 return
-            task_index, task, weight = value
-            yield position, (weight, (task_index, task), 0.0)
+            task_index, task = value
+            yield position, (task_index, task)
             position += 1
 
 
-def _worker(connection, partition, weights, handler, state, index, progress, settings, label, recycle_bytes=0,
+def _worker(connection, partition, handler, state, index, settings, label, recycle_bytes=0,
             dynamic=False):
     """An executor worker: run every phase's tasks of its partition in order (a phase command names the first
     one), keeping their states; with ``dynamic`` (one-phase executors without retained state) it then takes
@@ -130,8 +129,6 @@ def _worker(connection, partition, weights, handler, state, index, progress, set
     import numba
     bootstrap.apply_worker_settings(settings)
     states = {task_index: None for task_index, _ in partition}
-    # Work left after each task of the partition, in task order.
-    after = [sum(weights[position + 1:]) for position in range(len(weights))]
     memory = None
     baseline = None
     tasks_run = 0
@@ -149,22 +146,18 @@ def _worker(connection, partition, weights, handler, state, index, progress, set
             if memory is None:
                 memory = _TaskMemory(f"{label} {phase}", depth, parent, envelope)
             memory.label = f"{label} {phase}"
-            seat = _LeaseSeat(state, index, progress)
+            seat = _LeaseSeat(state, index)
             with lease_seat(seat):
                 # The exact initial allocation applies before any growth.
                 numba.set_num_threads(int(state.claims[index]))
                 results = []
                 # Positions before first_position were done by a retired predecessor in this phase.
-                for position, (weight, (task_index, task), left) in _tasks(connection, partition, weights, after,
-                                                                           first_position, dynamic):
-                    if position >= len(partition):    # a queued task: its own work is this worker's remainder
-                        seat.finish_task(weight)
-                    _, threads = seat.grow()
+                for position, (task_index, task) in _tasks(connection, partition, first_position, dynamic):
+                    _, threads = seat.grow(floor=1)       # task start: this worker's own boundary
                     request, resumed = memory.acquire(task_index, sizes[task_index], seat=seat)
                     threads = resumed or threads
                     if numba.get_num_threads() != threads:
                         numba.set_num_threads(threads)
-                    seat.task = (weight, left)
                     start = task_peak_start()
                     try:
                         with adopted(memory.held(task_index, request)):
@@ -175,9 +168,7 @@ def _worker(connection, partition, weights, handler, state, index, progress, set
                         raise
                     memory.finish(task_index, request, sizes[task_index], state_sizes[task_index],
                                   task_peak_bytes(start))
-                    seat.task = None
                     results.append((task_index, result))
-                    seat.finish_task(left)
                     release_memory()
                     tasks_run += 1
                     if recycle_bytes and all(value is None for value in states.values()):
@@ -212,14 +203,13 @@ class ChromosomeExecutor:
 
     ``budget`` (a CpuBudget or thread count) is the total CPU budget shared by the workers, bounded by affinity
     and Numba's pool size; there are at most min(tasks, budget, max_workers) persistent processes.
-    ``frontload`` apportions initial leases by each partition's first task; later growth still follows its
-    remaining total work. This gives long first tasks their cores before short queued tasks begin.
+    ``frontload`` apportions initial leases by each partition's first task (otherwise by its whole load); from
+    each worker's first boundary (its first task start) the running workers' shares are equal.
     ``dynamic`` (one phase, no retained state): partitions start with one task each and grow as workers take the
     next-largest unstarted task, so no worker waits behind another's mis-weighted tasks.
     ``weights`` are nonnegative workload estimates in task order: the largest tasks go first to the
     least-loaded partition, and every phase starts each worker with a lease proportional to its partition's
-    work. ``phase_progress`` maps phase names that handlers pass to ``budget.phase(name)`` to the fraction of a
-    task done when that phase starts. ``max_workers`` limits concurrent processes for memory-heavy tasks without
+    work. ``max_workers`` limits concurrent processes for memory-heavy tasks without
     reducing the CPU budget. Results always keep task order. One worker runs in the calling process.
     ``task_bytes`` (None, an int for every task, or one per task in task order) are each handler call's peak bytes
     and ``state_bytes`` the part the task's retained state keeps between calls (execution.memory); `run` may give
@@ -227,12 +217,11 @@ class ChromosomeExecutor:
     """
 
     def __init__(self, tasks, handler, *, budget, weights=None, max_workers=None, label="CHROMOSOME",
-                 phase_progress=None, task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None,
+                 task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None,
                  frontload=False, dynamic=False):
         self.tasks = tuple(tasks)
         self.handler = handler
         self.label = label
-        self.phase_progress = dict(phase_progress or {})
         self.task_bytes = task_sizes(task_bytes, self.tasks)
         self.state_bytes = task_sizes(state_bytes, self.tasks)
         self.envelope = bool(envelope)
@@ -258,7 +247,6 @@ class ChromosomeExecutor:
             self.partitions[owner].append((task_index, self.tasks[task_index]))
             self._loads[owner] += values[task_index]
         self._ran = False
-        self._weights = values
         self._initial_loads = ([values[partition[0][0]] for partition in self.partitions]
                                if frontload and self.tasks else None)
         self._state = LeaseState(FORKSERVER, self.worker_count, self.cpu_budget)
@@ -294,8 +282,7 @@ class ChromosomeExecutor:
         parent, child = FORKSERVER.Pipe()
         process = FORKSERVER.Process(
             target=_worker,
-            args=(child, partition, [self._weights[task_index] for task_index, _ in partition], self.handler,
-                  self._state, index, self.phase_progress, bootstrap.worker_settings(), self.label,
+            args=(child, partition, self.handler, self._state, index, bootstrap.worker_settings(), self.label,
                   self.recycle_bytes, self.dynamic))
         try:
             with main_module_guard():
@@ -352,7 +339,7 @@ class ChromosomeExecutor:
                     if self._queue:
                         task_index = self._queue.popleft()
                         self.partitions[index].append((task_index, self.tasks[task_index]))
-                        connection.send(("task", (task_index, self.tasks[task_index], self._weights[task_index])))
+                        connection.send(("task", (task_index, self.tasks[task_index])))
                     else:
                         connection.send(("done", None))
                     continue
@@ -398,7 +385,7 @@ class ChromosomeExecutor:
                     self._memory = _TaskMemory(f"{self.label} {phase}", depth, parent, self.envelope)
                 memory = self._memory
                 memory.label = f"{self.label} {phase}"
-                seat = _LeaseSeat(self._state, 0, self.phase_progress)
+                seat = _LeaseSeat(self._state, 0)
                 try:
                     with lease_seat(seat), numba_threads(self.cpu_budget):
                         for index, task in self.partitions[0]:

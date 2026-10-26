@@ -13,11 +13,11 @@ then records of
 A record is valid only once its trailer is complete, so an interrupted writer can only leave an incomplete last
 record: readers ignore it, and the next writer truncates it (with one warning) before appending.
 
-Appends are serialised by a per-process thread lock plus ``flock`` on the file (cluster-coherent on the /rds
-Lustre mount), so threads, processes and nodes may append to one file. Inside the lock a writer refreshes its
-index, truncates a torn tail, encodes and appends its record, and fsyncs it. Readers take no lock: they index
-complete records only, by scanning record headers and trailers (never payloads), and refresh incrementally from
-the last indexed end. Indexes are cached per process.
+Appends are serialised by a per-process thread lock plus ``flock`` on the file (coherent across nodes on a shared
+filesystem whose locks are cluster-wide), so threads, processes and nodes may append to one file. Inside the lock a
+writer refreshes its index, truncates a torn tail, encodes and appends its record, and fsyncs it. Readers take no
+lock: they index complete records only, by scanning record headers and trailers (never payloads), and refresh
+incrementally from the last indexed end. Indexes are cached per process.
 """
 from __future__ import annotations
 
@@ -277,7 +277,7 @@ class CheckpointFile:
         self.path = os.path.abspath(os.fspath(path))
         self.kind = kind
         self.name = str(name)
-        self.nthreads = max(1, int(nthreads))
+        self.nthreads = codec.thread_setting(nthreads)
         self.clevel = int(clevel)
 
     def __repr__(self):
@@ -355,6 +355,7 @@ class CheckpointFile:
         return self._read(info, self.nthreads if nthreads is None else nthreads, items)
 
     def _read(self, info, nthreads, items=None):
+        nthreads = codec.cpu_threads(nthreads)
         with open(self.path, "rb") as handle:
             metadata_offset = info.payload_offset + info.metadata_offset
             if items is None:

@@ -8,11 +8,12 @@ it is sent to a worker and releases it when its result arrives, so batches wait 
 overcommitting it; the reservation is an envelope (the search's nested reservations, its concurrent
 seed refits and a ladder extension, borrow its unused bytes first). The worker count is bounded by the
 pending batches, the CPU budget and how many of the largest batches fit the memory limit together.
-Workers share the budget's CPUs dynamically and are recycled after MAX_TASKS_PER_WORKER batches
-(memory fragmentation). A single pending batch runs in the coordinating process with the whole budget
-(holding its reservation). Every joined batch is recorded (``joins/<digest>``) by the coordinating
-process as it completes; a batch whose digest any assembly of the contig already joined is reused,
-never recomputed. Pacing changes timing only, never results.
+Workers share the budget's CPUs dynamically and are recycled when their private memory has grown past the pool's
+threshold (execution.pools), not after a fixed number of batches: each replacement reloads its kernels (where
+private memory cannot be measured, after MAX_TASKS_PER_WORKER batches). A single pending batch runs in the
+coordinating process with the whole budget (holding its reservation). Every joined batch is recorded
+(``joins/<digest>``) by the coordinating process as it completes; a batch whose digest any assembly of the contig
+already joined is reused, never recomputed. Pacing changes timing only, never results.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ from .batches import LevelPartition, partition, informative_masks
 # Private worker residence retained between tasks, including loaded kernels, runtime and heap retention.
 # Measured normal post-trim private maximum 1.994 GB includes retained task state; hold once per pool worker.
 WORKER_RESIDENT_BYTES = 2048 << 20
-MAX_TASKS_PER_WORKER = 4                 # base WORKER_MAXTASKS: recycle workers to return freed memory
+MAX_TASKS_PER_WORKER = 4                 # recycling by batch count, where workers cannot measure private memory
 BUNDLE_EVIDENCE_BYTES = 256 << 20        # batch queue: evidence transported per bundle (about)
 BUNDLE_TASKS = 64                        # batch queue: tasks per bundle at most
 
@@ -122,6 +123,13 @@ def batch_memory_bytes(task: BatchTask) -> int:
     total += (8 * samples * total_bins * (rows + 2) + 8 * samples * join_moves.MOVES_PER_CHUNK
               + join_search.POOL_BYTES_PER_PATH_PAIR * len(task.components) * quota * rows * rows + fits)
     return int(total)
+
+
+def _worker_task_cap() -> int | None:
+    """Batches per pool worker: unbounded where workers are recycled by measured private memory, else
+    MAX_TASKS_PER_WORKER (returns memory a long-lived worker's heap would keep)."""
+    from ...execution.pools import private_memory_measured
+    return None if private_memory_measured() else MAX_TASKS_PER_WORKER
 
 
 def _task(index, components, prepared, samples, settings) -> BatchTask:
@@ -225,7 +233,7 @@ def run_level(components, prepared, evidence, settings: JoinSettings, *, batch_s
         workers = memory_worker_limit([size + WORKER_RESIDENT_BYTES for size in estimates],
                                       min(len(pending), int(budget.threads())), label="hierarchy")
         reference = evidence.shared.scoring
-        with BudgetedPool(budget, processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+        with BudgetedPool(budget, processes=workers, max_tasks_per_child=_worker_task_cap(),
                           label="hierarchy") as pool:
             for result in pool.imap_unordered(join_batch, [(reference, task) for task in pending],
                                               task_bytes=estimates, envelope=True):
@@ -313,7 +321,7 @@ def _execute(payload, cpus):
     with reserve_memory(scoring.nbytes, label="hierarchy-queue evidence"):
         handle, reference = create_shared_array(scoring, copy_threads=cpus)
         try:
-            with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=MAX_TASKS_PER_WORKER,
+            with BudgetedPool(as_budget(cpus), processes=workers, max_tasks_per_child=_worker_task_cap(),
                               label="hierarchy-queue") as pool:
                 return list(pool.imap_unordered(join_batch, [(reference, task) for task in tasks],
                                                 task_bytes=estimates, envelope=True))

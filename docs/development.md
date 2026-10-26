@@ -124,11 +124,16 @@ observed and generated pedigrees), `complete/<stage>`, the pedigree product `ped
 - **Process set-up** (`execution/bootstrap.py`). At import: one thread per numerical-library pool, Numba's
   threading layer `omp` with passive waiting, a kernel cache directory per code version. At run start
   (`start_run`): the Numba pool size (the run's cores), the forkserver preload list (every stage's modules), the
-  profiling flag and the memory governor. Workers inherit these settings.
-- **CPU leases** (`execution/budget.py`). One `CpuBudget` tree (run -> lane -> pool -> worker): a lane's lease grows
-  toward its share of the remaining work at phase starts (`budget.phase(name)`); pool tasks claim
-  `floor(total / active) + remainder` threads at numerical boundaries (`claim_threads()`); a start-up gate gives
-  one thread per worker until the batch's workers have started. A running kernel never changes its team.
+  profiling flag and the memory governor. Workers inherit these settings, and every child applies the preload list
+  again, so the pools a contig lane opens (from the lane's own forkserver) start with the modules imported.
+- **CPU leases** (`execution/budget.py`). One `CpuBudget` tree (run -> lane -> pool -> worker), rebalanced by one
+  rule at every level: a fair share among contenders (lanes: equal shares after work-weighted initial claims; pool
+  tasks and in-process slots: `floor(total / (active + waiting)) + remainder`, capped by `max_threads`; lanes also
+  borrow idle CPUs while no lane is short), CPUs above the share returned by their holder at its next boundary
+  (`claim_threads()`, `budget.threads()` in the owning thread, `budget.phase(name)`, a pool's live re-read). A lane
+  waiting for memory lends its CPUs. A start-up gate gives one thread per worker until the batch's workers have
+  started. A running kernel never changes its team. Pools add workers when their total grows past their workers
+  while tasks wait.
 - **Pools and executors.** `BudgetedPool` is the one process pool (forkserver, non-daemonic so tasks may open
   pools; shared arrays copied once into shared memory and attached by every worker). `ChromosomeExecutor` runs one
   task per chromosome in persistent workers that keep per-chromosome state across phases. `execution/contig_lanes.py`

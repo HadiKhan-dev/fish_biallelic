@@ -355,15 +355,33 @@ class ContextProposal:
 
 
 def _refit_task(task, shared, budget):
-    """Pool task: one component (worker side)."""
-    index, h, columns, starts, stops, centers, rate, config, unknown_mass, census_key = task
+    """Pool task: one component, refitted and finished into its blocks' proposals (worker side): returns
+    (index, proposals of its member blocks in order, allele changes, fills, sites, founders, report)."""
+    (index, h, columns, starts, stops, centers, rate, config, unknown_mass, census_key, template,
+     block_ids) = task
     gl = np.ascontiguousarray(shared["likelihoods"][:, columns], dtype=np.float64)
     observed = np.ascontiguousarray(shared["observed"][:, columns])
-    started = time.monotonic()
     result, q, support, slots, report = refit_component(
         h, gl, observed, starts, stops, centers, rate, config, unknown_mass,
         census_key=None if census_key is None else f"{census_key}/c{index}")
-    return index, result, q, support, np.ascontiguousarray(slots.T), time.monotonic() - started, report
+    # A withheld allele keeps the component's published (completion-filled) call.
+    fallback = (result < 0) & (template >= 0)
+    result[fallback] = template[fallback]
+    changes = int(((result >= 0) & (template >= 0) & (result != template)).sum())
+    fills = int(((result >= 0) & (template < 0)).sum())
+    proposals = []
+    for block, lo, hi, block_slots in zip(block_ids, starts, stops, slots.T):
+        rows = result[:, lo:hi]
+        # Distinct local rows in content order. Founders whose local rows are equal carry the same local
+        # haplotype: its support is their summed support and its ALT posterior their support-weighted mean
+        # (release 2.2: order-free; 2.1 kept the first founder's, a convention).
+        local, inverse = unique_rows(rows, return_inverse=True)
+        posterior_alt, local_support = _combine_duplicates(q[:, lo:hi], support[:, lo:hi], inverse, len(local))
+        depth = np.any(observed[:, lo:hi], axis=1)
+        proposals.append(ContextProposal(
+            block=block, covered=True, calls=np.ascontiguousarray(local), posterior_alt=posterior_alt,
+            support=local_support, unknown_slots=np.where(depth, block_slots, 2).astype(np.int8)))
+    return index, proposals, changes, fills, int(result.shape[1]), len(result), report
 
 
 @dataclass(frozen=True)
@@ -430,8 +448,9 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
         else:
             rate = genetic_map.fallback_rate_per_bp * redraw_rate
         columns = np.searchsorted(evidence.positions, positions)
-        specs[index] = (members, starts, stops, template)
-        tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass, census_key))
+        specs[index] = members
+        tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass, census_key,
+                      template, tuple(panels[b].block for b in members)))
     proposals = [ContextProposal(block=panel.block, covered=False, calls=panel.calls)
                  for panel in panels]
     changes = fills = 0
@@ -449,37 +468,19 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
         with BudgetedPool(budget, processes=workers,
                           shared=dict(likelihoods=evidence.likelihoods, observed=observed),
                           label="context-refit") as pool:
-            for index, result, q, support, slots, _seconds, report in pool.imap_unordered(
+            # Each task returns its blocks' finished proposals: the coordinator only places them and adds counts.
+            for index, finished, changed, filled, sites, founders, report in pool.imap_unordered(
                     _refit_task, tasks, task_bytes=sizes):
-                members, starts, stops, template = specs[index]
-                # A withheld allele keeps the component's published (completion-filled) call.
-                fallback = (result < 0) & (template >= 0)
-                result[fallback] = template[fallback]
-                changes += int(((result >= 0) & (template >= 0) & (result != template)).sum())
-                fills += int(((result >= 0) & (template < 0)).sum())
+                changes += changed
+                fills += filled
                 for key in _TOTALS:
                     totals[key] += int(report[key])
                 bands["half"] += int(report["half_band_sites"])
                 bands["support"] += int(report["support_band_sites"])
-                bands["sites"] += int(result.shape[1])
-                max_founders = max(max_founders, len(result))
-                for b, lo, hi, block_slots in zip(members, starts, stops, slots):
-                    rows = result[:, lo:hi]
-                    # Distinct local rows in content order. Founders whose local rows are equal
-                    # carry the same local haplotype: its support is their summed support and its
-                    # ALT posterior their support-weighted mean (release 2.2: order-free; 2.1 kept
-                    # the first founder's, a convention).
-                    local, inverse = unique_rows(rows, return_inverse=True)
-                    posterior_alt, local_support = _combine_duplicates(
-                        q[:, lo:hi], support[:, lo:hi], inverse, len(local))
-                    panel = panels[b]
-                    depth = np.any(observed[:, panel.site_start:panel.site_start + panel.sites],
-                                   axis=1)
-                    proposals[b] = ContextProposal(
-                        block=panel.block, covered=True,
-                        calls=np.ascontiguousarray(local),
-                        posterior_alt=posterior_alt, support=local_support,
-                        unknown_slots=np.where(depth, block_slots, 2).astype(np.int8))
+                bands["sites"] += sites
+                max_founders = max(max_founders, founders)
+                for b, proposal in zip(specs[index], finished):
+                    proposals[b] = proposal
     tie_events = {"ls.refit.half.band": dict(decisions=bands["sites"], inside_tie=bands["half"], wide=0, boundary=0),
                   "ls.refit.support.band": dict(decisions=bands["sites"], inside_tie=bands["support"], wide=0,
                                                 boundary=0)}

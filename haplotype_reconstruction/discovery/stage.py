@@ -138,9 +138,9 @@ def block_task_bytes(evidence: BlockEvidence, config: DiscoveryConfig | None = N
             + clustering_matrix_bytes(samples, config))
 
 
-# Contigs whose evidence is prepared ahead of the block queue, on as many helper threads. Each helper uses the
-# run's full CPU budget beside the block pool, so more than one would oversubscribe the cores without an explicit
-# CPU split between the helpers and the pool.
+# Contigs whose evidence is prepared ahead of the block queue, on as many helper threads. A helper holds a reserved
+# slice of the block pool's CPUs while it runs (BudgetedPool.helper_seat); more helpers would each need a slice
+# taken from the block tasks.
 PREPARE_AHEAD = 1
 
 # Block workers return freed heap pages every this many blocks, or whenever their resident set
@@ -251,11 +251,12 @@ def _finish_contig(state) -> None:
 
 
 def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
-    """Discover every contig's pending blocks with one block pool and one queue across contigs (a contig's
-    last blocks run beside the next contig's first, so the pool never drains between contigs); blocks are
-    recorded as they complete. ``prepare(contig) -> ContigEvidence | None`` makes the contig's evidence record
-    (the evidence stage) and returns the evidence in memory (None: decode the record); it is called up to
-    PREPARE_AHEAD contigs ahead on helper threads. Every block's result depends only on its own evidence."""
+    """Discover every contig's pending blocks with one block pool and one queue across contigs (a contig's last blocks
+    run beside the next contig's first, so the pool never drains between contigs); blocks are recorded as they
+    complete. ``prepare(contig, budget) -> ContigEvidence | None`` makes the contig's evidence record (the evidence
+    stage) and returns the evidence in memory (None: decode the record); it is called up to PREPARE_AHEAD contigs
+    ahead on helper threads, each with a live share of the block pool's CPUs. Every block's result depends only on
+    its own evidence."""
     contigs = list(contigs)
     if not contigs:
         return
@@ -265,15 +266,21 @@ def run(store, contigs, config: DiscoveryConfig, budget, *, prepare) -> None:
     states = [None] * len(contigs)
     caller = held_context()
 
+    def prepared(contig):
+        """The evidence helper on a reserved slice of the block pool's CPUs (not a task contender, and not a second
+        full budget)."""
+        with pool.helper_seat() as share:
+            return prepare(contig, share)
+
     def tasks():
         """The block tasks of every contig in contig order, prepared one contig ahead (pool dispatch thread)."""
-        upcoming = deque(preparer.submit(prepare, contig) for contig in contigs[:PREPARE_AHEAD])
+        upcoming = deque(preparer.submit(prepared, contig) for contig in contigs[:PREPARE_AHEAD])
         for index, contig in enumerate(contigs):
             # The calling thread waits for this work: its reservation counts as waiting meanwhile.
             with adopted(caller), memory_governor().suspended():
                 evidence = upcoming.popleft().result()
             if index + PREPARE_AHEAD < len(contigs):
-                upcoming.append(preparer.submit(prepare, contigs[index + PREPARE_AHEAD]))
+                upcoming.append(preparer.submit(prepared, contigs[index + PREPARE_AHEAD]))
             states[index], blocks = _start_contig(store, contig, config, evidence)
             del evidence
             for block_input in blocks:

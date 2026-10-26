@@ -625,7 +625,14 @@ class SweepEngine:
         sizes = [windows.template_bytes(*windows.templates[index], self.workspace.samples, len(X))
                  + (0 if memo is None else memo.transient_bytes(*spans[index], X, fwd, bwd))
                  for index in todo]
-        computed = budget.thread_map(run, todo, item_bytes=sizes, label="founder_refinement window solves")
+        # Largest templates first (their workspace estimate tracks their work), so the map's tail holds small
+        # solves; each result is stored at its own index, so the order changes timing only.
+        order = sorted(range(len(todo)), key=lambda i: (-sizes[i], i))
+        solved = budget.thread_map(run, [todo[i] for i in order], item_bytes=[sizes[i] for i in order],
+                                   label="founder_refinement window solves")
+        computed = [None] * len(todo)
+        for i, value in zip(order, solved):
+            computed[i] = value
         for index, value in zip(todo, computed):
             results[index] = value
         if cache is not None:
@@ -818,7 +825,8 @@ class SweepEngine:
                 for m, (a, c, _, _) in enumerate(part):
                     for b in range(a, c):
                         sums[m] += bscale[b]
-                with execution.numba_threads(threads):
+                # Each chunk re-reads the live share (a sample's gain is its own recursion).
+                with execution.numba_threads(max(1, int(budget.threads()))):
                     per = gains_kernels.candidate_gains(
                         haps, orient.leaves, self.workspace.logs, orient.offsets, costs,
                         np.ascontiguousarray(fwd[fb]), np.ascontiguousarray(bwd[fb]), focal, fb, eb, rows, ro,
@@ -921,7 +929,7 @@ class SweepEngine:
                 for b in range(a, c):
                     sums[m - m0] += bscale[b]
             ro = row_offsets[m0:m1 + 1] - row_offsets[m0]
-            with execution.numba_threads(threads):
+            with execution.numba_threads(max(1, int(budget.threads()))):     # the live share, per chunk
                 per = gains_kernels.candidate_gains(
                     haps, leaves, logs, offsets, costs, np.ascontiguousarray(fwd[fb[m0:m1]]),
                     np.ascontiguousarray(bwd[fb[m0:m1]]), focal[m0:m1], fb[m0:m1], eb[m0:m1],
@@ -941,7 +949,7 @@ class SweepEngine:
             r = rows[row_offsets[m]:row_offsets[m + 1]]
             Y = X.copy()
             Y[k, a:c] = r
-            with execution.numba_threads(threads):
+            with execution.numba_threads(max(1, int(budget.threads()))):     # the live share, per window
                 haps_y = orient.haps(Y)
                 local_f = kernels.forward_boundaries(haps_y, logs, offsets, costs,
                                                      np.ascontiguousarray(fwd[a]), a, c)

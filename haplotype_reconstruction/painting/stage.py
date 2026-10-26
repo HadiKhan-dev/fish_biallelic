@@ -171,6 +171,9 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
         eligible = np.empty(n_samples, dtype=np.bool_)
         for start in range(0, n_samples, size):
             stop = min(start + size, n_samples)
+            # A boundary: the team follows the live share (a lane's lease grows as other lanes finish); the
+            # batch size was fixed above, so results and memory do not depend on it.
+            execution.claim_threads()
             batch_likelihoods, batch_observed = hmm.gather_sites(
                 likelihoods, observed, sites, slice(start, stop))
             emissions = hmm.binned_emissions(

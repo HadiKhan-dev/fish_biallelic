@@ -20,7 +20,8 @@ from __future__ import annotations
 import importlib
 
 _EXPORTS = {
-    "CpuBudget": "budget", "claim_threads": "budget", "numba_threads": "budget",
+    "CpuBudget": "budget", "claim_threads": "budget", "numba_threads": "budget", "capped_threads": "budget",
+    "numba_threads_set": "budget",
     "BudgetedPool": "pools",
     "ChromosomeExecutor": "chromosome_workers", "memory_worker_limit": "chromosome_workers",
     "SharedArrayRef": "shared_arrays", "create_shared_array": "shared_arrays",

@@ -44,7 +44,7 @@ class RunSection:
 @dataclass(frozen=True)
 class ExecutionSection:
     cores: int | str = setting("auto", "cores", "Total CPU ceiling (processes x threads); auto = CPU affinity.")
-    contig_lanes: int | str = setting("auto", "cores", "Contigs reconstructed concurrently; auto = one lane per 16 "
+    contig_lanes: int | str = setting("auto", "cores", "Contigs reconstructed concurrently; auto = one lane per 8 "
                                       "cores, paced by measured memory pressure; 1 = one contig at a time with all cores.")
     memory_limit: int | str = setting("auto", "memory", "Capacity for measured job memory pressure: a size such as "
                                       "\"200G\" (binary units), or auto = job cgroup capacity. SOFT/HARD "

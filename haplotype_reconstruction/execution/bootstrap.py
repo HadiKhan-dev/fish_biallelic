@@ -16,6 +16,7 @@ Run start (`start_run`, called by the driver before any pool exists): Numba's po
 """
 from __future__ import annotations
 
+import atexit
 from dataclasses import dataclass
 import getpass
 import hashlib
@@ -23,6 +24,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import sys
 import tempfile
@@ -55,6 +57,14 @@ _CODE_KEY_MARKER = "_HAPLOTYPES_NUMBA_CODE_KEY"
 _CACHE_BASE_MARKER = "_HAPLOTYPES_NUMBA_CACHE_BASE"
 _CACHE_DIR_MARKER = "_HAPLOTYPES_NUMBA_CACHE_DIR"
 _CACHE_RUN_MARKER = "_HAPLOTYPES_NUMBA_CACHE_RUN"
+# Memory-backed storage for the automatic run-local kernel cache when the job gives no scratch directory: every
+# fresh pool worker reads its compiled kernels from this directory, which costs seconds per worker when the
+# temporary directory is on network storage. Linux's shared-memory filesystem (also where POSIX shared memory
+# lives) is used when present, writable and with at least KERNEL_SCRATCH_FREE_BYTES free, else the system temporary
+# directory; the directory is then private to the run, named after its creating process and removed at that
+# process's exit (or by a later run on the host once its creator has ended).
+KERNEL_SCRATCH = Path("/dev/shm")
+KERNEL_SCRATCH_FREE_BYTES = 4 << 30
 
 def configure_imports() -> None:
     """Configure the numerical libraries before any numerical module is imported (package import)."""
@@ -84,6 +94,48 @@ def _threading_layer_started() -> bool:
     except ValueError:
         return False
     return True
+
+
+def _remove_orphaned_caches(parent: Path, host: str) -> None:
+    """Remove private run caches in ``parent`` whose creating process on this host has ended (a run killed before
+    its exit handler ran), so memory-backed caches cannot accumulate."""
+    if os.name != "posix":              # process-existence checks below are POSIX semantics
+        return
+    pattern = re.compile(r"-" + re.escape(re.sub(r"[^A-Za-z0-9_.-]", "_", host)) + r"-pid(\d+)$")
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        match = pattern.search(entry.name)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        try:
+            os.kill(pid, 0)                     # the creator still runs (or exists under another user)
+            continue
+        except ProcessLookupError:
+            pass
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def _kernel_scratch(parent: str, host: str) -> tuple[Path, bool]:
+    """(directory for the automatic run-local kernel cache, whether it is private node-local memory); ``parent``
+    names this user's directory of private run caches."""
+    job = os.environ.get("SLURM_TMPDIR") if os.environ.get("SLURM_JOB_ID") else None
+    if job:
+        return Path(job), False
+    try:
+        if os.access(KERNEL_SCRATCH, os.W_OK):
+            # Ended runs' caches are removed before the free-space test: they may be what fills the space.
+            _remove_orphaned_caches(KERNEL_SCRATCH / parent, host)
+            if shutil.disk_usage(KERNEL_SCRATCH).free >= KERNEL_SCRATCH_FREE_BYTES:
+                return KERNEL_SCRATCH, True
+    except OSError:
+        pass
+    return Path(tempfile.gettempdir()), False
 
 
 def _batch_cache_scope() -> str | None:
@@ -159,7 +211,14 @@ def _configure_numba_cache() -> str:
     user one. These are disposable compiled kernels, not scientific checkpoints.
     """
     explicit = os.environ.get("NUMBA_CACHE_DIR")
-    if explicit and explicit != os.environ.get(_CACHE_DIR_MARKER):
+    if explicit and explicit == os.environ.get(_CACHE_DIR_MARKER):
+        # Inherited from this run's parent process: the same run directory (scratch space is not chosen again),
+        # with this process's own code key below it (normally the parent's).
+        directory = Path(explicit).parent / numba_code_key()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.environ["NUMBA_CACHE_DIR"] = os.environ[_CACHE_DIR_MARKER] = str(directory)
+        return str(directory)
+    if explicit:
         os.environ[_CACHE_BASE_MARKER] = explicit
     base = os.environ.get(_CACHE_BASE_MARKER)
     if base:
@@ -169,13 +228,17 @@ def _configure_numba_cache() -> str:
         if not run_id:
             run_id = uuid.uuid4().hex
             os.environ[_CACHE_RUN_MARKER] = run_id
-        scope = _batch_cache_scope() or f"run-{run_id}"
         user = str(os.getuid()) if hasattr(os, "getuid") else getpass.getuser()
-        user = re.sub(r"[^A-Za-z0-9_.-]", "_", user)
-        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{scope}-{socket.gethostname()}")
-        scratch = Path((os.environ.get("SLURM_TMPDIR") if os.environ.get("SLURM_JOB_ID") else None)
-                       or tempfile.gettempdir())
-        directory = scratch / f"haplotype-reconstruction-numba-{user}" / name
+        parent = f"haplotype-reconstruction-numba-{re.sub(r'[^A-Za-z0-9_.-]', '_', user)}"
+        host = socket.gethostname()
+        scratch, private = _kernel_scratch(parent, host)
+        scope = (None if private else _batch_cache_scope()) or f"run-{run_id}"
+        owner = f"-pid{os.getpid()}" if private else ""
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{scope}-{host}{owner}")
+        directory = scratch / parent / name
+        if private and not directory.exists():
+            # Created by this process (children inherit the markers and reuse it): removed at its exit.
+            atexit.register(shutil.rmtree, str(directory), True)
     directory = directory / numba_code_key()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     cache = str(directory)
@@ -190,6 +253,11 @@ class RunSettings:
 
     cores: int
     profile: bool = False
+    # The forkserver preload list, applied again in every child: a contig lane (itself a forkserver child, whose
+    # own forkserver would otherwise preload nothing) opens pools whose workers then start with the modules
+    # already imported. (Compiled kernels cannot be preloaded: loading a parallel kernel starts the OpenMP pool,
+    # and a forkserver must not fork after that.)
+    preload: tuple[str, ...] = ()
 
 
 _RUN: RunSettings | None = None
@@ -214,17 +282,23 @@ def start_run(cores: int, *, preload: tuple[str, ...] = (), profile: bool = Fals
     numba = sys.modules.get("numba")
     if numba is not None and not _threading_layer_started():
         numba.config.NUMBA_NUM_THREADS = cores
-    try:
-        multiprocessing.set_forkserver_preload(list(dict.fromkeys((*BASE_PRELOAD, *preload))))
-    except (AttributeError, RuntimeError, ValueError):
-        pass
-    _RUN = RunSettings(cores=cores, profile=bool(profile))
+    modules = tuple(dict.fromkeys((*BASE_PRELOAD, *preload)))
+    _set_forkserver_preload(modules)
+    _RUN = RunSettings(cores=cores, profile=bool(profile), preload=modules)
     from .memory import start_governor
     start_governor(memory_limit, diagnostic_directory=memory_diagnostics)
     import numba as numba_module
     numba_module.set_num_threads(min(cores, numba_module.config.NUMBA_NUM_THREADS))
     _check_cached_kernel_signatures()
     return _RUN
+
+
+def _set_forkserver_preload(modules) -> None:
+    """This process's forkserver preload list (effective until its forkserver starts)."""
+    try:
+        multiprocessing.set_forkserver_preload(list(modules))
+    except (AttributeError, RuntimeError, ValueError):
+        pass
 
 
 def worker_settings() -> tuple[RunSettings | None, str]:
@@ -238,6 +312,8 @@ def apply_worker_settings(settings: tuple[RunSettings | None, str | None]) -> No
     """In a freshly started worker process: adopt the parent's run settings and memory governor."""
     global _RUN
     _RUN, memory_handle = settings
+    if _RUN is not None and _RUN.preload:
+        _set_forkserver_preload(_RUN.preload)
     from .memory import attach_governor
     attach_governor(memory_handle)
     _check_cached_kernel_signatures()

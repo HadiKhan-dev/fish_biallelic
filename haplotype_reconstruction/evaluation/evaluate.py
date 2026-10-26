@@ -329,8 +329,8 @@ def _evaluate_task(task, state, phase, common, budget):
     started = time.monotonic()
     threads = execution.claim_threads()
     print(f"EVALUATION {contig}: start; threads={threads}", flush=True)
-    file = CheckpointStore(common["checkpoints"], nthreads=threads).contig(contig)
-    result = evaluate_chromosome(file, common["names"], founder_stages, common["requested"], nthreads=threads)
+    file = CheckpointStore(common["checkpoints"], nthreads=budget).contig(contig)        # live lease
+    result = evaluate_chromosome(file, common["names"], founder_stages, common["requested"], nthreads=budget)
     print(f"EVALUATION {contig}: complete in {time.monotonic() - started:.2f}s; "
           f"threads={execution.claim_threads()}", flush=True)
     return state, result

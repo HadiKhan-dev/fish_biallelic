@@ -15,7 +15,7 @@ from .compact_m1 import CompactM1
 
 
 def _score_handler(contig, state, phase, common, budget):
-    store = CheckpointStore(common["root"], nthreads=execution.claim_threads())
+    store = CheckpointStore(common["root"], nthreads=budget)                # the worker's live lease
     file = store.contig(contig)
     candidate_panel = common["panel"]
     store.bind_identity(file, records.FLOORED_SCORES,

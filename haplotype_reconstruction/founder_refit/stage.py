@@ -26,7 +26,7 @@ from .refit import refit_chromosome, summary
 
 def _refit_contig(contig, state, phase, common, budget):
     """Chromosome-worker handler: load, refit and record one chromosome (resumable)."""
-    store = CheckpointStore(common["root"], nthreads=common["nthreads"])
+    store = CheckpointStore(common["root"], nthreads=budget)                # the worker's live lease
     file = store.contig(contig)
     # Bound before the completeness test (as painting): a finished contig is reused only under the same refit
     # settings, upstream records and code; anything else is refused ("use a new output root").

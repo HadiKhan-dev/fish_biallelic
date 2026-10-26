@@ -22,7 +22,7 @@ import time
 from .. import execution
 from ..config import RunConfig, default_output, stages, write_config
 from ..store.registry import STAGE_NAMES
-from .contig_work import PHASE_PROGRESS, ContigContext, contig_done, planning_bytes, reconstruct_contig
+from .contig_work import ContigContext, check_reused, contig_done, planning_bytes, reconstruct_contig
 from .outputs import publish
 from .samples import SampleTable, build_eligibility, read_sample_table
 from .sources import observation_source
@@ -219,6 +219,7 @@ def _summary_record(summary) -> dict:
 def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
     from ..discovery import records as discovery_records
     from ..discovery.stage import run as discover_contigs
+    from ..evidence import records as evidence_records
     from ..evidence import run_contig as prepare_evidence
     from ..store.store import CheckpointStore
     config, paths, cores = prepared.config, prepared.paths, prepared.cores
@@ -244,19 +245,43 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
     queue = config.execution.batch_queue
     context = ContigContext(configs, prepared.genetic_maps, queue, paths.output)
 
-    def prepare(contig):
-        """The evidence stage for one contig (discovery calls it one contig ahead on its helper thread); returns the
-        contig's ContigEvidence in memory, so discovery need not decode the record again (as base)."""
-        summary = prepare_evidence(store, source, contig, configs.evidence, budget, keep=True)
+    def prepare(contig, share=budget):
+        """The evidence stage for one contig (discovery calls it one contig ahead on its helper thread, with a live
+        share of its block pool's CPUs); returns the contig's ContigEvidence in memory, so discovery need not
+        decode the record again (as base)."""
+        # The helper's checkpoint compression and reads follow its share too (one store view bound to it).
+        local = store if share is budget else store.with_threads(share)
+        summary = prepare_evidence(local, source, contig, configs.evidence, share, keep=True)
         execution.record_product("evidence", contig, _summary_record(summary))
-        publish("write_quality", paths.output, store, contig, sample_ids)
+        publish("write_quality", paths.output, local, contig, sample_ids)
         return summary.prepared.evidence
 
+    def bind_reused(file):
+        """A contig whose evidence and discovery are reused without running them (its discovery is complete): both
+        must be bound to this code, configuration and source, as those stages check (CheckpointMismatch otherwise)."""
+        store.bind_identity(file, evidence_records.STAGE,
+                            evidence_records.identity(configs.evidence, source.identity()))
+        discovery_records.bind(store, file, configs.discovery)
+
     def discover(selected):
-        pending = [contig for contig in selected if not discovery_records.complete(store.contig(contig))]
+        pending = []
+        for contig in selected:
+            file = store.contig(contig)
+            if discovery_records.complete(file):
+                bind_reused(file)
+            else:
+                pending.append(contig)
         if pending:
             with execution.stage_timer("discovery"):
                 discover_contigs(store, tuple(pending), configs.discovery, budget, prepare=prepare)
+
+    for contig in todo:
+        if contig_done(store, contig):
+            # Painted by an earlier invocation and reused without running any of its stages: its records must be
+            # bound to this code and configuration (CheckpointMismatch otherwise).
+            file = store.contig(contig)
+            bind_reused(file)
+            check_reused(store, file, configs, prepared.genetic_maps.for_contig(contig), painting=True)
 
     if config.serial:
         if not _run_serially(store, todo, discover, context, cores, config.execution.max_contigs,
@@ -332,8 +357,7 @@ def _reconstruct(store, contigs, context, cores, config, n_samples, paths, ensur
         lanes, weights = plan_lanes(sizes, pending, cores=cores, requested=requested)
     if lanes > 1:
         run_lanes(store, contigs, reconstruct_contig, context, cores=cores, lanes=lanes, weights=weights,
-                  log_directory=paths.logs / "contigs", phase_progress=PHASE_PROGRESS,
-                  done=lambda contig: contig_done(store, contig))
+                  log_directory=paths.logs / "contigs", done=lambda contig: contig_done(store, contig))
     else:
         ensure_driver_resident()
         run_sequentially(store, [c for c, flag in zip(contigs, pending) if flag], reconstruct_contig, context,

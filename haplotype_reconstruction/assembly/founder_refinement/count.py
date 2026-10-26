@@ -67,11 +67,18 @@ from ..count_rule import shadow_bounds
 from .. import tie_rules
 from ...maths import ties
 from .acceptance import TOL
-from .objective import CENTER, forward_sites, pair_code7, row_max, unordered_pairs
+from .objective import (CENTER, forward_sites, is_skipped, pair_code7, row_max, selected_alleles, transition,
+                        unordered_pairs)
+from .workspace import sample_ranges
 from ... import execution
 
 # Additions stop at the incoming count plus COUNT_LIMIT_MULTIPLE times it (reported when reached).
 COUNT_LIMIT_MULTIPLE = 1
+
+# A complete shadow family is scored in one prefix-sharing pass while the pass's own arrays (allele slabs, base
+# alleles, scores and kernel scratch) take at most this many bytes; a larger family is scored member by member
+# (engine.per_sample: the same values). The engine's workspace and caches are not counted.
+FAMILY_BYTES = 1 << 30
 
 
 @dataclass(frozen=True)
@@ -349,6 +356,131 @@ def _full_site_costs(logs, site_offsets, dosages, dose_offsets, starts, costs, f
     return result
 
 
+@njit(inline="always")
+def _family_sites(row, R, haps, col0, logs, costs, s, j0, j1, first, second):
+    """score_direct's site step over sites [j0, j1): haps column j - col0 holds site j's coded alleles."""
+    for j in range(j0, j1):
+        if is_skipped(logs, s, j):
+            continue
+        transition(row, costs[s, j], R)
+        for q in range(len(first)):
+            row[q] += logs[s, j, pair_code7(haps[first[q], j - col0], haps[second[q], j - col0])] - CENTER
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _family_forward(base, logs, costs, unit_start, unit_stop, unit_offsets, unit_alleles, out):
+    """Raw max-path scores of every member of a factored shadow family, sharing prefixes.
+
+    base: int16 (K, L) coded alleles of the family's first member; unit u (sorted, disjoint site ranges
+    [unit_start[u], unit_stop[u])) has n_u = unit_offsets[u + 1] - unit_offsets[u] alternative allele
+    slabs unit_alleles[unit_offsets[u] + c] (K x width_u used). out: float64 (S, M), M = prod n_u members
+    in depth-first order (unit 0 slowest). A sample's forward row at a site depends only on the alleles
+    before it, so a member shares the row of its common prefix bit for bit: every member's score equals
+    score_panel's on its full allele matrix (the same site steps in the same order)."""
+    founders, sites = base.shape
+    first, second = unordered_pairs(founders)
+    units = len(unit_start)
+    for s in prange(logs.shape[0]):
+        R = np.empty(founders)
+        stack = np.zeros((units + 1, len(first)))
+        row = np.zeros(len(first))
+        _family_sites(row, R, base, 0, logs, costs, s, 0, unit_start[0], first, second)
+        stack[0, :] = row
+        index = np.zeros(units, np.int64)
+        depth = 0
+        leaf = 0
+        while True:
+            row[:] = stack[depth]
+            slab = unit_alleles[unit_offsets[depth] + index[depth]]
+            _family_sites(row, R, slab, unit_start[depth], logs, costs, s, unit_start[depth], unit_stop[depth],
+                          first, second)
+            following = unit_start[depth + 1] if depth + 1 < units else sites
+            _family_sites(row, R, base, 0, logs, costs, s, unit_stop[depth], following, first, second)
+            if depth + 1 < units:
+                depth += 1
+                stack[depth, :] = row
+                index[depth] = 0
+                continue
+            out[s, leaf] = row_max(row)
+            leaf += 1
+            while depth >= 0:
+                index[depth] += 1
+                if index[depth] < unit_offsets[depth + 1] - unit_offsets[depth]:
+                    break
+                index[depth] = 0
+                depth -= 1
+            if depth < 0:
+                break
+
+
+def _family_scores(engine, choices, shape, budget):
+    """Per-sample scores (engine.per_sample, normalisers included) of every member of the factored
+    family itertools.product(*choices) (choices: one option tuple per cell of a K x B panel, founder-major),
+    in product order. Members already in the engine's exact score cache take the cached vector, as per_sample
+    does; the others come from one prefix-sharing pass (_family_forward) over consecutive sample ranges, each
+    at the budget's live thread share (a sample's scores are its own recursion). None when the pass's arrays
+    would exceed FAMILY_BYTES (the caller then scores its members one at a time)."""
+    founders, blocks = shape
+    ws = engine.workspace
+    result = [engine._score_cache.get(tie_rules.panel_key(np.asarray(cells, np.int64).reshape(shape)))
+              for cells in itertools.product(*choices)]
+    if all(value is not None for value in result):
+        return result
+    varying = [i for i, options in enumerate(choices) if len(options) > 1]
+    base_rows = np.asarray([options[0] for options in choices], np.int64).reshape(shape)
+    by_block = {}
+    for i in varying:
+        by_block.setdefault(i % blocks, []).append(i)
+    unit_blocks = sorted(by_block)
+    unit_start = np.asarray([ws.offsets[b] for b in unit_blocks], np.int64)
+    unit_stop = np.asarray([ws.offsets[b + 1] for b in unit_blocks], np.int64)
+    width = int(max(unit_stop - unit_start))
+    combos = [(by_block[b], list(itertools.product(*[range(len(choices[i])) for i in by_block[b]])))
+              for b in unit_blocks]
+    offsets = np.cumsum([0] + [len(unit) for _, unit in combos]).astype(np.int64)
+    members = math.prod(len(unit) for _, unit in combos)
+    # Slabs (int16), base alleles (int16 K x L), raw and normalised scores, and per-sample kernel scratch (a prefix
+    # stack of len(combos) + 1 rows of Q states, a row and K maxima) are resident together at most.
+    states = founders * (founders + 1) // 2
+    nbytes = (2 * int(offsets[-1]) * founders * width + 2 * founders * int(ws.offsets[-1])
+              + 16 * ws.samples * members + 8 * ws.samples * ((len(combos) + 2) * states + founders))
+    if nbytes > FAMILY_BYTES:
+        return None
+    with execution.reserve_memory(nbytes, label="founder_refinement count family"):
+        slabs = np.zeros((int(offsets[-1]), founders, width), np.int16)
+        for u, (b, (cells, unit)) in enumerate(zip(unit_blocks, combos)):
+            leaf = ws.leaves[b]
+            for c, picks in enumerate(unit):
+                rows = base_rows[:, b].copy()
+                for i, pick in zip(cells, picks):
+                    rows[i // blocks] = choices[i][pick]
+                slabs[offsets[u] + c, :, :unit_stop[u] - unit_start[u]] = leaf[rows]
+        with execution.numba_threads(max(1, int(budget.threads()))):
+            base = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(base_rows))
+        raw = np.empty((ws.samples, members))
+        costs = ws.costs(founders)
+        for s0, s1, threads in sample_ranges(ws.samples, budget):
+            with execution.numba_threads(threads):
+                _family_forward(base, ws.logs[s0:s1], costs[s0:s1], unit_start, unit_stop, offsets, slabs,
+                                raw[s0:s1])
+        del slabs, base
+        # Depth-first leaf -> product index (cells in founder-major order, the last cell fastest).
+        radix = [len(choices[i]) for i in varying]
+        position = {cell: k for k, cell in enumerate(varying)}
+        normalisers = ws.normalisers(founders)
+        for leaf, picks in enumerate(itertools.product(*[unit for _, unit in combos])):
+            digits = [0] * len(varying)
+            for (cells, _), unit_picks in zip(combos, picks):
+                for cell, pick in zip(cells, unit_picks):
+                    digits[position[cell]] = pick
+            index = 0
+            for digit, base_count in zip(digits, radix):
+                index = index * base_count + digit
+            if result[index] is None:
+                result[index] = raw[:, leaf] + normalisers
+    return result
+
+
 # ------------------------------------------------------------------ helpers
 class _CountSamples:
     """The count rule's samples: the component's informative samples (workspace.count_samples,
@@ -459,9 +591,12 @@ def _shadow_decision(engine, geometry, larger, larger_scores, smaller_scores, re
                                             kind=kind, config=rule, seed_key=seed_key)
               if complete and combinations > 1 else None)
     decisions = []
-    for cells in paths:
+    # A complete family is scored in one prefix-sharing pass (the same per-member values as per_sample).
+    member_scores = (_family_scores(engine, choices, larger.shape, budget)
+                     if complete and combinations > 1 else None)
+    for m, cells in enumerate(paths):
         rows = np.asarray(cells, np.int64).reshape(larger.shape)
-        shadow_scores = engine.per_sample(rows, budget)
+        shadow_scores = engine.per_sample(rows, budget) if member_scores is None else member_scores[m]
         decisions.append(count_rule.decide(view(larger_scores), view(smaller_scores), view(shadow_scores),
                                           cost, kind=kind, config=rule, seed_key=seed_key)
                          if family is None else family.decide(view(shadow_scores)))
@@ -544,7 +679,8 @@ def _death_class(engine, rows, budget):
         return cache[token]
     owns = _own_sequence(rows)
     pool = np.flatnonzero(~owns) if not owns.all() else np.arange(len(rows))
-    totals = [engine.score(np.delete(rows, f, axis=0), budget) for f in pool.tolist()]
+    totals = [float(scores.sum()) for scores in _scores_many(
+        engine, [np.delete(rows, f, axis=0) for f in pool.tolist()], budget, "founder_refinement death class")]
     scale = max(abs(t) for t in totals)
     result = ties.tie_classes(totals, tie_rules.quantum("refine_F", scale),
                               content=[tie_rules.path_key(rows[f]) for f in pool.tolist()], descending=True,
@@ -562,13 +698,26 @@ def _symmetric_decision(engine, geometry, larger, larger_scores, smaller_scores,
     smaller K with ambiguity (the existing nearest-shadow convention)."""
     begun = time.perf_counter()
     members = _death_class(engine, larger, budget)
-    outcomes = []
-    for founder in members:
+
+    def member(child, founder):
         family = []
         decision, without, cells, detail = _shadow_decision(
             engine, geometry, larger, larger_scores, smaller_scores, np.delete(larger, founder, axis=0),
-            budget, cost, rule, seed_key, kind, view, decision_options=family)
-        outcomes.append((founder, decision, without, cells, detail, family))
+            child, cost, rule, seed_key, kind, view, decision_options=family)
+        return founder, decision, without, cells, detail, family
+
+    # The members' decisions are independent (each its own family and seed stream): concurrent, in member order.
+    if len(members) < 2:
+        outcomes = [member(budget, founder) for founder in members]
+    else:
+        outcomes = [None] * len(members)
+        # Each decision may build a shadow-family table (FAMILY_BYTES at most) and score panels.
+        member_bytes = FAMILY_BYTES + _score_bytes(engine, len(larger))
+        for wave in _waves([member_bytes] * len(members)):
+            for offset, outcome in budget.concurrent([lambda child, founder=members[i]: member(child, founder)
+                                                      for i in wave], member_bytes,
+                                                     label="founder_refinement death class decisions"):
+                outcomes[wave[offset]] = outcome
     founder, decision, without, cells, detail, _ = min(
         outcomes, key=lambda x: (x[1].accept_larger, x[1].margin, x[1].sequence.loso_margin,
                                  tie_rules.path_key(larger[x[0]])))
@@ -590,6 +739,49 @@ def _symmetric_decision(engine, geometry, larger, larger_scores, smaller_scores,
         for x in outcomes:
             decision_options.extend(x[5] or [x[1]])
     return decision, without, cells, detail
+
+
+def _score_bytes(engine, founders: int) -> int:
+    """Transient bytes of one engine.per_sample of a K = founders panel: its int16 alleles, the pair-dosage
+    table when objective.score_panel builds it (search.PAIR_TABLE_BYTES), and its result."""
+    from .search import PAIR_TABLE_BYTES
+    ws = engine.workspace
+    sites = int(ws.offsets[-1])
+    table = sites * founders * (founders + 1) // 2
+    return 2 * founders * sites + (table if table <= PAIR_TABLE_BYTES else 0) + 8 * int(ws.samples)
+
+
+# Transient bytes the count pass's concurrent scorings and shadow decisions may hold together: waves of them run
+# concurrently up to this sum (one at a time when a single one exceeds it), whatever the memory admission does.
+COUNT_FANOUT_BYTES = 4 << 30
+
+
+def _waves(sizes):
+    """Consecutive index ranges whose summed bytes stay within COUNT_FANOUT_BYTES (at least one item each)."""
+    start, total = 0, 0
+    for index, size in enumerate(sizes):
+        if index > start and total + size > COUNT_FANOUT_BYTES:
+            yield range(start, index)
+            start, total = index, 0
+        total += size
+    if start < len(sizes):
+        yield range(start, len(sizes))
+
+
+def _scores_many(engine, panels, budget, label):
+    """engine.per_sample of several panels as concurrent in-process tasks, each on its live share of the budget
+    (2.10: the count pass's independent scorings no longer run one after another); results in input order.
+    Scores never depend on threads (fixed-order per-sample recursions). Each task holds its transient bytes
+    with the run's memory governor, so concurrent scorings are paced by memory."""
+    if len(panels) < 2:
+        return [engine.per_sample(panel, budget) for panel in panels]
+    results = [None] * len(panels)
+    sizes = [_score_bytes(engine, len(panel)) for panel in panels]
+    for wave in _waves(sizes):
+        for offset, scores in budget.concurrent([lambda child, panel=panels[i]: engine.per_sample(panel, child)
+                                                 for i in wave], [sizes[i] for i in wave], label=label):
+            results[wave[offset]] = scores
+    return results
 
 
 def _fit_many(engine, starts, labels, budget):
@@ -981,9 +1173,10 @@ def _terminal_family(engine, candidate_fits, final, scores, budget):
     if len(possible) < 2:
         return final, scores, ()
     exact = {returned: scores}
-    for key in possible:
-        if key != returned:
-            exact[key] = engine.per_sample(np.asarray(key, np.int64), budget)
+    others = [key for key in possible if key != returned]
+    for key, found in zip(others, _scores_many(engine, [np.asarray(key, np.int64) for key in others], budget,
+                                               "founder_refinement terminal family")):
+        exact[key] = found
     values = [float(exact[key].sum()) for key in possible]
     scale = max(abs(value) for value in values)
     classes = ties.tie_classes(values, tie_rules.quantum("refine_F", scale),
@@ -1113,6 +1306,22 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             found = unrefitted_cache[token] = engine.per_sample(reduced, budget)
         return found
 
+    def prefetch(panel, founders):
+        """Fill unrefitted(panel, f) for several founders at once (concurrent scorings, the same values)."""
+        missing = {}
+        for founder in founders:
+            reduced = np.ascontiguousarray(np.delete(panel, founder, axis=0))
+            token = (reduced.shape, reduced.tobytes())
+            if token not in unrefitted_cache:
+                missing[token] = reduced
+        if len(missing) < 2:
+            return
+        if len(unrefitted_cache) + len(missing) > 4 * len(panel):
+            unrefitted_cache.clear()
+        for token, scores in zip(missing, _scores_many(engine, list(missing.values()), budget,
+                                                       "founder_refinement deletion scores")):
+            unrefitted_cache[token] = scores
+
     def keep_margin(F):
         """Margin of the best-F keep, the cycle keep and the restore: max(TOL, the tie quantum at F)."""
         return max(TOL, tie_rules.quantum("refine_F", F))
@@ -1151,7 +1360,9 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             found = None
             losses = []
             # canonical order = content order (reversed under ties.reverse_conventions())
-            for founder in ties.conv_order(len(current)).tolist():
+            order = ties.conv_order(len(current)).tolist()
+            prefetch(current, order)
+            for founder in order:
                 reduced = unrefitted(current, founder)
                 loss = float(np.max(np.abs(view(current_scores) - view(reduced))))
                 losses.append(loss)
@@ -1218,6 +1429,7 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             # margin of the total gain (tie classes; the founder's path inside a class); the top r,
             # with the tie class the cut falls in, are converged.
             keys = [None] * K
+            prefetch(X, candidates)
             for d in candidates:
                 keys[d] = min(_point_margins(view(scores), view(unrefitted(X, d)), cost))
             chosen = _shortlist(candidates, keys, ranked_refits, tie_rules.quantum("count_margin"),

@@ -13,6 +13,7 @@ import pandas as pd
 from .. import execution
 from ..evidence import records as evidence_records
 from ..painting import records as painting_records
+from ..execution.budget import current_budget
 from ..store import CheckpointStore
 from . import decision as decision_module
 from . import exclusion, panel, prepare, records, scoring, slots, tables
@@ -35,7 +36,7 @@ def tier_b_minimum_contigs(config: PedigreeConfig) -> int:
 
 # --------------------------------------------------------------------------- chromosome handlers
 def _open(common: dict, contig: str):
-    store = CheckpointStore(common["root"], nthreads=execution.claim_threads())
+    store = CheckpointStore(common["root"], nthreads=current_budget())      # the worker's live lease
     return store, store.contig(contig)
 
 

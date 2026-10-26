@@ -187,7 +187,7 @@ never change the founders, paintings or pedigree, and the export changes no reco
 The default is the CPU affinity of the process (the allocation). Discovery workers, contig lanes, process pools
 and Numba thread teams share the ceiling as leases, and freed CPUs move to the work still running at numerical
 boundaries; a running kernel never changes its team. `[execution] contig_lanes` sets how many contigs are
-reconstructed at once: `auto` is one lane per 16 cores, at most one per pending contig, limited by memory; `1`
+reconstructed at once: `auto` is one lane per 8 cores, at most one per pending contig, limited by memory; `1`
 runs one contig at a time with every core.
 
 ### Memory
@@ -212,11 +212,15 @@ refinement's window-frontier budget), never the memory that happens to be free.
 
 ### Compiled kernels
 
-Runs reuse compiled numerical kernels from `~/.cache/haplotype-reconstruction/numba`, or beneath
-`$XDG_CACHE_HOME` when set. `NUMBA_CACHE_DIR` selects the base of the run-local cache. No cache settings are
-required. At startup, the run requests the union of release reference signatures and signatures learned by the
-persistent store, using its CPU budget before scientific pools start. An empty store still requests the packaged
-signatures; the first run can therefore spend time compiling before the first scientific stage.
+Runs reuse compiled numerical kernels from `~/.cache/haplotype-reconstruction/numba`, or beneath `$XDG_CACHE_HOME`
+when set. Every worker process loads its kernels from a run-local cache: by default a scheduler job's scratch
+directory (`SLURM_TMPDIR`) when set, else memory-backed `/dev/shm` when it is writable with at least 4 GiB free
+(private to the run and removed when it ends), else the system temporary directory. `NUMBA_CACHE_DIR` selects the
+base of the run-local cache instead; keep it on local storage, since loading kernels from network storage costs
+every new worker seconds. No cache settings are required. At startup, the run requests the union of release
+reference signatures and signatures learned by the persistent store, using its CPU budget before scientific pools
+start. An empty store still requests the packaged signatures; the first run can therefore spend time compiling
+before the first scientific stage.
 
 After warm-up has requested missing overloads, its parallel workers finish and one fresh worker checks every
 listed signature through the existing cache guard, compiling misses serially before science starts. This

@@ -36,13 +36,14 @@ def _path_token(value, name) -> str:
 class CheckpointStore:
     """A run's checkpoint directory (see the module docstring).
 
-    ``nthreads`` is the default encode/decode CPU budget of its containers; ``clevel`` their default ZSTD level.
+    ``nthreads`` is the default encode/decode CPU budget of its containers (a count, or a live CPU budget re-read
+    at each encode/decode); ``clevel`` their default ZSTD level.
     A directory holding other subdirectories than contigs/ and work/ belongs to another layout and is refused.
     """
 
     def __init__(self, root, *, nthreads=1, clevel=None):
         self.root = os.fspath(root)
-        self.nthreads = max(1, int(nthreads))
+        self.nthreads = codec.thread_setting(nthreads)
         self.clevel = codec.CLEVEL if clevel is None else int(clevel)
         os.makedirs(self.root, exist_ok=True)
         for entry in os.scandir(self.root):
@@ -78,7 +79,7 @@ class CheckpointStore:
     def with_threads(self, nthreads) -> "CheckpointStore":
         """The same store with another default encode/decode CPU budget."""
         store = copy.copy(self)
-        store.nthreads = max(1, int(nthreads))
+        store.nthreads = codec.thread_setting(nthreads)
         return store
 
     def bind_identity(self, file: CheckpointFile, section: str, identity) -> None:
@@ -170,7 +171,7 @@ class WorkState:
         self.root = os.fspath(root)
         self.contig = _path_token(contig, "contig")
         self.name = _path_token(name, "work state name")
-        self.nthreads = max(1, int(nthreads))
+        self.nthreads = codec.thread_setting(nthreads)
 
     @property
     def path(self) -> str:
@@ -181,12 +182,13 @@ class WorkState:
 
     def save(self, payload) -> int:
         """Replace the state atomically; return its size in bytes."""
-        return codec.write_payload(self.path, payload, nthreads=self.nthreads, clevel=codec.FAST_CLEVEL)
+        return codec.write_payload(self.path, payload, nthreads=codec.cpu_threads(self.nthreads),
+                                   clevel=codec.FAST_CLEVEL)
 
     def load(self):
         """The saved state, or None when there is none."""
         try:
-            return codec.read_payload(self.path, nthreads=self.nthreads)
+            return codec.read_payload(self.path, nthreads=codec.cpu_threads(self.nthreads))
         except FileNotFoundError:
             return None
 

@@ -522,6 +522,9 @@ class WindowBeam:
                 for kind in ('fine', 'coarse'):
                     if kind == 'coarse' and self.coarse is None:
                         continue
+                    # The alphabet and unit preparation below is serial Python: one thread (the rest returned to
+                    # peers); the beam re-claims up to its reserved scratch team before its kernel.
+                    execution.numba_threads_set(execution.capped_threads(budget, 1))
                     groups, alphabets = self._units(X, kind)
                     # Prepared-row content orders each unit's alphabet (unknown aliases are row-specific).
                     alphabets = [p[sorted(range(len(p)), key=lambda r: (tuple(self.ws.leaves[b][p[r, b - a]].tobytes()
@@ -546,6 +549,7 @@ class WindowBeam:
                                         for f in focals], np.int64)
                     if not len(tasks):
                         continue
+                    execution.numba_threads_set(min(threads, max(1, int(budget.threads()))))
                     paths, values, counts, cert = beam_batch(logs, cc, states, cols, choices, first, second, groups_arr,
                                                              ff, gg, tasks, width, cur, quantum)
                     stats['max_frontier'] = max(stats['max_frontier'], int(counts[:, 0].max(initial=0)))

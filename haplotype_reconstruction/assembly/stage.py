@@ -154,14 +154,22 @@ def assembly_identity(inputs: AssemblyInputs, config: AssemblyConfig, role: Role
     A context assembly never refines, so its identity leaves the refinement settings out (changing
     them does not invalidate the contexts' records, as in base).
     """
+    return identity_of(inputs.evidence.identity,
+                       inputs.panels_identity if inputs.panels_identity is not None
+                       else panels_digest(inputs.panels), inputs.genetic_map, config, role, levels)
+
+
+def identity_of(evidence_identity: str, panels_identity: str, genetic_map, config: AssemblyConfig, role: Role,
+                levels: int | None) -> dict:
+    """assembly_identity from the upstream record identities themselves (a completed assembly's records are checked
+    against it without decoding its inputs)."""
     settings = jsonable(config)
     if role is Role.CONTEXT:
         settings.pop("refinement")
     identity = stage_identity("assembly", schema=SCHEMA, config=settings, upstream={
-        "evidence": inputs.evidence.identity,
-        "local_panels": (inputs.panels_identity if inputs.panels_identity is not None
-                         else panels_digest(inputs.panels)),
-        "genetic_map": json_digest(inputs.genetic_map.identity())})
+        "evidence": evidence_identity,
+        "local_panels": panels_identity,
+        "genetic_map": json_digest(genetic_map.identity())})
     identity["role"] = role.value
     identity["levels"] = levels
     return identity

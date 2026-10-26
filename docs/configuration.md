@@ -196,7 +196,7 @@ CPUs, lanes and shards (never part of results).
 | key | type | default | meaning |
 | --- | --- | --- | --- |
 | `cores` | "auto" or integer >= 1 | `"auto"` | Total CPU ceiling (processes x threads); auto = CPU affinity. |
-| `contig_lanes` | "auto" or integer >= 1 | `"auto"` | Contigs reconstructed concurrently; auto = one lane per 16 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. |
+| `contig_lanes` | "auto" or integer >= 1 | `"auto"` | Contigs reconstructed concurrently; auto = one lane per 8 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. |
 | `memory_limit` | "auto", integer bytes, or a size with a binary unit (K, M, G, T), e.g. "200G" | `"auto"` | Capacity for measured job memory pressure: a size such as "200G" (binary units), or auto = job cgroup capacity. SOFT/HARD thresholds and sampling interval are in execution/config.py; affects scheduling only. |
 | `serial` | boolean | `false` | Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). |
 | `max_contigs` | integer >= 0 | `0` | Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). |
@@ -822,7 +822,7 @@ No setting is read from the environment: every setting is in the configuration. 
 
 | variable | use |
 | --- | --- |
-| `NUMBA_CACHE_DIR` | Base directory for compiled kernels; the package uses a subdirectory per code version (package source, Python/NumPy/Numba/llvmlite versions, code-generation settings, CPU model). Default: a node-local scratch directory per scheduler job (or run) and host. |
+| `NUMBA_CACHE_DIR` | Base directory for compiled kernels; the package uses a subdirectory per code version (package source, Python/NumPy/Numba/llvmlite versions, code-generation settings, CPU model). Default: the scheduler job's SLURM_TMPDIR when set, else /dev/shm when writable with at least 4 GiB free (private to the run, removed when it ends), else the system temporary directory; per scheduler job (or run) and host. |
 | `XDG_CACHE_HOME` | Persistent kernel store `$XDG_CACHE_HOME/haplotype-reconstruction/numba` (default `~/.cache/haplotype-reconstruction/numba`); the six most recently used code versions are kept. |
 | `SLURM_JOB_ID` | Scheduler job identity: scopes the automatic kernel cache directory; recorded in batch-queue claims. |
 | `SLURM_ARRAY_TASK_ID` | Array task identity (automatic kernel cache directory). |

@@ -12,6 +12,8 @@ from their records.
 """
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 
 from ..assembly import AssemblyInputs, Role, assemble
@@ -67,6 +69,25 @@ def _block_tasks(discovered, evidence, genetic_map):
     return tasks
 
 
+def bind_rounds(file, config, assembly_config, genetic_map, discovery_config):
+    """Bind every round's record scope of the contig to its identity (each round's upstream includes the previous
+    round's), in round order; a different bound identity is a CheckpointMismatch. Returns the scopes."""
+    evidence_identity = file.info(evidence_records.EVIDENCE).identity
+    discovery_identity = file.info(f"identity/{discovery_records.STAGE}").identity
+    redraw_rate = float(config.model.redraw_rate_per_morgan)
+    upstream = dict(evidence=evidence_identity, discovery=discovery_identity)
+    scopes = []
+    for round_index, round_name in enumerate(ROUNDS):
+        scope = records.round_scope(file, round_name)
+        scope.bind(records.round_identity(round_name, config, discovery_config, redraw_rate,
+                                          genetic_map, upstream,
+                                          assembly_config if round_index else None))
+        upstream = dict(upstream, previous_round=file.info(
+            f"identity/{records.round_prefix(round_name)}").identity)
+        scopes.append(scope)
+    return scopes
+
+
 def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                discovery_config, queue=None, assembly_evidence=None, evidence=None):
     """Select the local panels of one contig (resuming completed rounds from their records).
@@ -86,20 +107,9 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
     A contig whose rounds are all recorded decodes neither the evidence nor the fits.
     """
     file = store.contig(contig)
-    evidence_identity = file.info(evidence_records.EVIDENCE).identity
-    discovery_identity = file.info(f"identity/{discovery_records.STAGE}").identity
     redraw_rate = float(config.model.redraw_rate_per_morgan)
     settings = (config, discovery_config, redraw_rate)
-    upstream = dict(evidence=evidence_identity, discovery=discovery_identity)
-    scopes = []
-    for round_index, round_name in enumerate(ROUNDS):
-        scope = records.round_scope(file, round_name)
-        scope.bind(records.round_identity(round_name, config, discovery_config, redraw_rate,
-                                          genetic_map, upstream,
-                                          assembly_config if round_index else None))
-        upstream = dict(upstream, previous_round=file.info(
-            f"identity/{records.round_prefix(round_name)}").identity)
-        scopes.append(scope)
+    scopes = bind_rounds(file, config, assembly_config, genetic_map, discovery_config)
     first = next((index for index, name in enumerate(ROUNDS) if not records.round_complete(file, name)),
                  len(ROUNDS))
     if first == len(ROUNDS):
@@ -138,7 +148,10 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                 proposals, summary = refine(
                     panels, components, evidence, genetic_map, config, redraw_rate,
                     budget.phase(f"feedback_l{level}_refine"), census_key=f"{contig}/{round_name}/refit")
-                scope.save("proposals", records.encode_proposals(proposals, summary))
+                # Written between pools: the lane's current share compresses it (in-pool chunk writes keep one).
+                wide = copy.copy(scope)
+                wide.nthreads = budget          # the live share at the write (store/codec.cpu_threads)
+                wide.save("proposals", records.encode_proposals(proposals, summary))
                 del result, components
                 release_memory()
             else:

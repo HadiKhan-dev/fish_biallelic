@@ -63,9 +63,19 @@ _METADATA_SPOOL_BYTES = 64 << 20
 _PARALLEL_READ_LOCK = RLock()
 
 
-def cpu_threads(nthreads: int) -> int:
-    """A positive thread count no larger than this process's CPU affinity."""
+def cpu_threads(nthreads) -> int:
+    """A positive thread count no larger than this process's CPU affinity; a live CPU budget (a contig lane's
+    lease) is re-read now, so compression takes the CPUs the lane holds at that moment."""
+    if hasattr(nthreads, "codec_threads"):
+        nthreads = nthreads.codec_threads()     # a lane's lease: one thread while its pools hold its CPUs
+    elif hasattr(nthreads, "threads"):
+        nthreads = nthreads.threads()
     return min(max(1, int(nthreads)), affinity_cpus())
+
+
+def thread_setting(nthreads):
+    """A store's thread setting: a live CPU budget as it is (re-read at each encode/decode), else a count."""
+    return nthreads if hasattr(nthreads, "threads") else max(1, int(nthreads))
 
 
 def _buffer_layout(sizes):

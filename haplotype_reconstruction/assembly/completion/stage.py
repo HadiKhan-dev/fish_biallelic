@@ -328,12 +328,12 @@ def _complete(panels, evidence, config, budget):
                                                                  panels[index].sites, config)
                                               for index in group) for group in groups]
     try:
-        # The workers start up while the coordinator scans the focal mask.
-        pool = BudgetedPool(budget, label="completion", processes=memory_worker_limit(
-            block_bytes, min(budget.threads(), len(groups)), label="completion"))
+        # The focal mask first, on the coordinator's share: no team of its own may run beside its pool's workers.
         with numba_threads(min(budget.threads(), COPY_THREADS)):
             _focal_mask(evidence.neutral, evidence.observed, starts, offsets, kept, UNIFORM_TOLERANCE,
                         focal)
+        pool = BudgetedPool(budget, label="completion", processes=memory_worker_limit(
+            block_bytes, min(budget.threads(), len(groups)), label="completion"))
         refs = (evidence.shared.neutral, evidence.shared.observed)
         block_tasks = [
             (refs, folds, config.crossfit, config.cavity,
