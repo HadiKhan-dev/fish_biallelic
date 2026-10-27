@@ -33,7 +33,7 @@ distinguishes implemented treatments from remaining conventions and unfinished v
 Two acceptance tests check this on every release candidate:
 
 - **The noise loop** reruns the whole pipeline under input perturbations that should not matter:
-  - 1e-12 and 1e-9 relative genotype-likelihood noise;
+  - 1e-12, 1e-9 and (release 2.13) 1e-6 relative genotype-likelihood noise;
   - value-consistent noise;
   - permuted sample order, in memory and in the input file;
   - another thread count and another numerical environment.
@@ -92,17 +92,34 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 `maths/ties.py` gives every stage one way to say "these values are tied".
 
 - **Tie quanta.** Each kind of compared quantity has a power-of-two quantum. It sits far above the rounding of the
-  compared sums and far below the first genuine differences, which a valley census of real and simulated runs
-  measured. The kinds and their quanta are:
-  - block NLLs and cavity scores: at least 2^-17, scaled with the block's null NLL;
-  - H-step allele costs: 2^-18;
-  - "improved" tests: 2^-14;
-  - per-sample sums: at least 2^-23;
-  - per-cell evidence: 2^-23;
-  - probabilities: 2^-20.
+  compared sums and above the typical movement that relative genotype-likelihood noise of `maths.ties.GL_NOISE` = 1e-6
+  causes in the compared contrasts. Releases 2.1 to 2.12 placed the quanta against 1e-9 noise, by a valley census of
+  real and simulated runs; under a 1e-6 jitter, compared values left their tie classes and changed, for example, 144
+  of 200 K30 discovery blocks and 19 to 37 discovery blocks per std or TroMau run. Release 2.13 (owner decision: no
+  decision tolerance below the noise floor) re-examined the decisions of stages 1 to 5 against 1e-6 noise and
+  raised those found below it to the smallest power of two at least 16 times their contrast's motion
+  (`maths.ties.noise_quantum`, `NOISE_MARGIN = 16`). The motions are measured on frozen contrasts of 1e-6 jitter
+  runs where available, otherwise the 2.1 census times 10^3 (a linear-response extrapolation, checked on the replays
+  listed); a relative factor without a recorded motion is its 2.1 value times 2^10, validated by replays (the
+  discovery factors). Typical matched-history motions and linear-response extrapolations guide the tolerances; bounded replays test the resulting policy. This is not a worst-case noise certificate. The factor 16 is a safety margin, not a significance level: differences smaller than a quantum
+  are decided by content or a stated prior even where their sign is stable. The kinds and their quanta are:
+  - block NLLs and cavity scores: at least 2^-10, and at least 2^-20 of the block's null NLL;
+  - H-step allele costs: 2^-12;
+  - "improved" tests: 2^-10;
+  - per-sample sums: at least 2^-13, and at least 2^-26 of the scale;
+  - per-cell evidence: 2^-14;
+  - probabilities: 2^-15.
 
-  Stages with their own scale use the same construction, for example the refinement quantum
-  max(2^-14, 2^-35 |F|) and the family-MAP gain quantum 2^-17.
+  Stages with their own scale use the same construction. Founder refinement's quantum is max(2^-9, 2^-26 |F|) and its
+  acceptance threshold 2^-9 nats (refinement fit contrasts move by 9e-5 nats at the 99th percentile under a 1e-6
+  jitter; a typical-motion census, not a certificate); local
+  selection's decision tolerance stays 2^-10 (a search round's gain moves by about 5e-5 nats at the 99.9th percentile in the matched-history census); the painting
+  Viterbi tie is 2^-15. The join quanta keep their 2.1 values: frozen join contrasts move 32 to 63 times less than
+  them under a 1e-6 jitter, and no final join changed on identical inputs. Convergence tolerances of fits,
+  float-resolution margins of exact bounds and stated statistical thresholds are not tie quanta and are unchanged.
+  Not yet re-measured: founder refinement's guard tolerance (a scientific test on the guard's energy, 1e-6) and
+  local selection's flip-acceptance tolerance (also its convergence tolerance, 1e-6); family phase's chain ties and
+  gain quantum are outside the validated stages.
 - **Tie classes.** Values are sorted exactly, and consecutive values within a quantum chain into one class.
   - **Width guard.** A class wider than four quanta is reported and ordered by value.
   - **Boundary guard.** A gap near a quantum is reported.
@@ -151,7 +168,7 @@ These decide exact ties. They are not reversed by the reversal test.
 | --- | --- | --- |
 | fewer founders (smaller K) | discovery selection, the local-selection bank and round winner, founder refinement at an exact-zero count margin, count cycles | parsimony: at equal fit the data do not support the extra founder |
 | fewer switches; fewer parents | the painting and family-phase Viterbi tie rule; the pedigree graph's replacement rows | at equal likelihood the recombination and transmission model already favours fewer events, because a switch probability is below 1/2 |
-| keep the current state inside a tie class | search climbs, keep-incumbent tests, the family MAP's acceptance (a gain must exceed the quantum) | an ascent moves only on evidence, so the optimum is a fixed point and noise cannot move it |
+| keep the current state inside a tie class | search climbs, keep-incumbent tests, the family MAP's acceptance (a gain must exceed the quantum) | an ascent moves only on evidence, so the optimum is a fixed point: noise cannot make it move while the compared gain stays inside the band |
 | the conservative side of an exact threshold | release, supporter, carrier and unknown-count bands; the abundant-route test | at exactly the threshold, withhold rather than call |
 | abstain | pedigree winners, completion links and neighbours whose released alleles differ, export `.` at equal totals | no released answer where the data give none |
 | more observed sites and more supporting samples first | discovery's data-birth ranking and residual emission | the better-supported candidate is tried first; candidate sets are kept whole up to their caps |

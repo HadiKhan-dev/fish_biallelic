@@ -13,7 +13,11 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit
 
-QUANTUM = 2.0 ** -20
+from ..maths.ties import tie_quantum
+
+# Gap and half band of landmark fractions: the probability tie quantum of maths.ties (2^-15 since 2.13, placed against
+# 1e-6 relative GL noise; 2^-20 before).
+QUANTUM = tie_quantum(0.0, "probability")
 
 
 @njit(cache=True)

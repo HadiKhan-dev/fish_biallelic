@@ -42,11 +42,18 @@ closures and their limits are recorded below; final full-pipeline validation rem
 No discrete outcome of discovery may depend on floating-point rounding, on perturbations of the genotype
 likelihoods far below any real difference, or on the order of the samples. Every block therefore has its tie quanta
 (`maths/ties.py`, `BlockQuanta` from the block's null NLL M, the sum over samples of their genotype-oracle NLL plus
-two unknown copies at every observed site, which bounds every panel's NLL): powers of two placed between the rounding
-and noise motion of the compared quantities and their first genuine differences. Kind `nll` (at least
-max(2^-17, 2^-30 M) nats) orders NLLs and cavity scores, kind `sample` (max(2^-23, 2^-36 M)) per-sample sums (A step,
-data-birth excess), `h_step` (2^-18) the H step's allele sums, `improvement` (2^-14) the search's improvement tests,
-`cell` (2^-23) per-cell release contributions and `probability` (2^-20) probabilities and masses. Values are grouped
+two unknown copies at every observed site, which bounds every panel's NLL): powers of two at least 16 times the
+typical motion of the compared quantities under 1e-6 relative GL noise (a design scale from measured and
+extrapolated motions, tested by bounded replays; not a worst-case certificate) (release 2.13; see [ties](ties.md#common-machinery)).
+Releases 2.1-2.12 placed them against 1e-9 noise (at 2^-7 to 2^-5 of the values below), and a 1e-6 jitter then
+changed 19 to 37 blocks per std or TroMau run and 144 of 200 K30 blocks; with the 2.13 quanta, replays of every one
+of those blocks under both evidences agree, and replays of every block of TroMau chr13 and K30 m4 and every third block
+of std chr10 under a 1e-5 jitter change no block (one perturbation per amplitude, not a worst case; the relative
+factors below have no recorded motion and are the 2.1 factors times 2^10, validated by these replays). Kind `nll`
+(at least max(2^-10, 2^-20 M) nats) orders NLLs and cavity scores, kind `sample` (max(2^-13, 2^-26 M)) per-sample
+sums (A step, data-birth excess), `h_step` (2^-12) the H step's allele sums, `improvement` (2^-10) the search's
+improvement tests, `cell` (2^-14) per-cell release contributions and `probability` (2^-15) probabilities and masses.
+Values are grouped
 into anchored tie classes (single-linkage chains of gaps at most the quantum over the exactly sorted values); every
 order is (class, then exact secondary keys, then an exact content key), and a class wider than four quanta is ordered
 by value inside (width guard). In release 2.3 the search scores and expands tied panel classes whole: the content key
@@ -382,7 +389,7 @@ an omitted class. Starts are fitted as complete usage-schedule families, then re
 classes at `DiscoveryConfig.search.data_start_beam_width = 6`.
 
 **Dosage families (D8a).** At each sample/site, use the full winning genotype-likelihood class at
-`probability` quantum 2^-20, with the common chained-class rule. Its minimum and maximum dosages
+`probability` quantum (2^-15 since 2.13), with the common chained-class rule. Its minimum and maximum dosages
 form the low and high dosage vectors. Their distinct rows contribute to the initial fallback,
 direct data births and every founder-subtraction birth; rows and complete starts are deduplicated
 before the existing whole-class budgets. No REF/ALT or dosage prior is added. The population-half
@@ -819,7 +826,7 @@ proposal geometry on at most 256 data-derived landmarks. Exact duplicate descrip
 share an identity; original observation weights are preserved. The initial anchors
 are the complete nearest class to the population prototype; subsequent anchors
 are complete farthest-from-current-set classes. Distance comparisons use the
-existing probability quantum 2^-20, including its chained-class definition.
+existing probability quantum (2^-15 since 2.13), including its chained-class definition.
 Names, record order, random seeds and truth do not select members. An over-budget
 class is omitted whole and recorded in search_incomplete with cause/count/scope.
 If the first class is too large, this proposal branch contributes no groups;

@@ -14,11 +14,17 @@ array order. The rules (``maths.ties``, owner-reviewed 18 Oct):
   shortlists) keeps every member of the class it cuts (capped at twice the budget) and orders inside a class by
   content; a class spanning more than ``maths.ties.WIDE_CLASS_QUANTA`` quanta is reported (width guard) and ordered
   by value inside. Content keys are exact discrete data: prepared-row index paths and panels as sorted path tuples.
-* **Quanta** (:data:`ASSEMBLY_QUANTA`): one per decision kind, a power of two at least max(floor, factor x |scale|),
-  placed in the kind's valley between the motion of the compared differences under 1e-9 relative GL noise (including
-  its one-ulp float32 consequences) and the first genuine differences, by the valley census of design A-8
-  (``maths.ties.census``; work/N2/harness/census.py). :data:`ASSEMBLY_MOTION` records the measured motions (boundary
-  guard).
+* **Quanta** (:data:`ASSEMBLY_QUANTA`): one per decision kind, a power of two at least max(floor, factor x |scale|).
+  Release 2.1 placed them in the kind's valley between the motion of the compared differences under 1e-9 relative GL
+  noise (including its one-ulp float32 consequences) and the first genuine differences, by the valley census of
+  design A-8 (``maths.ties.census``; work/N2/harness/census.py). Release 2.13 (owner: no decision tolerance below the
+  noise floor) re-measured the compared contrasts under 1e-6 relative GL noise. refine_F is placed at
+  ``maths.ties.noise_quantum`` (16 times) of its measured motion: p99 9e-5 nats over ~4,300 fit contrasts
+  F(fit) - F(start) of 1e-6 jitter runs, about 2e-7 of the contrast, ~5e-10 of |F| for whole-founder contrasts, so
+  (2^-9, 2^-26) instead of (2^-14, 2^-35). The join kinds keep their 2.1 quanta: frozen join contrasts move by
+  2.4e-7 to 3.8e-6 nats under that noise, 32 to 63 times below the 2.1 quanta at their scales, and no final join
+  changed on identical inputs in 9,785 comparisons of 1e-6 jitter runs (review I213/H213).
+  :data:`ASSEMBLY_MOTION` records the motions (boundary guard).
 """
 from __future__ import annotations
 
@@ -56,7 +62,7 @@ from ..maths import ties
 #   beam: 6.5e-8 nats / 1.2e-8 .. 3e-7 (a few dozen of ~1.3e6 differences below q, merged), dense from 1e-4
 #   count_margin: 1.3e-10 / 0.009 (units of c); zero-gain per-sample losses exactly 0 or >= 1.87 nats (motion 1.2e-5).
 ASSEMBLY_QUANTA: dict[str, tuple[float, float]] = {
-    "refine_F": (2.0 ** -14, 2.0 ** -35),
+    "refine_F": (2.0 ** -9, 2.0 ** -26),
     "join_ll": (2.0 ** -19, 2.0 ** -34),
     "join_ll_wide": (2.0 ** -19, 2.0 ** -30),
     "join_proxy": (2.0 ** -19, 2.0 ** -24),
@@ -64,10 +70,11 @@ ASSEMBLY_QUANTA: dict[str, tuple[float, float]] = {
     "count_margin": (2.0 ** -26, 0.0),
     "paint": (2.0 ** -30, 2.0 ** -30),
 }
-# Measured motion of the compared differences under 1e-9 relative GL noise (census above), as (absolute, relative to
-# the decision's scale): max(absolute, relative x |scale|) enables the boundary guard of maths.ties.tie_classes.
+# Measured motion of the compared differences (census above, under 1e-9 relative GL noise; refine_F under 1e-6, release
+# 2.13), as (absolute, relative to the decision's scale): max(absolute, relative x |scale|) enables the boundary guard
+# of maths.ties.tie_classes.
 ASSEMBLY_MOTION: dict[str, tuple[float, float]] = {
-    "refine_F": (5.1e-7, 3.6e-12),
+    "refine_F": (9e-5, 5e-10),
     "join_ll": (1.3e-7, 2.7e-12),
     "join_ll_wide": (1.3e-7, 5.7e-11),
     "join_proxy": (1.1e-7, 2.1e-9),

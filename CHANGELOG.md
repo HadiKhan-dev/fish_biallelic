@@ -1,5 +1,86 @@
 # Changelog
 
+## 2.13.0 (27 October 2026)
+
+This release reduces the demonstrated sensitivity of stages 1 to 5 to a 1e-6 relative change of the genotype
+likelihoods. Releases 2.1 to 2.12 placed every tie quantum against 1e-9 noise. Under a 1e-6 jitter, compared values
+left their tie classes: discovery changed 19 to 37 blocks per std or TroMau run and 144 of K30's 200 blocks, local
+selection's context feedback grew a few such blocks into tens of changed blocks, and assembly carried them into
+different founder panels; founder refinement's polish also chose among near-equal candidates by the last bits of their
+gains. Under the same jitter, discovery and local selection now agree in every measured seed and contig (Validation).
+Released results change.
+
+**Decision tolerances above the noise floor** (`maths/ties.py`, `assembly/tie_rules.py`, `discovery/landmarks.py`,
+`local_selection/fit.py`, `local_selection/search.py`, `local_selection/context_refit.py`, `local_selection/config.py`,
+`assembly/founder_alleles/site_posterior.py`, `assembly/founder_refinement/acceptance.py`,
+`assembly/founder_refinement/proposals.py`, `painting/hmm.py`). Owner decision: no decision tolerance below the noise
+floor. `maths.ties.GL_NOISE = 1e-6`; a quantum found below that floor becomes `noise_quantum(motion)`, the smallest
+power of two at least 16 times its compared contrast's motion under that noise, measured on frozen contrasts of 1e-6
+jitter runs where available, otherwise the 2.1 census times 10^3 (a relative factor without a recorded motion: its
+2.1 value times 2^10). The motion is a typical measured or extrapolated one, not a worst-case certificate.
+- Discovery: `nll` at least max(2^-10, 2^-20 M), `h_step` 2^-12, `improvement` 2^-10, `sample` at least
+  max(2^-13, 2^-26 M), `cell` 2^-14, `probability` 2^-15, also the landmark gap and the residual and partner bands
+  (2^-17 to 2^-23 floors before). Replays of every discovery block that differed between a 2.12 run and its jittered
+  twin (TroMau 126, std 63, K30 144 blocks) now agree under both evidences; replays of every block of TroMau chr13
+  (380) and K30 m4 (40) and every third block of std chr10 (501) under one seeded 1e-5 jitter change no block (a
+  probe, not a worst-case guarantee). Against 2.12 on the same contigs, discovery's wrong-or-missing alleles change
+  by +0.07 to +0.5% and its called-allele errors mostly fall (its release counts slightly fewer weak supporters).
+- Local selection: its decision tolerance stays 2^-10 (a search round's gain moves by about 5e-5 nats at the 99.9th
+  percentile on jitter runs); the
+  consensus band is 2^-20 (2^-31), the flip band 2^-10 relative (2^-20), the release's favourable margin 2^-14
+  (2^-23) and unknown-count and background-count bands 2^-15 (2^-20).
+- Assembly: founder refinement's quantum is max(2^-9, 2^-26 |F|) (max(2^-14, 2^-35 |F|)) and its acceptance
+  threshold 2^-9 nats (1e-4), from the measured motion of refinement contrasts (p99 9e-5 nats); the window
+  programmes' canonical floor is 2^-14 (1e-7); the site posterior's half band 2^-20 (2^-26) and its improvement
+  2^-10 (2^-17). The join quanta are unchanged: frozen join contrasts move 32 to 63 times less than them.
+- Painting: the Viterbi tie is 2^-15 nats (2^-20).
+Not changed: convergence tolerances of fits, float-resolution margins of exact bounds, stated statistical thresholds;
+not yet re-measured: founder refinement's guard tolerance and local selection's flip-acceptance tolerance (both
+1e-6); family phase's chain ties and gain quantum (outside the validated stages). Pedigree's tie classes read the
+rebased `maths.ties` quanta.
+
+**Founder refinement's polish decides near-ties by content** (`assembly/founder_refinement/beam.py`,
+`assembly/founder_refinement/search.py`). The escape beam ranked a unit's children on a fixed grid of their total
+bounds, which a 1e-6 perturbation shifts in common by several quanta; it now quantises bounds relative to the unit's
+best. Long repair and bridges chose the best variant, precursor, exchange and bridge by exact value; each now takes the
+content-smallest candidate within the refinement quantum of the best. std chr10, which differs under the jitter in
+all four of 2.12's seeds (603 to 1,413 founder cells), differs in one of four (982.5 cells, at assembly level 4).
+
+**Validation.** The single end-to-end run of this release, to painting, on 2.12's cases and contigs. Simulations
+against truth (WOM: truth-to-panel wrong plus missing alleles under one-to-one matching):
+- std, 8 contigs: WOM 465,652 -> 465,987 (+0.07%; chr10 and chr20 differ), nearest-row called errors +0.10%,
+  missing alleles 32,043 -> 32,035, label switches 718 -> 716.
+- f3: WOM +0.01% (chr9 only). backcross: identical.
+- K30: WOM 62,529 -> 55,965 (-10.5%), but one-to-one called errors 3,716 -> 4,880, nearest-row called errors +4.0%,
+  missing alleles +4.8% and label switches 24 -> 27. A 1e-6 jitter alone moved 2.12's K30 WOM by -12.1% and its
+  switches from 24 to 33, so this difference is of the size of 2.12's noise-chosen states, not a measured model effect.
+- TroMau, against the G0 v1.4 pseudo-reference (derived from earlier reconstructions of the same data; consistency,
+  not accuracy), window-matched (W100) disagreement against 2.10: wrong 316,080 -> 297,390 (limit +22,168), wrong or
+  missing 482,994 -> 464,852 (limit +22,093); against 2.12 wrong -4.7% and wrong or missing -3.1%, mostly chr7, chr9
+  and chr14 (-3.7k, -5.4k, -5.2k), with chr13 +0.5k; on 13 of 22 contigs W100 wrong is within 10 alleles of 2.12.
+- Run time within 5% of 2.12 on every case (TroMau -0.6%).
+
+Stability, founder cells that differ at painting between a run and its 1e-6-jittered twin (2.12 -> 2.13):
+- std, 8 contigs, four seeds: 1,268 / 5,700 / 2,042 / 1,717.5 -> 228.5 / 167.5 / 1,150 / 228.5.
+- TroMau, 22 contigs, four seeds: 48,195 / 94,918.5 / 59,829.5 / 27,790 -> 31,604 / 32,458 / 32,705 / 32,305, of
+  which 31,601 on chr7 in every seed (the rest 3 / 857 / 1,104 / 704). The jittered runs' W100 wrong spans
+  297,379-297,394 (2.12's twins 310,687-312,108).
+- K30: 11,950.5 -> 32. f3 and backcross: 0 in both.
+- Discovery and local selection agree in every seed and contig; the remaining differences arise at assembly levels 2
+  to 4. TroMau chr7 (31,601 cells) and std chr1 (167.5) differ identically in every seed while the jittered runs agree
+  exactly with one another, so there the unjittered run is the one that differs (Known limitations).
+- Convention reversal (the opposite direction on every exact tie): std 249 cells (2.12: 249, on the same contigs);
+  TroMau 52,173 (2.12: 23,627, none on chr7), of which 31,601 on chr7, where the reversed run's final panels equal
+  every jittered run's; the other 21 contigs 20,572.
+
+**Known limitations.** Exact ties in assembly are still decided by convention. On TroMau chr7 the
+convention-reversed run and every jittered run reach identical final founder panels (31,601 cells from the
+unjittered run's, diverging from assembly level 1 or 2), and on std chr1 they share the same level-3 change (83
+cells): an exact tie there is decided by convention, and a jitter, by breaking the equality, decides it the other way
+in every seed. Equal read counts give exactly equal genotype likelihoods in real data, so such ties are expected; the
+decision is not yet located. 2.12's limitations of founder refinement's objective and bounded search, of painting's
+identity moves and of discovery's path dependence under exact ties are unchanged.
+
 ## 2.12.0 (27 October 2026)
 
 This release removes the read-model calibration's site subsampling and the demonstrated discontinuities of local

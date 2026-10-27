@@ -17,6 +17,7 @@ import math
 import numpy as np
 from numba import njit, prange
 
+from ..maths.ties import noise_quantum
 from .transitions import PaintingTransitions
 
 # Spread of a normalised GL row above which the row is informative (not flat).
@@ -28,8 +29,10 @@ INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
 # identical in the bins between) and their sums differ only in rounding, which GL noise reorders. The path scores
 # themselves stay exact maxima. Census (TroMau chr18 painting, iid 1e-9; work/IE/census/viterbi_chr18_*): 4,980
 # decisions within 1e-2, gap motion <= 1.9e-9, genuine gaps from 1e-5 (2 in [1e-5, 3e-5), then >= 3e-4): 2^-20 =
-# 9.5e-7 sits ~500x above the motion and ~10x below the first genuine gaps.
-VITERBI_TIE = 2.0 ** -20
+# 9.5e-7 sat ~500x above that motion. Release 2.13 places it against 1e-6 relative GL noise (maths.ties.GL_NOISE;
+# gap motion <= 1.9e-6, the census times 10^3): noise_quantum = 2^-15 = 3.1e-5; gaps below it take the fewest track
+# changes (a safety margin over the motion; it also covers the census's genuine gaps in [1e-5, 3e-5)).
+VITERBI_TIE = noise_quantum(1.9e-6)
 # Candidate states of a track are int64 bit masks (painting switch intervals, release 2.2): S = classes + BACKGROUND
 # must fit 63 bits (K <= 30 founders gives S <= 31).
 MAXIMUM_MASK_STATES = 63

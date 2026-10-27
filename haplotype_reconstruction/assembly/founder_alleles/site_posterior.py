@@ -97,9 +97,11 @@ SITE_RECENTRE_BACKSTOP = 50
 # optimum (the ``nll`` floor of maths.ties), and the band of a carrier probability around exactly 1/2 and of a
 # carrier mass around the support threshold, placed by the valley census of the context refit's carrier
 # probabilities (actm3, 4,674 within 1e-3 of 1/2: 1e-9 relative GL noise moves them by <= 5.7e-11, genuine
-# values are dense from 3e-6): 2^-26 = 1.5e-8, >= 200x from both.
-SITE_IMPROVEMENT = 2.0 ** -17
-SITE_HALF_BAND = 2.0 ** -26
+# values are dense from 3e-6): 2^-26 = 1.5e-8, >= 200x from both. Release 2.13 places both against 1e-6 relative
+# GL noise: the improvement at the ``nll`` floor of maths.ties (2^-10), the band at noise_quantum of its motion under
+# 1e-6 noise (5.7e-8): 2^-20 = 9.5e-7, below the genuine values (dense from 3e-6).
+SITE_IMPROVEMENT = 2.0 ** -10
+SITE_HALF_BAND = 2.0 ** -20
 
 # Support of a site's posterior.
 METHOD_CUBE = 0       # all m <= MAX_EXACT_BITS bits enumerated

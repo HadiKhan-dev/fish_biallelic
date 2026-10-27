@@ -33,9 +33,10 @@ fallback; it binds at no reference size). Large programmes take memory from the 
 governor as they grow (programme_budgets): a solve that passes a budget is repeated within the next
 one, so the result always equals one solve at the cap.
 
-Canonical answer (a pure function of the problem): among paths within tol = 1e-7 + 1e-9 |H(incumbent)|
-of the optimum, the incumbent if it is one, else the lexicographically first path, units left to
-right, each in the order (incumbent row, then ascending index), found by exact restricted programmes.
+Canonical answer (a pure function of the problem): among paths within tol = CANONICAL_TOL + 1e-9 |H(incumbent)|
+of the optimum (release 2.13: CANONICAL_TOL = 2^-14; 1e-7 before, below the motion of 1e-6 relative GL noise), the
+incumbent if it is one, else the lexicographically first path, units left to right, each in the order (incumbent
+row, then ascending index), found by exact restricted programmes.
 
 Shared background: only the K states containing f depend on f's row, so children carry their K focal
 values and per-bin switch floors and the background enters through per-unit tables
@@ -63,7 +64,13 @@ from ...maths import ties
 from .objective import row_max
 from ..join.emissions import pair_index
 
+# Closed-message dominance tolerance (nats): a partial path is dropped when no completion makes it better than a kept
+# one by more than this; the programme's margin carries (units + 1) times it and the canonical answer is then found
+# by exact restricted programmes, so it bounds the programme's approximation, not which tied path is returned.
 DOMINANCE_TOLERANCE = 1e-6
+# Absolute part of the canonical-answer tolerance (nats; release 2.13: 2^-14, 16 times the ~1e-6 motion of a window
+# contrast under 1e-6 relative GL noise; 1e-7 before; the module docstring).
+CANONICAL_TOL = 2.0 ** -14
 # Relative float margin between the box bound's and the programme's summation orders: a window is
 # certified by the box only clear of it, so a certified window is one the programme would also
 # leave unchanged.
@@ -2320,7 +2327,7 @@ def solve_focal(emissions, cols, cands, offsets, focal, incumbent, first, second
         segs.append(seg)
     upper = window_box(emissions, cols, cands, offsets, focal, first, second, penalty, end, fz, bg,
                        prefixes, suffixes, segs)
-    tol = 1e-7 + 1e-9 * max(1.0, abs(incumbent_value))
+    tol = CANONICAL_TOL + 1e-9 * max(1.0, abs(incumbent_value))
     certificate = (incumbent_value + tol
                    - BOX_ARITHMETIC_MARGIN * max(1.0, abs(incumbent_value)))
     if _join(start_n, start_c, upper[0]) <= certificate:

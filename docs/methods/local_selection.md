@@ -127,8 +127,8 @@ current (H, f):
 The fit converges at a conditional fixed point: no frequency gain and no exact one-bit flip gain
 above `LocalSelectionConfig.search.tolerance = 1e-6` nats. A flip that would make two rows equal
 stops the fit, because changing K belongs to the outer search. Founders, or single exact flips,
-whose gains lie within a relative 2^-20 of the largest (`local_selection.fit.FLIP_TIE = 9.5367431640625e-07`)
-are tied. The data decide between them by the exact objective after each flip. If tied moves still
+whose gains lie within a relative 2^-10 of the largest (`local_selection.fit.FLIP_TIE = 0.0009765625`; 2^-20 placed
+against 1e-9 GL noise before release 2.13, times `maths.ties.NOISE_SCALE` = 2^10 for 1e-6 noise) are tied. The data decide between them by the exact objective after each flip. If tied moves still
 lead to different panels, the fit stops there (keep-current; termination `tied_flips` or
 `tied_exact_flips`), so neither row order nor the last bits of the gains steer it. A fit is returned
 with its rows in lexicographic order (frequencies and per-row posteriors permuted with them): the
@@ -186,8 +186,9 @@ the decision tolerance `LocalSelectionConfig.search.decision_tolerance = 0.00097
 (2^-10): values whose consecutive gaps are at most the tolerance are tied, and a tie is decided by
 content (fewer founders, then the canonical panel bytes, then the order in which the candidates
 were generated), never by the last bits of the objectives. The tolerance lies far above EM
-convergence residuals and the motion of 1e-9 relative GL perturbations, and far below the
-differences between distinct drop, merge and add outcomes. In a context round, when the start's fit
+convergence residuals and at least 16 times the typical motion of the compared contrasts under 1e-6
+relative GL perturbations (a search round's gain moves by about 5e-5 nats at the 99.9th percentile
+in the matched-history census of 1e-6 jitter runs, release 2.13; not a worst-case certificate), and far below the differences between distinct drop, merge and add outcomes. In a context round, when the start's fit
 reaches the previous round's selected panel of the block (the *incumbent*), the search continues
 from the incumbent's fit; when the incumbent scores better than the start's fit by more than the
 tolerance, the search explores from the incumbent instead (refitted only when that improves it by
@@ -196,8 +197,9 @@ more than the tolerance), so it does not climb back to it. Each search round the
 - proposes every **drop** (one row deleted, frequencies renormalised), every **merge** of rows
   i < j (row j deleted, row i set to the occupancy-weighted consensus of the two rows' allele
   probabilities, its frequency f_i + f_j; where that probability is 1/2 within
-  `local_selection.search.CONSENSUS_TIE = 4.656612873077393e-10` (2^-31, placed by the valley census
-  between the motion of 1e-9 GL perturbations and the closest genuine values), row i's allele is
+  `local_selection.search.CONSENSUS_TIE = 9.5367431640625e-07` (2^-20 since release 2.13, 16 times
+  the motion under 1e-6 GL noise; 2^-31 before, placed against 1e-9; the band now also covers consensus
+  values that were distinguishable from 1/2 at 1e-9), row i's allele is
   kept) and every **add** of
   a candidate-bank row not in the panel (frequency 1/(K + 1), the others scaled by K/(K + 1));
   starts with the same panel and frequencies equal up to rounding are proposed once;
@@ -264,7 +266,7 @@ The union bank and the drop, add and replace neighbourhoods of its best panels a
 under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
 K x `LocalSelectionConfig.bank.complexity_scale = 0.5` x (L / 200) x N_active + 2 NLL (lower is
 better; N_active the samples with depth), until it improves by at most the block's `improvement`
-tie quantum (2^-14 nats). The block's discovery tie quanta define the bank's tie sets, which are
+tie quantum (2^-10 nats since release 2.13; 2^-14 before). The block's discovery tie quanta define the bank's tie sets, which are
 kept whole (no member is preferred by its key). The selected panels are the best tie class of the
 BIC score (kind `nll`), inside it the best class of the NLL, then fewer founders (a class wider
 than the width guard keeps only the panels exactly at its best value). Every member's
@@ -353,11 +355,13 @@ carry the founder) or by carrier mass; nothing is released at a site whose two a
 different comparable optima (multimodal abstention), or where the ball's shell guard withholds it.
 The refit's founder prior is uniform, so a carrier probability can be exactly 1/2 by symmetry and a
 carrier mass exactly at the threshold (a sum of halves): within
-`assembly.founder_alleles.site_posterior.SITE_HALF_BAND = 1.4901161193847656e-08` of 1/2 a sample is
+`assembly.founder_alleles.site_posterior.SITE_HALF_BAND = 9.5367431640625e-07` of 1/2 (2^-20 since release 2.13,
+at least 16 times the motion of 1e-6 GL noise and below the first genuine values; 2^-26 before) a sample is
 not counted, and a mass within that band of the threshold does not release (a fixed conservative
 rule at a mathematical tie). An ascent flip, a ball recentring and the complement start's optimum
 must raise the log posterior by more than
-`assembly.founder_alleles.site_posterior.SITE_IMPROVEMENT = 7.62939453125e-06` nats. The [assembly](assembly.md) page describes this posterior in
+`assembly.founder_alleles.site_posterior.SITE_IMPROVEMENT = 0.0009765625` nats (the `nll` floor, 2^-10 since
+release 2.13). The [assembly](assembly.md) page describes this posterior in
 full. A withheld allele keeps the component's published (completion-filled) call when it has one.
 
 **Proposals.** A covered block's proposal is the set of distinct local rows of the refitted
@@ -377,8 +381,8 @@ The selected panel's alleles are released from one more E-step over per-sample p
   the log marginal likelihood ratio of flipping that allele with every other bit and pi fixed
   (summed over samples, equal prior odds);
 - the *favourable* samples are those whose own exact flip gain is below
-  -`LocalSelectionConfig.release.favourable_margin = 1.1920928955078125e-07` nats (the `cell` tie
-  quantum 2^-23), i.e. whose evidence favours the allele; a symmetric-evidence cell (one REF and one
+  -`LocalSelectionConfig.release.favourable_margin = 6.103515625e-05` nats (the `cell` tie
+  quantum, 2^-14 since release 2.13), i.e. whose evidence favours the allele; a symmetric-evidence cell (one REF and one
   ALT read: GL(0/0) = GL(1/1)) gives a homozygous carrier a gain of exactly zero, inside this band,
   so it is never favourable; the carrier probability is the posterior probability that a homologue
   copies founder k at the site (a homozygous state counted once);
@@ -413,8 +417,8 @@ favourable carrier counts.
 **Unknown-copy summary.** For each sample with depth, the largest MAP number (0, 1 or 2) of copies
 drawn from the unknown state over its observed discovery sites (2 for a sample without depth), and
 the block's `unknown_mass`, those copies over the 2 copies of every sample with depth. A site's
-MAP count must win by more than `LocalSelectionConfig.release.unknown_count_band = 9.5367431640625e-07`
-(2^-20, the `probability` tie quantum) times the largest count mass, else the smaller count is
+MAP count must win by more than `LocalSelectionConfig.release.unknown_count_band = 3.0517578125e-05`
+(2^-15, the `probability` tie quantum since release 2.13) times the largest count mass, else the smaller count is
 taken: completion's veto is all-or-nothing, and count masses can tie exactly. Assembly's
 completion reads them as a spatial MAP summary; it is not a probability of any unknown state and
 does not invent a constant founder pair for a sample.
@@ -438,8 +442,9 @@ reversal was chosen by a convention. The conventions are:
 
 In the context refit, duplicate founder rows share the consensus of their released templates (-1 where called
 templates differ). Duplicate local rows carry their summed support and support-weighted ALT posterior. A bin's background-copy
-count is the smallest count within a relative 2^-20 of the largest state-pair weight
-(`local_selection.context_refit.BACKGROUND_COUNT_BAND = 9.5367431640625e-07`). These are data decisions, not
+count is the smallest count within a relative 2^-15 of the largest state-pair weight
+(`local_selection.context_refit.BACKGROUND_COUNT_BAND = 3.0517578125e-05`; the `probability` tie quantum since release
+2.13). These are data decisions, not
 conventions.
 
 The *stated priors* are model preferences and are not reversed:

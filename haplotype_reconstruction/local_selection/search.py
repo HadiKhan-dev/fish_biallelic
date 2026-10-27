@@ -32,7 +32,7 @@ import itertools
 import numpy as np
 
 from ..execution import claim_threads
-from ..maths.ties import (TieCounter, census, census_enabled, improves, reverse_conventions,
+from ..maths.ties import (TieCounter, census, census_enabled, improves, noise_quantum, reverse_conventions,
                           tie_classes)
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
 from .objective import ContextFounders, coded_regularizer, selection_objective
@@ -44,12 +44,15 @@ from .path_model import FLIPS, PathWorkspace, WorkspaceBuffers, log_likelihood
 PROPOSAL_FREQUENCY_TIE = 1e-12
 # Band around 1/2 of the merge consensus probability, placed by the valley census (actm3, 22,671 consensus
 # sites within 1e-3 of 1/2 over three rounds): 1e-9 relative GL noise moves them by <= 3.9e-11, the closest
-# genuine value lies 3e-9 from 1/2 (dense from 1e-7): 2^-31 = 4.7e-10 holds an exact 1/2 (with its rounding)
-# and decides no genuine value (design A-7: a band only at a mathematical tie).
-CONSENSUS_TIE = 2.0 ** -31
-# Measured motion of compared local-selection objectives under 1e-9 relative GL noise, including
-# a GEM stopping one EM step earlier or later (<= the fit tolerance): enables the boundary guard.
-DECISION_MOTION = 1e-6
+# genuine value lies 3e-9 from 1/2 (dense from 1e-7): 2^-31 = 4.7e-10 held an exact 1/2 (with its rounding).
+# Release 2.13 places it against 1e-6 relative GL noise (motion <= 3.9e-8, the census times 10^3): noise_quantum =
+# 2^-20 = 9.5e-7; consensus values closer to 1/2 than that count as 1/2 (row i keeps its allele), including some
+# that were distinguishable from 1/2 at 1e-9.
+CONSENSUS_TIE = noise_quantum(3.9e-8)
+# Motion of compared local-selection contrasts under 1e-6 relative GL noise (release 2.13; measured on the 2.12
+# jitter runs: a search round's best gain moves by at most about 5e-5 nats, p99.9 over ~2e4 rounds; 2.1-2.12: 1e-6
+# under 1e-9 noise, dominated by GEM stopping): enables the boundary guard.
+DECISION_MOTION = 5e-5
 
 
 class _Starts:

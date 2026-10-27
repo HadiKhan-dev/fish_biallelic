@@ -34,13 +34,13 @@ from numba import njit, prange
 
 from ..assembly.founder_alleles import site_posterior
 from ..execution import BudgetedPool, claim_threads, memory_worker_limit, reserve_memory
-from ..maths.ties import census, census_enabled
+from ..maths.ties import census, census_enabled, tie_quantum
 from .fit import unique_rows
 
 # MAP background-copy count band of the carrier weights (release 2.2): the probability tie quantum
-# of maths.ties (2^-20, as the release's unknown_count_band); a larger count must win by more than
-# this relative weight.
-BACKGROUND_COUNT_BAND = 2.0 ** -20
+# of maths.ties (2^-15 since 2.13, 2^-20 before; as the release's unknown_count_band); a larger count
+# must win by more than this relative weight.
+BACKGROUND_COUNT_BAND = tie_quantum(0.0, "probability")
 # Census window of the carrier-probability band at 1/2 (diagnostics only).
 HALF_CENSUS_WINDOW = 1e-3
 

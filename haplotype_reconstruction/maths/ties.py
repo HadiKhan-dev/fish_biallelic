@@ -4,20 +4,30 @@ Floating values that differ only by rounding, or by the effect of input perturba
 must not decide a discrete outcome, and neither may array order. This module gives every stage one way to say
 "these values are tied" and one way to break such ties by content.
 
-* **Tie quanta per decision kind** (:func:`tie_quantum`, :class:`BlockQuanta`). A quantum is a power of two placed
-  in the valley of its kind: far above the rounding of the compared sums and above the movement 1e-9 relative GL
-  perturbations cause, far below the first genuine differences (N1's census, review R2). Kinds:
+* **Tie quanta per decision kind** (:func:`tie_quantum`, :class:`BlockQuanta`). A quantum is a power of two far above
+  the rounding of the compared sums and above the typical movement that relative GL perturbations of size GL_NOISE = 1e-6
+  cause in the compared contrasts, and otherwise as small as possible: the smallest power of two at least
+  NOISE_MARGIN = 16 times that motion (:func:`noise_quantum`). Release 2.1 placed the quanta against 1e-9 relative
+  noise (N1's census, review R2); release 2.13 places them against 1e-6 (owner, 27 Oct: no decision tolerance below
+  the noise floor). The motions are the 2.1 census values times 10^3 (the motion scales linearly with the noise
+  amplitude; NOISE_MOTION below), or measured under a 1e-6 jitter where the 2.1 motion came from fit convergence; a
+  relative factor with no recorded motion is the 2.1 factor times NOISE_SCALE = 2^10. Typical matched-history
+  motions and linear-response extrapolations guide the tolerances; bounded replays test the resulting policy. This is
+  not a worst-case noise certificate. Differences smaller than a
+  quantum are decided by content (exact keys) or a stated prior, never by which of two values happens to be larger;
+  the margin 16 is a safety factor over the motion, not a significance level, so this includes some differences whose
+  sign is stable. Kinds:
 
   ============  =========================  ====================================================================
   kind          quantum (power of two >=)   compared quantities
   ============  =========================  ====================================================================
-  nll           max(2^-17, 2^-30 x scale)   block NLLs (archive and beam order, dedup, cycles), bank BIC,
+  nll           max(2^-10, 2^-20 x scale)   block NLLs (archive and beam order, dedup, cycles), bank BIC,
                                             cavity scores (K selection), gauge site sums
-  h_step        2^-18                       H-step allele cost sums
-  improvement   2^-14                       "improved" tests
-  sample        max(2^-23, 2^-36 x scale)   per-sample sums: data-birth excess, A-step state costs
-  cell          2^-23                       per-cell evidence contributions (supporter tests)
-  probability   2^-20                       probabilities and masses (bands at 1/2, partner masses)
+  h_step        2^-12                       H-step allele cost sums
+  improvement   2^-10                       "improved" tests
+  sample        max(2^-13, 2^-26 x scale)   per-sample sums: data-birth excess, A-step state costs
+  cell          2^-14                       per-cell evidence contributions (supporter tests)
+  probability   2^-15                       probabilities and masses (bands at 1/2, partner masses)
   ============  =========================  ====================================================================
 
   ``scale`` is the decision's magnitude (for a discovery block its null NLL, every panel's NLL being at most that).
@@ -68,21 +78,37 @@ from typing import Callable, Iterable, Sequence
 import numba
 import numpy as np
 
+# Relative GL noise the tie quanta are placed against (release 2.13; 2.1-2.12: 1e-9), the margin of a quantum over
+# the motion of its compared contrast under that noise, and the factor (a power of two, the ratio of the noise levels)
+# by which 2.13 multiplies a 2.1 relative factor that has no recorded motion.
+GL_NOISE = 1e-6
+NOISE_MARGIN = 16.0
+NOISE_SCALE = 2.0 ** 10
+
+
+def noise_quantum(motion: float) -> float:
+    """The smallest power of two at least NOISE_MARGIN times ``motion`` (a contrast's motion under GL_NOISE)."""
+    return math.ldexp(1.0, int(math.ceil(math.log2(NOISE_MARGIN * float(motion)))))
+
+
+# Movement of the compared contrasts under GL_NOISE relative GL noise (nats; per kind): the N1 census measured under
+# 1e-9 noise (review F1/F3: nll 5.5e-8, h_step 1e-8, improvement 5.5e-8, sample 5e-9, cell 2e-9, probability 1e-9)
+# times 10^3, the motion scaling linearly with the noise amplitude.
+NOISE_MOTION: dict[str, float] = {
+    "nll": 5.5e-5, "h_step": 1e-5, "improvement": 5.5e-5, "sample": 5e-6, "cell": 2e-6, "probability": 1e-6,
+}
 # (floor, relative factor of the scale) per decision kind; quantum = power of two at least max(floor, factor x scale).
+# Floors: noise_quantum of the kind's motion; factors: the 2.1 factors (no recorded relative motion) times NOISE_SCALE.
 QUANTUM_KINDS: dict[str, tuple[float, float]] = {
-    "nll": (2.0 ** -17, 2.0 ** -30),
-    "h_step": (2.0 ** -18, 0.0),
-    "improvement": (2.0 ** -14, 0.0),
-    "sample": (2.0 ** -23, 2.0 ** -36),
-    "cell": (2.0 ** -23, 0.0),
-    "probability": (2.0 ** -20, 0.0),
+    "nll": (noise_quantum(NOISE_MOTION["nll"]), 2.0 ** -30 * NOISE_SCALE),
+    "h_step": (noise_quantum(NOISE_MOTION["h_step"]), 0.0),
+    "improvement": (noise_quantum(NOISE_MOTION["improvement"]), 0.0),
+    "sample": (noise_quantum(NOISE_MOTION["sample"]), 2.0 ** -36 * NOISE_SCALE),
+    "cell": (noise_quantum(NOISE_MOTION["cell"]), 0.0),
+    "probability": (noise_quantum(NOISE_MOTION["probability"]), 0.0),
 }
 # A tie class wider than this many quanta has no valley around it: reported, and ordered by value inside.
 WIDE_CLASS_QUANTA = 4.0
-# Measured movement of the compared quantities under 1e-9 relative GL noise (nats; per kind; N1 census, review F1/F3).
-NOISE_MOTION: dict[str, float] = {
-    "nll": 5.5e-8, "h_step": 1e-8, "improvement": 5.5e-8, "sample": 5e-9, "cell": 2e-9, "probability": 1e-9,
-}
 # A consecutive gap within this many noise motions of q is a boundary-guard event.
 BOUNDARY_GUARD = 10.0
 

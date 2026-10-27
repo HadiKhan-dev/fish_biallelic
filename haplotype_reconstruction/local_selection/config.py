@@ -46,8 +46,11 @@ class PathSearchConfig:
         (release 2.1): the proposal cut per kind, the round winner and the stop of the climb, the
         start-or-incumbent choice and the keep-incumbent rule between rounds; values chained within
         it are tied and decided by content (fewer founders, then the canonical panel bytes). A power
-        of two placed by the valley census far above EM convergence residuals and the motion of 1e-9
-        relative GL noise, far below genuine drop / merge / add differences (nats).
+        of two far above EM convergence residuals and at least 16 times the typical motion of a
+        compared contrast under 1e-6 relative GL noise (release 2.13: a search round's gain moves by
+        about 5e-5 nats at the 99.9th percentile in the matched-history census of 1e-6 jitter runs;
+        2.1 placed it against 1e-9 noise), far below
+        genuine drop / merge / add differences (nats).
     """
 
     refits_per_kind: int = 8
@@ -107,17 +110,18 @@ class PathReleaseConfig:
     probability reaches ``min_call_probability`` and the favourable samples (whose own evidence
     favours the allele by more than ``favourable_margin`` nats) include ``min_supporters``
     carriers by count (posterior carrier probability above 1/2) or by expected carrier mass.
-    Release 2.1: ``favourable_margin`` is the ``cell`` tie quantum of maths.ties (2^-23 nats; the
-    1e-9 of 2.0 sat at the motion of 1e-9 GL noise, so a symmetric-evidence cell, whose gain is
-    exactly 0, straddled it). ``unknown_count_band``: a site's MAP number of unknown copies (0, 1,
-    2; it feeds assembly completion's all-or-nothing veto) must win by more than this relative
-    posterior margin, else the smaller count (the ``probability`` tie quantum of maths.ties, 2^-20;
+    Release 2.1: ``favourable_margin`` is the ``cell`` tie quantum of maths.ties (2^-14 nats since
+    2.13, placed against 1e-6 relative GL noise; 2^-23 in 2.1-2.12; the 1e-9 of 2.0 sat at the motion
+    of 1e-9 GL noise, so a symmetric-evidence cell, whose gain is exactly 0, straddled it).
+    ``unknown_count_band``: a site's MAP number of unknown copies (0, 1, 2; it feeds assembly
+    completion's all-or-nothing veto) must win by more than this relative posterior margin, else the
+    smaller count (the ``probability`` tie quantum of maths.ties, 2^-15 since 2.13, 2^-20 before;
     design A-7: an integer count whose posterior masses can tie exactly)."""
 
     min_call_probability: float = 0.85
     min_supporters: float = 2.0
-    favourable_margin: float = 2.0 ** -23
-    unknown_count_band: float = 2.0 ** -20
+    favourable_margin: float = 2.0 ** -14
+    unknown_count_band: float = 2.0 ** -15
 
 
 @dataclass(frozen=True)

@@ -332,9 +332,17 @@ def beam_template(logs, costs, states, cols, candidates, first, second, focal, g
         children += len(flat)
         for v in range(len(flat)):
             flat[v] += totals[v // rmax]
+        # Rank keys anchored at the unit's best bound (release 2.13): the bounds are totals (~|H|) that a GL
+        # perturbation shifts in common by far more than the quantum, so a fixed grid on the totals reordered
+        # near-equal children at its rounding boundaries; anchored at the best, only contrasts are quantised.
+        anchor = -np.inf
+        for v in range(len(flat)):
+            anchor = max(anchor, flat[v])
+        if not np.isfinite(anchor):
+            anchor = 0.0
         keys = np.empty(len(flat))
         for v in range(len(flat)):
-            keys[v] = np.floor(flat[v] / quantum + 0.5)
+            keys[v] = np.floor((flat[v] - anchor) / quantum + 0.5)
         ranked = np.argsort(-keys, kind='mergesort')
         size = min(width, len(ranked))
         cohort = size
@@ -415,7 +423,10 @@ def beam_template(logs, costs, states, cols, candidates, first, second, focal, g
         best_all = max(best_all, value)
         if not distinct[p]:
             continue
-        if np.all(chosen < 0) or np.floor(value / quantum + 0.5) > np.floor(best / quantum + 0.5):
+        # A later distinct path replaces the best only when its difference to the best rounds to at least one quantum,
+        # i.e. it is better by half the quantum or more (release 2.13: the difference is rounded, not each total on a
+        # fixed grid); admission of the offer itself still needs a gain above the quantum.
+        if np.all(chosen < 0) or np.floor((value - best) / quantum + 0.5) > 0.0:
             best = value
             chosen = paths[p].copy()
     cert = np.array([best_all, max_dropped, max(0.0, max_dropped - best_all), incumbent, best])

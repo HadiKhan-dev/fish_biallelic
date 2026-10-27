@@ -6,6 +6,6 @@ numerical module loads (execution.bootstrap.configure_imports); nothing else hap
 """
 from .execution.bootstrap import configure_imports as _configure_imports
 
-__version__ = "2.12.0"
+__version__ = "2.13.0"
 
 _configure_imports()

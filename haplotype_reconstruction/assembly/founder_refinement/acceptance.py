@@ -50,10 +50,14 @@ from ... import execution
 from ...maths import ties
 from ..tie_rules import quantum as tie_quantum
 
-# A move is accepted while its exact F gain exceeds TOL (log units).
-TOL = 1e-4
+# A move is accepted while its exact F gain exceeds TOL (log units). Release 2.13: 2^-9, the noise_quantum of the
+# motion of refinement contrasts under 1e-6 relative GL noise (p99 9e-5 nats over ~4,300 fit contrasts of 1e-6 jitter
+# runs), the refine_F floor; 2.1-2.12: 1e-4, placed against 1e-9 noise.
+TOL = 2.0 ** -9
 # A coarse move "lowers E" when gain + switch-cost change < -GUARD_TOLERANCE (E = F + the
-# switch cost of the samples' lexicographic maximum paths).
+# switch cost of the samples' lexicographic maximum paths). A scientific guard on dE, not a tie between scores: kept
+# at its 2.1 value in release 2.13 (raising it would let moves with small negative dE bypass the guard; its contrast
+# under 1e-6 GL noise is not yet measured).
 GUARD_TOLERANCE = 1e-6
 # Forward messages of the current panel computed ahead of the pass position at a time.
 AHEAD_BLOCKS = 16

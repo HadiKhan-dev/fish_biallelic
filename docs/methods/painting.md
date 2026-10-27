@@ -148,7 +148,8 @@ Every sample is decoded independently (`painting/hmm.py`):
 
 - **Viterbi.** Exact max-product recursion over the S^2 ordered states, O(S^2) per bin: the best predecessor for
   each of the three Hamming costs comes from the best and second-best entries of every row and column of the
-  previous scores and their complement. Predecessors within `VITERBI_TIE` = 2^-20 nats of the best are tied; the
+  previous scores and their complement. Predecessors within `VITERBI_TIE` = 2^-15 nats of the best are tied (release
+  2.13: 16 times the gap motion under 1e-6 GL noise; 2^-20 before, placed against 1e-9); the
   back-pointer takes the fewest track changes (a stated prior), then the smallest previous flat state; scores are
   centred per bin. The traceback runs right to left and stays while staying is tied, so among co-optimal
   placements a switch lands on the leftmost tied edge. That placement is a convention and is never released by

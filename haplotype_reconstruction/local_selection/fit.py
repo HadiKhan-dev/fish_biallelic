@@ -27,15 +27,15 @@ import numpy as np
 from scipy.special import expit
 
 from ..execution import claim_threads
-from ..maths.ties import census, reverse_conventions
+from ..maths.ties import NOISE_SCALE, census, reverse_conventions
 from .objective import edit_ball_code, regularizer
 from .path_model import COUNTS, EXACT, FLIPS, PathWorkspace
 
 # Relative tie band of the GEM's flip choices: candidates whose gain is within FLIP_TIE x |largest
 # gain| of the largest are tied (release 2.2: decided by the exact objective after each flip, see
-# _tied_move). Far above the rounding of the gains (~1e-16 relative) and their motion under 1e-9
-# relative GL noise.
-FLIP_TIE = 2.0 ** -20
+# _tied_move). Far above the rounding of the gains (~1e-16 relative) and their motion under GL noise:
+# 2^-20 placed against 1e-9 relative noise, times maths.ties.NOISE_SCALE since 2.13 (1e-6 noise).
+FLIP_TIE = 2.0 ** -20 * NOISE_SCALE
 
 
 def tied_within(values, tie=FLIP_TIE) -> np.ndarray:

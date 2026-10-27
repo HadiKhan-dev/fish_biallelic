@@ -104,7 +104,10 @@ sweep:
    paths;
 3. runs one exact acceptance pass over the junctions in block order, its direction alternating
    between sweeps (`assembly/founder_refinement/acceptance.py`). At every junction the best founder-pair suffix exchange is
-   applied while its exact gain exceeds `assembly.founder_refinement.acceptance.TOL = 1e-4`; then
+   applied while its exact gain exceeds `assembly.founder_refinement.acceptance.TOL = 0.001953125` (2^-9, release
+   2.13: at least 16 times the typical motion of refinement contrasts under 1e-6 relative GL noise, 9e-5 nats at p99
+   over about 4,300 matched-history fit contrasts of jitter runs, a design scale and not a worst-case certificate;
+   1e-4 before); then
    the proposals anchored at the junction (one founder's rows on the blocks where a proposal differs
    from the current panel) are re-scored exactly against the current panel and applied best first
    (earliest on ties) while their gain exceeds the same tolerance; coarse proposals must also pass
@@ -160,8 +163,9 @@ blocks or L1 spans). The solver (`assembly/founder_refinement/proposals.py`) fir
 founder's later rows freely), which certifies windows whose incumbent is already optimal. Otherwise
 an exact forward frontier programme runs: a partial path is dropped only when another is at least as
 good for every completion (closed-message dominance) or when a valid upper bound on its completions
-lies below a feasible value. The answer is canonical, a pure function of the problem: among paths
-within 1e-7 + 1e-9 |H| of the optimum H, the incumbent if it is one, else the lexicographically
+lies below a feasible value. The answer is canonical, a pure function of the problem: among paths within
+2^-14 + 1e-9 |H| of the optimum H (release 2.13; 1e-7 + 1e-9 |H| before), the incumbent if it is one, else the
+lexicographically
 first path (units left to right, each in the order incumbent row, then ascending row index). A
 programme whose frontier passes `assembly.founder_refinement.proposals.EXPLORE_FRONTIER = 256`
 partial paths restarts with tighter pruning (Lagrangian suffix bounds and the best feasible value of
@@ -217,7 +221,11 @@ at every sweep that accepts nothing; when one accepts, ordinary sweeps resume:
    `assembly.founder_refinement.beam.BEAM_WIDTH = 64` best partial paths per unit (an approximate
    search: cut windows are counted, `escape_beam_cut` and `escape_beam_binding`, and warned) and offers
    each window's best path that differs from the incumbent when its surrogate gain exceeds the tie
-   quantum. One exact acceptance pass over these offers follows (coarse offers pass the guard where coarse
+   quantum. The beam ranks a unit's children by their bounds rounded in quanta relative to the unit's best bound
+   (release 2.13; before, on a fixed grid of the totals, which a 1e-6 GL perturbation shifts in common by
+   several quanta, so near-equal children traded places at its rounding boundaries); a later distinct path
+   replaces the best offer when it is better by half a quantum or more. Cuts at the width still separate
+   children whose rounded keys differ, so near-equal children at a cut can still trade places. One exact acceptance pass over these offers follows (coarse offers pass the guard where coarse
    moves are guarded), and its gain is verified by full rescoring.
 2. **Long repair.** Beam offers on windows of `assembly.founder_refinement.search.LONG_WINDOW = 64` blocks
    (every `LONG_STRIDE = 16`; beam width `assembly.founder_refinement.search.LONG_BEAM_WIDTH = 16`, cut
@@ -225,7 +233,8 @@ at every sweep that accepts nothing; when one accepts, ordinary sweeps resume:
    it whose rows on one stretch of `LONG_CORRECTION = 8` blocks (starting inside the offer's changed span,
    within the offer's window) are replaced by the incumbent's rows or those of one of the `LONG_DONORS = 2`
    founders that agree with the offer on most blocks of that span (one private correction), is scored
-   exactly as a one-founder move. Per offer, the best variant whose gain exceeds the tolerance enters one
+   exactly as a one-founder move. Per offer, the best variant whose gain exceeds the tolerance (the
+   content-smallest among those within the refinement quantum 2^-9 of the best, release 2.13) enters one
    acceptance pass as a coarse move, so the shared-junction guard applies where coarse moves are guarded
    (components with an L1 context, levels 2 and above); a guard rejection leaves the offer's other variants
    untried. A long surrogate optimum can be exactly F-negative only over a short stretch; the ordinary
@@ -234,7 +243,11 @@ at every sweep that accepts nothing; when one accepts, ordinary sweeps resume:
 3. **Bridges.** For every fine window, the offered change of largest exact gain (one precursor per window,
    from the escape's offers) is applied privately and every founder-pair suffix exchange at every cut
    inside the window is scored exactly against it; the best combined gain above the tolerance is applied
-   after full rescoring. Bridges are not subject to the shared-junction guard.
+   after full rescoring. Each of these choices takes the content-smallest candidate in the band
+   [best - q, best], q the refinement quantum 2^-9 (release 2.13; a maximum band, not the chained tie
+   classes; before, exact ties only, so near-equal gains were chosen by their last bits and a 1e-6 GL
+   perturbation sent the polish along another path). A bridge picks its exchange before testing the
+   combined gain against the tolerance, so a tied exchange can leave the window without an offer. Bridges are not subject to the shared-junction guard.
 
 The best polished fit (tie classes of F) and its equal-F family then follow the count pass's own
 terminal rule (the fewest exact-optimal switches). The polish never changes K; the count decisions,

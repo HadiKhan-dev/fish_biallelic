@@ -51,6 +51,15 @@ from .proposals import WindowSolver
 from .workspace import sample_ranges
 from ... import execution
 
+
+def _top_class(values) -> np.ndarray:
+    """Indices of the values in the closed band [max - q, max], q the refine_F floor quantum (release 2.13): the
+    polish's choices among candidates whose exact gains differ by less than q (a safety margin over their motion
+    under 1e-6 relative GL noise, not a significance level) are made by content, not by the last bits of the gains.
+    A maximum band, not the chained tie classes of maths.ties: (0, 0.75q, 1.5q) gives the last two."""
+    values = np.asarray(values, dtype=np.float64)
+    return np.flatnonzero(values >= values.max() - tie_rules.quantum("refine_F", 0.0))
+
 # Precursor content scoring of the bridge search runs in batches of at most this many message bytes.
 BRIDGE_BATCH_BYTES = 256 << 20
 # Polish: long one-founder moves, beam offers on LONG_WINDOW-block windows at LONG_STRIDE, each
@@ -769,7 +778,8 @@ class SweepEngine:
         LONG_DONORS screened founders' rows or the incumbent's (one private correction: a long surrogate optimum is
         often exact-F negative only through a short stretch), is a one-founder content candidate on the offer's
         window, scored exactly from the panel's messages (gains.candidate_gains). Per offer the best candidate
-        above TOL (content order on ties) enters ONE acceptance pass as a coarse move, so the shared-junction guard
+        above TOL (content order among those within the refine_F floor quantum of the best, release 2.13) enters ONE
+        acceptance pass as a coarse move, so the shared-junction guard
         applies; accepted gains are verified by full rescoring and must clear TOL. Candidates per offer
         O(window), each O(S L_w Q). Returns (panel or None, its per-sample scores, exact gain, record)."""
         founders, blocks = X.shape
@@ -832,11 +842,16 @@ class SweepEngine:
                         np.ascontiguousarray(fwd[fb]), np.ascontiguousarray(bwd[fb]), focal, fb, eb, rows, ro,
                         np.ascontiguousarray(bwd[eb]), sums)
                 gains.extend(float(sum(per[m])) for m in range(len(part)))
-            best = {}
+            groups = {}
             for (a, c, k, r), gain in zip(cands, gains):
-                key = (-gain, tuple(r.tolist()))
-                if gain > TOL and ((a, c, k) not in best or key < best[(a, c, k)][0]):
-                    best[(a, c, k)] = (key, r)
+                if gain > TOL:
+                    groups.setdefault((a, c, k), []).append((gain, r))
+            best = {}
+            for unit, members in groups.items():
+                # The variants within the quantum of the best gain are tied: content (the rows) decides (2.13).
+                tied = _top_class([gain for gain, _ in members])
+                r = min((members[i][1] for i in tied), key=lambda rows: tuple(rows.tolist()))
+                best[unit] = (None, r)
             record["repaired"] = len(best)
             if not best:
                 return None, None, 0.0, record
@@ -895,11 +910,12 @@ class SweepEngine:
 
         At an ordinary fixed point the fine proposals of the sweep (the surrogate's window
         maximisers, rejected by exact acceptance) are bridge precursors whatever the sign of their
-        exact gain: per fine window the precursor of largest exact gain (content order on ties) is
+        exact gain: per fine window the precursor of largest exact gain (content order inside the refine_F floor quantum
+        of it, release 2.13) is
         applied privately, and every founder-pair suffix exchange at every cut inside the window
         is scored exactly from the private panel's local messages (prefix and suffix outside the
         window unchanged). The offer is precursor gain + exchange gain; the largest above TOL is
-        returned (ties: content order of (cut, pair, window, founder, rows)) as (panel, predicted
+        returned (ties within the quantum: content order of (cut, pair, window, founder, rows)) as (panel, predicted
         exact gain, record). The caller verifies the gain by full rescoring. (The 2.8 design prototype's fine-bridge
         family on the 2.6 engine's proposals.)"""
         ws = self.workspace
@@ -935,14 +951,18 @@ class SweepEngine:
                     np.ascontiguousarray(bwd[fb[m0:m1]]), focal[m0:m1], fb[m0:m1], eb[m0:m1],
                     rows[row_offsets[m0]:row_offsets[m1]], ro, np.ascontiguousarray(bwd[eb[m0:m1]]), sums)
             content.extend(float(sum(per[m])) for m in range(m1 - m0))
-        best = {}
+        windows = {}
         for m, (a, c, k, r) in enumerate(fine_props):
-            key = (-content[m], int(k), tuple(int(x) for x in r))
-            if (a, c) not in best or key < best[(a, c)][0]:
-                best[(a, c)] = (key, m)
+            windows.setdefault((a, c), []).append(m)
+        best = {}
+        for (a, c), members in windows.items():
+            # Precursors within the quantum of the largest exact gain are tied: content decides (2.13).
+            tied = [members[i] for i in _top_class([content[m] for m in members])]
+            m = min(tied, key=lambda m: (int(fine_props[m][2]), tuple(int(x) for x in fine_props[m][3])))
+            best[(a, c)] = (None, m)
         pa, pb = gains_kernels.exchange_pairs(founders)
         ident = np.arange(fwd.shape[2], dtype=np.int64)
-        chosen = None
+        offers = []
         evaluated = 0
         for (a, c), (_, m) in sorted(best.items()):
             k = int(focal[m])
@@ -959,14 +979,20 @@ class SweepEngine:
                     swap = gains_kernels.exchange_gains(np.ascontiguousarray(local_f[cut - a]),
                                                         np.ascontiguousarray(local_b[cut - a]))
                     evaluated += len(swap)
-                    p = int(np.argmax(swap))
+                    # Exchanges within the quantum of the best are tied: the first pair in pair order (2.13).
+                    p = int(_top_class(swap)[0])
                     gain = content[m] + float(swap[p])
-                    key = (-gain, cut, int(pa[p]), int(pb[p]), a, c, k, tuple(int(x) for x in r))
-                    if gain > TOL and (chosen is None or key < chosen[0]):
-                        chosen = (key, Y, cut, int(pa[p]), int(pb[p]), gain, m)
-        if chosen is None:
+                    if gain > TOL:
+                        # Keys and indices only: the precursor panel is rebuilt for the chosen offer below.
+                        offers.append(((cut, int(pa[p]), int(pb[p]), a, c, k, tuple(int(x) for x in r)), cut,
+                                       int(pa[p]), int(pb[p]), gain, m))
+        if not offers:
             return None
-        _, Y, cut, u, v, gain, m = chosen
+        # Offers within the quantum of the largest gain are tied: content order of (cut, pair, window, founder, rows).
+        tied = [offers[i] for i in _top_class([offer[4] for offer in offers])]
+        _, cut, u, v, gain, m = min(tied, key=lambda offer: offer[0])
+        Y = X.copy()
+        Y[int(focal[m]), int(fb[m]):int(eb[m])] = rows[row_offsets[m]:row_offsets[m + 1]]
         Y = Y.copy()
         Y[[u, v], cut:] = Y[[v, u], cut:]
         record = dict(window=[int(fb[m]), int(eb[m])], founder=int(focal[m]),
