@@ -295,7 +295,8 @@ def refit_task_bytes(samples: int, sites: int, blocks: int, founders: int) -> in
 
 def refit_component(h, gl, observed, starts, stops, centers, rate, config, unknown_mass, census_key=None):
     """(refitted calls, ALT posterior, carrier support, per-bin MAP background-copy counts
-    (N, B), site-posterior report) of one component's founders ``h`` over its blocks' sites.
+    (N, B), site-posterior report, released) of one component's founders ``h`` over its blocks' sites; the refitted
+    calls are the refit's releases where it released (``released``, bool) and ``h`` elsewhere.
     ``census_key``: the component's key for the valley census of its carrier probabilities near
     1/2 (diagnostics only)."""
     claim_threads()
@@ -310,7 +311,8 @@ def refit_component(h, gl, observed, starts, stops, centers, rate, config, unkno
         for sample, bin_index, founder in np.argwhere(np.abs(carried - .5) <= HALF_CENSUS_WINDOW):
             census("ls.refit.half.band", f"{census_key}/b{bin_index}/n{sample}/f{founder}",
                    (0.0, float(carried[sample, bin_index, founder] - .5)))
-    result = h.copy()
+    # The kernel writes only the calls it releases; the rest keep h below (release 2.12: the release mask is kept).
+    result = np.full(h.shape, -1, dtype=h.dtype)
     probabilities = np.full(h.shape, .5)
     supporters = np.zeros(h.shape)
     site_info = np.zeros((site_posterior.INFO_FIELDS, h.shape[1]), np.int64)
@@ -324,10 +326,12 @@ def refit_component(h, gl, observed, starts, stops, centers, rate, config, unkno
                      starts[b], stops[b], float(config.posterior_threshold),
                      float(config.min_support), site_info, site_boundary, site_withheld, site_bands,
                      settings)
+    released = result >= 0
+    result = np.where(released, result, h).astype(h.dtype)
     report = site_posterior.summarize_sites(site_info, site_boundary, site_withheld)
     report["half_band_sites"] = int(np.count_nonzero(site_bands[0]))
     report["support_band_sites"] = int(np.count_nonzero(site_bands[1]))
-    return result, probabilities, supporters, slots, report
+    return result, probabilities, supporters, slots, report, released
 
 
 @dataclass(frozen=True)
@@ -335,11 +339,13 @@ class ContextProposal:
     """One block's proposal of a context round.
 
     covered: a context component covered the block; then ``calls`` are the distinct local rows
-    of the component's refitted founders (lexicographic order; -1 uncalled), which are also
-    the context founders of the path objective's code, ``posterior_alt``/``support`` the refit's
-    ALT posterior and carrier support, ``unknown_slots`` the MAP number of background copies per
-    sample (2 without depth). Otherwise ``calls`` are the block's current selected calls and the
-    other fields None.
+    of the component's refitted founders (lexicographic order; -1 uncalled), ``multiplicity``
+    the number of the component's assembled founders carrying each, ``posterior_alt``/``support``
+    the refit's ALT posterior and carrier support, ``unknown_slots`` the MAP number of background
+    copies per sample (2 without depth), ``witnessed`` (release 2.12) where the refit itself released
+    the call (site posterior and carrier support passed; not a completion-filled fallback; None in
+    records written before 2.12). Otherwise ``calls`` are the block's current selected calls
+    and the other fields None.
     """
 
     block: int
@@ -348,20 +354,39 @@ class ContextProposal:
     posterior_alt: np.ndarray | None = None
     support: np.ndarray | None = None
     unknown_slots: np.ndarray | None = None
+    multiplicity: np.ndarray | None = None
+    witnessed: np.ndarray | None = None
 
     @property
     def founders(self):
-        return self.calls if self.covered else None
+        """The context founders of the path objective's code: one local row per assembled founder
+        (release 2.12). Founders whose local rows are equal stay separate
+        claimers, so a one-call change that makes two founders' rows equal moves the code by an edit,
+        not by a whole free row; the proposal panel itself keeps the distinct rows."""
+        if not self.covered:
+            return None
+        if self.multiplicity is None:
+            return self.calls
+        return np.repeat(self.calls, np.asarray(self.multiplicity, dtype=np.int64), axis=0)
+
+    @property
+    def founder_witness(self):
+        """``witnessed`` aligned with ``founders`` (one row per assembled founder); None when absent."""
+        if not self.covered or self.witnessed is None:
+            return None
+        if self.multiplicity is None:
+            return self.witnessed
+        return np.repeat(self.witnessed, np.asarray(self.multiplicity, dtype=np.int64), axis=0)
 
 
 def _refit_task(task, shared, budget):
     """Pool task: one component, refitted and finished into its blocks' proposals (worker side): returns
     (index, proposals of its member blocks in order, allele changes, fills, sites, founders, report)."""
     (index, h, columns, starts, stops, centers, rate, config, unknown_mass, census_key, template,
-     block_ids) = task
+     block_ids, carriers) = task
     gl = np.ascontiguousarray(shared["likelihoods"][:, columns], dtype=np.float64)
     observed = np.ascontiguousarray(shared["observed"][:, columns])
-    result, q, support, slots, report = refit_component(
+    result, q, support, slots, report, released = refit_component(
         h, gl, observed, starts, stops, centers, rate, config, unknown_mass,
         census_key=None if census_key is None else f"{census_key}/c{index}")
     # A withheld allele keeps the component's published (completion-filled) call.
@@ -377,17 +402,26 @@ def _refit_task(task, shared, budget):
         # (release 2.2: order-free; 2.1 kept the first founder's, a convention).
         local, inverse = unique_rows(rows, return_inverse=True)
         posterior_alt, local_support = _combine_duplicates(q[:, lo:hi], support[:, lo:hi], inverse, len(local))
+        # A distinct local row's call is witnessed when the refit released it for one of its founders (equal rows
+        # carry equal calls).
+        witnessed = np.zeros(local.shape, dtype=np.bool_)
+        np.logical_or.at(witnessed, inverse, released[:, lo:hi])
+        witnessed &= local >= 0
         depth = np.any(observed[:, lo:hi], axis=1)
+        # Assembled founders per distinct local row (``carriers``: per refitted row, its duplicate inference rows).
+        multiplicity = np.bincount(inverse, weights=carriers, minlength=len(local)).astype(np.int64)
         proposals.append(ContextProposal(
             block=block, covered=True, calls=np.ascontiguousarray(local), posterior_alt=posterior_alt,
-            support=local_support, unknown_slots=np.where(depth, block_slots, 2).astype(np.int8)))
+            support=local_support, unknown_slots=np.where(depth, block_slots, 2).astype(np.int8),
+            multiplicity=multiplicity, witnessed=witnessed))
     return index, proposals, changes, fills, int(result.shape[1]), len(result), report
 
 
 @dataclass(frozen=True)
 class RefitSummary:
     """components refitted, components skipped (block coverage incomplete), released alleles
-    that changed a published call, alleles newly called, site-posterior totals, largest K;
+    that changed a published call, alleles newly called, site-posterior totals, the largest number of
+    distinct refitted founder rows in one component (not the dictionary code's claiming slots);
     tie_events (release 2.1, maths.ties TieCounter record; one decision per refitted site): sites
     with a band decision of the release ("ls.refit.half.band": a carrier probability within the
     band of an exact 1/2; "ls.refit.support.band": a founder's support mass within the band of the
@@ -450,7 +484,8 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
         columns = np.searchsorted(evidence.positions, positions)
         specs[index] = members
         tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass, census_key,
-                      template, tuple(panels[b].block for b in members)))
+                      template, tuple(panels[b].block for b in members),
+                      np.bincount(inverse, minlength=len(h)).astype(np.float64)))
     proposals = [ContextProposal(block=panel.block, covered=False, calls=panel.calls)
                  for panel in panels]
     changes = fills = 0

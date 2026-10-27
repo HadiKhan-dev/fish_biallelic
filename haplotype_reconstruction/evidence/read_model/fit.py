@@ -167,6 +167,27 @@ def joint_objective(vector, hist, depth, alt, mean, variance):
     return value, np.r_[gradients[:, :4].ravel(), gradients[:, 4].sum()]
 
 
+def log_predictive(fit: ReadModelFit, depth, alt) -> np.ndarray:
+    """float64[N, C]: each sample's log predictive likelihood of the cells (depth[c], alt[c]), depth >= 1, under a
+    fit (its training mixture nuisances, no prior): the per-cell terms that ``score`` sums."""
+    from .emission import prefix
+    depth, alt = np.asarray(depth, np.int64), np.asarray(alt, np.int64)
+    error, heterozygote = fit.error_and_heterozygote()
+    inverse = fit.heterozygote_inverse_concentration
+    deepest = int(depth.max()) if len(depth) else 0
+    reference = depth - alt
+    out = np.empty((fit.n_samples, len(depth)))
+    for sample in range(fit.n_samples):
+        hom, het = prefix(error[sample], 0., deepest), prefix(heterozygote[sample], inverse, deepest)
+        m0, m1 = fit.mixing[sample]
+        normaliser = np.logaddexp(np.logaddexp(m0, m1), 0.)
+        l0 = hom[0, alt] + hom[1, reference] - hom[2, depth] + m0 - normaliser
+        l1 = het[0, alt] + het[1, reference] - het[2, depth] + m1 - normaliser
+        l2 = hom[0, reference] + hom[1, alt] - hom[2, depth] - normaliser
+        out[sample] = np.logaddexp(np.logaddexp(l0, l1), l2)
+    return out
+
+
 def score(hist, depth, alt, fit: ReadModelFit) -> float:
     """Unpenalised log likelihood of a histogram under a fit (its training mixture nuisances)."""
     value, _ = _objective(fit.local(), fit.heterozygote_inverse_concentration, hist, depth, alt,

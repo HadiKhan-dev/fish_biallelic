@@ -78,25 +78,39 @@ A fitted (H, f) is scored by its log likelihood plus a coding regularizer
 
     J(H, f) = log P(GL | H, f) - log C(2^L, U) - c_claimed - log K - log(K + 1) + (1/K) sum_a log(K f_a)
 
-- **Dictionary.** log C(2^L, U) is the code length of U rows coded as new arbitrary binary
-  haplotypes. In the initial round, and in blocks no assembled context covers, U = K. In a covered
-  block of a context round, each refitted context founder claims one of its nearest panel rows on
-  the founder's called sites. The claims are those of the shortest description of the panel (release
-  2.1, a declared model change): a maximum-cardinality, then minimum-edit-cost matching of founders
-  to their nearest rows, so the code is a function of the row set whatever the row order (2.0 let a
-  founder equidistant to several rows claim the lowest of them, a greedy rule applied to a
-  trajectory-dependent row order); a claimed row is a local parameter of a founder
-  whose existence the multi-block assembly decided, coded by reference to that founder plus its
-  edits, log C(n_f, d) for d differing sites among the founder's n_f called sites (the smallest
-  over the row's claimers, and never more than one more free row would cost). c_claimed sums these
-  codes and U counts the unclaimed rows, so a claimed row equal to a proposal costs nothing.
+- **Dictionary and context code.** log C(2^L, U) is the code length of U rows coded as new arbitrary
+  binary haplotypes. In the initial round, and in blocks no assembled context covers, U = K. In a
+  covered block of a context round, the refitted context founders may claim panel rows. The context
+  supplies one local row per assembled founder of the covering component: founders whose local rows
+  are equal remain separate claimers (release 2.12), and a founder with no called site in the block
+  claims nothing. A claimed row is coded by reference to its founder plus its edits,
+  log V(n_f, d) with V(n, d) = sum_{j<=d} C(n, j): the number of rows within Hamming distance d of the
+  founder's n_f called sites (0 for an exact copy, n_f log 2 at most). The panel's code is its
+  shortest such description (release 2.12):
+
+      C = min over m of [ E_m + log C(2^L, K - m) ],
+
+  with E_m the minimum summed edit code over matchings of m founders to m distinct rows (each founder
+  and each row used at most once; any founder may claim any row). E_m comes for every m from one pass
+  of successive shortest augmenting paths, O(min(F, K) (F + K)^2). Descriptions equal within a
+  relative 1e-9 prefer more claims. Then c_claimed = E_m and U = K - m.
+  - **Properties.** The code is a function of the row set: no row order enters. For fixed claimers
+    and called masks, one changed call moves it by at most one edit-ball increment (at most
+    log(n + 1) for a fully called founder of n sites), never by a whole free row. A row that
+    complements a founder costs n_f log 2, not nothing.
+  - **Scope.** The edit code covers only the founder's called sites: a claimed row's alleles at the
+    founder's uncalled sites carry no code. This is a context-reuse penalty, not a complete prefix
+    code, since neither the radius d nor the choice of claiming founders is coded.
+  - **History.** Releases 2.1-2.11 let each founder claim only its nearest rows (a maximum-cardinality,
+    then minimum-cost matching on those edges) at the shell code log C(n_f, d), and deduplicated equal
+    local founder rows. 2.12 replaced both. A one-call change could move a claim between nearest rows,
+    or merge two founders' rows, and so cost a whole free row (up to L log 2 nats).
 - **K prior.** -log K - log(K + 1), the telescoping prior also used by discovery.
 - **Frequency shrinkage.** (1/K) sum_a log(K f_a) is zero at uniform frequencies and negative
   otherwise; it amounts to one extra count spread uniformly over the founders.
 
 This is a regularised best-panel objective, not marginal evidence for K or an assumed ancestral
-founder count. Rows beyond the context's founders (local recombinants, noise rows) pay the full
-dictionary code.
+founder count. Rows no founder claims (local recombinants, noise rows) pay the full dictionary code.
 
 ## Fixed-K fit
 
@@ -127,6 +141,42 @@ dictionary term is constant, so a fit maximises the likelihood plus the frequenc
 context code enters where fits of different panels are compared. A fit reports, per founder
 allele, the exact one-bit conditional probability of ALT (every other bit and pi fixed, equal
 prior odds) and the expected copies per site.
+
+**Context-aware selection along the trajectory (release 2.12).** The GEM climbs the context-free
+objective (likelihood plus frequency shrinkage), but a context round selects fits by the
+context-coded objective, so a fit can pass through a panel the context code prefers and then leave
+it. A context round's fit therefore keeps the best state under the selection objective along its
+trajectory: the start and every accepted state. When that state beats the endpoint by more than the
+decision tolerance, the fit returns it. Its frequencies are then refitted at its fixed panel by
+frequency-only EM steps, each kept only when the selection objective rises; the context code of a
+fixed panel does not depend on the frequencies. Such a fit is not a conditional fixed point
+(converged False). Its record gives selected = trajectory_best, the update at which the state was
+reached, and the selection objectives of the endpoint and of the selected state. Release 2.11
+returned the endpoint only.
+
+**Context snaps (release 2.12).** The GEM's exact one-bit steps use the likelihood only, so an allele the
+data do not inform (an exact one-bit likelihood gain near zero) stays wherever the trajectory left it,
+although the selection objective prefers it to agree with the claiming founder's context call: one edit
+less saves log V(n_f, d) - log V(n_f, d - 1) nats of code. After the GEM, a context round's fit therefore
+takes one-bit steps judged by the selection objective. One shortest description of the panel is chosen
+in canonical order (founders by content and called mask, rows by content), so equal-cost choices do not
+depend on row order. Each of its (founder, row) pairs proposes the founder's called sites where the row
+differs from it. A proposal's lower bound is its exact one-bit likelihood gain (at fixed frequencies)
+plus that pair's edit-code saving: the current description stays feasible after the flip, so the
+selection value rises by at least the bound. A step is taken only when the largest bound exceeds the
+decision tolerance; the proposals whose bounds lie within the tolerance of that largest bound form one tie
+class (one band below the maximum, not a chain of near-equalities), decided by content (the resulting panel
+with the smallest canonical bytes) and counted as `ls.snap.tie`. The chosen proposal's bound is then
+strictly positive but may be below the tolerance, and the step is accepted only when the recomputed
+selection value rises. Flips that would make two rows equal are not
+proposed, since changing K belongs to the outer search. Each step solves one matching and scores one
+panel, O(K^3 + K L), plus O(K L log K) per member of a tie class to find its canonical panel (only the
+canonically smallest trial is kept). After each flip the frequencies are refitted at the fixed panel while the selection
+objective rises. A fit records its snaps and tied steps; one with snaps is not a conditional fixed point
+(converged False). This adds a selection-aware local improvement pass; it does not make the search complete
+(a bit outside the matched pairs' disagreements, or one that would create a claim, is not proposed), and it
+changes no likelihood, prior or code. A fit's `selected`, `selected_update` and `termination` describe the GEM
+history before the snaps; `selected_selection` is the selection value of the returned panel.
 
 ## Panel search
 
@@ -180,7 +230,9 @@ round replaces a block's panel only for a real improvement, so a change elsewher
 does not move a block between equally good optima. A block whose search inputs (start, candidate
 bank, likelihoods, map distances, settings and context founders) equal the incumbent's reuses the
 incumbent's search. Fits, scores and merge bounds are deterministic functions of their
-inputs; they are memoised within a block and carried to the block's next round.
+inputs; they are memoised within a block and carried to the block's next round. A context round's
+fits depend on the context through the trajectory selection above, so their memo keys include the
+context founders.
 
 ## Candidate bank
 
@@ -309,8 +361,12 @@ must raise the log posterior by more than
 full. A withheld allele keeps the component's published (completion-filled) call when it has one.
 
 **Proposals.** A covered block's proposal is the set of distinct local rows of the refitted
-founders, in lexicographic order; they are its candidate panel and the context founders of the
-dictionary code. Proposals are recorded per round.
+founders, in lexicographic order: its candidate panel. The refit and the candidate panel use these
+distinct rows. The dictionary code instead has one claiming slot per assembled founder of the
+component (release 2.12): each proposal row is recorded with its multiplicity, the number of the
+component's founders that carry it (counted through both the component's and the block's merging of
+equal rows), and a slot with no called site in the block cannot claim. The refit summary's
+`max_founders` counts distinct refitted rows, not claiming slots. Proposals are recorded per round.
 
 ## Release rule
 
@@ -331,10 +387,26 @@ The selected panel's alleles are released from one more E-step over per-sample p
   `LocalSelectionConfig.release.min_supporters = 2.0` carriers, by count (samples with carrier
   probability above 1/2) or by expected carrier mass. The mass alone sits just below two for a
   founder with exactly two near-certain carriers; the count alone would withhold diffusely
-  supported sites; so either suffices.
+  supported sites; so either suffices;
+- **context witness (release 2.12).** The probability test is never relaxed, but in a feedback round an allele that
+  passes it and fails the support test is released when the row is claimed by an assembled context founder in the
+  panel's shortest description (the matching of the objective's dictionary code), the allele equals that founder's
+  call, and the context refit itself released that call for at least one founder carrying this local row (posterior
+  `posterior_threshold` with `min_support` carriers; not a call retained from its input or a completion fill;
+  `ContextProposal.witnessed`). The block posterior splits the carriers of near-identical rows by frequency, so a row
+  the context claims kept fewer than `min_supporters` carriers of its own and was withheld wholesale although its
+  alleles are shared with carriers the refit identifies; context snaps made such rows common. The refit identifies
+  carriers by linkage (cavity weights from the flanking blocks) but reads the same block's reads, and its founder rows
+  were themselves learned from the data: this is conditional reuse of the evidence with a better carrier assignment,
+  not independent confirmation, and the two thresholds do not combine into a probability of correctness. A
+  support rule pooling the carriers of mutual nearest rows was tested and left out: on simulations it released the
+  common row's allele at sites private to the founder the row matches (std, one-to-one matching of rows to true
+  founders: 60 of 67 such rescues wrong), although its errors against the nearest true row were few.
 
 Released alleles are the panel's own; others are -1, as are all sites that are not discovery
-sites. The probability is a conditional one-bit quantity, not a full allele posterior or a
+sites. Because the release depends on the round's context witnesses, an incumbent's release is reused
+only when the selected panel and frequencies are unchanged, the round has no context witnesses and the incumbent's
+release used none. The probability is a conditional one-bit quantity, not a full allele posterior or a
 calibrated probability of correctness. The `LocalPanel` stores the fit's ALT probabilities and the
 favourable carrier counts.
 

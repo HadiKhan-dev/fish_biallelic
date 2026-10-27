@@ -108,8 +108,7 @@ def prepare_contig(reads: ContigReads, config: EvidenceConfig, budget) -> Prepar
 
     started = time.monotonic()
     threads = budget.threads()
-    with reserve_memory(calibration_bytes(kept.n_samples, len(calibration.calibration_sites(positions, config.read_model)),
-                                          config.read_model)
+    with reserve_memory(calibration_bytes(kept.n_samples, kept.n_sites, config.read_model)
                         if config.read_model.enabled else 0, label="evidence calibration"), \
             stage_timer("read_calibration", contig), numba_threads(threads):
         fitted, report = calibration.calibrate(counts, positions, config.read_model, threads=threads)
@@ -159,13 +158,13 @@ def preparation_bytes(samples: int, sites: int) -> int:
     return 40 * samples * sites + 256 * sites + (16 << 20)
 
 
-def calibration_bytes(samples: int, calibration_sites: int, config) -> int:
-    """Histogram construction and fitting workspace, beyond the retained kept counts."""
+def calibration_bytes(samples: int, sites: int, config) -> int:
+    """Histogram construction, held-out stretch scoring and fitting workspace, beyond the retained kept counts."""
     width = config.maximum_fit_depth + 1
     cells = width * (width + 1) // 2 - 1
-    # Sampled int64 AD/depth/mask + square four-fold histogram and its compact copy;
-    # fitting retains four folds, training/content-order copies and per-objective scratch.
-    histogram = 27 * samples * calibration_sites + 32 * samples * (width * width + cells)
+    # One sample's int64 depth/key/cell arrays and masks at a time, two square histograms and their compact
+    # copies, three per-cell predictive tables; fitting retains the histograms and per-objective scratch.
+    histogram = 40 * sites + 16 * samples * (width * width + cells) + 24 * samples * cells
     fitting = 96 * samples * cells
     return max(histogram, fitting) + (16 << 20)
 

@@ -1,5 +1,170 @@
 # Changelog
 
+## 2.12.0 (27 October 2026)
+
+This release removes the read-model calibration's site subsampling and the demonstrated discontinuities of local
+selection's context code, adds trajectory retention and a selection-aware local improvement pass to local selection's
+fits, and lets local selection's release credit alleles that the context refit witnessed. A calibration redraw, or a
+1e-6 change of the genotype likelihoods, could tip near-threshold local-selection decisions that assembly and founder
+refinement then amplified into different local optima. On the std eight-contig redraw (targeted replays below), none
+of the replayed selections trails the tested candidate bank by more than one nat under its own evidence and context,
+and 49 of 191 pairs select identical panels; other search differences remain, mainly on TroMau, and founder refinement
+still lands in different optima (Known limitations). Released results change.
+
+**Read-model calibration on every kept site, with dependence-aware selection** (`evidence/read_model/calibrate.py`,
+`evidence/read_model/fit.py`, `evidence/config.py`, `evidence/stage.py`, `evidence/reports.py`). Releases 2.3 to 2.11
+fitted the read model on about one kept site in eight and chose among the shared binomial, sample binomial and sample
+joint candidates by the summed held-out score of one fold within a one-nat band. Redrawing that sample moved the
+contigs' mean fitted error logits by about 0.1 (standard deviation over 22 TroMau contigs) and changed the selected
+model on 7 of them. Calibration now:
+- builds the histograms from every kept site (cells subject to the observed-cell and maximum-depth admission);
+- fits on folds 0/1 and scores folds 2/3;
+- accepts each more complex candidate over the currently accepted one only when its held-out gain is at least
+  `ReadModelConfig.selection_z = 2.0` standard errors.
+
+The standard error comes from the held-out 2-Mb stretches that hold admitted cells. Sites are not independent: on six
+TroMau contigs the standard error of the held-out gain grew 4- to 16-fold from single sites to 2-Mb windows (the
+windows set the scale of the error estimate; they neither bound it nor identify a dependence range). With fewer than
+`selection_minimum_blocks = 4` such stretches the shared binomial is kept. Each comparison records its gain, error, z,
+stretches and leave-one-stretch-out flips; selections within 0.5 of the threshold are counted in the ties report. The
+empirical-Bayes shrinkage weight depends on the amount of data, and a per-sample error rate near 1e-5 is weakly
+identified at low depth (docs/methods/evidence.md). This is a reasoned estimator change, not a demonstrated accuracy
+improvement.
+
+**Local selection: the context code's demonstrated discontinuities removed** (`local_selection/fit.py`,
+`objective.py`, `context_refit.py`, `search.py`, `rounds.py`). In a context round the assembled context's founders
+code the panel rows they claim. A perturbation could change a block's selected panel by tens to hundreds of nats in
+four demonstrated ways:
+- **Trajectory-best selection.** The fixed-K GEM climbs the context-free objective while rounds select fits by the
+  context-coded objective, so a fit could pass through a panel the context code prefers and then leave it. A context
+  round's fit now returns the best state under the selection objective along its trajectory when it beats the
+  endpoint by more than the decision tolerance, with its frequencies refitted.
+- **All-edge, all-cardinality context code.** Each founder used to claim only one of its nearest rows (maximum
+  cardinality first) at the shell code log C(n, d), so one changed call could move a claim between nearest rows
+  and cost a whole free row. The code is now the shortest description over every matching of founders to rows, of
+  every size, at the monotone edit-ball code log sum_{j<=d} C(n, j), computed exactly by successive shortest
+  augmenting paths in O(min(F, K)(F + K)^2), with one canonical matching (independent of row and founder order).
+  For fixed claimers and fixed called masks a changed call moves the code by at most log(n + 1).
+- **One claimer per assembled founder.** The context refit merged founders whose local rows were equal, so a
+  collision of two founders' rows removed a claimer: 200 log 2 nats for one call in the observed case. The
+  proposal panel and the refit still use the distinct rows, but the code keeps one claimer per assembled founder
+  (`ContextProposal.multiplicity`).
+- **Context snaps.** The likelihood-only GEM left data-uninformative alleles wherever its trajectory put them. A
+  context round's fit now ends with one-bit steps judged by the selection objective: proposals are the called-site
+  disagreements of the matched pairs of one canonical shortest description, ranked by a valid lower bound (exact
+  one-bit likelihood gain plus the pair's edit-code saving). A step needs the largest bound above the decision
+  tolerance; bounds within the tolerance of it are one tie class, decided by content and counted (`ls.snap.tie`);
+  the step is accepted only if the recomputed selection value rises. Each step costs O(K^3 + K L) plus
+  O(K L log K) per tie-class member. This is a local improvement pass, not a complete search: a bit outside the
+  matched disagreements, or one that would create a claim, is not proposed.
+
+The code charges a claimed row only on its founder's called sites (a context-reuse penalty, stated in the methods,
+not a complete code). One whole-row transition is therefore retained: when a founder's last informative call
+disappears it stops claiming (a single perfectly matching call in a 200-site block moves the regulariser by 138.6
+nats). Two completions were tested against simulation truth and left out, each a tradeoff rather than a gain: coding
+uncalled sites (K30: summed Hamming distance 859 -> 844 but exactly recovered true rows 299 -> 296) and a radius code
+(std: summed Hamming distance 908 -> 1,097 while split rows fell 21 -> 8).
+
+**Local selection: context-witnessed release** (`local_selection/release.py`, `context_refit.py`, `objective.py`,
+`rounds.py`, `stage.py`). The block posterior splits the carriers of near-identical rows by frequency, so a row the
+context claims kept fewer than two supporters of its own and was withheld wholesale although its alleles are shared
+with witnessed carriers; snaps made such rows common (std: wholly withheld rows 12 -> 53 in the replayed blocks, 99.2%
+of their 10,600 withheld alleles correct against the nearest true row). The probability test is unchanged. In the
+feedback rounds an allele that passes it but not the support test is now also released when it equals the call of the
+context founder that claims the row and the context refit itself released that call (posterior 0.99 and the refit's
+support threshold of two, by carrier count or expected carrier mass, with carriers assigned by linkage from the
+flanking blocks; `ContextProposal.witnessed`, which excludes calls the refit kept from its input and completion
+fills). The refit reads the same block's reads, so this is conditional reuse of evidence with a better carrier
+assignment, not independent confirmation. On identical selected fits (alleles rescued / wrong against the nearest true
+row): backcross 368 / 16, f3 720 / 1, std 8 contigs 18,641 / 58 (withheld 85,819 -> 67,178; released errors 3,164 ->
+3,222), K30 8,144 / 115 (withheld 44,504 -> 36,360; released errors 2,353 -> 2,468); over the four simulations 0.68%
+of rescued alleles are wrong, 1.09% among rows nearest a true row with at most two sampled copies, and on K30 alone
+1.4%. Matched one-to-one to true rows instead, backcross and f3 rescues have no errors; std 289 of 16,574 matched
+cells and K30 216 of 8,144 are wrong, and at sites private to the matched founder 14 of 239 (std) and 14 of 25 (K30).
+On three TroMau contigs the withheld alleles fall 25,620 -> 9,241 and 77 of 79 wholly withheld rows are released. The
+incumbent's release is no longer reused in a round with context witnesses, or when it used them. A second rule pooling
+the carriers of mutual nearest rows passed the same error allowances but, matched one-to-one to true founders,
+released the common row's allele at sites private to the matched founder (std: 60 of 67 such rescues wrong); it was
+left out as a scientific exception to those allowances.
+
+Targeted replays of saved selections (no end-to-end runs), each block replayed under its own evidence and context
+where two 2.11 runs selected different panels (units: block-rounds):
+- std, 8 contigs, under a 1e-6 likelihood jitter: the 4 divergent block-rounds now select identical panels (2.11:
+  none shared even K).
+- std, 8 contigs, calibration redraw (191 block-rounds): same K 187 (2.11: 177); identical panels 49 (2.11: 0); gaps
+  above 1 nat to the better panel 0 (2.11: 49).
+- TroMau, calibration redraw (1,217 block-rounds): same K 511 (2.11: 404); identical panels 164 (2.11: 0). Most
+  remaining TroMau differences are likelihood-driven search differences under different candidate banks and contexts.
+
+One claimer per assembled founder, against simulation truth, all other inputs fixed. Columns: block-rounds with equal
+founder rows; changed selections; K toward / away from the true local founder count; summed Hamming distance from
+true rows to the panel over the changed selections.
+
+| Dataset | Block-rounds | Changed | K toward / away | Summed Hamming |
+|---|---|---|---|---|
+| f3 | 3,842 | 53 | 48 / 5 | 369 -> 0 |
+| backcross | 2,967 | 13 | 10 / 3 | 47 -> 3 |
+| std, 8 contigs | 6,404 | 131 | 118 / 12 | 1,787 -> 661 |
+| K30 | 290 | 253 | 249 / 0 | 18,761 -> 13,110 |
+
+The strongest extra rows are real shared recombinant haplotypes: one f3 example exactly matches 19 sampled
+haplotypes that carry one true breakpoint (a descendant recombinant, not an original founder). On TroMau the change
+adds local rows in about 2,100 block-rounds.
+
+Context snaps against truth, every covered block-round replayed without and with them (changed selections; better /
+worse summed Hamming recovery; exactly recovered true rows lost / gained): std 8 contigs 1,422; 856 / 354; 223 / 646;
+backcross 50; 35 / 7; 5 / 29; f3 5; 2 / 2 (summed Hamming 29 -> 45); 2 / 1; K30 374; 214 / 120; 174 / 153. Snaps turn
+over rare founders (one or two sampled copies): on std they lose 18 of the 95 rare true rows recovered without them
+(18.9%, against 0.19% of commoner rows) and gain 76, net +58; on f3 two two-copy rows are lost (chr9, chr19) and one
+one-copy row gained; on K30 18 two-copy rows are lost and 25 gained. The rule fixed before these receipts (drop snaps
+if losses concentrate in rare founders while gains do not) is not met.
+
+**Known limitations.** Founder refinement's objective prefers identity-wrong (chimeric) routings in multi-generation
+crosses: started from a nearest-local-row proxy of the truth routing on saved f3 and std inputs, the production polish
+raises the objective while moving away from truth (f3 chr9: a mismatch-plus-missingness proxy of 180 -> 62,337.5),
+because a crossover inherited by many descendants is charged once per descendant under independent per-sample paths,
+so routing a founder along the shared recombinant can score higher (an objective/target mismatch). Bounded search also
+misses better-scoring routings, so runs whose inputs differ slightly land in different optima; per-contig differences
+in founder identity between runs reflect both, and upstream changes, including those above, can seed a different
+optimum. Better optimisation alone does not guarantee historical-founder recovery. A shared-descent-aware objective or
+an explicit identity-ambiguity release is a research direction (the tested greedy uniform-prior recombinant
+constructions did not make the truth proxy highest-scoring); no validated objective correction is included in this
+release. Painting (outside this release's scope) can also move founder identity between runs: on std chr20 the
+painting-stage identity disagreement rose by 34.1k while founder refinement changed by 0.8k. Discovery's path
+dependence under exact ties (140 sites on std under a 1e-6 jitter) is unchanged.
+
+**Validation.** The single end-to-end run of this release, to painting, compared with 2.11. Simulations against
+truth (WOM: truth-to-panel wrong plus missing alleles under one-to-one matching; called-allele errors by each row's
+nearest true row unless stated):
+- std, 8 contigs: WOM 452,468 -> 465,652 (+2.9%; five scored 2.11 calibration redraws spanned 418.7k-452.7k),
+  nearest-row called errors -0.1% (one-to-one +1.3%), missing alleles 24,259 -> 32,043, label switches 727 -> 718.
+  At painting the identity disagreement rises on chr20 by 34.1k and falls on chr18 by 25.2k; chr20 changes by only
+  +0.8k at founder refinement, so most of that swing arises in painting. At local selection WOM is -6.8% and at
+  assembly level 1 -3.0% (called errors -11%).
+- f3: WOM 149,864 -> 224,108 (+49.5%), almost entirely chr9 (46,403 -> 120,893, already at founder refinement), a
+  founder-identity optimum (Known limitations); at local selection -1.6% and assembly level 1 -4.8%; missing 329 ->
+  318; switches 19 -> 17.
+- backcross: WOM 1,259 -> 1,346 (+6.9%); called errors 949 -> 681 (-28%); missing 310 -> 665; switches 6 -> 4.
+- K30 (against the 2.11-equivalent run): WOM 67,647 -> 62,529 (-7.6%); called errors 10,356 -> 3,690 (-64%); missing
+  9,203 -> 18,813; switches 30 -> 24.
+- Missingness: on std final assembly, all uncalled alleles were kept-site local-selection withholdings that
+  completion had not filled. The probability-derived alleles would match the assigned true founder at about 70% and
+  74% in the two diagnostic strata (one-bit probability below / at least 0.85), against 72% and 78% in 2.11. These
+  results support withholding these uncertain cells; they do not establish an unchanged release calibration.
+- TroMau (against 2.10 on the G0 pseudo-reference, not truth): W100 wrong -3,890 (-1.2%) and W100 wrong + missing
+  -3,406 (-0.7%), inside the locked screen (<= +22,168 / <= +22,093) and below all six 2.11 redraws (+4,028 to
+  +22,168); W0 wrong -12.0%; W100 missing +0.3%; per-contig churn 39,080 (2.11 redraws up to 46,610); largest
+  adverse contigs chr9 +4,455 and chr7 +3,712.
+
+TroMau is scored against the dependent G0 v1.4 pseudo-reference, not truth, against 2.10, with 2.11's six calibration
+redraws as the locked comparison (primary screen W100 wrong <= +22,168 and W100 wrong + missing <= +22,093;
+secondaries W0, missingness, per-contig deltas and churn). An exceedance triggers attribution to a stage, not
+automatic rejection, and a result inside the six-redraw envelope is not proof of accuracy or equivalence.
+
+**2.11 validation exception.** After the 2.11.0 release its TroMau run exceeded a rule built on one 2.10 calibration
+redraw. Six calibration redraws of 2.11 later showed changes of that size within redraw variability (W100 wrong
++4,028 to +22,168 against 2.10). 2.11 remains the operational baseline; the six-redraw cohort above replaces that rule.
+
 ## 2.11.0 (26 October 2026)
 
 This release reworks the evidence stage's numerical fits, calibration sample and edge cases, and speeds discovery's

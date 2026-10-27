@@ -283,33 +283,45 @@ Bayesian inference, and it does not guarantee identifiability at low depth.
 
 ### Folds, selection and fallback
 
-Calibration uses about one kept site in `EvidenceConfig.read_model.marker_stride = 8`: every kept
-site has a fixed pseudo-random priority computed from its position alone (the splitmix64 finaliser), and
-a site is used when its priority lies in the lowest eighth of the range. Each used site contributes per-sample histograms of (depth, ALT) cells with depth 1 to
-`EvidenceConfig.read_model.maximum_fit_depth = 48`; deeper cells are left out of fitting only. The
-sites fall into four physical folds, floor(POS / `EvidenceConfig.read_model.fold_window_bp = 1000000`)
-mod 4. The sample is a uniform draw from the kept sites whatever their local density, so the fitted
-model describes the sites it is applied to, and adding or removing a kept site changes no other site's
-use (the per-contig fit, and so the likelihoods, can still change everywhere). Used sites closer than a
-sequenced fragment can share reads, so the observations are not independent. Releases 2.3 to 2.10 took
-every eighth kept site by index, so one inserted site changed the calibration sample for the rest of the
-contig. Thinning the kept sites to a minimum spacing would instead sample along the genome: on TroMau it
-over-represents sparse regions about threefold and lowers the fitted error rates systematically. On
-TroMau chr16 the sample holds 9,711 of 78,415 kept sites (the 2.10 stride: 9,802). Folds 0 and 1 fit every candidate; fold 2 selects among the candidates with a finite
-predictive log likelihood (each scored with its training genotype mixtures): candidates within one
-nat of the best (`evidence.read_model.calibrate._SELECTION_TIE_NATS = 1.0`) are tied and the
-simplest of them is applied, so a more complex model must predict the selection fold better by
-more than a likelihood ratio of e; fold 3 is an untouched diagnostic
-that never chooses parameters or the model (a contig without admitted fold-3 observations but with
-populated training and selection folds, for example one spanning fewer than three fold windows, is
-still calibrated and its diagnostic score is unavailable). Every sample is calibrated, flagged samples included.
+Calibration uses every kept site. Each contributes per-sample histograms of (depth, ALT) cells with depth 1 to
+`EvidenceConfig.read_model.maximum_fit_depth = 48`; deeper cells are left out of fitting only. The sites fall into
+four physical folds, floor(POS / `EvidenceConfig.read_model.fold_window_bp = 1000000`) mod 4: folds 0 and 1 train,
+folds 2 and 3 are held out. The histograms are built one sample at a time, so their memory does not grow with the
+number of sites. Folds 0 and 1 fit every candidate.
+
+Each more complex candidate in turn (the sample binomial, then the sample joint model) replaces the currently accepted
+one only when it predicts the held-out folds better (each candidate scored with its training genotype mixtures) by at
+least `EvidenceConfig.read_model.selection_z = 2.0` standard errors; a rejected candidate does not stop the next
+comparison, which is then against the model still accepted. The standard error is not the per-site one. Sites are not
+independent observations: nearby sites can share sequenced fragments, and in a cross the genotype composition of the
+samples changes along the chromosome with their ancestry, so the per-site score differences are correlated over long
+distances. On six TroMau contigs the standard error of a contig's total held-out gain (sample binomial against
+shared), estimated from sums over windows of increasing length, grows 1.2- to 1.3-fold from single sites to 1-kb
+windows (a scale at which reads may be shared) and 4- to 16-fold to 2-Mb windows, and on five of them further at 8 Mb:
+windows do not show where the dependence ends, and they also mix in regional differences of density, depth and fit.
+The error is therefore estimated from the gains of the B held-out stretches that hold admitted cells (folds 2 and 3 of
+each four-window cycle, 2 Mb each by default) as sqrt(B var(stretch gains)); with fewer than
+`EvidenceConfig.read_model.selection_minimum_blocks = 4` such stretches the configured rule does not use the estimate
+and the shared binomial is kept (an explicit conservative fallback, not evidence that it fits better). This error
+assumes nearly independent, comparable stretches and ignores the uncertainty of the training fits; the z rule is a
+preference for the simpler model, not a significance test with a calibrated error rate (B is small, about nine per
+TroMau contig). Each comparison records its stretches' admitted cells, the largest stretch's share, an
+exposure-centred error and how many leave-one-stretch-out decisions differ, as sensitivity diagnostics.
+
+Releases 2.3 to 2.11 fitted on one kept site in eight and selected by the summed held-out score of one fold with a
+one-nat band. Both choices made the result depend on which sites were sampled: redrawing the sample changed per-sample
+error estimates by about 10% (a contig's mean error logit by about 0.1) and the selected model on 7 of 22 TroMau
+contigs. With all-site fits the joint model's held-out gain over the sample binomial is near zero on most TroMau
+contigs (chr10 -0.3 +- 22, chr16 2 +- 6, chr22 9 +- 16 nats), well inside the noise of a one-nat band. Fitting on all
+sites removes the sample; the stretch-based error keeps such near-zero gains on the simpler model (chr3, 688 +- 218,
+keeps the joint model). Every sample is calibrated, flagged samples included.
 
 The selected training fit is applied to every cell of the contig without a full-data refit, so
 some of the reads the likelihoods describe also trained the model: this is not out-of-fold
 application. The fixed binomial model, e = `EvidenceConfig.fixed_error = 0.02` and q = 1/2 for
-every sample, applies instead when calibration is disabled, when a training or selection fold lacks
-calibration observations (short or sparse contigs), when no shared EM start converges, or when no candidate
-has a finite selection score; the reason is recorded. No truth, pedigree or founder panel
+every sample, applies instead when calibration is disabled, when the training or held-out folds lack
+calibration observations (short or sparse contigs), when no shared EM start converges, or when the shared model
+has no finite held-out score; the reason is recorded. No truth, pedigree or founder panel
 enters estimation.
 
 A failed shared-binomial polish counts as a failed EM start. Among the remaining starts,
@@ -319,8 +331,8 @@ exceeds every distinct competitor by more than one nat (the existing read-model 
 Otherwise the entire contig uses the fixed binomial model with reason
 `shared_endpoints_unresolved`. When no start survives, the existing no-converged-shared-start
 fallback applies. The sample-binomial fit initializes from the shared fit, and the joint fit from the
-sample-binomial fit; neither is fitted when the shared fit is unresolved. Selection and diagnostic
-folds do not resolve competing training endpoints.
+sample-binomial fit; neither is fitted when the shared fit is unresolved. The held-out folds do not
+resolve competing training endpoints.
 
 These failures do not stop the run. Failed starts and decisions among distinct endpoints produce
 a log warning, a calibration warning in the run summary, and evidence-report diagnostics:
@@ -362,7 +374,7 @@ indices. These are the units of [discovery](discovery.md) and
 | loading | `evidence/vcf.py` | worker processes scan disjoint physical windows, then decode directly into one shared sample-major array | O(N M_in); two BCF passes, no count-array result transfers |
 | site filter | `evidence/site_quality.py` | per-site genotype EM parallel over sites; elementwise mixture terms in thread chunks | O(N M_in) (at most 60 EM iterations per site) plus O(M_in) per mixture iteration |
 | sample QC | `evidence/sample_quality.py` | vectorised | O(N M_in), then per-sample fits over private cells |
-| read model | `evidence/read_model/fit.py`, `evidence/read_model/calibrate.py` | per-sample fits in threads; objectives parallel over samples | site selection O(M_kept); histograms O(N M_cal), M_cal about M_kept / 8; each objective O(N C), C <= 1,224, independent of chromosome length |
+| read model | `evidence/read_model/fit.py`, `evidence/read_model/calibrate.py` | per-sample fits in threads; objectives parallel over samples | histograms and held-out stretch scores O(N M_kept); each objective O(N C), C <= 1,224, independent of chromosome length |
 | likelihoods | `evidence/read_model/emission.py` | samples in parallel; a lookup/prefix table per active sample | O(N M_kept) |
 
 The stage has no dependence on founder count K. Here N is sample count, M_in the input SNP count,
@@ -373,9 +385,10 @@ of whole-window results and concatenation/filter/transpose copies. Canonical sam
 requires a second count array while permuting, so source loading can peak at 16 N M_in bytes.
 
 Site selection writes one C-order count array. The driver releases input counts immediately after
-selection, before calibration/emission. Read-model histogram construction retains the calibration
-sites' int64 counts/depths and four square histograms, then a compact histogram copy: a conservative
-bound beyond kept counts is 27 N M_cal + 32 N (49^2 + C) bytes for M_cal calibration sites. Fitting remains O(N C).
+selection, before calibration/emission. Read-model histogram construction holds one sample's int64
+depths and cell keys at a time, two square histograms and their compact copies, and, for the held-out
+stretch scores, three per-cell predictive tables: a conservative bound beyond kept counts is
+40 M_kept + 16 N (49^2 + C) + 24 N C bytes. Fitting remains O(N C).
 Likelihood emission allocates its 24 N M_kept output once. Lookup storage is now
 24 T (cap+1)^2 bytes for T active samples, instead of 24 N (cap+1)^2; prefix tables use at most
 128 T (D+1) bytes for deepest cell D. Prefix sums and cell normalization retain their original
@@ -439,11 +452,20 @@ boundary at tau = 0.
   all 22 TroMau contigs show a maximum relative applied-GL change of 3.67749e-10 after polishing
   (chr22), with every selected model unchanged. Flat directions can still amplify rounding, so
   neither numerical uniqueness nor invariance of every downstream decision follows from this
-  comparison. The one-nat selection rule is unchanged.
+  comparison.
 - Optimiser bounds, starts and tolerances are numerical choices, not biological estimates; the
-  calibration sampling rate (one kept site in eight) is a statistical sampling-design choice (it changes
-  which observations train the read model). The one-nat selection band is a preference
-  applied to summed marginal predictive scores, not a confidence level.
+  selection threshold (two standard errors over the held-out stretches) is a preference for the
+  simpler model applied to summed marginal predictive scores, not a confidence level; the stretch
+  error is estimated from about nine stretches per contig and assumes the stretches are nearly
+  independent. A contig whose gain lies near the threshold can still change its selected model under
+  small input changes (such selections are counted in the ties report).
+- The per-sample error and balance effects are empirical-Bayes estimates: each sample's logit is shrunk toward a
+  fitted population mean with a weight set by its own sampling variance. Their values therefore depend on how much
+  data the fit sees. On TroMau, fitting one kept site in eight (releases 2.3 to 2.11) gave a median per-sample error
+  about three times the all-site fit's (chr16: 4.4e-5 against 1.4e-5), the same in every eighth of the sites. At a
+  few tens of thousands of observed cells per sample, a sample whose error rate is near 1e-5 shows fewer than one
+  error read in expectation. Such rates are not identifiable individually, and the estimate largely reflects the
+  population prior. Uncertainty in the error rates is not propagated into the likelihoods.
 - The site filter's depth rules cannot distinguish benign sample-specific missingness from mapping
   artefacts, and r5 removes sites without segregating information by design.
 - The contamination QC detects foreign DNA through private alleles only: contamination shared by
@@ -492,7 +514,7 @@ K20/K30 retain their fixed fallback and exactly unchanged GLs. Standard and stre
 applied GL changes are 6.33e-5 and 3.57e-5. In sim_s10001, chr1 changes from shared binomial
 to sample binomial, while chr6 and chr11 change in the opposite direction; the largest GL
 change is 0.00679817. Shared training optimization changes held-out scores enough to cross
-the unchanged one-nat model-selection rule. Full regenerated-evidence truth gates are required
+the then one-nat model-selection rule (replaced in 2.12). Full regenerated-evidence truth gates are required
 for these discrete model changes. No held-out score enters the within-shared endpoint choice.
 
 ### Shared-binomial Newton curvature and bounds (2.3)

@@ -8,7 +8,8 @@ distance classes of exact "double-removal" merges), then refits the top ``refits
 proposals of each kind. Screening costs O(N L K^3) without distance ties and up to O(N L K^4)
 when ties require every merge's exact forward. Reuse is keyed by the complete panel AND its
 frequencies. Fits, scores and
-merge bounds are founder-independent and kept across rounds in a ``LikelihoodMemo``; a whole
+merge bounds are kept across rounds in a ``LikelihoodMemo`` (a context round's fits, which select along
+their trajectory by the context-coded objective, are keyed by the context founders too); a whole
 search is reused when all its inputs are identical (``search_input_key``).
 
 Release 2.1 (noise stability): every decision between objectives uses anchored tie classes of
@@ -226,7 +227,7 @@ def content_key(*arrays) -> bytes:
 
 
 class LikelihoodMemo:
-    """Founder-independent likelihood results of one block, kept across rounds.
+    """Likelihood results of one block, kept across rounds (context-aware fits keyed by their context).
 
     A fit is a deterministic function of its canonical start, a score of its (panel,
     frequencies), and the merge bounds of a fit's (panel, frequencies), given the block's data
@@ -256,14 +257,21 @@ class LikelihoodMemo:
         return PathFit(panel=panel, frequencies=stored["frequencies"], allele_probability=None,
                        occupancy=None, log_likelihood=stored["log_likelihood"],
                        objective=stored["objective"], converged=stored["converged"],
-                       termination=stored["termination"])
+                       termination=stored["termination"], selected=stored.get("selected", "endpoint"),
+                       selected_update=stored.get("selected_update", -1),
+                       endpoint_selection=stored.get("endpoint_selection"),
+                       selected_selection=stored.get("selected_selection"),
+                       context_snaps=stored.get("context_snaps", 0), snap_ties=stored.get("snap_ties", 0))
 
     def add_fit(self, key, fit: PathFit) -> None:
         self.fits[key] = dict(panel=(fit.panel.shape[1], np.packbits(fit.panel.astype(np.uint8),
                                                                      axis=1)),
                               frequencies=fit.frequencies, log_likelihood=fit.log_likelihood,
                               objective=fit.objective, converged=fit.converged,
-                              termination=fit.termination)
+                              termination=fit.termination, selected=fit.selected,
+                              selected_update=fit.selected_update, endpoint_selection=fit.endpoint_selection,
+                              selected_selection=fit.selected_selection, context_snaps=fit.context_snaps,
+                              snap_ties=fit.snap_ties)
 
 
 @dataclass(frozen=True)
@@ -336,14 +344,27 @@ def tied_cut(classes, limit: int, cap: int) -> tuple[int, bool]:
     return take, False
 
 
-def fitted_start(start, prepared, search_config, memo: "LikelihoodMemo") -> PathFit:
+def _selection(context):
+    """The context-coded selection objective of a fit state (None without a context: the fit's own objective)."""
+    if context is None:
+        return None
+    return lambda panel, frequencies, log_likelihood: log_likelihood + coded_regularizer(panel, frequencies, context)
+
+
+def _context_key(context) -> bytes:
+    """Memo-key suffix: a context-aware fit depends on the context (release 2.12)."""
+    return b"" if context is None else content_key(context.founders, context.called)
+
+
+def fitted_start(start, prepared, search_config, memo: "LikelihoodMemo", context=None) -> PathFit:
     """The fixed-K fit of a start (memoised under the key search_panel uses, so the search from
     this start reuses it)."""
     start_panel, start_frequencies = canonical(start, None)
-    memo_key = content_key(start_panel, start_frequencies)
+    memo_key = content_key(start_panel, start_frequencies) + _context_key(context)
     result = memo.fit(memo_key)
     if result is None:
-        result = fit_fixed(start, None, prepared, search_config, WorkspaceBuffers())
+        result = fit_fixed(start, None, prepared, search_config, WorkspaceBuffers(), selection=_selection(context),
+                           context=context)
         memo.add_fit(memo_key, result)
     return result
 
@@ -379,14 +400,15 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
             return fit_cache[key]
         # fit_fixed depends on its input only through this canonical start.
         start_panel, start_frequencies = canonical(panel, frequencies)
-        memo_key = content_key(start_panel, start_frequencies)
+        memo_key = content_key(start_panel, start_frequencies) + _context_key(context)
         result = memo.fit(memo_key)
         if result is None:
             fit_key = None
             if collect:
                 # A diagnostic key stable across reruns: the start panel and its frequencies to 1e-6.
                 fit_key = f"{census_key}/fit{content_key(start_panel, np.round(start_frequencies, 6)).hex()[:16]}"
-            result = fit_fixed(panel, frequencies, prepared, search_config, buffers, census_key=fit_key)
+            result = fit_fixed(panel, frequencies, prepared, search_config, buffers, census_key=fit_key,
+                               selection=_selection(context), context=context)
             work["fit_calls"] += 1
             memo.add_fit(memo_key, result)
         fit_cache[key] = replace(result, allele_probability=None, occupancy=None)

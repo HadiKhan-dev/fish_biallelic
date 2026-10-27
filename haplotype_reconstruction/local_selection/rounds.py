@@ -64,6 +64,7 @@ class BlockTask:
     keep_memo: bool
     label: str = ""
     alternatives: tuple = ()
+    witness: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def _best_outcome(outcomes, tolerance, ties) -> tuple[SearchOutcome, list]:
     return winner, (list(tied.values()) if len(tied) > 1 else [])
 
 
-def _consensus_panel(task, outcome, path_release, alternatives, prepared, release_config):
+def _consensus_panel(task, outcome, path_release, alternatives, prepared, release_config, context=None):
     """The LocalPanel released for tied alternative panels (release 2.2), and the founder rows it
     withholds. A founder row that every alternative contains keeps a call where all alternatives'
     releases of that row agree (-1 elsewhere), their mean ALT probability and their smallest
@@ -113,7 +114,8 @@ def _consensus_panel(task, outcome, path_release, alternatives, prepared, releas
     others."""
     released = []
     for alternative in alternatives:
-        own = path_release if alternative is outcome else release(alternative.fit, prepared, release_config)
+        own = (path_release if alternative is outcome
+               else release(alternative.fit, prepared, release_config, context=context, witness=task.witness))
         released.append((alternative.fit.panel, local_panel(task.block, task.site_start, task.positions,
                                                             task.kept, alternative.fit, own)))
     shared = None
@@ -167,7 +169,7 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
     if len(starts) > 1:
         # The fitted starts' selection objectives decide which starts are searched: the best tie
         # class, fewer founders inside it (a stated prior); one search per distinct fitted panel.
-        fits = [fitted_start(start, prepared, config.search, memo) for start in starts]
+        fits = [fitted_start(start, prepared, config.search, memo, context) for start in starts]
         values = [selection_objective(fit, context) for fit in fits]
         classes = tie_classes(values, tolerance, descending=True, motion=DECISION_MOTION)
         best = [n for n in range(len(starts)) if classes.classes[n] == 0]
@@ -201,19 +203,24 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
         if census_key is not None and census_enabled():
             census("ls.keep", f"{census_key}/keep", (-incumbent_objective, -attempted.selection_objective))
     outcome = incumbent if retained else attempted
-    # The release is a function of the selected (panel, frequencies) and the block data: an
-    # incumbent's release is reused when they are equal.
-    reuse = (incumbent is not None and task.incumbent_release is not None
+    # Context snaps decided inside a tie class (by content), for the selected fit (release 2.12).
+    ties.note("ls.snap.tie", inside_tie=bool(getattr(outcome.fit, "snap_ties", 0)))
+    # The release is a function of the selected (panel, frequencies) and the block data, and in a feedback round
+    # also of the round's context witnesses (release 2.12): an incumbent's release is reused when they are equal and
+    # the round has no witnesses and the incumbent's release used none (it may have seen another round's context).
+    reuse = (incumbent is not None and task.incumbent_release is not None and task.witness is None
+             and getattr(task.incumbent_release, "context_cells", 0) == 0
              and np.array_equal(outcome.fit.panel, incumbent.fit.panel)
              and np.array_equal(outcome.fit.frequencies, incumbent.fit.frequencies))
     path_release = (task.incumbent_release if reuse
-                    else release(outcome.fit, prepared, config.release, ties=ties, census_key=census_key))
+                    else release(outcome.fit, prepared, config.release, ties=ties, census_key=census_key,
+                                 context=context, witness=task.witness))
     panel = local_panel(task.block, task.site_start, task.positions, task.kept, outcome.fit,
                         path_release)
     withheld_by_ties = 0
     if alternatives and not retained:
         panel, withheld_by_ties = _consensus_panel(task, outcome, path_release, alternatives, prepared,
-                                                   config.release)
+                                                   config.release, context)
     summary = dict(
         incumbent_retained=bool(retained), release_reused=bool(reuse),
         bank=None if bank_summary is None else asdict(bank_summary),
@@ -224,10 +231,14 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
         incumbent_margin=incumbent_margin,
         round_backstop=bool(attempted.round_backstop),
         update_backstop=bool(outcome.fit.update_backstop),
+        trajectory_best=bool(outcome.fit.selected == "trajectory_best"),
+        context_snaps=int(getattr(outcome.fit, "context_snaps", 0)),
         context_founders=None if context is None else len(context),
         free_rows=len(outcome.fit.panel) if context is None else context.free(outcome.fit.panel),
         tie_events=ties.record(), starts=len(starts), searched_starts=len(searched),
         tied_alternatives=len(alternatives), withheld_by_ties=withheld_by_ties,
+        # Context-witness rescues of the representative release, before any tied-panel consensus withholds them.
+        context_witnessed=int(path_release.context_cells),
         cut_overflow=sum(int(ties.counts.get(f"ls.rank.{kind}.overflow", {}).get("inside_tie", 0))
                          for kind in ("drop", "merge", "add")),
         memo_hits=dict(memo.hits), seconds=time.monotonic() - started)
@@ -406,6 +417,8 @@ def _report(selections, label):
     counts = dict(blocks=len(selections),
                   round_backstop=sum(s.summary["round_backstop"] for s in selections),
                   update_backstop=sum(s.summary["update_backstop"] for s in selections),
+                  trajectory_best=sum(bool(s.summary.get("trajectory_best")) for s in selections),
+                  context_snaps=sum(int(s.summary.get("context_snaps", 0)) for s in selections),
                   bank_backstop=sum(bool(s.summary["bank"] is not None
                                          and s.summary["bank"]["budget_bound"]) for s in selections),
                   incumbent_retained=sum(bool(s.summary["incumbent_retained"]) for s in selections))

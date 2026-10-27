@@ -447,7 +447,8 @@ Stage `evidence`, `evidence/config.py`. Evidence stage: loader policy -> site/sa
 | `sample_quality.segment_minimum_events` | `3.0` |  |
 | **read_model** (ReadModelConfig) |  | Held-out calibration of the observed-AD read model (``evidence/read_model``). |
 | `read_model.enabled` | `True` | *Set by* `[quality] read_calibration`. |
-| `read_model.marker_stride` | `8` | Calibration sites: each kept site is used with probability 1/marker_stride, decided by a fixed pseudo-random hash of its position alone, so the sample is drawn from the kept sites the model is applied to (as 2.3-2.10's every marker_stride-th kept site by index) and adding or removing a kept site changes no other site's use. A statistical sampling-design choice. |
+| `read_model.selection_z` | `2.0` | Selection: a more complex candidate is accepted when its held-out log-likelihood gain is at least selection_z standard errors. The error comes from the gains of the held-out stretches (folds 2/3 of each four-window cycle), since sites linked through ancestry or sharing reads are not independent observations. |
+| `read_model.selection_minimum_blocks` | `4` | With fewer held-out stretches than this the error cannot be estimated and the shared model is kept. |
 | `read_model.maximum_fit_depth` | `48` |  |
 | `read_model.fold_window_bp` | `1000000` |  |
 | `read_model.em_starts` | `((0.02, 0.5), (0.01, 0.35), (0.08, 0.65))` |  |

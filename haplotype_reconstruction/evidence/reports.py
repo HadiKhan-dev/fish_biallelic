@@ -122,11 +122,11 @@ def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
                      + f"; {len(samples.segments)} inherited-segment regions reported")
     calibration_report = report.calibration
     if calibration_report.applied:
-        lines.append(f"    [Read model] {summary.contig}: {calibration_report.selected}; selection gain "
-                     f"over shared {calibration_report.selection_gain_over_shared:.3f}; diagnostic gain "
-                     + ("unavailable (no admitted diagnostic-fold observations)"
-                        if calibration_report.diagnostic_gain_over_shared is None
-                        else f"{calibration_report.diagnostic_gain_over_shared:.3f}"))
+        steps = "; ".join(f"{step['candidate']} vs {step['against']} {step['gain']:+.1f} nats, z {step['z']:.2f} over "
+                          f"{step['blocks']} stretches" + ("" if step["accepted"] else " (kept the simpler)")
+                          for step in calibration_report.comparisons)
+        lines.append(f"    [Read model] {summary.contig}: {calibration_report.selected}; held-out gain over shared "
+                     f"{calibration_report.selection_gain_over_shared:.3f}" + (f"; {steps}" if steps else ""))
     else:
         lines.append(f"    [Read model] {summary.contig}: fixed model ({calibration_report.fallback_reason})")
     if calibration_report.shared_fit_warning is not None:

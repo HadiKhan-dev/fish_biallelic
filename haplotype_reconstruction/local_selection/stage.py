@@ -166,11 +166,13 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                 ) + (np.ascontiguousarray(proposal.calls[:, kept]),)
                 founders = (None if proposal.founders is None
                             else np.ascontiguousarray(proposal.founders[:, kept]))
+                witness = proposal.founder_witness
+                witness = None if witness is None else np.ascontiguousarray(witness[:, kept])
             else:
-                candidate_panels, founders = (), None
+                candidate_panels, founders, witness = (), None, None
             prior = previous[index] if previous is not None else None
             tasks.append(BlockTask(
-                **fields, proposals=candidate_panels, founders=founders,
+                **fields, proposals=candidate_panels, founders=founders, witness=witness,
                 incumbent=None if prior is None else prior.outcome,
                 incumbent_release=None if prior is None else prior.release,
                 memo=None if prior is None else prior.memo,

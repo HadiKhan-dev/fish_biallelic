@@ -90,21 +90,22 @@ class SampleQualityConfig:
 class ReadModelConfig:
     """Held-out calibration of the observed-AD read model (``evidence/read_model``).
 
-    Fitting uses about one kept site in ``marker_stride``, chosen by its position (``calibrate.calibration_sites``),
-    cells of depth 1..``maximum_fit_depth``, and
-    four physical folds of ``fold_window_bp`` windows (folds 0/1 fit, fold 2 selects, fold 3 is
-    diagnostic). The candidates are nested: shared binomial (EM from ``em_starts``), pooled
-    sample binomial and sample beta-binomial heterozygotes (joint concentration); homozygotes are
-    binomial. When disabled, or when no candidate has a finite selection score, the fixed binomial
-    model (``EvidenceConfig.fixed_error``) applies.
+    Fitting uses every kept site, cells of depth 1..``maximum_fit_depth``, and four physical folds of
+    ``fold_window_bp`` windows (folds 0/1 fit, folds 2/3 are held out). The candidates are nested:
+    shared binomial (EM from ``em_starts``), pooled sample binomial and sample beta-binomial
+    heterozygotes (joint concentration); homozygotes are binomial. A more complex candidate is
+    selected when its held-out gain is at least ``selection_z`` standard errors over the held-out
+    stretches. When disabled, or when the shared model has no finite held-out score, the fixed
+    binomial model (``EvidenceConfig.fixed_error``) applies.
     """
 
     enabled: bool = True
-    # Calibration sites: each kept site is used with probability 1/marker_stride, decided by a fixed pseudo-random
-    # hash of its position alone, so the sample is drawn from the kept sites the model is applied to (as 2.3-2.10's
-    # every marker_stride-th kept site by index) and adding or removing a kept site changes no other site's use.
-    # A statistical sampling-design choice.
-    marker_stride: int = 8
+    # Selection: a more complex candidate is accepted when its held-out log-likelihood gain is at least
+    # selection_z standard errors. The error comes from the gains of the held-out stretches (folds 2/3 of each
+    # four-window cycle), since sites linked through ancestry or sharing reads are not independent observations.
+    selection_z: float = 2.0
+    # With fewer held-out stretches than this the error cannot be estimated and the shared model is kept.
+    selection_minimum_blocks: int = 4
     maximum_fit_depth: int = 48
     fold_window_bp: int = 1_000_000
     em_starts: tuple[tuple[float, float], ...] = ((0.02, 0.5), (0.01, 0.35), (0.08, 0.65))
