@@ -680,9 +680,10 @@ def project(component: PreparedComponent, posterior: np.ndarray, *, source_gap_s
                                (candidates, bins - 1)).copy()
     excursion = np.zeros((candidates, bins - 1), dtype=np.float64)
     if source_gap_support_sites > 0 and bins > 1:
-        # A parent bin without informative markers carries only the painter's interpolation, whose
-        # switch penalty is not a probability: such bridges take the meiotic switch probability k
-        # as a uniform excursion weight, scaled by 1 - min(1, n / N) for the smaller adjacent count n.
+        # A parent bin without informative markers carries only the painter's interpolation (its copying
+        # process; before 2.14 an imposed switch-suppression prior): such bridges take the meiotic
+        # switch probability k as a uniform excursion weight, scaled by 1 - min(1, n / N) for the smaller
+        # adjacent count n.
         per_bin = informative_marker_counts(gl, observed, bin_start, bin_stop)
         adjacent = np.minimum(per_bin[:, :-1], per_bin[:, 1:])
         excursion = selector * (1.0 - np.minimum(1.0, adjacent / source_gap_support_sites))

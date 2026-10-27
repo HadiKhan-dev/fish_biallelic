@@ -16,9 +16,11 @@ onwards (a suffix transposition) leaves the set of row alleles at every site
 unchanged. The painting state space (trajectory classes plus BACKGROUND) is
 renamed, not changed, so each emission of the painting HMM is unchanged except
 in the one bin that straddles j, whose sites left of j keep their labels. Only
-which ordered state sequences count as continuous changes. A transposition t
-at j is scored with the painting model's own Viterbi objective, for every
-sample s,
+which ordered state sequences count as continuous changes. The search uses the
+component's copying model, estimated before it (painting.stage.component_model)
+and fixed throughout. A transposition t at j is screened with the Viterbi
+objective of the model's label-level copying process (painting.transitions: the
+estimated rate, tempered emissions, no panel-error state), for every sample s,
 
     V_s(t) = max_x [ G_s(x) + L_s(x) + Q_s(t(x)) ],   Q_s = P_s + B_s,
 
@@ -28,18 +30,22 @@ its sites left and right of j, and B_s is the backward message from that bin
 (every bin to its right). Backward messages of the relabelled panel are the
 current ones renamed by t, and the Hamming transition is invariant when both
 of its arguments are renamed, so V_s(t) is the exact best-path score of the
-relabelled panel: paths re-optimise on both sides, and a switch that sat
-anywhere inside a stretch of identical rows vanishes when the relabelling
-makes the haplotype continuous. One painted track switch costs about 109 nats
-at the default settings, which dominates V_s, so a gain is a fall in the
-painted switches that :func:`painting.hmm.minimum_switch_counts` counts.
+relabelled panel under that process: paths re-optimise on both sides, and a
+switch that sat anywhere inside a stretch of identical rows vanishes when the
+relabelling makes the haplotype continuous. Gains are measured in units u of
+one track change (the median log-probability cost of a change against staying,
+PaintingTransitions.switch_unit), so a gain approximates a fall in painted
+switches; the screen only ranks and admits candidates (release 2.14: it leaves
+out painting's panel-error state, whose mixture is not a sum over a straddling
+bin's parts), and every decision is made on the painted switches of the full
+model.
 
 Acceptance uses no pedigree, generation label or truth. Candidates are ranked
 by their summed score gain and considered only when that gain is at least
-``label_continuity_minimum_switch_gain`` painted switches (u = |log weight of
-a one-track change|, median over the component's bin edges). A candidate is
+``label_continuity_minimum_switch_gain`` units u. A candidate is
 then decided on painted switches exactly as painting reports them: every
-sample is re-decoded with the painting Viterbi under the candidate labels, and
+sample is re-decoded with the painting Viterbi (painting.fidelity, the class x
+fidelity chain) under the candidate labels, and
 its minimum-unordered switch count is compared with the current one. The
 candidate is accepted when the total falls by at least the minimum gain and the
 samples whose count rises (losers) are at most
@@ -52,53 +58,52 @@ when the recombinant lineage is the majority (one unsequenced F1 can parent
 half of an F2 cohort). Score changes are not used to classify samples. The
 first acceptable candidate is applied, every message is recomputed, and the
 search repeats until no candidate is acceptable; each accepted move lowers the
-painted switch total, so the search terminates. Only singleton, anchored
+painted switch total, so the search terminates. When another acceptable candidate
+of the same tie class would relabel differently (a competing repair the gains
+cannot order), neither is applied and the search goes on with the next class
+(release 2.14). Only singleton, anchored
 trajectory classes move; pooled duplicate rows and BACKGROUND keep their
-labels. The relabelled component is kept only when repainting it with the
-painting functions also lowers the total.
+labels, and a candidate that would change which of the two classes is called
+anywhere (their panel-error states) is not accepted (release 2.14). The
+relabelled component is kept only when repainting it with the painting
+functions also lowers the total and leaves those states unchanged.
 
 Cost. A transposition t of rows a and b fixes every state that involves
 neither, so the swapped maximum at a link is the larger of the best unaffected
 identity term (the first entry outside rows and columns a and b of the
 identity terms, sorted once per link and sample) and the 4S - 4 affected states
 evaluated under t: O(links N S^3) per iteration, with the same maxima as a scan
-over all S^2 states. A candidate check re-decodes only the samples for which
-the best unaffected state does not strictly beat every affected state under
-both the identity and t. For any other sample every optimal relabelled path
-crosses the link in a state that t fixes; renaming such a path's suffix by t
-(t applied to both arguments preserves the Hamming kernel, the emissions and
-the minimum-unordered switch count) maps the optimal relabelled paths one to
-one onto the optimal current paths, which cross the link in the same
-unaffected states, with equal scores and switch counts. Its painted switches
-therefore cannot change (barring exact score ties between optimal paths with
-different switch counts), and each sample's Viterbi decode depends only on its
-own emissions, so the re-decoded samples are bitwise the same as in a full
-decode. Memory: the search holds about 20-28 N S^2 B bytes (part and relabelled
-emissions, a Viterbi decode, messages and link scores; relabel_bytes) when it
-runs on every sample at once (tens of GB for a long chromosome at K = 30,
-N = 290-320). It therefore runs in contiguous sample batches sized by a
-reservation from the run's memory governor (at most LABEL_CONTINUITY_MAX_BYTES
-or a quarter of the run's memory limit): every quantity is
-per sample except the summed gains, which each batch adds in sample order, so
+over all S^2 states. A candidate check re-decodes every eligible sample under
+the candidate labels with the chain, O(N S'^2 B) (release 2.14). Before, samples whose best unaffected state
+beat every affected one were skipped: a relabelling maps the optimal paths one
+to one, but it can change which of several exactly co-optimal paths a traceback
+convention selects, and so the selected switch count, so the shortcut was not a
+certificate. Equivalent placements of one transposition (the same per-site panel
+data, see _leftmost_equivalent_link) are checked once, and a check keeps only its
+per-sample count changes. Memory: the search holds about 20-28 N S^2 B bytes
+plus a chain decode's 12 N S'^2 B (part and relabelled emissions, a Viterbi decode, messages and link scores;
+relabel_bytes) when it runs on every sample at once (tens of GB for a long
+chromosome at K = 30, N = 290-320). It therefore runs in contiguous sample
+batches sized by a reservation from the run's memory governor (as much as the
+measured headroom admits): every quantity is per sample except the summed
+gains, which each batch adds in sample order, so
 results are bitwise identical for any batch size; a batched search recomputes
-the batch's part emissions in each pass instead of keeping them (a candidate's
-check, those of its re-decoded samples only).
+the batch's part emissions in each pass instead of keeping them.
 """
 from __future__ import annotations
 
-import math
 
 import numpy as np
 from numba import njit, prange
 
 from .. import execution
 from ..maths import ties
-from ..model.components import ComponentPanel, relabel_rows
-from . import hmm
+from ..model.components import _SITE_FOUNDER_FIELDS, ComponentPanel, relabel_rows
+from . import fidelity, hmm
 from .config import PaintingConfig
 from .release import LabelContinuity, RelabelMove
 from .states import build_bins, build_states
-from .transitions import bin_switch_probabilities, hamming_log_weights
+from .transitions import copying_transitions, edge_morgans
 
 
 @njit(cache=True)
@@ -273,65 +278,9 @@ def _add_transposition_gains(total, left, right, eligible, pairs, n_states):
                 total[link, pair] += swapped - identity
 
 
-@njit(cache=True, parallel=True)
-def _candidate_samples(left, right, eligible, candidate_links, candidate_pairs, pairs, n_states):
-    """Per candidate, the eligible samples whose painted switches it can change.
-
-    False only when the best state involving neither transposed row strictly
-    beats every affected state, under the identity and under the transposition.
-    """
-    n_candidates = len(candidate_links)
-    n_samples = left.shape[1]
-    result = np.zeros((n_candidates, n_samples), dtype=np.bool_)
-    for task in prange(n_candidates * n_samples):
-        candidate = task // n_samples
-        sample = task % n_samples
-        if not eligible[sample]:
-            continue
-        link = candidate_links[candidate]
-        first_row = pairs[candidate_pairs[candidate], 0]
-        second_row = pairs[candidate_pairs[candidate], 1]
-        unaffected = -np.inf
-        affected = -np.inf
-        for row in range(n_states):
-            moved_row = row
-            if row == first_row:
-                moved_row = second_row
-            elif row == second_row:
-                moved_row = first_row
-            for column in range(n_states):
-                state = row * n_states + column
-                value = left[link, sample, state] + right[link, sample, state]
-                if moved_row == row and column != first_row and column != second_row:
-                    if value > unaffected:
-                        unaffected = value
-                    continue
-                if value > affected:
-                    affected = value
-                moved_column = column
-                if column == first_row:
-                    moved_column = second_row
-                elif column == second_row:
-                    moved_column = first_row
-                value = (left[link, sample, state]
-                         + right[link, sample, moved_row * n_states + moved_column])
-                if value > affected:
-                    affected = value
-        result[candidate, sample] = not unaffected > affected
-    return result
-
-
 def _state_maps(perms: np.ndarray, n_states: int) -> np.ndarray:
     return np.ascontiguousarray(
         (perms[:, :, None] * n_states + perms[:, None, :]).reshape(len(perms), -1))
-
-
-def _painted_switches(emissions, transitions, eligible) -> np.ndarray:
-    """Per-sample painted switches: painting's Viterbi, minimum unordered count."""
-    switches = hmm.minimum_switch_counts(
-        hmm.viterbi_paths(np.ascontiguousarray(emissions), transitions))
-    switches[~eligible] = 0
-    return switches
 
 
 def _outcome(reason, *, link_points=0, movable_rows=0, unit=None, before=None, after=None,
@@ -344,12 +293,13 @@ def _outcome(reason, *, link_points=0, movable_rows=0, unit=None, before=None, a
 
 
 def relabel_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: np.ndarray,
-                      evidence_sites: np.ndarray, config: PaintingConfig, genetic_map
+                      evidence_sites: np.ndarray, config: PaintingConfig, genetic_map, *, model=None
                       ) -> tuple[ComponentPanel, LabelContinuity]:
     """Return (painted panel, outcome): the relabelled panel when that lowers painted switches.
 
     ``likelihoods``/``observed`` are the chromosome evidence (all samples) and
-    ``evidence_sites`` int64[L] the evidence index of each panel position.
+    ``evidence_sites`` int64[L] the evidence index of each panel position; ``model`` the component's copying model
+    (painting.stage.component_model; estimated here when None).
     """
     states = build_states(panel.positions, panel.inference, panel.kept)
     classes = states.classes
@@ -371,46 +321,52 @@ def relabel_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: 
     counts = dict(link_points=len(links), movable_rows=len(movable))
     if len(movable) < 2 or not links or n_bins < 2:
         return panel, _outcome("no_link_or_movable_row", **counts)
-    # The search's arrays are admitted by the run's memory governor: every sample at once when that fits (at
-    # most max(LABEL_CONTINUITY_MAX_BYTES, a quarter of the run's memory limit)), else contiguous sample batches
-    # of the granted size (identical results; a batched search recomputes part emissions, ~3x slower).
+    # The search's arrays are admitted by the run's memory governor from measured pressure: every sample at once
+    # when the headroom admits it, else contiguous sample batches of the granted size (identical results; a batched
+    # search recomputes part emissions, ~3x slower).
     n_samples = len(likelihoods)
     # Selected sites covering the whole evidence axis are gathered as views (no copy) when every sample is searched
     # at once; a batched search may copy its re-decoded samples' rows, so a batch's size always counts them.
     views = (n_selected == likelihoods.shape[1] and likelihoods.dtype == np.float64
              and observed.dtype == np.bool_)
-    full = relabel_bytes(n_samples, states.n_states, n_bins, len(links), n_selected, gathered=not views)
-    single = relabel_bytes(1, states.n_states, n_bins, len(links), n_selected)
-    cap = max(LABEL_CONTINUITY_MAX_BYTES, execution.memory_governor().limit // 4)
-    with execution.reserve_memory(min(full, max(single, cap)), minimum=min(single, full),
-                                  label="painting label continuity") as held:
+    n_track = states.n_states + int(np.sum(states.anchored))
+    full = relabel_bytes(n_samples, states.n_states, n_bins, len(links), n_selected, gathered=not views,
+                         n_track=n_track)
+    single = relabel_bytes(1, states.n_states, n_bins, len(links), n_selected, n_track=n_track)
+    with execution.reserve_memory(full, minimum=min(single, full), label="painting label continuity") as held:
         per_sample = max(1, single - LABEL_CONTINUITY_BASE_BYTES)
         batch = n_samples if held.nbytes >= full else max(1, (held.nbytes - LABEL_CONTINUITY_BASE_BYTES)
                                                              // per_sample)
+        if model is None:
+            from .stage import component_model
+            model = component_model(panel, likelihoods, observed, evidence_sites, config, genetic_map)
         return _relabel_linked(panel, likelihoods, observed, evidence_sites, config, genetic_map, states,
-                               movable, offsets, links, bins, counts, batch)
+                               movable, offsets, links, bins, counts, batch, model)
 
 
-# Largest search a component runs at once (bytes) unless a quarter of the run's memory limit is larger; a larger
-# search runs in sample batches.
-LABEL_CONTINUITY_MAX_BYTES = 32 << 30
 # Bookkeeping of one search beyond its per-sample arrays.
 LABEL_CONTINUITY_BASE_BYTES = 64 << 20
 
 
 def relabel_bytes(n_samples: int, n_states: int, n_bins: int, n_links: int, n_sites: int, *,
-                  gathered: bool = True) -> int:
+                  gathered: bool = True, n_track: int | None = None) -> int:
     """Peak bytes of a label-continuity search over ``n_samples`` samples at once (one batch), plus
     LABEL_CONTINUITY_BASE_BYTES. Per sample (D = S^2 ordered states, float64 unless noted): the gathered
     evidence (25 L, unless ``gathered`` is False: views of the evidence) and part emissions (8 D (B + links))
     held throughout, plus the largest of a painted-switch
-    count (relabelled emissions 8 D B + int32 Viterbi back-pointers 4 D B; also the final verification), the
+    count (relabelled emissions 8 D B, their reversed copy 8 D B, the chain's expanded emissions 8 S'^2 B and int32
+    Viterbi back-pointers 4 S'^2 B, S' = ``n_track`` track states; also the final verification), the
     link messages (relabelled emissions + forward/backward 16 D slots) and the link scores (messages + left/right
     16 D links); slots <= links. (The search before batching also kept the current and the accepted trial
     emissions: K30's 36 N S^2 B.)"""
     squares = n_states * n_states
+    # A painted-switch count re-decodes with the class x fidelity chain (release 2.14): relabelled emissions 8 S^2 B,
+    # their reversed copy 8 S^2 B (the mirrored convention), structured emissions 8 S'^2 B and int32 back-pointers
+    # 4 S'^2 B, S' track states (at most 2 S - 1).
+    tracks = (2 * n_states - 1) if n_track is None else n_track
     kept = 8 * squares * (n_bins + n_links) + (25 * n_sites if gathered else 0)
-    working = max(12 * squares * n_bins, 8 * squares * n_bins + 16 * squares * n_links, 32 * squares * n_links)
+    working = max(16 * squares * n_bins + 12 * tracks * tracks * n_bins, 8 * squares * n_bins + 16 * squares * n_links,
+                  32 * squares * n_links)
     # 1/8 margin: measured peaks reach 0.98-1.00 of the array sum (K30 synthetic 2,373 of 2,431 MiB; std_n80 chr8).
     return n_samples * (kept + working) * 9 // 8 + LABEL_CONTINUITY_BASE_BYTES
 
@@ -419,9 +375,11 @@ class _SampleBatches:
     """The component's samples in contiguous batches: their gathered evidence and part emissions, kept
     when one batch holds every sample, else recomputed for each batch when needed."""
 
-    def __init__(self, likelihoods, observed, sites, states, part_start, part_stop, config, size):
+    def __init__(self, likelihoods, observed, sites, states, part_start, part_stop, config, size, bin_starts,
+                 part_bin):
         self.likelihoods, self.observed, self.sites = likelihoods, observed, sites
         self.states, self.part_start, self.part_stop, self.config = states, part_start, part_stop, config
+        self.bin_starts, self.part_bin = bin_starts, part_bin
         n_samples = likelihoods.shape[0]
         self.spans = [(start, min(start + size, n_samples)) for start in range(0, n_samples, size)]
         self._kept = {}
@@ -444,26 +402,35 @@ class _SampleBatches:
             self._kept[key] = value
         return value
 
-    def rows_part_emissions(self, rows):
-        """Part emissions of the component's samples ``rows`` (increasing indices) only, never kept: each
-        sample's emissions depend on its own evidence alone."""
-        runs = np.split(rows, np.flatnonzero(np.diff(rows) != 1) + 1)
-        gathered = [hmm.gather_sites(self.likelihoods, self.observed, self.sites,
-                                     slice(int(run[0]), int(run[-1]) + 1)) for run in runs]
-        if len(gathered) == 1:
-            return self._emissions(*gathered[0])
-        return self._emissions(np.concatenate([value[0] for value in gathered]),
-                               np.concatenate([value[1] for value in gathered]))
-
     def _emissions(self, likelihoods, observed):
+        # Tempered as painting's: every part divided by its whole bin's design effect (painting.hmm.design_effect),
+        # so the parts of a bin sum to the bin's tempered emission.
+        design = hmm.design_effect(likelihoods, observed, self.bin_starts, self.config.emission_site_correlation)
         return np.ascontiguousarray(hmm.binned_emissions(
             likelihoods, observed, self.states.alt_probability(), self.states.background_frequency,
             self.part_start, self.part_stop, robustness_epsilon=self.config.robustness_epsilon,
-            log_floor=self.config.emission_log_floor))
+            log_floor=self.config.emission_log_floor) / design[:, None, self.part_bin])
+
+
+def _leftmost_equivalent_link(panel, offsets, links, perms, row_of_class, first, second, link, steps=None):
+    """The leftmost link point at which transposing classes ``first`` and ``second`` gives the same relabelled panel
+    as at ``link``: walk left while, under the current labelling ``perms``, the two rows carry identical founder-axis
+    data (released and inference calls, ALT probabilities, support) at every panel site between consecutive link
+    points (segment s lies between links s - 1 and s); at most ``steps`` points when given."""
+    while link > 0 and (steps is None or steps > 0):
+        steps = None if steps is None else steps - 1
+        start, stop = int(offsets[links[link - 1][1]]), int(offsets[links[link][1]])
+        left = int(row_of_class[perms[link, first]])
+        right = int(row_of_class[perms[link, second]])
+        if not all(np.array_equal(getattr(panel, name)[left, start:stop], getattr(panel, name)[right, start:stop])
+                   for name in _SITE_FOUNDER_FIELDS):
+            break
+        link -= 1
+    return link
 
 
 def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, genetic_map, states, movable,
-                    offsets, links, bins, counts, batch):
+                    offsets, links, bins, counts, batch, model):
     """The relabelling search of a component with link points and movable rows (relabel_component), over
     contiguous batches of ``batch`` samples (every sample at once when ``batch`` covers them)."""
     classes = states.classes
@@ -485,7 +452,7 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
     part_segment = np.searchsorted(link_sites, part_start, side="right").astype(np.int64)
     size = max(1, int(batch))
     samples = _SampleBatches(likelihoods, observed, evidence_sites[site_indices], states, part_start,
-                             np.asarray(part_stops, dtype=np.int64), config, size)
+                             np.asarray(part_stops, dtype=np.int64), config, size, bins.starts, part_bin)
     spans = samples.spans
     eligible = np.empty(n_samples, dtype=np.bool_)
     for start, stop in spans:
@@ -494,14 +461,11 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
         return panel, _outcome("no_evidence", **counts)
 
     n_states = states.n_states
-    theta = bin_switch_probabilities(bins.centers, genetic_map)
-    transitions = hamming_log_weights(
-        theta, n_states, switch_penalty_per_snp=config.switch_penalty_per_snp,
-        snps_per_bin=config.snps_per_bin, double_recomb_factor=config.double_recomb_factor)
-    # u: |log weight of one track change| (unnormalised, as base), median over bin edges.
-    log_one_change = (np.log(theta) - config.switch_penalty_per_snp * config.snps_per_bin
-                      + np.log1p(-theta) - math.log(float(n_states - 1)))
-    unit = float(np.median(np.abs(log_one_change)))
+    # The label-level copying process of the component's model (the screen) and the full chain (every decision).
+    transitions = copying_transitions(edge_morgans(bins.centers, genetic_map), n_states, model.rate)
+    capable = np.concatenate((np.asarray(states.anchored, dtype=np.int64), np.zeros(1, dtype=np.int64)))
+    # u: the log-probability cost of one track change against staying, median over bin edges.
+    unit = transitions.switch_unit()
 
     # A link's messages live at the bin holding its first right-hand site.
     bin_of_site = np.repeat(np.arange(n_bins, dtype=np.int64), bins.stops - bins.starts)
@@ -522,13 +486,34 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
         """Painted switches of the batch's samples ``rows`` (batch positions) under ``maps``."""
         emissions = _relabelled_emissions(samples.part_emissions(start, stop), rows, part_bin, part_segment,
                                           maps, n_bins)
-        return _painted_switches(emissions, transitions, eligible[start + rows])
+        return fidelity.painted_switches(emissions, model, capable, eligible[start + rows])
 
-    def rows_switches(rows, maps):
-        """Painted switches of the component's samples ``rows`` under ``maps`` (their part emissions only)."""
-        emissions = _relabelled_emissions(samples.rows_part_emissions(rows), np.arange(len(rows), dtype=np.int64),
-                                          part_bin, part_segment, maps, n_bins)
-        return _painted_switches(emissions, transitions, eligible[rows])
+    def winner_directions(winners, maps, first, second, link_bin):
+        """(a -> b, b -> a): winners whose decoded path (the default convention, labels before the move) has a
+        track in state ``first`` left of the link and ``second`` right of it, or the reverse, within two bins of it."""
+        forward = reverse = 0
+        low, high = max(0, link_bin - 2), min(n_bins - 1, link_bin + 2)
+        for start, stop in spans:
+            rows = winners[(winners >= start) & (winners < stop)] - start
+            if not len(rows):
+                continue
+            emissions = _relabelled_emissions(samples.part_emissions(start, stop), rows, part_bin, part_segment,
+                                              maps, n_bins)
+            paths = fidelity.label_paths(np.ascontiguousarray(emissions), model, capable, reverse=False)
+            for row in range(len(rows)):
+                left, right = paths[row, :, low], paths[row, :, high]
+                found = 0
+                for track in (0, 1):
+                    for target in (0, 1):
+                        if left[1 - track] != right[1 - target]:
+                            continue
+                        if left[track] == first and right[target] == second:
+                            found = found or 1
+                        elif left[track] == second and right[target] == first:
+                            found = found or 2
+                forward += found == 1
+                reverse += found == 2
+        return forward, reverse
 
     def link_scores(start, stop, maps):
         """(left, right) link scores of the batch's samples under ``maps``."""
@@ -541,6 +526,20 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
         del emissions
         return _link_scores(parts, part_segment, maps, link_slot, link_segment, link_first_part,
                             link_stop_part, forward, backward)
+
+    row_of_class = np.asarray([members[0] for members in classes], dtype=np.int64)
+    # Error capabilities (release 2.14): a class has a panel-error state when it is called at a selected site. A suffix
+    # exchange can move every call of a row into the other row (both classes keep their rows, the alphabet of error
+    # states changes), which the model fixed before the search does not describe: such candidates are not accepted.
+    # called_in[c, g] = the original class c is called at a selected site of segment g (between consecutive links).
+    segment_of_site = np.searchsorted(link_sites, np.arange(len(site_indices)), side="right")
+    called_in = np.zeros((n_states, len(links) + 1), dtype=np.bool_)
+    for index in range(states.n_classes):
+        called = np.flatnonzero(states.named_alleles[index] >= 0)
+        called_in[index, np.unique(segment_of_site[called])] = True
+
+    def anchored_under(trial_perms, labels):
+        return tuple(bool(np.any(called_in[trial_perms[:, label], np.arange(len(links) + 1)])) for label in labels)
 
     perms = np.tile(np.arange(n_states, dtype=np.int64), (len(links) + 1, 1))
     maps = _state_maps(perms, n_states)
@@ -556,11 +555,9 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
     while True:
         # Summed gains: each batch adds its samples in sample order (the same sums as one pass).
         total = np.zeros((len(links), len(pairs)))
-        kept = None
         for start, stop in spans:
             left, right = link_scores(start, stop, maps)
             _add_transposition_gains(total, left, right, eligible[start:stop], pairs, n_states)
-            kept = (left, right) if len(spans) == 1 else None
             del left, right
         # Rank by the score gain in tie classes (release 2.1: gains equal up to rounding, e.g. one transposition at
         # two link points inside a stretch where both rows are identical, keep the leftmost link, then the pair
@@ -576,51 +573,100 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
             ties.census("painting.relabel_rank", f"p{int(panel.positions[0])}/m{len(moves)}",
                         np.sort(values)[::-1][:8])
             candidates = [divmod(int(flats[index]), len(pairs)) for index in ranked.order]
-        if candidates:
-            candidate_links, candidate_pairs = np.asarray(candidates, dtype=np.int64).T
-            redecode = np.empty((len(candidates), n_samples), dtype=np.bool_)
-            for start, stop in spans:
-                left, right = kept if kept is not None else link_scores(start, stop, maps)
-                redecode[:, start:stop] = _candidate_samples(
-                    left, right, eligible[start:stop], np.ascontiguousarray(candidate_links),
-                    np.ascontiguousarray(candidate_pairs), pairs, n_states)
-                del left, right
-        kept = None
-        accepted = None
-        for index, (link, pair) in enumerate(candidates):
+            candidate_class = [int(ranked.classes[index]) for index in ranked.order]
+        leftmost = {}
+        results = {}
+
+        def canonical(index):
+            """(pair, link) of candidate ``index`` moved to its leftmost equivalent link (memoised along a stretch)."""
+            link, pair = candidates[index]
             first, second = (int(value) for value in pairs[pair])
-            trial = perms.copy()
-            trial[link + 1:, [first, second]] = trial[link + 1:, [second, first]]
-            trial_maps = _state_maps(trial, n_states)
-            # The other samples' painted switches cannot change (module docstring).
-            redecoded = np.flatnonzero(redecode[index])
-            change = np.zeros_like(current)
-            if len(spans) == 1:
-                if len(redecoded):
-                    change[redecoded] = switches(0, n_samples, redecoded, trial_maps) - current[redecoded]
-            else:                       # batches of the re-decoded samples only
-                for offset in range(0, len(redecoded), size):
-                    rows = redecoded[offset:offset + size]
-                    change[rows] = rows_switches(rows, trial_maps) - current[rows]
-            checked += 1
-            winners, losers = np.flatnonzero(change < 0), np.flatnonzero(change > 0)
-            if (-int(np.sum(change)) >= minimum_gain
-                    and len(losers) <= maximum_loser_ratio * len(winners)):
-                accepted = (link, pair, trial, trial_maps, change, winners, losers)
-                break
+            walked = []
+            while (pair, link) not in leftmost:
+                left = _leftmost_equivalent_link(panel, offsets, links, perms, row_of_class, first, second, link,
+                                                 steps=1)
+                if left == link:
+                    break
+                walked.append(link)
+                link = left
+            target = leftmost.get((pair, link), link)
+            for point in walked + [link]:
+                leftmost[(pair, point)] = target
+            return pair, target
+
+        def evaluate(key):
+            """(acceptable, change, winners, losers) of the relabelling ``key`` = (pair, link), computed once per
+            iteration: every eligible sample is re-decoded under it (release 2.14)."""
+            nonlocal checked
+            if key not in results:
+                pair, link = key
+                first, second = (int(value) for value in pairs[pair])
+                trial = perms.copy()
+                trial[link + 1:, [first, second]] = trial[link + 1:, [second, first]]
+                if anchored_under(trial, (first, second)) != anchored_under(perms, (first, second)):
+                    results[key] = (False, np.zeros_like(current), np.zeros(0, dtype=np.int64),
+                                    np.zeros(0, dtype=np.int64))
+                    counter.note("painting.relabel_capability_change", inside_tie=False)
+                    return results[key]
+                trial_maps = _state_maps(trial, n_states)
+                change = np.zeros_like(current)
+                for start, stop in spans:
+                    change[start:stop] = (switches(start, stop, np.arange(stop - start, dtype=np.int64), trial_maps)
+                                          - current[start:stop])
+                del trial_maps
+                checked += 1
+                winners, losers = np.flatnonzero(change < 0), np.flatnonzero(change > 0)
+                acceptable = (-int(np.sum(change)) >= minimum_gain
+                              and len(losers) <= maximum_loser_ratio * len(winners))
+                results[key] = (acceptable, change, winners, losers)
+            return results[key]
+
+        # The first acceptable candidate in ranked order is applied, unless another acceptable candidate of its tie
+        # class would relabel differently (release 2.14): competing repairs that this policy does not order leave the
+        # assembled labels in place, and the search goes on with the next class. Equivalent placements of one
+        # transposition (canonical) are evaluated once.
+        accepted = None
+        index = 0
+        while index < len(candidates):
+            key = canonical(index)
+            if not evaluate(key)[0]:
+                index += 1
+                continue
+            members = [other for other in range(len(candidates))
+                       if candidate_class[other] == candidate_class[index] and other != index]
+            if any(canonical(other) != key and evaluate(canonical(other))[0] for other in members):
+                counter.note("painting.relabel_ambiguous", inside_tie=True)
+                index = max(members) + 1
+                continue
+            accepted = key
+            break
         if accepted is None:
             break
-        link, pair, perms, maps, change, winners, losers = accepted
+        pair, link = accepted
+        acceptable, change, winners, losers = results[accepted]
         first, second = (int(value) for value in pairs[pair])
+        # Tied suffix transpositions (release 2.14): where the two rows carry identical founder-axis data over the
+        # stretch between two consecutive link points, transposing at either point gives the same per-site panel
+        # data, painting and switches; the move is placed at the leftmost such point, a stated rule that the
+        # convention reversal does not change.
+        gain = float(total[link, pair] / unit)
+        # Identity evidence (release 2.14): a label exchange of two founders' rows makes the carriers of either founder
+        # switch at the link (both directions); one shared recombinant lineage switches one way only.
+        forward, reverse = winner_directions(winners, maps, first, second,
+                                             int(np.searchsorted(bins.starts, links[link][0], side="right") - 1))
+        perms = perms.copy()
+        perms[link + 1:, [first, second]] = perms[link + 1:, [second, first]]
+        maps = _state_maps(perms, n_states)
         current = current + change
         span = links[link][1]
         moves.append(RelabelMove(
             atomic_span=int(span), position=int(panel.positions[offsets[span]]),
             rows=(int(classes[first][0]), int(classes[second][0])),
-            score_gain_switches=float(total[link, pair] / unit),
+            score_gain_switches=gain,
             painted_switch_change=int(np.sum(change)),
             winners=tuple(int(value) for value in winners),
-            losers=tuple(int(value) for value in losers)))
+            losers=tuple(int(value) for value in losers),
+            winners_forward=int(forward), winners_reverse=int(reverse)))
 
     counts.update(unit=unit, before=switches_before, checks=checked, moves=moves, tie_events=counter.record())
     if not moves:
@@ -628,7 +674,6 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
 
     # Movable classes are singleton rows, so the class maps are row maps.
     n_rows = panel.founders
-    row_of_class = np.asarray([members[0] for members in classes], dtype=np.int64)
     segment_maps = []
     for perm in perms:
         row_map = np.arange(n_rows, dtype=np.int64)
@@ -645,13 +690,17 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
     if (new_states.classes != classes
             or not np.array_equal(new_states.site_indices, site_indices)):
         return panel, _outcome("trajectory_classes_changed", after=switches_before, **counts)
+    if not np.array_equal(new_states.anchored, states.anchored):
+        return panel, _outcome("error_capabilities_changed", after=switches_before, **counts)
     switches_after = 0
     for start, stop in spans:
+        gathered = samples.gathered(start, stop)
         new_emissions = hmm.binned_emissions(
-            *samples.gathered(start, stop), new_states.alt_probability(),
+            *gathered, new_states.alt_probability(),
             new_states.background_frequency, bins.starts, bins.stops,
-            robustness_epsilon=config.robustness_epsilon, log_floor=config.emission_log_floor)
-        switches_after += int(np.sum(_painted_switches(new_emissions, transitions, eligible[start:stop])))
+            robustness_epsilon=config.robustness_epsilon, log_floor=config.emission_log_floor
+        ) / hmm.design_effect(*gathered, bins.starts, config.emission_site_correlation)[:, None, :]
+        switches_after += int(np.sum(fidelity.painted_switches(new_emissions, model, capable, eligible[start:stop])))
         del new_emissions
     if switches_after >= switches_before:
         return panel, _outcome("painted_switches_not_lowered", after=switches_before, **counts)

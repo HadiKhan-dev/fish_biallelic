@@ -141,6 +141,10 @@ def _prepare_component(index: int, painted, evidence, painting_config, chromosom
             bins.starts, bins.stops, robustness_epsilon=painting_config.robustness_epsilon,
             log_floor=painting_config.emission_log_floor, sample_block=_EMISSION_SAMPLE_BLOCK,
             before_block=claim_threads)
+        # Tempered as the painting's decoder and its packed emissions (release 2.14): each sample's bin divided by its
+        # design effect.
+        emissions /= painting_hmm.design_effect(selected_gl, selected_observed, bins.starts,
+                                                painted.transitions.site_correlation)[:, None, :]
         del selected_gl, selected_observed
     transition = HammingTransition(*painted.transitions.probabilities())
     claim_threads()

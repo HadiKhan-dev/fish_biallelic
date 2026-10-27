@@ -107,11 +107,15 @@ Chromosome workers prepare every painting component of a contig (`pedigree/prepa
   `PedigreeConfig.preparation.markers_per_bin = 10` evenly spaced ones (in a bin of n > 10 sites, those at offsets
   ⌊j n / 10⌋, j = 0, …, 9) enter the transmission model, with every sample's genotype likelihoods and observed flags
   there. The likelihoods are used exactly as the evidence stage stored them.
-- **Exact source factors.** Each sample's painting is an HMM over ordered diplotypes (S² states) with the painting's
-  own emissions (the packed emissions of the painting record, or the same emission model recomputed for components
-  beyond the painting's cache) and its normalised transition table, whose weights depend only on whether zero, one
-  or both founders change. The backward pass is stored as the bin-0 ordered-diplotype law (symmetrised over the
-  arbitrary homologue order) and max-normalised right weights r_b, so that the posterior chain kernel
+- **Exact source factors.** Within the reduced source model below, each sample's source chain is an HMM over ordered
+  diplotypes (S² states) with the painting's own tempered emissions (the packed emissions of the painting record, or the
+  same emission model recomputed and divided by its design effect (each sample's bin, as painting does) for components
+  beyond the painting's cache) and its normalised label-level transition table at the painting's estimated
+  ancestry-change rate, whose weights depend only on whether zero, one or both founders change. This is pedigree's own
+  reduced source model, not the marginal of painting's class x fidelity chain: the panel-error state is left out and a
+  called founder allele is transmitted unchanged (release 2.14). The backward pass is stored as the bin-0
+  ordered-diplotype law (symmetrised over the arbitrary homologue order) and max-normalised right weights r_b, so that
+  the posterior chain kernel
 
       K_b(u, v) = A_b(u, v) r_b(v) / Σ_w A_b(u, w) r_b(w)
 
@@ -169,9 +173,9 @@ ordered-diplotype chain with the selector, an S⁴ object for two parents. The p
   only when its rows are stochastic and it reproduces the adjacent marginal and the persistence flow within
   max(8 × `PedigreeConfig.scoring.bridge_tolerance = 2e-13`, 256 ε_mach); otherwise the stage stops with an error.
 
-A painting's switch penalty is a regulariser, not a probability, so where a candidate has no informative markers its
-chain between two bins is the painter's interpolation only. Each bridge is therefore mixed with the uniform selector
-kernel,
+Where a candidate has no informative markers, its chain between two bins is the painter's interpolation only (the
+painting's label-level copying process; before 2.14 an imposed switch-suppression prior). Each bridge is therefore
+mixed with the uniform selector kernel,
 
     T' = (1 − k) T + k U,   k = θ (1 − min(1, n / G)),
 

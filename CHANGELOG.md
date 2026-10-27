@@ -1,5 +1,191 @@
 # Changelog
 
+## 2.14.0 (27 October 2026)
+
+This release works on painting (stage 5). Its switch prior was an imposed switch-suppression prior: every track change
+cost about 109 nats (theta exp(-100)), which kept switch precision high but made the within-model posteriors near 0 or
+1 (on the std simulation, among pairs with qV >= 1 - 1e-6 where the panel held the truth, 0.063% were wrong against a
+claimed 2e-10). 2.14 replaces it with a copying model whose parameters are estimated from the data, an explicit
+panel-error state and a design-effect adjustment of the emissions, and gates the release on the probability of
+faithful copying. It also makes the released track order and label continuity's tie decisions independent of the
+traceback convention, fixes a switch-interval predicate and a label-continuity switch count, and reports the
+founder-identity evidence of label continuity's moves. Released results change: the painting (paths, posteriors,
+abstention), label continuity's moves on some components, pedigree's Tier B release on a few samples, and the founder
+refit through the painting.
+
+**A copying model in place of the switch penalty** (`painting/transitions.py`, new `painting/fidelity.py`,
+`painting/stage.py`; `docs/methods/painting.md`, Copying model). Each track copies a label (a trajectory class or
+BACKGROUND) with a fidelity (faithful, or in a panel-error run; anchored classes only).
+- Labels change along the genetic map as a jump process at rate rho per Morgan, each jump to one of the other S - 1
+  labels uniformly, independently on the two tracks: theta = (S - 1)/S (1 - exp(-rho d S/(S - 1))) per bin edge of d
+  Morgans. The pair transition is the product of the two tracks' (2.13 coupled a change of both tracks with an
+  exponent of 1.5).
+- A label that stays enters a panel-error run with probability a per edge and leaves it with probability b; a label
+  that moves, and a component's first bin, draw the fidelity from the chain's stationary law; an error track emits as
+  BACKGROUND (its row is locally wrong for the sample, or the sample's haplotype is locally absent), so a locally wrong
+  row contributes log(1/a) at the run's entry and log(1/b) at its exit (besides its duration and label-stay factors)
+  and keeps the founder label, instead of two ancestry changes. Painted switches are label changes only.
+- Each sample's bin log emission is divided by 1 + (n - 1) r, n the sample's informative sites in the bin and r =
+  `PaintingConfig.emission_site_correlation = 0.1` (`painting.hmm.design_effect`): a tuned, equicorrelation-inspired
+  magnitude adjustment of the composite log likelihood (Kish's design effect for n equal-variance terms with common
+  correlation r; under that working assumption a bin of 100 informative sites counts as about 9 variance-equivalent
+  sites and one of 8 as about 4.7, and the weight tends to 1 as n -> 1). r is a tuned constant, not an estimated
+  correlation or dependence correction.
+- (rho, a, b) are estimated per component from all its eligible samples by EM: 8 updates from fixed starts (rho 2 per
+  Morgan, a 1e-3, b 0.25), each an exact forward-backward pass over the chain followed by the M-step of the expected
+  complete-data log-likelihood (rho by a scan and golden-section search; a and b by bounded quasi-Newton, including
+  the stationary fidelity draws at the first bin and after label moves), neither update accepted when it would lower
+  its part of the objective; rounded to 2^-6 in log space. A truncated, deterministic estimator, not a convergence
+  test (for the constant-temperature predecessor, 4, 8 and 16 updates gave the same released decisions on std and
+  backcross). The model is estimated before label continuity and fixed through it; per component it is published in
+  the new `painting_model.tsv` and summarised in the log.
+- Release: the gate is qF (qAF at stage 2), the model's posterior mass that both tracks copy the Viterbi labels' rows
+  faithfully, at the unchanged tau = 0.9; qV and qA remain as diagnostics (qA >= qV >= qF).
+- Consumers. Label continuity screens candidates with the model's label-level process (the estimated rate, tempered
+  emissions, no error state: the error mixture of a bin is not a sum over the parts of a bin a link splits; each part
+  is divided by its whole bin's design effect) and decides every candidate on the painted switches of the full model;
+  a candidate that would change which of its classes are called anywhere (their error states) is not accepted.
+  Pedigree's source chain is a reduced model: the label-level table and the tempered emissions (packed, or recomputed
+  and divided by the design effect), without the panel-error state; a called founder allele is still transmitted
+  unchanged. Records: painting schema 3 (the transition record carries rho, a, b and r).
+  `PaintingConfig.switch_penalty_per_snp` and `double_recomb_factor` are removed; `emission_site_correlation`,
+  `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations` and `estimate_grid` are
+  added (internal constants). The 2.13 Viterbi and posterior kernels of `painting/hmm.py` are removed.
+- Validation against simulation truth on the 2.13 final panels (painted switch events matched one to one, maximum
+  cardinality, with true ancestry changes within 3 bins; a decoded pair counts as right when its rows carry the true
+  haplotypes' alleles in the bin up to max(1, 2%) mismatches; mixed bins excluded), against 2.14's other fixes on the
+  2.13 prior, label continuity on: std matched events 2,166 -> 2,162 of 2,311 true with painted events 2,389 -> 2,334
+  (precision 0.907 -> 0.926, recall 0.937 -> 0.936); f3 886 of 1,007 matched in both, painted 961 -> 959 (precision
+  0.922 -> 0.924); backcross matched 1,786 -> 1,784 of 1,809 with unmatched painted events 9 -> 12 (precision 0.995 ->
+  0.993, recall 0.987 -> 0.986); K30 equal; wrong pairs where the panel held the truth std 609 -> 546, backcross 79 ->
+  67, f3 and K30 equal; pairs whose rows' whole-component founder identity mismatches the truth std 43,958 -> 43,435,
+  backcross 102 -> 78. A trade-off, not an improvement on every count: std loses 4 matched events, backcross 2. Most
+  wrong pairs remain where no row of the panel carries the truth (std 8,769 of 9,403), which a named-panel label
+  cannot correctly represent.
+- Calibration on represented truth (std, 8 contigs; observed local-allele error against mean predicted 1 - qF, by
+  bucket; qF's faithful latent event differs from the scored local-allele event): qF < 0.5 1.4e-2 against 0.64,
+  [0.5, 0.9) 8.0e-3 against 0.26, [0.9, 0.99) 4.0e-3 against 4.0e-2, [0.99, 0.999) 2.2e-3 against 3.4e-3,
+  [0.999, 1 - 1e-6) 9.5e-4 against 3.4e-5, >= 1 - 1e-6 7.6e-5 (38 of 497,327) against 3.8e-7; 2.13's qV had 4e-3 to
+  5.5e-3 in every bucket from 0.5 to 1 - 1e-6 and 6.3e-4 against 2e-10 at the top. On these diagnostics qF is closer
+  to its observed errors than 2.13's qV, not calibrated: lower in the low buckets (partly the event mismatch), about
+  equal in [0.99, 0.999), over-confident above 0.999 (about 30 and 200 times). The same panels served to tune and to
+  measure the model.
+- Costs: abstention rises (std 234 -> 3,112 sample-bins of ~945k, backcross 104 -> 1,087, f3 12 -> 373, K30 2 -> 32);
+  painting takes longer (8 estimation passes plus the decode and label continuity's chain re-decodes, each
+  O(N B S'^2) with S' <= 2S - 1 track states): a synthetic component with N = 300 samples, 2,000 bins and 200 link
+  points (112 threads) at K = 10 / 20 / 30 takes 14 / 51 / 110 s to estimate, 11 / 38 / 82 s for label continuity and
+  3 / 10 / 21 s to decode and release (2.13: 6 / 19 / 40 s in all), peak memory 10 / 26 / 50 GiB (2.13: 6 / 11 / 20
+  GiB); label continuity's whole-search memory at K = 30, N = 300, 10,000 bins and 2,000 link points is about 242 GB
+  (2.13's model: 79 GB), batched under a smaller grant.
+- Without the emission adjustment the estimated rate and the error chain lose precision (std 0.772, f3 0.692, backcross
+  0.800): where a row is locally wrong the path escapes it by changing label. A fixed temperature (every bin divided by
+  T = 12) came close to 2.13's precision on the simulations (below it on backcross) but lost a sparsely read true short
+  tract in a frozen control (no switch, wrong labels), which the design effect recovers exactly (min qF 0.985); on the
+  simulations' full bins the two behave alike. Design-effect sweep without label continuity, r = 0.1 / 0.125 / 0.15: std
+  precision 0.925 / 0.925 / 0.922 at recall 0.936 / 0.934 / 0.932; f3 precision 0.924 / 0.928 / 0.928 (recall 0.880);
+  backcross precision 0.993 / 0.993 / 0.992 at recall 0.986 / 0.984 / 0.981; K30 unchanged. Without the panel-error
+  state, precision falls where the panel has error runs (std chr1 0.899 -> 0.855). Rejected on the way: an independent
+  per-bin panel-error mixture (std precision 0.696), an allele-level miscopy rate (lower still) and an error state that
+  copies its row with flips (0.60-0.68).
+- Downstream (copies of the 2.13 final runs repainted and continued to founder refit): pedigree against truth std
+  exact parent configurations 37 -> 38 and true edges found 55 -> 57 of 60 (none extra), f3, backcross and K30
+  unchanged; TroMau parent assignments and states unchanged for all 116 samples, Tier B release changed for 3 (two
+  two-parent calls released, one zero-parent call withheld). Founder refit against truth (wrong or missing alleles)
+  rises slightly: std 461,079 -> 461,529, backcross 924 -> 978, f3 223,984 -> 224,001, K30 55,717 -> 55,725 (the refit
+  reads fewer released labels). TroMau painted panels against the G0 pseudo-reference (dependent reference, not
+  truth): wrong alleles at W0 -14.6% against 2.10 (2.14's other fixes alone: -12.9%), at W100 equal.
+- Stability: on the five validation cases (std, f3, backcross, K30, TroMau) the released painting is identical under
+  the convention reversal and under a 1e-6 jitter of the genotype likelihoods (two seeds). The decoder chooses a label
+  change from the first source within `VITERBI_TIE` of the best; the reversed convention decodes the same model
+  backwards (transposed transition, the initial law at its last step); a dense brute-force reference checks the
+  kernels and the EM's monotone likelihood.
+
+**Released track order from the unordered candidate sets** (`painting/hmm.py` `canonical_track_order`;
+`painting/fidelity.py` `decode_candidates`). The two tracks' order (H1/H2, a gauge) is fixed from the bins' combined
+unordered candidate sets: from the last bin (smaller candidate mask on track 0) leftwards, each bin takes the
+orientation with fewer track changes towards the next bin, then fewer allele-visible changes, then the smaller mask on
+track 0. It no longer depends on which traceback convention ran: the default and the reversed convention release
+identical ordered products on all five validation cases (before: the tracks of 52-97% of sample-bins exchanged, the
+unordered product equal). Measured alone against 2.13 (before the model change below), the unordered product was
+unchanged and the order differed in up to 5.1% of sample-bins (TroMau); pedigree's tables and founder refit's summary
+were byte-identical under it (copies of the 2.13 final runs repainted and continued to founder refit).
+
+**Label continuity's ties** (`painting/label_continuity.py`).
+- An accepted transposition is placed at the leftmost link point of a run where the two rows carry identical
+  founder-axis data (the same per-site panel data and painting at either point), and such equivalent placements are
+  checked once; the convention reversal moved it to the rightmost before (TroMau chr3, chr6, chr14; identical calls).
+- A stated policy for competing repairs: when another acceptable candidate of the accepted one's tie class of gains
+  would relabel differently (another row pair, or a non-equivalent link), neither is applied in that iteration and the
+  event is counted (`painting.relabel_ambiguous`). Before, the first in index order was taken, so the input row order or
+  the convention reversal chose between founder panels (a review fixture: 450 cells apart after the best row matching;
+  now no move under every row order, convention and sample order). No such tie occurred on the validation panels.
+- Painted switches are counted as the painting reports them, the fewer of the two conventions' paths of the new decoder
+  (before: the run's convention alone), and every eligible sample is re-decoded for each distinct candidate. Before,
+  samples whose best unaffected state strictly beat every affected one were skipped; a relabelling can change which of
+  several exactly co-optimal paths a traceback convention selects, and so the counted switches, so that shortcut was not
+  a certificate (a review's finite HMM counterexample; none in 1,500 genotype-emission fixtures). A check keeps only the
+  per-sample count changes (a review fixture with 999 link points: 801 checks and 103 MB of retained candidate maps
+  before, now 1 check and 0.3 MB). No accepted move changed on the validation panels.
+- Memory: the search is granted as much as the measured headroom admits, without the former ceiling (the larger of 32
+  GiB and a quarter of the run's limit), so a large-K search batches (about 3x slower, identical results) only under
+  real pressure (K = 30, N = 300, 10,000 bins, 2,000 link points: about 79 GB at once under 2.13's model, about 242 GB
+  under 2.14's).
+
+**Switch intervals use the emission's equivalence** (`painting/hmm.py` `_distinguishable`, `switch_interval_masks`). Two
+classes are interchangeable for a track in a bin only when, paired with the sample's other track, they have the same
+genotype law at every observed site: where both are uncalled and the other track is a named class equal to one of them,
+that pair shares one latent allele and the other does not. Before, every equal call counted, so a switch that the reads
+located could be released as an interval (a review fixture: two bins withheld as SWITCH_INTERVAL against a 108- and
+489-nat preference; now named). No released bin changed on the validation panels.
+
+**Founder identity across label-continuity moves (diagnostic)** (`painting/release.py` `RelabelMove`, new
+`label_continuity.tsv`). A label exchange of two founders' rows makes the carriers of either founder switch at the link
+in both directions; one shared recombinant lineage switches one way only. Each accepted move records how many winners
+switch each way and is `identified` when both are positive; a one-way move is kept and reported as identity-ambiguous
+(log: `(k identity-ambiguous)`). No consumer reads the flag, so it changes no released label: it does not solve founder
+identity, it shows where the evidence for it is one-sided.
+
+**Viterbi tie band per candidate.** The decoder judges each candidate predecessor on its own score against the band of
+the maximum (2.13 compared the row and column one-change candidates with each other first, which could admit a pointer
+up to twice `VITERBI_TIE` below the best). The dynamic-programming scores are exact maxima; with two stages per bin the
+traced path lies within (2B - 1) x `VITERBI_TIE` of them.
+
+**Measured, not changed.**
+- Label continuity is kept. Over the saved 2.12 and 2.13 simulation runs its 10 accepted moves (3 to 6 winners, no
+  loser) improved founder identity in some cases (std chr10 -24.8k, chr18 -0.9k, chr20 -16k, K30 m5 -0.5k to -0.8k
+  wrong-or-missing alleles) and worsened it in others (std chr20 +16.9k, chr1 +1.8k), with no truth-free feature found
+  to separate them. Under the 2.14 model TroMau has 8 moves (2.13 prior: 11; 6 in common).
+- Speed: painting was about 0.3% of a TroMau run under 2.13 (114 s of 42,370 lane-seconds).
+
+**Correction to 2.13.** 2.13's known limitation said a 1e-6 jitter decides an exact assembly tie the other way "by
+breaking the equality". The tested 1e-12 jitter (seed 1), which breaks the equalities of the genotype likelihoods
+themselves, leaves the std run unchanged at every stage (chr1 included), so those equalities alone do not decide it: the
+1e-6 jitter moves a convention-decided comparison the same way in every seed (a tolerance between the two scales, or a
+systematic effect of the jitter). The decision is not yet located.
+
+**Known limitations.** The design effect's r is a tuned constant chosen on simulations (the same 2.13 panels served
+to choose and to measure it), not a measured correlation; real panels may err differently, and qF is a within-model
+probability, over-confident above 0.999. Pedigree's source chain and label continuity's screen are reduced models
+without the panel-error state; pedigree transmits a called founder allele unchanged even where painting puts the row
+in an error run. Label continuity remains a heuristic for founder identity (above); its identity flag is a
+diagnostic. Bins repartition a component's selected sites globally, so one inserted or removed site can move every bin
+edge of the component (a local binning is a model change left for a later release). Label continuity's candidate
+checks are at worst quartic in K per iteration (every screened candidate re-decoded); the validation runs checked at
+most 8 distinct candidates per component.
+
+**End-to-end validation** (the release candidate, from scratch through founder refit, family phase skipped as in every
+validation since 2.7; inputs, configurations and seeds of the 2.13 final runs). On all five cases (std, f3, backcross,
+K30, TroMau) every stage before painting is identical to 2.13's (discovery, local selection, assembly and founder
+refinement; zero differing founder cells), and the painted panels are identical on the four simulations. The
+simulations' painting, pedigree and founder-refit results equal the targeted replays above (founder refit
+wrong-or-missing alleles std 461,529, f3 224,001, backcross 978, K30 55,725; pedigree std 38 exact parent
+configurations and 57 of 60 true edges, none extra). TroMau: label continuity makes 8 moves (2.14's other fixes on the
+2.13 prior: 11), so the painted panels differ in 39,749 founder cells; against the G0 pseudo-reference (dependent
+reference, not truth) wrong alleles at W0 fall 14.6% against 2.10 (2.14's other fixes alone: 12.9%) and at W100 5.9%
+(equal); parent assignments and states are unchanged for all 116 samples and the Tier B release changes for 3 (94 ->
+95 released). Wall time: TroMau 6,298 s (2.14's other fixes alone: 6,399 s), K30 2,317 s (2,257 s) on full 76-CPU
+nodes.
+
 ## 2.13.0 (27 October 2026)
 
 This release reduces the demonstrated sensitivity of stages 1 to 5 to a 1e-6 relative change of the genotype

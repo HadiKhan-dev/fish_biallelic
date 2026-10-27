@@ -29,7 +29,9 @@ STAGE = "painting"
 KEY = "painting"
 SUMMARY_KEY = "painting/summary"
 # 2: release 2.2 switch intervals (TrackStatus.SWITCH_INTERVAL, candidate-set posteriors).
-SCHEMA = 2
+# 3: release 2.14 copying model: estimated switch rate, panel-error chain and the emissions' site correlation (design
+#    effect) with the transition table; packed emissions are tempered.
+SCHEMA = 3
 EVIDENCE_KEY = evidence_records.EVIDENCE
 ASSEMBLY_KEY = f"{assembly_records.FINAL_PREFIX}/final"
 
@@ -116,6 +118,8 @@ def _encode_component(component: ComponentPainting) -> dict:
         "bin_starts": bins.starts, "bin_stops": bins.stops, "bin_centers": bins.centers,
         "bin_edges": bins.edges, "log_same": transitions.log_same,
         "log_one": transitions.log_one, "log_two": transitions.log_two,
+        "switch_rate": transitions.switch_rate, "error_entry": transitions.error_entry,
+        "error_exit": transitions.error_exit, "site_correlation": transitions.site_correlation,
         "local_keys": component.local_keys, "eligible": component.eligible,
         "labels": component.labels, "track_classes": component.classes,
         "status": component.status, "direct": component.direct,
@@ -211,7 +215,9 @@ def _decode_component(record: dict, panel: ComponentPanel | None,
         bins=PaintingBins(record["bin_starts"], record["bin_stops"], record["bin_centers"],
                           record["bin_edges"]),
         transitions=PaintingTransitions(n_states, record["log_same"], record["log_one"],
-                                        record["log_two"]),
+                                        record["log_two"], float(record["switch_rate"]),
+                                        float(record["error_entry"]), float(record["error_exit"]),
+                                        float(record["site_correlation"])),
         local_keys=record["local_keys"], eligible=record["eligible"], labels=record["labels"],
         classes=record["track_classes"], status=record["status"], direct=record["direct"],
         member_ids=record["member_ids"],

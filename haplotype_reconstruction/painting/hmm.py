@@ -1,14 +1,15 @@
-"""Numerical kernels of the painting HMM: emissions, Viterbi, forward-backward.
+"""Numerical kernels of the painting HMM: emissions, the label-level max-product step, track order and the
+switch intervals of decoded paths.
 
-State of a sample in a bin: an ordered pair (x1, x2) of track states, flat
+State of a sample in a bin: an ordered pair (x1, x2) of labels, flat
 index x1 * S + x2 (S = classes + BACKGROUND). Emissions are binned sums of
 robust per-site genotype log likelihoods, centred by log(1/3) so unobserved
-and flat sites are neutral. Transitions are the Hamming table of
-painting/transitions.py, so every recursion contracts in O(S^2) per bin from
-row, column and complement sums (forward-backward) or from the best and
-second-best entries of each row and column (Viterbi). Samples are independent;
-every per-sample reduction runs in a fixed order, so results do not depend on
-the thread count.
+and flat sites are neutral (the decoder divides each sample's bin by its design effect, design_effect).
+The label-level transition is the Hamming table of painting/transitions.py, so its
+max-product step contracts in O(S^2) per bin from the best and second-best entries
+of each row and column (label continuity). Painting's decoder, the class x fidelity
+chain, is painting/fidelity.py. Samples are independent; every per-sample reduction
+runs in a fixed order, so results do not depend on the thread count.
 """
 from __future__ import annotations
 
@@ -18,36 +19,25 @@ import numpy as np
 from numba import njit, prange
 
 from ..maths.ties import noise_quantum
-from .transitions import PaintingTransitions
 
 # Spread of a normalised GL row above which the row is informative (not flat).
 INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
 # Viterbi tie quantum (nats; release 2.1, design A-4): predecessors whose path scores are within this of the best are
-# tied, and the back-pointer then takes the fewest track changes (stay, then one change, then two), then the
-# smallest flat index; the final state is the smallest index within it of the best. Equal-score paths arise where
-# two switch placements cost the same (equal theta on a cold, zero-cM stretch of the map, and the states' emissions
+# tied, and the back-pointer then takes the fewest track changes (painting.fidelity: per track, staying, then the same
+# label, then a label change), then the smallest index; the final state is the smallest index within it of the best.
+# Since 2.14 the scores are of tempered emissions (divided by their design effect, design_effect), so the quantum sits
+# further above the GL-noise motion, and more near-ties take the fewest changes. Equal-score paths arise where two
+# switch placements cost the same (equal theta on a cold, zero-cM stretch of the map, and the states' emissions
 # identical in the bins between) and their sums differ only in rounding, which GL noise reorders. The path scores
 # themselves stay exact maxima. Census (TroMau chr18 painting, iid 1e-9; work/IE/census/viterbi_chr18_*): 4,980
-# decisions within 1e-2, gap motion <= 1.9e-9, genuine gaps from 1e-5 (2 in [1e-5, 3e-5), then >= 3e-4): 2^-20 =
-# 9.5e-7 sat ~500x above that motion. Release 2.13 places it against 1e-6 relative GL noise (maths.ties.GL_NOISE;
-# gap motion <= 1.9e-6, the census times 10^3): noise_quantum = 2^-15 = 3.1e-5; gaps below it take the fewest track
-# changes (a safety margin over the motion; it also covers the census's genuine gaps in [1e-5, 3e-5)).
+# decisions within 1e-2, gap motion <= 1.9e-9, genuine gaps from 1e-5 (2 in [1e-5, 3e-5), then >= 3e-4): 2^-20 = 9.5e-7
+# sat ~500x above that motion. Release 2.13 places it against 1e-6 relative GL noise (maths.ties.GL_NOISE; gap motion <=
+# 1.9e-6, the census times 10^3): noise_quantum = 2^-15 = 3.1e-5; gaps below it take the fewest track changes (a safety
+# margin over the motion; it also covers the census's genuine gaps in [1e-5, 3e-5)).
 VITERBI_TIE = noise_quantum(1.9e-6)
 # Candidate states of a track are int64 bit masks (painting switch intervals, release 2.2): S = classes + BACKGROUND
 # must fit 63 bits (K <= 30 founders gives S <= 31).
 MAXIMUM_MASK_STATES = 63
-
-
-@njit(cache=True, inline="always")
-def _before(value, index, reference_value, reference_index, reverse):
-    """True if (value, index) ranks before (reference_value, reference_index): the larger value, and at an exact
-    tie the smaller flat index (the canonical rule), or the larger one under the convention reversal (release 2.2,
-    maths.ties.reverse_conventions)."""
-    if value > reference_value:
-        return True
-    if value == reference_value:
-        return index > reference_index if reverse else index < reference_index
-    return False
 
 
 @njit(cache=True, parallel=True)
@@ -78,6 +68,19 @@ def _gather_kernel(likelihoods, observed, sites):
             values[sample, site, 2] = likelihoods[sample, source, 2]
             flags[sample, site] = observed[sample, source]
     return values, flags
+
+
+def design_effect(likelihoods: np.ndarray, observed: np.ndarray, bin_starts: np.ndarray,
+                  correlation: float) -> np.ndarray:
+    """float64[N, B]: 1 + (n - 1) r for the n informative sites (informative_sites) of each sample in each bin (1 when
+    n <= 1), r = ``correlation``; ``likelihoods``/``observed`` are gathered at the component's selected sites and
+    ``bin_starts`` are the bins' first selected sites (release 2.14). The variance inflation of a sum of n
+    equal-variance terms with common correlation r (Kish's design effect), used as a tuned working weight of a bin's
+    log emission: under that assumption the bin counts as n / (1 + (n - 1) r) variance-equivalent sites. Not an
+    estimated dependence correction; the weight tends to 1 as n -> 1, and a bin without informative sites has 1."""
+    counts = np.add.reduceat(informative_sites(likelihoods, observed).astype(np.int64),
+                             np.asarray(bin_starts, dtype=np.int64), axis=1)
+    return 1.0 + np.maximum(counts - 1, 0) * float(correlation)
 
 
 def gather_sites(likelihoods: np.ndarray, observed: np.ndarray, sites: np.ndarray,
@@ -217,141 +220,12 @@ def unpack_emissions(packed, n_states):
 
 
 @njit(cache=True, inline="always")
-def hamming_max_step(previous, cost_same, cost_one, cost_two, n_states, out_values, out_index,
-                     row_best_value, row_second_value, row_best_index, row_second_index,
-                     column_best_value, column_second_value, column_best_index,
-                     column_second_index, tie, reverse):
-    """out_values[z] = max_y previous[y] + T(y, z) and out_index[z] its argmax, O(S^2).
-
-    T charges cost_same, cost_one or cost_two for zero, one or two changed
-    tracks. The best y excluding row/column/both of z comes from the best and
-    second-best entries of each row and column. out_values are exact maxima; the
-    back-pointer takes, among the candidates within ``tie`` of the maximum, the one
-    with the fewest changed tracks (stay, one, two), and between the best one-change
-    candidates of the row and of the column the smaller flat index when they are
-    within ``tie`` (release 2.1; exact ties inside a row or column go to the
-    smallest flat index, the canonical tie rule). ``reverse`` (release 2.2 convention
-    reversal) takes the largest flat index instead at every such index tie; the
-    fewest-changes preference (a stated prior) is unchanged.
-    """
-    for row in range(n_states):
-        best_value = -np.inf
-        second_value = -np.inf
-        best_index = -1
-        second_index = -1
-        for column in range(n_states):
-            index = row * n_states + column
-            value = previous[index]
-            if _before(value, index, best_value, best_index, reverse):
-                second_value = best_value
-                second_index = best_index
-                best_value = value
-                best_index = index
-            elif _before(value, index, second_value, second_index, reverse):
-                second_value = value
-                second_index = index
-        row_best_value[row] = best_value
-        row_second_value[row] = second_value
-        row_best_index[row] = best_index
-        row_second_index[row] = second_index
-
-    for column in range(n_states):
-        best_value = -np.inf
-        second_value = -np.inf
-        best_index = -1
-        second_index = -1
-        for row in range(n_states):
-            index = row * n_states + column
-            value = previous[index]
-            if _before(value, index, best_value, best_index, reverse):
-                second_value = best_value
-                second_index = best_index
-                best_value = value
-                best_index = index
-            elif _before(value, index, second_value, second_index, reverse):
-                second_value = value
-                second_index = index
-        column_best_value[column] = best_value
-        column_second_value[column] = second_value
-        column_best_index[column] = best_index
-        column_second_index[column] = second_index
-
-    for current_row in range(n_states):
-        # Best previous state outside the current row and outside one column.
-        complement_best_value = -np.inf
-        complement_second_value = -np.inf
-        complement_best_index = -1
-        complement_second_index = -1
-        complement_best_column = -1
-        for previous_column in range(n_states):
-            index = column_best_index[previous_column]
-            value = column_best_value[previous_column]
-            if index // n_states == current_row:
-                index = column_second_index[previous_column]
-                value = column_second_value[previous_column]
-            if _before(value, index, complement_best_value, complement_best_index, reverse):
-                complement_second_value = complement_best_value
-                complement_second_index = complement_best_index
-                complement_best_value = value
-                complement_best_index = index
-                complement_best_column = previous_column
-            elif _before(value, index, complement_second_value, complement_second_index, reverse):
-                complement_second_value = value
-                complement_second_index = index
-
-        for current_column in range(n_states):
-            current = current_row * n_states + current_column
-            stay_value = previous[current] + cost_same
-
-            column_index = column_best_index[current_column]
-            column_value = column_best_value[current_column]
-            if column_index // n_states == current_row:
-                column_index = column_second_index[current_column]
-                column_value = column_second_value[current_column]
-            row_index = row_best_index[current_row]
-            row_value = row_best_value[current_row]
-            if row_index % n_states == current_column:
-                row_index = row_second_index[current_row]
-                row_value = row_second_value[current_row]
-            one_value = max(row_value, column_value)
-            if row_value > column_value + tie:
-                one_index = row_index
-            elif column_value > row_value + tie:
-                one_index = column_index
-            elif row_index < 0 or (column_index >= 0 and (column_index > row_index if reverse
-                                                          else column_index < row_index)):
-                one_index = column_index
-            else:
-                one_index = row_index
-            one_candidate = one_value + cost_one
-
-            complement_value = complement_best_value
-            complement_index = complement_best_index
-            if complement_best_column == current_column:
-                complement_value = complement_second_value
-                complement_index = complement_second_index
-            two_candidate = complement_value + cost_two
-
-            best_value = max(stay_value, max(one_candidate, two_candidate))
-            if stay_value >= best_value - tie:
-                best_index = current
-            elif one_candidate >= best_value - tie:
-                best_index = one_index
-            else:
-                best_index = complement_index
-
-            out_values[current] = best_value
-            out_index[current] = best_index
-
-
-@njit(cache=True, inline="always")
 def hamming_max_values(values, cost_same, cost_one, cost_two, n_states, out, row_first, row_second,
                        column_first, column_second, row_first_column, column_first_row):
-    """out[z] = max_y values[y] + T(y, z): :func:`hamming_max_step` without back-pointers.
+    """out[z] = max_y values[y] + T(y, z) under the label-level Hamming table, without back-pointers.
 
-    The maxima are the same; without argmax tie bookkeeping each excluded
-    maximum needs only the best and second-best values of a row or column and
-    where the best one lies. Used where only scores matter (label continuity).
+    Each excluded maximum needs only the best and second-best values of a row or column and
+    where the best one lies. Used where only scores matter (label continuity's screen).
     """
     for index in range(n_states):
         row_first[index] = -np.inf
@@ -402,86 +276,6 @@ def hamming_max_values(values, cost_same, cost_one, cost_two, n_states, out, row
             if candidate > best:
                 best = candidate
             out[row * n_states + column] = best
-
-
-@njit(cache=True, parallel=True)
-def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two, tie, reverse):
-    n_samples, n_diplotypes, n_bins = emissions.shape
-    back = np.full((n_samples, n_bins, n_diplotypes), -1, dtype=np.int32)
-    final_scores = np.empty((n_samples, n_diplotypes), dtype=np.float64)
-    for sample in prange(n_samples):
-        previous = emissions[sample, :, 0].copy()
-        previous -= np.max(previous)
-        current_scores = np.empty(n_diplotypes, dtype=np.float64)
-        row_best_value = np.empty(n_states, dtype=np.float64)
-        row_second_value = np.empty(n_states, dtype=np.float64)
-        row_best_index = np.empty(n_states, dtype=np.int64)
-        row_second_index = np.empty(n_states, dtype=np.int64)
-        column_best_value = np.empty(n_states, dtype=np.float64)
-        column_second_value = np.empty(n_states, dtype=np.float64)
-        column_best_index = np.empty(n_states, dtype=np.int64)
-        column_second_index = np.empty(n_states, dtype=np.int64)
-        for bin_index in range(1, n_bins):
-            hamming_max_step(previous, log_same[bin_index - 1], log_one[bin_index - 1],
-                             log_two[bin_index - 1], n_states, current_scores,
-                             back[sample, bin_index],
-                             row_best_value, row_second_value, row_best_index,
-                             row_second_index, column_best_value, column_second_value,
-                             column_best_index, column_second_index, tie, reverse)
-            for current in range(n_diplotypes):
-                current_scores[current] += emissions[sample, current, bin_index]
-            # Per-bin centring prevents long-path overflow; paths and ties are unchanged.
-            current_scores -= np.max(current_scores)
-            previous, current_scores = current_scores, previous
-        final_scores[sample] = previous
-
-    result = np.empty((n_samples, 2, n_bins), dtype=np.int32)
-    for sample in prange(n_samples):
-        # The smallest final state within the tie quantum of the best (release 2.1; the largest under the
-        # convention reversal).
-        top = np.max(final_scores[sample])
-        current = 0
-        for rank in range(n_diplotypes):
-            state = n_diplotypes - 1 - rank if reverse else rank
-            if final_scores[sample, state] >= top - tie:
-                current = state
-                break
-        result[sample, 0, n_bins - 1] = current // n_states
-        result[sample, 1, n_bins - 1] = current % n_states
-        for bin_index in range(n_bins - 1, 0, -1):
-            current = back[sample, bin_index, current]
-            result[sample, 0, bin_index - 1] = current // n_states
-            result[sample, 1, bin_index - 1] = current % n_states
-    return result
-
-
-def viterbi_paths(emissions: np.ndarray, transitions: PaintingTransitions, *,
-                  tie: float = VITERBI_TIE, reverse: bool | None = None) -> np.ndarray:
-    """int32[N, 2, B] state of each track on the Viterbi path (needs B >= 1).
-
-    Exact O(N B S^2) maxima; predecessors within ``tie`` nats of the best are tied
-    and resolved by the fewest track changes, then the smallest flat state
-    (VITERBI_TIE; tie = 0 gives 2.0's exact rule up to the stay preference).
-    Holds int32 back-pointers [N, B, S^2], the largest painting array.
-
-    The traceback runs right to left and stays while staying is tied, so among
-    co-optimal placements a switch lands on the leftmost tied edge; that is a
-    convention, not a released result. ``reverse``
-    (default: maths.ties.reverse_conventions(), release 2.2) mirrors it: the
-    recursion runs over the bins in reverse order (a switch lands on the
-    rightmost tied edge) and index ties take the largest flat state.
-    """
-    from ..maths import ties
-    if reverse is None:
-        reverse = ties.reverse_conventions()
-    if not reverse:
-        return _viterbi_kernel(emissions, transitions.n_states, transitions.log_same,
-                               transitions.log_one, transitions.log_two, float(tie), False)
-    mirrored = _viterbi_kernel(np.ascontiguousarray(emissions[:, :, ::-1]), transitions.n_states,
-                               np.ascontiguousarray(transitions.log_same[::-1]),
-                               np.ascontiguousarray(transitions.log_one[::-1]),
-                               np.ascontiguousarray(transitions.log_two[::-1]), float(tie), True)
-    return np.ascontiguousarray(mirrored[:, :, ::-1])
 
 
 @njit(cache=True)
@@ -545,170 +339,6 @@ def parsimonious_track_order(paths, local_keys, n_classes):
     return result
 
 
-@njit(cache=True, parallel=True)
-def _release_posterior_kernel(emissions, n_states, weight_same, weight_one, weight_two,
-                              masks, other_masks, public_ids, local_keys):
-    n_samples, _, n_bins = emissions.shape
-    qv = np.zeros((n_samples, n_bins), dtype=np.float64)
-    qa = np.zeros((n_samples, n_bins), dtype=np.float64)
-    for sample in prange(n_samples):
-        # Scaled forward pass: one sample's B x S x S table is live per thread.
-        forward = np.zeros((n_bins, n_states, n_states), dtype=np.float64)
-        scales = np.empty(n_bins, dtype=np.float64)
-        emission_max = np.max(emissions[sample, :, 0])
-        scale = 0.0
-        for row in range(n_states):
-            for column in range(n_states):
-                value = math.exp(emissions[sample, row * n_states + column, 0] - emission_max)
-                forward[0, row, column] = value
-                scale += value
-        scales[0] = scale
-        forward[0] /= scale
-
-        row_sums = np.zeros(n_states, dtype=np.float64)
-        column_sums = np.zeros(n_states, dtype=np.float64)
-        for bin_index in range(1, n_bins):
-            same = weight_same[bin_index - 1]
-            one = weight_one[bin_index - 1]
-            two = weight_two[bin_index - 1]
-            row_sums[:] = 0.0
-            column_sums[:] = 0.0
-            total = 0.0
-            for row in range(n_states):
-                for column in range(n_states):
-                    value = forward[bin_index - 1, row, column]
-                    row_sums[row] += value
-                    column_sums[column] += value
-                    total += value
-            emission_max = np.max(emissions[sample, :, bin_index])
-            scale = 0.0
-            for row in range(n_states):
-                for column in range(n_states):
-                    cell = forward[bin_index - 1, row, column]
-                    one_change = max(0.0, row_sums[row] + column_sums[column] - 2.0 * cell)
-                    two_changes = max(0.0, total - row_sums[row] - column_sums[column] + cell)
-                    prediction = same * cell + one * one_change + two * two_changes
-                    weight = math.exp(
-                        emissions[sample, row * n_states + column, bin_index] - emission_max)
-                    value = prediction * weight
-                    forward[bin_index, row, column] = value
-                    scale += value
-            scales[bin_index] = scale
-            forward[bin_index] /= scale
-
-        backward = np.ones((n_states, n_states), dtype=np.float64)
-        weighted_next = np.empty((n_states, n_states), dtype=np.float64)
-        previous_backward = np.empty((n_states, n_states), dtype=np.float64)
-        for bin_index in range(n_bins - 1, -1, -1):
-            posterior_total = 0.0
-            for row in range(n_states):
-                for column in range(n_states):
-                    posterior_total += forward[bin_index, row, column] * backward[row, column]
-            # qV: mass of the unordered public pairs consistent with the two tracks'
-            # candidate sets (the Viterbi state, plus the other side of a switch
-            # interval; release 2.2); qA: the same over local allele keys (coarser,
-            # so qA >= qV). With one candidate per track this is the mass of the
-            # Viterbi state's unordered public (local-key) pair, summed over the
-            # same terms in the same order as release 2.1. Masses are added in
-            # state order, as one pass over the full pair table would.
-            # The released masses are the smaller of the two decodings' (``other_masks``: the mirrored traceback
-            # convention's Viterbi pair; release 2.2), so a bin passes only if both conventions' pairs do.
-            for decoding in range(2):
-                source = masks if decoding == 0 else other_masks
-                mask_first = source[sample, 0, bin_index]
-                mask_second = source[sample, 1, bin_index]
-                public_first_mask = np.int64(0)
-                public_second_mask = np.int64(0)
-                local_first_mask = np.int64(0)
-                local_second_mask = np.int64(0)
-                for state in range(n_states):
-                    if (mask_first >> state) & 1:
-                        public_first_mask |= np.int64(1) << public_ids[state]
-                        local_first_mask |= np.int64(1) << local_keys[bin_index, state]
-                    if (mask_second >> state) & 1:
-                        public_second_mask |= np.int64(1) << public_ids[state]
-                        local_second_mask |= np.int64(1) << local_keys[bin_index, state]
-                public_mass = 0.0
-                local_mass = 0.0
-                for first in range(n_states):
-                    first_public = public_ids[first]
-                    first_local = local_keys[bin_index, first]
-                    for second in range(n_states):
-                        mass = forward[bin_index, first, second] * backward[first, second] / posterior_total
-                        second_public = public_ids[second]
-                        if ((((public_first_mask >> first_public) & 1)
-                             and ((public_second_mask >> second_public) & 1))
-                                or (((public_second_mask >> first_public) & 1)
-                                    and ((public_first_mask >> second_public) & 1))):
-                            public_mass += mass
-                        second_local = local_keys[bin_index, second]
-                        if ((((local_first_mask >> first_local) & 1) and ((local_second_mask >> second_local) & 1))
-                                or (((local_second_mask >> first_local) & 1)
-                                    and ((local_first_mask >> second_local) & 1))):
-                            local_mass += mass
-                public_value = min(1.0, max(0.0, public_mass))
-                local_value = min(1.0, max(0.0, local_mass))
-                if decoding == 0:
-                    qv[sample, bin_index] = public_value
-                    qa[sample, bin_index] = local_value
-                else:
-                    qv[sample, bin_index] = min(qv[sample, bin_index], public_value)
-                    qa[sample, bin_index] = min(qa[sample, bin_index], local_value)
-            if bin_index == 0:
-                continue
-
-            same = weight_same[bin_index - 1]
-            one = weight_one[bin_index - 1]
-            two = weight_two[bin_index - 1]
-            emission_max = np.max(emissions[sample, :, bin_index])
-            row_sums[:] = 0.0
-            column_sums[:] = 0.0
-            total = 0.0
-            for row in range(n_states):
-                for column in range(n_states):
-                    value = (math.exp(emissions[sample, row * n_states + column, bin_index]
-                                      - emission_max) * backward[row, column])
-                    weighted_next[row, column] = value
-                    row_sums[row] += value
-                    column_sums[column] += value
-                    total += value
-            for row in range(n_states):
-                for column in range(n_states):
-                    cell = weighted_next[row, column]
-                    one_change = max(0.0, row_sums[row] + column_sums[column] - 2.0 * cell)
-                    two_changes = max(0.0, total - row_sums[row] - column_sums[column] + cell)
-                    previous_backward[row, column] = (
-                        same * cell + one * one_change + two * two_changes) / scales[bin_index]
-            backward, previous_backward = previous_backward, backward
-    return qv, qa
-
-
-def release_posteriors(emissions: np.ndarray, transitions: PaintingTransitions, paths: np.ndarray,
-                       public_ids: np.ndarray, local_keys: np.ndarray, masks: np.ndarray | None = None,
-                       other_paths: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """(qV, qA) float64[N, B]: posterior masses of the unordered public class pairs and of the
-    unordered local allele-key pairs consistent with each track's candidate states (exact scaled
-    forward-backward).
-
-    ``masks`` int64[N, 2, B]: per track and bin the candidate states as bits (state x = bit x);
-    None = the Viterbi state alone, i.e. the mass of the Viterbi state's unordered public (local-key)
-    pair (release 2.1). ``other_paths`` (the mirrored traceback convention's Viterbi path, release 2.2):
-    each mass is the smaller of the two paths' Viterbi pair masses, so the release gate never passes a
-    bin that the 2.1 gate (the default convention's pair) rejects, and does not depend on the convention.
-    """
-    same, one, two = transitions.probabilities()
-    if masks is None:
-        masks = np.left_shift(np.int64(1), np.asarray(paths, dtype=np.int64))
-    other = masks if other_paths is None else np.left_shift(np.int64(1), np.asarray(other_paths, dtype=np.int64))
-    if transitions.n_states > MAXIMUM_MASK_STATES:
-        raise ValueError(f"painting candidate masks hold at most {MAXIMUM_MASK_STATES} states")
-    return _release_posterior_kernel(
-        emissions, transitions.n_states, same, one, two,
-        np.ascontiguousarray(masks, dtype=np.int64), np.ascontiguousarray(other, dtype=np.int64),
-        np.ascontiguousarray(public_ids, dtype=np.int32),
-        np.ascontiguousarray(local_keys, dtype=np.int32))
-
-
 def minimum_switch_counts(paths: np.ndarray) -> np.ndarray:
     """int64[N] minimum track changes of each path; a pure track swap counts as none."""
     if paths.shape[2] < 2:
@@ -741,17 +371,26 @@ def direct_support(paths, named_alleles, informative, bin_starts, bin_stops, bac
 
 
 @njit(cache=True)
-def _distinguishable(first, second, sample, bin_index, named_alleles, observed, bin_starts, bin_stops,
+def _distinguishable(first, second, partner, sample, bin_index, named_alleles, observed, bin_starts, bin_stops,
                      n_classes):
-    """True if states ``first`` and ``second`` have different calls at a site of the bin that the
-    sample observes (read depth > 0; BACKGROUND is uncalled everywhere; uncalled = -1 is a value).
-    Discrete: the observed mask and the calls, so GL noise cannot move it."""
+    """True if the pairs (first, partner) and (second, partner) have different genotype laws at a site of the bin
+    that the sample observes (read depth > 0), i.e. their emissions can differ there. Discrete: the observed mask and
+    the calls, so GL noise cannot move it.
+
+    Different calls (0, 1 or uncalled = -1; BACKGROUND is uncalled everywhere) differ. Equal calls give equal laws,
+    except where both are uncalled and exactly one of the two classes is the partner's own class: two
+    tracks in one class share one latent allele (no heterozygote), two different classes do not (release 2.14; the
+    interval used to treat every equal call, -1 included, as interchangeable)."""
+    first_shared = first == partner and first < n_classes
+    second_shared = second == partner and second < n_classes
     for site in range(bin_starts[bin_index], bin_stops[bin_index]):
         if not observed[sample, site]:
             continue
         first_call = named_alleles[first, site] if first < n_classes else -1
         second_call = named_alleles[second, site] if second < n_classes else -1
         if first_call != second_call:
+            return True
+        if first_call < 0 and first_shared != second_shared:
             return True
     return False
 
@@ -762,7 +401,8 @@ def switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops,
 
     A track change a -> b of the (gauge-fixed) Viterbi path at the edge after bin e can sit at any
     edge of the maximal run of bins around e in which a and b are indistinguishable for the sample
-    (no observed site of the bin where their calls differ, :func:`_distinguishable`): the data cannot
+    (paired with the other track's state, no observed site of the bin where their genotype laws differ,
+    :func:`_distinguishable`): the data cannot
     place the switch inside the run (its emissions are equal for both), so only the
     transition prior places the switch there, and the traceback convention breaks exact ties. The
     bins of that run get both a and b as candidates; elsewhere the candidate is the Viterbi state.
@@ -789,15 +429,16 @@ def switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops,
             # Left: bins left_edge+1 .. edge could carry ``after`` (bin previous_edge + 1 keeps ``before``).
             left_edge = edge
             while (left_edge - 1 >= previous_edge + 1
-                   and not _distinguishable(before, after, sample, left_edge, named_alleles, observed,
-                                            bin_starts, bin_stops, n_classes)):
+                   and not _distinguishable(before, after, paths[sample, 1 - track, left_edge], sample, left_edge,
+                                            named_alleles, observed, bin_starts, bin_stops, n_classes)):
                 left_edge -= 1
             # Right: bins edge+1 .. right_edge could carry ``before`` (bin next_edge keeps ``after``;
             # next_edge = B - 1 at the last switch).
             right_edge = edge
             while (right_edge + 1 <= next_edge - 1
-                   and not _distinguishable(before, after, sample, right_edge + 1, named_alleles, observed,
-                                            bin_starts, bin_stops, n_classes)):
+                   and not _distinguishable(before, after, paths[sample, 1 - track, right_edge + 1], sample,
+                                            right_edge + 1, named_alleles, observed, bin_starts, bin_stops,
+                                            n_classes)):
                 right_edge += 1
             for bin_index in range(left_edge + 1, right_edge + 1):
                 masks[sample, track, bin_index] |= (np.int64(1) << before) | (np.int64(1) << after)
@@ -854,26 +495,80 @@ def combine_candidate_masks(primary, secondary):
     return result
 
 
-def decode_candidates(emissions, transitions, local_keys, named_alleles, observed, bin_starts, bin_stops,
-                      n_classes, *, reverse=None):
-    """(paths int32[N, 2, B], candidate masks int64[N, 2, B], switch counts int64[N], the mirrored convention's
-    paths int32[N, 2, B]) of one batch (release 2.2).
+@njit(cache=True, inline="always")
+def _mask_change(previous, current, bin_index, local_keys, n_classes, n_states):
+    """(changed, visible) of one track moving between candidate masks: (0, 0) when the masks share a state; else
+    changed, and allele-invisible, (1, 0), when some pair of their states shares a local key below C in bin_index - 1
+    or bin_index (:func:`_allele_visible_change`), else (1, 1)."""
+    if previous & current:
+        return 0, 0
+    for first in range(n_states):
+        if not (previous >> first) & 1:
+            continue
+        for second in range(n_states):
+            if (current >> second) & 1 and _allele_visible_change(first, second, bin_index, local_keys,
+                                                                  n_classes) == 0:
+                return 1, 0
+    return 1, 1
 
-    The gauge-fixed Viterbi path of the run's convention (maths.ties.reverse_conventions(); ``reverse``
-    overrides it) gives the released track order; the mirrored convention's path is decoded too, each path's
-    switch intervals are taken (:func:`switch_interval_masks`) and the two candidate sets are combined
-    (:func:`combine_candidate_masks`), so no released candidate set depends on the traceback convention. Switch
-    counts are the fewer of the two paths' minimum track changes (fewest switches, a stated prior).
+
+@njit(cache=True, parallel=True)
+def canonical_track_order(masks, local_keys, n_classes):
+    """bool[N, B]: whether to exchange the two tracks of each bin, so that the track order (the H1/H2 gauge) is a
+    function of the unordered candidate pairs alone (release 2.14).
+
+    The unordered pair of candidate masks of a bin does not depend on the traceback convention
+    (:func:`combine_candidate_masks`); the order read from one convention's Viterbi path did (its final state and
+    traceback run from opposite ends). Right to left, as the default traceback: the last bin puts the smaller mask on
+    track 0; every earlier bin takes the orientation with fewer track changes towards the bin after it (a track
+    keeps its identity while consecutive masks share a state), then fewer allele-visible changes, and when both
+    orientations are equal, the smaller mask on track 0. Unordered states, posteriors, switch counts and releases are
+    unchanged. O(N B) for single-state masks (O(N B S^2) at worst).
     """
-    from ..maths import ties
-    if reverse is None:
-        reverse = ties.reverse_conventions()
-    decoded = []
-    for convention in (bool(reverse), not bool(reverse)):
-        paths = parsimonious_track_order(viterbi_paths(emissions, transitions, reverse=convention),
-                                         local_keys, n_classes)
-        masks = switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops, n_classes)
-        decoded.append((paths, masks))
-    (paths, primary), (other_paths, secondary) = decoded
-    counts = np.minimum(minimum_switch_counts(paths), minimum_switch_counts(other_paths))
-    return paths, combine_candidate_masks(primary, secondary), counts, other_paths
+    n_samples, _, n_bins = masks.shape
+    n_states = local_keys.shape[1]
+    swap = np.zeros((n_samples, n_bins), dtype=np.bool_)
+    for sample in prange(n_samples):
+        if n_bins == 0:
+            continue
+        last = n_bins - 1
+        first = masks[sample, 0, last]
+        second = masks[sample, 1, last]
+        exchange = second < first
+        swap[sample, last] = exchange
+        next_first = second if exchange else first
+        next_second = first if exchange else second
+        for bin_index in range(n_bins - 2, -1, -1):
+            first = masks[sample, 0, bin_index]
+            second = masks[sample, 1, bin_index]
+            # The change between bin_index and bin_index + 1 is judged on the local keys of both bins.
+            direct_first, direct_visible_first = _mask_change(
+                next_first, first, bin_index + 1, local_keys, n_classes, n_states)
+            direct_second, direct_visible_second = _mask_change(
+                next_second, second, bin_index + 1, local_keys, n_classes, n_states)
+            crossed_first, crossed_visible_first = _mask_change(
+                next_first, second, bin_index + 1, local_keys, n_classes, n_states)
+            crossed_second, crossed_visible_second = _mask_change(
+                next_second, first, bin_index + 1, local_keys, n_classes, n_states)
+            direct = direct_first + direct_second
+            crossed = crossed_first + crossed_second
+            if direct != crossed:
+                exchange = crossed < direct
+            elif direct_visible_first + direct_visible_second != crossed_visible_first + crossed_visible_second:
+                exchange = (crossed_visible_first + crossed_visible_second
+                            < direct_visible_first + direct_visible_second)
+            else:
+                exchange = second < first
+            swap[sample, bin_index] = exchange
+            next_first = second if exchange else first
+            next_second = first if exchange else second
+    return swap
+
+
+def apply_track_order(swap: np.ndarray, *arrays: np.ndarray) -> None:
+    """Exchange the two tracks of each [N, 2, B] array in place where ``swap`` [N, B] is set."""
+    rows, columns = np.nonzero(swap)
+    for array in arrays:
+        first = array[rows, 0, columns].copy()
+        array[rows, 0, columns] = array[rows, 1, columns]
+        array[rows, 1, columns] = first

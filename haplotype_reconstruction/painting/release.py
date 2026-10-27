@@ -1,9 +1,12 @@
 """Release rule and the painting product.
 
 Per sample, bin and track the decoder gives a Viterbi state (gauge-fixed track
-order) and two posterior masses: qV, the mass of the Viterbi state's unordered
-public class pair, and qA, the mass of its unordered pair of per-bin local
-allele-equivalence keys (qA >= qV). Release, with tau = minimum_release_posterior:
+order) and the gate's two posterior masses (release 2.14: the faithful masses qF
+and qAF of painting.fidelity, with both tracks copying their rows without a panel
+error; 2.13 used qV and qA): the mass of the Viterbi state's unordered public
+class pair, and that of its unordered pair of per-bin local allele-equivalence
+keys (the second >= the first); written qV and qA below. Release, with
+tau = minimum_release_posterior:
 
 1. qV >= tau: both tracks are released as their classes: a singleton anchored
    class names its row (SINGLETON_NAMED), a pooled class its rows
@@ -232,7 +235,12 @@ class RelabelMove:
     position: bp position of its first site; rows: the two founder rows;
     score_gain_switches: summed Viterbi score gain in units of one track change;
     painted_switch_change: change of the painted switch total (negative);
-    winners, losers: samples whose painted switches fall / rise.
+    winners, losers: samples whose painted switches fall / rise;
+    winners_forward, winners_reverse (release 2.14): winners whose decoded path, under the labels before the move,
+        switches from rows[0] to rows[1] at the link, or from rows[1] to rows[0]. A label exchange of two founders'
+        rows makes carriers of either founder switch, so both directions are expected; one shared recombinant
+        lineage switches one way only, and the panel's founder identity across the link is then not identified
+        (``identified`` False: the move is released as identity-ambiguous).
     """
 
     atomic_span: int
@@ -242,6 +250,13 @@ class RelabelMove:
     painted_switch_change: int
     winners: tuple[int, ...]
     losers: tuple[int, ...]
+    winners_forward: int = 0
+    winners_reverse: int = 0
+
+    @property
+    def identified(self) -> bool:
+        """Winners switch in both directions (a label exchange of two founders' carriers)."""
+        return self.winners_forward > 0 and self.winners_reverse > 0
 
 
 @dataclass(frozen=True)
@@ -313,7 +328,7 @@ def release_tracks(states: PaintingStates, paths: np.ndarray, eligible: np.ndarr
     """Staged release of the Viterbi tracks: (labels, classes, status), each [N, 2, B].
 
     ``paths`` int32[N, 2, B] gauge-fixed Viterbi states; ``qv``/``qa``
-    float64[N, B] (masses over the candidate sets, painting.hmm.release_posteriors);
+    float64[N, B] (the faithful-copy masses of the Viterbi pairs, painting.fidelity.release_posteriors);
     ``support`` bool[N, 2, B] direct read support of each Viterbi track;
     ``threshold`` = tau; ``masks`` int64[N, 2, B] candidate states (None = the
     Viterbi state alone): an interval track of a released bin gets SWITCH_INTERVAL.

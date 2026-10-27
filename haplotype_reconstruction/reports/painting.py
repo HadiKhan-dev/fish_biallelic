@@ -9,8 +9,12 @@ and sample-switch tables of one painted chromosome.
   founder_counts.tsv           per component: how firmly its founder count is determined (final count step,
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.tsv          painted switches per sample relative to the cohort median
+  label_continuity.tsv         every accepted label-continuity move with its winners' switch directions and
+                               whether the founder identity across its link is identified (release 2.14)
   sample_segments.tsv          the released painting per sample: runs of bins with one release (status, named
                                founder row, candidate rows), switch intervals included (release 2.2)
+  painting_model.tsv           per component: the estimated copying model (ancestry-change rate, panel-error
+                               entry and exit, the emissions' site correlation; release 2.14)
 
 Carrier support uses released named painting tracks intersected with positive read depth: it is
 painting-dependent, not independent lineage evidence or a phasing probability, and samples are correlated.
@@ -265,4 +269,48 @@ def _write_tables(output, file, contig: str, positions, store_manifest=None) -> 
     segments = pd.DataFrame(segment_rows(painting, recorded_input_order(store_manifest)),
                             columns=("SampleID", "Component", "Track", "Start", "End", "Status", "Label", "Rows"))
     written.append(write_frame(directory / "sample_segments.tsv", segments, sep="\t"))
+    written.append(write_frame(directory / "label_continuity.tsv", pd.DataFrame(
+        label_continuity_rows(painting),
+        columns=("Component", "AtomicSpan", "Position", "RowA", "RowB", "ScoreGainSwitches", "PaintedSwitchChange",
+                 "Winners", "Losers", "WinnersAtoB", "WinnersBtoA", "Identity")), sep="\t"))
+    written.append(write_frame(directory / "painting_model.tsv", pd.DataFrame(
+        painting_model_rows(painting),
+        columns=("Component", "FirstVariant1Based", "LastVariant1Based", "Bins", "States", "ErrorCapableClasses",
+                 "SwitchRatePerMorgan", "ErrorEntry", "ErrorExit", "ErrorRunBinsKeepingLabel", "SiteCorrelation",
+                 "EligibleSamples")), sep="\t"))
     return written
+
+
+def painting_model_rows(painting) -> list[tuple]:
+    """One row per component with bins (release 2.14): the copying model painting estimated from all its samples
+    (painting.fidelity.estimate_chain): rho, the panel-error chain's entry a and exit b (ErrorRunBinsKeepingLabel =
+    1 / b, the mean length of a run that keeps its label; a at its floor 1e-6 is a boundary fit: no support for error
+    runs) and the site correlation r of the emissions' design effect."""
+    rows = []
+    for index, component in enumerate(painting.components):
+        if component.bins.n_bins == 0:
+            continue
+        transitions = component.transitions
+        capable = int(sum(1 for value in component.states.anchored if value))
+        rows.append((index, int(component.states.positions[0]), int(component.states.positions[-1]),
+                     int(component.bins.n_bins), int(component.states.n_states), capable,
+                     float(transitions.switch_rate), float(transitions.error_entry), float(transitions.error_exit),
+                     (1.0 / transitions.error_exit) if transitions.error_exit > 0 else None,
+                     float(transitions.site_correlation), int(component.eligible.sum())))
+    return rows
+
+
+def label_continuity_rows(painting) -> list[tuple]:
+    """One row per accepted label-continuity move (release 2.14): Identity is 'two_way' when winners switch in both
+    directions (a label exchange of two founders' carriers) and 'ambiguous' otherwise (consistent with one shared
+    recombinant lineage: the relabelling is kept, the founder identity across the link is not identified)."""
+    rows = []
+    for component, outcome in enumerate(painting.label_continuity):
+        if not outcome.accepted:
+            continue
+        for move in outcome.moves:
+            rows.append((component, move.atomic_span, move.position, move.rows[0], move.rows[1],
+                         round(move.score_gain_switches, 3), move.painted_switch_change, len(move.winners),
+                         len(move.losers), move.winners_forward, move.winners_reverse,
+                         "two_way" if move.identified else "ambiguous"))
+    return rows

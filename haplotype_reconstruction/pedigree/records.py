@@ -61,7 +61,7 @@ class HammingTransition:
 
 @dataclass(frozen=True)
 class SourceFactors:
-    """Exact painting source-posterior chain of every sample as a candidate parent.
+    """Exact source-posterior chain of every sample as a candidate parent (pedigree's reduced source model).
 
     initial:      float64 [N, S, S] normalised ordered-diplotype law of bin 0 (homologue-symmetrised).
     right_weight: float64 [N, B-1, S, S] backward factors r_b(v), max-normalised per boundary, so that

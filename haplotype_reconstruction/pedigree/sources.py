@@ -1,7 +1,9 @@
-"""Exact painting source posterior of every sample as a candidate parent.
+"""Exact source posterior of every sample as a candidate parent, within pedigree's reduced source model.
 
-A sample's painting is an HMM over ordered diplotypes (S^2 states, S = classes + BACKGROUND) with the
-painting's Hamming transition, which is symmetric and depends only on how many founders change.
+A sample's source chain is an HMM over ordered diplotypes (S^2 states, S = classes + BACKGROUND) with the
+painting's label-level Hamming transition, which is symmetric and depends only on how many founders change, and its
+tempered emissions; it leaves out painting's panel-error state (release 2.14), so it is not the marginal of the
+painting's own chain.
 Its backward pass is stored compactly as initial probabilities and max-normalised right weights
 r_b (O(N B S^2)); the posterior chain kernel K_b(u, v) = A_b(u, v) r_b(v) / sum_w A_b(u, w) r_b(w)
 and the per-bin marginals follow in O(S^2) per bin through row, column and total sums (never an
