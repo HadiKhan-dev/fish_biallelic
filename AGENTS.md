@@ -40,6 +40,8 @@ These override cost, speed and convenience. Each is detailed in the section cite
     opportunity every five minutes (§6.6).
 12. **Leave the environment alone and keep secrets private.** No installs or Conda changes without approval. Never
     print `.env` files, credentials or tokens (§3.4, §7.1).
+13. **One end-to-end validation per release candidate.** Validate individual fixes with targeted checks where they
+    act. Run the pipeline end to end only once, on the final integrated candidate (§2.6, §5.5).
 
 ## 2. Science
 
@@ -172,6 +174,15 @@ interpretation.
 ### 2.6 Validation
 
 Match validation to the change.
+- **Validate each fix where it acts, not end to end** (owner, 26 October 2026).
+  - Check a fix to one stage with targeted checks of that stage:
+    - the reproducing fixture;
+    - replays of the affected blocks or components on saved checkpoint inputs;
+    - competing outputs scored under common inputs;
+    - stage-level metrics.
+  - Never run the whole pipeline to judge an individual fix. A problem further downstream can make a correct fix
+    look worse, and end-to-end runs are slow.
+  - A release candidate gets exactly one end-to-end validation, once all its fixes are integrated (§5.5).
 - **Non-numerical changes:** focused execution paths, import or syntax checks, small fixtures, schema checks and
   regression checks on the affected behaviour.
 - **Numerical or scientific changes:**
@@ -640,8 +651,12 @@ validations and tests and runs".
   it.
 - **Check the queue first.** Never queue a test whose answer, or a newer version of it, is already queued or known.
 - **Validate proportionately.**
-  - Use focused, bounded tests for what changed.
+  - Use focused, bounded tests for what changed (§2.6).
   - Run broad matrices (every dataset, noise cell, reversal and renaming) once, on the final integrated candidate.
+    That single end-to-end matrix is the release's only end-to-end validation. Individual fixes never get their own
+    end-to-end runs.
+  - Runs of the released baseline that serve the final comparison, such as a noise-control distribution, are not fix
+    validation. Say so when proposing them.
   - Never rerun checks whose code and inputs have not changed.
 - **Cancel superseded work at once.** A task is superseded when its question has been answered, or when a newer
   candidate, tree or configuration replaces what it tests. Examples:
