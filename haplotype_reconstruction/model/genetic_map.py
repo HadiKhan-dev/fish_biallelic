@@ -9,8 +9,8 @@ Genetic distances d (Morgans) become the probabilities the models use through:
 
     haldane_fraction(d)          (1 - e^{-2d}) / 2: recombination fraction of one meiosis (a Numba function, callable
                                  from Python with float64 scalars or arrays and inlined into kernels): painting's
-                                 bin-to-bin switches, the recombination decoder, screening and junction hotspots
-    poisson_switch_stay_terms    1 - e^{-d} switch probabilities and their log switch/stay costs (pedigree path model)
+                                 bin-to-bin switches, pedigree's transmission selector, the recombination
+                                 decoder, screening and junction hotspots
 
 Family phase computes the Haldane fraction of its marker intervals with NumPy's vectorised expm1 (solver.py), which
 differs from the scalar expm1 of these kernels in the last bit, and local selection's copying path model uses
@@ -158,28 +158,6 @@ class ChromosomeGeneticMap:
         """Small semantic identity (independent of the file it came from) for stage identities."""
         return dict(format=MAP_FORMAT, contig=self.contig, default_rate_cm_per_mb=self.default_rate_cm_per_mb,
                     knots=len(self.positions_bp), map_sha256=self._digest if self.has_map else None)
-
-
-def poisson_switch_stay_terms(marker_positions, recombination_rate, *, probability_floor=1e-15,
-                              probability_cap=0.5, chromosome_map: ChromosomeGeneticMap | None = None):
-    """Per-marker switch probabilities and their switch/stay log costs (pedigree path model).
-
-    Distances are between adjacent markers (zero for the first). The switch probability is
-    ``1 - exp(-distance x rate)`` (genetic distance from ``chromosome_map`` when given) clipped to
-    [probability_floor, probability_cap]. Returns (probabilities, log probabilities, log(1 - probabilities)).
-    """
-    positions = np.asarray(marker_positions, dtype=np.float64)
-    distances = np.zeros(len(positions), dtype=np.float64)
-    if len(positions) > 1:
-        distances[1:] = np.diff(positions)
-    mass = distances * recombination_rate
-    if chromosome_map is not None:
-        if chromosome_map.has_map:
-            mass[1:] = chromosome_map.interval_morgans(positions[:-1], positions[1:])
-        else:
-            mass = distances * chromosome_map.fallback_rate_per_bp
-    probabilities = np.clip(1.0 - np.exp(-mass), probability_floor, probability_cap)
-    return probabilities, np.log(probabilities), np.log(1.0 - probabilities)
 
 
 @dataclass(frozen=True, eq=False)

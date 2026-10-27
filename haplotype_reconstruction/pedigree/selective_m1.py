@@ -14,7 +14,7 @@ def outward_sum(values):
 @njit(cache=True,parallel=True)
 def _dyads(pairs,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,excursion,branch,
            available,state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,
-           mismatch,zero,products,first_child,powered):
+           null_frequency,mismatch,zero,products,first_child,powered):
     output=np.empty(len(pairs))
     for i in prange(len(pairs)):
         c,p=pairs[i]
@@ -23,14 +23,14 @@ def _dyads(pairs,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,excur
         else:
             a,b=forward._score_path(c,p,0,1,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,
                 excursion,branch,state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,
-                mismatch,products,first_child,powered)
+                null_frequency,mismatch,products,first_child,powered)
             output[i]=.5*(a+b)
     return output
 
 
 def terms_args(p,t):
     return (p.state_alt,t.gl,t.coefficient,t.site_index,t.site_start,t.site_stop,t.exponent,
-            t.null_diagonal,t.null_off,t.mismatch)
+            t.null_diagonal,t.null_off,t.null_frequency,t.mismatch)
 
 
 def zero(p,t,eligible_children,claim_threads):

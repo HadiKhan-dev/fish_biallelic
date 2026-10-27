@@ -672,6 +672,7 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `scoring.source_gap_support_sites` | `1` | A candidate-parent bridge mixes in the uniform selector kernel with weight switch probability x (1 - min(1, n / N)), n = the smaller informative selected-marker count of the two adjacent parent bins, N = this value; 0 keeps the painter-interpolated chain. |
 | `scoring.bridge_tolerance` | `2e-13` | Maximum-entropy bridge: root-finding tolerance and bisection budget. |
 | `scoring.bridge_max_iterations` | `128` |  |
+| `scoring.null_prior_samples` | `1.0` | Null source of an unobserved parent's slot: it starts from, and redraws from, the founder-state frequencies transmitted by the other samples with an informative painting site (leave the child out), with a uniform pseudo-count of this many samples (keeps a state no other sample carries possible). |
 | **panel** (PanelConfig) |  | Genome-wide retained-parent M2 panel; legacy screen constants remain for compatibility. |
 | `panel.parents_per_child` | `20` | Legacy reference only; production includes every eligible pair of genome-retained M1 parents. |
 | `panel.information_tempering_power` | `0.5` | Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power. |

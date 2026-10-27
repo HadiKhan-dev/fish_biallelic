@@ -63,8 +63,8 @@ linearly through their whole gap. Each model turns distances d (Morgans) into pr
 
 | form | used by |
 | --- | --- |
-| Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), family phase and phase polishing, the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
-| the probability of at least one event of a Poisson process, 1 - e^(-d) | pedigree's selector switches (`poisson_switch_stay_terms`, which also returns the log switch and stay costs) and local selection's copying path model, with d multiplied by `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` |
+| Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), pedigree's transmission selector between bins (within [1e-15, 0.5]; release 2.15, before which it used 1 - e^(-d)), family phase and phase polishing, the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
+| the probability of at least one event of a Poisson process, 1 - e^(-d) | local selection's copying path model, with d multiplied by `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` |
 
 Family phase evaluates the Haldane fraction of its marker intervals with NumPy's vectorised `expm1`, which can
 differ from the compiled kernels' scalar `expm1` in the last bit.

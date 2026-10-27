@@ -12,7 +12,7 @@ from dataclasses import replace
 import numpy as np
 from numba import njit, prange
 
-from ..model.genetic_map import poisson_switch_stay_terms
+from ..model.genetic_map import haldane_fraction
 from ..painting import hmm as painting_hmm
 from . import sources
 from .config import PreparationConfig
@@ -26,6 +26,8 @@ _UNANCHORED_STATUS = 5
 # worker's CPU lease grow (no value changes).
 _EMISSION_SAMPLE_BLOCK = 16
 OMITTED = "no_observed_nonuniform_component_evidence"
+# Smallest selector switch probability between bins (bins at equal map positions keep a finite switch cost).
+SELECTOR_SWITCH_FLOOR = 1e-15
 
 
 def selected_markers(positions: np.ndarray, bin_edges: np.ndarray,
@@ -152,8 +154,10 @@ def _prepare_component(index: int, painted, evidence, painting_config, chromosom
     del emissions
     unknown = (painted.status == _BACKGROUND_STATUS) | (painted.status == _UNANCHORED_STATUS)
     state_classes = np.where(unknown, -1, painted.classes).astype(np.int16)
-    theta = poisson_switch_stay_terms(bins.centers, chromosome_map.fallback_rate_per_bp,
-                                      chromosome_map=chromosome_map)[0]
+    # Which parental homologue is transmitted changes between adjacent bin centres when an odd number of
+    # crossovers falls between them: one meiosis's Haldane recombination fraction, kept within [floor, 1/2].
+    theta = np.clip(haldane_fraction(chromosome_map.interval_morgans(bins.centers[:-1], bins.centers[1:])),
+                    SELECTOR_SWITCH_FLOOR, 0.5)
     return PreparedComponent(
         component_index=index,
         named_alleles=np.ascontiguousarray(states.named_alleles[:, chosen]),
@@ -162,7 +166,7 @@ def _prepare_component(index: int, painted, evidence, painting_config, chromosom
         anchored_states=np.concatenate((np.any(states.named_alleles >= 0, axis=1), [False])),
         transition=transition, factors=factors,
         robustness_epsilon=float(painting_config.robustness_epsilon),
-        selector_switch_probability=np.ascontiguousarray(theta[1:]),
+        selector_switch_probability=np.ascontiguousarray(theta),
         genotype_likelihoods=gl, observed=observed,
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
         information_exponent=np.empty((gl.shape[0], 0)))

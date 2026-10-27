@@ -40,6 +40,10 @@ class ScoringConfig:
     # Maximum-entropy bridge: root-finding tolerance and bisection budget.
     bridge_tolerance: float = 2e-13
     bridge_max_iterations: int = 128
+    # Null source of an unobserved parent's slot: it starts from, and redraws from, the founder-state frequencies
+    # transmitted by the other samples with an informative painting site (leave the child out), with a uniform
+    # pseudo-count of this many samples (keeps a state no other sample carries possible).
+    null_prior_samples: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,123 @@
 # Changelog
 
+## 2.15.0 (28 October 2026)
+
+This release works on pedigree inference (stage 6). Its unobserved-parent null drew every founder state with equal
+probability, so in a cross where a few founder haplotypes dominate, "no observed parent" paid for common haplotypes as
+if they were rare, and a sampled relative of the child's unsampled parent could look like a parent. 2.15 draws the
+unobserved parent's transmitted state from the sample's own transmitted-state frequencies, corrects the meiotic
+selector to the probability of an odd number of crossovers, fits each distinct bootstrap weighting once, and corrects
+the method documentation. Released results change: Tier B gains true parent edges on the std simulation, and one
+TroMau two-parent call no longer meets chromosome-resampling support (it stays the complete view's call); nothing
+upstream of pedigree changes.
+
+**Sample-frequency null source** (`pedigree/forward.py` `null_frequencies`, `ChildTerms`, `_apply_null`,
+`_score_path`; `pedigree/block_certificate_fast.py`; `pedigree/selective_bounds.py`, `pedigree/selective_m1.py`,
+`pedigree/scoring.py`; `PedigreeConfig.scoring.null_prior_samples = 1.0`; `docs/methods/pedigree.md`, Child forward
+model). An unobserved parent's slot (both slots of M0, the second of M1) now starts from, and redraws from, the
+leave-one-out frequency f_cb(s) = (Σ_{j ≠ c} a_j π_jb(s) + w/S) / (Σ_{j ≠ c} a_j + w) at which the other samples with
+an informative painting site transmit founder state s at bin b, with a uniform pseudo-count of w = 1 sample (a
+regulariser): an empirical, persistent copying null in the spirit of the sample-allele-frequency null of parentage
+likelihoods, at founder-state resolution. Per bin edge the slot keeps its state with the old kernel's persistence
+weight k and otherwise redraws from f_c,b+1, so its marginal follows m_c,b+1 = k m_cb + (1 − k) f_c,b+1 (f is the
+initial and redraw law, not the marginal at every bin); with uniform frequencies this is exactly the old kernel
+(measured: largest difference 5.7e-14 nats of the M0/M1 screen with the frequencies forced uniform). A saturated
+kernel whose persistence weight rounds below zero is set to zero persistence; a materially negative weight is an
+error. The production M1 certificate's null step uses the same law (every term stays nonnegative); the private
+relaxation bound only needs the null's unit row sums. The frequencies pool every informative sample (descendants and
+large sibships included): they describe the sampled population, and leaving the child out removes its own row, not
+its influence on the shared paintings. Cost: one float64 [N, B, S] array per component (8 N B S bytes), O(N B S).
+- Validation (pedigree replays of the 2.14 end-to-end runs' saved paintings and evidence, all other stages fixed;
+  simulation truth; parents compared as sets): std Tier B 38 -> 39 exact configurations of 40, 57 -> 59 of 60 true
+  edges, 0 extra; f3 (every sample truly without observed parents) complete view 13 -> 16 exact, false edges
+  136 -> 127, Tier B unchanged (5 certified M0 states); backcross unchanged; K30 Tier B and complete view unchanged
+  in aggregate, but its supported partial edges fall from 10 to 8 true (F2_2's two parents and one of F2_3's lost,
+  one of F2_17's gained; no false partial edge) and 3 samples' Tier-B state flags change. TroMau: complete view
+  identical; Tier B releases 2021cicX14537327's two parents no longer (its genetic M2-over-M1 contrast falls from 61.0
+  to 17.3 nats before the predictive scale, the marginal state margin from 5.0 to 0.38 nats, bootstrap support
+  0.87 -> 0.55; the call stays the complete view's), and 3 samples' Tier A flags change. Over TroMau's released
+  calls the state margins fall by a median 2.6 nats (one parent) and 3.4 nats (two parents) genome-wide: a common
+  founder state is cheaper for an unsampled parent, which weakens relatives and true parents alike; the change is not
+  monotone in parentage accuracy.
+- A new missing-parent simulation (cohorts 10/20/30, 75% of individuals sequenced at random, 8 chromosomes; 45
+  samples: 8 with no, 22 with one and 15 with two observed parents): Tier B 43 -> 44 exact of 45 (the last M0 child
+  recovered; one-parent 22/22 and two-parent 14/15 unchanged), 50 of 52 true edges, no false edge or wrong state
+  claim; complete view 45/45 in both. A larger simulation (N = 320, cohorts 20/100/200, 5 chromosomes): 320/320
+  exact, 600/600 edges in both.
+- The pseudo-count w = 1 is a fixed choice, not tuned. Sensitivity (std, f3, K30, TroMau, missing-parent; backcross
+  not run): w = 0.1 gives identical calls everywhere; w = 10 lowers std's Tier B from 39 to 37 exact configurations
+  and from 59 to 55 true edges (partial 59 -> 57; complete view and false edges unchanged) and moves one K30 Tier-B
+  state flag and one missing-parent Tier-A flag. A stronger pull towards uniform frequencies loses true std parents.
+- Every released edge of std and TroMau stays Mendelian-compatible on the raw genotype likelihoods (full-marker
+  exclusion log E at most -7.19 and -3.74, against release thresholds of 8.99 and 10.05).
+
+**Meiotic selector: odd crossover parity** (`pedigree/prepare.py`; `model/genetic_map.py`; `docs/genetic_maps.md`).
+Which parental homologue a child receives changes between two bin centres when an odd number of crossovers falls
+between them, θ = (1 − e^(−2d))/2 (Haldane's recombination fraction of one meiosis, `haldane_fraction`), clipped to
+[1e-15, 0.5]. 2.14 used 1 − e^(−d), the probability of at least one crossover, which treats an even number as a
+switch (the projection applies θ as a homologue flip). The largest relative difference is about 2.3% of θ on TroMau's
+bins and 0.6% on the simulations; no released or complete-view call changed on the five validation cases (TroMau
+included). The now-unused `poisson_switch_stay_terms` helper is removed.
+
+**Bootstrap fits once per distinct weighting** (`pedigree/resampling.py`). A resampled fit is a deterministic function
+of its chromosome multiplicities, so each distinct multiplicity vector of the 1,000 seeded draws is fitted once and its
+selections, failures and fits are counted as many times as it was drawn (LOCO stays separate). With few chromosomes
+most draws repeat (10 distinct vectors at C = 3, 118 at C = 5, 840 at C = 8, all 1,000 at C = 22). Every pedigree
+table is byte-identical to fitting each draw (five cases; only the calibration report's timing fields differ). End
+to end, K30's pedigree stage took 17.1 instead of 27.9 s; with 22 chromosomes (TroMau) every draw is distinct.
+
+**Method documentation** (`docs/methods/pedigree.md`). The cost section no longer claims a 190-row M2 panel per child
+or O(N²) decision rows: the retained-parent panel has no cap (measured: f3 43,052 rows, at most 2,415 per child), the
+decision has N + E + T rows, and the screen's C × N × N profile and the downstream arrays are dense in N (17.6 GB per
+float64 array at C = 22, N = 10,000). The tie tolerance states its 2^-15-nat floor; the unordered parent slot order
+states its name fallback for identical observed-site counts; two limitations are new (junctions on one homologue are
+transmitted together, which the binomial direction comparison ignores; a sampled relative of an unsampled parent can
+outscore the null, see below).
+
+**Measured, not changed.**
+- Stability: 1e-6 genotype-likelihood jitter (two seeds) and the convention reversal of the pedigree stage
+  (upstream records fixed) leave every released, partial and complete-view parent set and every state and tier
+  flag unchanged on the five cases, for 2.14 and 2.15 (the unordered Parent1/Parent2 label flips under the reversal,
+  as documented).
+- Parent versus related non-parent. A prototype related-but-not-parent slot (the child's homologue copies a candidate
+  inside IBD tracts that switch at the meiotic rate, the population null outside) scores true parents above it by
+  about 2.2 nats per chromosome (median; std and backcross; 0.6 on K30), while in the inbred f3 design full sibs fit
+  it better than as parents (by about 2.2 nats per chromosome). Outbred designs already reject relatives through
+  allele mismatches (M1 − M0 medians of −600 to −3,000 nats per chromosome). Mixing it into the decision's
+  unobserved-parent explanations was tried on the saved scores and these tested extensions were rejected: into M0
+  alone (per chromosome or genome-wide, mixture weights 0.1-0.9) it improves f3's complete view (16 -> 35-59 exact)
+  and, genome-wide, K30's Tier B (4 -> 18 true edges), but loses up to 7 true std Tier-B edges and creates 7-18 wrong
+  Tier-B state claims in the missing-parent design; into M1's unobserved slot as well, it calls true two-parent
+  children one-parent (std: 9 wrong claims and a false edge). A relative resembles a partially IBD parent, and these
+  mixtures let it compete with the parent hypothesis for the same candidate; a joint relationship classification
+  (parent, full sib, half-sib or grandparent, unrelated) is the proposed next design.
+- Tier-B state claims (all released parent counts, including those whose identity is unresolved) are not error-free
+  where relatives are numerous and founders hard to tell apart: K30 has 3 wrong of 28 (4 of 29 in 2.14), std 1 of 40
+  (a two-parent child claimed as one-parent, its released edge right). No released Tier-B edge is false in any
+  validation case.
+- Resampling at N = 320 (5 chromosomes) takes about 50 of the stage's 120 s and scales poorly with workers: 4 to 112
+  workers take 53 to 60 s for 118 distinct fits of about 1 s each, one worker 116 s; process start-up is a suspected
+  contributor (not separately timed).
+- f3 and K30 are difficult low-diversity designs, poorly separated by the present model; these tests do not separate
+  limited information from model inadequacy. f3 has about 7 founder haplotypes per chromosome and sibling matings
+  (kinship 0.22-0.50 between "unrelated" candidates; the full-marker exclusion leaves a compatible relative for most
+  samples on 3 chromosomes); with K30's low-divergence templates a true parent scores about 2 nats per chromosome
+  over M0, no more than a half-sib.
+
+**Known limitations.** The null does not model a sampled relative of the unsampled parent (above). The direction
+term's binomial transmission of junctions ignores their linkage on a homologue (bounded at log(2/ε_c − 1) nats per
+chromosome). Pedigree memory and decision arrays are dense in N; N = 10,000 needs a sparse representation. The
+ancestry-path factor's top-16 cutoff has an exact-equality boundary (no released call moved under the jitter).
+
+**End-to-end validation** (the release candidate, from scratch through founder refit, family phase skipped as in every
+validation since 2.7; inputs, configurations and seeds of the 2.13 final runs). On all five cases (std, f3, backcross,
+K30, TroMau) every stage up to and including painting is identical to 2.14 (0 differing founder-panel cells), founder
+refit is identical (it does not read the pedigree), and the pedigree tables are byte-identical to the stage replays
+above. Wall times 694, 714, 532, 2,230 and 6,150 s (2.14: 701, 747, 548, 2,317, 6,298; nodes of the same types); the
+pedigree stage took 13.0, 30.9, 10.8, 17.1 and 24.7 s (2.14: 12.7, 32.7, 12.1, 27.9, 29.9). The candidate that ran
+end to end differs from the release only by the saturated-kernel repair (byte-identical stage replays on all five
+cases) and text.
+
 ## 2.14.0 (27 October 2026)
 
 This release works on painting (stage 5). Its switch prior was an imposed switch-suppression prior: every track change

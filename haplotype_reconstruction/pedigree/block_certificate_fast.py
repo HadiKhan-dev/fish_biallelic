@@ -28,8 +28,8 @@ def power_common(common,children,exponent):
 
 @njit(cache=True,parallel=True)
 def block_upper(children,first,stop,site_first,refs,tv,mass,ref_mass,alt_low,alt_high,common,
-                state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,mismatch,
-                stay,alpha,beta,row_arm,column_arm,pivot,branch,excursion,powered,scales):
+                state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,null_frequency,
+                mismatch,stay,alpha,beta,row_arm,column_arm,pivot,branch,excursion,powered,scales):
     groups=len(refs);k=len(state_alt);length=stop-first
     output=np.empty((len(children),groups))
     for task in prange(len(children)*groups):
@@ -64,18 +64,13 @@ def block_upper(children,first,stop,site_first,refs,tv,mass,ref_mass,alt_low,alt
                     for t in range(k):value[s,t]*=emission[local,view,s,t]
                 score+=.5*scales[ci,b,view]
                 if b:
-                    nd,no=null_diag[c,b-1],null_off[c,b-1]
+                    # Null slot (exact): stay with nd - no >= 0 (ChildTerms checks), else move to a state drawn
+                    # from the child's null frequencies at bin b; every term is nonnegative.
+                    keep=null_diag[c,b-1]-null_off[c,b-1];move=k*null_off[c,b-1]
                     for s in range(k):
-                        if nd>=no:
-                            total=0.
-                            for t in range(k):total+=value[s,t]
-                            for t in range(k):work[s,t]=(nd-no)*value[s,t]+no*total
-                        else:
-                            for t in range(k):
-                                total=nd*value[s,t]
-                                for u in range(k):
-                                    if u!=t:total+=no*value[s,u]
-                                work[s,t]=total
+                        total=0.
+                        for t in range(k):total+=null_frequency[c,b,t]*value[s,t]
+                        for t in range(k):work[s,t]=keep*value[s,t]+move*total
                     boundary=b-1;piv=pivot[p,boundary];kind=branch[p,boundary]
                     for t in range(k):
                         lo_v[t]=np.inf;hi_v[t]=0.;sum_v[t]=0.;arm[t]=0.

@@ -1,9 +1,10 @@
 """M0 / M1 / M2 forward likelihoods of a child's genotype likelihoods (projected quadratic model).
 
 The hidden state of a child at a bin is the ordered pair of transmitted founder states (S^2 states):
-under M0 both come from the null source (every state equally likely, switching at the meiotic switch
-probability), under M1 the first comes from the candidate parent's projected transmission (pi,
-bridges), under M2 both come from the two parents. Emissions multiply the child's per-marker
+under M0 both come from the null source (a copying chain that starts from, and redraws from, the
+leave-one-out frequency of the founder states the other samples transmit), under M1 the
+first comes from the candidate parent's projected transmission (pi, bridges), under M2 both come from
+the two parents. Emissions multiply the child's per-marker
 likelihoods of the two transmitted alleles (with mismatch probability) over its observed markers
 of the bin. Each score pools two views with equal weight: tempered (bin emissions raised to the
 information exponent) and full strength, run in one pass that shares the emission products. Their
@@ -307,28 +308,36 @@ def _apply_excursion(current, output, probability, axis):
 
 
 @njit(cache=True)
-def _apply_null(current, output, diagonal, off, axis):
+def _apply_null(current, output, diagonal, off, frequency, axis):
+    """One null-slot step: stay with weight diagonal - off, else draw the destination from ``frequency``.
+
+    With uniform frequencies this is the symmetric kernel diagonal / off (rows sum to diagonal + (S - 1) off).
+    """
     states = current.shape[0]
     coefficient = diagonal - off
+    move = states * off
     if axis == 0:
         for second in range(states):
             total = 0.0
             for source in range(states):
                 total += current[source, second]
             for destination in range(states):
-                output[destination, second] = coefficient * current[destination, second] + off * total
+                output[destination, second] = (coefficient * current[destination, second]
+                                               + move * frequency[destination] * total)
     else:
         for first in range(states):
             total = 0.0
             for source in range(states):
                 total += current[first, source]
             for destination in range(states):
-                output[first, destination] = coefficient * current[first, destination] + off * total
+                output[first, destination] = (coefficient * current[first, destination]
+                                              + move * frequency[destination] * total)
 
 
 @njit(cache=True)
 def _advance(current, work, child, first_parent, second_parent, mode, boundary, stay, alpha, beta,
-             row_arm, column_arm, pivot, excursion, branch, null_diagonal, null_off, prefix, suffix):
+             row_arm, column_arm, pivot, excursion, branch, null_diagonal, null_off, null_frequency, prefix,
+             suffix):
     """Cross one bin edge on both selector axes; the result returns to ``current``."""
     if mode >= 1:
         _apply_bridge(current, work, stay[first_parent, boundary], alpha[first_parent, boundary],
@@ -339,7 +348,8 @@ def _advance(current, work, child, first_parent, second_parent, mode, boundary, 
         if probability > 0.0:
             _apply_excursion(current, work, probability, 0)
     else:
-        _apply_null(current, work, null_diagonal[child, boundary], null_off[child, boundary], 0)
+        _apply_null(current, work, null_diagonal[child, boundary], null_off[child, boundary],
+                    null_frequency[child, boundary + 1], 0)
     if mode == 2:
         _apply_bridge(work, current, stay[second_parent, boundary], alpha[second_parent, boundary],
                       beta[second_parent, boundary], row_arm[second_parent, boundary],
@@ -349,14 +359,15 @@ def _advance(current, work, child, first_parent, second_parent, mode, boundary, 
         if probability > 0.0:
             _apply_excursion(work, current, probability, 1)
     else:
-        _apply_null(work, current, null_diagonal[child, boundary], null_off[child, boundary], 1)
+        _apply_null(work, current, null_diagonal[child, boundary], null_off[child, boundary],
+                    null_frequency[child, boundary + 1], 1)
 
 
 @njit(cache=True)
 def _score_path(child, first_parent, second_parent, mode, pi, candidate_alt, stay, alpha, beta,
                 row_arm, column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient,
-                site_index, site_start, site_stop, exponent, null_diagonal, null_off, mismatch,
-                common_products, first_cached_child, common_powered):
+                site_index, site_start, site_stop, exponent, null_diagonal, null_off, null_frequency,
+                mismatch, common_products, first_cached_child, common_powered):
     """(tempered, full) forward log likelihood of one child under one configuration.
 
     The views keep their own forward state, scaling and underflow path and each stops at its first
@@ -374,9 +385,9 @@ def _score_path(child, first_parent, second_parent, mode, pi, candidate_alt, sta
     for first in range(states):
         for second in range(states):
             if mode == 0:
-                tempered[first, second] = 1.0 / (states * states)
+                tempered[first, second] = null_frequency[child, 0, first] * null_frequency[child, 0, second]
             elif mode == 1:
-                tempered[first, second] = pi[first_parent, 0, first] / states
+                tempered[first, second] = pi[first_parent, 0, first] * null_frequency[child, 0, second]
             else:
                 tempered[first, second] = pi[first_parent, 0, first] * pi[second_parent, 0, second]
             full[first, second] = tempered[first, second]
@@ -390,11 +401,11 @@ def _score_path(child, first_parent, second_parent, mode, pi, candidate_alt, sta
             if tempered_alive:
                 _advance(tempered, scratch, child, first_parent, second_parent, mode, boundary,
                          stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
-                         null_diagonal, null_off, prefix, suffix)
+                         null_diagonal, null_off, null_frequency, prefix, suffix)
             if full_alive:
                 _advance(full, scratch, child, first_parent, second_parent, mode, boundary,
                          stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
-                         null_diagonal, null_off, prefix, suffix)
+                         null_diagonal, null_off, null_frequency, prefix, suffix)
 
         stable_product = True
         for first in range(states):
@@ -481,7 +492,7 @@ def _score_path(child, first_parent, second_parent, mode, pi, candidate_alt, sta
 @njit(cache=True, parallel=True)
 def _m0_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
                state_alt, child_gl, coefficient, site_index, site_start, site_stop, exponent,
-               null_diagonal, null_off, mismatch, eligible_child):
+               null_diagonal, null_off, null_frequency, mismatch, eligible_child):
     tempered = np.empty(child_gl.shape[0], dtype=np.float64)
     full = np.empty(child_gl.shape[0], dtype=np.float64)
     for child in prange(child_gl.shape[0]):
@@ -489,7 +500,7 @@ def _m0_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot,
             tempered[child], full[child] = _score_path(
                 child, 0, 0, 0, pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot,
                 excursion, branch, state_alt, child_gl, coefficient, site_index, site_start,
-                site_stop, exponent, null_diagonal, null_off, mismatch, None, 0, None)
+                site_stop, exponent, null_diagonal, null_off, null_frequency, mismatch, None, 0, None)
         else:
             tempered[child] = -np.inf
             full[child] = -np.inf
@@ -499,7 +510,7 @@ def _m0_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot,
 @njit(cache=True, parallel=True)
 def _m1_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
                available, state_alt, child_gl, coefficient, site_index, site_start, site_stop,
-               exponent, null_diagonal, null_off, mismatch, eligible_edge, tempered_m0, full_m0,
+               exponent, null_diagonal, null_off, null_frequency, mismatch, eligible_edge, tempered_m0, full_m0,
                common_products, child_start, child_stop, common_powered):
     children = child_stop - child_start
     candidates = pi.shape[0]
@@ -519,7 +530,7 @@ def _m1_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot,
             tempered[local_child, parent], full[local_child, parent] = _score_path(
                 child, parent, 0, 1, pi, candidate_alt, stay, alpha, beta, row_arm, column_arm,
                 pivot, excursion, branch, state_alt, child_gl, coefficient, site_index, site_start,
-                site_stop, exponent, null_diagonal, null_off, mismatch, common_products,
+                site_stop, exponent, null_diagonal, null_off, null_frequency, mismatch, common_products,
                 child_start, common_powered)
     return tempered, full
 
@@ -527,7 +538,7 @@ def _m1_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot,
 @njit(cache=True, parallel=True)
 def _m2_kernel(trios, pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot, excursion,
                branch, state_alt, child_gl, coefficient, site_index, site_start, site_stop, exponent,
-               null_diagonal, null_off, mismatch, common_products, first_cached_child,
+               null_diagonal, null_off, null_frequency, mismatch, common_products, first_cached_child,
                common_powered):
     tempered = np.empty(len(trios), dtype=np.float64)
     full = np.empty(len(trios), dtype=np.float64)
@@ -535,9 +546,20 @@ def _m2_kernel(trios, pi, candidate_alt, stay, alpha, beta, row_arm, column_arm,
         tempered[row], full[row] = _score_path(
             trios[row, 0], trios[row, 1], trios[row, 2], 2, pi, candidate_alt, stay, alpha, beta,
             row_arm, column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient,
-            site_index, site_start, site_stop, exponent, null_diagonal, null_off, mismatch,
+            site_index, site_start, site_stop, exponent, null_diagonal, null_off, null_frequency, mismatch,
             common_products, first_cached_child, common_powered)
     return tempered, full
+
+
+def null_frequencies(pi: np.ndarray, available: np.ndarray, prior_samples: float) -> np.ndarray:
+    """float64 [N, B, S]: per child, the leave-one-out transmitted-state frequency of the other informative
+    samples with a uniform pseudo-count regulariser of ``prior_samples`` samples (see ChildTerms)."""
+    states = pi.shape[2]
+    weight = np.asarray(available, dtype=np.float64)
+    total = np.einsum("n,nbs->bs", weight, pi)
+    own = weight[:, None, None] * pi
+    counts = np.maximum(total[None] - own, 0.0) + prior_samples / states
+    return np.ascontiguousarray(counts / np.sum(counts, axis=2, keepdims=True))
 
 
 class ChildTerms:
@@ -545,12 +567,23 @@ class ChildTerms:
 
     gl float64 [N, M, 3], coefficient [N, M, 3], observed-marker CSR (site_index, site_start,
     site_stop), exponent float64 [N, B], null transition coefficients [N, B-1] (diagonal, off),
-    mismatch, the cache batch size and whether any exponent is fractional.
+    null_frequency float64 [N, B, S] (the null source's initial and redraw law per child and bin), mismatch, the
+    cache batch size and whether any exponent is fractional.
+
+    The null source of a child's unobserved parent slot starts from, and redraws from, the frequency at which the
+    other samples transmit each founder state, f_cb(s) = (sum_{j != c} a_j pi_jb(s) + w / S) /
+    (sum_{j != c} a_j + w), over the samples j with an informative painting site (a_j = 1), with a uniform
+    pseudo-count of w = ``null_prior_samples`` samples (a regulariser): an empirical sample-frequency null at
+    founder-state resolution. Across a bin edge the slot keeps its state with the weight keep = diagonal - off of the
+    painting's single-homologue copying kernel mixed with the meiotic selector, and otherwise draws a state from
+    f_c,b+1 (with uniform frequencies, exactly the symmetric diagonal / off kernel). Its marginal therefore follows
+    m_c0 = f_c0, m_c,b+1 = keep m_cb + (1 - keep) f_c,b+1, not f_cb at every bin. Leaving the child out removes its
+    own row from the average, not its influence on the shared paintings.
     """
 
     def __init__(self, projection: Projection, gl: np.ndarray, observed: np.ndarray,
                  exponent: np.ndarray, selector_switch_probability: np.ndarray, same: np.ndarray,
-                 one: np.ndarray, two: np.ndarray, mismatch: float):
+                 one: np.ndarray, two: np.ndarray, mismatch: float, null_prior_samples: float):
         children = gl.shape[0]
         states = projection.n_states
         bins = projection.n_bins
@@ -565,6 +598,20 @@ class ChildTerms:
             (1.0 - selector) * (same[None, :] + (states - 1) * one[None, :]) + selector / states)
         self.null_off = np.ascontiguousarray(
             (1.0 - selector) * (one[None, :] + (states - 1) * two[None, :]) + selector / states)
+        # Persistence weight keep = diagonal - off >= 0: a saturated kernel (theoretically diagonal == off: no
+        # persistence) can round a few ULP below zero; that rounding is clipped to zero persistence (diagonal = off =
+        # 1 / S, rows summing to one), a materially negative keep is an error. The certificate needs keep >= 0.
+        keep = self.null_diagonal - self.null_off
+        rounding = 64.0 * np.finfo(np.float64).eps * states * np.maximum(self.null_diagonal, self.null_off)
+        if np.any(keep < -rounding):
+            raise ValueError("null source kernel prefers a specific other state to staying")
+        saturated = keep < 0.0
+        if np.any(saturated):
+            self.null_diagonal = np.ascontiguousarray(np.where(saturated, 1.0 / states, self.null_diagonal))
+            self.null_off = np.ascontiguousarray(np.where(saturated, 1.0 / states, self.null_off))
+        if not null_prior_samples > 0.0:
+            raise ValueError("null_prior_samples must be positive")
+        self.null_frequency = null_frequencies(projection.pi, projection.available, float(null_prior_samples))
         self.fractional = bool(np.any((exponent > 0.0) & (exponent < 1.0)))
         cache_children = COMMON_EMISSION_CACHE_BYTES // max(1, bins * states * states * 16)
         self.cached = cache_children > 0
@@ -596,7 +643,7 @@ def screen(projection: Projection, terms: ChildTerms, eligible_children: np.ndar
     eligible_edge = np.ascontiguousarray(eligible_parents & eligible_children[:, None])
     common_args = (projection.state_alt, terms.gl, terms.coefficient, terms.site_index,
                    terms.site_start, terms.site_stop, terms.exponent, terms.null_diagonal,
-                   terms.null_off, terms.mismatch)
+                   terms.null_off, terms.null_frequency, terms.mismatch)
     claim_threads()
     zero = _m0_kernel(*_model(projection), *common_args, np.ascontiguousarray(eligible_children))
     one = tuple(np.empty((children, candidates), dtype=np.float64) for _ in range(2))
@@ -631,7 +678,7 @@ def score_pairs(projection: Projection, terms: ChildTerms, trios: np.ndarray, ze
     active_children = trios[active_rows, 0]
     common_args = (projection.state_alt, terms.gl, terms.coefficient, terms.site_index,
                    terms.site_start, terms.site_stop, terms.exponent, terms.null_diagonal,
-                   terms.null_off, terms.mismatch)
+                   terms.null_off, terms.null_frequency, terms.mismatch)
     for child_start in range(0, children, terms.batch):
         child_stop = min(children, child_start + terms.batch)
         batch_rows = active_rows[(active_children >= child_start) & (active_children < child_stop)]

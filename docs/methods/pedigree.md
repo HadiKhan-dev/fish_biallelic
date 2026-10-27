@@ -126,8 +126,10 @@ Chromosome workers prepare every painting component of a contig (`pedigree/prepa
 - **Painted state classes.** The painting's MAP class of each sample, bin and track; BACKGROUND, unanchored tracks
   and abstentions are unknown. They feed the junction counts.
 - **Selector switch probabilities.** Between adjacent bin centres at genetic distance d (Morgans, from the contig's
-  map, or the fallback rate), θ = 1 − exp(−d), clipped to [1e-15, 0.5]
-  (`model.genetic_map.poisson_switch_stay_terms`).
+  map, or the fallback rate), the transmitted homologue changes when an odd number of crossovers falls between them:
+  θ = (1 − exp(−2d)) / 2, one meiosis's Haldane recombination fraction (`model.genetic_map.haldane_fraction`),
+  clipped to [`pedigree.prepare.SELECTOR_SWITCH_FLOOR = 1e-15`, 0.5]. Before 2.15 θ was 1 − exp(−d), the probability
+  of at least one crossover, which counts even numbers of crossovers as switches.
 - **Information exponents.** The chromosome's selected markers are grouped bin by bin, across components in order,
   into consecutive groups that close once they hold `PedigreeConfig.preparation.markers_per_information_block = 100`
   markers (the last group may hold fewer). For
@@ -185,8 +187,26 @@ leaves every data-supported bridge unchanged.
 
 ### Child forward model and composite score
 
-An unobserved parent's slot follows the null source: a uniform initial state and, per bin edge, (1 − θ) times the
-painting transition's single-homologue marginal plus θ times the uniform kernel. M0 has two null slots; M1 takes the
+An unobserved parent's slot follows the null source, built from the founder states that the other samples
+transmit. For child c and bin b, the leave-one-out sample frequency is
+
+    f_cb(s) = (Σ_{j ≠ c} a_j π_jb(s) + w / S) / (Σ_{j ≠ c} a_j + w),
+
+over the samples j with an informative painting site in the component (a_j = 1; π_jb is j's transmitted-state
+marginal), with a uniform pseudo-count of w = `PedigreeConfig.scoring.null_prior_samples = 1.0` samples, a
+regulariser that keeps a state no other sample carries possible. The slot starts from f_c0 and, per bin edge, keeps
+its state with the weight k = d − o and otherwise redraws a state from f_c,b+1, where d and o are the diagonal and
+off-diagonal entries of (1 − θ) times the painting transition's single-homologue marginal plus θ times the uniform
+kernel. Its marginal therefore follows m_c0 = f_c0 and m_c,b+1 = k m_cb + (1 − k) f_c,b+1: f is the initial and
+redraw law, not the slot's marginal at every bin. With uniform frequencies this is exactly the symmetric kernel, the
+null of releases before 2.15. A saturated kernel (theoretically d = o) whose difference rounds below zero is set to
+d = o = 1/S; a materially negative k is an error. This is an empirical, persistent copying null in the spirit of the
+sample-allele-frequency null of parentage likelihoods, at founder-state resolution: a founder state that many samples
+carry is cheap for M0, as it is for any candidate. The frequencies pool every informative sample, descendants and
+large sibships included, so they describe the sampled population rather than the parents' breeding population, and
+leaving the child out removes its own row from the average, not its influence on the shared paintings. The null does
+not model a sampled relative of the child's unsampled parent: a close relative can still explain one homologue
+better than the population draw (see the limitations). M0 has two null slots; M1 takes the
 first transmitted state from the candidate's projection (π at bin 0, then its bridges) and keeps a null second slot;
 M2 takes both from the two parents. At an observed selected marker with transmitted ALT probabilities a1 and a2, the
 child's emission is
@@ -416,10 +436,13 @@ an incomplete M2 panel lowers the M2 evidence and never inflates it. The margina
 fixed state prior, 1/3 for each state in the decision fit, and the state support is the softmax of the marginal
 scores. The state is chosen first, as the unique winner of the marginal state scores, then the identity within it,
 as the unique winner of the decision scores (marginal state score + identity score − the state's best identity
-score). Two values closer than the contrast tolerance, `pedigree.ties.CONTRAST_ULP_FACTOR = 512.0` machine epsilons
-times the largest magnitude compared (taken as at least 1), are tied: a tie leaves the state
-(`no_unique_marginal_parent_state`) or the identity (`parent_state_resolved_identity_unresolved`) unresolved, so
-floating evaluation order never decides a call.
+score). Two values closer than the winner tolerance, the larger of `pedigree.ties.CONTRAST_ULP_FACTOR = 512.0`
+machine epsilons times the largest magnitude compared (taken as at least 1) and the absolute floor
+`pedigree.ties.NOISE_FLOOR = 2^-15` nats (release 2.1, placed by a census of decision gaps under 1e-9
+genotype-likelihood noise), are tied: a tie leaves the state (`no_unique_marginal_parent_state`) or the identity
+(`parent_state_resolved_identity_unresolved`) unresolved, so
+floating evaluation order does not decide a call within the measured noise scale (a finite band cannot guarantee
+invariance at its own boundary; the 2.15 replays found no released change under 1e-6 genotype-likelihood jitter).
 
 M0 calls must survive prior sensitivity: the selection is repeated on the same adjusted scores under each
 alternative fixed prior, (0.5, 0.3, 0.2), (1/3, 1/3, 1/3) and (0.2, 0.3, 0.5) for (M0, M1, M2), and an M0 state is
@@ -433,11 +456,11 @@ first: in each cyclic strongly connected component of the local edges, the impli
 (confidence = the smaller of its state and identity margins) is the link the search is expected to break, and when
 two or more implicated children are tied at that weakest link all of them are marked as graph tie conflicts and left
 unresolved, because choosing one by sample order would manufacture confidence from a graph constraint. Peeling
-repeats until no cycle remains. The tie tolerance of this step is 512 machine epsilons times the largest magnitude
-of the scores the implicated children's margins were computed from (their marginal state scores and the identity
-and decision scores of their local state; at least the margins themselves and 1), the same yardstick as a single
-margin's tie test above: a margin is a difference of composite scores of 1e4-1e5 nats and carries their rounding
-(measured: up to about 136 ULP of its scores, so a difference of two margins up to about 272).
+repeats until no cycle remains. The tie tolerance of this step is the winner tolerance above (at least 2^-15 nats)
+of the largest magnitude of the scores the implicated children's margins were computed from (their marginal state
+scores and the identity and decision scores of their local state; at least the margins themselves and 1), the same
+yardstick as a single margin's tie test: a margin is a difference of composite scores of 1e4-1e5 nats and carries
+their rounding (measured: up to about 136 ULP of its scores, so a difference of two margins up to about 272).
 
 A greedy pass then visits the children that have a local configuration, tie conflicts excluded, by descending
 orientation support of that configuration (the product of its edges' order probabilities), then confidence, then
@@ -453,13 +476,15 @@ reported (`DAGDisplaced`, `GraphConflict`).
 Support comes from refits with resampled chromosome multiplicities (`pedigree/resampling.py`):
 `PedigreeConfig.resampling.bootstrap_replicates = 1000` bootstrap replicates, each drawing C informative chromosomes
 with replacement from a generator seeded with `PedigreeConfig.resampling.bootstrap_seed = 20260725`, and C
-leave-one-chromosome-out (LOCO) refits, counted separately. Every refit recomputes the orientation, the exposure
-gate, the reciprocal and path terms, the final solve, state, identity and graph; the genetic scores, λ, the panel,
-the eligibility, the priors and the thresholds stay fixed. Counts are integer sums over fits, per configuration (as
-local winner and as graph choice), per state and per (child, parent) edge, and a fraction divides by all fits,
-including non-converged ones that abstained. The fractions measure internal stability across chromosomes, not
-calibrated probabilities of correct parentage, and they condition on the paintings, the panel and λ, which use all
-chromosomes.
+leave-one-chromosome-out (LOCO) refits, counted separately. Every refit recomputes the orientation, the exposure gate,
+the reciprocal and path terms, the final solve, state, identity and graph; the genetic scores, λ, the panel, the
+eligibility, the priors and the thresholds stay fixed. Counts are integer sums over fits, per configuration (as local
+winner and as graph choice), per state and per (child, parent) edge, and a fraction divides by all fits, including
+non-converged ones that abstained. A fit is a deterministic function of its multiplicities, so each distinct bootstrap
+multiplicity vector is fitted once and its selections, failures and fits are counted as many times as the replicates
+drew it (release 2.15; with few chromosomes most draws repeat: the default seed's 1,000 draws hold 10 distinct vectors
+at C = 3, 118 at C = 5 and 840 at C = 8). The fractions measure internal stability across chromosomes, not calibrated
+probabilities of correct parentage, and they condition on the paintings, the panel and λ, which use all chromosomes.
 
 ## Release tiers
 
@@ -613,9 +638,10 @@ to `calls`, `tier_a`, `complete`, `edges` and the relationship and candidate-set
   the sire (M). Family phase gives the child's homologue 0 to slot 0, so the exported GT of such a child reads
   maternal | paternal. This basis needs recorded sexes {F, M} from the configured metadata; nothing is inferred.
 - **unordered**: otherwise (no metadata, unknown or equal sexes) the slots carry no biological meaning and their
-  order is a canonical label that does not depend on sample names or input order: the parent with more observed
-  sites (read depth > 0) first, compared over the configured contigs in order until the counts differ; only parents
-  with identical counts on every contig fall back to the name. Under `HAPLOTYPES_TIE_REVERSE=1` this label flips.
+  order is a canonical label that does not depend on input order: the parent with more observed sites (read depth >
+  0) first, compared over the configured contigs in order until the counts differ; only parents with identical
+  counts on every contig fall back to the name, so renaming can swap such a pair's slots (a label, never a different
+  parent set). Under `HAPLOTYPES_TIE_REVERSE=1` this label flips.
 - **single**: one observed parent: slot 1 when its recorded sex is M (the sire), else slot 0.
 
 Tables carry `ParentSlotBasis` (`dam_sire`, `unordered`, `single`, `none`) next to Parent2; per-slot columns
@@ -687,13 +713,19 @@ edges and T panel rows; junction counts O(N B J²) for J ≤ K distinct trajecto
 exponential in K, no kernel is worse than quadratic in S, and there is no exact-enumeration branch.
 
 Per chromosome the dominant term is the M1 screen, O(N n (M + B) S²) for n eligible parents per child, quadratic in
-samples without restrictions; the panel bounds M2 at 190 rows per child, O(190 N (M + B) S²). The decision has
-A = O(N²) configuration rows (N M0 rows, one M1 row per eligible edge, at most 190 N M2 rows). One fit costs
-O(C (A + N²)) for the weighted likelihoods, exposure and junction log odds (the binomial tails, O(C N² m) for a
-typical per-chromosome junction count m, are computed once and reweighted), O((4 + I)(A + N²)) for the messages with
-I ≤ 8192 + 4096 final iterations, and O(R A + R N² + R² A₂) for the path factor with R = 16 and A₂ = O(N) M2 rows;
-resampling repeats the fit 1000 + C times. The exclusion costs O(D L) for D target dyads and L markers (D at most the
-targets times N, quadratic in samples in the worst case), with exact reuse of repeated GL triples up to
+samples without restrictions (the certified selective screen scores exactly only the dyads its bounds cannot settle);
+M2 is scored for the T retained-parent panel rows, O(T (M + B) S²). The panel has no parent cap: T is the number of
+admissible pairs among each child's genome-retained parents (measured: f3 43,052 rows, median 300 and at most 2,415
+per child; K30 12,546, median 136, at most 435), O(N³) in the worst case without eligibility restrictions. The
+decision has A = N + E + T configuration rows (N M0 rows, one M1 row per eligible edge E = O(N²), the T M2 rows), and
+the screen's dense C × N × N profile, exposure, orientation and resampling arrays are dense in N (one float64
+C × N × N array is 17.6 GB at C = 22, N = 10,000). One fit costs O(C (A + N²)) for the weighted likelihoods, exposure
+and junction log odds (the binomial tails, O(C N² m) for a typical per-chromosome junction count m, are computed once
+and reweighted), O((4 + I)(A + N²)) for the messages with I ≤ 8192 + 4096 final iterations, and
+O(R A + R N² + R² T) for the path factor with R = 16; resampling repeats the fit for each distinct bootstrap
+multiplicity vector (at most 1000) and the C LOCO weightings. The exclusion costs O(D L) for D target dyads and L
+markers (D at most the targets times N, quadratic in samples in the worst case), with exact reuse of repeated GL
+triples up to
 `pedigree.exclusion.MAX_PATTERNS = 1024` distinct triples per sample (beyond it a direct per-site scorer gives the
 same values).
 
@@ -702,7 +734,9 @@ same values).
 A preparation worker holds the contig's decoded evidence and painting and, per component, the emissions, source
 factors and workspace. A scoring worker holds the prepared record, whose largest array is the source right weights
 (float64 N × (B − 1) × S²), and per component the unordered source pair masses (N × B × S(S + 1)/2, half the ordered
-marginals, which the projection consumes in place), the projection (O(N (M + B) S)) and the child terms. The shared
+marginals, which the projection consumes in place), the projection (O(N (M + B) S)) and the child terms (including
+the null frequencies, float64 N × B × S, 8 N B S bytes, with a few transient arrays of that size while they are
+built). The shared
 emission products of called founders are cached in child batches of at most
 `pedigree.forward.COMMON_EMISSION_CACHE_BYTES = 268435456` bytes (256 MiB); a batch that does not fit is scored on
 the uncached path with identical values. Memory per chromosome worker is therefore O(N B S²). The decision holds
@@ -780,13 +814,24 @@ ties, the symmetric top-16 boundary, and the released parent order's dam/sire ba
   callability correction, not common-interval recounts), and the cavity messages exclude immediate feedback but not
   every loop.
 - Direction evidence depends on the paintings. Related samples of equal junction burden receive little orientation
-  evidence and stay unreleased rather than guessed; design chronology is exempt.
+  evidence and stay unreleased rather than guessed; design chronology is exempt. The binomial junction comparison
+  treats a parent's junctions as transmitted independently, but junctions on one homologue are linked (without a
+  crossover a child inherits all or none of a homologue's junctions), so a parent with many junctions on one
+  homologue can supply bounded (at most log(2/ε_c − 1) nats per chromosome) orientation evidence in the wrong
+  direction: the term is a bounded compatibility correction, not a calibrated probability of the orientation.
+- A sampled close relative of a child's unsampled parent (a sibling, half-sibling, grandparent or aunt/uncle of the
+  child) can explain one of the child's homologues better than the null source and win the complete view's
+  genetic comparison against M0: the model has no explicit related-but-not-parent alternative. In inbred designs
+  with few founder haplotypes and few chromosomes (the f3 simulation: about 7 founder haplotypes per chromosome,
+  3 chromosomes) such relatives remain poorly separated from parents by this model, and the full-marker exclusion
+  leaves them compatible; the release tiers and the chromosome-count requirement keep them out of Tier B there.
 - Eligibility is an assumption, not data: a wrong generation label or an over-restrictive constraint takes a true
   parent out of the universe, and the model can then report at most an unobserved parent. Real crosses have no
   individual-level trio truth, so real-data calls cannot be scored for accuracy; supervised validation uses
   simulations with a known pedigree, and real data are judged by internal consistency, chromosome-level stability,
   competing-candidate margins and explicit unresolved outcomes ([validation](../validation.md)).
-- Known failure modes: fewer than 5 informative chromosomes (nothing released), a true parent pair outside the
+- Known failure modes: fewer than 5 informative chromosomes (no chromosome-resampling Tier B call under the
+  defaults; the full-marker exclusion can still release zero- or one-parent counts), a true parent pair outside the
   retained-parent screen (the M2 evidence is a lower bound; see `search_diagnostics.csv`), unsampled parents, closely
   related alternatives, long feedback loops and highly structured missingness.
 - The exclusion release assumes calibrated, independent read errors and correct supported directions. Samples

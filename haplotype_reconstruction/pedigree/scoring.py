@@ -48,7 +48,7 @@ def resident(component: PreparedComponent, config: PedigreeConfig,
                                component.information_exponent,
                                component.selector_switch_probability, transition.same,
                                transition.one_change, transition.two_changes,
-                               config.scoring.mismatch_probability)
+                               config.scoring.mismatch_probability, config.scoring.null_prior_samples)
     return ResidentComponent(masses, projected, terms)
 
 

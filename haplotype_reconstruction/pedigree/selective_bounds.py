@@ -71,7 +71,7 @@ class Geometry:
                 claim_threads()
                 values=kernel.block_upper(children,b.first,b.stop,int(p.bin_start[b.first]),b.refs,b.tv,
                     b.mass,b.reference_mass,dummy,dummy,common,p.state_alt,t.gl,t.coefficient,t.site_index,
-                    t.site_start,t.site_stop,t.exponent,t.null_diagonal,t.null_off,t.mismatch,
+                    t.site_start,t.site_stop,t.exponent,t.null_diagonal,t.null_off,t.null_frequency,t.mismatch,
                     p.stay,p.alpha,p.beta,p.row_arm,p.column_arm,p.pivot,p.branch,p.excursion,powered,scales)
                 active=np.flatnonzero(b.which>=0)
                 upper[:,active]+=values[:,b.which[active]]

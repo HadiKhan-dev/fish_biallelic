@@ -4,7 +4,9 @@ Each replicate refits everything downstream of the genetic scores (orientation, 
 family messages, state, identity, graph) with chromosome multiplicities: seeded bootstrap draws of
 C chromosomes with replacement, and C leave-one-out weightings (separate counts and denominator).
 A replicate whose final family solve does not converge abstains for every sample and stays in the
-denominator. Counts are integer sums, so support does not depend on worker count or order.
+denominator. Counts are integer sums, so support does not depend on worker count or order. A fit is a
+deterministic function of its multiplicities, so each distinct bootstrap multiplicity vector is fitted once and
+counted as many times as it was drawn (few chromosomes repeat most draws: 10 distinct vectors among 1,000 at C = 3).
 """
 from __future__ import annotations
 
@@ -65,43 +67,46 @@ class Resampling:
 
 
 @njit(cache=True, nogil=True)
-def _accumulate(local_rows, graph_rows, local_states, rows, local_configuration,
+def _accumulate(local_rows, graph_rows, local_states, draws, rows, local_configuration,
                 graph_configuration, local_state, local_parent, graph_parent):
+    """Add each fitted multiplicity vector's selections ``draws[i]`` times (the replicates that drew it)."""
     n_replicates, n_samples = local_rows.shape
     for replicate in range(n_replicates):
+        count = draws[replicate]
         for child in range(n_samples):
             state = local_states[replicate, child]
             if state >= 0:
-                local_state[child, state] += 1
+                local_state[child, state] += count
             row = local_rows[replicate, child]
             if row >= 0:
-                local_configuration[row] += 1
+                local_configuration[row] += count
                 for slot in range(1, 3):
                     parent = rows[row, slot]
                     if parent >= 0:
-                        local_parent[child, parent] += 1
+                        local_parent[child, parent] += count
             row = graph_rows[replicate, child]
             if row >= 0:
-                graph_configuration[row] += 1
+                graph_configuration[row] += count
                 for slot in range(1, 3):
                     parent = rows[row, slot]
                     if parent >= 0:
-                        graph_parent[child, parent] += 1
+                        graph_parent[child, parent] += count
 
 
 def _evaluate(inputs: DecisionInputs, config: PedigreeConfig, multiplicities: np.ndarray):
-    """Selections of a chunk of replicates: local rows, graph rows, local states, nonconverged."""
+    """Selections of a chunk of multiplicity vectors: local rows, graph rows, local states and the
+    nonconverged flag of each vector."""
     n_replicates = len(multiplicities)
     n_samples = inputs.alternatives.n_samples
     local_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     graph_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     local_states = np.full((n_replicates, n_samples), -1, dtype=np.int8)
-    nonconverged = 0
+    nonconverged = np.zeros(n_replicates, dtype=np.bool_)
     for replicate, weights in enumerate(multiplicities):
         try:
             chosen, _, _ = selection.fit(weights, inputs, config)
         except FamilyMessageNonConvergence:
-            nonconverged += 1
+            nonconverged[replicate] = True
             continue
         local_states[replicate] = chosen.local_state
         local_rows[replicate] = chosen.local_row
@@ -150,9 +155,9 @@ def _inputs_from_shared(shared) -> DecisionInputs:
 
 
 def _pool_task(task, shared, budget):
-    """Pool worker: evaluate one tagged chunk of replicates on the shared inputs."""
-    is_loco, multiplicities, config = task
-    return is_loco, _evaluate(_inputs_from_shared(shared), config, multiplicities)
+    """Pool worker: evaluate one tagged chunk of multiplicity vectors on the shared inputs."""
+    is_loco, multiplicities, draws, config = task
+    return is_loco, draws, _evaluate(_inputs_from_shared(shared), config, multiplicities)
 
 
 # --------------------------------------------------------------------- driver
@@ -173,39 +178,44 @@ def run(inputs: DecisionInputs, config: PedigreeConfig, budget) -> Resampling:
     n_samples = alternatives.n_samples
     replicates = config.resampling.bootstrap_replicates
     multiplicities = bootstrap_multiplicities(n_contigs, replicates, config.resampling.bootstrap_seed)
+    # Distinct vectors (each fitted once) and how many replicates drew each.
+    distinct, draws = np.unique(multiplicities, axis=0, return_counts=True)
+    draws = draws.astype(np.int64)
+    fitted = len(distinct)
     cpus = budget.threads()
-    work = len(alternatives.rows) * replicates
-    worker_count = (1 if cpus <= 1 or replicates < 32 or work < _MINIMUM_POOL_WORK
-                    else min(cpus, replicates))
-    chunk = max(1, int(math.ceil(replicates / float(worker_count * 4))))
-    tasks = [(False, np.ascontiguousarray(multiplicities[start:start + chunk]), config)
-             for start in range(0, replicates, chunk)]
+    work = len(alternatives.rows) * fitted
+    worker_count = (1 if cpus <= 1 or fitted < 32 or work < _MINIMUM_POOL_WORK
+                    else min(cpus, fitted))
+    chunk = max(1, int(math.ceil(fitted / float(worker_count * 4))))
+    tasks = [(False, np.ascontiguousarray(distinct[start:start + chunk]),
+              np.ascontiguousarray(draws[start:start + chunk]), config)
+             for start in range(0, fitted, chunk)]
     if n_contigs > 1:
         for omitted in range(n_contigs):
             weights = np.ones((1, n_contigs), dtype=np.float64)
             weights[0, omitted] = 0.0
-            tasks.append((True, weights, config))
+            tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
     bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples)
     loco = SupportCounts.zeros(len(alternatives.rows), n_samples)
     tallies = {False: [0, 0], True: [0, 0]}     # fits, nonconverged
 
-    def accumulate(is_loco, result):
+    def accumulate(is_loco, task_draws, result):
         counts = loco if is_loco else bootstrap
         local_rows, graph_rows, local_states, failed = result
-        _accumulate(local_rows, graph_rows, local_states, alternatives.rows,
+        _accumulate(local_rows, graph_rows, local_states, task_draws, alternatives.rows,
                     counts.local_configuration, counts.graph_configuration, counts.local_state,
                     counts.local_parent, counts.graph_parent)
-        tallies[is_loco][0] += len(local_rows)
-        tallies[is_loco][1] += failed
+        tallies[is_loco][0] += int(np.sum(task_draws))
+        tallies[is_loco][1] += int(np.sum(task_draws[failed]))
 
     if worker_count == 1:
-        for is_loco, weights, task_config in tasks:
-            accumulate(is_loco, _evaluate(inputs, task_config, weights))
+        for is_loco, weights, task_draws, task_config in tasks:
+            accumulate(is_loco, task_draws, _evaluate(inputs, task_config, weights))
     else:
         with BudgetedPool(budget, processes=worker_count, shared=_shared_arrays(inputs),
                           label="pedigree resampling") as pool:
-            for is_loco, result in pool.imap_unordered(_pool_task, tasks, chunksize=1):
-                accumulate(is_loco, result)
+            for is_loco, task_draws, result in pool.imap_unordered(_pool_task, tasks, chunksize=1):
+                accumulate(is_loco, task_draws, result)
     bootstrap = replace(bootstrap, fits=tallies[False][0], nonconverged=tallies[False][1])
     loco = replace(loco, fits=tallies[True][0], nonconverged=tallies[True][1])
     return Resampling(bootstrap, loco, multiplicities, worker_count)

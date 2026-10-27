@@ -1,7 +1,8 @@
 """Tie-aware winners and ranks of composite log evidence.
 
-Two scores closer than a scale-relative tolerance (512 ULP of the largest magnitude, at least 1)
-are tied: floating evaluation order must not decide a parent state, an identity or a rank.
+Two scores closer than the tolerance (the larger of 512 ULP of the largest magnitude, at least 1, and
+the absolute floor NOISE_FLOOR = 2^-15 nats) are tied: floating evaluation order must not decide a
+parent state, an identity or a rank.
 Margins (differences of scores) are compared on the same scale: the magnitude of the scores they
 came from, not their own (graph.tie_conflict_children).
 """
