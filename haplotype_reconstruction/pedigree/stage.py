@@ -288,8 +288,7 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     # The selective screen certifies the genome gate/profile before M2 scoring.
     # Uncertified M1 candidates use the unchanged exact HMM.
     from . import selective_stage
-    candidate_panel, chromosome_scores = selective_stage.score_prepared(
-        store, informative, eligibility, config, budget)
+    candidate_panel = selective_stage.score_prepared(store, informative, eligibility, config, budget)
 
     identity = records.product_identity(store, contigs, informative, config, eligibility,
                                         candidate_panel, scores_key=records.FLOORED_SCORES)
@@ -297,8 +296,11 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     if store.run.has(records.PRODUCT):
         return records.load_product(store)
 
-    # Decision, then the full-marker count release of unresolved Tier-B children.
-    scores = GenomeScores.stack(sample_ids, candidate_panel, chromosome_scores)
+    # Decision, then the full-marker count release of unresolved Tier-B children. The decision input keeps the
+    # eligible-edge entries of each chromosome record, decoded one at a time (no [C, N, N] array).
+    scores = GenomeScores.stack(sample_ids, candidate_panel,
+                                selective_stage.load_scores(store, informative), eligibility)
+    markers_by_contig = dict(zip(scores.contigs, scores.informative_markers.tolist()))
     decided = decision_module.decide_floored(scores, eligibility, config, budget)
     rows = decided.alternatives.rows
     dyads = exclusion.target_dyads(decided.tier_b, rows, eligibility)
@@ -339,11 +341,10 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT)])
     calls = _calls(released.tier_b, rows, orientation)
     search = panel.search_diagnostics(candidate_panel, eligibility, calls.parents, sample_ids)
-    by_contig = {value.contig: value for value in chromosome_scores}
     chromosome_summary = pd.DataFrame([dict(
         Contig=contig, ComponentCount=summaries[contig][2],
         ScoredComponentCount=summaries[contig][0],
-        InformativeMarkers=by_contig[contig].informative_markers if contig in by_contig else 0,
+        InformativeMarkers=markers_by_contig.get(contig, 0),
         OmittedReason=omitted.get(contig)) for contig in contigs])
     product = PedigreeProduct(
         sample_ids=sample_ids, contigs=contigs, informative_contigs=informative, omitted=omitted,

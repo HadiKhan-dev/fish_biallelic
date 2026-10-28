@@ -19,7 +19,7 @@ from scipy.special import logsumexp
 from ..maths import ties
 from .alternatives import Alternatives
 from .config import PedigreeConfig
-from .records import GenomeScores
+from .records import GenomeScores, edge_index
 
 # Broad numerical bounds, not fitted constants: a boundary optimum is unidentified and keeps
 # scale 1. The 33-point grid only brackets optima (the objective need not be unimodal).
@@ -129,23 +129,39 @@ def _maximize(prediction, derivatives=None):
     return best, log_scale, converged, grid, values
 
 
-def _reciprocal_dominant_mask(rows: np.ndarray, zero: np.ndarray, one: np.ndarray,
+def _reciprocal_slots(rows: np.ndarray, edges: np.ndarray, n_samples: int) -> list:
+    """Per parent slot of the configuration rows: (rows naming a parent there, child, parent, edge-axis
+    positions of (child, parent) and of the reverse (parent, child), -1 where the reverse is not an eligible
+    edge); ``edges`` is GenomeScores.edges."""
+    slots = []
+    for column in (1, 2):
+        present = np.flatnonzero(rows[:, column] >= 0)
+        child, parent = rows[present, 0], rows[present, column]
+        slots.append((present, child, parent, edge_index(edges, n_samples, child, parent),
+                      edge_index(edges, n_samples, parent, child)))
+    return slots
+
+
+def _reciprocal_dominant_mask(n_rows: int, zero: np.ndarray, one: np.ndarray, slots: list,
                               contigs: np.ndarray) -> np.ndarray:
     """0 / -inf objective weights excluding reciprocal-dominant rows.
 
     A row naming p as a parent of c is excluded when, on ``contigs``, M1(p with parent c) - M0(p) >=
     M1(c with parent p) - M0(c): genetics cannot order such reciprocal hypotheses (direction and
     family messages settle them). Excluded from the scale's objective only, never from decisions.
+    ``one`` float64 [C, E] per eligible edge; ``slots`` from ``_reciprocal_slots``.
     """
     with np.errstate(invalid="ignore"):
-        # Ineligible children have -inf M0 and M1; their NaN gains never win.
-        gain = one[contigs].sum(axis=0) - zero[contigs].sum(axis=0)[:, None]
-    mask = np.zeros(len(rows), dtype=np.float64)
-    child = rows[:, 0]
-    for column in (1, 2):
-        present = np.flatnonzero(rows[:, column] >= 0)
-        parent = rows[present, column]
-        dominant = gain[parent, child[present]] >= gain[child[present], parent]
+        one_total = one[contigs].sum(axis=0)
+        zero_total = zero[contigs].sum(axis=0)
+    mask = np.zeros(n_rows, dtype=np.float64)
+    for present, child, parent, forward, reverse in slots:
+        with np.errstate(invalid="ignore"):
+            # A reverse dyad off the eligible edges has M1 -inf on every chromosome; ineligible children have
+            # -inf M0 as well, and their NaN gains never win.
+            reverse_gain = np.where(reverse >= 0, one_total[reverse], -np.inf) - zero_total[parent]
+            forward_gain = one_total[forward] - zero_total[child]
+        dominant = reverse_gain >= forward_gain
         mask[present[dominant]] = -np.inf
     return mask
 
@@ -201,9 +217,10 @@ def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfi
     all_training = likelihoods[folds < 3].sum(axis=0)
     prior = np.log(np.asarray(config.selection.state_priors)[states])
     prior -= np.log(np.maximum(1, alternatives.full_counts[rows[:, 0], states]))
-    fit_mask = np.stack([_reciprocal_dominant_mask(rows, scores.zero, scores.one,
+    slots = _reciprocal_slots(rows, scores.edges, len(scores.sample_ids))
+    fit_mask = np.stack([_reciprocal_dominant_mask(len(rows), scores.zero, scores.one, slots,
                                                    (folds < 3) & (folds != i)) for i in range(3)])
-    test_mask = _reciprocal_dominant_mask(rows, scores.zero, scores.one, folds < 3)
+    test_mask = _reciprocal_dominant_mask(len(rows), scores.zero, scores.one, slots, folds < 3)
     prepared, omitted = [], 0
     expanded_terms = aggregated_terms = 0
     for child_rows in alternatives.child_rows:

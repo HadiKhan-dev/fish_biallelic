@@ -92,6 +92,13 @@ class DirectionConfig:
     message_passes: int = 4
     # Final reciprocal solve: undamped, then a damped retry; residual measured before damping.
     final_max_iterations: int = 8192
+    # Undamped progress window: after two windows, an undamped solve that made no progress over the last window,
+    # or whose geometric residual rate there needs more than final_pause_budgets x final_max_iterations
+    # iterations in all to reach final_tolerance, pauses for the damped retry, and resumes where it paused if
+    # the retry fails (so no fit that the full undamped budget would converge is lost). The forecast is a
+    # heuristic: slow modes that speed up later can still pause; resumption is the safeguard.
+    final_progress_window: int = 512
+    final_pause_budgets: int = 4
     final_tolerance: float = 1e-8
     retry_iterations: int = 4096
     retry_damping: float = 0.5

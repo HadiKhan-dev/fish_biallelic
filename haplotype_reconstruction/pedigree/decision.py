@@ -87,7 +87,7 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
     """Decide from the already fixed full-genome M1 profile.
 
     Used by the certified screen. The genome floor is not idempotent: raw
-    chromosome scores must use ``decide`` instead.
+    chromosome scores must use ``decide`` instead. ``eligibility`` must be the one ``scores`` was stacked with.
     """
     alternatives = alternatives_module.build(scores, eligibility)
     scale, calibration_report = calibration.fit_scale(scores, alternatives, config)
@@ -95,10 +95,11 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
         alternatives = alternatives.scaled(scale)
     inputs = DecisionInputs(
         alternatives,
-        ExposureEvidence.build(scores.edge_exposed, scores.pair_exposed, scores.total_bins,
-                               config.exposure),
+        ExposureEvidence.build(scores.edges, scores.edge_exposed, scores.pair_exposed, scores.total_bins,
+                               alternatives, config.exposure),
         junction_evidence(scores.junctions, scores.callable_bins, scores.total_bins,
-                          config.direction.chromosome_error_probability),
+                          config.direction.chromosome_error_probability, scores.junction_dyads,
+                          scores.junction_log_cdf),
         eligibility.chronology)
     trace: dict = {}
     from ..maths import ties as tie_rules

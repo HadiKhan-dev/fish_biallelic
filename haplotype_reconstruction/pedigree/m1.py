@@ -43,8 +43,23 @@ def floor_chromosome(one: np.ndarray, markers: int | float, eligibility, config)
     return output
 
 
+def _child_profile(values, temperatures, genome_temperature):
+    """(retained bool [P], floors [C], best, cutoff) of one child from the RAW M1 scores [C, P] of its eligible
+    parents."""
+    # Each parent's chromosome scores contiguous (the layout of the dense reference's [C, child, parents] gather),
+    # so the genome totals are the same pairwise sums on the dense and the per-edge layout.
+    values = np.asfortranarray(values)
+    totals = np.sum(values, axis=0)
+    best = np.max(totals)
+    cutoff = best + LOG_FLOOR * genome_temperature
+    retained = totals >= cutoff
+    chromosome_best = np.max(values, axis=1)
+    floors = chromosome_best - temperatures / np.sum(temperatures) * (np.sum(chromosome_best) - cutoff)
+    return retained, floors, best, cutoff
+
+
 def genome_profile(one, markers, eligibility, config):
-    """Exact genome gate and exact-sum chromosome profile from RAW M1 scores.
+    """Exact genome gate and exact-sum chromosome profile from RAW M1 scores [C, N, N] (reference paths).
 
     Gate/profile are computed once from raw full-genome scores, before resampling.
     The returned mask includes cutoff ties. Ineligible cells are never replaced.
@@ -60,22 +75,26 @@ def genome_profile(one, markers, eligibility, config):
         parents = np.flatnonzero(eligibility.parents[child])
         if not len(parents):
             continue
-        values = one[:, child, parents]
-        totals = np.sum(values, axis=0)
-        best[child] = np.max(totals)
-        cutoff[child] = best[child] + LOG_FLOOR * genome_temperature
-        retained = totals >= cutoff[child]
+        retained, floors[:, child], best[child], cutoff[child] = _child_profile(
+            one[:, child, parents], temperatures, genome_temperature)
         keep[child, parents] = retained
-        chromosome_best = np.max(values, axis=1)
-        floors[:, child] = chromosome_best - temperatures / np.sum(temperatures) * (
-            np.sum(chromosome_best) - cutoff[child])
         output[:, child, parents[~retained]] = floors[:, child, None]
     return output, keep, floors, best, cutoff
 
 
 def floor_genome(scores, eligibility, config):
-    """Transform RAW chromosome aggregate scores once at the decision boundary."""
-    one, _, _, _, _ = genome_profile(scores.one, scores.informative_markers, eligibility, config)
+    """Transform RAW chromosome aggregate scores once at the decision boundary (GenomeScores, M1 per eligible
+    edge [C, E]); the same profile as ``genome_profile``."""
+    temperatures = temperature(scores.informative_markers, config)
+    genome_temperature = float(temperature(np.sum(scores.informative_markers), config))
+    starts = scores.edge_starts()
+    one = scores.one.copy()
+    for child in np.flatnonzero(eligibility.children):
+        start, stop = starts[child], starts[child + 1]
+        if start == stop:
+            continue
+        retained, floors, _, _ = _child_profile(scores.one[:, start:stop], temperatures, genome_temperature)
+        one[:, start + np.flatnonzero(~retained)] = floors[:, None]
     return replace(scores, one=one)
 
 

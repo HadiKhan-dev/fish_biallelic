@@ -112,10 +112,16 @@ def _cavity_passes(log_scores, rows, states, log_multiplicity, samples, passes):
 
 @njit(cache=True, nogil=True)
 def _converged_cavity(scores, rows, states, log_multiplicity, samples, maximum, tolerance,
-                      damping=1.0):
-    """The same cavity equations iterated to the undamped fixed-point residual."""
-    previous = np.zeros((samples, samples))
+                      damping, start, window, horizon):
+    """The same cavity equations iterated from ``start`` to the undamped fixed-point residual.
+
+    Returns (messages, iterations, residual, paused). With window > 0 the solve pauses (paused True, the
+    messages being the state to resume from) once two windows have run and the residual's geometric rate over
+    the last window cannot reach ``tolerance`` within ``horizon`` iterations; window 0 never pauses.
+    """
+    previous = start.copy()
     residual = np.inf
+    history = np.full(max(window, 1), np.inf)
     for iteration in range(maximum):
         adjusted = scores.copy()
         for row in range(len(rows)):
@@ -133,9 +139,20 @@ def _converged_cavity(scores, rows, states, log_multiplicity, samples, maximum, 
                 residual = max(residual, abs(value - previous[child, parent]))
                 odds[child, parent] = value
         if residual <= tolerance:
-            return odds, iteration + 1, residual
+            return odds, iteration + 1, residual, False
         previous = (1.0 - damping) * previous + damping * odds
-    return previous, maximum, residual
+        if window > 0:
+            done = iteration + 1
+            position = done % window
+            earlier = history[position]
+            history[position] = residual
+            if done >= 2 * window and done % window == 0:
+                # Pause without progress over the last window, or when that window's geometric rate
+                # needs more than ``horizon`` iterations in all to reach the tolerance.
+                if residual >= earlier or done + window * math.log(tolerance / residual) / math.log(
+                        residual / earlier) > horizon:
+                    return previous, done, residual, True
+    return previous, maximum, residual, False
 
 
 def _incoming_messages(avoidance, rows, eligible, chronology):
@@ -338,15 +355,24 @@ def adjust(state_scores: np.ndarray, identity_scores: np.ndarray, rows: np.ndarr
     # The path factor is frozen; the final reciprocal solve replaces the preparatory term.
     state_scores = state_scores + paths
     identity_scores = identity_scores + paths
-    avoidance, iterations, residual = _converged_cavity(
-        identity_scores, rows, states, log_multiplicity, samples,
-        config.final_max_iterations, config.final_tolerance)
+    zero = np.zeros((samples, samples))
+    avoidance, iterations, residual, paused = _converged_cavity(
+        identity_scores, rows, states, log_multiplicity, samples, config.final_max_iterations,
+        config.final_tolerance, 1.0, zero, config.final_progress_window,
+        config.final_pause_budgets * config.final_max_iterations)
     retry_iterations = 0
     if residual > config.final_tolerance:
         # Loopy messages can oscillate in a resample: restart damped, keeping the undamped residual.
-        avoidance, retry_iterations, residual = _converged_cavity(
-            identity_scores, rows, states, log_multiplicity, samples,
-            config.retry_iterations, config.final_tolerance, config.retry_damping)
+        undamped = avoidance
+        avoidance, retry_iterations, residual, _ = _converged_cavity(
+            identity_scores, rows, states, log_multiplicity, samples, config.retry_iterations,
+            config.final_tolerance, config.retry_damping, zero, 0, 0)
+        if residual > config.final_tolerance and paused:
+            # The undamped solve paused for lack of progress; give it the rest of its budget.
+            avoidance, resumed, residual, _ = _converged_cavity(
+                identity_scores, rows, states, log_multiplicity, samples,
+                config.final_max_iterations - iterations, config.final_tolerance, 1.0, undamped, 0, 0)
+            iterations += resumed
     if residual > config.final_tolerance:
         raise FamilyMessageNonConvergence(
             f"Final reciprocal family messages did not converge in {iterations} initial + "

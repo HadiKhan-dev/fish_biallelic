@@ -50,7 +50,10 @@ class Alternatives:
 
 
 def build(scores: GenomeScores, eligibility: ParentEligibility) -> Alternatives:
-    """Configuration rows of the eligible universe; M2 rows are the child's panel rows."""
+    """Configuration rows of the eligible universe; M2 rows are the child's panel rows.
+
+    ``eligibility`` must be the one ``scores`` was stacked with: a child's M1 rows are its run of ``scores.edges``.
+    """
     trios = scores.panel.trios
     n_contigs = len(scores.contigs)
     n_samples = len(scores.sample_ids)
@@ -71,6 +74,8 @@ def build(scores: GenomeScores, eligibility: ParentEligibility) -> Alternatives:
     log_likelihoods = np.empty((n_contigs, n_rows), dtype=np.float64)
     child_rows = []
     scored_counts = np.zeros((n_samples, 3), dtype=np.int64)
+    # The M1 rows of a child are its eligible edges, a contiguous run of the genome scores' edge axis.
+    edge_starts = scores.edge_starts()
     offset = 0
     for child in range(n_samples):
         if not eligibility.children[child]:
@@ -81,13 +86,14 @@ def build(scores: GenomeScores, eligibility: ParentEligibility) -> Alternatives:
         states[offset] = M0
         log_likelihoods[:, offset] = scores.zero[:, child]
         offset += 1
-        parents = np.flatnonzero(eligibility.parents[child])
+        edges = slice(edge_starts[child], edge_starts[child + 1])
+        parents = scores.edges[edges, 1]
         stop = offset + len(parents)
         rows[offset:stop, 0] = child
         rows[offset:stop, 1] = parents
         rows[offset:stop, 2] = NO_PARENT
         states[offset:stop] = M1
-        log_likelihoods[:, offset:stop] = scores.one[:, child, parents]
+        log_likelihoods[:, offset:stop] = scores.one[:, edges]
         offset = stop
         panel = panel_by_child[child]
         stop = offset + len(panel)

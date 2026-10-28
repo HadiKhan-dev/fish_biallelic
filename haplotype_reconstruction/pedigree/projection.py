@@ -110,7 +110,13 @@ def _symmetrise(posterior):
 def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, site_to_bin,
                      background_index, epsilon):
     """P(transmitted allele = ALT | transmitted state, own reads), the untransmitted homologue
-    marginalised over the source posterior, without an S^2 per-site array."""
+    marginalised over the source posterior, without an S^2 per-site array.
+
+    Only BACKGROUND (no panel haplotype) is conditioned on the candidate's reads. A named class transmits its panel
+    allele, or BACKGROUND's ALT frequency where the panel left it uncalled (release 2.16): the panel leaves alleles
+    uncalled where the data are noisy, and there the candidate's own GL rows are noisy too (simulations: heterozygous-
+    looking at ~40% of truly homozygous such sites), so conditioning on them cost true parents tens of nats per
+    chromosome against M0 and the relative models."""
     candidates, sites, _ = candidate_gl.shape
     states = state_alt.shape[0]
     result = np.empty((candidates, sites, states), dtype=np.float64)
@@ -122,8 +128,8 @@ def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, sit
         block = site_to_bin[site]
         q_first = state_alt[first, site]
         # A deterministic transmitted allele cannot change on conditioning (the shared emission
-        # cache relies on these passing through unchanged).
-        if q_first == 0.0 or q_first == 1.0:
+        # cache relies on these passing through unchanged); named classes are never conditioned.
+        if q_first == 0.0 or q_first == 1.0 or first < background_index:
             result[candidate, site, first] = q_first
             continue
         if candidate_observed[candidate, site]:

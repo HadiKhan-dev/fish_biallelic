@@ -21,7 +21,7 @@ from .alternatives import Alternatives, softmax_finite
 from .config import ExposureConfig, PedigreeConfig
 from .orientation import JunctionEvidence, Orientation
 from .orientation import fit as fit_orientation
-from .records import M0, M1, M2, UNRESOLVED
+from .records import M0, M1, M2, UNRESOLVED, edge_index
 from .ties import magnitude, unique_finite_winner
 
 
@@ -63,12 +63,15 @@ def _count_present(packed, weights):
 
 @dataclass(frozen=True)
 class ExposureEvidence:
-    """Posterior-expected exposure of every edge and panel pair, per informative chromosome.
+    """Posterior-expected exposure of every eligible edge and panel pair, per informative chromosome.
 
-    edge_exposed: float64 [C, N, N]; pair_exposed: float64 [C, T]; total_bins: float64 [C].
-    edge_present / pair_present: uint64 [W, N*N] / [W, T] packed per-chromosome flags of
+    edge_exposed: float64 [C, E] on the eligible edges (GenomeScores.edges); pair_exposed: float64 [C, T];
+    total_bins: float64 [C].
+    edge_present / pair_present: uint64 [W, E] / [W, T] packed per-chromosome flags of
     exposure > 0 and >= the minimum bins (W = ceil(C / 64)), so a fit counts exposed chromosomes
     with one popcount per item.
+    row_edges: int64 [A, 2] edge-axis positions of each configuration row's (child, parent) edges, one per
+    parent slot; -1 for an empty slot.
     """
 
     edge_exposed: np.ndarray
@@ -76,16 +79,25 @@ class ExposureEvidence:
     total_bins: np.ndarray
     edge_present: np.ndarray
     pair_present: np.ndarray
+    row_edges: np.ndarray
 
     @classmethod
-    def build(cls, edge_exposed: np.ndarray, pair_exposed: np.ndarray, total_bins: np.ndarray,
+    def build(cls, edges: np.ndarray, edge_exposed: np.ndarray, pair_exposed: np.ndarray,
+              total_bins: np.ndarray, alternatives: Alternatives,
               config: ExposureConfig) -> "ExposureEvidence":
-        n_contigs = edge_exposed.shape[0]
         edge_flags = (edge_exposed > 0.0) & (edge_exposed >= config.minimum_edge_exposed_bins)
         pair_flags = (pair_exposed > 0.0) & (pair_exposed >= config.minimum_pair_exposed_bins)
+        rows = alternatives.rows
+        row_edges = np.full((len(rows), 2), -1, dtype=np.int64)
+        for slot in (1, 2):
+            named = np.flatnonzero(rows[:, slot] >= 0)
+            row_edges[named, slot - 1] = edge_index(edges, alternatives.n_samples, rows[named, 0],
+                                                    rows[named, slot])
+        if np.any(row_edges[rows[:, 1:] >= 0] < 0):
+            raise ValueError("a configuration row names a parent outside the eligible edges")
         return cls(edge_exposed, pair_exposed, total_bins,
-                   _pack_presence(np.ascontiguousarray(edge_flags.reshape(n_contigs, -1))),
-                   _pack_presence(np.ascontiguousarray(pair_flags)))
+                   _pack_presence(np.ascontiguousarray(edge_flags)),
+                   _pack_presence(np.ascontiguousarray(pair_flags)), row_edges)
 
 
 @dataclass(frozen=True)
@@ -106,7 +118,6 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig
     """bool [A]: configurations testable on the weighted chromosomes (M0 always)."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
-    n_samples = alternatives.n_samples
     edge_exposed = np.tensordot(weights, exposure.edge_exposed, axes=(0, 0))
     pair_exposed = weights @ exposure.pair_exposed
     total_bins = float(np.dot(weights, exposure.total_bins))
@@ -114,7 +125,7 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig
                               where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed),
                               where=total_bins > 0.0)
-    edge_contigs = _count_present(exposure.edge_present, weights).reshape(n_samples, n_samples)
+    edge_contigs = _count_present(exposure.edge_present, weights)
     pair_contigs = _count_present(exposure.pair_present, weights)
     edge_ok = ((edge_exposed >= config.minimum_edge_exposed_bins)
                & (edge_fraction >= config.minimum_exposed_fraction)
@@ -123,13 +134,13 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig
                & (pair_fraction >= config.minimum_exposed_fraction)
                & (pair_contigs >= config.minimum_exposed_contigs))
     rows, states = alternatives.rows, alternatives.states
+    first, second = exposure.row_edges[:, 0], exposure.row_edges[:, 1]
     result = np.zeros(len(rows), dtype=np.bool_)
     result[states == M0] = True
     m1 = np.flatnonzero(states == M1)
-    result[m1] = edge_ok[rows[m1, 0], rows[m1, 1]]
+    result[m1] = edge_ok[first[m1]]
     m2 = np.flatnonzero(states == M2)
-    result[m2] = (edge_ok[rows[m2, 0], rows[m2, 1]] & edge_ok[rows[m2, 0], rows[m2, 2]]
-                  & pair_ok[alternatives.panel_row[m2]])
+    result[m2] = edge_ok[first[m2]] & edge_ok[second[m2]] & pair_ok[alternatives.panel_row[m2]]
     return result
 
 

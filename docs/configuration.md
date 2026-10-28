@@ -691,6 +691,8 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `direction.pair_failure_probability` | `0.02` | Pair-level painting-failure mixture bounding the orientation correction to [log(epsilon), log(2 - epsilon)]. Base shared this value with the M0 contamination (parent_state_contamination_probability); the two roles are now separate settings. |
 | `direction.message_passes` | `4` | Synchronous cavity-message passes preparing the frozen short-ancestry path factor. |
 | `direction.final_max_iterations` | `8192` | Final reciprocal solve: undamped, then a damped retry; residual measured before damping. |
+| `direction.final_progress_window` | `512` | Undamped progress window: after two windows, an undamped solve that made no progress over the last window, or whose geometric residual rate there needs more than final_pause_budgets x final_max_iterations iterations in all to reach final_tolerance, pauses for the damped retry, and resumes where it paused if the retry fails (so no fit that the full undamped budget would converge is lost). The forecast is a heuristic: slow modes that speed up later can still pause; resumption is the safeguard. |
+| `direction.final_pause_budgets` | `4` |  |
 | `direction.final_tolerance` | `1e-08` |  |
 | `direction.retry_iterations` | `4096` |  |
 | `direction.retry_damping` | `0.5` |  |

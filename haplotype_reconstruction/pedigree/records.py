@@ -35,7 +35,7 @@ FLOORED_SCORES = "pedigree/floored_scores"
 EXCLUSION = "pedigree/exclusion"
 PRODUCT = "pedigree"
 # 2: release 2.2 released parent order (pedigree.slots: dam/sire or canonical), eligibility sexes.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Parent states: number of parents among the sequenced candidates (M0 is not "founder generation").
 M0, M1, M2 = 0, 1, 2
@@ -191,6 +191,10 @@ class ChromosomeScores:
     callable_bins: int64 [N] observed haplotype-bin labels behind the junction count.
     informative_markers: selected markers of the scored components.
     component_count, scored_component_count: painting components / prepared components.
+    junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every
+        eligible edge, in row-major order (the same for every chromosome of a run).
+    junction_log_cdf: float64 [D] log P(the junctions that c inherits from p and detects are at most c's own
+        count) under linked transmission (pedigree.junctions.linked_log_cdf, release 2.16).
     """
 
     contig: str
@@ -207,19 +211,46 @@ class ChromosomeScores:
     informative_markers: int
     component_count: int
     scored_component_count: int
+    junction_dyads: np.ndarray
+    junction_log_cdf: np.ndarray
+
+
+# ChromosomeScores fields stacked whole ([C, N], [C, T], [C, D]) and the [N, N] fields of which the genome
+# scores keep only the eligible edges ([C, E]).
+_STACKED_FIELDS = ("zero", "two", "pair_explained", "pair_exposed", "junctions", "callable_bins",
+                   "junction_log_cdf")
+_EDGE_FIELDS = ("one", "edge_matched", "edge_exposed")
+
+
+def edge_index(edges: np.ndarray, n_samples: int, children: np.ndarray, parents: np.ndarray) -> np.ndarray:
+    """int64 positions of the (child, parent) pairs on the edge axis ``edges`` (GenomeScores.edges, sorted
+    child-major); -1 for a pair that is not an eligible edge."""
+    keys = edges[:, 0] * n_samples + edges[:, 1]
+    wanted = np.asarray(children, dtype=np.int64) * n_samples + np.asarray(parents, dtype=np.int64)
+    index = np.searchsorted(keys, wanted)
+    found = index < len(keys)
+    found[found] = keys[index[found]] == wanted[found]
+    return np.where(found, index, -1).astype(np.int64)
 
 
 @dataclass(frozen=True)
 class GenomeScores:
     """Decision input: every informative contig's scores stacked in contig order (not a record).
 
-    contigs: informative contigs (C); arrays carry a leading contig axis C, e.g. one [C, N, N].
-    total_bins float64 [C]; informative_markers int64 [C]; junctions / callable_bins float64 [C, N].
+    contigs: informative contigs (C); arrays carry a leading contig axis C.
+    edges:   int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending
+             (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [C, E] on this
+             axis (release 2.16): the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure
+             of non-edges and self coverage) are never read by the decision or the report.
+    zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C];
+    informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
+    junction_log_cdf float64 [C, D] (ChromosomeScores).
     """
 
     sample_ids: tuple[str, ...]
     contigs: tuple[str, ...]
     panel: CandidatePanel
+    edges: np.ndarray
     zero: np.ndarray
     one: np.ndarray
     two: np.ndarray
@@ -231,22 +262,55 @@ class GenomeScores:
     junctions: np.ndarray
     callable_bins: np.ndarray
     informative_markers: np.ndarray
+    junction_dyads: np.ndarray
+    junction_log_cdf: np.ndarray
 
     @classmethod
-    def stack(cls, sample_ids: tuple[str, ...], panel: CandidatePanel,
-              chromosomes: tuple[ChromosomeScores, ...]) -> "GenomeScores":
+    def stack(cls, sample_ids: tuple[str, ...], panel: CandidatePanel, chromosomes,
+              eligibility) -> "GenomeScores":
+        """Stack the chromosome records in contig order on the edges of ``eligibility`` (ParentEligibility).
+
+        ``chromosomes`` (ChromosomeScores) is iterated once, so it may decode the records one at a time: only each
+        record's eligible-edge entries of its [N, N] arrays are kept, and no [C, N, N] array is formed.
+        """
+        n_samples = len(sample_ids)
+        edges = np.argwhere(eligibility.parents).astype(np.int64)
+        flat = edges[:, 0] * n_samples + edges[:, 1]
+        columns = {name: [] for name in _STACKED_FIELDS + _EDGE_FIELDS}
+        contigs, total_bins, markers = [], [], []
+        dyads = np.zeros((0, 2), dtype=np.int64)
+        for value in chromosomes:
+            # The oriented dyads follow the eligibility only, so they are the same on every chromosome.
+            # Decoded records can share one buffer among all their arrays (store codec), so every kept field is
+            # copied: a view would keep the record's dense [N, N] arrays alive.
+            if not contigs:
+                dyads = np.array(value.junction_dyads, dtype=np.int64, copy=True)
+            elif not np.array_equal(value.junction_dyads, dyads):
+                raise ValueError("chromosome scores orient different dyads")
+            contigs.append(value.contig)
+            total_bins.append(value.total_bins)
+            markers.append(value.informative_markers)
+            for name in _STACKED_FIELDS:
+                columns[name].append(np.array(getattr(value, name), copy=True))
+            for name in _EDGE_FIELDS:
+                columns[name].append(np.asarray(getattr(value, name), dtype=np.float64).reshape(-1)[flat])
+            del value  # before the next record is decoded
+
         def stacked(name, dtype=np.float64):
-            return np.ascontiguousarray(
-                np.stack([getattr(value, name) for value in chromosomes]), dtype=dtype)
+            return np.ascontiguousarray(np.stack(columns.pop(name)), dtype=dtype)
         return cls(
-            sample_ids=tuple(sample_ids), contigs=tuple(value.contig for value in chromosomes),
-            panel=panel, zero=stacked("zero"), one=stacked("one"), two=stacked("two"),
+            sample_ids=tuple(sample_ids), contigs=tuple(contigs), panel=panel, edges=edges,
+            zero=stacked("zero"), one=stacked("one"), two=stacked("two"),
             edge_matched=stacked("edge_matched"), edge_exposed=stacked("edge_exposed"),
             pair_explained=stacked("pair_explained"), pair_exposed=stacked("pair_exposed"),
-            total_bins=np.asarray([value.total_bins for value in chromosomes], dtype=np.float64),
+            total_bins=np.asarray(total_bins, dtype=np.float64),
             junctions=stacked("junctions"), callable_bins=stacked("callable_bins"),
-            informative_markers=np.asarray(
-                [value.informative_markers for value in chromosomes], dtype=np.int64))
+            informative_markers=np.asarray(markers, dtype=np.int64),
+            junction_dyads=dyads, junction_log_cdf=stacked("junction_log_cdf"))
+
+    def edge_starts(self) -> np.ndarray:
+        """int64 [N + 1]: child c's eligible edges are edges[starts[c]:starts[c + 1]] (parents ascending)."""
+        return np.searchsorted(self.edges[:, 0], np.arange(len(self.sample_ids) + 1)).astype(np.int64)
 
 
 # ------------------------------------------------------------------------------- exclusion
@@ -502,8 +566,13 @@ def decode_screen(record: dict) -> ChromosomeScreen:
         int(record["informative_markers"]))
 
 
+def _fields(value) -> dict:
+    """Top-level fields of a record dataclass without copying its arrays (dataclasses.asdict deep-copies)."""
+    return {item.name: getattr(value, item.name) for item in fields(value)}
+
+
 def encode_scores(value: ChromosomeScores) -> dict:
-    return dict(schema=SCHEMA_VERSION, **asdict(value))
+    return dict(schema=SCHEMA_VERSION, **_fields(value))
 
 
 def decode_scores(record: dict) -> ChromosomeScores:
@@ -513,7 +582,7 @@ def decode_scores(record: dict) -> ChromosomeScores:
 
 
 def encode_exclusion(value: ExclusionEvidence) -> dict:
-    return dict(schema=SCHEMA_VERSION, **asdict(value))
+    return dict(schema=SCHEMA_VERSION, **_fields(value))
 
 
 def decode_exclusion(record: dict) -> ExclusionEvidence:

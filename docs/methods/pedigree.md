@@ -164,10 +164,21 @@ crossovers with probability θ per bin edge. The exact law of the transmitted fo
 ordered-diplotype chain with the selector, an S⁴ object for two parents. The projection keeps, per candidate and bin:
 
 - π_b(s), the transmitted-state marginal (the homologue-symmetrised source marginals propagated with the selector);
-- at each selected marker, the probability that state s transmits the ALT allele given the candidate's own reads:
-  the untransmitted homologue is summed out under the source posterior, with the candidate's GL rows mixed with the
-  painting's robustness weight (a uniform genotype mixture); a class with a called allele transmits it unchanged,
-  and an uncalled class or BACKGROUND starts from BACKGROUND's ALT frequency;
+- at each selected marker, the probability that state s transmits the ALT allele: a class with a called allele transmits
+  it, a class the panel left uncalled there transmits BACKGROUND's ALT frequency (the null's and the painting's value),
+  and BACKGROUND, which has no panel haplotype, is conditioned on the candidate's own reads (the untransmitted homologue
+  summed out under the source posterior, the candidate's GL rows mixed with the painting's robustness weight, a uniform
+  genotype mixture). The candidate's reads still shape its source posterior, marginals and bridges; only the
+  within-class allele update of named classes is omitted. Until release 2.16 uncalled named classes were conditioned on
+  the reads too. The panel leaves an allele uncalled where the data are noisy, and in the traced simulation examples the
+  candidate's GL rows were noisy there as well (genotype argmax wrong at 41-49% of such sites, 5-8% at fully called
+  ones; heterozygous-looking at about 40% of truly homozygous such sites); there the conditioned allele scored the
+  transmitted one worse than the background frequency (summed log predictive probability −96 against −65 on one
+  chromosome). Those sites (0.3-1.8% of selected markers in the simulations, 0.01-0.03% in TroMau) accumulated losses of
+  7-68 nats in M1 against M0 on the traced chromosomes of true parents, directly and through the filter, where the
+  called ancestry and alleles of parent and child were mostly correct. The omission is a conservative treatment of
+  panel-withheld alleles, not the generative likelihood: a genuinely private allele that the panel withheld (for example
+  because few samples carry it) loses its read evidence too;
 - between adjacent bins, a maximum-entropy bridge: the S × S transition that matches the exact adjacent marginals
   π_b and π_b+1 and the exact same-state (persistence) flow. It is a diagonal plus a rank-one off-diagonal part with
   pivot arms, found by bisection on the maximum-entropy root (at most
@@ -345,13 +356,29 @@ appear in the diagnostics only and never gate a decision.
 
 ### Finite continuous direction
 
-Junction counts orient a linked pair. A homologue transmitted by parent p copies one of p's homologues at each
-position, so on chromosome k it carries each of p's J_p painted junctions with probability 1/2, seen where the child
-is callable (fraction f_c of its haplotype bins, missing at random). Everything else in the child's count J_c (the
+Junction counts orient a linked pair. A homologue transmitted by parent p copies one of p's two homologues and
+switches between them only at meiotic crossovers, so the junctions on one of p's homologues are inherited together
+(release 2.16; before, each junction was transmitted independently with probability 1/2, which made a parent with
+many junctions on one homologue look implausible). Per component, each sample's painting is traced as its
+minimum-switch unordered pair of deduplicated trajectories (`pedigree.junctions.schedules`, the path behind its
+junction count J; trajectories in canonical allele-content order, so painted track order does not matter), which
+places p's junctions on its two homologues. The transmitted homologue starts uniform in each component and switches
+with the meiotic selector probability θ at each bin edge; a junction on the transmitted homologue at an edge (under
+each of the two homologue alignments that minimise p's switches there, averaged when both do) is inherited and seen
+with the child's chromosome-wide callable fraction f_c (missing at random). The inherited count accumulates over the
+chromosome's components. The compatibility model assumes that everything else in the child's count J_c (the
 crossovers of the two meioses that formed the child, junctions from the other parent and false junctions) is a
-non-negative remainder with no assumed distribution:
+non-negative remainder with no assumed distribution (identical-by-state founders, missing labels and compensating
+changes can mask inherited junctions; see the limitations):
 
-    L_k(p → c) ∝ P(Binomial(J_p, f_c / 2) ≤ J_c),     L_k(c → p) ∝ P(Binomial(J_c, f_p / 2) ≤ J_p).
+    L_k(p → c) ∝ P(inherited and seen junctions of p ≤ J_c),     L_k(c → p) likewise with the roles swapped,
+
+computed by a count recurrence over the bins (`pedigree.junctions.linked_log_cdf`: O(B (J_c + 1)) per dyad, counts
+above J_c dropped and the retained mass renormalised per edge) for both directions of every eligible edge. Two
+impossible directions carry no evidence. Without crossovers, ten junctions on one parental homologue give
+P(none inherited) = 1/2, not 2^-10. At θ = 1/2 the selector choices at successive edges are independent, but
+simultaneous junctions on p's two homologues still share their edge's selector (exactly one of them is inherited),
+so the former independent-junction binomial is not a special case.
 
 Under the reverse orientation the proposed parent would have lost junctions that its own "parent" transmits: equal
 counts give no evidence, and a junction-poor parent of a junction-rich child gives strong evidence. With probability
@@ -417,6 +444,17 @@ at most `PedigreeConfig.direction.final_tolerance = 1e-08`, for at most
 would halve their rate); on failure, a restart of the same equations with damping
 `PedigreeConfig.direction.retry_damping = 0.5` for at most `PedigreeConfig.direction.retry_iterations = 4096`
 iterations. The residual is measured before damping, so smaller damped steps cannot signal convergence falsely.
+Some resampled fits oscillate undamped without converging (N = 320 simulation: two of 118 distinct bootstrap weightings,
+residual still 17 nats after 8192 iterations, while the damped restart converges in under 300). So every
+`PedigreeConfig.direction.final_progress_window = 512` iterations, from the second window on (iteration 1024), the
+undamped solve checks its progress: if its residual did not fall over the last window, or would need more than
+`PedigreeConfig.direction.final_pause_budgets = 4` times the 8192 iterations at that window's geometric rate, it pauses
+and the damped restart runs at once (release 2.16). The forecast is a heuristic: slow modes that speed up later can
+still pause (f3 on 8 chromosomes: three resampled fits whose undamped solves finish in 1,796-2,959 iterations). If the
+restart fails, the undamped solve resumes from where it paused for the rest of its budget, so it follows exactly the
+iterates it would have followed without the pause and no fit meets the residual criterion less often. A fit that pauses,
+converges damped and would also have converged undamped meets the same residual criterion with messages that can differ:
+at most 2.8e-7 in the measured fits, with no pedigree table changed; the loopy solver has no uniqueness guarantee.
 Failure of both attempts is an error in the full-data fit and an abstention, for every sample, of a resampled fit
 (which stays in the denominator and so only lowers support). The incoming final messages are added to the state and
 identity scores once, and the path factor is not recomputed from them. The product records the full-data solve
@@ -713,34 +751,58 @@ edges and T panel rows; junction counts O(N B J²) for J ≤ K distinct trajecto
 exponential in K, no kernel is worse than quadratic in S, and there is no exact-enumeration branch.
 
 Per chromosome the dominant term is the M1 screen, O(N n (M + B) S²) for n eligible parents per child, quadratic in
-samples without restrictions (the certified selective screen scores exactly only the dyads its bounds cannot settle);
-M2 is scored for the T retained-parent panel rows, O(T (M + B) S²). The panel has no parent cap: T is the number of
-admissible pairs among each child's genome-retained parents (measured: f3 43,052 rows, median 300 and at most 2,415
-per child; K30 12,546, median 136, at most 435), O(N³) in the worst case without eligibility restrictions. The
-decision has A = N + E + T configuration rows (N M0 rows, one M1 row per eligible edge E = O(N²), the T M2 rows), and
-the screen's dense C × N × N profile, exposure, orientation and resampling arrays are dense in N (one float64
-C × N × N array is 17.6 GB at C = 22, N = 10,000). One fit costs O(C (A + N²)) for the weighted likelihoods, exposure
-and junction log odds (the binomial tails, O(C N² m) for a typical per-chromosome junction count m, are computed once
-and reweighted), O((4 + I)(A + N²)) for the messages with I ≤ 8192 + 4096 final iterations, and
-O(R A + R N² + R² T) for the path factor with R = 16; resampling repeats the fit for each distinct bootstrap
-multiplicity vector (at most 1000) and the C LOCO weightings. The exclusion costs O(D L) for D target dyads and L
-markers (D at most the targets times N, quadratic in samples in the worst case), with exact reuse of repeated GL
-triples up to
-`pedigree.exclusion.MAX_PATTERNS = 1024` distinct triples per sample (beyond it a direct per-site scorer gives the
-same values).
+samples without restrictions (the certified selective screen scores exactly only the dyads its bounds cannot settle); M2
+is scored for the T retained-parent panel rows, O(T (M + B) S²). The panel has no parent cap: T is the number of
+admissible pairs among each child's genome-retained parents (measured: f3 43,052 rows, median 300 and at most 2,415 per
+child; K30 12,546, median 136, at most 435), O(N³) in the worst case without eligibility restrictions. The decision has
+A = N + E + T configuration rows (N M0 rows, one M1 row per eligible edge E = O(N²), the T M2 rows) and keeps the
+genome-wide M1 profile and the matched and exposed bins per eligible edge (float64 C × E each, [memory](#memory)); the
+per-fit orientation and family matrices are N × N. One fit costs O(C A + N²): the weighted likelihoods, the exposure
+(per eligible edge, E ≤ A) and the junction log odds (per oriented dyad, at most 2E; the linked count recurrences, O(D B
+m) per chromosome for D oriented dyads, B bins and a typical junction count m, plus O(N B K²) for the minimum-switch
+traces, are computed once in the score phase and reweighted) are O(C A), and the orientation matrices O(N²); then O((4 +
+I)(A + N²)) for the messages with I ≤ 8192 + 4096 final iterations, and O(R A + R N² + R² T) for the path factor with R
+= 16; resampling repeats the fit for each distinct bootstrap multiplicity vector (at most 1000) and the C LOCO
+weightings. The exclusion costs O(D L) for D target dyads and L markers (D at most the targets times N, quadratic in
+samples in the worst case), with exact reuse of repeated GL triples up to `pedigree.exclusion.MAX_PATTERNS = 1024`
+distinct triples per sample (beyond it a direct per-site scorer gives the same values).
 
 ### Memory
 
-A preparation worker holds the contig's decoded evidence and painting and, per component, the emissions, source
-factors and workspace. A scoring worker holds the prepared record, whose largest array is the source right weights
-(float64 N × (B − 1) × S²), and per component the unordered source pair masses (N × B × S(S + 1)/2, half the ordered
-marginals, which the projection consumes in place), the projection (O(N (M + B) S)) and the child terms (including
-the null frequencies, float64 N × B × S, 8 N B S bytes, with a few transient arrays of that size while they are
-built). The shared
-emission products of called founders are cached in child batches of at most
-`pedigree.forward.COMMON_EMISSION_CACHE_BYTES = 268435456` bytes (256 MiB); a batch that does not fit is scored on
-the uncached path with identical values. Memory per chromosome worker is therefore O(N B S²). The decision holds
-O(C (A + N²)) values, and an exclusion worker one contig's evidence and the dyad results.
+The decision's genome-wide arrays follow the eligible edges, not N × N (release 2.16). The M1 profile and the matched
+and exposed bins are float64 [C, E] arrays on the eligible edges (child-major, parents ascending): the decision decodes
+the chromosome records one at a time and keeps copies of their eligible-edge entries and small fields (decoded records
+can share one buffer, so views would keep their dense arrays alive), so no [C, N, N] array is formed, and the score
+workers write their records instead of returning them. The linked junction compatibilities and the orientation evidence
+are stored per oriented dyad ([C, D] and [C, U] for D ordered and U unordered eligible dyads), the bootstrap and LOCO
+parent counts per named edge, the screen utilities are computed child by child from the compact M1 profile (no [C, N, N]
+expansion), and records are encoded without copying their arrays. The three [C, E] arrays take 24 C E bytes: 52.8 GB at
+C = 22 and N = 10,000 with unrestricted eligibility (E = N (N − 1), as much as the former dense layout), 0.53 GB for a
+restricted design with E = 10⁶ eligible edges (for example 10,000 children with 100 candidate parents each), where the
+dense layout took 52.8 GB whatever the eligibility. These are the final payloads, not the decision's peak: building the
+stack briefly holds the gathered columns and their destination, and the arrays listed below remain.
+
+Still dense in N: each chromosome record (M1, matched and exposed bins [N, N], and the per-component screens), held one
+chromosome at a time by a scoring worker and by the decision while it gathers the edges; the panel's screen utilities
+and the eligibility masks ([N, N] each); and each fit's orientation and family matrices ([N, N]). The configuration
+rows' likelihoods ([C, A]) repeat the M1 profile in their M1 rows, and A grows with the retained M2 panel (T rows; O(N³)
+without restrictions). With unrestricted eligibility E = N (N − 1), so the decision cannot be sub-quadratic in N at all.
+A restricted eligibility (for example a generation design) reduces D, E and T and with them the decision's genome
+arrays; the N × N arrays above, the shared transmission sources and the configuration counts remain, so N = 10,000 has
+not been run.
+
+A preparation worker holds the contig's decoded evidence and painting and, per component, the emissions, source factors
+and workspace. A scoring worker holds the prepared record, whose largest array is the source right weights (float64 N ×
+(B − 1) × S²), and per component the unordered source pair masses (N × B × S(S + 1)/2, half the ordered marginals, which
+the projection consumes in place), the projection (O(N (M + B) S)) and the child terms (including the null frequencies,
+float64 N × B × S, 8 N B S bytes, with a few transient arrays of that size while they are built). The shared emission
+products of called founders are cached in child batches of at most `pedigree.forward.COMMON_EMISSION_CACHE_BYTES =
+268435456` bytes (256 MiB); a batch that does not fit is scored on the uncached path with identical values. The source
+workspace per chromosome worker is therefore O(N B S²); the worker also holds the chromosome's dense N × N M1 scores and
+exposure and its retained M2 rows, and while tracing junctions 8 B K(K + 1)/2 bytes of traceback scratch per thread and
+the 16 N B bytes of minimum-switch schedules. The decision holds O(C A + N²) values (O(C E) per eligible edge, O(C D)
+per dyad with D ≤ 2E, and the N × N matrices above), and an exclusion worker one contig's evidence and the dyad
+results.
 
 ### Measured on the reference runs
 
@@ -774,8 +836,8 @@ Per contig, each record bound to its identity:
   record identities, `PedigreeConfig.preparation` and the contig's genetic map.
 - `pedigree/screen`: per component M0 [N] and M1 [N, N]; bound to the prepared record, `PedigreeConfig.scoring` and
   the eligibility identity.
-- `pedigree/scores`: the chromosome's M0, M1 and panel M2 scores, exposure and junction counts; bound to the screen
-  record and the panel's rows.
+- `pedigree/scores`: the chromosome's M0, M1 and panel M2 scores, exposure, junction counts and the linked junction
+  log compatibilities of the oriented eligible dyads; bound to the screen record and the panel's rows.
 - `pedigree/exclusion`: the contig's exclusion evidence for the target dyads, written only when there are targets;
   bound to the evidence record, target dyads and `PedigreeConfig.exclusion`; the default certificate also binds its model identity, chromosome count and sample count, so a bound cannot be reused with a different genome divisor or threshold.
 
@@ -794,12 +856,13 @@ index; the bootstrap is seeded and support counts are integer sums independent o
 each kernel task is independent of the thread count. Results do not depend on `[execution] cores`, the number of
 chromosome workers or memory pacing.
 
-Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2) reverses the remaining arbitrary orders: the run's
-sample axis (centrally), the graph's visit order among equal role and confidence (the index, last key), the search
-diagnostics' rank ties, the calibration's choice between equally near scales after the stated prior (smallest
-|log scale|), and the projection bridges' lowest state among rounding-tied Hall states, bracketing large branches and
-pivots. Not reversed (stated priors and abstentions): abstention on a tie (winners, margins), fewer parents at graph
-ties, the symmetric top-16 boundary, and the released parent order's dam/sire basis.
+Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2) reverses the remaining arbitrary orders: the run's sample
+axis (centrally), the graph's visit order among equal role and confidence (the index, last key), the search diagnostics'
+rank ties, the calibration's choice between equally near scales after the stated prior (smallest |log scale|), and the
+projection bridges' lowest state among rounding-tied Hall states, bracketing large branches and pivots, and the junction
+trace's choice among tied minimum-switch predecessors (release 2.16). Not reversed (stated priors and abstentions):
+abstention on a tie (winners, margins), fewer parents at graph ties, the symmetric top-16 boundary, and the released
+parent order's dam/sire basis.
 
 ## Interpretation and limitations
 
@@ -814,17 +877,31 @@ ties, the symmetric top-16 boundary, and the released parent order's dam/sire ba
   callability correction, not common-interval recounts), and the cavity messages exclude immediate feedback but not
   every loop.
 - Direction evidence depends on the paintings. Related samples of equal junction burden receive little orientation
-  evidence and stay unreleased rather than guessed; design chronology is exempt. The binomial junction comparison
-  treats a parent's junctions as transmitted independently, but junctions on one homologue are linked (without a
-  crossover a child inherits all or none of a homologue's junctions), so a parent with many junctions on one
-  homologue can supply bounded (at most log(2/ε_c − 1) nats per chromosome) orientation evidence in the wrong
-  direction: the term is a bounded compatibility correction, not a calibrated probability of the orientation.
+  evidence and stay unreleased rather than guessed; design chronology is exempt. The linked junction comparison
+  conditions on one minimum-switch placement of each painting's junctions (alternative minimum paths are not
+  integrated) and treats the child's minimum count as observed junctions plus a non-negative remainder (inherited
+  changes can be masked by identical-by-state founders or missing labels); it is a bounded compatibility correction
+  (at most log(2/ε_c − 1) nats per chromosome), not a calibrated probability of the orientation.
 - A sampled close relative of a child's unsampled parent (a sibling, half-sibling, grandparent or aunt/uncle of the
-  child) can explain one of the child's homologues better than the null source and win the complete view's
-  genetic comparison against M0: the model has no explicit related-but-not-parent alternative. In inbred designs
-  with few founder haplotypes and few chromosomes (the f3 simulation: about 7 founder haplotypes per chromosome,
-  3 chromosomes) such relatives remain poorly separated from parents by this model, and the full-marker exclusion
-  leaves them compatible; the release tiers and the chromosome-count requirement keep them out of Tier B there.
+  child) can explain one of the child's homologues better than the null source and win the complete view's genetic
+  comparison against M0: the model has no explicit related-but-not-parent alternative. In inbred designs with few
+  founder haplotypes and few chromosomes (the f3 simulation: about 7 founder haplotypes per chromosome, 3 chromosomes)
+  such relatives remain poorly separated from parents by this model, and the full-marker exclusion leaves them
+  compatible; the chromosome-count requirement keeps them out of Tier B there. With enough chromosomes Tier B can
+  release them: the same design on 8 chromosomes released 3 full sibs as parents (and 6 wrong one-parent counts among
+  106 released counts; 5 of 105 before release 2.16, the extra one a bootstrap fraction moving from 0.694 to 0.71 across
+  the 0.70 threshold), with 106 of 112 complete-view configurations right. Measured in release 2.16 with explicit
+  relative models (the child's homologue copies a candidate inside IBD tracts, the population null outside;
+  second-degree and full-sib forms), after the transmitted-allele correction of the same release (before it, true
+  parents lost tens of nats on single chromosomes to read-conditioned panel-withheld alleles, which defeated every
+  relationship gate tried): every true parent of the std, missing-parent, backcross and K30 simulations outscores the
+  second-degree form genome-wide, but by at most log 2 − Σ log(1 − θ) ≈ log 2 + Σθ per independently started component
+  (about 2 nats per chromosome; the full-sib form, with two independent IBD tracts, has a larger bound of about log 2 +
+  4Σθ). Relatives that look parent-like at founder resolution therefore stay parent-like: of the 3 false full-sib edges
+  on 8 chromosomes one has a negative contrast (−47.6 nats) and two favour the parent even over the full-sib form, and
+  in K30 sibling and half-sibling F1s score like true parents (+2.4 to +3.3 nats against the second-degree form), as do
+  reversed parent-child pairs. A joint relationship model, or a release abstention on a negative contrast (which would
+  withhold the one separable false edge there without losing a true parent), is future work.
 - Eligibility is an assumption, not data: a wrong generation label or an over-restrictive constraint takes a true
   parent out of the universe, and the model can then report at most an unobserved parent. Real crosses have no
   individual-level trio truth, so real-data calls cannot be scored for accuracy; supervised validation uses

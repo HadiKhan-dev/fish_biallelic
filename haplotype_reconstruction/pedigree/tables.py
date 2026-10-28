@@ -110,8 +110,8 @@ def _set_text(indices, sample_ids) -> str:
 
 
 def _structure(decision: Decision, config: PedigreeConfig):
-    """Full-data C/X diagnostics: edge coverage [N, N], pair explainability [T], C/X-compatible and
-    exposure-testable rows [A], children with a testable M1 row [N]."""
+    """Full-data C/X diagnostics: edge coverage [E] per eligible edge (GenomeScores.edges), pair
+    explainability [T], C/X-compatible and exposure-testable rows [A], children with a testable M1 row [N]."""
     scores, alternatives = decision.scores, decision.alternatives
     weights = np.ones(len(scores.contigs))
     edge_matched = np.tensordot(weights, scores.edge_matched, axes=(0, 0))
@@ -124,15 +124,15 @@ def _structure(decision: Decision, config: PedigreeConfig):
                                out=np.full_like(pair_explained, np.nan), where=pair_exposed > 0.0)
     testable = decision.trace["testable"]
     rows, states = alternatives.rows, alternatives.states
+    row_edges = decision.inputs.exposure.row_edges
     compatible = np.zeros(len(rows), dtype=np.bool_)
     compatible[states == M0] = True
     m1 = np.flatnonzero(states == M1)
-    compatible[m1] = testable[m1] & (coverage[rows[m1, 0], rows[m1, 1]]
-                                     >= config.exposure.report_edge_coverage)
+    compatible[m1] = testable[m1] & (coverage[row_edges[m1, 0]] >= config.exposure.report_edge_coverage)
     m2 = np.flatnonzero(states == M2)
     compatible[m2] = (testable[m2]
-                      & (coverage[rows[m2, 0], rows[m2, 1]] >= config.exposure.report_edge_coverage)
-                      & (coverage[rows[m2, 0], rows[m2, 2]] >= config.exposure.report_edge_coverage)
+                      & (coverage[row_edges[m2, 0]] >= config.exposure.report_edge_coverage)
+                      & (coverage[row_edges[m2, 1]] >= config.exposure.report_edge_coverage)
                       & (explainability[alternatives.panel_row[m2]]
                          >= config.exposure.report_pair_explainability))
     evaluable = np.zeros(alternatives.n_samples, dtype=np.bool_)
@@ -147,6 +147,7 @@ def diagnostics(decision: Decision, config: PedigreeConfig) -> pd.DataFrame:
     sample_ids = decision.scores.sample_ids
     boot = decision.resampling.bootstrap
     coverage, explainability, compatible, testable, evaluable = _structure(decision, config)
+    row_edges = decision.inputs.exposure.row_edges
     junctions, callable_bins = decision.scores.junctions, decision.scores.callable_bins
     eligible_children = decision.eligibility.children
     records = []
@@ -179,7 +180,7 @@ def diagnostics(decision: Decision, config: PedigreeConfig) -> pd.DataFrame:
         pair_explainability = np.nan
         if local_row >= 0 and selected:
             for slot, parent in enumerate(selected):
-                parent_coverage[slot] = coverage[child, parent]
+                parent_coverage[slot] = coverage[row_edges[local_row, slot]]
                 parent_direction[slot] = decision.orientation.order_probability[child, parent]
             if len(selected) > 1 and alternatives.panel_row[local_row] >= 0:
                 pair_explainability = explainability[alternatives.panel_row[local_row]]

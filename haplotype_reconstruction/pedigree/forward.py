@@ -89,10 +89,10 @@ def observed_sites(observed, bin_start, bin_stop):
 @njit(cache=True, parallel=True)
 def _common_products(state_alt, child_gl, coefficient, site_index, site_start, site_stop,
                      mismatch, child_start, child_stop):
-    """Emission products of called-founder state pairs per child and bin; NaN = candidate-specific.
+    """Emission products of called-founder state pairs per child and bin; NaN = the general path.
 
-    Missing named alleles and BACKGROUND keep candidate-specific emissions; the site order,
-    likelihood and underflow fallback of the general path stay authoritative.
+    Missing named alleles (BACKGROUND's frequency) and BACKGROUND (candidate-specific) take the general path, whose
+    site order, likelihood and underflow fallback stay authoritative.
     """
     bins = site_start.shape[1]
     states = state_alt.shape[0]

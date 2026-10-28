@@ -30,28 +30,53 @@ _MINIMUM_POOL_WORK = 100_000
 
 
 @dataclass(frozen=True)
+class EdgeCounts:
+    """Integer counts per (child, parent) edge named by some configuration row, read as ``counts[child, parent]``
+    (0 for an edge no row names). keys int64 [E] sorted child * N + parent; values int64 [E] (release 2.16: per
+    edge, not a dense [N, N] array)."""
+
+    keys: np.ndarray
+    values: np.ndarray
+    samples: int
+
+    def __getitem__(self, edge) -> int:
+        child, parent = edge
+        key = int(child) * self.samples + int(parent)
+        index = int(np.searchsorted(self.keys, key))
+        return int(self.values[index]) if index < len(self.keys) and self.keys[index] == key else 0
+
+
+def named_edges(rows: np.ndarray, samples: int) -> np.ndarray:
+    """int64 [E] sorted keys child * N + parent of the edges the configuration rows name."""
+    keys = np.concatenate([rows[:, 0] * samples + rows[:, slot] for slot in (1, 2)])
+    named = np.concatenate([rows[:, slot] >= 0 for slot in (1, 2)])
+    return np.unique(keys[named]).astype(np.int64)
+
+
+@dataclass(frozen=True)
 class SupportCounts:
     """Integer counts over resampled fits.
 
     local_configuration / graph_configuration int64 [A]: fits whose local / graph row is the row.
     local_state int64 [N, 3]: fits calling each marginal state.
-    local_parent / graph_parent int64 [N, N]: fits whose local / graph row names [child, parent].
+    local_parent / graph_parent EdgeCounts: fits whose local / graph row names [child, parent].
     fits: number of fits (the denominator); nonconverged: fits that abstained.
     """
 
     local_configuration: np.ndarray
     graph_configuration: np.ndarray
     local_state: np.ndarray
-    local_parent: np.ndarray
-    graph_parent: np.ndarray
+    local_parent: EdgeCounts
+    graph_parent: EdgeCounts
     fits: int
     nonconverged: int
 
     @classmethod
-    def zeros(cls, n_alternatives: int, n_samples: int) -> "SupportCounts":
+    def zeros(cls, n_alternatives: int, n_samples: int, edges: np.ndarray) -> "SupportCounts":
         return cls(np.zeros(n_alternatives, np.int64), np.zeros(n_alternatives, np.int64),
-                   np.zeros((n_samples, 3), np.int64), np.zeros((n_samples, n_samples), np.int64),
-                   np.zeros((n_samples, n_samples), np.int64), 0, 0)
+                   np.zeros((n_samples, 3), np.int64),
+                   EdgeCounts(edges, np.zeros(len(edges), np.int64), n_samples),
+                   EdgeCounts(edges, np.zeros(len(edges), np.int64), n_samples), 0, 0)
 
     def fraction(self, count: int) -> float:
         """count / fits; 0 without fits."""
@@ -67,7 +92,7 @@ class Resampling:
 
 
 @njit(cache=True, nogil=True)
-def _accumulate(local_rows, graph_rows, local_states, draws, rows, local_configuration,
+def _accumulate(local_rows, graph_rows, local_states, draws, rows, edges, local_configuration,
                 graph_configuration, local_state, local_parent, graph_parent):
     """Add each fitted multiplicity vector's selections ``draws[i]`` times (the replicates that drew it)."""
     n_replicates, n_samples = local_rows.shape
@@ -83,14 +108,14 @@ def _accumulate(local_rows, graph_rows, local_states, draws, rows, local_configu
                 for slot in range(1, 3):
                     parent = rows[row, slot]
                     if parent >= 0:
-                        local_parent[child, parent] += count
+                        local_parent[np.searchsorted(edges, child * n_samples + parent)] += count
             row = graph_rows[replicate, child]
             if row >= 0:
                 graph_configuration[row] += count
                 for slot in range(1, 3):
                     parent = rows[row, slot]
                     if parent >= 0:
-                        graph_parent[child, parent] += count
+                        graph_parent[np.searchsorted(edges, child * n_samples + parent)] += count
 
 
 def _evaluate(inputs: DecisionInputs, config: PedigreeConfig, multiplicities: np.ndarray):
@@ -122,9 +147,10 @@ _ARRAY_FIELDS = {
     "full_counts": ("alternatives", "full_counts"), "scored_counts": ("alternatives", "scored_counts"),
     "edge_exposed": ("exposure", "edge_exposed"), "pair_exposed": ("exposure", "pair_exposed"),
     "total_bins": ("exposure", "total_bins"), "edge_present": ("exposure", "edge_present"),
-    "pair_present": ("exposure", "pair_present"),
+    "pair_present": ("exposure", "pair_present"), "row_edges": ("exposure", "row_edges"),
     "junctions": ("junctions", "junctions"), "callable_bins": ("junctions", "callable_bins"),
     "junction_total_bins": ("junctions", "total_bins"),
+    "pair_child": ("junctions", "pair_child"), "pair_parent": ("junctions", "pair_parent"),
     "pair_log_odds": ("junctions", "pair_log_odds"), "compared": ("junctions", "compared"),
 }
 
@@ -147,9 +173,10 @@ def _inputs_from_shared(shared) -> DecisionInputs:
                                 shared["full_counts"], shared["scored_counts"])
     exposure = ExposureEvidence(shared["edge_exposed"], shared["pair_exposed"],
                                 shared["total_bins"], shared["edge_present"],
-                                shared["pair_present"])
+                                shared["pair_present"], shared["row_edges"])
     junctions = JunctionEvidence(shared["junctions"], shared["callable_bins"],
-                                 shared["junction_total_bins"], shared["pair_log_odds"],
+                                 shared["junction_total_bins"], shared["pair_child"], shared["pair_parent"],
+                                 shared["pair_log_odds"],
                                  shared["compared"])
     return DecisionInputs(alternatives, exposure, junctions, shared["chronology"])
 
@@ -195,16 +222,17 @@ def run(inputs: DecisionInputs, config: PedigreeConfig, budget) -> Resampling:
             weights = np.ones((1, n_contigs), dtype=np.float64)
             weights[0, omitted] = 0.0
             tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
-    bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples)
-    loco = SupportCounts.zeros(len(alternatives.rows), n_samples)
+    edges = named_edges(alternatives.rows, n_samples)
+    bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)
+    loco = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)
     tallies = {False: [0, 0], True: [0, 0]}     # fits, nonconverged
 
     def accumulate(is_loco, task_draws, result):
         counts = loco if is_loco else bootstrap
         local_rows, graph_rows, local_states, failed = result
-        _accumulate(local_rows, graph_rows, local_states, task_draws, alternatives.rows,
+        _accumulate(local_rows, graph_rows, local_states, task_draws, alternatives.rows, edges,
                     counts.local_configuration, counts.graph_configuration, counts.local_state,
-                    counts.local_parent, counts.graph_parent)
+                    counts.local_parent.values, counts.graph_parent.values)
         tallies[is_loco][0] += int(np.sum(task_draws))
         tallies[is_loco][1] += int(np.sum(task_draws[failed]))
 

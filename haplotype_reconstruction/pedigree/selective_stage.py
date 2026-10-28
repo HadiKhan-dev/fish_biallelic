@@ -1,8 +1,10 @@
 """Default-stage adapter for the certified genome-wide M1 screen.
 
-This migration keeps the existing dense decision/exposure API. Only the expensive
+The chromosome records keep the dense per-chromosome [N, N] API; only the expensive
 all-pairs likelihood calculation is replaced. Compact profiles and their fixed
 chromosome values have separate checkpoint keys from the raw reference screen.
+The score workers only record each chromosome: the decision decodes the records one
+at a time (``load_scores``) and keeps their eligible-edge entries (GenomeScores).
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ def _score_handler(contig, state, phase, common, budget):
     store.bind_identity(file, records.FLOORED_SCORES,
                         records.floored_scores_identity(store, file, candidate_panel))
     if file.has(records.FLOORED_SCORES):
-        return None, records.decode_scores(file.get(records.FLOORED_SCORES))
+        return None, None
     saved = store.run.get(records.SELECTIVE_SCREEN)
     compact = CompactM1.decode(saved["compact"])
     chromosome = tuple(saved["contigs"]).index(contig)
@@ -31,11 +33,11 @@ def _score_handler(contig, state, phase, common, budget):
         prepared, one, candidate_panel.trios, common["eligibility"], common["config"],
         execution.claim_threads)
     file.put(records.FLOORED_SCORES, records.encode_scores(value))
-    return None, value
+    return None, None
 
 
 def score_prepared(store, contigs, eligibility, config, budget, *, method="certified"):
-    """Screen, freeze the G4 panel/profile, then score M2 and exposure.
+    """Screen, freeze the G4 panel/profile, then score and record M2 and exposure per contig; returns the panel.
 
     Called by stage.run after preparation; ``method='exact'`` is the same-API
     all-pairs reference. Checkpoint reuse is independent of the search method,
@@ -56,12 +58,12 @@ def score_prepared(store, contigs, eligibility, config, budget, *, method="certi
             store.root, contigs, markers, eligibility, config, budget, method=method)
         store.run.put(records.SELECTIVE_SCREEN,
                       dict(contigs=contigs, compact=compact.encode(), zero=zero, work=work))
-    # Explicit dense migration adapter. The downstream layouts are unchanged;
-    # this is not a claim that pedigree memory is already sub-quadratic.
-    one = compact.dense_reference(eligibility)
-    candidate_panel = panel.retained_panel(
-        compact.keep_reference(), panel.robust_screen(one, compact.markers, eligibility, config), eligibility)
-    del one, compact
+    # Screen utilities child by child from the compact profile (no dense [C, N, N] expansion); the retained
+    # parents are the compact profile's.
+    utilities = panel.robust_screen_values(compact.values, compact.n_contigs, compact.n_samples, compact.markers,
+                                           eligibility, config)
+    candidate_panel = panel.retained_panel(compact.keep_reference(), utilities, eligibility)
+    del utilities, compact
     estimates = [_scoring_bytes(store, c) for c in contigs]
     limit = execution.memory_worker_limit(estimates, len(contigs), label="PEDIGREE SELECTIVE M2")
     weights = [store.contig(c).info(records.PREPARED).stored_bytes for c in contigs]
@@ -69,5 +71,11 @@ def score_prepared(store, contigs, eligibility, config, budget, *, method="certi
     with execution.ChromosomeExecutor(contigs, _score_handler, budget=budget, weights=weights,
                                       max_workers=limit, label="PEDIGREE SELECTIVE M2",
                                       task_bytes=estimates) as pool:
-        scores = tuple(pool.run("score", common))
-    return candidate_panel, scores
+        pool.run("score", common)
+    return candidate_panel
+
+
+def load_scores(store, contigs):
+    """Each contig's fixed-profile scores (``pedigree/floored_scores``), decoded one at a time."""
+    for contig in contigs:
+        yield records.decode_scores(store.contig(contig).get(records.FLOORED_SCORES))

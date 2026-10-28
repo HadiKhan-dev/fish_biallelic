@@ -1,5 +1,148 @@
 # Changelog
 
+## 2.16.0 (28 October 2026)
+
+This release continues the pedigree work of 2.15. It removes a measured source of chromosome-scale penalties against
+true parents: the parent model conditioned the alleles that the founder panel had withheld on the parent's own reads,
+which were noisy exactly there in the traced simulations, and those few sites cost the traced true parents up to tens of
+nats per chromosome against "no observed parent" and against relative models. With that fixed, the std and
+missing-parent simulations release every true parent in Tier B. The direction evidence now respects that a parent's
+junctions on one homologue are inherited together; resampled fits whose family messages stall get the damped retry
+early; and the pedigree arrays that scaled with N × N for every dyad now follow the eligible edges. Parents versus close
+relatives in inbred or low-diversity designs remains the main limitation, now measured without that artefact.
+
+**Named founder classes transmit their panel alleles** (`pedigree/projection.py` `_transmitted_alt`;
+`docs/methods/pedigree.md`, Transmitted-state projection). Where the founder panel left a named class's allele uncalled,
+the transmitted ALT probability started from BACKGROUND's ALT frequency and was then conditioned on the candidate
+parent's own GL row. The panel withholds alleles where the data are noisy, and in the traced examples the parent's reads
+were noisy there too: its genotype argmax was wrong at 41-49% of such sites against 5-8% at fully called sites, and at
+truly homozygous such sites the conditioned allele scored the transmitted one worse than the background frequency
+(summed log predictive probability −96 against −65 on std chr13). M1 and M2 used these values for the child's emissions
+while M0 did not, so these sites (0.3-1.8% of the selected markers) accumulated losses for true parents, directly and
+through the filter: std F2_11 <- F1_7 chr13 M1 − M0 = −20.5 nats, F2_6 <- F1_6 chr19 −53.8, missing-parent F3_1 <- F2_10
+chr2 −23.9, where the called ancestry and alleles of parent and child were mostly correct. Named classes now transmit
+their panel allele, or BACKGROUND's ALT frequency where it is uncalled (the value the null and the painting use); only
+BACKGROUND, which has no panel haplotype, keeps the read conditioning. The parent's reads still shape its source
+posterior and bridges. On the traced chromosomes M1 now beats M0 by 3.5 to 44 nats. Found by a per-bin trace of the
+forward likelihood and confirmed by an independent review, which also showed the enrichment is not explained by depth or
+true genotype. It is a conservative treatment of panel-withheld alleles, not the generative likelihood.
+
+- Pedigree replays on the saved inputs, truth from the simulation manifests: std Tier B 39 -> 40 of 40 exact, true
+  edges 59 -> 60 of 60, wrong state claims 1 -> 0; missing-parent 44 -> 45 of 45, edges 50 -> 52 of 52; N = 320,
+  backcross, f3, f3 on 8 chromosomes and TroMau (0.01-0.03% uncalled alleles): no call change. K30 (30 founders,
+  low diversity): Tier-B edges 4 -> 6 of 40 and wrong state claims 3 -> 2, but exact configurations 9 -> 8 (two
+  correct zero-parent counts of F1s became unresolved, one false two-parent count was withdrawn, F2_19 gained both
+  true parents) and the complete view 69 -> 67 exact with 15 -> 17 extra edges (F1 siblings named as parents): the
+  old penalty also held relatives down there, by accident. This is an accepted trade-off, not a passed casewise gate:
+  K30's correct Tier-B claims fall 25 -> 24 while std and missing-parent gain (+1 correct claim pooled); the old
+  mechanism penalised candidates for noisy withheld alleles, which is not a defensible relative discriminator.
+- The predictive evidence scale rose where the scores had been miscalibrated: std 0.18 -> 1.0, missing-parent
+  0.098 -> 0.19 (TroMau 0.1021 -> 0.1025, the other cases 1.0). The std and missing-parent improvements remain
+  with the scale held at (approximately) its old values.
+- Identical parent sets, states and tier flags under the convention reversal and two 1e-6 jitter seeds on seven
+  cases (21 comparisons). Cost: none measurable.
+- What it gives up: a panel-withheld allele no longer gains candidate-specific information from the parent's own reads
+  (called alleles, including private ones, are unaffected). A genuinely private allele that the panel withheld, for
+  example because few samples carry it, loses that evidence, and an incompatible candidate's reads no longer count
+  against it there. At the traced sites the update scored worse than the background frequency; a release-aware shared
+  allele model would need independent calibration.
+
+**Linked junction transmission in the direction evidence** (`pedigree/junctions.py` `schedules`, `linked_log_cdf`;
+`pedigree/scoring.py`; `pedigree/orientation.py`; `docs/methods/pedigree.md`, Finite continuous direction). The
+orientation of a linked pair compared each sample's painted junction count with a binomial in which every parental
+junction was inherited independently with probability 1/2: ten junctions on one parental homologue made inheriting
+none look like a 1-in-1,024 event, when without a crossover it happens half the time (review control: −3.63 nats
+against the true direction; now −0.66). Each painting is now traced as its minimum-switch pair of deduplicated
+trajectories (the path behind its junction count, in canonical content order, so painted track order does not
+matter), which places the parent's junctions on its two homologues; the transmitted homologue switches with the
+meiotic selector probability between bins, and a count recurrence gives P(inherited and seen junctions ≤ the child's
+count) for both directions of every eligible edge. The chromosome and pair failure mixtures are unchanged.
+- Checked against independent path-enumeration references (550 and, in an independent review, 1,200 cases; ≤ 6.7e-16)
+  and the review prototype (equal on every dyad of a std chromosome); the traceback's tie placement reverses under the
+  convention reversal. At θ = 1/2 the selector choices at successive edges are independent, but simultaneous junctions
+  on the parent's two homologues still share their edge's selector, so the former binomial is not a special case.
+- On its own (linked direction against 2.15, before the allele change), in pedigree replays on the saved inputs of std,
+  f3, backcross, K30, the missing-parent and N = 320 simulations and TroMau: no Tier-B or partial parent edge changed;
+  on f3 two complete-view parents changed identity (F3_9: F3_85 -> F3_16; F3_22: F3_38 -> F3_26), all wrong under that
+  simulation's all-unobserved truth, as before; on the missing-parent case F2_14's correct one-parent call (true parent
+  F1_4) entered Tier A, its bootstrap fraction moving from 0.949 to 0.950 at the 0.95 threshold. The direction log odds
+  of true parent-child pairs change individually (std F2_11 <- F1_7: 7.14 -> 9.85 nats; std median 2.39 -> 2.36;
+  backcross pairs above log 49: 11 -> 17). Identical parent sets, states and tier flags under the convention reversal
+  and two 1e-6 jitter seeds on all seven cases (21 comparisons). Cost (traces and dyad recurrences in the score phase):
+  the pedigree stage end to end took K30 17.1 -> 15.7 s and TroMau 24.7 -> 23.5 s on the same node type, and f3 30.9 ->
+  50.8 s, std 13.0 -> 16.2 s and backcross 10.8 -> 14.5 s against 2.15 runs on faster nodes (f3 traces 112 samples).
+
+**Final family solve: early damped retry for stalled solves** (`pedigree/family.py`;
+`PedigreeConfig.direction.final_progress_window = 512`, `final_pause_budgets = 4`; `docs/methods/pedigree.md`, Converged
+final reciprocal solve). Some resampled fits oscillate undamped without converging, and the solve ran all 8,192 undamped
+iterations before the damped restart (N = 320 simulation: two of 118 distinct bootstrap weightings, residual still 17
+nats, about 50 s each, while the damped restart converges in under 300 iterations). The undamped solve now checks its
+progress every 512 iterations from iteration 1,024 and pauses for the damped restart when its residual did not fall over
+the last window or its rate there would need more than four budgets; if the restart fails, the undamped solve resumes
+where it paused and follows exactly the iterates it would have followed, so no fit meets the residual criterion less
+often. The forecast is a heuristic: slow modes that speed up later can still pause.
+
+- Old against new policy on every distinct resampling fit of eight cases (3,846 fits, messages compared bitwise):
+  identical except two fits of f3 on 8 chromosomes, which pause, converge damped and would also have converged undamped;
+  both meet the residual criterion but their messages differ by up to 2.8e-7, and no pedigree table changed on any of
+  the eight cases. Family solves over all fits: N = 320 139 -> 30 s; f3 on 8 chromosomes 20.4 -> 22.3 s (a paused slow
+  mode pays for the retry). N = 320 pedigree stage 201 -> 148 s on the same node type.
+
+**Pedigree memory follows the eligible edges** (`pedigree/records.py`, `pedigree/selection.py`,
+`pedigree/alternatives.py`, `pedigree/m1.py`, `pedigree/calibration.py`, `pedigree/tables.py`,
+`pedigree/orientation.py`, `pedigree/resampling.py`, `pedigree/panel.py`, `pedigree/selective_stage.py`,
+`pedigree/stage.py`). Exact layout changes (every pedigree table byte-identical on the eight validation cases):
+- the decision's genome-wide M1 profile and matched and exposed bins are [C, E] arrays on the eligible edges instead of
+  three [C, N, N] arrays: the decision decodes the chromosome records one at a time and keeps copies of their
+  eligible-edge entries (a decoded record's arrays can share one buffer, so a kept view would hold its dense arrays),
+  and the score workers write their records instead of returning them to the driver (which held all of them as well). At
+  N = 10,000 and C = 22: 52.8 GB, plus as much again for the returned records, becomes a 24 C E-byte payload, 0.53 GB
+  for 10⁶ eligible edges (unchanged, 52.8 GB, without eligibility restrictions; the stage's peak also counts the arrays
+  listed below);
+- the junction compatibilities and the per-chromosome direction evidence are stored per oriented dyad ([C, D] and
+  [C, U]) instead of [C, N, N] (at N = 10,000, C = 22 with 50 eligible parents per child: 19.8 GB -> 0.1 GB);
+- bootstrap and LOCO parent counts per named edge instead of four [N, N] int64 arrays (3.2 GB -> 16 MB);
+- the screen utilities are computed child by child from the compact M1 profile (no 17.6-GB [C, N, N] expansion);
+- records are encoded without copying their arrays (dataclasses.asdict deep-copied every score array).
+Still dense in N: each chromosome record (held one at a time), the per-fit orientation and family matrices, the panel's
+screen utilities and the eligibility masks; with unrestricted eligibility the stage is quadratic in N by construction,
+and N = 10,000 has not been run. A weighted sum over chromosomes on the edge axis can associate the last (E mod 4) edges
+differently from the dense layout in BLAS, a one-ulp difference for at most three edges when E is not a multiple of four
+(all validation cases are).
+
+**Parents versus close relatives** (`docs/methods/pedigree.md`, Interpretation and limitations). The relationship
+prototypes of this release (a second-degree relative model in which the child's homologue copies the candidate inside
+IBD tracts and the population null outside, and a full-sib form) failed in their first tests because true parents
+lost tens of nats on single chromosomes. That was the allele artefact above, not painting failure or relatedness.
+With it fixed, every true parent of the std, missing-parent, backcross and K30 simulations has a non-negative
+genome-wide contrast against the second-degree model (std 53 -> 60 of 60, missing-parent 46 -> 52 of 52, backcross
+120 of 120, K30 39 -> 40 of 40). What remains is an information limit at founder resolution:
+- A true parent can outscore the second-degree model by at most log 2 − Σ log(1 − θ) ≈ log 2 + Σθ per independently
+  started component (about 2 nats per chromosome; the full-sib form, with two independent IBD tracts, about
+  log 2 + 4Σθ), so relatives that look parent-like at founder resolution stay parent-like.
+- Measured on released and complete-view edges after the fix: in f3 on 8 chromosomes (inbred, about 7 founder
+  haplotypes) Tier B releases 3 full sibs as parents and 6 wrong one-parent counts among 106 claims (5 of 105 before
+  the linked direction, the extra one a bootstrap fraction moving from 0.694 to 0.71 across 0.70); one of the 3 false
+  edges has a negative contrast (−47.6 nats), the other two favour the parent even over the full-sib model (+6.8,
+  +26.8). In K30 the F1 half-sibs and full sibs named in the complete view score +2.4 to +3.3 nats against the
+  second-degree model, the same as true parents. A release abstention on a negative contrast would withhold the one
+  separable false edge without losing a true parent on these simulations; it is not part of this release, and the
+  reversed parent-child pairs (equally positive) show why a sign test alone is no relationship classifier.
+- TroMau (no call change from the correction): 35 of its 36 released edges favour the parent over a second-degree
+  relative genome-wide (median +1.61 nats per chromosome; one edge at −3.3) and none favours a full sib.
+
+**End-to-end validation** (the release's single end-to-end run, on the candidate before a final copy-only memory repair,
+through founder refit; simulations against their manifests): std 8 chromosomes, f3, backcross, K30 and TroMau all
+completed (rc 0; wall 1,010, 1,031, 750, 2,202 and 6,212 s on 76-CPU nodes; TroMau 6,137 s in 2.15 on the same node
+type). Every stage up to and including painting is identical to the 2.15 runs (census over 8, 3, 3, 5 and 22 contigs: no
+differing founder-panel cell), and every pedigree table is byte-identical to the pedigree-only replays above. Std: Tier
+B 40 of 40 exact, 60 of 60 true edges, no false edge; every released edge stays compatible with the raw genotype
+likelihoods (0 of 60 excluded). f3 and backcross as in 2.16's replays (no Tier-B edge; complete view f3 16 of 112,
+backcross 80 of 80). K30: Tier B 8 of 80 exact, 6 of 40 true edges, no false edge; complete view 67 of 80 with 17 extra
+edges. TroMau: no call differs from 2.15 (36 released edges, 0 of 36 excluded by the raw-likelihood check). The final
+memory repair (decoded records' kept arrays copied, so a view no longer holds a chromosome's dense arrays) changes no
+value: pedigree replays of the final code are byte-identical on all eight cases.
+
 ## 2.15.0 (28 October 2026)
 
 This release works on pedigree inference (stage 6). Its unobserved-parent null drew every founder state with equal
@@ -993,7 +1136,6 @@ A new refinement is being designed for 2.8.
   Both change when work is admitted, never what is computed. The guard-scratch change was checked identical on
   backcross, N640 and TroMau, and a bounded reproducer hangs before the fix and completes after it.
 
-
 **Known limitation, unchanged:** family phase, the recombination maps derived from it and phased-sample VCFs are known
 to be broken and are not validated.
 
@@ -1405,7 +1547,6 @@ exact local provenance establishes the disagreement.
 Exact bootstrap reuse and a bounded optional cache for identical refinement windows
 reduce repeated work without changing scientific decisions. Cache omission and eviction
 change computational work only.
-
 
 #### Assembly accuracy trade-offs against 2.2
 

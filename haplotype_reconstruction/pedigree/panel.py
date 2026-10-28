@@ -38,7 +38,14 @@ def chromosome_weights(markers: np.ndarray, config: PedigreeConfig) -> np.ndarra
 def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: ParentEligibility,
                   config: PedigreeConfig) -> np.ndarray:
     """float64 [N, N] screen utility [child, parent] from the per-chromosome M1 scores [C, N, N]."""
-    n_contigs, n_samples, _ = pair_scores.shape
+    return robust_screen_values(lambda child, parents: pair_scores[:, child, parents], len(markers),
+                                pair_scores.shape[1], markers, eligibility, config)
+
+
+def robust_screen_values(values_of, n_contigs: int, n_samples: int, markers: np.ndarray,
+                         eligibility: ParentEligibility, config: PedigreeConfig) -> np.ndarray:
+    """robust_screen with each child's per-chromosome M1 scores [C, P] of its eligible parents from
+    ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array."""
     panel = config.panel
     output = np.full((n_samples, n_samples), -np.inf, dtype=np.float64)
     weights = chromosome_weights(markers, config)
@@ -49,8 +56,9 @@ def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: Par
         if not len(parents):
             continue
         utility = np.empty((n_contigs, len(parents)), dtype=np.float64)
+        scores = values_of(child, parents)
         for contig in range(n_contigs):
-            values = pair_scores[contig, child, parents]
+            values = scores[contig]
             centered = (values - np.max(values)) / tempering[contig]
             soft = np.exp(centered)
             soft /= np.sum(soft)

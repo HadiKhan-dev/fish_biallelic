@@ -74,6 +74,7 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
     required = eligibility.parents | eligibility.parents.T
     np.fill_diagonal(required, True)
     parts = []
+    schedules, thetas = [], []
     for index, (component, component_screen) in enumerate(zip(prepared.components,
                                                               screen.components)):
         state = states[index] if states is not None else resident(component, config, claim_threads)
@@ -83,6 +84,10 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
         counts, callable_bins = junctions.junction_counts(component.state_classes,
                                                           component.named_alleles,
                                                           component.bin_sizes)
+        claim_threads()
+        schedules.append(junctions.schedules(component.state_classes, component.named_alleles,
+                                             component.bin_sizes))
+        thetas.append(np.ascontiguousarray(component.selector_switch_probability, dtype=np.float64))
         structure = exposure.expected_structure(state.pair_masses, component.anchored_states,
                                                 required, trios, component.factors.available,
                                                 claim_threads)
@@ -95,6 +100,19 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
     def total(position):
         return np.sum(np.stack([part[position] for part in parts]), axis=0)
 
+    # Linked junction transmission (release 2.16) for every dyad the decision orients (both directions of each
+    # eligible edge): the child's chromosome-wide callable fraction thins the inherited junctions (as before).
+    own = total(7).astype(np.int64)
+    total_bins = float(sum(component.n_bins for component in prepared.components))
+    detection = np.minimum(1.0, total(8) / (2.0 * total_bins)) if total_bins > 0 else np.zeros(len(own))
+    oriented = required.copy()
+    np.fill_diagonal(oriented, False)
+    dyads = np.argwhere(oriented).astype(np.int64)
+    junction_log_cdf = np.zeros(len(dyads))
+    if len(dyads):
+        claim_threads()
+        junction_log_cdf = junctions.linked_log_cdf(dyads, schedules, thetas, own, detection, own)
+
     return ChromosomeScores(
         contig=prepared.contig, zero=total(0),
         one=total(1) if one_values is None else one_values,
@@ -104,7 +122,8 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
         junctions=total(7), callable_bins=total(8),
         informative_markers=prepared.informative_markers,
         component_count=prepared.component_count,
-        scored_component_count=len(prepared.components))
+        scored_component_count=len(prepared.components),
+        junction_dyads=dyads, junction_log_cdf=junction_log_cdf)
 
 
 def score_chromosome_selective(prepared: PreparedChromosome, one: np.ndarray,
