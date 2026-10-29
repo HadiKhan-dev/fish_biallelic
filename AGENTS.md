@@ -568,7 +568,7 @@ On 21 October 2026 a delegated replay hung for two hours on a paid node:
 - the agent had ended its turn, and the coordinator watched only exit codes.
 
 - **Confirm every start** (owner, 21 October 2026). This applies to any launch, by you or a delegated agent: a local
-  or background process, a pool task, an `srun` step or an `sbatch` job.
+  or background process, a node-queue task, an `srun` step or an `sbatch` job.
   - Within about five minutes, check that it really runs:
     - its processes are alive on the expected node and using CPU;
     - its log shows the expected start-up lines and keeps growing;
@@ -609,12 +609,26 @@ On 21 October 2026 a delegated replay hung for two hours on a paid node:
 
 The owner pays for every core of a paid allocation, the hosting node included. On 21 October 2026 they asked that
 "the nodes we have allocated to us aren't being left idle or underutilised".
-- **Every 30 minutes during a campaign,** the coordinator checks every allocation: the hosting node, the pool workers
-  and any others.
+- **Run computation on worker nodes through the node queue, `nodeq`** (owner, 29 October 2026). One standing queue,
+  `/rds/project/rds-8b3VcZwY7rY/projects/claude_lab/nodeq` (see its README), serves every worker node.
+  - Each node's worker packs tasks onto its own CPUs. A task that needs a whole node waits for an empty one.
+  - Send replays, sweeps, targeted checks and validations with `nodeq run` or `nodeq submit`. `nodeq run` waits,
+    streams the log and returns the exit code, like a local command.
+  - Declare `--cores N` and `--minutes M` for every task. Use `--cores all` for whole-genome runs (§6.5), and
+    `--exclusive` for timing and speed checks.
+  - Keep the hosting node for orchestration, light inspection and smoke tests with tiny caps (§6.8). Never run work
+    there while a worker node is idle.
+  - `nodeq status` lists idle nodes and why each pending task waits. `claude_lab/nodeq/nodeq_remind.py` prints a
+    one-line reminder once nodes have been idle for 10 minutes. Check one of them whenever you regain control.
+  - Start worker nodes with `nodeq/sbatch/nodeq_<partition>.sbatch`. Older campaign pools served by
+    `pool_worker.sh` are superseded: once a node's old pool is empty, give it a nodeq worker with
+    `nodeq/attach.sh JOBID`.
+- **Every 30 minutes during a campaign,** the coordinator checks every allocation: the hosting node, the node-queue
+  workers and any others.
   - One cheap pass covers heartbeats, claimed and pending tasks, and host load, plus at most one `squeue`.
   - Record it as one status line, and reuse the same pass for the stall checks (§5.3).
 - **Also reassess utilization:**
-  - when a pool starts and when a canary finishes;
+  - when node workers start and when a canary finishes;
   - at stage, batch or chromosome boundaries;
   - when workers exit or a straggler tail begins;
   - whenever you regain control during a long run.
@@ -638,7 +652,8 @@ The owner pays for every core of a paid allocation, the hosting node included. O
 - **Reallocate as tasks finish;** never keep an early, conservative worker count. Where the validated path supports
   it, schedule dependency-ready batches rather than whole chromosomes. Keep batch boundaries, stable ordering,
   single-writer checkpoints and resource limits. `docs/performance.md` documents where each stage stands.
-- **Order pool tasks** so that critical work is claimed first, and keep a short ready queue for nodes about to start.
+- **Order node-queue tasks** so that critical work is claimed first (`nodeq` claims in name order; set
+  `--priority`), and keep a short ready queue for nodes about to start.
 - **Before a session or turn ends with follow-on work queued,** make sure workers whose walltime covers that work will
   exist while nobody is watching. Otherwise run it on the hosting node through a durable waiter.
 - **Never fill nodes with busywork** (§5.5), and never put whole-genome work on a partial node (§6.5).

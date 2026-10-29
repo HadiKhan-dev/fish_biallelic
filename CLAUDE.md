@@ -14,6 +14,11 @@ specific to Claude Code. Shared rules go in `AGENTS.md`, never here.
     analyse it, test hypotheses and try to solve it.
   - Then compare conclusions. A review checks your reasoning; it never substitutes for it.
   - Never wait idle for a reviewer's verdict on a question you could be investigating.
+- **Act on the idle-node reminder** (owner, 29 October 2026).
+  - A user-level hook (`~/.claude/settings.json`, running `claude_lab/nodeq/hook.sh`) adds an `[idle nodes]` line to
+    the context. It fires once worker nodes have been idle for 10 minutes or more.
+  - Act on it in the same turn (`AGENTS.md` §5.4): queue useful authorized work through `nodeq`, or say why none is
+    ready.
 - **No end-to-end runs to check a fix** (owner, 26 October 2026; shared rule in `AGENTS.md` §2.6 and §5.5).
   - Validate each fix where it acts: its fixture, replays of the affected blocks or components on saved inputs, and
     competing outputs scored on common inputs.
