@@ -1,5 +1,151 @@
 # Changelog
 
+## 2.18.0 (29 October 2026)
+
+This release works on the founder refit (stage `founder_refit`) and on the site filter at low read depth. The refit
+now calls founder alleles the painted panel left unknown when two or more painted carriers support them, can change
+two rows that carry the same wrong allele together, keeps its tie decisions stable under 10^-6 likelihood noise at
+large sample sizes (a 940-sample control), and its kernel costs O(N + K^3 log K) per site except in large tie
+classes (an accepted exception to the cubic rule). The site filter's wrong-allele rule r3
+now expects the heterozygote reads its genotype classification counts as homozygote errors; at 4-6x it removed
+nearly every site of a clean simulation and now removes none. Simulations do not run the site filter, so upstream of
+the refit they are unchanged; on real data the filter's kept sites change (TroMau: about 0.5% each way). Pedigree
+does not read the refit.
+
+**Founder refit fills unknown alleles** (`founder_refit/refit.py`, `founder_refit/config.py`
+`fill_min_supporters = 2`, `founder_refit/records.py` schema 2; `docs/methods/founder_refit.md`, Filled cells).
+After the refit's sweeps, an allele the painted panel left unknown is called when one allele's robust log likelihood
+over the row's scoring carriers beats the other by the refit's minimum gain (5 nats) and at least two of those
+carriers favour it on their own reads: the same minimum of two favourable samples that local selection and
+discovery require (`min_supporters` = 2), not their whole release rule. All fills of a site are decided against the post-sweep state and applied together; carriers
+whose partner allele is unknown give no evidence; cells the refit's tie rule released unknown are not filled; fills
+change only the released alleles (the inference snapshot that family phase decodes keeps them unknown). They are
+counted per contig (`filled_alleles` in `OUTPUT/founder_refit/summary.csv` and the log line) and marked per changed
+cell in the record (schema-1 records of earlier releases load with no fills).
+- Measured on the 2.17 end-to-end inputs (refit replays, simulation truth; every other cell unchanged):
+  | design | fills | wrong-or-missing alleles | within-segment allele errors | called-allele errors |
+  | --- | --- | --- | --- | --- |
+  | std (8 chromosomes) | 1,554 | 461,529 -> 460,128 | +5 | +145 |
+  | held-out std seed | 1,378 | 414,690 -> 413,364 | +5 | +52 |
+  | K30 | 452 | 55,763 -> 55,329 | +7 | +10 |
+  | backcross | 81 | 978 -> 897 | 0 | 0 |
+  | TroMau-like | 91 | 318 -> 227 | 0 | 0 |
+  | f3 | 11 | 224,001 -> 223,991 | 0 | +1 |
+  Real TroMau: 1,464 fills on 22 chromosomes. Without the two-supporter condition (the 5-nat margin alone) the fills
+  carried five times as many within-segment errors (std +26, K30 +40).
+- Conditional accuracy of the 3,567 simulated fills, each judged against the truth founders its row follows in the
+  painted panel around the site (the site itself excluded; resolved when those candidates agree there): 3,074
+  right, 17 wrong, 476 unresolved, so 0.55% wrong among resolved (nominal 0.7% for a 5-nat margin). Exactly two
+  supporters: 1.37% (16 of 1,169); three or four: 0.06%; five or more: 0; margins of 10 nats or more: 0. A fill can
+  carry another founder's allele where the painting names the wrong carriers. Most of the called-allele errors
+  above are fills that agree with the founder their row follows locally but not with the founder the row is matched
+  to over its whole component; the 17 wrong fills were wrong locally, and the 476 unresolved ones could not be
+  judged.
+
+**Founder refit: pair flips** (`founder_refit/refit.py`; `docs/methods/founder_refit.md`, Model). The refit's
+second phase now also flips two rows painted together that carry the same allele, at the swap's 10 nats for two
+cells. Where both rows carry the wrong allele, their shared carriers' reads favour neither single flip: under the
+robust error floor a heterozygote fits a homozygote's reads barely better than the wrong homozygote (two shared
+carriers of 13 reads: a single flip gains 0.08 nats, the pair flip 11.4), so the refit could not reach the genotype
+the reads show (found by the adversarial review; nine constructed cases with 2-6 carriers at 8-20x, all corrected
+now, none before). With the new tie quantum (the two were measured together) it changes one cell on the 2.17
+end-to-end inputs (real TroMau chr9) and nothing in the simulations.
+
+**Founder refit: tie quantum above the noise floor at large N** (`founder_refit/refit.py` `_tie_components`). Two
+move gains summing n_i and n_j scoring carriers are now tied within max(2^-16, 2^-18 (n_i + n_j)) nats, and a tie
+class is a connected component of that relation (two sorts and union-find, O(n log n)), instead of the fixed 2^-16
+placed against 10^-9 noise in 2.1. Membership does not depend on the convention that orders equal gains, and a gain
+lying between two tied gains can no longer hide their direct tie (two earlier versions chained neighbouring gains
+and could change a call under the convention reversal, or after a 10^-12 change to an unrelated row; found by the
+adversarial review; 2,000 random cases agree with the brute-force components and are invariant to permutation and
+reversal); a third move can still join two classes when it is tied with both. A component wider than `WIDE_QUANTA`
+times max(2^-16, 2 x 2^-18 x its largest carrier count) is not a tie, as before: its members keep value order.
+Why the quantum scales: 10^-6 relative
+genotype-likelihood noise (the 2.13 noise floor) moves one
+carrier's two log terms by up to about 2·10^-6, so a sum over hundreds of carriers moved more than 2^-16. A
+940-sample control with two exactly tied moves changed from the released tie abstention to a call in 12 of 30 draws
+of 10^-6 noise and changes in none now. No released cell changes on the 2.17 end-to-end inputs.
+
+**Founder refit kernel: O(N + K^3 log K) per site on the generic path, decisions unchanged** (`founder_refit/refit.py`). A swap's gain is computed
+in O(1) from the two rows' flip gains (swap(a, b) = flip(a) + flip(b) - T[a, b, 0] - T[a, b, 2] + 2 T[a, b, 1]), the
+tie-conflict rule examines only pairs inside a tie class, and the decision order is a stable sort (O(n log n)
+instead of an insertion sort). Per site and sweep the cost is O(N + K^3 log K); only large tie classes (many moves
+whose gains lie within the carrier-scaled quantum, which at large N is much wider than 2^-16) can make the tie
+checks exceed it, up to O(K^4) (accepted, below). Released alleles identical to 2.17 on all saved end-to-end inputs (std,
+held-out seed, f3, backcross, K30, TroMau-like, TroMau: 24 chromosomes) and on synthetic panels for K = 4 to 60
+(gains within 3.6e-15); the K = 60 synthetic kernel takes 0.070 s instead of 0.101 s. Measured on those inputs: at
+most 4 swap candidates and tie classes of at most 2 per site, at most 3 rounds per phase.
+
+**Site filter: r3's clean expectation includes heterozygote leakage** (`evidence/site_quality.py`
+`_leakage_terms`, `_error_mixture`, `_clean_rate`; site-quality version v2; `docs/methods/evidence.md`, Genotype
+classification). r3 compares W, the wrong-allele reads of the samples a site's genotype classification calls
+homozygous, with a Poisson clean core and a negative-binomial artefact class. W weights each cell's reads by the
+classification's posteriors (fixed read model: error 0.01, heterozygote balance 1/2), so a heterozygote whose reads
+show its minor allele once also adds to W, frequently at low depth. The clean expectation is now, to first order in
+the error rate e, lambda + kappa e: lambda the expected leaked heterozygote reads and kappa the posterior-weighted
+homozygote depth, both from the site's fitted genotype frequencies and its samples' depths (until 2.17: N e, the
+homozygote depth times the rate). Both terms are exact to first order: lambda also holds, at depth 1-2, the reads
+of error-free homozygotes that the classification weights with the other homozygote's posterior, and kappa is the
+change one error read makes to a homozygote's weighted wrong reads (found by the adversarial review). Sites whose
+cells carry no first-order information on the rate (kappa below 10^-9 of the homozygote depth, for example only
+depth-1 cells at a balanced site) are not scored. The clean rate is searched in [10^-12, 1/2] on its concave
+objective: a bound when the gradient keeps its sign there, else Newton steps that keep a bracket of the root, with
+bisection when a step leaves it (a first version could loop on all-depth-1 data, found by the adversarial review).
+The artefact M-step's analytic derivatives follow the new mean. The classification itself is unchanged.
+- Clean simulation (TroMau-like chr19, 115 samples, error rate 0.0015, Poisson depth): 2.17 kept 3, 259 and 1,129
+  of 272,701 sites at 4, 5 and 6x (r3 removed 79-99%: the leaked reads depend on each site's genotype frequencies,
+  so the mixture separated sites by frequency) and 51% at 7x and above (the rest are uninformative, r5); 2.18 keeps
+  51% at every depth from 3x to 20x and with 1,003 samples at 5x, with the clean rate at 0.00147-0.00154.
+- Planted artefacts (10% of sites with homozygote read error 0.015), r3 false flags among clean sites / recall among
+  artefact sites, 2.17 -> 2.18: 5x 100% / 100% -> 0.14% / 52%; 8x 2.2% / 94% -> 0.10% / 78%; 13x 0.24% / 98.5% ->
+  0.05% / 97%; 1,003 samples at 5x 52% / 100% -> 0% / 86%; 3x (2.18) 0.8% / 42%. Per-library error rates
+  (coefficient of variation 0.5) without artefacts at 5x: false flags 79% -> 0 (2.18's r3 stays inactive); 13x 0 in
+  both.
+- Real TroMau (about 13x; 22 chromosomes): the leaked reads are 22-23% of W; the clean rate falls from about 0.0014
+  to 0.0002-0.00035; r3 changes on 51,771 of 5.9 million sites and the kept sites change by +11,421 / -9,940
+  (1,993,687 -> 1,995,168). Sites the new r3 removes that 2.17 kept fit the released 2.17 painting worse than the
+  sites both keep (0.55 and 0.59 against 0.080 and 0.076 nats per sample on chr1 and chr8; r3-removed sites in the
+  2.4 analysis: 0.37). On chr3 the changed site set also moves the unchanged contamination QC: sample
+  2021cicX13611489 (robust z 4.05 in 2.17, threshold 5) is flagged there (the cohort's robust spread narrows on the
+  changed site set while its own private-event count is unchanged), which removes its reads from chr3's founder
+  evidence and moves r5 on 1,025 sites.
+- Rejected: classifying with the fitted clean rate until self-consistent. Exact on the simulations at 3-20x, but on
+  real TroMau the rate collapses to about 0.00012 (single minor reads stop being attributable at 13x) and r3, r4 and
+  r5 change on 6,000-40,000 sites per chromosome (kept sites -1.8%).
+
+**End-to-end validation** (one fresh run per case through founder refit, family phase skipped as in every
+validation since 2.7; candidate r218e, whose refit and site-filter outputs equal the release code's on every saved
+input: refit replays of 57 chromosomes and the site filter on 22 real chromosomes identical). Std, held-out std
+seed, f3, backcross, K30 and TroMau-like: every founder stage through painting identical to 2.17 (simulations do not
+run the site filter) and every pedigree table identical; the founder refit's wrong-or-missing alleles 461,529 ->
+460,128 (std), 414,690 -> 413,364 (held-out seed), 224,001 -> 223,991 (f3), 978 -> 897 (backcross), 55,763 -> 55,329
+(K30), 318 -> 227 (TroMau-like). The release code also reproduces these runs' own refit records exactly (released
+and inference alleles, changed cells, fills and gains on all 35 simulated chromosomes). The real TroMau end-to-end
+run had not finished when this release was made; its site filter, fills and pair flip are measured above on the
+2.17 inputs.
+
+**Accepted trade-offs** (owner, 29 October 2026): the refit's tie checks stay within the cubic rule on the generic
+path but can need O(K^4) pair checks when very many moves fall in one tie class (a constructed family; at most two
+tied moves on every measured case); r3 at 8x catches fewer planted artefacts than 2.17 (78% against 94%) while removing about 20
+times fewer clean sites; on real TroMau chr3 the changed site set makes the unchanged contamination QC flag one more
+sample.
+
+**Founder refit documentation** (`docs/methods/founder_refit.md`, `founder_refit/config.py`): the update order
+(rounds since 2.1), the tie rule that releases mutually exclusive tied moves unknown (2.2) and its
+`ambiguous_alleles` count, and the cost were still described as in 2.0; the minimum gain is now described as
+charged per accepted move (a hysteresis rule, not exactly a fixed prior on the assembled allele); the refit is a
+per-site conditional correction given the painting's released labels with the untempered robust genotype
+likelihood, not the M-step of painting's tempered copying-model likelihood (since 2.14).
+
+**Measured and left unchanged:**
+- What the refit contributes (painting stage -> refit, 2.17 end-to-end runs): wrong-or-missing alleles std
+  465,987 -> 461,529, held-out seed 416,418 -> 414,690, K30 55,968 -> 55,763, backcross 1,346 -> 978, TroMau-like
+  323 -> 318, f3 224,120 -> 224,001.
+- Identity-gated refit carriers (labels gated on painting's identity mass qV instead of the faithful-copy mass qF,
+  the gate since 2.14): std wrong-or-missing -1,363 but within-segment allele errors +1,926; backcross -33 / +33;
+  K30 and TroMau-like unchanged. The carriers it adds are noisy (12.4% of their painted pairs disagree with the true
+  genotype, against 0.055% of the current carriers); not adopted (it would also need a new painting grid).
+
 ## 2.17.0 (29 October 2026)
 
 This release measures where the remaining founder errors come from, reports what the data do not resolve instead of

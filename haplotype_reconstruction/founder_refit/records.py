@@ -20,7 +20,7 @@ from .refit import ComponentRefit, FounderRefit
 
 STAGE = "founder_refit"
 KEY = "founder_refit"
-SCHEMA = 1
+SCHEMA = 2  # 2: release 2.18 fills (per component `filled`)
 
 
 def stage_identity(file, config: FounderRefitConfig) -> dict:
@@ -49,7 +49,8 @@ def encode(refit: FounderRefit) -> dict:
         "components": [{"released": component.panel.released,
                         "changed_rows": component.changed_rows,
                         "changed_sites": component.changed_sites,
-                        "gain_nats": component.gain_nats} for component in refit.components],
+                        "gain_nats": component.gain_nats,
+                        "filled": component.filled} for component in refit.components],
     }
 
 
@@ -68,7 +69,10 @@ def load(file) -> FounderRefit:
             panel=replace(panel, released=released,
                           inference=np.where(panel.inference >= 0, released, -1).astype(np.int8)),
             changed_rows=component["changed_rows"], changed_sites=component["changed_sites"],
-            gain_nats=component["gain_nats"]))
+            gain_nats=component["gain_nats"],
+            # records before release 2.18 (schema 1) never filled a cell
+            filled=np.asarray(component.get("filled", np.zeros(len(component["changed_rows"]), dtype=np.bool_)),
+                              dtype=np.bool_)))
     return FounderRefit(contig=record["contig"], sample_ids=tuple(record["sample_ids"]),
                         components=tuple(components),
                         excluded_samples=tuple(record["excluded_samples"]))

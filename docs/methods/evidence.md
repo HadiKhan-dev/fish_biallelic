@@ -81,13 +81,34 @@ wrong-allele reads W_l and depth N_l in homozygotes, the expected ALT reads A_l 
 heterozygotes, and c_l, the number of samples with reads. The clean-core rates are then fitted,
 not fixed:
 
-- r3, among r1/r2-passing sites with N_l >= 1: clean W ~ Poisson(N eps0), artefact
-  W ~ NegBin(mean N eps1, shape k, clipped to [1e-3, 1e4]);
+- r3, among r1/r2-passing sites with N_l >= 1: clean W ~ Poisson(lambda_l + kappa_l eps0), artefact
+  W ~ NegBin(mean lambda_l + kappa_l eps1, shape k, clipped to [1e-3, 1e4]). Release 2.18: W weights each
+  cell's reads by the classification's posteriors, so a heterozygote whose reads show its minor allele once,
+  frequent at low depth, also adds to W. Under a clean site with error rate e the expectation of W, given the site's
+  fitted genotype frequencies F_l, is to first order in e lambda_l + kappa_l e, with w(a, d) = p0 a + p2 (d - a) a cell's posterior-weighted wrong reads
+  (h = the classification's heterozygote balance): lambda_l = sum over the site's cells of
+  F_l1 sum_a Bin(a; d, h) w(a, d) + F_l0 w(0, d) + F_l2 w(d, d), the heterozygote reads the classification counts
+  as homozygote errors and, at depth 1-2, the reads of error-free homozygotes weighted by the other homozygote's
+  posterior; kappa_l = sum over cells of d (F_l0 (w(1, d) - w(0, d)) + F_l2 (w(d - 1, d) - w(d, d))), the change one
+  error read makes. A site whose cells carry no first-order information on e (kappa_l below 10^-9 of its
+  homozygote depth N_l, for example only depth-1 cells at a balanced site) is not scored by r3; the floor also
+  excludes some small positive slopes, whose whole mean change over e in [0, 1/2] is below 5·10^-10 N_l. W is a
+  posterior-weighted, non-integer count, so its Poisson and negative-binomial likelihoods are approximations.
+  The clean rate e0 is searched in [10^-12, 1/2]: a bound is returned when the concave objective's gradient keeps
+  its sign there, otherwise Newton steps that keep a bracket of the root, with bisection when a step leaves it.
+  Until 2.17 the
+  clean mean was N_l eps0 (lambda = 0, kappa = N), which left the leaked reads in the fitted rate: at 4-6x the
+  leakage depends on each site's genotype frequencies, the mixture separated sites by frequency rather than by
+  quality, and r3 removed 79-99% of the sites of a clean simulation (2.18's r3 removes none; at 7x and above
+  neither r3 removed any). On real TroMau (about 13x) the leaked reads are 22-23% of W, the clean rate falls from about
+  0.0014 to 0.0003 and r3 changes on about 2% of the sites it tests: the sites it now removes that 2.17 kept fit
+  the released painting worse than kept sites (0.55-0.59 against 0.08 nats per sample);
 - r4, among r1-r3-passing sites with H_l >= 1: clean A ~ Binomial(H, h0), artefact
   A ~ beta-binomial(mean m, concentration c, clipped to [1e-2, 1e5]). The clean heterozygote ALT
   fraction h0 is also the balance the sample QC uses.
 
-Both are fitted by EM: closed-form clean and mixing updates, and an artefact M-step that maximises
+Both are fitted by EM: closed-form mixing updates and clean updates (r3's clean rate by the bracketed Newton
+search above, closed form when no site has leakage), and an artefact M-step that maximises
 the weighted artefact log likelihood over its two parameters (log rate and log shape; logit mean
 and log concentration) jointly within the box of those clips, by projected Newton steps with
 analytic gradients and Hessians. An M-step stops when the full Newton step moves no transformed
@@ -96,8 +117,8 @@ divided by the artefact class's posterior weight, is then at most 1e-9 (a disper
 clip needs only an outward gradient), and otherwise recorded as a small-step stop whose gradient
 certificate is unmet (`precision`). Each mixture records its M-step outcomes (`m_steps`:
 stationary, precision, line-search and iteration-cap counts, and the largest gradient over all
-its M-steps). On TroMau, 2,060 of 3,236 M-steps are certified and the rest are small-step stops
-(largest normalized gradient 3.1e-7); none fails its line search or reaches the cap. The EM stops when the summed parameter change
+its M-steps). On TroMau in release 2.11, 2,060 of 3,236 M-steps were certified and the rest were small-step stops
+(largest normalized gradient 3.1e-7); none failed its line search or reached the cap. The EM stops when the summed parameter change
 falls below 1e-5 (r3) or 1e-6 (r4), or after 300 iterations. Where the data hold no artefact
 class (clean reads) the two components nearly coincide and the EM can run to its cap; each
 iteration then costs a few likelihood passes. Releases 2.10 and earlier searched the unbounded

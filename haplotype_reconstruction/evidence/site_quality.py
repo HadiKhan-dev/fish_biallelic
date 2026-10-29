@@ -39,7 +39,7 @@ from ..execution.budget import current_budget, CpuBudget
 from .config import SampleQualityConfig, SiteQualityConfig
 from . import sample_quality
 
-VERSION = "self-calibrated-site-quality-v1"
+VERSION = "self-calibrated-site-quality-v2"  # v2: release 2.18 r3 clean expectation with heterozygote leakage
 RULES = ("r1", "r2", "r3", "r4", "r5")
 QUALITY_RULES = RULES[:4]          # r1-r4; r5 is informativeness
 
@@ -171,12 +171,70 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
     return wrong, homn, heta, hetn
 
 
+@njit(cache=True)
+def _leakage_terms(n, f, eps, h):
+    """Release 2.18: the expectation of a site's homozygote wrong-read statistic W under a clean site with error
+    rate e, E[W] = lam + kap e, exact to first order in e. W weights each cell's reads by the classification's
+    posteriors, w(a, d) = p0 a + p2 (d - a). A heterozygote's reads ~ Bin(d, h), so heterozygotes add
+    f1 sum_a Bin(a; d, h) w(a, d) whatever e; an error-free homozygote adds w(0, d) (hom-ref) or w(d, d) (hom-alt),
+    its own reads weighted by the posterior of the other homozygote (not small at depth 1-2); each error read
+    (probability d e to first order) moves a homozygote from w(0, d) to w(1, d) (hom-ref) or from w(d, d) to
+    w(d - 1, d) (hom-alt). So lam = sum over cells of f1 H(d) + f0 w(0, d) + f2 w(d, d) and
+    kap = sum over cells of d (f0 (w(1, d) - w(0, d)) + f2 (w(d - 1, d) - w(d, d))). Same read model as the
+    classification (eps, h) and the site's fitted frequencies f; cells cached by depth."""
+    S = len(n)
+    dmax = 0
+    for s in range(S):
+        if n[s] > dmax:
+            dmax = int(n[s])
+    leak = np.full(dmax + 1, -1.0)
+    slope = np.zeros(dmax + 1)
+    le, l1e = math.log(eps), math.log(1.0 - eps)
+    lh, l1h = math.log(h), math.log(1.0 - h)
+    lf0, lf1, lf2 = math.log(f[0]), math.log(f[1]), math.log(f[2])
+    lam = 0.0
+    kap = 0.0
+    for s in range(S):
+        d = int(n[s])
+        if d == 0:
+            continue
+        if leak[d] < 0.0:
+            het = 0.0
+            w0 = w1 = wd1 = wd = 0.0
+            lgd = math.lgamma(d + 1.0)
+            for a in range(d + 1):
+                l0 = lf0 + a * le + (d - a) * l1e
+                l1 = lf1 + a * lh + (d - a) * l1h
+                l2 = lf2 + a * l1e + (d - a) * le
+                m = max(l0, l1, l2)
+                e0 = math.exp(l0 - m)
+                e1 = math.exp(l1 - m)
+                e2 = math.exp(l2 - m)
+                w = (e0 * a + e2 * (d - a)) / (e0 + e1 + e2)
+                het += math.exp(lgd - math.lgamma(a + 1.0) - math.lgamma(d - a + 1.0) + a * lh + (d - a) * l1h) * w
+                if a == 0:
+                    w0 = w
+                if a == 1:
+                    w1 = w
+                if a == d - 1:
+                    wd1 = w
+                if a == d:
+                    wd = w
+            leak[d] = f[1] * het + f[0] * w0 + f[2] * wd
+            slope[d] = d * (f[0] * (w1 - w0) + f[2] * (wd1 - wd))
+        lam += leak[d]
+        kap += slope[d]
+    return lam, kap
+
+
 @njit(cache=True, parallel=True)
 def _genotype_expectations(alt, dep, eps, h, iters):
-    """alt, dep: (sites, samples). Per-site frequencies, expected counts, covered samples."""
+    """alt, dep: (sites, samples). Per-site frequencies, expected counts, covered samples, and the clean-site
+    expectation terms of W (release 2.18, _leakage_terms)."""
     L, S = dep.shape
     frequencies = np.zeros((L, 3))
     wrong = np.zeros(L); homn = np.zeros(L); heta = np.zeros(L); hetn = np.zeros(L)
+    leak = np.zeros(L); slope = np.zeros(L)
     covered = np.zeros(L, np.int32)
     for i in prange(L):
         a = alt[i].astype(np.float64); n = dep[i].astype(np.float64)
@@ -191,13 +249,14 @@ def _genotype_expectations(alt, dep, eps, h, iters):
         f = np.zeros(3); ll = np.zeros((S, 3))
         w, hn, ha, hh = _site_genotype_fit(a, n, eps, h, iters, f, ll)
         wrong[i] = w; homn[i] = hn; heta[i] = ha; hetn[i] = hh
+        leak[i], slope[i] = _leakage_terms(n, f, eps, h)
         frequencies[i, 0] = f[0]; frequencies[i, 1] = f[1]; frequencies[i, 2] = f[2]
-    return frequencies, wrong, homn, heta, hetn, covered
+    return frequencies, wrong, homn, heta, hetn, covered, leak, slope
 
 
 @njit(cache=True, nogil=True)
 def _genotype_counts_into(counts, samples, eps, h, iters, start, stop,
-                          frequencies, wrong, homn, heta, hetn, covered):
+                          frequencies, wrong, homn, heta, hetn, covered, leak, slope):
     S = len(samples)
     for i in range(start, stop):
         a = np.empty(S); n = np.empty(S)
@@ -215,6 +274,7 @@ def _genotype_counts_into(counts, samples, eps, h, iters, start, stop,
         f = np.zeros(3); ll = np.zeros((S, 3))
         w, hn, ha, hh = _site_genotype_fit(a, n, eps, h, iters, f, ll)
         wrong[i] = w; homn[i] = hn; heta[i] = ha; hetn[i] = hh
+        leak[i], slope[i] = _leakage_terms(n, f, eps, h)
         frequencies[i, 0] = f[0]; frequencies[i, 1] = f[1]; frequencies[i, 2] = f[2]
 
 
@@ -222,7 +282,7 @@ def _genotype_expectations_counts(counts, samples, eps, h, iters):
     """One live-budget queue, with direct-count tasks and disjoint output slices."""
     L = counts.shape[1]
     values = (np.zeros((L, 3)), np.zeros(L), np.zeros(L), np.zeros(L),
-              np.zeros(L), np.zeros(L, np.int32))
+              np.zeros(L), np.zeros(L, np.int32), np.zeros(L), np.zeros(L))
     if L == 0:
         return values
     # Limit the number of simultaneous O(N) workspaces to the reserved capacity.
@@ -355,10 +415,10 @@ _BETALN = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double, ctypes.c_double, ct
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _negative_binomial_values(W, N, lw, rate, shape, gamma_shape, function):
+def _negative_binomial_values(W, lam, kap, lw, rate, shape, gamma_shape, function):
     result = np.empty(len(W))
     for i in prange(len(W)):
-        mu = N[i] * rate
+        mu = lam[i] + kap[i] * rate
         result[i] = (function(W[i] + shape, 1) - gamma_shape - lw[i]
                      + shape * math.log(shape / (shape + mu))
                      + W[i] * math.log(mu / (shape + mu)))
@@ -399,9 +459,9 @@ class _Chunks:
             pass
         return out
 
-    def negative_binomial(self, W, N, lw, rate, shape):
+    def negative_binomial(self, W, lam, kap, lw, rate, shape):
         with numba_threads(self.budget.threads()):
-            return _negative_binomial_values(W, N, lw, rate, shape,
+            return _negative_binomial_values(W, lam, kap, lw, rate, shape,
                                              special.gammaln(shape), _GAMMALN)
 
     def beta_binomial(self, A, H, lc, mean, concentration):
@@ -445,9 +505,10 @@ def _trigamma(x):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _negative_binomial_terms(W, N, w, rate, k):
-    """Weighted sums over fixed site chunks of log NegBin(W | mean N rate, shape k) (without log W!) and its first
-    and second derivatives in (log rate, log k): rows of (value, gx, gy, hxx, hyy, hxy)."""
+def _negative_binomial_terms(W, lam, kap, w, rate, k):
+    """Weighted sums over fixed site chunks of log NegBin(W | mean lam + kap rate, shape k) (without log W!) and its
+    first and second derivatives in (log rate, log k): rows of (value, gx, gy, hxx, hyy, hxy). The mean's derivative
+    in log rate is g = kap rate (= the mean when lam = 0)."""
     n = len(W)
     out = np.zeros((_M_STEP_CHUNKS, 6))
     log_k, digamma_k, trigamma_k, lgamma_k = math.log(k), _digamma(k), _trigamma(k), math.lgamma(k)
@@ -456,18 +517,19 @@ def _negative_binomial_terms(W, N, w, rate, k):
         for i in range(chunk * n // _M_STEP_CHUNKS, (chunk + 1) * n // _M_STEP_CHUNKS):
             if w[i] == 0.0:
                 continue
-            x, mu = W[i], N[i] * rate
+            x, g = W[i], kap[i] * rate
+            mu = lam[i] + g
             km = k + mu
             log_km = math.log(km)
             d_mu = x / mu - (x + k) / km
             d_k = _digamma(x + k) - digamma_k + log_k + 1.0 - log_km - (x + k) / km
             s0 += w[i] * (math.lgamma(x + k) - lgamma_k + k * (log_k - log_km) + x * (math.log(mu) - log_km))
-            s1 += w[i] * d_mu * mu
+            s1 += w[i] * d_mu * g
             s2 += w[i] * d_k * k
-            s3 += w[i] * ((-x / (mu * mu) + (x + k) / (km * km)) * mu * mu + d_mu * mu)
+            s3 += w[i] * ((-x / (mu * mu) + (x + k) / (km * km)) * g * g + d_mu * g)
             s4 += w[i] * ((_trigamma(x + k) - trigamma_k + 1.0 / k - 1.0 / km - (mu - x) / (km * km)) * k * k
                           + d_k * k)
-            s5 += w[i] * (x - mu) / (km * km) * mu * k
+            s5 += w[i] * (x - mu) / (km * km) * g * k
         out[chunk, 0], out[chunk, 1], out[chunk, 2] = s0, s1, s2
         out[chunk, 3], out[chunk, 4], out[chunk, 5] = s3, s4, s5
     return out
@@ -504,9 +566,9 @@ def _chunk_totals(rows):
     return total
 
 
-def _negative_binomial_objective(q, W, N, w, weight_total):
+def _negative_binomial_objective(q, W, lam, kap, w, weight_total):
     """Weighted artefact log likelihood of r3 at q = (log eps1, log k), its gradient and Hessian."""
-    total = _chunk_totals(_negative_binomial_terms(W, N, w, math.exp(q[0]), math.exp(q[1])))
+    total = _chunk_totals(_negative_binomial_terms(W, lam, kap, w, math.exp(q[0]), math.exp(q[1])))
     return total[0], total[1:3], np.array([[total[3], total[5]], [total[5], total[4]]])
 
 
@@ -594,27 +656,67 @@ def _tally(statuses, status, gradient):
 # boxes only keep the arithmetic finite.
 # np.log as for the M-steps' starts, so that a clipped dispersion starts exactly on its bound.
 _ERROR_LOWER, _ERROR_UPPER = np.log([1e-12, 1e-3]), np.log([10.0, 1e4])
+# Release 2.18: the r3 clean rate's search interval (the artefact rate's lower bound; a rate of one half is no
+# longer an error), and the relative size below which a site's leakage slope kap is numerical zero (no
+# information on the error rate, e.g. only depth-1 cells at a balanced site).
+_CLEAN_RATE_BOUNDS = (1e-12, 0.5)
+_LEAKAGE_SLOPE_FLOOR = 1e-9
 _BALANCE_LOWER, _BALANCE_UPPER = np.array([-30.0, np.log(1e-2)]), np.array([30.0, np.log(1e5)])
 
 
-def _error_mixture(W, N, evaluate):
-    """Clean: W ~ Poisson(N eps0). Artefact: W ~ NegBin(mean N eps1, shape k). Returns parameters and P(clean)."""
-    pi = 0.6; e0 = max(np.median(W / N) / 2, 1e-5); e1 = 10 * e0; k = 1.0
+def _clean_rate(W, lam, kap, wc, start):
+    """Release 2.18: the clean core's rate e0 in [_CLEAN_RATE_BOUNDS] maximising
+    sum wc (W log(lam + kap e) - kap e), concave in e (its gradient decreases). A boundary is returned when the
+    gradient does not change sign inside; otherwise Newton steps from ``start`` (clipped into the bracket) keep a
+    bracket of the root and fall back to bisection when a step leaves it. With lam = 0 the root is the closed form
+    sum wc W / sum wc kap (clipped)."""
+    low, high = _CLEAN_RATE_BOUNDS
+    if not np.any(lam > 0.0):
+        return float(np.clip((wc * W).sum() / (wc * kap).sum(), low, high))
+
+    def gradient_and_curvature(e):
+        mu = lam + kap * e
+        return (float(np.sum(wc * (W * kap / mu - kap))), float(np.sum(wc * W * kap * kap / (mu * mu))))
+    if gradient_and_curvature(low)[0] <= 0.0:
+        return low
+    if gradient_and_curvature(high)[0] >= 0.0:
+        return high
+    e = min(max(float(start), low), high)
+    for _ in range(_MIXTURE_ITERATIONS):
+        gradient, curvature = gradient_and_curvature(e)
+        if gradient > 0.0:
+            low = e
+        else:
+            high = e
+        new = e + gradient / curvature if curvature > 0.0 else 0.5 * (low + high)
+        if not low < new < high:
+            new = 0.5 * (low + high)
+        if abs(new - e) <= 1e-12 * e:
+            return new
+        e = new
+    return e
+
+
+def _error_mixture(W, lam, kap, evaluate):
+    """Clean: W ~ Poisson(lam + kap eps0). Artefact: W ~ NegBin(mean lam + kap eps1, shape k). Returns parameters
+    and P(clean). lam, kap: the clean-site expectation of W (release 2.18, _leakage_terms; 2.17 used lam = 0 and
+    the homozygote depth N for kap)."""
+    pi = 0.6; e0 = float(np.clip(np.median(np.maximum(W - lam, 0.0) / kap) / 2, 1e-5, 0.1)); e1 = 10 * e0; k = 1.0
     lw = special.gammaln(W + 1)
     m_steps = {}
 
     def artefact(rate, shape):
-        return evaluate.negative_binomial(W, N, lw, rate, shape)
+        return evaluate.negative_binomial(W, lam, kap, lw, rate, shape)
     for it in range(_MIXTURE_ITERATIONS):
-        wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, N * e0, lw),
+        wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, lam + kap * e0, lw),
                               np.log1p(-pi) + artefact(e1, k))
-        pi2 = float(np.clip(wc.mean(), 1e-6, 1 - 1e-6)); e02 = float((wc * W).sum() / (wc * N).sum())
+        pi2 = float(np.clip(wc.mean(), 1e-6, 1 - 1e-6)); e02 = _clean_rate(W, lam, kap, wc, e0)
         wa = 1 - wc
         if wa.sum() > 1e-6:
             weight = float(wa.sum())
             with numba_threads(evaluate.budget.threads()):
                 q, status, gradient = _newton_maximum(
-                    lambda q: _negative_binomial_objective(q, W, N, wa, weight),
+                    lambda q: _negative_binomial_objective(q, W, lam, kap, wa, weight),
                     [np.log(e1), np.log(k)], _ERROR_LOWER, _ERROR_UPPER, weight)
             _tally(m_steps, status, gradient)
             e12, k2 = float(np.exp(q[0])), float(np.clip(np.exp(q[1]), 1e-3, 1e4))
@@ -624,9 +726,12 @@ def _error_mixture(W, N, evaluate):
         pi, e0, e1, k = pi2, e02, e12, k2
         if change < 1e-5:
             break
-    wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, N * e0, lw),
+    wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, lam + kap * e0, lw),
                           np.log1p(-pi) + artefact(e1, k))
-    return dict(pi_clean=pi, eps0=e0, eps1=e1, shape=k, iterations=it + 1, m_steps=m_steps), wc
+    clean = float((wc * (lam + kap * e0)).sum())
+    return dict(pi_clean=pi, eps0=e0, eps1=e1, shape=k, iterations=it + 1, m_steps=m_steps,
+                heterozygote_leakage=float(lam.sum() / max(W.sum(), 1e-300)),
+                clean_leakage=float((wc * lam).sum() / clean) if clean > 0 else 0.0), wc
 
 
 def _balance_mixture(A, H, evaluate):
@@ -704,7 +809,7 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
         # One live-budget work queue with only per-worker sample vectors.
         # The task count also bounds worker scratch for unusually large N.
         with numba_threads(min(threads, tile)):
-            F, W, N, A, H, covered = _genotype_expectations_counts(
+            F, W, N, A, H, covered, LK, SL = _genotype_expectations_counts(
                 counts, np.arange(S), config.classification_error,
                 config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
         for start in range(0, L, tile):
@@ -715,6 +820,7 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
     else:
         F = np.empty((L, 3))
         W = np.empty(L); N = np.empty(L); A = np.empty(L); H = np.empty(L)
+        LK = np.empty(L); SL = np.empty(L)
         covered = np.empty(L, np.int32)
         for start in range(0, L, tile):
             stop = min(start + tile, L)
@@ -722,7 +828,7 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
             D[start:stop] = dep.sum(axis=1, dtype=np.float64)
             values = _genotype_expectations(alt, dep, config.classification_error,
                                            config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
-            for output, value in zip((F, W, N, A, H, covered), values):
+            for output, value in zip((F, W, N, A, H, covered, LK, SL), values):
                 output[start:stop] = value
         del alt, dep, values
     parameters = dict(records=int(L), samples=int(S), snp=int(L))
@@ -768,17 +874,20 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
     base = ~r1 & ~r2
     separation = config.minimum_artefact_separation
     # r3 wrong-allele reads in homozygotes
-    m3 = base & (N >= 1)
+    # Release 2.18: a site whose cells carry no first-order information on the error rate (kap numerically zero
+    # against its homozygote depth, e.g. only depth-1 cells) cannot be scored against the clean core.
+    m3 = base & (N >= 1) & (SL > _LEAKAGE_SLOPE_FLOOR * N)
     r3 = np.zeros(L, bool)
     r4 = np.zeros(L, bool)
     with ThreadPoolExecutor(threads) as pool:
         if m3.any():
-            error, clean = _error_mixture(W[m3], N[m3], _Chunks(pool, int(m3.sum()), threads))
+            error, clean = _error_mixture(W[m3], LK[m3], SL[m3], _Chunks(pool, int(m3.sum()), threads))
             error["applied"] = bool(error["eps1"] >= separation * error["eps0"])
             if error["applied"]:
                 r3[np.where(m3)[0][clean < config.clean_posterior_level]] = True
         else:
-            error = dict(applied=False, reason="no site with expected homozygote reads >= 1")
+            error = dict(applied=False, reason="no site with expected homozygote reads >= 1 and a leakage "
+                                                 "slope above 1e-9 of them")
         # r4 heterozygote allele balance
         m4 = base & ~r3 & (H >= 1)
         if m4.any():
@@ -819,7 +928,7 @@ def uninformative_sites(alt, dep, config: SiteQualityConfig):
     tile = _tile_sites(dep.shape[1])
     for start in range(0, len(dep), tile):
         stop = min(start + tile, len(dep))
-        F, _, _, _, _, covered = _genotype_expectations(
+        F, _, _, _, _, covered, _, _ = _genotype_expectations(
             np.ascontiguousarray(alt[start:stop], dtype=np.int32),
             np.ascontiguousarray(dep[start:stop], dtype=np.int32),
             config.classification_error, config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
@@ -856,7 +965,7 @@ def filter_sites(positions, counts, config: SiteQualityConfig, sample_config: Sa
         if not np.all(counted):
             tile = _tile_sites(counts.shape[0])
             with numba_threads(min(threads, tile)):
-                F, _, _, _, _, covered = _genotype_expectations_counts(
+                F, _, _, _, _, covered, _, _ = _genotype_expectations_counts(
                     counts, np.flatnonzero(counted), config.classification_error,
                     config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
             flags["r5"] = covered * (1 - F.max(1)) < config.minimum_expected_carriers

@@ -44,7 +44,8 @@ def _refit_contig(contig, state, phase, common, budget):
     result = summary(refit)
     excluded = result["excluded_samples"]
     print(f"[founder refit {contig}] {result['changed_alleles']} of {result['called_alleles']} "
-          f"called alleles changed at {result['changed_sites']} sites"
+          f"called alleles changed at {result['changed_sites']} sites ({result['filled_alleles']} unknown "
+          f"alleles filled)"
           + (f"; sample-quality QC excludes the reads of {', '.join(excluded)}" if excluded
              else ""), flush=True)
     del refit

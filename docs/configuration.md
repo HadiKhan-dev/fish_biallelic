@@ -730,8 +730,9 @@ Stage `founder_refit`, `founder_refit/config.py`. Defaults are the production va
 
 | constant | default | meaning |
 | --- | --- | --- |
-| `minimum_gain_nats` | `5.0` | prior per allele: a called allele changes only if the painted carriers' robust log likelihood improves by at least this much (5 nats: the assembled allele keeps prior odds of about 150 to 1); a swap of two rows' alleles changes two cells and needs twice this. |
-| `coordinate_sweeps` | `3` | sweeps of single-row flips and two-row swaps per site. |
+| `minimum_gain_nats` | `5.0` | minimum gain per changed cell of each accepted move: a called allele changes only if the painted carriers' robust log likelihood improves by at least this much (5 nats: the assembled allele keeps prior odds of about 150 to 1 against a single move); a two-row move (a swap of two rows' different alleles or a pair flip of their equal alleles) changes two cells and needs twice this. |
+| `coordinate_sweeps` | `3` | sweeps of single-row flips and two-row moves (swaps and pair flips) per site. |
+| `fill_min_supporters` | `2` | release 2.18: an allele the painted panel leaves unknown is called when one allele beats the other by ``minimum_gain_nats`` and at least this many painted carriers' own reads favour it (the same minimum as local selection's and discovery's ``min_supporters``). |
 
 ### FamilyPhaseConfig
 
