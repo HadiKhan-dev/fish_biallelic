@@ -87,7 +87,7 @@ def simulation(config: RunConfig):
         design=SimulationDesign(backcross_fraction=section.backcross_fraction,
                                 backcross_start_cohort=section.backcross_start_cohort,
                                 observe_cohorts=section.observe_cohorts,
-                                observed_fraction=section.observed_fraction),
+                                observed_fraction=section.observed_fraction, pedigree=section.pedigree),
         reads=ReadModel(error_rate=reads.error_rate, depth_cv=reads.depth_cv,
                         heterozygote_alt_probability=reads.heterozygote_alt_probability,
                         dropout_fraction=reads.dropout_fraction, read_length_bp=reads.read_length_bp,

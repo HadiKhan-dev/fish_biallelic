@@ -95,6 +95,33 @@ def founder_stage_present(file, stage: str) -> bool:
     raise ValueError(f"unknown founder stage: {stage}")
 
 
+def identity_flags(file, stage: str):
+    """Per component {row: sorted int64 positions} of the stage's founder identity flags (export.identity: the
+    first marker of the block right of each flagged junction), or None for a stage without row paths (discovery,
+    local selection). Release 2.17."""
+    from ..assembly import records as assembly_records
+    from ..founder_refit import records as refit_records
+    from ..export.identity import partner_changes
+    from ..painting import records as painting_records
+    if stage.startswith("assembly_l") or stage == "founder_refinement":
+        panels = assembly_records.founder_panels(file, level=None if stage == "founder_refinement"
+                                                 else _assembly_level(stage))
+    elif stage == "painting":
+        panels = painting_records.founder_panels(file)
+    elif stage == "founder_refit":
+        panels = refit_records.founder_panels(file)
+    else:
+        return None
+    result = {}
+    for component, panel in enumerate(panels or ()):
+        offsets, positions = np.asarray(panel.atomic_offsets), np.asarray(panel.positions)
+        rows = {}
+        for flag in partner_changes(panel.rows):
+            rows.setdefault(flag.row, []).append(int(positions[offsets[flag.block]]))
+        result[component] = {row: np.asarray(sorted(marks), dtype=np.int64) for row, marks in rows.items()}
+    return result
+
+
 def founder_panels(file, stage: str) -> list[tuple[np.ndarray, np.ndarray]]:
     """One contig's panels of a founder stage, in chromosome order: (positions int64 [L], calls int8 [K, L]).
 
@@ -139,13 +166,15 @@ def _stage_bytes(file, stage: str) -> int:
 
 
 # ------------------------------------------------------------------------------------------- downstream counts
-def pedigree_counts(sample_ids, calls, truth, names) -> dict:
+def pedigree_counts(sample_ids, calls, truth, names, targets=None) -> dict:
     """Tier-B calls vs the true pedigree of the analysed samples.
 
     ``sample_ids``/``calls``: pedigree.records.load_calls (PedigreeCalls: state -1 unresolved, parents -1 none);
     ``truth``: the simulation manifest's PedigreeTable of the analysed samples (parents outside the analysed
     samples are not observable edges); ``names``: the analysed sample axis. The calls' axis may be any order of
     ``names`` (release 2.1 records hold the run's canonical sample order); edges are matched by sample name.
+    ``targets`` (release 2.17): the eligibility's inference targets by name (a simulated design with metadata);
+    only they are counted, and the count is reported. None: every sample is a target.
     """
     sample_ids = tuple(map(str, sample_ids))
     if len(set(sample_ids)) != len(sample_ids) or set(sample_ids) != set(names) or len(sample_ids) != len(names):
@@ -157,6 +186,8 @@ def pedigree_counts(sample_ids, calls, truth, names) -> dict:
     expected_states = {state: 0 for state in PARENT_STATES}
     for sample, state, parents in zip(sample_ids, np.asarray(calls.state).tolist(),
                                       np.asarray(calls.parents).tolist()):
+        if targets is not None and sample not in targets:
+            continue
         expected = set(true_parents[sample]) & known
         actual = {sample_ids[parent] for parent in parents if parent >= 0}
         called_state = PARENT_STATES[state] if state >= 0 else None
@@ -167,10 +198,30 @@ def pedigree_counts(sample_ids, calls, truth, names) -> dict:
         true_edges += len(expected)
         inferred_edges += len(actual)
         shared_edges += len(expected & actual)
-    return dict(exact_configurations=exact, correct_parent_states=correct_states,
-                expected_states=expected_states, true_edges=true_edges,
-                correct_edges=shared_edges, extra_edges=inferred_edges-shared_edges,
-                missing_edges=true_edges-shared_edges)
+    result = dict(exact_configurations=exact, correct_parent_states=correct_states,
+                  expected_states=expected_states, true_edges=true_edges,
+                  correct_edges=shared_edges, extra_edges=inferred_edges-shared_edges,
+                  missing_edges=true_edges-shared_edges)
+    if targets is not None:
+        result["targets"] = len(set(targets) & set(sample_ids))
+    return result
+
+
+def pedigree_targets(run_directory, names):
+    """Inference targets of a simulated design with metadata eligibility (release 2.17), by name; None when the
+    run's configuration supplies no [samples] metadata (every sample a target)."""
+    from ..config.load import load_config
+    from ..pipeline.samples import build_eligibility, read_sample_table
+    path = Path(run_directory) / "config.toml"
+    if not path.is_file():
+        return None
+    config = load_config(path)
+    if config.samples.metadata is None:
+        return None
+    eligibility = build_eligibility(config, read_sample_table(config.samples, names))
+    if eligibility is None:
+        return None
+    return {name for name, child in zip(eligibility.sample_ids, eligibility.children) if child}
 
 
 def map_counts(product, events, names) -> dict:
@@ -251,14 +302,23 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
         raise ValueError(f"{file.label}: simulation truth sample axis differs")
     positions = np.asarray(truth.positions)
     if founder_stages:
+        from .identity import copy_counts, identity_counts, stratum_counts
         founder_truth = np.asarray(truth.founder_haplotypes, dtype=np.int8)
         execution.claim_threads()
         represented = represented_ancestry(truth.painting, positions, len(founder_truth))
+        counts = copy_counts(truth.painting, positions, len(founder_truth))
+        grid = dict(haplotypes=founder_truth, positions=positions)
         for stage in founder_stages:
             panels = founder_panels(file, stage)
             execution.claim_threads()
             summary, components, matches = evaluate_founders(
                 panels, positions, founder_truth, represented, contig=contig, stage=stage)
+            # Release 2.17: copy-count strata and continuity assertions (evaluation.identity), after every
+            # existing column.
+            for name, values in stratum_counts(panels, matches, grid, counts).items():
+                summary.update({f"{name}_copy_{key}": value for key, value in values.items()})
+            summary.update({f"identity_{key}": value for key, value in
+                            identity_counts(panels, grid, counts, identity_flags(file, stage)).items()})
             founders.append(summary)
             component_rows.extend(components)
             matching_rows.extend(matches)
@@ -408,7 +468,8 @@ def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("availa
     if automatic or "pedigree" in requested:
         if pedigree_records.complete(store):
             sample_ids, calls = pedigree_records.load_calls(store)
-            report["pedigree"] = pedigree_counts(sample_ids, calls, manifest.observed, names)
+            report["pedigree"] = pedigree_counts(sample_ids, calls, manifest.observed, names,
+                                                 targets=pedigree_targets(output, names))
         elif not automatic:
             raise FileNotFoundError("no completed genome-wide pedigree")
     tasks = []

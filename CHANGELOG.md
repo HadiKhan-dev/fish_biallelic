@@ -1,5 +1,98 @@
 # Changelog
 
+## 2.17.0 (29 October 2026)
+
+This release measures where the remaining founder errors come from, reports what the data do not resolve instead of
+hiding it, adds the validation tools that 2.16 lacked, and bounds local selection's merge screen at large K. Local
+selection's search changes (one exact double-removal merge per nearest-distance class, below), so panels can change
+where a distance class held several merges; the other inference stages are unchanged. The release kernel manifest
+covers the new relative-proxy kernels. New are a structural founder
+identity diagnostic with every export, a decision-free relative-proxy table for released parent edges, truth metrics
+that separate identity from local allele accuracy, and explicit pedigree designs for simulation (with sample
+metadata, so cohort eligibility and opposite-sex pairs get a truth test).
+
+**Founder identity flags** (`export/identity.py`, `export/founders.py` `write_identity_flags`;
+`OUTPUT/export/<contig>.founder_identity.tsv`; `docs/methods/founder_identity.md`, Identity flags). Where a founder row
+copies other rows' prepared local rows on both sides of a junction with disjoint partner sets, no local content of its
+own carries it across (`local_duplicate_partner_change`). Each flag names the exported column, its source component and
+row, the block boundary with its flanking marker positions, the local rows and partner columns of both sides, and
+whether the junction is also a release-segment boundary. Computed on the exported panel's painted row paths (after
+label continuity) and named through the release segments. Diagnostic only: calls, columns and breaks are unchanged
+(re-exporting the same 2.16 inputs gives a byte-identical founder VCF on std chr10 and chr20).
+- Measured with the new identity metric (below) on the 2.16 runs: std (8 chromosomes) 1,487 wrong continuity
+  assertions; flags cross 1,164 of them and 316 correct ones (0.36% of correct), multi-copy coverage 0.9954 -> 0.9951
+  for a consumer that drops flagged continuity. K30: 87 of 146 wrong, 1 correct. f3 7 of 43 and backcross 16 of 34
+  wrong (their errors have other causes). On a design whose founders are all well represented, about 20 flags per
+  chromosome, nearly all on true shared stretches: a structural flag, not an error detector.
+- Why identity errors remain: on std they appear mainly with the founder refinement of assembly levels 3 and 4, not at
+  the joins (f3's appear by level 2; its level-4 jump in whole-component errors is the matching span, not new switches);
+  most sit in one or two mosaic rows per chromosome that follow other founders' local rows, and the refinement objective
+  prefers those panels to substantially more truth-like routings of the same local rows (std chr10 level 4: 2,156
+  nats). More search does not remove them; shared-crossover accounting is not pursued.
+
+**Local selection: bounded double-removal merges** (`local_selection/search.py` `double_removal_merges`;
+`docs/methods/local_selection.md`). The merge screen scores exactly, besides their EM bounds, the merges of each row
+with its nearest rows and the merges whose consensus is nearest a row. Until 2.16 every member of these
+nearest-distance classes was scored exactly, up to K(K - 1)/2 forwards per screen (Hamming distances are integers, so
+the classes are large at K = 30: a census found 76-277 of about 400). Now each class is represented by its member with
+the largest EM bound (tie classes of the decision tolerance, then content; counted as
+`ls.rank.merge_representative`), so at most 2K merges are scored exactly and the likelihood screening is O(N L K^3).
+Likelihoods, objective, refit caps and stopping rules are unchanged; the other members keep their bounds. The context
+regulariser's founder matching per proposal is not bounded by that figure (pre-existing). Measured on saved 2.16
+round inputs with both searches run in full (95,253 blocks of the std, f3, backcross, K30 and real TroMau
+designs, three rounds each): every simulated block and every context round is unchanged; 9 initial-round blocks
+(2 K30, 7 TroMau) end at a lower objective (0.9 to 40 nats; on K30 one more true founder recovered in each), and
+when each round feeds the next, 7 of the 9 return to the 2.16 result by the last round (TroMau chr14 one block
+11.7 nats lower, chr6 one block 2.6 nats higher). K30 needs 51-57% fewer exact likelihood scores per round.
+Reversing the tie conventions changes the same 6 of 600 K30 block-rounds before and after the change. End to end (fresh runs
+through founder refit, rounds feeding rounds and assembly re-run): the std, f3, backcross, TroMau-like and a held-out
+std seed are identical to 2.16 at every stage. K30 changes on one chromosome (m2: the changed initial block reaches
+assembly level 2; its founder panel calls 7,214 more alleles with 570 more errors, wrong-or-missing alleles 55,725 ->
+55,763 over K30, wrong continuity assertions 28 -> 46 against about 2,400 correct ones). Real TroMau keeps every
+pedigree call; its paintings change on five chromosomes: on chr3 four founder rows are routed differently over the
+first half (5.8% of panel cells after row matching; the paintings need 8% fewer switches), on chr14 3,170 cells of one
+row (2% more switches), on chr2, chr5 and chr6 a few cells.
+
+**Truth metrics** (`evaluation/identity.py`, `evaluation/evaluate.py`; `docs/simulation.md`, Founder metrics).
+`haplotypes evaluate` adds to every founder stage: copy-count strata (truth alleles whose founder no sampled homologue,
+one or several carry), and continuity assertions on a fixed 100-marker truth grid (identity switches, direct and across
+unlabelled windows, by copy stratum; a window's interval ends at its middle marker; coverage of represented, distinguishable founders; assertions crossing the
+stage's identity flags and the coverage left without them). The counts are read together: splitting rows can raise the
+correct share without raising coverage. With metadata eligibility, the pedigree counts cover the eligibility's targets.
+
+**Explicit pedigree simulations** (`simulation/design.py` `read_pedigree_table`, `simulation/pedigree.py`
+`simulate_explicit_pedigree`, `simulation/source.py`; `pipeline/driver.py`, `pipeline/samples.py`, `config/load.py`;
+`tools/cross_pedigree.py`, which rejects impossible mating-pair counts and fills a sex's shortfall of sequenced F1
+from the other sex; `docs/simulation.md`, Explicit pedigrees). `[simulation] pedigree` takes a table of samples,
+parents, sexes, generations and who is sequenced (founders may be); such a design may carry `[samples] metadata` (the
+same table; `.tsv`/`.csv` tables are now read as metadata) and a cohort eligibility policy. Random designs simulate
+byte-identical data (chr19/chr20 reads and truth digests equal to 2.16; the simulation's code identity changes, so a
+2.16 simulation is regenerated, identically, on resume). A TroMau-like cross (2 dams, 1 sire, 34 F1 with
+16 sequenced, 96 F2 from 22 matings, 58 of them without a sequenced parent; 8 chromosomes): 2.16 inference calls every
+target exactly (96/96, 48/48 edges, no false edge; the sequenced F1 are the unsequenced parents' sibs), founders 2-107
+wrong-or-missing alleles per chromosome.
+
+**Relative-proxy contrasts of released edges** (`pedigree/relatives.py`, `pedigree/stage.py`;
+`OUTPUT/pedigree/relative_contrasts.csv`; `docs/methods/pedigree.md`). For every child-candidate edge of the Tier-B,
+Tier-B partial and complete views: the production M1 score minus a second-degree and a full-sib relationship proxy,
+summed over the chromosomes where the candidate has evidence, with negative-chromosome counts. Uncalibrated, decision-
+free. TroMau-like: every released (true) edge beats the second-degree proxy by >= 12.6 nats and the full-sib proxy by
+>= 23.5; real TroMau: 2 of 38 released edges negative against the second-degree proxy (the proxy has the larger composite
+score under these paintings; this identifies no relationship). Small positive contrasts also occur for non-parents
+(K30: 2.4-3.3 nats), so only large positive totals separate.
+
+**Measured and left unchanged:** TroMau's fitted evidence scale (0.10) changes no Tier-B call against 0.5
+or 1.0 (it withholds one complete-view call, whose candidate is an F1 sib of the child's likely unsequenced
+parents; no parentage truth exists for it); discovery's winning-set mean-field solves at
+20x the iterations change no K30 panel or count; doubled local-selection bank backstops change no K30 panel;
+per-founder release at multimodal context-refit sites is unsafe (an enumerable counterexample) and would add almost
+nothing on K30; local selection can replace two rare founders by one mixed row (documented). The contamination QC is blind at about
+1,000 samples: a private allele survives the one-read carrier rule with probability (1 - e)^(d (N - 1)), nil at that
+size; an N-scaled carrier rule restores detection in simulation but, with the current event statistic, falsely flags
+clean low-depth or sparsely observed libraries in dense-marker controls, so the QC is unchanged in 2.17.
+
+Documentation: the 2.16 docs-check error (pedigree.md NOISE_FLOOR literal) is fixed.
+
 ## 2.16.0 (28 October 2026)
 
 This release continues the pedigree work of 2.15. It removes a measured source of chromosome-scale penalties against

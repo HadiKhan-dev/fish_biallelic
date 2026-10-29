@@ -22,8 +22,8 @@ from ..model.evidence import ContigReads
 from ..model.genetic_map import load_genetic_maps
 from ..store.identity import json_digest, jsonable, stage_identity
 from . import truth as records
-from .design import SimulationConfig, observed_indices
-from .pedigree import materialise_founders, pair_founders, simulate_pedigree
+from .design import SimulationConfig, observed_indices, read_pedigree_table
+from .pedigree import materialise_founders, pair_founders, simulate_explicit_pedigree, simulate_pedigree
 from .reads import sample_reads
 
 KIND = "simulation"
@@ -102,9 +102,14 @@ class SimulationSource:
             maps = load_genetic_maps(self.config.generating_map, self.config.generating_rate_cm_per_mb)
             templates = {contig: hashlib.sha256(_template_path(self.config, contig).read_bytes()).hexdigest()
                          for contig in self.config.contigs}
-            self._identity = stage_identity(
-                KIND, schema=records.SCHEMA, config=config,
-                upstream={"templates": json_digest(templates), "generating_map": json_digest(maps.identity())})
+            upstream = {"templates": json_digest(templates), "generating_map": json_digest(maps.identity())}
+            # An explicit pedigree (2.17) enters by its contents; without one the configuration projection is that of
+            # 2.16 (the simulation code hash still changes with the code).
+            config["design"].pop("pedigree", None)
+            if self.config.design.pedigree is not None:
+                config.pop("cohorts")
+                upstream["pedigree"] = hashlib.sha256(self.config.design.pedigree.read_bytes()).hexdigest()
+            self._identity = stage_identity(KIND, schema=records.SCHEMA, config=config, upstream=upstream)
         return self._identity
 
     def is_materialised(self, store) -> bool:
@@ -112,9 +117,13 @@ class SimulationSource:
         return manifest is not None and manifest.state == records.COMPLETE
 
     def sample_ids(self) -> tuple[str, ...]:
-        if self._manifest is None or self._manifest.state != records.COMPLETE:
-            raise RuntimeError("the simulation is not materialised yet")
-        return self._manifest.sample_ids
+        """The sequenced samples: known before materialisation for an explicit pedigree (its observed rows, in
+        table order), otherwise from the completed manifest."""
+        if self._manifest is not None and self._manifest.state == records.COMPLETE:
+            return self._manifest.sample_ids
+        if self.config.design.pedigree is not None:
+            return tuple(row.sample for row in read_pedigree_table(self.config.design.pedigree) if row.observed)
+        raise RuntimeError("the simulation is not materialised yet")
 
     def reads(self, contig: str, budget) -> ContigReads:
         """The simulated allele depths of one contig (from its ``simulation/reads`` record)."""
@@ -173,15 +182,22 @@ class SimulationSource:
         chromosome_maps = [maps.for_contig(contig) for contig in contigs]
         with execution.stage_timer("simulate_pedigree"):
             # Contigs the map lacks (or every contig without a map) use the set's one fallback rate.
-            generated, simulated = simulate_pedigree(
-                founders_by_contig, sites_by_contig, config.cohorts, seed=seed,
-                recombination_rate=chromosome_maps[0].fallback_rate_per_bp,
-                mutation_rate=config.mutation_rate_per_bp,
-                chromosome_maps=[m if m.has_map else None for m in chromosome_maps],
-                design=config.design, budget=budget)
+            common = dict(seed=seed, recombination_rate=chromosome_maps[0].fallback_rate_per_bp,
+                          mutation_rate=config.mutation_rate_per_bp,
+                          chromosome_maps=[m if m.has_map else None for m in chromosome_maps], budget=budget)
+            if config.design.pedigree is not None:
+                table = read_pedigree_table(config.design.pedigree)
+                generated, simulated = simulate_explicit_pedigree(founders_by_contig, sites_by_contig, table,
+                                                                  **common)
+            else:
+                generated, simulated = simulate_pedigree(founders_by_contig, sites_by_contig, config.cohorts,
+                                                         design=config.design, **common)
         print(f"  [simulation] pedigree of {len(generated.samples)} individuals on {len(contigs)} contigs "
               f"in {time.monotonic() - started:.1f}s", flush=True)
-        observed_rows = observed_indices(generated.cohorts, config.design, seed)
+        if config.design.pedigree is not None:
+            observed_rows = np.asarray([index for index, row in enumerate(table) if row.observed], dtype=np.int64)
+        else:
+            observed_rows = observed_indices(generated.cohorts, config.design, seed)
         observed = generated.take(observed_rows)
         sample_ids = observed.samples
         analysed = {int(row): index for index, row in enumerate(observed_rows)}

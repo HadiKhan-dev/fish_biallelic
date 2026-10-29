@@ -20,15 +20,24 @@ class SimulationDesign:
     backcross (a member of the previous cohort with one of its actual parents) instead of a cross
     of two previous-cohort members. observe_cohorts: cohorts whose members are sequenced (empty:
     all); observed_fraction: random fraction of those kept (seeded, after the pedigree is made).
+    pedigree (release 2.17): an explicit pedigree table (:func:`read_pedigree_table`) that replaces
+    the cohort sizes and the random matings; its ``observed`` column chooses who is sequenced
+    (founders may be), so the observation options above must keep their defaults.
     """
 
     backcross_fraction: float = 0.0
     backcross_start_cohort: int = 3
     observe_cohorts: tuple[int, ...] = ()
     observed_fraction: float = 1.0
+    pedigree: Path | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "observe_cohorts", tuple(int(c) for c in self.observe_cohorts))
+        if self.pedigree is not None:
+            object.__setattr__(self, "pedigree", Path(self.pedigree))
+            if self.backcross_fraction or self.observe_cohorts or self.observed_fraction != 1:
+                raise ValueError("an explicit pedigree sets matings and observation itself: leave backcross_fraction, "
+                                 "observe_cohorts and observed_fraction at their defaults")
         if not 0 <= self.backcross_fraction <= 1:
             raise ValueError("backcross_fraction must be between zero and one")
         if self.backcross_start_cohort < 2:
@@ -113,6 +122,63 @@ class SimulationConfig:
             raise ValueError("depth must be finite and positive")
         if self.seed is not None and int(self.seed) != self.seed:
             raise ValueError("seed must be an integer or None (random)")
+
+
+PEDIGREE_COLUMNS = ("sample", "parent1", "parent2", "sex", "generation", "observed")
+
+
+@dataclass(frozen=True)
+class PedigreeRow:
+    """One individual of an explicit pedigree: parents empty for a founder (founders take the template founders
+    in table order); parent1 gives the first (maternal) haplotype; observed: sequenced."""
+
+    sample: str
+    parent1: str
+    parent2: str
+    sex: str
+    generation: str
+    observed: bool
+
+
+def read_pedigree_table(path) -> tuple[PedigreeRow, ...]:
+    """The rows of an explicit pedigree table (tab-separated, header PEDIGREE_COLUMNS in any order, more columns
+    allowed). Founders (both parents empty) come first; every other row names two different earlier rows as
+    parents. Sample names are unique; observed is 0/1 (or false/true)."""
+    path = Path(path)
+    lines = [line.rstrip("\n").split("\t") for line in path.read_text().splitlines() if line.strip()]
+    if not lines:
+        raise ValueError(f"{path}: empty pedigree table")
+    header = lines[0]
+    missing = [name for name in PEDIGREE_COLUMNS if name not in header]
+    if missing:
+        raise ValueError(f"{path}: missing pedigree columns {', '.join(missing)}")
+    column = {name: header.index(name) for name in PEDIGREE_COLUMNS}
+    rows, seen, founders_done = [], set(), False
+    for number, fields in enumerate(lines[1:], start=2):
+        fields = fields + [""] * (len(header) - len(fields))
+        value = {name: fields[index].strip() for name, index in column.items()}
+        observed = value["observed"].lower()
+        if observed not in ("0", "1", "false", "true"):
+            raise ValueError(f"{path}:{number}: observed must be 0/1 or false/true")
+        row = PedigreeRow(value["sample"], value["parent1"], value["parent2"], value["sex"], value["generation"],
+                          observed in ("1", "true"))
+        if not row.sample or row.sample in seen:
+            raise ValueError(f"{path}:{number}: sample names must be unique and non-empty")
+        founder = not row.parent1 and not row.parent2
+        if founder and founders_done:
+            raise ValueError(f"{path}:{number}: founders must precede every other row")
+        if not founder:
+            founders_done = True
+            if not row.parent1 or not row.parent2 or row.parent1 == row.parent2:
+                raise ValueError(f"{path}:{number}: a non-founder needs two different parents")
+            unknown = [parent for parent in (row.parent1, row.parent2) if parent not in seen]
+            if unknown:
+                raise ValueError(f"{path}:{number}: parents must be earlier rows ({', '.join(unknown)})")
+        seen.add(row.sample)
+        rows.append(row)
+    if not any(row.observed for row in rows):
+        raise ValueError(f"{path}: no observed individual")
+    return tuple(rows)
 
 
 def observed_indices(cohort_of_rows, design: SimulationDesign, seed: int) -> np.ndarray:

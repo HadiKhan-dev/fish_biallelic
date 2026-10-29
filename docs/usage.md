@@ -382,7 +382,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `painting/<contig>/sample_switches.tsv` | per sample: painted switches relative to the cohort median |
 | `painting/<contig>/sample_segments.tsv` | the released painting per sample: one row per sample, component, track and run of bins with one release (Start/End in bp, status, named founder row, candidate rows); a `SWITCH_INTERVAL` row is the interval in which the track switches between founders the sample cannot tell apart |
 | `pedigree/tier_b_relationships.csv` | the primary pedigree calls (one row per sample: parents, parent-count state, status) |
-| `pedigree/*.csv` | partial-edge, Tier-A and complete-data views, candidate sets, state calls, explanations, alternative explanations, search and exclusion diagnostics, evidence and chromosome summaries |
+| `pedigree/*.csv` | partial-edge, Tier-A and complete-data views, candidate sets, state calls, explanations, alternative explanations, search and exclusion diagnostics, evidence and chromosome summaries, and the released edges' relative-proxy contrasts (`relative_contrasts.csv`) |
 | `pedigree/evidence_calibration.json` | the cross-chromosome evidence scaling and its fit |
 | `pedigree/summary.json` | informative and omitted contigs, the chromosome-count statement (whether Tier A and Tier B were reachable), the family solve, the exclusion and the eligibility summaries |
 | `founder_refit/summary.csv` | per contig: components, founder rows, called and changed alleles, changed sites, median gain of a change, samples excluded from founder construction |
@@ -395,6 +395,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `recombination/<contig>.png` | conditional rate and effective meioses along the contig |
 | `recombination/summary.csv` | per contig: meioses, crossovers, exposure, coverage, orientation fit, breakpoints, junction loci |
 | `export/<contig>.founders.vcf.gz`, `.tbi` | the founder VCF: haploid GT, one column `c<C>_H<k>` per founder row `k` of component `C` ([Export](#export)) |
+| `export/<contig>.founder_identity.tsv` | founder identity flags: junctions where a founder column's own local content does not carry it across ([Export](#export)) |
 | `export/<contig>.samples.vcf.gz`, `.tbi` | the final sample phase: GT and PS ([Export](#export)) |
 | `export/manifest.json` | every exported file, its components, columns and site counts |
 | `ties/decisions.csv`, `ties/summary.json` | when the run completes: decisions taken inside a tie by the fixed conventions, per contig, record group and decision kind, their totals per stage, and the recorded ambiguity flags ([ties](methods/ties.md#what-a-run-records)) |
@@ -419,6 +420,12 @@ directory, with the options below. Per contig:
   `c1_H1` are not implied to be one founder, so a column has calls only inside its component's span (first to last
   panel position, listed in `##component` header lines) and `.` outside it. Inside the span a column holds the
   released allele (`0` REF, `1` ALT), or `.` where the panel withholds it; nothing is imputed.
+- `<contig>.founder_identity.tsv` (release 2.17), founder identity flags of the exported founder columns: one row
+  per junction between two prepared blocks where a founder row copies other rows' local rows on both sides with
+  disjoint partner sets (`local_duplicate_partner_change`), with the column, the source component and row, the
+  global block, the last left and first right marker positions, the local rows and the partner columns of both
+  sides, and `at_release_break` (1 where the junction is also a release-segment boundary). Diagnostic only: the
+  calls, columns and breaks are unchanged ([founder identity](methods/founder_identity.md#identity-flags)).
 - `<contig>.samples.vcf.gz`, the final sample phase: GT and PS, phased (`|`) inside a component with PS = the
   component's first site, unphased (`/`, PS `.`) between components; unknown alleles stay `.`.
 - a tabix index beside each file (`.tbi`; `.csi` for contigs longer than 2^29 bp), and `manifest.json`, which

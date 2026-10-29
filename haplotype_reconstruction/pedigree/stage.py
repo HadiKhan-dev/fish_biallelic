@@ -7,6 +7,8 @@ report form the run record ``pedigree``.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 
@@ -137,6 +139,36 @@ def _score_handler(contig, state, phase, common, budget):
             work.release()
         if hold is not None:
             hold.release()
+
+
+def _relatives_handler(contig, state, phase, common, budget):
+    """Released-edge relative-proxy contrasts of one contig (pedigree.relatives; diagnostics only)."""
+    from . import relatives
+    _, file = _open(common, contig)
+    pairs = common["pairs"]
+    second, full = np.zeros(len(pairs)), np.zeros(len(pairs))
+    usable = np.zeros(len(pairs), dtype=bool)
+    for component in records.decode_prepared(file.get(records.PREPARED)).components:
+        a, b, u = relatives.component_contrasts(component, common["config"], pairs, execution.claim_threads)
+        second += a
+        full += b
+        usable |= u
+    return None, (second, full, usable)
+
+
+def _released_edges(released, decided, rows, sample_ids):
+    """(pairs int64 [E, 2] child-candidate, views per edge) of the Tier-B, Tier-B partial and complete views."""
+    views = {}
+    for name, parents in (("tier_b", _calls(released.tier_b, rows).parents),
+                          ("tier_b_partial", np.where(released.partial_b.supported, released.partial_b.parents,
+                                                      NO_PARENT)),
+                          ("complete", _calls(decided.complete, rows).parents)):
+        for child, candidates in enumerate(np.asarray(parents).tolist()):
+            for parent in candidates:
+                if parent >= 0:
+                    views.setdefault((child, int(parent)), []).append(name)
+    pairs = np.asarray(sorted(views), dtype=np.int64).reshape(-1, 2)
+    return pairs, [views[(int(c), int(p))] for c, p in pairs]
 
 
 def _exclusion_handler(contig, state, phase, common, budget):
@@ -341,6 +373,19 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT)])
     calls = _calls(released.tier_b, rows, orientation)
     search = panel.search_diagnostics(candidate_panel, eligibility, calls.parents, sample_ids)
+    # Release 2.17: relative-proxy contrasts of the released edges (decision-free; pedigree.relatives).
+    from . import relatives
+    pairs, views = _released_edges(released, decided, rows, sample_ids)
+    contrasts = None
+    if len(pairs):
+        estimates = [_scoring_bytes(store, c) for c in informative]
+        limit = execution.memory_worker_limit(estimates, len(informative), label="PEDIGREE RELATIVES")
+        with execution.ChromosomeExecutor(informative, _relatives_handler, budget=budget, max_workers=limit,
+                                          label="PEDIGREE RELATIVES", task_bytes=estimates) as pool:
+            per_contig = list(pool.run("relatives", dict(common, pairs=pairs)))
+        contrasts = [np.stack(values) for values in zip(*per_contig)]
+    relative_table = relatives.contrast_table(
+        sample_ids, pairs, views, *(contrasts or (np.zeros((0, 0)), np.zeros((0, 0)), np.zeros((0, 0), bool))))
     chromosome_summary = pd.DataFrame([dict(
         Contig=contig, ComponentCount=summaries[contig][2],
         ScoredComponentCount=summaries[contig][0],
@@ -352,8 +397,8 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         tier_a=_calls(decided.tier_a, rows, orientation), complete=_calls(decided.complete, rows, orientation),
         reach=decided.reach, calibration=decided.calibration, family_solve=decided.family_solve,
         exclusion=exclusion_summary, eligibility=eligibility.summary(), panel=candidate_panel,
-        report=_orient_report(tables.build(decided, released, search, chromosome_summary, config), sample_ids,
-                              orientation),
+        report=replace(_orient_report(tables.build(decided, released, search, chromosome_summary, config),
+                                      sample_ids, orientation), relative_contrasts=relative_table),
         tie_events=decided.tie_events)
     store.run.put(records.PRODUCT, records.encode_product(product))
     store.mark_stage_complete(records.STAGE)

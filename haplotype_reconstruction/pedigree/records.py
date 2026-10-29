@@ -421,6 +421,8 @@ class PedigreeReport:
     exclusion_diagnostics: pd.DataFrame
     evidence_summary: pd.DataFrame
     chromosome_summary: pd.DataFrame
+    # Release 2.17: released-edge relative-proxy contrasts (pedigree.relatives; None in earlier records).
+    relative_contrasts: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)

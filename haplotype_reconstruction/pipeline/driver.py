@@ -139,6 +139,13 @@ def check_run(config: RunConfig) -> PreparedRun:
         source.check()
         samples = read_sample_table(config.samples, source.sample_ids())
         eligibility = build_eligibility(config, samples)
+    elif config.samples.metadata is not None:
+        # A simulated design with metadata (2.17): only an explicit pedigree fixes its samples before simulating.
+        if config.simulation.pedigree is None:
+            raise ValueError("[samples] metadata in a simulation needs [simulation] pedigree (the sequenced samples "
+                             "are otherwise known only after simulating)")
+        samples = read_sample_table(config.samples, source.sample_ids())
+        eligibility = build_eligibility(config, samples)
     configs = stages.stage_configs(config)
     maps = stages.genetic_maps(config)
     _check_store(paths, config, source)

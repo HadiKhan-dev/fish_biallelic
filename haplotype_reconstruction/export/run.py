@@ -275,12 +275,13 @@ def _export_task(task, shared, budget):
     if "founders" in products or "samples" in products:
         sites = build_site_table(file, task["contig"], full_length=task["full_length"],
                                  reference=task["reference"], synthetic=task["synthetic"])
-    founders = withheld = ambiguous = release = None
+    founders = withheld = ambiguous = release = identity_paths = None
     if "founders" in products or "tracks" in products:
         from ..assembly.release import (ReleaseAxes, budget_overflow, load_prepared_alleles,
                                         load_release_input, release_founders)
         stage, components = _founder_component_panels(file)
         panels = [(panel.positions, panel.released) for panel in components]
+        identity_paths = [(panel.start, panel.positions, panel.atomic_offsets, panel.rows) for panel in components]
         components = tuple(ReleaseAxes(panel.start, panel.stop, panel.rows, panel.atomic_offsets)
                            for panel in components)
         panels, _, masks = unobserved_founder_alleles(file, panels, return_masks=True)
@@ -307,6 +308,15 @@ def _export_task(task, shared, budget):
                           founder_release=None if release is None else release.segments)
     if ambiguous is not None:
         entry["refit_ambiguous_alleles"] = ambiguous
+    if identity_paths is not None:
+        from .founders import write_identity_flags
+        filename = quote(task["contig"], safe="") + ".founder_identity.tsv"
+        flags = write_identity_flags(destination / filename, task["contig"], stage, identity_paths,
+                                     None if release is None else release.segments)
+        entry["files"].append(filename)
+        entry["founder_identity_flags"] = flags
+        print(f"  [export] {task['contig']}: {flags} founder identity flags (local duplicate-partner changes; "
+              "diagnostic only)", flush=True)
     if release is not None:
         entry.update(assembly_release_phase_seconds=release.phase_seconds,
                      assembly_release_work_counters=release.work_counters,
@@ -353,6 +363,11 @@ def write_manifest(destination: Path, checkpoint_root, *, synthetic: bool, refer
             founder_columns=("cC_Hk = founder row k of release segment C of the chromosome; source_component "
                              "and segment_index identify its inference component and local segment. A column "
                              "has calls only inside its segment's span and is '.' outside it"),
+            founder_identity_flags=("CONTIG.founder_identity.tsv: junctions where a founder row copies other rows' "
+                                    "prepared local rows on both sides with disjoint partner sets "
+                                    "(local_duplicate_partner_change): no local content of the row's own carries "
+                                    "it across. Diagnostic only: no routing, call, column or break changes; not a "
+                                    "calibrated identity confidence, and absence is no identity certificate"),
             founder_continuity=("live assembly alternatives split founder columns/tracks at unsupported "
                                 "continuity; unmatched evaluated final local content is withheld. "
                                 "Computational count overflow is count_unverified; unperformed source continuation is continuation_unverified. Both preserve calls and record the unperformed scope. "

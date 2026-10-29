@@ -58,15 +58,20 @@ def read_sample_table(section, sample_ids) -> SampleTable:
         return SampleTable(sample_ids)
     import pandas as pd
     path = Path(section.metadata)
-    try:
-        frame = pd.read_excel(path, sheet_name=section.sheet)
-    except ValueError as error:
-        raise ValueError(f"{path}: cannot read sheet {section.sheet!r}: {error}") from None
+    if path.suffix.lower() in (".tsv", ".txt", ".csv"):
+        # Delimited text (2.17; e.g. a simulation's explicit pedigree table): no sheet, every value as text.
+        frame = pd.read_csv(path, sep="," if path.suffix.lower() == ".csv" else "\t", dtype=str,
+                            keep_default_na=False)
+    else:
+        try:
+            frame = pd.read_excel(path, sheet_name=section.sheet)
+        except ValueError as error:
+            raise ValueError(f"{path}: cannot read sheet {section.sheet!r}: {error}") from None
     columns = (section.id_column, section.generation_column, section.sex_column)
     missing = [name for name in columns if name not in frame.columns]
     if missing:
         raise ValueError(f"{path} [{section.sheet}]: missing columns {', '.join(missing)}")
-    rows = frame.loc[frame[section.id_column].notna(), list(columns)]
+    rows = frame.loc[frame[section.id_column].notna() & (frame[section.id_column] != ""), list(columns)]
     ids = [_text(value) for value in rows[section.id_column]]
     by_id, axis = {}, set(sample_ids)
     for name, generation, sex in zip(ids, rows[section.generation_column], rows[section.sex_column]):

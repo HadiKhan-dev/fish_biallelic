@@ -105,6 +105,47 @@ backcross_fraction = 0.5
 backcross_start_cohort = 3
 ```
 
+### Explicit pedigrees
+
+`[simulation] pedigree` (release 2.17) replaces the cohorts and the random matings by a pedigree table: a
+tab-separated file with the columns `sample`, `parent1`, `parent2`, `sex`, `generation` and `observed` (more columns
+are allowed). Founder rows have both parents empty and come first; they take the template founders in table order,
+so their number must equal the templates' founders. Every other row names two different earlier rows; `parent1`
+gives the first (maternal) haplotype. `observed` (0/1) chooses who is sequenced, founders included, so
+`observe_cohorts`, `observed_fraction` and `backcross_fraction` keep their defaults. Children are simulated by depth
+(one more than the deeper parent), each depth drawing its seeds as one cohort of the random design does; the table's
+contents, not its path, enter the simulation identity. A founder's truth is its own two template haplotypes.
+
+Because the sequenced samples are known before simulating, such a design may also carry sample metadata: point
+`[samples] metadata` at the same table (a `.tsv`/`.csv` table is read without a sheet) with `id_column = "sample"`,
+`generation_column = "generation"` and `sex_column = "sex"`, and set `[pedigree.eligibility]` as for real data.
+`haplotypes evaluate` then counts pedigree calls of the eligibility's targets only (`targets` in the pedigree
+counts). `tools/cross_pedigree.py` writes a two-generation cross table (G0 dams and sires, F1 from each dam and sire
+with a sequenced subset, F2 from F1 x F1 matings with Zipf-distributed family sizes, so that most F2 parents are
+unsequenced and the sequenced F1 are their sibs):
+
+```bash
+python tools/cross_pedigree.py work/designs/cross.tsv --dams 2 --sires 1 --f1-per-dam 16,18 --f1-observed 16 --f2 96
+```
+
+```toml
+[simulation]
+pedigree = "work/designs/cross.tsv"
+
+[samples]
+metadata = "work/designs/cross.tsv"
+id_column = "sample"
+generation_column = "generation"
+sex_column = "sex"
+
+[pedigree.eligibility]
+policy = "cohorts"
+parent_generations = {F2 = "F1"}
+opposite_sex_pairs = true
+```
+
+The design states structure only: cohort labels constrain eligibility in inference and never assign parents.
+
 ### Reads
 
 Per cell, depth ~ Poisson(depth x sample factor) and the alternate reads ~ Binomial(depth, p) with p =
@@ -179,6 +220,21 @@ the products it compares, never the reads or likelihoods. It writes `RUN/evaluat
   another founder for a segment), and `segment_label_switches` counts those segments.
 - Represented and absent strata use the one-to-one matching: represented ancestry is carried by at least one
   observed individual, which does not make it independently identifiable.
+- Copy-count strata (release 2.17): every truth allele falls in `absent` (no sampled homologue carries its founder
+  there), `single` (one) or `multi` (two or more); `<stratum>_copy_truth_alleles`, `_correct`, `_wrong` and
+  `_missing` use the same one-to-one matching. A single sampled copy is not an impossibility claim.
+- Identity (release 2.17, `evaluation/identity.py`): on a fixed grid of 100 truth markers, a row's window label is
+  the truth founder its calls match (at least 16 calls, at most 5% of them or one mismatching, every other founder at
+  least 2 mismatches worse). Consecutive labelled windows of a row are a continuity assertion, correct or wrong (an
+  identity switch): `identity_direct_*` for adjacent windows, `identity_gap_*` across unlabelled windows, each by
+  copy stratum (a wrong assertion's stratum is the departing founder's class in the second window: `absent` there
+  means the row could not have continued with it). `identity_coverage_pairs_*` counts consecutive eligible windows
+  of each represented, locally distinguishable truth founder and `identity_coverage_covered_*` those one row joins.
+  `identity_flagged_correct`/`identity_flagged_wrong` count assertions crossing a founder identity flag of the
+  stage's row paths ([founder identity](methods/founder_identity.md#identity-flags)) and
+  `identity_coverage_covered_unflagged_*` the coverage left to a consumer that drops flagged continuity. Splitting
+  rows or dropping assertions can raise the correct share without raising coverage, so read these counts together;
+  flagged wrong assertions are not errors corrected.
 
 ### Phase, pedigree and map metrics
 
@@ -189,7 +245,7 @@ the products it compares, never the reads or likelihoods. It writes `RUN/evaluat
   correct-genotype true heterozygotes (uncalled or wrong ones bridged) when both runs hold at least 5 or 20
   heterozygotes; single-site flips, which dominate `phase_switch_errors`, are excluded.
 - Pedigree: exact observed-parent configurations and edges of the Tier-B calls (correct, extra, missing), per true
-  parent-count state.
+  parent-count state; with metadata eligibility, over the eligibility's targets only (`targets`).
 - Maps: true crossovers are counted only on correctly inferred edges within the inferred observable exposure (not
   whole-genome sensitivity). `called_interval_hit_rate` is the fraction of called crossover intervals on correct
   edges that contain a true crossover; `reported_interval_hit_rate` applies the rule to the bin-honest reported

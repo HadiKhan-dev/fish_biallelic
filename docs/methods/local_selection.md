@@ -207,13 +207,18 @@ more than the tolerance), so it does not climb back to it. Each search round the
   merges by an EM lower bound: the merged panel is the drop panel of either row with the other row
   replaced by the consensus, so the drop panel's posterior gives LL(drop) plus the replaced row's
   complete-data flip gains at the changed sites plus the expected-copy frequency term, and the
-  larger of the two bounds ranks the merge. For every row k, all merges with tied nearest rows
-  and all merges not involving k with tied nearest consensus rows are scored exactly as well.
-  Hamming distances are integers: the complete minimum class is retained and the union is
-  deduplicated. The fixed-posterior bound credits no re-routing of carriers, so selecting one
-  tied distance by row or proposal order could hide an improving merge. Without distance ties
-  this adds at most 2K forwards; with ties it can include every proposed merge. Likelihoods,
-  objective, refit caps and stopping rules are unchanged;
+  larger of the two bounds ranks the merge. For every row k, the merges of k with its nearest
+  rows and the merges not involving k whose consensus is nearest row k are double-removal
+  candidates: the fixed-posterior bound credits no re-routing of carriers and can rank them far
+  below their exact scores. From each of these two nearest-distance classes (Hamming distances are
+  integers, so classes are often large: on K30 a merge's consensus usually equals one of its two
+  rows) the member with the largest EM bound is scored exactly (release 2.17; tie classes of the
+  decision tolerance, then content order; a choice inside a tie class is counted as
+  `ls.rank.merge_representative`), so at most 2K merges per round are scored exactly and the others
+  keep their bounds. Tied bounds do not imply tied exact scores, so the choice is deterministic for
+  a fixed tie convention but not invariant to it. Until 2.16 every member of both classes was scored
+  exactly, up to K(K - 1)/2 forwards (a K30 census found 76-277 of about 400 per screen).
+  Likelihoods, objective, refit caps and stopping rules are unchanged;
 - refits whole tie classes of each kind's screened scores, in order, until at least
   `LocalSelectionConfig.search.refits_per_kind = 8` proposals; a class that would take the kind past
   `LocalSelectionConfig.search.refits_per_kind_cap = 16` is left out whole and counted as an overflow (the block's
@@ -535,10 +540,11 @@ Cost in the founder count K, samples N and discovery sites L of one block (S = K
   copies, then complete-emission flip gains and occupancy, then the exact one-bit gains, which are
   computed only at stationary points and for the reported probabilities.
 - **A GEM update** is a few passes, O(N L K^2); a fit takes at most 20 + 4K + 2L updates.
-- **A search round**, without distance ties, has the existing O(N L K^3) screening estimate:
-  drop forwards, add forwards, drop-statistic passes, merge lower bounds and at most 2K exact
-  merge forwards. Complete distance ties can select every available merge, up to K(K - 1)/2,
-  giving O(N L K^4) worst-case screening. Refit admission still uses whole score classes,
+- **A search round** has an O(N L K^3) likelihood screen: drop forwards, add forwards,
+  drop-statistic passes, merge lower bounds and at most 2K exact merge forwards (one representative
+  per nearest-distance class, release 2.17). In context rounds each of the O(K^2) proposals also
+  has its context-coded regulariser, a founder matching of O(min(F, K) (F + K)^2) for F context
+  founders, which is not bounded by this figure. Refit admission still uses whole score classes,
   with target 8 and cap 16 per proposal kind.
 - **The candidate bank** fits at most 512 + 64K starts per call with discovery's fixed-K model,
   completing up to two usage schedules per start only where a tie is encountered, with shared A
@@ -598,3 +604,16 @@ On the package's K-ladder simulation (N = 320, every block with K distinct found
   changes how readily samples switch founders within a block.
 - The unknown state absorbs copies no founder explains; a high `unknown_mass` flags a block whose
   panel misses haplotypes or whose reads are poor.
+- Two rare founders can be replaced by one mixed row (release 2.17 diagnosis, f3 simulation chr2): discovery found
+  one of them, the initial round dropped it, and a context round introduced a row about equally far from both (36
+  of 200 sites from each, the two founders 75 apart). With fixed panels and frequency-only refits, the round's
+  objective (path log-likelihood plus the context code) scores the mixed panel -807.0, the panel with the one true
+  row in its place -1,122.0 and the panel with both true rows -987.3: the two true rows gain 44 log-likelihood nats
+  but cost 225 code nats, and still 138 without any context, so the code's row cost, not only the context, keeps
+  the mixed row. Such rows are rare (at most 1-8 non-truth released rows per simulated chromosome) but can make
+  assembly swap two founders over a long range, which identity flags do not detect.
+- At more than ten founders a context-refit site whose two found posterior modes differ releases nothing
+  (multimodal abstention). Releasing the founders both found modes agree on is not safe: agreement of two local
+  optima bounds no mass in a third basin (a fully enumerable 12-founder site where both modes agree on a founder,
+  each with flip costs above 20 nats and 11 carriers, has exact posterior 0.875 for it). On K30 it would also gain
+  almost nothing (2.17 lab: no new context-proposal calls and 7 more released cells of 227,598 in the next round).

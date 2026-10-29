@@ -220,7 +220,7 @@ Optional sample metadata.
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
-| `metadata` | path | `""` (unset) | Metadata workbook (.xlsx) describing the samples. |
+| `metadata` | path | `""` (unset) | Metadata workbook (.xlsx), or a .tsv/.csv table, describing the samples. |
 | `sheet` | string | `"main_data"` | Workbook sheet. |
 | `id_column` | string | `"primary_ID"` | Column holding the VCF sample IDs. |
 | `generation_column` | string | `"generation"` | Column holding generation/cohort labels. |
@@ -318,6 +318,7 @@ Simulation (input kind = simulation).
 | `backcross_start_cohort` | integer >= 0 | `3` | First cohort with backcrosses. |
 | `observe_cohorts` | array of integers | `[]` | Only sequence these cohorts (empty: all). |
 | `observed_fraction` | number | `1.0` | Random fraction of eligible individuals sequenced. |
+| `pedigree` | path | `""` (unset) | Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. |
 
 ### [simulation.reads]
 
@@ -348,7 +349,7 @@ Checked when the configuration is loaded, before any input is read (the error me
 - [simulation] settings need [input] kind = "simulation": ...
 - [input] kind = "simulation" needs [simulation] templates (or --templates)
 - [input] vcf is not read by simulations (templates are built with the templates command)
-- simulations take neither [samples] metadata nor a parent-eligibility policy
+- simulations take [samples] metadata or a parent-eligibility policy only with an explicit [simulation] pedigree
 - [pedigree.eligibility] policy = "cohorts" needs [samples] metadata
 - [pedigree.eligibility] policy = "cohorts" needs parent_generations
 - [pedigree.eligibility] parent_generations needs policy = "cohorts"

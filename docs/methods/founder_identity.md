@@ -43,6 +43,41 @@ confidence. A broader uncertainty policy needs a declared model, controls with i
 through shared sequence, ambiguous controls, and simulations with rare founder copies. Related
 samples must not be treated as independent replicates when calibrating support.
 
+## Identity flags
+
+Release 2.17 reports one structural identity diagnostic with every exported founder panel (`export/identity.py`,
+`OUTPUT/export/<contig>.founder_identity.tsv`). A founder row is a path through the local rows of the prepared
+blocks; on a block, its local partners are the other founder rows on the same local row. Where row k has partners on
+both sides of a junction and the two partner sets are disjoint, no local content of its own carries the row across:
+it copies one set of founders on the left and another on the right (`local_duplicate_partner_change`). The flags are
+computed on the exported panel's row paths (the painted paths after label continuity, which founder refit keeps)
+and named in the exported columns of the release segments.
+
+The flag states that property and nothing more. A true founder can share stretches with different founders on the
+two sides of a junction while informative flanks or carriers still link it, so a flag does not show a wrong
+correspondence, a competing panel of equal score or a crossover; its absence is no identity certificate, and it names
+the focal row only (an exchange there could involve its partners, whose identities are not certified either). It
+changes no routing, call, column or release break, and it is not a release alternative.
+
+Measured on the 2.16 simulations (2.17 lab, fixed-grid truth assertions of `haplotypes evaluate`): on std (8
+chromosomes) the final panels make 1,487 wrong continuity assertions (identity switches), mostly in one or two
+mosaic rows per chromosome that copy other founders' local rows block by block; the flags cross 1,164 of them and 316
+correct assertions (0.36% of the correct ones), at nearly unchanged coverage. On K30 they cross 87 of 146 wrong and 1
+correct assertion. On f3 and the backcross most flags fall on true shared stretches (7 of 43 and 16 of 34 wrong
+assertions crossed), and on a design whose founders are all well represented they fall almost only on correct
+assertions (about 20 per chromosome), the cost of a structural flag. The f3 identity errors come from a different
+mechanism the flag does not see: two rare founders without a close local row, where local selection releases a
+mixture of the two (see [local selection](local_selection.md)).
+
+Why the mosaic rows arise: on the same local rows, the refinement objective F prefers the recorded mosaic panels to
+substantially more truth-like routings (std chr10 L4: by 2,156 nats against a missing-inclusive local truth
+routing), so further search would not remove them. Identity switches appear mainly with the founder refinement of
+levels 3 and 4 rather than at the joins themselves (matched lower-level switch patterns, not an exact origin census).
+F scores each sample's switches separately (below) and weakly represented founders leave rows with little content of
+their own, so such rows can follow other founders' local rows (local donor switching; a few coincide with
+crossovers shared by several samples). Shared-crossover accounting is not pursued; the flags report the affected
+continuity instead.
+
 ## Diagnosing a suspected exchange
 
 Use whole-component matching and independently block-rematched metrics on the same panels. Their

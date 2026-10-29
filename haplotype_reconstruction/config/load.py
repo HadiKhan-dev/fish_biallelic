@@ -248,8 +248,12 @@ def validate(config: RunConfig, given: set = frozenset()) -> None:
         if inputs.vcf is not None:
             raise ConfigError("[input] vcf is not read by simulations (templates are built with the templates "
                               "command)")
-        if config.samples.metadata is not None or config.pedigree.eligibility.policy != "none":
-            raise ConfigError("simulations take neither [samples] metadata nor a parent-eligibility policy")
+        if (config.samples.metadata is not None or config.pedigree.eligibility.policy != "none") and \
+                config.simulation.pedigree is None:
+            # 2.17: an explicit pedigree fixes the sequenced samples before simulating, so its design may carry
+            # metadata and an eligibility policy; the random design's samples exist only after simulating.
+            raise ConfigError("simulations take [samples] metadata or a parent-eligibility policy only with an "
+                              "explicit [simulation] pedigree")
     eligibility = config.pedigree.eligibility
     if eligibility.policy == "cohorts":
         if config.samples.metadata is None:

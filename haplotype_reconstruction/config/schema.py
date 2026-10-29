@@ -71,7 +71,8 @@ class InputSection:
 
 @dataclass(frozen=True)
 class SamplesSection:
-    metadata: Path | None = setting(None, "path", "Metadata workbook (.xlsx) describing the samples.")
+    metadata: Path | None = setting(None, "path", "Metadata workbook (.xlsx), or a .tsv/.csv table, describing "
+                                    "the samples.")
     sheet: str = setting("main_data", "str", "Workbook sheet.")
     id_column: str = setting("primary_ID", "str", "Column holding the VCF sample IDs.")
     generation_column: str = setting("generation", "str", "Column holding generation/cohort labels.")
@@ -174,6 +175,8 @@ class SimulationSection:
     backcross_start_cohort: int = setting(3, "int", "First cohort with backcrosses.")
     observe_cohorts: tuple[int, ...] = setting((), "ints", "Only sequence these cohorts (empty: all).")
     observed_fraction: float = setting(1.0, "float", "Random fraction of eligible individuals sequenced.")
+    pedigree: Path | None = setting(None, "path", "Explicit pedigree table (TSV: sample, parent1, parent2, sex, "
+                                    "generation, observed); replaces cohorts and the random matings.")
     reads: SimulationReadsSection = section(SimulationReadsSection, "Generating read model.")
 
 

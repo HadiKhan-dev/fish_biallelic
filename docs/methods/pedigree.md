@@ -476,7 +476,7 @@ scores. The state is chosen first, as the unique winner of the marginal state sc
 as the unique winner of the decision scores (marginal state score + identity score − the state's best identity
 score). Two values closer than the winner tolerance, the larger of `pedigree.ties.CONTRAST_ULP_FACTOR = 512.0`
 machine epsilons times the largest magnitude compared (taken as at least 1) and the absolute floor
-`pedigree.ties.NOISE_FLOOR = 2^-15` nats (release 2.1, placed by a census of decision gaps under 1e-9
+`pedigree.ties.NOISE_FLOOR = 3.0517578125e-05` (2^-15) nats (release 2.1, placed by a census of decision gaps under 1e-9
 genotype-likelihood noise), are tied: a tie leaves the state (`no_unique_marginal_parent_state`) or the identity
 (`parent_state_resolved_identity_unresolved`) unresolved, so
 floating evaluation order does not decide a call within the measured noise scale (a finite band cannot guarantee
@@ -721,11 +721,34 @@ names are `zero_observed_parents`, `one_observed_parent`, `two_observed_parents`
 | `exclusion_diagnostics.csv` | target child | compatible, supported-reverse and remaining candidates, the weakest exclusion log E against ThresholdLogE, CompleteCandidateEvidence, Released, ReleaseConditionalOnSupportedDirections; interval evidence adds WeakestExclusionLogELower/Upper/Exact |
 | `evidence_summary.csv` | informative chromosome | selected markers, mean minimum junctions and mean callable haplotype bins |
 | `chromosome_summary.csv` | configured contig | ComponentCount, ScoredComponentCount, InformativeMarkers, OmittedReason |
+| `relative_contrasts.csv` | released child-candidate edge | release 2.17, diagnostics only: Views (tier_b, tier_b_partial, complete), ProxyModel, M1MinusSecondDegreeProxyNats and M1MinusFullSibProxyNats (summed over UsableChromosomes, where the candidate has evidence), NegativeChromosomesSecondDegree, NegativeChromosomesFullSib, MinChromosomeContrastSecondDegree ([relative contrasts](#relative-proxy-contrasts-of-released-edges)) |
 | `evidence_calibration.json` | (one object) | the calibration report: mode, applied and fitted scale, status, folds, search grid, selection gain, untouched test gains |
 | `summary.json` | (one object) | the informative contigs, the omitted ones with their reasons, the chromosome-count statement (`reach`: whether Tier A and Tier B were reachable with these chromosomes, and why), the final family solve, the exclusion summary and the eligibility summary |
 
 All values are composite log evidence or resampling fractions of the fitted model; none is a calibrated probability,
 a proof of biological direction or a validation against truth.
+
+### Relative-proxy contrasts of released edges
+
+Release 2.17 reports, for every child-candidate edge of the Tier-B, Tier-B partial and complete views, uncalibrated
+composite genetic-score contrasts between the candidate-parent model and two relationship proxies
+(`pedigree/relatives.py`). Per scored chromosome: the production M1 score of the edge (the screen's kernel; the
+other slot null) minus the score of a second-degree proxy (one homologue of the child IBD with the candidate's
+transmission chain in tracts, switching with the meiotic selector probability, the population null outside, the
+other homologue null) and of a full-sib proxy (each homologue IBD with the candidate's chain in its own tracts,
+flipping with probability 2θ(1 − θ) per bin edge). Each is the composite of the tempered and the full view; a
+chromosome counts (UsableChromosomes) when the candidate has evidence in one of its components, whether or not that
+evidence discriminates a parent from a relative, so a chromosome can count and contribute about zero. Positive
+favours the candidate-parent model over the stated proxy under these paintings. The contrasts change no call, tier
+or release, are not posterior parentage probabilities, and the proxies are not exhaustive alternatives (no
+inbreeding loops or other relatives). A parent's margin over the second-degree proxy per chromosome is small
+(Interpretation and limitations; reset components and the map span change it), so a small positive total does not
+separate a parent from a relative: small positive contrasts were also measured for non-parents (2.4 to 3.3 nats on
+the K30 simulation). A negative contrast says only that the specified relative proxy has the larger composite
+genetic score under these paintings; it does not identify a true relationship. Measured (2.17 lab): on a TroMau-like simulated cross
+(96 sequenced F2, most parents unsequenced, the sequenced F1 their sibs; 8 chromosomes) every released edge is a
+true parent and beats the second-degree proxy by at least 12.6 nats and the full-sib proxy by at least 23.5; on the
+real TroMau cross 2 of 38 released edges have a negative second-degree contrast.
 
 ## Implementation and cost
 
@@ -901,7 +924,8 @@ parent order's dam/sire basis.
   on 8 chromosomes one has a negative contrast (−47.6 nats) and two favour the parent even over the full-sib form, and
   in K30 sibling and half-sibling F1s score like true parents (+2.4 to +3.3 nats against the second-degree form), as do
   reversed parent-child pairs. A joint relationship model, or a release abstention on a negative contrast (which would
-  withhold the one separable false edge there without losing a true parent), is future work.
+  withhold the one separable false edge there without losing a true parent), is future work; release 2.17 reports
+  the contrasts of every released edge (`relative_contrasts.csv`) without changing any call.
 - Eligibility is an assumption, not data: a wrong generation label or an over-restrictive constraint takes a true
   parent out of the universe, and the model can then report at most an unobserved parent. Real crosses have no
   individual-level trio truth, so real-data calls cannot be scored for accuracy; supervised validation uses

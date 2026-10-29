@@ -198,3 +198,62 @@ def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synth
                     emit(row, "\t".join(template))
     finally:
         writer.close()
+
+
+IDENTITY_COLUMNS = ("contig", "column", "export_component", "founder_row", "source_stage", "source_component",
+                    "source_row", "block", "left_position", "right_position", "left_local_row", "right_local_row",
+                    "left_partners", "right_partners", "at_release_break", "reason", "method", "status")
+
+
+def write_identity_flags(path: Path, contig: str, stage: str, identity_paths, segments=None) -> int:
+    """Write the founder identity flags of one chromosome (export.identity.partner_changes on the exported panel's
+    row paths) atomically to ``path``; returns their number.
+
+    ``identity_paths``: per source component (first prepared block, positions int64 [L], atomic_offsets int64 [B],
+    row paths [K, B]); ``segments``: the assembly release's segment metadata in export-component order
+    (source_component, global block_start/block_stop, source_founder_rows), None when every source component is
+    exported whole with its own row order. A flag is listed under the export component holding its right block, its
+    rows renamed to that component's columns through source_founder_rows; a flag at a release segment boundary
+    (at_release_break 1) names its left partners in the left segment's columns. Positions are the last marker of
+    the left block and the first of the right one.
+    """
+    from .identity import METHOD, REASON, partner_changes
+    path = Path(path)
+    lines = []
+    for source, (first_block, positions, offsets, rows) in enumerate(identity_paths):
+        positions = np.asarray(positions, dtype=np.int64)
+        offsets = np.asarray(offsets, dtype=np.int64)
+        if segments is None:
+            owners = [(source, dict(block_start=first_block, block_stop=first_block + len(offsets),
+                                    source_founder_rows=list(range(len(rows)))))]
+        else:
+            owners = [(index, segment) for index, segment in enumerate(segments)
+                      if segment["source_component"] == source]
+
+        def owner(block):
+            return next(((index, segment) for index, segment in owners
+                         if segment["block_start"] <= first_block + block < segment["block_stop"]), (None, None))
+
+        def columns(index, segment):
+            order = list(segment["source_founder_rows"])
+            return {row: (order.index(row), vcf_column(index, order.index(row))) for row in range(len(rows))}
+
+        for flag in partner_changes(rows):
+            index, segment = owner(flag.block)
+            if segment is None:
+                continue
+            right = columns(index, segment)
+            at_break = int(first_block + flag.block == segment["block_start"])
+            left_owner = owner(flag.block - 1) if at_break else (index, segment)
+            left = right if left_owner[1] is None or not at_break else columns(*left_owner)
+            lines.append((contig, right[flag.row][1], index, right[flag.row][0], stage, source, flag.row,
+                          first_block + flag.block, int(positions[offsets[flag.block] - 1]),
+                          int(positions[offsets[flag.block]]), flag.left_local_row, flag.right_local_row,
+                          ",".join(left[r][1] for r in flag.left_partners),
+                          ",".join(right[r][1] for r in flag.right_partners), at_break, REASON, METHOD,
+                          "diagnostic_only"))
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text("\t".join(IDENTITY_COLUMNS) + "\n"
+                         + "".join("\t".join(map(str, line)) + "\n" for line in lines))
+    temporary.replace(path)
+    return len(lines)

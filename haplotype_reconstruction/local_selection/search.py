@@ -4,9 +4,10 @@ Rounds continue until the best refit does not improve the selection objective by
 tolerance; ``round_backstop(K)`` rounds are a reported backstop. Each round screens every drop
 and add by its exact initial score and every merge by an EM lower bound from the
 forward-backward statistics of the two corresponding drop panels (plus the complete nearest-
-distance classes of exact "double-removal" merges), then refits the top ``refits_per_kind``
-proposals of each kind. Screening costs O(N L K^3) without distance ties and up to O(N L K^4)
-when ties require every merge's exact forward. Reuse is keyed by the complete panel AND its
+distance classes of exact "double-removal" merges, each represented by its best-bounded member since
+release 2.17), then refits the top ``refits_per_kind`` proposals of each kind. The likelihood screening
+costs O(N L K^3) (at most 2K exact merge scores of O(N L K^2) each); the context-coded regulariser of
+each proposal (a context round's founder matching) is extra and not bounded here. Reuse is keyed by the complete panel AND its
 frequencies. Fits, scores and
 merge bounds are kept across rounds in a ``LikelihoodMemo`` (a context round's fits, which select along
 their trajectory by the context-coded objective, are keyed by the context founders too); a whole
@@ -191,12 +192,18 @@ def merge_bounds(panel, drops, merges, prepared, buffers=None):
     return bounds, len(statistics)
 
 
-def double_removal_merges(panel, merges) -> set[int]:
-    """Merges scored exactly besides their EM bounds: for every row k, the merge of k with its
-    nearest rows and every merge (i, j), k not in {i, j}, whose consensus is nearest row k.
-    All minima at the integer Hamming distance are included, with their union deduplicated. The
-    fixed-posterior bound credits no re-routing of carriers, so it can rank such merges far below
-    their exact scores. Distance ties can require every available merge to be scored exactly."""
+def double_removal_merges(panel, merges, bounds, tolerance, ties: TieCounter | None = None) -> set[int]:
+    """Merges scored exactly besides their EM bounds: for every row k, the best-bounded merge of k with
+    one of its nearest rows, and the best-bounded merge (i, j), k not in {i, j}, whose consensus is
+    nearest row k. The fixed-posterior bound credits no re-routing of carriers, so it can rank such
+    merges far below their exact scores. Release 2.17: within each nearest-distance class only its
+    representative is scored exactly (the best of the class's EM bounds, tie classes of
+    ``tolerance`` broken by content; a choice inside a tie class is counted as
+    ``ls.rank.merge_representative``), so at most 2K merges are scored exactly per screen and the
+    likelihood screening stays O(N L K^3); before, a distance tie admitted the whole class (up to
+    K(K - 1)/2 merges; a K30 census of screens with incomplete context inputs found 76-277 of about 400).
+    The other members keep their bounds. Tied bounds do not imply tied exact scores: the choice is
+    deterministic for a fixed tie convention, not invariant to it."""
     if len(panel) < 2 or not merges:
         return set()
     panel = np.asarray(panel)
@@ -206,16 +213,28 @@ def double_removal_merges(panel, merges) -> set[int]:
     rows = (panel[:, None, :] != panel[None, :, :]).sum(axis=2)
     np.fill_diagonal(rows, np.iinfo(np.int64).max)
     distance = (consensus[:, None, :] != panel[None, :, :]).sum(axis=2)
+
+    def representative(members):
+        members = sorted(set(members))
+        if len(members) == 1:
+            return members[0]
+        classes = tie_classes([bounds[m] for m in members], tolerance,
+                              content=[(merges[m][0].tobytes(), merges[m][1].tobytes()) for m in members],
+                              descending=True, motion=DECISION_MOTION)
+        if ties is not None:
+            ties.add("ls.rank.merge_representative", classes)
+        return members[int(classes.order[0])]
+
     chosen = set()
     for k in range(len(panel)):
-        for nearest in np.flatnonzero(rows[k] == rows[k].min()):
-            pair = (min(k, int(nearest)), max(k, int(nearest)))
-            if pair in order:
-                chosen.add(order[pair])
+        nearest = [order[(min(k, int(n)), max(k, int(n)))] for n in np.flatnonzero(rows[k] == rows[k].min())
+                   if (min(k, int(n)), max(k, int(n))) in order]
+        if nearest:
+            chosen.add(representative(nearest))
         valid = (pairs[:, 0] != k) & (pairs[:, 1] != k)
         if valid.any():
             minimum = distance[valid, k].min()
-            chosen.update(np.flatnonzero(valid & (distance[:, k] == minimum)).tolist())
+            chosen.add(representative(np.flatnonzero(valid & (distance[:, k] == minimum)).tolist()))
     return chosen
 
 
@@ -392,7 +411,7 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
     # them without (one E-step restores a cached fit that becomes the incumbent fit).
     score_cache, fit_cache = {}, {}
     buffers = WorkspaceBuffers()
-    work = dict(score_calls=0, score_cache_hits=0, fit_calls=0, fit_cache_hits=0, bound_passes=0)
+    work = dict(score_calls=0, score_cache_hits=0, fit_calls=0, fit_cache_hits=0, bound_passes=0, exact_merges=0)
     context = None if founders is None else ContextFounders(founders)
     incumbent_fit = None if incumbent is None else incumbent.fit
 
@@ -510,7 +529,8 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
                 memo.bounds[bounds_key] = bounds
             else:
                 memo.hits["bounds"] += 1
-            exact = double_removal_merges(fit.panel, merges)
+            exact = double_removal_merges(fit.panel, merges, bounds, tolerance, ties)
+            work["exact_merges"] += len(exact)
             for index, (bound, (panel, frequency, _origin)) in enumerate(zip(bounds, merges)):
                 if index in exact:
                     bound = score(panel, frequency)

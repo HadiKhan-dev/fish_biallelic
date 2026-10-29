@@ -1,7 +1,8 @@
 """OUTPUT/pedigree/: the pedigree stage's report tables, its evidence calibration and a run summary.
 
 One CSV per table of the product's PedigreeReport (tier_b_relationships.csv is the primary call table; the others
-are the Tier-A and complete views, partial relationships, candidate sets, explanations and diagnostics),
+are the Tier-A and complete views, partial relationships, candidate sets, explanations and diagnostics, and from
+release 2.17 relative_contrasts.csv, the released edges' relative-proxy contrasts),
 evidence_calibration.json (the cross-chromosome evidence scaling) and summary.json (the scored and omitted
 chromosomes, what Tier A/B can release with them, the final family solve, the full-marker exclusion and the
 eligibility design: why a tier may release nothing). Real-data calls are inferences conditional on the paintings
@@ -23,7 +24,7 @@ def write_pedigree(output, product, input_ids=None) -> list[Path]:
     directory = Path(output) / "pedigree"
     written = [write_frame(directory / f"{field.name}.csv",
                            frame_in_input_order(getattr(product.report, field.name), input_ids))
-               for field in fields(product.report)]
+               for field in fields(product.report) if getattr(product.report, field.name) is not None]
     written.append(write_json(directory / "evidence_calibration.json", product.calibration))
     written.append(write_json(directory / "summary.json", dict(
         informative_contigs=list(product.informative_contigs), omitted=dict(product.omitted),
