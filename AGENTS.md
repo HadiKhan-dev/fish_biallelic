@@ -623,6 +623,20 @@ The owner pays for every core of a paid allocation, the hosting node included. O
   - Start worker nodes with `nodeq/sbatch/nodeq_<partition>.sbatch`. Older campaign pools served by
     `pool_worker.sh` are superseded: once a node's old pool is empty, give it a nodeq worker with
     `nodeq/attach.sh JOBID`.
+- **Fan out independent units; never loop over them inside one task** (owner, 29 October 2026).
+  - The incident: on 29 October, prototype evaluations ran as one 8-core task per design, each looping over
+    chromosomes and samples on about one core. Each took about an hour while about 900 node cores sat idle. Split per
+    chromosome, with a process pool over samples, the same work took minutes.
+  - Before submitting, split the work into its independent units: chromosome, component, sample, replicate or
+    parameter value. Submit one task per unit or small batch, so that the slowest unit sets the wall time, not the
+    sum of the units.
+  - Write lab scripts per unit from the start. The unit is an argument, each unit writes its own output, and a small
+    merge step combines them.
+  - Use every core a task declares. Either run its independent units in a process pool (package code uses the
+    package's pools and CPU budget, §4.5), or declare only the cores it can use. A serial script declares one core.
+  - Within a few minutes of submitting, compare the busy cores in `nodeq status` with your tasks' declared cores and
+    the idle capacity. Long-running tasks on few busy cores while nodes sit idle mean the work is under-decomposed:
+    cancel it and fan it out. Its partial outputs are superseded (§5.5).
 - **Every 30 minutes during a campaign,** the coordinator checks every allocation: the hosting node, the node-queue
   workers and any others.
   - One cheap pass covers heartbeats, claimed and pending tasks, and host load, plus at most one `squeue`.

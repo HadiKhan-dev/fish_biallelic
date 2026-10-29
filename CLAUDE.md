@@ -19,6 +19,11 @@ specific to Claude Code. Shared rules go in `AGENTS.md`, never here.
     the context. It fires once worker nodes have been idle for 10 minutes or more.
   - Act on it in the same turn (`AGENTS.md` §5.4): queue useful authorized work through `nodeq`, or say why none is
     ready.
+  - It also fires while your own tasks run. If they loop over independent units (chromosomes, samples, variants) or
+    use few of their declared cores, they are the cause. Fan them out per unit and parallelise inside each task
+    (`AGENTS.md` §5.4) instead of reporting that nothing is ready.
+  - Before ending a turn with work queued, check `nodeq status` once: busy cores should be close to what your tasks
+    declared, with no idle nodes that per-unit tasks could fill.
 - **No end-to-end runs to check a fix** (owner, 26 October 2026; shared rule in `AGENTS.md` §2.6 and §5.5).
   - Validate each fix where it acts: its fixture, replays of the affected blocks or components on saved inputs, and
     competing outputs scored on common inputs.
