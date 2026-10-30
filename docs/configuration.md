@@ -28,9 +28,10 @@ Run or resume the pipeline.
 ```text
 usage: haplotypes run [-h] [--preset {tromau,aulstu}] [--vcf VCF] [--templates TEMPLATES] [--output OUTPUT]
                       [--checkpoints CHECKPOINTS] [--cores CORES] [--memory-limit MEMORY_LIMIT]
-                      [--contigs CONTIGS [CONTIGS ...]] [--stop-after {discovery,painting}] [--serial]
-                      [--max-contigs MAX_CONTIGS] [--process-contigs PROCESS_CONTIGS [PROCESS_CONTIGS ...]]
-                      [--batch-queue BATCH_QUEUE] [--set SECTION.KEY=VALUE]
+                      [--contigs CONTIGS [CONTIGS ...]] [--stop-after {relatedness,discovery,painting}]
+                      [--serial] [--max-contigs MAX_CONTIGS]
+                      [--process-contigs PROCESS_CONTIGS [PROCESS_CONTIGS ...]] [--batch-queue BATCH_QUEUE]
+                      [--set SECTION.KEY=VALUE]
                       [config]
 ```
 
@@ -45,7 +46,7 @@ usage: haplotypes run [-h] [--preset {tromau,aulstu}] [--vcf VCF] [--templates T
 | `--cores` | `CORES` |  | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | `MEMORY_LIMIT` |  | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
 | `--contigs` | `CONTIGS ...` |  | Contigs in order ([input] contigs). |
-| `--stop-after` | `{discovery,painting}` |  | [run] stop_after. |
+| `--stop-after` | `{relatedness,discovery,painting}` |  | [run] stop_after. |
 | `--serial` |  |  | [execution] serial. |
 | `--max-contigs` | `MAX_CONTIGS` |  | [execution] max_contigs (implies --serial). |
 | `--process-contigs` | `PROCESS_CONTIGS ...` |  | Shard: [execution] process_contigs. |
@@ -187,7 +188,7 @@ Where results go and where to stop.
 | --- | --- | --- | --- |
 | `output` | path | `""` (unset) | Run directory (outputs, logs, run records); default work/runs/<preset or input kind>[_seed<seed>]. |
 | `checkpoints` | path | `""` (unset) | Checkpoint directory; default OUTPUT/checkpoints. |
-| `stop_after` | string: `"discovery"`, `"painting"` | `""` | Stop cleanly after this stage: discovery, or painting (per-contig work done, genome-wide stages not started); empty runs everything. |
+| `stop_after` | string: `"relatedness"`, `"discovery"`, `"painting"` | `""` | Stop cleanly after this stage: relatedness (every contig's evidence and the genome-wide relatedness product recorded; run it once before shards), discovery, or painting (per-contig work done, later genome-wide stages not started); empty runs everything. |
 
 ### [execution]
 
@@ -345,6 +346,7 @@ Checked when the configuration is loaded, before any input is read (the error me
 - [execution] process_contigs must be unique
 - [execution] process_contigs must be a subset of [input] contigs
 - [execution] process_contigs (a shard) and serial cannot be combined
+- [run] stop_after = "relatedness" records every contig's evidence and the genome-wide relatedness product: run it once without [execution] process_contigs, then the shards
 - [input] kind = "vcf" needs [input] vcf (or --vcf)
 - [simulation] settings need [input] kind = "simulation": ...
 - [input] kind = "simulation" needs [simulation] templates (or --templates)

@@ -2,13 +2,16 @@
 
     check inputs (before any computation) -> start the run (cores, kernel cache, log, run record, config.toml)
     -> simulated inputs (simulation only) -> evidence + discovery (one persistent block pool for all contigs; the
-    evidence of the next contig is prepared on discovery's helper thread) -> per contig in lanes: local selection
-    -> final assembly -> painting -> pedigree -> founder refit -> family phase -> recombination -> export (the final
-    founder and sample VCFs in OUTPUT/export; [export] enabled)
+    evidence of the next contig is prepared on discovery's helper thread) -> relatedness (genome-wide, from every
+    contig's evidence: a barrier before any assembly) -> per contig in lanes: local selection -> final assembly ->
+    painting -> pedigree -> founder refit -> family phase -> recombination -> export (the final founder and sample
+    VCFs in OUTPUT/export; [export] enabled)
 
-Serial mode runs discovery and the per-contig work one contig at a time (each recorded before the next starts);
-a shard ([execution] process_contigs) runs its contigs through painting only. Every stage resumes from its records;
-genome-wide completion is recorded in run.ckpt (complete/<stage>) only for full runs.
+Serial mode first records every contig's evidence and the relatedness product, then runs discovery and the
+per-contig work one contig at a time (each recorded before the next starts). A shard ([execution] process_contigs)
+runs its contigs through painting only and needs the relatedness product recorded first ([run] stop_after =
+"relatedness" records it). Every stage resumes from its records; genome-wide completion is recorded in run.ckpt
+(complete/<stage>) only for full runs.
 """
 from __future__ import annotations
 
@@ -178,6 +181,13 @@ def _check_store(paths: RunPaths, config: RunConfig, source) -> None:
         raise RuntimeError("a shard ([execution] process_contigs) needs the simulated inputs of every contig recorded "
                            "first: run the configuration once without process_contigs (the simulation of every "
                            "contig is recorded before any other stage; --max-contigs 1 stops after one contig)")
+    if config.execution.process_contigs:
+        from ..relatedness import records as relatedness_records
+        if store is None or not store.run.has(relatedness_records.PRODUCT):
+            raise RuntimeError("a shard ([execution] process_contigs) needs the genome-wide relatedness product "
+                               "recorded first (it runs before any assembly): run the configuration once without "
+                               "process_contigs and with [run] stop_after = \"relatedness\" (every contig's evidence "
+                               "and the product), then the shards")
 
 
 def run_pipeline(config: RunConfig, prepared: PreparedRun | None = None) -> RunResult:
@@ -285,6 +295,14 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
             with execution.stage_timer("discovery"):
                 discover_contigs(store, tuple(pending), configs.discovery, budget, prepare=prepare)
 
+    def record_evidence(selected):
+        """Every selected contig's evidence recorded, one contig at a time (an evidence-only pass before the
+        relatedness barrier: serial mode, and a run that stops at relatedness); recorded contigs are reused."""
+        for contig in selected:
+            summary = prepare_evidence(store, source, contig, configs.evidence, budget)
+            execution.record_product("evidence", contig, _summary_record(summary))
+            publish("write_quality", paths.output, store, contig, sample_ids)
+
     for contig in todo:
         if contig_done(store, contig):
             # Painted by an earlier invocation and reused without running any of its stages: its records must be
@@ -293,6 +311,15 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
             bind_reused(file)
             check_reused(store, file, configs, prepared.genetic_maps.for_contig(contig), painting=True)
 
+    if config.serial or config.run.stop_after == "relatedness":
+        # The barrier needs every contig's evidence before any contig is discovered and painted (serial), or
+        # without discovery at all (a run that only records the relatedness product).
+        record_evidence(contigs)
+        related = _relatedness(store, contigs, sample_ids, prepared, budget, paths.output)
+        if config.run.stop_after == "relatedness":
+            print("[STOP] evidence and relatedness recorded; discovery, local selection, assembly and painting not "
+                  "started", flush=True)
+            return RunResult("stopped", "relatedness", todo)
     if config.serial:
         if not _run_serially(store, todo, discover, context, cores, config.execution.max_contigs,
                              len(sample_ids), ensure_driver_resident):
@@ -307,6 +334,10 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
         print("[STOP] discovery recorded; local selection, assembly and painting not started", flush=True)
         return RunResult("stopped", "discovery", todo)
 
+    if not config.serial:
+        # The genome-wide barrier before any assembly: every contig's evidence is recorded here (a shard reads the
+        # product its preparatory run recorded; relatedness.run binds and reuses a recorded product).
+        related = _relatedness(store, contigs, sample_ids, prepared, budget, paths.output, report=not shard)
     _reconstruct(store, todo, context, cores, config, len(sample_ids), paths, ensure_driver_resident)
     if not shard:
         _mark_when(store, "painting", contigs, lambda contig: contig_done(store, contig))
@@ -314,7 +345,7 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
         print("[STOP] painting recorded; genome-wide stages not started", flush=True)
         return RunResult("stopped", "painting", todo)
 
-    _genome_wide(store, contigs, sample_ids, prepared, budget, paths.output)
+    _genome_wide(store, contigs, sample_ids, prepared, budget, paths.output, related)
     print(f"Pipeline complete in {time.monotonic() - started:.1f} s", flush=True)
     return RunResult("complete", None, contigs)
 
@@ -374,17 +405,29 @@ def _reconstruct(store, contigs, context, cores, config, n_samples, paths, ensur
                          cores=cores, task_bytes=lambda contig: planning_bytes(store, contig, n_samples))
 
 
-def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, output) -> None:
-    """Relatedness, pedigree, founder refit, family phase, recombination and the export (each stage resumes and marks
-    itself complete), then the run's tie report."""
-    from .. import founder_refit, pedigree, relatedness
+def _relatedness(store, contigs, sample_ids, prepared: PreparedRun, budget, output, report=True):
+    """The genome-wide relatedness barrier (release 3.3): from every contig's evidence record, before any assembly;
+    a recorded product with the same identity is reused. Returns the product.
+    ``report``: publish the run's relatedness report; a shard only reads the product its preparatory run recorded
+    and reported (concurrent shards must not write the same run-level report)."""
+    from .. import relatedness
+    from ..evidence.sample_order import store_input_order
+    with execution.stage_timer("relatedness"):
+        related = relatedness.run(store, contigs, sample_ids, prepared.configs.relatedness, prepared.genetic_maps,
+                                  budget)
+    if report:
+        publish("write_relatedness", output, related, input_ids=store_input_order(store))
+    return related
+
+
+def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, output, related) -> None:
+    """Pedigree (with the relatedness product of the barrier), founder refit, family phase, recombination and the
+    export (each stage resumes and marks itself complete), then the run's tie report."""
+    from .. import founder_refit, pedigree
     from ..family_phase.stage import run as phase_families
     from ..recombination.stage import run as map_recombination
     configs, maps = prepared.configs, prepared.genetic_maps
     from ..evidence.sample_order import store_input_order
-    with execution.stage_timer("relatedness"):
-        related = relatedness.run(store, contigs, sample_ids, configs.relatedness, maps, budget)
-    publish("write_relatedness", output, related, input_ids=store_input_order(store))
     with execution.stage_timer("pedigree"):
         product = pedigree.run(store, contigs, sample_ids, prepared.eligibility, configs.pedigree, maps, budget,
                                related)

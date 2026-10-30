@@ -224,14 +224,15 @@ Match validation to the change.
 
 The package reconstructs founder haplotypes and local ancestry from low-coverage sequencing of experimental crosses.
 From a multi-sample VCF or BCF it:
-1. discovers founder haplotypes within marker blocks;
-2. assembles them along chromosomes;
-3. paints offspring as diploid mosaics of founders;
-4. infers the pedigree and corrects phase;
-5. estimates recombination maps.
+1. estimates pairwise relatedness and full-sib families from the genotype likelihoods;
+2. discovers founder haplotypes within marker blocks;
+3. assembles them along chromosomes;
+4. paints offspring as diploid mosaics of founders;
+5. infers the pedigree and corrects phase;
+6. estimates recombination maps.
 
-It is one pipeline of stage packages run by the `haplotypes` command: evidence, discovery, local_selection, assembly,
-painting, pedigree, founder_refit, family_phase, recombination and export.
+It is one pipeline of stage packages run by the `haplotypes` command: evidence, relatedness, discovery,
+local_selection, assembly, painting, pedigree, founder_refit, family_phase, recombination and export.
 - **The primary real workflow is the TroMau cichlid cross:** `haplotypes run CONFIG` with `preset = "tromau"`. The
   preset is `haplotype_reconstruction/config/presets/tromau.toml`, and the example is `configs/tropheops.toml`.
 - **AulStu is never used for testing.** The owner, 17 October 2026: "real data aul stu is very very bloated, do not
@@ -266,11 +267,15 @@ Infrastructure, under `haplotype_reconstruction/`:
 - `evidence/`: VCF/BCF loading, site and sample filters, the read model and genotype likelihoods.
 
 **How the stages fit together.** `docs/methods/` documents each stage. In brief:
+- relatedness estimates pairwise IBD and full-sib families from genotype likelihoods alone (no painting, pedigree,
+  phase or cohort label), from every contig's evidence before discovery and assembly (the relatedness barrier;
+  shards read the product their preparatory run recorded);
 - discovery is missing-aware;
 - local selection chooses paths with assembly feedback contexts;
 - assembly is hierarchical (L1-L4) with joint founder completion;
 - painting is component-local;
-- pedigree inference uses the paintings and raw genotype likelihoods, with Tier B as the primary output;
+- pedigree inference uses the paintings and raw genotype likelihoods, with Tier B as the primary output; its sibling
+  guard withholds edges whose parent looks like one more full sib of the child's relatedness family;
 - family phase refines phase conditioned on the pedigree;
 - recombination estimates maps from the final phase.
 

@@ -22,11 +22,12 @@ class Stage:
 
 STAGES: tuple[Stage, ...] = (
     Stage("evidence", "contig", ("evidence",)),
+    # Release 3.3: genome-wide, after every contig's evidence and before any assembly (the relatedness barrier).
+    Stage("relatedness", "genome", ("relatedness",)),
     Stage("discovery", "contig", ("discovery",)),
     Stage("local_selection", "contig", ("local_selection", "discovery", "assembly")),
     Stage("assembly", "contig", ("assembly",)),
     Stage("painting", "contig", ("painting",)),
-    Stage("relatedness", "genome", ("relatedness",)),
     Stage("pedigree", "genome", ("pedigree", "painting")),
     Stage("founder_refit", "contig", ("founder_refit", "painting")),
     Stage("family_phase", "contig", ("family_phase", "painting")),
@@ -36,9 +37,10 @@ STAGES: tuple[Stage, ...] = (
 
 STAGE_NAMES: tuple[str, ...] = tuple(entry.name for entry in STAGES)
 
-# Where a run may stop early (`[run] stop_after`): after discovery, or after painting (per-contig work done,
-# genome-wide stages not started).
-STOP_POINTS: tuple[str, ...] = ("discovery", "painting")
+# Where a run may stop early (`[run] stop_after`): after relatedness (every contig's evidence and the genome-wide
+# relatedness product recorded; what shards need first), after discovery, or after painting (per-contig work done,
+# later genome-wide stages not started).
+STOP_POINTS: tuple[str, ...] = ("relatedness", "discovery", "painting")
 
 SIMULATION_PREFIX = "simulation"
 

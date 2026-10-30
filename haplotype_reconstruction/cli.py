@@ -32,7 +32,7 @@ def _add_run_options(command):
     command.add_argument("--memory-limit", help="Memory the run may plan to use at once, e.g. 200G "
                          "([execution] memory_limit; default: available at start minus headroom).")
     command.add_argument("--contigs", nargs="+", help="Contigs in order ([input] contigs).")
-    command.add_argument("--stop-after", choices=("discovery", "painting"), help="[run] stop_after.")
+    command.add_argument("--stop-after", choices=("relatedness", "discovery", "painting"), help="[run] stop_after.")
     command.add_argument("--serial", action="store_true", default=None, help="[execution] serial.")
     command.add_argument("--max-contigs", type=int, help="[execution] max_contigs (implies --serial).")
     command.add_argument("--process-contigs", nargs="+", help="Shard: [execution] process_contigs.")

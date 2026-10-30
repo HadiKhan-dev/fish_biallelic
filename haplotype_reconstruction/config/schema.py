@@ -36,9 +36,11 @@ class RunSection:
     output: Path | None = setting(None, "path", "Run directory (outputs, logs, run records); default "
                                   "work/runs/<preset or input kind>[_seed<seed>].")
     checkpoints: Path | None = setting(None, "path", "Checkpoint directory; default OUTPUT/checkpoints.")
-    stop_after: str = setting("", "str", "Stop cleanly after this stage: discovery, or painting (per-contig work "
-                              "done, genome-wide stages not started); empty runs everything.",
-                              ("", "discovery", "painting"))
+    stop_after: str = setting("", "str", "Stop cleanly after this stage: relatedness (every contig's evidence and "
+                              "the genome-wide relatedness product recorded; run it once before shards), discovery, "
+                              "or painting (per-contig work done, later genome-wide stages not started); empty runs "
+                              "everything.",
+                              ("", "relatedness", "discovery", "painting"))
 
 
 @dataclass(frozen=True)

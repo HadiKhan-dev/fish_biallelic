@@ -1,5 +1,35 @@
 # Changelog
 
+## 3.3.0 (30 October 2026)
+
+This release moves the relatedness stage ahead of assembly. No result changes: relatedness reads only the evidence
+records, and the relatedness product, the released pedigree edges and the family-phase calls are identical on every
+execution path and identical to 3.2. Stage identities are unchanged, so runs started with 3.2 resume.
+
+**The relatedness barrier** ([relatedness](docs/methods/relatedness.md#interpretation-and-limitations),
+[usage](docs/usage.md#shards)). The relatedness stage now runs once every contig's evidence is recorded and before any
+assembly, in every execution mode:
+- default mode: after discovery, before the per-contig lanes;
+- serial mode (`--serial`): after an evidence-only pass over every contig, then one contig at a time from discovery
+  through painting;
+- shards (`--process-contigs`): a shard reads the product and is refused without it. Record it first with one run of
+  the configuration with `[run] stop_after = "relatedness"` (`--stop-after relatedness`, a new stop point: every
+  contig's evidence, and for a simulation its simulated inputs, then the product). Concurrent shards never write the
+  run-level relatedness report.
+
+Pedigree and the later genome-wide stages read the same product as before.
+
+**Investigated, not included.**
+- A pedigree-aware correction of founder-row correspondence at assembly junctions: an inherited crossover charged
+  once, in the meiosis where it arose, rather than once per descendant. With the true pedigree it preferred the
+  correct correspondence at every known misjoin of the simulations. With families inferred from genotype likelihoods
+  (one latent copy of each unsequenced parent per full-sib family), a parent shared by several families pays its
+  crossovers once per copy, which biases the score towards absorbing them into the panel. Under the safety rules
+  needed against that bias it made no change in 12 simulation designs. It needs latent parents identified across
+  families and linked to their own parents first.
+- A shared-background (population structure) term in the relatedness likelihood: neither candidate passed held-out
+  prediction and merge tests.
+
 ## 3.2.0 (30 October 2026)
 
 This release covers four changes:

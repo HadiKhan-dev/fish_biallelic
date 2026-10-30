@@ -9,12 +9,12 @@ fails if a cited value differs from the code.
 | stage | chapter | what it computes |
 | --- | --- | --- |
 | evidence | [evidence.md](evidence.md) | the record policy for VCF input, site and sample quality control, the read model fitted to the allele depths, genotype likelihoods |
+| relatedness | [relatedness.md](relatedness.md) | pairwise identity by descent and full-sib families with latent or sequenced parents, from genotype likelihoods alone, before discovery (release 3.3: the relatedness barrier) |
 | discovery | [discovery.md](discovery.md) | founder panels of each 200-site block from the pooled sample evidence, with missing alleles kept unknown |
 | local selection | [local_selection.md](local_selection.md) | the local panel of each block under a diploid copying-path model, refined twice with candidates from context assemblies |
 | assembly | [assembly.md](assembly.md) | completion of missing founder alleles, linking and joining panels into chromosome-scale founder components over the L1-L4 hierarchy |
 | | [founder_refinement.md](founder_refinement.md) | converged refinement of the founder paths and founder counts after every final assembly level |
 | painting | [painting.md](painting.md) | label continuity across atomic spans, then each sample as a diploid mosaic of the founders with an explicit unknown state |
-| relatedness | [relatedness.md](relatedness.md) | pairwise identity by descent and full-sib families with latent or sequenced parents, from genotype likelihoods alone (release 3.2) |
 | pedigree | [pedigree.md](pedigree.md) | observed-parent configurations from the paintings and genotype likelihoods, with direction, family evidence and support tiers |
 | founder refit | [founder_refit.md](founder_refit.md) | founder alleles refitted from the painted carriers |
 | family phase | [family_phase.md](family_phase.md) | a founder-mosaic pedigree model: final genotypes, phase, phase sets and released ambiguity, conditioned on the released parent edges |

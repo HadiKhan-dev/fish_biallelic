@@ -235,6 +235,9 @@ def validate(config: RunConfig, given: set = frozenset()) -> None:
         raise ConfigError("[execution] process_contigs must be a subset of [input] contigs")
     if execution.process_contigs and config.serial:
         raise ConfigError("[execution] process_contigs (a shard) and serial cannot be combined")
+    if execution.process_contigs and config.run.stop_after == "relatedness":
+        raise ConfigError("[run] stop_after = \"relatedness\" records every contig's evidence and the genome-wide "
+                          "relatedness product: run it once without [execution] process_contigs, then the shards")
     if inputs.kind == "vcf":
         if inputs.vcf is None:
             raise ConfigError("[input] kind = \"vcf\" needs [input] vcf (or --vcf)")

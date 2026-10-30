@@ -159,19 +159,19 @@ A run checks everything it can before computing anything:
    warns at the start that, unless the chromosomes are long on a supplied map, it can release no Tier-B parent (so
    family phase and recombination have no parent edges). The pedigree stage states its informative chromosomes and
    their map units at its end, which is authoritative (a contig can turn out uninformative).
-6. An existing checkpoint directory carries this release's layout mark, and a shard of a simulation finds the
-   simulated inputs of every contig recorded.
+6. An existing checkpoint directory carries this release's layout mark, a shard of a simulation finds the
+   simulated inputs of every contig recorded, and every shard finds the relatedness product recorded.
 
 ## What a run computes
 
 | stage | per | product |
 | --- | --- | --- |
 | [evidence](methods/evidence.md) | contig | allele depths, site and sample QC, calibrated genotype likelihoods, 200-site blocks |
+| [relatedness](methods/relatedness.md) | genome | pairwise identity by descent and full-sib families from genotype likelihoods alone (after every contig's evidence, before any assembly) |
 | [discovery](methods/discovery.md) | 200-site block | missing-aware local founder panels |
 | [local selection](methods/local_selection.md) | contig | path-selected local panels, refined twice with context assemblies |
 | [assembly](methods/assembly.md) | contig | component-preserving founder chromosomes (L1-L4 hierarchy, [founder refinement](methods/founder_refinement.md) after each level) |
 | [painting](methods/painting.md) | contig | diploid founder mosaics of every sample |
-| [relatedness](methods/relatedness.md) | genome | pairwise identity by descent and full-sib families from genotype likelihoods alone |
 | [pedigree](methods/pedigree.md) | genome | observed-parent calls with support tiers |
 | [founder refit](methods/founder_refit.md) | contig | founder alleles refitted from the painted carriers |
 | [family phase](methods/family_phase.md) | contig | pedigree-conditioned genotypes, phase and phase sets |
@@ -179,9 +179,10 @@ A run checks everything it can before computing anything:
 | [export](#export) | contig | the final founder VCF and phased sample VCF in `OUTPUT/export` |
 
 Discovery runs over all pending contigs in one block pool before the per-contig work starts (the evidence of the
-next contig is prepared while the current one is discovered). Local selection, assembly and painting then run per
-contig in concurrent lanes. The genome-wide stages follow when every contig is painted, and the export writes the
-final VCFs last (`[export] enabled = false` skips it). Nothing feeds back upstream: family phase and the maps
+next contig is prepared while the current one is discovered). The relatedness stage then runs once, from every
+contig's evidence: a genome-wide barrier before any assembly. Local selection, assembly and painting then run per
+contig in concurrent lanes. The later genome-wide stages follow when every contig is painted, and the export writes
+the final VCFs last (`[export] enabled = false` skips it). Nothing feeds back upstream: family phase and the maps
 never change the founders, paintings or pedigree, and the export changes no record.
 
 ## Execution
@@ -244,11 +245,12 @@ from these compiled caches. See [compiled kernels](performance.md#compiled-kerne
 ## Short allocations
 
 By default discovery covers every contig before the lanes start, so an allocation that ends early can leave many
-contigs partly done. `[execution] serial = true` (`--serial`) takes one contig at a time, in the configured order,
-through evidence, discovery, local selection, assembly and painting with all cores; each contig is recorded before
-the next starts. `[execution] max_contigs = N` (`--max-contigs N`, implies serial) finishes at most N more contigs,
-counting one resumed from partial records, then exits with status 0, naming the contigs still to do. Rerun the
-same command to continue:
+contigs partly done. `[execution] serial = true` (`--serial`) first records every contig's evidence (one contig at a
+time) and the genome-wide relatedness product, then takes one contig at a time, in the configured order, through
+discovery, local selection, assembly and painting with all cores; each contig is recorded before the next starts.
+`[execution] max_contigs = N` (`--max-contigs N`, implies serial) finishes at most N more contigs, counting one
+resumed from partial records, then exits with status 0, naming the contigs still to do. Rerun the same command to
+continue:
 
 ```bash
 # Each invocation paints at most two more contigs.
@@ -263,20 +265,23 @@ simulation first generates its inputs for every contig.
 
 ## Shards
 
-`[execution] process_contigs` (`--process-contigs C ...`) processes only the named contigs (of `[input]
-contigs`) through painting and then stops: a shard never runs or marks the genome-wide stages. Independent shards
-can run on separate allocations against one run directory, each with its own contigs:
+`[execution] process_contigs` (`--process-contigs C ...`) processes only the named contigs (of `[input] contigs`)
+through painting and then stops: a shard never runs or marks the later genome-wide stages. The genome-wide
+relatedness stage runs before any assembly, so a shard needs its product recorded first (a shard reads it and never
+computes or reports it) and is refused otherwise: run the configuration once without `process_contigs` and with
+`[run] stop_after = "relatedness"` (`--stop-after relatedness`; it records every contig's evidence and the product,
+and for a simulation every contig's simulated inputs before them). Independent shards can then run on separate
+allocations against one run directory, each with its own contigs:
 
 ```bash
+haplotypes run sim.toml --stop-after relatedness --cores 76
 haplotypes run sim.toml --process-contigs chr1 chr2 --cores 76
 haplotypes run sim.toml --process-contigs chr3 chr4 --cores 76
 ```
 
-Keep `[input] contigs` and every scientific setting identical across shards. A shard of a simulation needs the
-simulated inputs of every contig recorded first, and is refused otherwise: run the configuration once without
-`process_contigs` (the simulation of every contig is recorded before any other stage; `--max-contigs 1` stops after
-one contig). After every shard has finished, run once without `process_contigs`: it finds every contig painted,
-records stage completion and continues with the genome-wide stages. Shards cannot be combined with serial mode.
+Keep `[input] contigs` and every scientific setting identical across shards. After every shard has finished, run
+once without `process_contigs`: it finds every contig painted, records stage completion and continues with the
+genome-wide stages. Shards cannot be combined with serial mode.
 
 ## Batch helpers
 

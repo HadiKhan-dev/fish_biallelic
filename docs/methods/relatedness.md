@@ -161,10 +161,10 @@ shared latent parents. Every sample receives a family; consumers abstain through
   design. The guard does not use them.
 - **No cohort labels.** The stage uses no cohort, sex or generation label, and no assumed parentage. Real-data
   families are hypotheses, never truth.
-- **Placement.** The stage depends only on the evidence. It runs at the start of the genome-wide stages, after every
-  contig is painted, in every execution mode. A consumer before assembly (pedigree-aware founder identity, planned)
-  would need it to move ahead of assembly, which serial mode does not yet allow: there the evidence of later contigs
-  is not yet prepared.
+- **Placement (release 3.3).** The stage depends only on the evidence. It runs once every contig's evidence is
+  recorded and before any assembly, in every execution mode: after discovery in the default mode, after an
+  evidence-only pass over every contig in serial mode, and before any shard (which needs the product recorded by a
+  run with `[run] stop_after = "relatedness"`). Nothing downstream feeds back into it.
 
 ## Cost
 
