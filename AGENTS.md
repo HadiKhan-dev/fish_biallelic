@@ -616,13 +616,23 @@ The owner pays for every core of a paid allocation, the hosting node included. O
     streams the log and returns the exit code, like a local command.
   - Declare `--cores N` and `--minutes M` for every task. Use `--cores all` for whole-genome runs (§6.5), and
     `--exclusive` for timing and speed checks.
-  - Keep the hosting node for orchestration, light inspection and smoke tests with tiny caps (§6.8). Never run work
-    there while a worker node is idle.
   - `nodeq status` lists idle nodes and why each pending task waits. `claude_lab/nodeq/nodeq_remind.py` prints a
     one-line reminder once nodes have been idle for 10 minutes. Check one of them whenever you regain control.
   - Start worker nodes with `nodeq/sbatch/nodeq_<partition>.sbatch`. Older campaign pools served by
     `pool_worker.sh` are superseded: once a node's old pool is empty, give it a nodeq worker with
     `nodeq/attach.sh JOBID`.
+- **The hosting allocation is a nodeq node too** (owner, 30 October 2026). It is paid like any worker.
+  - The incident: on 29-30 October, the second half of a TroMau validation was queued to wait about 12 hours for a
+    worker node. Meanwhile the hosting node sat idle, though it was a full 112-CPU node with 500 GB and 4.5 hours
+    left. On the owner's word it ran there instead.
+  - Give the hosting allocation a nodeq worker (`nodeq/attach.sh JOBID`), started like any other: no `--shared` and
+    no `--cpus` subset.
+  - nodeq then treats the host as a full node when the hosting job holds the whole node, and as a partial node when
+    it does not, whatever agents (Claude, Codex) run there. A full host takes whole-node tasks, whole-genome runs
+    included (§6.5).
+  - Attach the worker only while no work started outside nodeq uses those CPUs: the worker assumes they are free.
+  - Its tasks follow the usual rules: they fit its free CPUs, memory and remaining walltime, or checkpoint so that
+    another worker can resume them.
 - **Fan out independent units; never loop over them inside one task** (owner, 29 October 2026).
   - The incident: on 29 October, prototype evaluations ran as one 8-core task per design, each looping over
     chromosomes and samples on about one core. Each took about an hour while about 900 node cores sat idle. Split per
@@ -840,9 +850,11 @@ jobs.
 - **Scope:** production, validation, merge-correctness checks, resume tests and canaries. That includes "the last
   remaining check", and a resume expected to be short. It applies to delegated agents and checkers too.
 - **Default node:** a full 76-CPU Ice Lake node, reused across successive whole-genome tests while its walltime
-  suffices, and requested on SL4 (§6.2). For other node types, use their verified full-node CPU count.
+  suffices, and requested on SL4 (§6.2). For other node types, use their verified full-node CPU count. The hosting
+  allocation qualifies when it holds a full node (§5.4).
 - **Before launch:** record the job ID, allocated CPUs, memory, remaining walltime and worker affinity. Verify that
-  the full node is allocated to this run: not merely its host, and not shared with other tasks.
+  the whole node is allocated to this run, not just some of its CPUs, and that no other task shares it. Agents
+  running on a hosting node do not count as other tasks (§5.4).
 - **Use all of it:**
   - pass the full CPU budget through the launcher, harness, checker and scientific workers;
   - set process × thread limits that prevent oversubscription;
