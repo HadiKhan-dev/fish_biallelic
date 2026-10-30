@@ -10,10 +10,13 @@ except for a departure with probability ``site_deviation``, and its own reads at
 - Phase of a sample with a linked parent is anchored by parental origin (homologue k is the slot assigned to the
   slot-k parent: its copy where the chain's source is 0/1).
   A sample without a linked parent but with children is anchored by its children's chains. A sample with neither is a
-  gauge sample: its chromosome is partitioned at hard cuts (forced breaks, below) and at every heterozygous bin whose
-  ordered posterior, given the current partition's anchor, falls below ``phase_posterior``. Each partition is anchored
-  at its first confidently heterozygous bin (P(heterozygous) >= ``phase_posterior``) by the gauge "homologue 0
-  carries the smaller label" (no decoded label is assumed); a partition without such a bin releases no phase.
+  gauge sample: its chromosome is partitioned at hard cuts (forced breaks, below) and at every heterozygous bin where,
+  given the current partition's anchor, the orientation of its alleles is uncertain: the median over the bin's
+  confidently heterozygous sites (P(heterozygous) >= ``genotype_posterior``) of max(P01, P10) / (P01 + P10) falls
+  below ``set_posterior`` (stricter than ``phase_posterior``: a wrong continuation misphases the rest of the set). Uncertainty about which labels a sample carries does not break its phase where the
+  candidate labels carry the same alleles at its sites (the orientation is then still determined). Each partition is
+  anchored at its first confidently heterozygous bin (P(heterozygous) >= ``phase_posterior``) by the gauge "homologue
+  0 carries the smaller label" (no decoded label is assumed); a partition without such a bin releases no phase.
 - Forced breaks (``break_bins``, chosen by the stage): a sample without a linked parent breaks its phase sets at its
   painting tie boundaries (the painting's track order there is a convention), and every sample breaks at the junction
   candidates where it carries both junction labels, unless the parental homologue it copies there is pinned by the
@@ -39,6 +42,29 @@ def label_pair_posterior(post, labs0, labs1, S):
     return out
 
 
+def _orientation_certainty(post, site_bin, alleles, gl, epsilon, tau_g, lo_bin, hi_bin, B):
+    """float64 [B]: per bin in [lo_bin, hi_bin), the median over its sites with P(heterozygous) >= tau_g under the
+    label-pair posteriors ``post`` of the orientation certainty max(P01, P10) / (P01 + P10); 1 elsewhere and in a bin
+    without such a site (no evidence that the orientation is lost)."""
+    out = np.ones(B)
+    lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
+    hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
+    if hi <= lo:
+        return out
+    ordered = kernels.site_posteriors(post, site_bin[lo:hi], np.ascontiguousarray(alleles[:, lo:hi]), gl[lo:hi],
+                                      epsilon)
+    het = ordered[1] + ordered[2]
+    sites = np.flatnonzero(het >= tau_g)
+    if not len(sites):
+        return out
+    certainty = np.maximum(ordered[1], ordered[2])[sites] / het[sites]
+    bins = site_bin[lo:hi][sites]
+    starts = np.flatnonzero(np.r_[True, bins[1:] != bins[:-1]])
+    for a, e in zip(starts, np.r_[starts[1:], len(bins)]):
+        out[bins[a]] = np.median(certainty[a:e])
+    return out
+
+
 def release_sample(model, n, ctx):
     """One sample's release over the component's released sites.
 
@@ -53,13 +79,16 @@ def release_sample(model, n, ctx):
     NaN for a free homologue).
     """
     config = ctx["config"]
-    tau_g, tau_p = config.genotype_posterior, config.phase_posterior
+    tau_g, tau_p, tau_s = config.genotype_posterior, config.phase_posterior, config.set_posterior
     B, S = model.B, model.S
     (em, T0, T1, TG, labs0, labs1), kinds = model.tables(n)
     anchored_by_parent = bool(np.any(kinds == 1))
     children = len(model.child_tracks[n])
     gauge = not anchored_by_parent and children == 0
     forced = ctx["break_bins"]
+    site_bin = ctx["site_bin"]
+    alleles = ctx["site_alleles"]
+    gl = ctx["site_gl"]
     every = np.ones((1, 1), dtype=np.bool_)
     post = kernels.forward_backward(em, T0, T1, TG, -1, every)
     gposts = label_pair_posterior(post, labs0, labs1, S)
@@ -82,18 +111,15 @@ def release_sample(model, n, ctx):
                 continue
             mask = labs0[anchor][:, None] < labs1[anchor][None, :]
             lp = label_pair_posterior(kernels.forward_backward(em, T0, T1, TG, anchor, mask), labs0, labs1, S)
-            m0, m1 = (map0, map1) if map0[anchor] < map1[anchor] else (map1, map0)
-            conf = lp[np.arange(B), m0, m1]                    # absolute posterior of the decoded ordered pair
+            orientation = _orientation_certainty(lp, site_bin, alleles, gl, config.site_deviation, tau_g, anchor,
+                                                 hard, B)
             stop = next((int(b) for b in het_bins
-                         if anchor < b < hard and het_conf[b] >= tau_g and conf[b] < tau_p), hard)
+                         if anchor < b < hard and het_conf[b] >= tau_g and orientation[b] < tau_s), hard)
             posts[start:stop] = lp[start:stop]
             start = stop
     else:
         posts = gposts
         set_breaks = cuts
-    site_bin = ctx["site_bin"]
-    alleles = ctx["site_alleles"]
-    gl = ctx["site_gl"]
     ordered = kernels.site_posteriors(posts, site_bin, alleles, gl, config.site_deviation)
     genotype = kernels.site_posteriors(gposts, site_bin, alleles, gl, config.site_deviation)
     pg = np.stack([genotype[0], genotype[1] + genotype[2], genotype[3]])

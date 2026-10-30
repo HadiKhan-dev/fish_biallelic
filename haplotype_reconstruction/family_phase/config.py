@@ -41,8 +41,17 @@ class FamilyPhaseConfig:
         phased joins; 3e-4 keeps more genotype errors), not an estimate of an error rate.
       genotype_posterior: a genotype is called where its posterior reaches this value (the painting's tau).
       phase_posterior: a heterozygous call is released phased where its ordered allele posterior reaches this
-        value; a gauge sample's set continues while the posterior of its decoded ordered label pair, given the set's
-        anchor, stays at or above it at its heterozygous bins (a different event from a site's allele marginal).
+        value.
+      set_posterior: a gauge sample's phase set continues while the orientation of its alleles, given the set's
+        anchor, stays at or above this value at its heterozygous bins (the median over a bin's confidently
+        heterozygous sites of max(P01, P10) / (P01 + P10)); uncertainty about which labels it carries does not
+        break a set. Stricter than phase_posterior because a wrong continuation misphases the rest of the set,
+        whereas a wrong site call misphases one site. A working value chosen on the validation simulations: at 0.99,
+        near-ties decided only by the label-switch prior added released long switches in partial-genome designs,
+        which 0.999 avoided. Not an estimate of an error rate, nor a calibrated confidence for a whole set; longer
+        sets still carry an upstream identity error over more sites. It must lie below the orientation certainty of a fully determined
+        heterozygous site under the site model, (1 - 5 site_deviation / 6) / (1 - 2 site_deviation / 3)
+        (0.99983 at the default site_deviation), or every bin would end a set.
         Phase sets also break at junction candidates for samples carrying both labels unless a parental homologue
         pins them, and, for samples without a linked parent, at every painting tie boundary (release.py).
       protected_intervals: (contig, start, end) closed bp intervals across which meiosis chains reset (the switch
@@ -60,6 +69,7 @@ class FamilyPhaseConfig:
     site_deviation: float = 1e-3
     genotype_posterior: float = 0.9
     phase_posterior: float = 0.99
+    set_posterior: float = 0.999
     protected_intervals: tuple[tuple[str, int, int], ...] = ()
 
     def __post_init__(self):
@@ -68,9 +78,15 @@ class FamilyPhaseConfig:
         for name in ("max_sweeps", "junction_min_samples", "junction_pin_bins"):
             if int(getattr(self, name)) != getattr(self, name) or getattr(self, name) < 1:
                 raise ValueError(f"family_phase.{name} must be a positive integer")
-        for name in ("genotype_posterior", "phase_posterior"):
+        for name in ("genotype_posterior", "phase_posterior", "set_posterior"):
             if not 0.5 < getattr(self, name) < 1:
                 raise ValueError(f"family_phase.{name} must lie strictly between 0.5 and 1")
+        if self.set_posterior < self.phase_posterior:
+            raise ValueError("family_phase.set_posterior must be at least phase_posterior")
+        ceiling = (1 - 5 * self.site_deviation / 6) / (1 - 2 * self.site_deviation / 3)
+        if not self.set_posterior < ceiling:
+            raise ValueError(f"family_phase.set_posterior must lie below {ceiling:.6f}, the orientation certainty of a "
+                             f"fully determined heterozygous site at site_deviation {self.site_deviation}")
         if not 0 < self.site_deviation < 0.5:
             raise ValueError("family_phase.site_deviation must lie strictly between 0 and 0.5")
         if not self.junction_pin_nats > 0:

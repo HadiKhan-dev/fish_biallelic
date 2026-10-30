@@ -180,9 +180,22 @@ final state. Label-pair posteriors per bin become ordered allele posteriors per 
     reaches `phase_posterior`, by the convention that homologue 0 carries the smaller label. The convention fixes
     the gauge, never a decoded label.
 - **Phase sets.**
-  - A gauge sample's set ends at the first heterozygous bin whose ordered posterior, given the anchor, falls below
-    `phase_posterior`, or at a forced break, which is recorded at its own bin. The next set starts there and is
+  - A gauge sample's set ends at the first heterozygous bin where, given the anchor, the orientation of its alleles
+    is uncertain, or at a forced break, which is recorded at its own bin. The orientation certainty of a bin is the
+    median, over its sites with P(heterozygous) ≥ `genotype_posterior`, of max(P01, P10) / (P01 + P10) under the
+    anchored posterior; the set ends where it falls below `set_posterior` (0.999). This is stricter than the
+    per-site `phase_posterior` (0.99) because a wrong continuation misphases the rest of the set, whereas a wrong
+    site call misphases one site (at 0.99, near-ties decided by the label-switch prior alone added released long
+    switches in partial-genome designs). It is a working value, not a calibrated confidence for a whole set.
+  - Longer sets carry an upstream identity error over more sites: where two founder rows exchange identity at a
+    point the assembly does not flag as a junction candidate, a sample carrying both rows keeps its unordered
+    labels, so its own reads cannot see the exchange. A new partition can also withdraw a site that an earlier
+    partition would have phased. The next set starts there and is
     anchored at its first confidently heterozygous bin; a partition without one releases no phase.
+  - Uncertainty about which labels a sample carries is not phase uncertainty: where the candidate label pairs carry
+    the same alleles at the sample's sites, the orientation is determined and the set continues. (Until 3.1 a set
+    ended wherever the posterior of the decoded ordered label pair fell below `phase_posterior`. On real data most
+    gauge-sample sets started at such label-uncertainty stops, although their allele orientation was still certain.)
   - Other samples' sets break only at forced breaks.
   - Component edges always start a new set.
 - **Phased calls.** A heterozygous call is released phased where its ordered posterior reaches `phase_posterior`
@@ -261,7 +274,8 @@ same sets. `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`, 
   - every applied or rejected block is checked against the full objective, O(N B) per block, so a sweep is O(N² B)
     without the block terms;
   - the release costs one forward-backward per sample, plus one per new anchor of a gauge sample, and a projection
-    of O(m S²) for its m sites;
+    of O(m S²) for its m sites (a gauge sample's partition also projects the sites from its anchor to its next forced
+    break, to find where its orientation becomes uncertain);
   - both the ascent and the release run once per tie convention: about 1.6 times the cost of one.
 
   The ascent settles in one to three sweeps on the validation designs.

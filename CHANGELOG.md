@@ -1,5 +1,58 @@
 # Changelog
 
+## 3.1.0 (30 October 2026)
+
+This release changes where family phase ends the phase sets of samples with no released parent and no children
+("gauge" samples; `family_phase/release.py`, [family phase](docs/methods/family_phase.md)). Upstream stages,
+genotypes, meiosis chains, recombination inputs and every sample with a released parent or children are unchanged.
+Records keep their schemas; family phase and the stages after it rerun on resume because its code changed.
+
+**Gauge phase sets follow allele orientation, not label certainty.** 3.0 ended a gauge sample's phase set at the
+first confidently heterozygous bin where the anchored posterior of its decoded ordered label pair fell below
+`phase_posterior` (0.99). Similar founders carry the same alleles at a sample's sites, so uncertainty about which
+labels a sample carries is mostly not phase uncertainty: on real TroMau 86% of gauge samples' phase sets started at
+such stops, and at 93% of those stops the allele orientation was still at least 0.99 certain. A set now ends where
+the orientation of the sample's alleles, given the set's anchor, is uncertain: the median over the bin's confidently
+heterozygous sites of max(P01, P10) / (P01 + P10) falls below a new `set_posterior` (0.999). The per-site phase rule
+is unchanged (0.99).
+
+- `set_posterior` is stricter than `phase_posterior` because a wrong continuation misphases the rest of the set,
+  whereas a wrong site call misphases one site. At 0.99, near-ties decided by the label-switch prior alone added
+  released long switches in partial-genome designs.
+- It is a working value chosen on the validation simulations, not a calibrated confidence for a whole set. It must
+  lie below the orientation certainty of a fully determined heterozygous site under the site model,
+  (1 − 5ε/6) / (1 − 2ε/3) = 0.99983 at `site_deviation` ε = 0.001; the configuration rejects values at or above it.
+
+**Measured** on the 3.0 saved inputs (stage replays), for samples without a released parent, with the 3.0 metrics
+(set-aligned errors count the sites on the minority orientation of their set; switch errors count orientation
+changes between consecutive sites; long switches count changes between runs of at least 20 sites on both sides):
+
+| design | phase sets | set-aligned errors (sites) | switch errors | long switches | correctly called true hets released phased |
+| --- | --- | --- | --- | --- | --- |
+| TroMau-like | 7,231 → 6,364 | 182 → 182 | 4 → 4 | 1 → 1 | 98.64% → 98.92% |
+| f3, 8 chromosomes, no metadata | 7,175 → 5,509 | 319 → 1,421 | 122 → 119 | 3 → 2 | 97.89% → 98.05% |
+| std seed 9217 | 1,159 → 506 | 13 → 13 | 10 → 10 | 0 → 0 | 96.07% → 96.22% |
+| K30 | 620 → 388 | 206 → 206 | 220 → 221 | 1 → 1 | 99.23% → 99.29% |
+| backcross | 4,439 → 3,702 | 2,003 → 2,003 | 1 → 1 | 1 → 1 | 98.80% → 98.97% |
+| f3 | 1,329 → 1,203 | 15 → 14 | 12 → 11 | 0 → 0 | 99.19% → 99.23% |
+
+- std and the 8-chromosome backcross have no gauge samples; their products are byte-identical to 3.0.
+- Longer sets carry upstream errors over more sites. The 8-chromosome f3's extra 1,102 sites sit at a founder-row
+  identity exchange on one chromosome that two samples already carried in 3.0 (same events, longer sets). K30 gains
+  one released wrong adjacency next to an existing single-site panel error.
+- Real TroMau (22 chromosomes): phase sets of samples without a released parent 93,849 → 31,771 (−66%); their
+  called heterozygotes released phased 95.9% → 96.6%; family phase about twice as fast in these replays (fewer
+  re-anchorings; per-chromosome wall times summed 4,700 s → 2,148 s on shared nodes, not an exclusive benchmark).
+- Real-data consistency, without truth: each TroMau sample with a released parent and no children (682
+  sample-chromosomes) was released again as if parentless (its own painting path and the junction vetoes a parentless
+  sample gets) and compared, within sets, with its parent-anchored phase. Disagreeing sites 2,463 → 612; long
+  disagreements 8 → 2. The two remaining are one location (chr1, bin edge at 39,365,102 bp, two full sibs): a
+  suspected upstream identity fault where parental and gauge phase conflict.
+- Evaluated and not adopted: continuation at 0.99 (long switches at near-ties; 16 long disagreements in the real
+  check); an allele anchor; a broader parentless junction veto (more sets than 3.0 on four simulated designs);
+  latent-parent rows in the family model (hundreds of long switches even with known families: the release conditions
+  on MAP latent haplotypes); family-based joins at painting ties (wrong joins when families are inferred).
+
 ## 3.0.0 (30 October 2026)
 
 This release rebuilds family phase (stage `family_phase`) from scratch and rebuilds recombination on the meiosis
