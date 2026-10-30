@@ -59,7 +59,7 @@ simulation truth; cohort labels and assumed G0 parentage cannot supply that trut
 
 The `export_phase_sets_v2` evaluation follows the sample VCF's phase-set identity: a new set starts at a component boundary or an explicit per-sample `phase_breaks` boundary. A displayed-undetermined site is unphased and contributes its unordered allele error, but it does not split the phased flanks unless an explicit boundary is present. Each set gets one strand alignment, including phased sites on both sides of such an unphased stretch. Sets with at least two phased called heterozygotes contribute to the reported count and span N50.
 
-Earlier evaluation omitted explicit boundaries and split at undetermined cells. Baseline and candidate comparisons must use the same corrected metric version. Component-aligned and union painting-tie metrics remain independent checks; releasing more PS breaks does not remove their orientation penalties. Release validation reports PS errors together with set count, N50 and callability.
+Earlier evaluation omitted explicit boundaries and split at undetermined cells. Baseline and candidate comparisons must use the same corrected metric version. Release 3.2 replaced this metric (`released_phase_v3`): phase is scored per released set over correctly called true heterozygotes only, with genotype errors reported separately ([simulation](../simulation.md#phase-pedigree-and-map-metrics)). Component-aligned and union painting-tie metrics remain independent checks; releasing more PS breaks does not remove their orientation penalties. Release validation reports PS errors together with set count, N50 and callability.
 
 ## Family-phase release for 2.3
 

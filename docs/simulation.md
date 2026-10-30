@@ -20,7 +20,7 @@ haplotypes evaluate work/examples/quick/run --stages all
 
 The example is a software check, not an empirical diversity model or an accuracy benchmark: three short contigs
 can leave the whole pedigree unresolved (the genome-wide stages need at least three contigs, and Tier-B calls at
-least five informative chromosomes). `haplotypes example DEST --contigs 22 --sites 2400 --length-bp 4800000`
+least five informative chromosomes without a genetic map). `haplotypes example DEST --contigs 22 --sites 2400 --length-bp 4800000`
 writes a larger synthetic genome. For scientific comparisons use fixed, biologically appropriate templates and
 enough chromosomes.
 
@@ -201,11 +201,15 @@ the products it compares, never the reads or likelihoods. It writes `RUN/evaluat
 
 | file | contents |
 | --- | --- |
-| `summary.json` | seed, samples, pedigree counts, per-chromosome and per-stage rows, totals, interpretation notes |
-| `chromosomes.csv` | per chromosome: family-phase genotype and phase metrics, map metrics |
+| `summary.json` | seed, samples, pedigree counts, per-chromosome, per-group and per-stage rows, totals (`totals`, and `phase_totals` per parent group), interpretation notes; `phase_set_metric` names the phase definitions (`released_phase_v3` since release 3.2) |
+| `chromosomes.csv` | per chromosome: family-phase genotype and phase metrics (all samples), map metrics |
+| `phase_groups.csv` | per chromosome and parent group (`all`, `parents0`, `parents1`, `parents2`): genotype and phase metrics |
 | `founders.csv` | per chromosome and founder stage: totals and denominators |
 | `founder_components.csv` | per component (or block) of every founder stage |
 | `founder_matches.csv` | the one-to-one row-to-founder matches behind `founder_components.csv` |
+
+From Python, `haplotype_reconstruction.evaluation.evaluate_run(RUN, destination=DIR)` writes these files to `DIR`
+instead and only reads the run.
 
 ### Founder metrics
 
@@ -218,6 +222,16 @@ the products it compares, never the reads or likelihoods. It writes `RUN/evaluat
 - `segment_allele_errors` relabels each founder row segment-wise (a label switch costs 20 mismatches);
   `chimeric_segment_charges` = `called_allele_errors` - `segment_allele_errors` (charged because a row follows
   another founder for a segment), and `segment_label_switches` counts those segments.
+- Splitting (release 3.2). Rows carry no identity across a component boundary, so the counts above are component-wise:
+  cutting a component without changing any allele lets each piece re-match its labels, and the nearest-founder,
+  one-to-one, truth-to-panel, segment-wise and copy-stratum counts can fall (a cut at a chimeric row's junction
+  removes its charge). `split_charged_segment_cost` cannot be lowered that way: it is the segment-wise cost
+  (`segment_allele_errors` + 20 x `segment_label_switches`) plus 20 for every row of every component after the
+  chromosome's first, so a component boundary is charged as one label switch per row. A cut leaves it unchanged where
+  every row already switches founder and otherwise raises it by up to 20 per row. Compare panels that differ in their
+  components with this cost, read with the component count and identity coverage.
+- Row labels: a pure permutation of a component's rows changes no count. Exact ties of the one-to-one assignment
+  (founders indistinguishable over a component) are broken by row content, not by row index.
 - Represented and absent strata use the one-to-one matching: represented ancestry is carried by at least one
   observed individual, which does not make it independently identifiable.
 - Copy-count strata (release 2.17): every truth allele falls in `absent` (no sampled homologue carries its founder
@@ -234,16 +248,42 @@ the products it compares, never the reads or likelihoods. It writes `RUN/evaluat
   stage's row paths ([founder identity](methods/founder_identity.md#identity-flags)) and
   `identity_coverage_covered_unflagged_*` the coverage left to a consumer that drops flagged continuity. Splitting
   rows or dropping assertions can raise the correct share without raising coverage, so read these counts together;
-  flagged wrong assertions are not errors corrected.
+  flagged wrong assertions are not errors corrected. Coverage is measured at window resolution: a cut placed inside a
+  window exactly at a row's true founder switch can let each piece label that window and so raise coverage of the
+  pairs around it.
 
 ### Phase, pedigree and map metrics
 
-- `genotype_errors` over `called_genotypes`; `phase_switch_errors` between eligible adjacent true heterozygotes of a
-  sample; unsupported components and missing or wrong intervening heterozygotes break the comparison.
-  `component_aligned_allele_errors` allow one arbitrary strand swap per component.
-- `long_phase_switches_min5` and `long_phase_switches_min20` count orientation changes between runs of
-  correct-genotype true heterozygotes (uncalled or wrong ones bridged) when both runs hold at least 5 or 20
-  heterozygotes; single-site flips, which dominate `phase_switch_errors`, are excluded.
+Phase (release 3.2, `evaluation/metrics.py`) is scored on the released product, as the sample VCFs present it. Per
+sample, a phase set is a maximal run of its sites inside one painting component that none of its released phase
+breaks separates. Phase is scored only at **scored sites**: correctly called true heterozygotes (both alleles called,
+called genotype equal to the true genotype) released phased (inside a component, displayed phase not undetermined).
+A scored site is flipped when its first released allele differs from the first (maternal) true allele.
+
+- `set_aligned_errors` (sites): per set, the scored sites on its minority orientation.
+- `switch_errors` (events): orientation changes between consecutive scored sites of a set.
+- `long_switches` (events): within a set, the orientation runs of at least 20 scored sites are kept in order, and
+  each orientation change between consecutive kept runs counts once; a short opposite run between two long runs of
+  one orientation is no long switch.
+- `phase_sets`: sets holding at least one scored site; `phase_set_n50_bp` is the N50 of their spans (first to last
+  scored site). `released_phase_sets` and `released_phase_set_n50_bp` count and measure the sets as a reader of the
+  export sees them, without truth: sets holding at least one called heterozygote released phased, spanning first to
+  last such site.
+- `genotype_errors` over `called_genotypes` (both alleles called) at every site, reported separately: a genotype error
+  is never a phase error. `phased_share` = `phased_true_heterozygotes` / `correct_true_heterozygotes` (correctly
+  called true heterozygotes at every site, inside a component or not).
+- Parent groups (`phase_groups.csv`, `phase_totals`): `parents0`, `parents1` and `parents2` hold the samples with 0, 1
+  or 2 released (Tier-B supported) pedigree edges into them, the edges family phase was conditioned on; `all` holds
+  every sample. A group is a property of the inferred pedigree, not of the true one.
+- `called_alleles` / `total_alleles` (`called_fraction`) count released alleles.
+
+Up to release 3.1 (`phase_set_metric` `export_phase_sets_v2`) the evaluation reported component-level relations
+instead: `phase_comparisons`, `phase_switch_errors`, `long_phase_switches_min5/min20` and
+`component_aligned_allele_errors` compared consecutive heterozygotes across released phase breaks and undetermined
+sites, `ps_aligned_allele_errors` included genotype errors, and `eligible_heterozygotes` and
+`undetermined_called_alleles` were their denominators. Those columns are gone. `phase_sets` and `phase_set_n50_bp`
+keep their names with the definitions above (they counted sets with at least two phased called heterozygotes), so
+compare them across releases only together with `phase_set_metric`.
 - Pedigree: exact observed-parent configurations and edges of the Tier-B calls (correct, extra, missing), per true
   parent-count state; with metadata eligibility, over the eligibility's targets only (`targets`).
 - Maps: true crossovers are counted only on correctly inferred edges within the inferred observable exposure (not

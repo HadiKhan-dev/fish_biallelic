@@ -101,6 +101,10 @@ class GeneticMapSection:
     rate_cm_per_mb: float = setting(5.0, "float", "Fallback recombination rate (cM/Mb) without a map or beyond "
                                     "its knots.")
     file: Path | None = setting(None, "path", "Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV).")
+    rate_is_measured: bool = setting(False, "bool", "rate_cm_per_mb is this organism's genome-wide average: the "
+                                     "pedigree's map-length rule counts chromosome lengths from it where no map "
+                                     "covers them. Off: the rate is a placeholder and only a supplied map's span "
+                                     "counts.")
 
 
 @dataclass(frozen=True)

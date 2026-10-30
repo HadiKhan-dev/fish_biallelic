@@ -148,6 +148,8 @@ _ARRAY_FIELDS = {
     "edge_exposed": ("exposure", "edge_exposed"), "pair_exposed": ("exposure", "pair_exposed"),
     "total_bins": ("exposure", "total_bins"), "edge_present": ("exposure", "edge_present"),
     "pair_present": ("exposure", "pair_present"), "row_edges": ("exposure", "row_edges"),
+    "units": ("exposure", "units"), "edge_units": ("exposure", "edge_units"),
+    "pair_units": ("exposure", "pair_units"),
     "junctions": ("junctions", "junctions"), "callable_bins": ("junctions", "callable_bins"),
     "junction_total_bins": ("junctions", "total_bins"),
     "pair_child": ("junctions", "pair_child"), "pair_parent": ("junctions", "pair_parent"),
@@ -173,7 +175,8 @@ def _inputs_from_shared(shared) -> DecisionInputs:
                                 shared["full_counts"], shared["scored_counts"])
     exposure = ExposureEvidence(shared["edge_exposed"], shared["pair_exposed"],
                                 shared["total_bins"], shared["edge_present"],
-                                shared["pair_present"], shared["row_edges"])
+                                shared["pair_present"], shared["row_edges"], shared["units"],
+                                shared["edge_units"], shared["pair_units"])
     junctions = JunctionEvidence(shared["junctions"], shared["callable_bins"],
                                  shared["junction_total_bins"], shared["pair_child"], shared["pair_parent"],
                                  shared["pair_log_odds"],
@@ -261,10 +264,11 @@ def _distinct_probability(n_contigs: int, minimum: int) -> float:
 
 
 def minimum_contigs_for_tier(thresholds: TierThresholds, minimum_exposed_contigs: int) -> int:
-    """Smallest informative-chromosome count whose resampling can reach ``thresholds``.
+    """Smallest count of informative chromosomes shorter than one map unit whose resampling can reach ``thresholds``
+    (longer chromosomes count more units and need fewer; ``reach`` is exact for a run).
 
-    A non-M0 configuration is testable only on >= ``minimum_exposed_contigs`` distinct exposed
-    chromosomes; in fits with fewer, every state ties and nothing is called. So the bootstrap
+    A non-M0 configuration is testable only on exposed chromosomes holding >= m map units; with chromosomes of one
+    unit each, fits with fewer than m distinct chromosomes tie every state and call nothing. So the bootstrap
     support of any call is at most P(distinct draws >= m) and LOCO support is 0 unless C - 1 >= m.
     """
     n_contigs = max(1, minimum_exposed_contigs)
@@ -276,13 +280,17 @@ def minimum_contigs_for_tier(thresholds: TierThresholds, minimum_exposed_contigs
         n_contigs += 1
 
 
-def reach(multiplicities: np.ndarray, config: PedigreeConfig) -> TierReach:
-    """What this run's resampling can release with its informative chromosomes."""
+def reach(multiplicities: np.ndarray, units: np.ndarray, config: PedigreeConfig) -> TierReach:
+    """What this run's resampling can release with its informative chromosomes of ``units`` map units each: the
+    share of bootstrap draws, and of leave-one-out fits, whose distinct chromosomes hold the gate's map units."""
     n_contigs = multiplicities.shape[1]
-    minimum = config.exposure.minimum_exposed_contigs
-    distinct = np.count_nonzero(multiplicities > 0, axis=1)
-    max_bootstrap = float(np.mean(distinct >= minimum)) if len(distinct) else 0.0
-    max_loco = 1.0 if n_contigs > 1 and n_contigs - 1 >= minimum else 0.0
+    units = np.asarray(units, dtype=np.float64)
+    minimum_units = config.exposure.minimum_exposed_units
+    minimum = int(np.ceil(minimum_units))
+    drawn = (multiplicities > 0) @ units if len(multiplicities) else np.zeros(0)
+    max_bootstrap = float(np.mean(drawn >= minimum_units)) if len(drawn) else 0.0
+    left = units.sum() - units
+    max_loco = float(np.mean(left >= minimum_units)) if n_contigs > 1 else 0.0
 
     def reachable(thresholds: TierThresholds) -> bool:
         return (max_bootstrap >= thresholds.configuration_bootstrap
@@ -293,11 +301,15 @@ def reach(multiplicities: np.ndarray, config: PedigreeConfig) -> TierReach:
     need_a = minimum_contigs_for_tier(config.release.tier_a, minimum)
     need_b = minimum_contigs_for_tier(config.release.tier_b, minimum)
     support = f"max bootstrap support {max_bootstrap:.3f}, LOCO {max_loco:.2f}"
+    size = (f"{n_contigs} informative chromosomes holding {float(units.sum()):.1f} map units of "
+            f"{config.exposure.unit_morgans:g} Morgan")
+    short = f"chromosomes shorter than {config.exposure.unit_morgans:g} Morgan, fewer longer ones"
     if tier_b:
-        statement = (f"{n_contigs} informative chromosomes: Tier B assessable ({support}); "
-                     + ("Tier A assessable" if tier_a else f"Tier A needs >= {need_a}"))
+        statement = (f"{size}: Tier B assessable ({support}); "
+                     + ("Tier A assessable" if tier_a else f"Tier A needs >= {need_a} {short}"))
     else:
-        statement = (f"{n_contigs} informative chromosomes: not assessable ({support}); "
-                     f"Tier B needs >= {need_b} informative chromosomes, Tier A >= {need_a}")
+        statement = (f"{size}: not assessable ({support}); Tier B needs >= {need_b} {short}, "
+                     f"Tier A >= {need_a}")
     return TierReach(n_contigs, minimum, max_bootstrap, max_loco, tier_a, tier_b, need_a, need_b,
-                     statement)
+                     statement, informative_units=float(units.sum()),
+                     unit_morgans=float(config.exposure.unit_morgans))

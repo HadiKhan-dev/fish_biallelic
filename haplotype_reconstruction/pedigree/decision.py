@@ -31,7 +31,8 @@ class Decision:
     scores: genome-floor transformed chromosome scores (unscaled); inputs: the fit inputs (alternatives
     carry the evidence scale); full / orientation / adjusted (state, identity scores) / trace: the
     full-data fit and its per-row terms; sensitivity: (priors, selection) per alternative prior;
-    informative: int64 [N] chromosomes whose own evidence picks a unique state.
+    informative: int64 [N] chromosomes whose own evidence picks a unique state; informative_units: float64 [N]
+    their map units (release 3.2: the tier rules read these).
     """
 
     scores: GenomeScores
@@ -55,22 +56,33 @@ class Decision:
     reach: TierReach
     family_solve: dict
     tie_events: dict
+    informative_units: np.ndarray | None = None
 
     @property
     def alternatives(self) -> Alternatives:
         return self.inputs.alternatives
 
 
-def informative_contigs(alternatives: Alternatives) -> np.ndarray:
-    """int64 [N]: chromosomes on which the child's own state evidence has a unique winner."""
-    counts = np.zeros(alternatives.n_samples, dtype=np.int64)
+def informative_chromosomes(alternatives: Alternatives) -> np.ndarray:
+    """bool [C, N]: chromosomes on which the child's own state evidence has a unique winner."""
+    winners = np.zeros((len(alternatives.log_likelihoods), alternatives.n_samples), dtype=np.bool_)
     states = np.arange(3, dtype=np.int64)
     for contig, likelihoods in enumerate(alternatives.log_likelihoods):
         evidence = alternatives_module.state_log_evidence(likelihoods, alternatives)
         for child in range(alternatives.n_samples):
             winner, _ = unique_finite_winner(states, evidence[child], key=f"informative/k{contig}/c{child}")
-            counts[child] += winner is not None
-    return counts
+            winners[contig, child] = winner is not None
+    return winners
+
+
+def child_units(edges: np.ndarray, edge_units: np.ndarray, n_samples: int) -> np.ndarray:
+    """float64 [C, N]: the map units a child's own evidence can claim on each chromosome: the most any of its eligible
+    edges earns there (ExposureEvidence.edge_units; 1 for a child without eligible edges), so a whole long
+    chromosome counts for a child only where some candidate edge is exposed over it."""
+    units = np.ones((edge_units.shape[0], n_samples))
+    if len(edges):
+        np.maximum.at(units.T, edges[:, 0], edge_units.T)
+    return units
 
 
 def decide(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeConfig,
@@ -96,7 +108,8 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
     inputs = DecisionInputs(
         alternatives,
         ExposureEvidence.build(scores.edges, scores.edge_exposed, scores.pair_exposed, scores.total_bins,
-                               alternatives, config.exposure),
+                               alternatives, config.exposure, scores.scored_morgans,
+                               scores.edge_exposed_morgans, scores.pair_exposed_morgans),
         junction_evidence(scores.junctions, scores.callable_bins, scores.total_bins,
                           config.direction.chromosome_error_probability, scores.junction_dyads,
                           scores.junction_log_cdf),
@@ -117,13 +130,16 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
     resampled = resampling.run(inputs, config, budget)
     pedigree_ties.CENSUS_CONTEXT = "full"
     try:
-        informative = informative_contigs(alternatives)
+        winners = informative_chromosomes(alternatives)
     finally:
         pedigree_ties.CENSUS_CONTEXT = None
+    informative = winners.sum(axis=0).astype(np.int64)
+    informative_units = np.sum(winners * child_units(scores.edges, inputs.exposure.edge_units,
+                                                     alternatives.n_samples), axis=0)
     tie_events = pedigree_ties.FULL_FIT_COUNTER.record()
     pedigree_ties.FULL_FIT_COUNTER = None
     log_odds = trace["orientation_log_odds"]
-    evidence = release.child_evidence(full, list(sensitivity), resampled, alternatives, informative,
+    evidence = release.child_evidence(full, list(sensitivity), resampled, alternatives, informative_units,
                                       log_odds, eligibility.chronology, config)
     tier_a = release.tier_calls("tier_a", config.release.tier_a, full, evidence, eligibility, config)
     tier_b = release.tier_calls("tier_b", config.release.tier_b, full, evidence, eligibility, config)
@@ -147,5 +163,5 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
         nonconverged_loco_replicates=int(resampled.loco.nonconverged))
     return Decision(scores, eligibility, inputs, full, orientation, adjusted, trace, sensitivity,
                     resampled, informative, evidence, tier_a, tier_b, complete, partial_a, partial_b,
-                    candidates, calibration_report, resampling.reach(resampled.multiplicities, config),
-                    family_solve, tie_events)
+                    candidates, calibration_report, resampling.reach(resampled.multiplicities, inputs.exposure.units, config),
+                    family_solve, tie_events, informative_units)

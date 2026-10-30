@@ -128,6 +128,7 @@ def resolve_cores(config: RunConfig) -> int:
 def check_run(config: RunConfig) -> PreparedRun:
     """Fail before any computation: inputs, workbook and eligibility, stage configs, contig counts."""
     from ..pedigree import tier_b_minimum_contigs
+    from ..pedigree.stage import minimum_scored_contigs
     paths = RunPaths.from_config(config)
     cores = resolve_cores(config)
     # One canonical sample order for the whole run (release 2.1, design A-11): applied here, after any wrapper a test
@@ -151,15 +152,17 @@ def check_run(config: RunConfig) -> PreparedRun:
     _check_store(paths, config, source)
     contigs = config.input.contigs
     genome_wide = not config.run.stop_after and not config.execution.process_contigs
-    minimum = configs.pedigree.exposure.minimum_exposed_contigs
+    minimum = minimum_scored_contigs(configs.pedigree)
     if genome_wide and len(contigs) < minimum:
         raise ValueError(f"genome-wide pedigree inference needs at least {minimum} contigs ({len(contigs)} "
                          "configured); set [run] stop_after = \"painting\" for a smaller reconstruction")
     tier_b = tier_b_minimum_contigs(configs.pedigree)
     if genome_wide and len(contigs) < tier_b:
         print(f"WARNING: {len(contigs)} contigs: Tier-B pedigree calls need at least {tier_b} informative "
-              "chromosomes, so this run can release no Tier-B parent; family phase and recombination then have "
-              "no parent edges", flush=True)
+              f"chromosomes shorter than {configs.pedigree.exposure.unit_morgans:g} Morgan, or fewer longer ones; "
+              "unless these chromosomes are long on the genetic map, this run can release no Tier-B parent and "
+              "family phase and recombination then have no parent edges (the pedigree's reach statement decides)",
+              flush=True)
     return PreparedRun(config, paths, cores, source, configs, maps, samples, eligibility)
 
 
@@ -372,15 +375,19 @@ def _reconstruct(store, contigs, context, cores, config, n_samples, paths, ensur
 
 
 def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, output) -> None:
-    """Pedigree, founder refit, family phase, recombination and the export (each stage resumes and marks itself
-    complete), then the run's tie report."""
-    from .. import founder_refit, pedigree
+    """Relatedness, pedigree, founder refit, family phase, recombination and the export (each stage resumes and marks
+    itself complete), then the run's tie report."""
+    from .. import founder_refit, pedigree, relatedness
     from ..family_phase.stage import run as phase_families
     from ..recombination.stage import run as map_recombination
     configs, maps = prepared.configs, prepared.genetic_maps
-    with execution.stage_timer("pedigree"):
-        product = pedigree.run(store, contigs, sample_ids, prepared.eligibility, configs.pedigree, maps, budget)
     from ..evidence.sample_order import store_input_order
+    with execution.stage_timer("relatedness"):
+        related = relatedness.run(store, contigs, sample_ids, configs.relatedness, maps, budget)
+    publish("write_relatedness", output, related, input_ids=store_input_order(store))
+    with execution.stage_timer("pedigree"):
+        product = pedigree.run(store, contigs, sample_ids, prepared.eligibility, configs.pedigree, maps, budget,
+                               related)
     publish("write_pedigree", output, product, input_ids=store_input_order(store))
     with execution.stage_timer("founder_refit"):
         summaries = founder_refit.run(store, contigs, configs.founder_refit, budget)

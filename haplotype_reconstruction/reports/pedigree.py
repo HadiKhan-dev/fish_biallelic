@@ -5,8 +5,10 @@ are the Tier-A and complete views, partial relationships, candidate sets, explan
 release 2.17 relative_contrasts.csv, the released edges' relative-proxy contrasts),
 evidence_calibration.json (the cross-chromosome evidence scaling) and summary.json (the scored and omitted
 chromosomes, what Tier A/B can release with them, the final family solve, the full-marker exclusion and the
-eligibility design: why a tier may release nothing). Real-data calls are inferences conditional on the paintings
-and the stated eligibility design, not pedigree truth.
+eligibility design: why a tier may release nothing; from release 3.2 the sibling-as-parent guard's summary, with its
+per-edge calls in sibling_guard.csv). The relationship tables, candidate sets and final state calls are the released
+views after the guard; complete_relationships.csv and the selection diagnostics keep the pre-guard decisions.
+Real-data calls are inferences conditional on the paintings and the stated eligibility design, not pedigree truth.
 """
 from __future__ import annotations
 
@@ -29,6 +31,6 @@ def write_pedigree(output, product, input_ids=None) -> list[Path]:
     written.append(write_json(directory / "summary.json", dict(
         informative_contigs=list(product.informative_contigs), omitted=dict(product.omitted),
         reach=asdict(product.reach), family_solve=product.family_solve, exclusion=product.exclusion,
-        eligibility=product.eligibility)))
+        eligibility=product.eligibility, sibling_guard=product.sibling_guard)))
     print(f"Pedigree output: {directory / 'tier_b_relationships.csv'}", flush=True)
     return written

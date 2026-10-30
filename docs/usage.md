@@ -91,8 +91,9 @@ are never truncated to a biallelic pair. A missing AD value is zero reads (unobs
 Unreadable files, unknown contigs, records out of position order and malformed AD values are errors.
 
 Select populated physical contigs explicitly: a contig must be declared in the header and have indexed records.
-The genome-wide stages need at least three contigs, and Tier-B pedigree calls need at least five informative
-chromosomes (see [Checks before computation](#checks-before-computation)).
+The genome-wide stages need at least three contigs, and Tier-B pedigree calls need enough map length: five
+informative chromosomes shorter than 1 Morgan or without a genetic map, fewer long ones on a supplied map (see
+[Checks before computation](#checks-before-computation)).
 
 The input file's path, size and modification time and its sample list enter the evidence identity: a run directory
 belongs to one input file. Do not modify or replace the file while its runs are in use.
@@ -150,11 +151,14 @@ A run checks everything it can before computing anything:
 3. The workbook, sheet and columns exist, every sample occurs exactly once, and labels are allowed; the
    eligibility policy is built (a constraints file is parsed).
 4. `[execution] cores` fits the CPU affinity.
-5. A run that reaches the genome-wide stages needs at least `PedigreeConfig.exposure.minimum_exposed_contigs = 3`
-   contigs (set `[run] stop_after = "painting"` for fewer). Tier-B pedigree calls need at least five informative
-   chromosomes: with fewer than five configured contigs the run warns at the start that it can release no Tier-B
-   parent (so family phase and recombination have no parent edges). The pedigree stage states its own count of
-   informative chromosomes at its end, which is authoritative (a contig can turn out uninformative).
+5. A run that reaches the genome-wide stages needs at least three contigs (set `[run] stop_after = "painting"` for
+   fewer). Tier-B pedigree calls need informative chromosomes holding about three map units in most resamples
+   ([pedigree](methods/pedigree.md#map-length-requirement-release-32)): five chromosomes shorter than 1 Morgan or
+   without a measured length, fewer long chromosomes on a supplied map or a stated rate
+   (`[genetic_map] rate_is_measured = true`; see [genetic maps](genetic_maps.md#map-length-as-pedigree-material-release-32)). With fewer than five configured contigs the run
+   warns at the start that, unless the chromosomes are long on a supplied map, it can release no Tier-B parent (so
+   family phase and recombination have no parent edges). The pedigree stage states its informative chromosomes and
+   their map units at its end, which is authoritative (a contig can turn out uninformative).
 6. An existing checkpoint directory carries this release's layout mark, and a shard of a simulation finds the
    simulated inputs of every contig recorded.
 
@@ -167,6 +171,7 @@ A run checks everything it can before computing anything:
 | [local selection](methods/local_selection.md) | contig | path-selected local panels, refined twice with context assemblies |
 | [assembly](methods/assembly.md) | contig | component-preserving founder chromosomes (L1-L4 hierarchy, [founder refinement](methods/founder_refinement.md) after each level) |
 | [painting](methods/painting.md) | contig | diploid founder mosaics of every sample |
+| [relatedness](methods/relatedness.md) | genome | pairwise identity by descent and full-sib families from genotype likelihoods alone |
 | [pedigree](methods/pedigree.md) | genome | observed-parent calls with support tiers |
 | [founder refit](methods/founder_refit.md) | contig | founder alleles refitted from the painted carriers |
 | [family phase](methods/family_phase.md) | contig | pedigree-conditioned genotypes, phase and phase sets |

@@ -248,6 +248,7 @@ Inference genetic map.
 | --- | --- | --- | --- |
 | `rate_cm_per_mb` | number | `5.0` | Fallback recombination rate (cM/Mb) without a map or beyond its knots. |
 | `file` | path | `""` (unset) | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). |
+| `rate_is_measured` | boolean | `false` | rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. |
 
 ### [pedigree]
 
@@ -656,6 +657,21 @@ Stage `painting`, `painting/config.py`. Model constants of the painting HMM; def
 | `label_continuity_minimum_switch_gain` | `2.0` | a row-suffix relabelling must lower the painted switch total by at least this many switches. |
 | `label_continuity_maximum_loser_ratio` | `0.1` | samples whose painted switches rise may be at most this fraction of the samples whose switches fall. |
 
+### RelatednessConfig
+
+Stage `relatedness`, `relatedness/config.py`. Pairwise identity by descent and full-sib families from genotype likelihoods.
+
+| constant | default | meaning |
+| --- | --- | --- |
+| `minor_allele_frequency` | `0.05` | sites enter only where the EM allele frequency (Hardy-Weinberg, all samples) gives a minor allele frequency of at least this value. |
+| `minimum_observed` | `0.5` | and where at least this share of samples has reads. |
+| `family_site_step` | `20` | the family model uses every this-many-th eligible site (sites are linked; the composite likelihood over thinned sites ranks family arrangements, and per-chromosome support measures stability). |
+| `ibd_site_step` | `10` | the pairwise IBD model uses every this-many-th evidence site (any frequency). |
+| `ibd_switch_rate` | `4.0` | the pairwise IBD chain leaves a state at this rate per Morgan, to the other allowed states equally. |
+| `max_sweeps` | `30` | at most this many search sweeps (parent assignment, single-sample moves, one merge) after the agglomeration. |
+| `support_unit_morgans` | `1.0` | support is measured on each map unit alone: a chromosome with a measured map length (a supplied genetic map, or a stated rate) is cut into max(1, floor(measured length / this)) consecutive units of equal measured length (an unlinked chromosome is one unit however short; a long one holds nearly independent stretches, as the pedigree's exposure gate counts); a chromosome with neither (fallback rate) is one unit. |
+| `rate_is_measured` | `False` | [genetic_map] rate_is_measured: the fallback rate is the organism's stated genome-wide average, so support units count map length from it where no supplied map covers a chromosome. |
+
 ### PedigreeConfig
 
 Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibration`` is the only user-visible field.
@@ -683,7 +699,9 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `exposure.minimum_edge_exposed_bins` | `1.0` |  |
 | `exposure.minimum_pair_exposed_bins` | `1.0` |  |
 | `exposure.minimum_exposed_fraction` | `0.1` | Exposed bins / total painting bins of the selected chromosomes. |
-| `exposure.minimum_exposed_contigs` | `3` | Distinct exposed chromosomes in a fit (bootstrap draws count once). With the resampling thresholds this makes Tier B unreachable below 5 informative chromosomes (see resampling.reach). |
+| `exposure.minimum_exposed_units` | `3.0` | Working map units a fit's exposed chromosomes must hold (release 3.2; bootstrap draws count once). A chromosome counts max(1, its scored map length / unit_morgans) units, and an edge (or panel pair) there max(1, the map length it is exposed over / unit_morgans): an unlinked chromosome is an independent replicate however short, and a long one holds several nearly independent stretches (one meiosis's transmission correlation between loci d Morgans apart is exp(-2 d) under Haldane, 0.14 at 1 Morgan). With the resampling thresholds Tier B needs 5 chromosomes shorter than unit_morgans, fewer when they are longer (resampling.reach). Lengths are measured by a supplied genetic map, over the span its knots cover, or by a stated rate (rate_is_measured); the fallback rate, and a map's extrapolated tails, are placeholders that measure no recombination (pedigree.prepare.measured_coordinates), so a chromosome with neither counts one unit. |
+| `exposure.unit_morgans` | `1.0` |  |
+| `exposure.rate_is_measured` | `False` | [genetic_map] rate_is_measured: the fallback rate is the organism's stated genome-wide average, so map lengths count from it where no supplied map covers them (pedigree.prepare.measured_coordinates). |
 | `exposure.report_edge_coverage` | `0.95` | Report-only thresholds of the C/X compatibility diagnostics (never gate a decision). |
 | `exposure.report_pair_explainability` | `0.95` |  |
 | **direction** (DirectionConfig) |  | Junction-count orientation and the reciprocal / short-ancestry family factors. |
@@ -706,7 +724,7 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `resampling.bootstrap_replicates` | `1000` |  |
 | `resampling.bootstrap_seed` | `20260725` |  |
 | **release** (ReleaseConfig) |  | Tier A / Tier B release rules (Tier B is the primary product). |
-| `release.minimum_informative_contigs` | `3` |  |
+| `release.minimum_informative_units` | `3.0` | A tier call needs the child's own per-chromosome state evidence to pick a unique winner on chromosomes holding at least this many map units (ExposureConfig.unit_morgans; release 3.2: three chromosomes shorter than one unit or without a genetic map). |
 | **release.tier_a** (TierThresholds) |  | Release cut-offs of one evidence tier (fractions of resampled fits). |
 | `release.tier_a.configuration_bootstrap` | `0.95` |  |
 | `release.tier_a.parent_bootstrap` | `0.95` |  |
@@ -722,6 +740,11 @@ Stage `pedigree`, `pedigree/config.py`. All pedigree settings; ``evidence_calibr
 | `exclusion.genotype_replacement_probability` | `0.01` |  |
 | `exclusion.bet_sizes` | `(0.0009765625, 0.00390625, 0.015625, 0.0625, 0.25, 1.0)` |  |
 | `exclusion.window_widths_bp` | `(1000000, 5000000, 20000000)` | Half-overlapping physical windows (bp), plus the whole chromosome. |
+| **guard** (SiblingGuardConfig) |  | The sibling-as-parent guard on released edges (release 3.2, pedigree.guard). |
+| `guard.minimum_family` | `3` | an edge is tested only when c's family without p has at least this many supported members. |
+| `guard.member_support` | `0.75` | a family member counts when its family is its best placement on at least this share of chromosomes (relatedness member support). |
+| `guard.lower` | `0.75` | the edge is withheld when r is at least this... |
+| `guard.upper` | `1.33` | ...and at most this (a more distant or unrelated candidate has r above 1). |
 
 ### FounderRefitConfig
 

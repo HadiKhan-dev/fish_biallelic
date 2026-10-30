@@ -1,6 +1,6 @@
 """Release rules: Tier A / Tier B configuration calls, marginal parent edges and candidate sets.
 
-A tier releases a child's marginal parent state when enough chromosomes are informative, the state
+A tier releases a child's marginal parent state when its informative chromosomes hold enough map units, the state
 survives the bootstrap and leave-one-chromosome-out (LOCO) cut-offs and, for M0, every alternative
 prior; it releases the exact configuration when the local configuration is also the graph's choice,
 is resampling-stable as local and graph configuration, each named parent is stable, and every
@@ -29,7 +29,7 @@ class ChildEvidence:
 
     local_parents / graph_parents: int64 [N, 2] parents of the local / graph row (NO_PARENT).
     graph_state: int8 [N]; graph_conflict: bool [N] (tie conflict or graph row != local row).
-    informative_contigs: int64 [N] chromosomes whose own evidence picks a unique state.
+    informative_units: float64 [N] map units of the chromosomes whose own evidence picks a unique state.
     state_bootstrap / state_loco: support of the local state.
     configuration_*: support of the local row as local / graph configuration.
     parent_bootstrap / parent_loco: float64 [N, 2] local-parent support per slot.
@@ -43,7 +43,7 @@ class ChildEvidence:
     graph_parents: np.ndarray
     graph_state: np.ndarray
     graph_conflict: np.ndarray
-    informative_contigs: np.ndarray
+    informative_units: np.ndarray
     state_bootstrap: np.ndarray
     state_loco: np.ndarray
     configuration_bootstrap: np.ndarray
@@ -207,11 +207,11 @@ def tier_calls(label: str, thresholds: TierThresholds, full: Selection, evidence
     identity_pass = np.zeros(n, dtype=np.bool_)
     withheld = np.zeros(n, dtype=np.bool_)
     flags = np.zeros((n, 2), dtype=np.bool_)
-    minimum_contigs = config.release.minimum_informative_contigs
+    minimum_units = config.release.minimum_informative_units
     for child in range(n):
         state, row = int(full.local_state[child]), int(full.local_row[child])
         passed = bool(state != UNRESOLVED
-                      and evidence.informative_contigs[child] >= minimum_contigs
+                      and evidence.informative_units[child] >= minimum_units
                       and evidence.state_bootstrap[child] >= thresholds.configuration_bootstrap
                       and evidence.state_loco[child] >= thresholds.loco_fraction
                       and evidence.m0_state_agreement[child])
@@ -303,7 +303,7 @@ def partial_edges(label: str, thresholds: TierThresholds, calls: TierCalls,
     status = list(calls.status)
     for child in range(n):
         if exact[child] or evidence.graph_conflict[child] or (
-                evidence.informative_contigs[child] < config.release.minimum_informative_contigs):
+                evidence.informative_units[child] < config.release.minimum_informative_units):
             continue
         retained = withheld = 0
         for slot in range(2):

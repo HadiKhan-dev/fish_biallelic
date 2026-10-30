@@ -75,6 +75,31 @@ maximum inter-component gap instead uses mean map span and the independent searc
 identities of every stage that uses them, so a changed map gives new results in a new output root rather than
 reusing old ones.
 
+## Map length as pedigree material (release 3.2)
+
+The pedigree measures how much material a run has in map units: max(1, L / 1 Morgan) per informative chromosome
+([pedigree](methods/pedigree.md#map-length-requirement-release-32)). The relatedness stage cuts each chromosome into
+family-support pieces on the same measured coordinates: max(1, floor(L / 1 Morgan)) pieces, where the pedigree counts
+fractional exposed length. Only measured length counts:
+
+- **A supplied map.** A chromosome's length counts where its scored intervals lie between the map's first and last
+  knots. Its tails, which the fallback rate extends, do not.
+- **A stated rate.** With `[genetic_map] rate_is_measured = true`, `rate_cm_per_mb` is your organism's genome-wide
+  average recombination rate, and every chromosome's length counts from it (and a supplied map's tails do too).
+  Set it only when the rate is known for the organism. An overstated rate credits material the data do not have: on
+  a sib-rich three-chromosome simulation whose stated rate was 2.5 times the true one, the pedigree released three
+  siblings as parents that the evaluated checks did not withhold (the sibling guard abstained).
+- **Neither.** The rate is a placeholder (the default 5 cM/Mb is no measurement for any organism), and each chromosome
+  counts one unit: Tier B then needs five informative chromosomes.
+
+```toml
+[genetic_map]
+rate_cm_per_mb = 2.0      # this organism's genome-wide average
+rate_is_measured = true
+```
+
+A two-point map per chromosome at the same rate gives the same lengths.
+
 ## What an inferred map means
 
 The input map is a prior for the recombination process, not ground truth. The recombination stage estimates rates

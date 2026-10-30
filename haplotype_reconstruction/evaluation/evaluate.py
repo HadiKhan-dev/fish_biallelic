@@ -3,11 +3,16 @@
 Truth is used only here, after inference; nothing is fed back. Every product is read through its stage's records
 API. Outputs, RUN/evaluation/:
 
-  summary.json             seed, samples, pedigree counts, per-chromosome and founder rows, totals, notes
-  chromosomes.csv          per chromosome: phase (family phase) and map (recombination) counts
+  summary.json             seed, samples, pedigree counts, per-chromosome, phase-group and founder rows, totals, notes
+  chromosomes.csv          per chromosome: genotype and released-phase counts (family phase, all samples) and map
+                           (recombination) counts
+  phase_groups.csv         per chromosome and parent group (all, parents0/1/2: released pedigree edges into the
+                           sample): genotype and released-phase counts (evaluation.metrics)
   founders.csv             per chromosome and founder stage: panel-vs-truth counts
   founder_components.csv   per component (or block) of every founder stage
   founder_matches.csv      the one-to-one row-to-founder matches behind founder_components
+
+``evaluate_run(..., destination=D)`` writes these files to D instead (the run directory is then only read).
 
 Founder stages (pipeline order, the stage vocabulary): discovery blocks, the three local-selection rounds, the
 final assembly's levels 1-4, founder refinement (the final assembly product), painting (relabelled panels) and
@@ -26,17 +31,13 @@ FOUNDER_STAGES = ("discovery", "local_selection_initial", "local_selection_l1", 
                   "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4", "founder_refinement",
                   "painting", "founder_refit")
 EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
-PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
-                 "eligible_heterozygotes", "phase_comparisons", "phase_switch_errors",
-                 "component_aligned_allele_errors")
-# Long-range switches: both adjacent orientation runs hold at least this many
-# correct-genotype heterozygotes (wrong/uncalled ones bridged).
-LONG_SWITCH_RUNS = (5, 20)
-LONG_SWITCH_COLUMNS = tuple(f"long_phase_switches_min{runs}" for runs in LONG_SWITCH_RUNS)
-# Exported phase sets (release 2.3): split only at components and explicit phase_breaks. Undetermined cells
-# contribute unordered errors and do not split the surrounding PS. Report qualifying sets (>=2 phased called
-# heterozygotes), undetermined called alleles and N50 of the sets' spans together with aligned allele errors.
-PHASE_SET_COLUMNS = ("ps_aligned_allele_errors", "phase_sets", "undetermined_called_alleles")
+# Released-phase counts (release 3.2, evaluation.metrics): summed over samples per chromosome (all samples) and
+# per parent group; the N50 columns and phased_share are derived from them.
+PHASE_COLUMNS = ("called_genotypes", "genotype_errors", "correct_true_heterozygotes", "phased_true_heterozygotes",
+                 "phase_sets", "set_aligned_errors", "switch_errors", "long_switches", "released_phase_sets")
+# Parent groups: the number of released (Tier-B supported) pedigree edges into the sample, 0, 1 or 2.
+PARENT_GROUPS = ("parents0", "parents1", "parents2")
+PHASE_METRIC = "released_phase_v3"
 # Reported-interval map columns, written after every earlier column.
 REPORTED_INTERVAL_COLUMNS = ("reported_intervals_containing_true_crossover",
                              "reported_interval_hit_rate", "called_interval_median_width_bp",
@@ -46,13 +47,18 @@ INTERPRETATION = (
     "Truth is used only for evaluation. Founder labels match over whole components, "
     "not marker-wise; nearest-row errors and one-to-one completeness are separate. "
     "Represented ancestry means present in a sampled homologue, not independently identifiable. "
-    "Phase switches break at gaps/incorrect heterozygotes. Map truth uses correct edges "
+    "Phase is scored per sample and released phase set (a component split at the sample's released phase "
+    "breaks) over correctly called true heterozygotes released phased; genotype errors are counted "
+    "separately, never as phase errors. Map truth uses correct edges "
     "within inferred observable spans. Unexecuted stages are not evaluated.")
 SEGMENT_INTERPRETATION = (
-    "long_phase_switches_minN bridge uncalled/wrong heterozygotes and count orientation "
-    "changes whose two adjacent runs hold >= N correct heterozygotes. segment_allele_errors "
+    "set_aligned_errors are sites on a set's minority orientation, switch_errors orientation changes "
+    "between consecutive scored sites of a set, long_switches orientation changes between consecutive "
+    "orientation runs of >= 20 scored sites. segment_allele_errors "
     "label founder rows segment-wise (a label switch costs 20 mismatches); "
     "chimeric_segment_charges = called_allele_errors - segment_allele_errors. "
+    "Component-wise founder counts can fall when a component is cut (labels re-match on each piece); "
+    "split_charged_segment_cost charges each component boundary as one label switch per row and never falls. "
     "called_interval_hit_rate is the fraction of called crossover intervals on correct "
     "edges that contain a true crossover. reported_interval_hit_rate applies the same "
     "rule to the bin-honest reported intervals (reported_left_bp, reported_right_bp]; "
@@ -285,18 +291,92 @@ def true_crossover_events(crossovers) -> dict:
             for gamete, (parent, child) in enumerate(zip(crossovers.parent, crossovers.child))}
 
 
+# ------------------------------------------------------------------------------------------- released phase
+def parent_counts_of(store, names):
+    """int64 [N] in ``names`` order: the released (Tier-B supported) pedigree edges into each sample, the edges family
+    phase was conditioned on (pedigree.records.load_edges); None when the run has no pedigree."""
+    from ..pedigree import records as pedigree_records
+    if not pedigree_records.complete(store):
+        return None
+    edges = pedigree_records.load_edges(store)
+    sample_ids = tuple(map(str, edges.sample_ids))
+    if sorted(sample_ids) != sorted(names):
+        raise ValueError("pedigree and true sample axes differ")
+    counts = np.bincount(np.asarray(edges.children, dtype=np.int64), minlength=len(sample_ids))
+    by_name = dict(zip(sample_ids, counts.tolist()))
+    return np.asarray([by_name[name] for name in names], dtype=np.int64)
+
+
+def phase_scores(file, truth, names, parent_counts, *, nthreads=1):
+    """One chromosome's released family phase scored against the truth (evaluation.metrics).
+
+    ``truth``: the contig's simulation truth (alleles int8 [N, L, 2] in ``names`` order, positions); ``parent_counts``:
+    parent_counts_of (None: only the all-sample group). Returns (chromosome columns, one row per parent group with the
+    sample count and PHASE_COLUMNS, plus the groups' scored and released set spans under ``phase_set_spans_bp`` and
+    ``released_phase_set_spans_bp`` for collect)."""
+    from ..family_phase import records as phase_records
+    from .metrics import SAMPLE_COLUMNS, released_phase_counts
+    product = phase_records.load_arrays(file, ("sample_ids", "positions", "component_ids", "calls",
+                                               "frame_undetermined", "phase_breaks", "phase_break_offsets"),
+                                        nthreads=nthreads)
+    sample_ids = tuple(map(str, product["sample_ids"]))
+    if len(set(sample_ids)) != len(sample_ids) or sorted(sample_ids) != sorted(names):
+        raise ValueError(f"{file.name}: family-phase and true sample axes differ")
+    # Release 2.1 records hold the run's canonical sample order: rows back to the truth's order.
+    index = {name: row for row, name in enumerate(sample_ids)}
+    order = np.asarray([index[name] for name in names], dtype=np.int64)
+    calls = np.asarray(product["calls"])[order]
+    true_alleles = np.asarray(truth.alleles, dtype=np.int8)
+    positions = np.asarray(truth.positions)
+    if true_alleles.shape != calls.shape:
+        raise ValueError(f"{file.name}: incompatible true/final allele axes")
+    if not np.array_equal(np.asarray(product["positions"]), positions):
+        raise ValueError(f"{file.name}: final positions differ from truth")
+    undetermined = product.get("frame_undetermined")
+    if undetermined is not None:
+        undetermined = (np.asarray(undetermined)[order] & 2) != 0       # bit 1: displayed phase undetermined
+    breaks, offsets = product.get("phase_breaks"), product.get("phase_break_offsets")
+    sample_breaks = (None if breaks is None or offsets is None else
+                     [np.asarray(breaks)[offsets[i]:offsets[i + 1]] for i in order.tolist()])
+    counts, spans, released = released_phase_counts(calls, true_alleles, np.asarray(product["component_ids"]),
+                                                    undetermined, positions, sample_breaks)
+    columns = dict(total_alleles=int(calls.size), called_alleles=int(np.count_nonzero(calls >= 0)))
+    columns["called_fraction"] = columns["called_alleles"] / columns["total_alleles"] if calls.size else None
+    del calls, true_alleles
+    members = {"all": np.ones(len(names), dtype=bool)}
+    if parent_counts is not None:
+        members.update((group, np.asarray(parent_counts) == count) for count, group in enumerate(PARENT_GROUPS))
+    groups = []
+    for group, mask in members.items():
+        totals = counts[mask].sum(axis=0) if mask.any() else np.zeros(len(SAMPLE_COLUMNS), dtype=np.int64)
+        row = dict(contig=file.name, parent_group=group, samples=int(mask.sum()), **dict(zip(
+            SAMPLE_COLUMNS, map(int, totals))))
+        chosen = np.flatnonzero(mask).tolist()
+        row["phase_set_spans_bp"] = [int(v) for i in chosen for v in spans[i]]
+        row["released_phase_set_spans_bp"] = [int(v) for i in chosen for v in released[i]]
+        groups.append(row)
+    columns.update((key, groups[0][key]) for key in PHASE_COLUMNS)
+    return columns, groups
+
+
+def _phase_shares(row: dict) -> None:
+    """Add phased_share (scored sites / correctly called true heterozygotes) to a row of PHASE_COLUMNS."""
+    row["phased_share"] = (row["phased_true_heterozygotes"] / row["correct_true_heterozygotes"]
+                           if row.get("correct_true_heterozygotes") else None)
+
+
 # ------------------------------------------------------------------------------------------- one chromosome
-def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
-    """One chromosome's rows: (chromosome row, founder rows, component rows, match rows, skipped)."""
+def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1, parent_counts=None):
+    """One chromosome's rows: (chromosome row, founder rows, component rows, match rows, phase-group rows,
+    skipped). ``parent_counts``: parent_counts_of (released edges into each sample, ``names`` order) or None."""
     from .. import execution
     from ..family_phase import records as phase_records
     from ..recombination import records as recombination_records
     from ..simulation import truth as truth_records
     from .founders import evaluate_founders, represented_ancestry
-    from .metrics import long_switch_counts, phase_counts, phase_set_counts
     contig = file.name
     automatic = requested in (("available",), ("all",))
-    founders, component_rows, matching_rows, skipped = [], [], [], []
+    founders, component_rows, matching_rows, phase_groups, skipped = [], [], [], [], []
     truth = truth_records.load(file, nthreads=nthreads)
     if tuple(truth.sample_ids) != tuple(names):
         raise ValueError(f"{file.label}: simulation truth sample axis differs")
@@ -325,43 +405,13 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
             del panels
         del founder_truth, represented
     row = dict(contig=contig, sites=len(positions))
-    added = {}     # long-range switch columns follow every existing column
-    reported = {}  # then the reported-interval map columns
+    reported = {}  # the reported-interval map columns follow every other column
     if automatic or "family_phase" in requested:
         if phase_records.complete(file):
-            sample_ids, phase_positions, component_ids, calls = phase_records.load_calls(file, nthreads=nthreads)
-            true_alleles = np.asarray(truth.alleles, dtype=np.int8)
-            if tuple(sample_ids) != tuple(names) and sorted(sample_ids) == sorted(names):
-                # Release 2.1 records hold the run's canonical sample order: rows back to the truth's order.
-                index = {name: row for row, name in enumerate(sample_ids)}
-                calls = np.asarray(calls)[[index[name] for name in names]]
-                sample_ids = tuple(names)
-            if tuple(sample_ids) != tuple(names) or true_alleles.shape != calls.shape:
-                raise ValueError(f"{contig}: incompatible true/final allele axes")
-            if not np.array_equal(phase_positions, positions):
-                raise ValueError(f"{contig}: final positions differ from truth")
             execution.claim_threads()
-            values = phase_counts(calls, true_alleles, component_ids)
-            row.update(total_alleles=int(calls.size), **dict(zip(PHASE_COLUMNS, map(int, values))))
-            row["called_fraction"] = row["called_alleles"]/row["total_alleles"]
-            values = long_switch_counts(calls, true_alleles, component_ids,
-                                        np.asarray(LONG_SWITCH_RUNS, dtype=np.int64))
-            added.update(zip(LONG_SWITCH_COLUMNS, map(int, values)))
-            metadata = phase_records.load_arrays(
-                file, ("sample_ids", "frame_undetermined", "phase_breaks", "phase_break_offsets"), nthreads=nthreads)
-            index = {name: row for row, name in enumerate(metadata["sample_ids"])}
-            order = [index[name] for name in names]
-            undetermined = metadata.get("frame_undetermined")
-            if undetermined is not None:
-                undetermined = (np.asarray(undetermined)[order] & 2) != 0  # bit 1: displayed frame
-            breaks = metadata.get("phase_breaks")
-            offsets = metadata.get("phase_break_offsets")
-            sample_breaks = None if breaks is None else [breaks[offsets[i]:offsets[i + 1]] for i in order]
-            errors, sets, loose, spans = phase_set_counts(calls, true_alleles, component_ids, undetermined,
-                                                        positions, phase_breaks=sample_breaks)
-            added.update(ps_aligned_allele_errors=errors, phase_sets=sets, undetermined_called_alleles=loose,
-                         phase_set_spans_bp=[int(value) for value in spans])
-            del calls, true_alleles
+            columns, phase_groups = phase_scores(file, truth, names, parent_counts, nthreads=nthreads)
+            row.update(columns)
+            _phase_shares(row)
         elif not automatic:
             raise FileNotFoundError(f"{contig}: no completed family phase")
         else:
@@ -376,9 +426,8 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
             raise FileNotFoundError(f"{contig}: no completed recombination map")
         else:
             skipped.append(f"{contig}/recombination")
-    row.update(added)
     row.update(reported)
-    return row, founders, component_rows, matching_rows, skipped
+    return row, founders, component_rows, matching_rows, phase_groups, skipped
 
 
 def _evaluate_task(task, state, phase, common, budget):
@@ -390,7 +439,8 @@ def _evaluate_task(task, state, phase, common, budget):
     threads = execution.claim_threads()
     print(f"EVALUATION {contig}: start; threads={threads}", flush=True)
     file = CheckpointStore(common["checkpoints"], nthreads=budget).contig(contig)        # live lease
-    result = evaluate_chromosome(file, common["names"], founder_stages, common["requested"], nthreads=budget)
+    result = evaluate_chromosome(file, common["names"], founder_stages, common["requested"], nthreads=budget,
+                                 parent_counts=common.get("parent_counts"))
     print(f"EVALUATION {contig}: complete in {time.monotonic() - started:.2f}s; "
           f"threads={execution.claim_threads()}", flush=True)
     return state, result
@@ -425,17 +475,19 @@ def _write_table(destination: Path, filename: str, rows) -> None:
 
 def new_report(seed, names, requested, checkpoint_root) -> dict:
     """The summary skeleton (keys in their published order)."""
-    return dict(seed=seed, samples=len(names), pedigree=None, chromosomes=[], founders=[],
+    return dict(seed=seed, samples=len(names), pedigree=None, chromosomes=[], phase_groups=[], founders=[],
                 requested_stages=list(requested), checkpoint_root=str(Path(checkpoint_root).resolve()),
-                phase_set_metric="export_phase_sets_v2", skipped=[])
+                phase_set_metric=PHASE_METRIC, skipped=[])
 
 
-def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("available",), contigs=None) -> dict:
+def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("available",), contigs=None,
+                 destination=None) -> dict:
     """Evaluate completed contigs/stages of a simulation run, without requiring downstream completion.
 
-    Writes RUN/evaluation/ (module docstring) and returns the summary. ``checkpoints`` defaults to
-    RUN/checkpoints; ``cores`` (default: the CPU affinity) bounds the chromosome workers and their threads;
-    ``contigs`` (default: every simulated contig) never changes the genome-wide pedigree counts.
+    Writes RUN/evaluation/ (module docstring), or ``destination`` when given (the run is then only read), and
+    returns the summary. ``checkpoints`` defaults to RUN/checkpoints; ``cores`` (default: the CPU affinity) bounds
+    the chromosome workers and their threads; ``contigs`` (default: every simulated contig) never changes the
+    genome-wide pedigree counts.
     """
     from .. import execution
     from ..pedigree import records as pedigree_records
@@ -495,13 +547,16 @@ def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("availa
     # Each chromosome task holds its planned peak of the run's memory while it runs (it waits until it fits).
     weights = _memory_estimates(store, tasks, requested)
     limit = execution.memory_worker_limit(weights, workers, label="EVALUATION")
-    common = dict(checkpoints=str(store.root), names=names, requested=requested)
+    # Parent groups of the phase metrics: the released edges family phase was conditioned on (genome-wide).
+    parent_counts = parent_counts_of(store, names) if automatic or "family_phase" in requested else None
+    common = dict(checkpoints=str(store.root), names=names, requested=requested, parent_counts=parent_counts)
     with execution.ChromosomeExecutor(tasks, _evaluate_task, budget=execution.CpuBudget.fixed(workers),
                                       weights=weights, max_workers=limit, label="EVALUATION",
                                       task_bytes=weights) as executor:
         results = executor.run("evaluate", common)
     component_rows, matching_rows = collect(report, results)
-    write_evaluation(output / "evaluation", report, component_rows, matching_rows)
+    write_evaluation(output / "evaluation" if destination is None else Path(destination), report,
+                     component_rows, matching_rows)
     return report
 
 
@@ -509,8 +564,9 @@ def collect(report: dict, results) -> tuple[list, list]:
     """Add the chromosomes' rows (evaluate_chromosome results, contig order) to ``report`` and complete it with
     totals and notes; returns (component rows, match rows)."""
     component_rows, matching_rows = [], []
-    for row, founders, component_part, matching_part, skipped in results:
+    for row, founders, component_part, matching_part, phase_groups, skipped in results:
         report["chromosomes"].append(row)
+        report["phase_groups"].extend(phase_groups)
         report["founders"].extend(founders)
         report["skipped"].extend(skipped)
         component_rows.extend(component_part)
@@ -521,28 +577,47 @@ def collect(report: dict, results) -> tuple[list, list]:
                   f"called errors; {summary['truth_to_panel_errors_missing']} truth-to-panel errors/missing",
                   flush=True)
     from .metrics import n50
-    spans = []
-    for row in report["chromosomes"]:
-        if "phase_set_spans_bp" in row:
-            contig_spans = row.pop("phase_set_spans_bp")
-            row["phase_set_n50_bp"] = n50(contig_spans)
-            spans.extend(contig_spans)
+    # Phase-set N50s (bp) per chromosome and group, then genome-wide per group; the spans themselves are not kept.
+    spans, totals = {}, {}
+    for group_row in report["phase_groups"]:
+        group = group_row["parent_group"]
+        part = spans.setdefault(group, dict(scored=[], released=[]))
+        total = totals.setdefault(group, dict(samples=group_row["samples"], **{key: 0 for key in PHASE_COLUMNS}))
+        for key in PHASE_COLUMNS:
+            total[key] += group_row[key]
+        _phase_shares(group_row)
+        for key, name in (("phase_set_spans_bp", "scored"), ("released_phase_set_spans_bp", "released")):
+            values = group_row.pop(key)
+            group_row[key.replace("_spans_bp", "_n50_bp")] = n50(values)
+            part[name].extend(values)
+        if group == "all":
+            row = next(row for row in report["chromosomes"] if row["contig"] == group_row["contig"])
+            row["phase_set_n50_bp"] = group_row["phase_set_n50_bp"]
+            row["released_phase_set_n50_bp"] = group_row["released_phase_set_n50_bp"]
+    for group, total in totals.items():
+        _phase_shares(total)
+        total["phase_set_n50_bp"] = n50(spans[group]["scored"])
+        total["released_phase_set_n50_bp"] = n50(spans[group]["released"])
+    report["phase_totals"] = totals
     report["totals"] = {key: sum(row.get(key, 0) for row in report["chromosomes"])
-                        for key in (*PHASE_COLUMNS, "total_alleles", *LONG_SWITCH_COLUMNS, *PHASE_SET_COLUMNS)}
-    report["totals"]["phase_set_n50_bp"] = n50(spans)
+                        for key in ("total_alleles", "called_alleles", *PHASE_COLUMNS)}
+    _phase_shares(report["totals"])
+    report["totals"]["phase_set_n50_bp"] = totals.get("all", {}).get("phase_set_n50_bp", 0)
+    report["totals"]["released_phase_set_n50_bp"] = totals.get("all", {}).get("released_phase_set_n50_bp", 0)
     report["interpretation"] = INTERPRETATION
     report["segment_and_long_range_interpretation"] = SEGMENT_INTERPRETATION
     return component_rows, matching_rows
 
 
 def write_evaluation(destination, report: dict, component_rows, matching_rows) -> None:
-    """Write summary.json and the four tables atomically into ``destination``."""
+    """Write summary.json and the five tables atomically into ``destination``."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     temporary = destination / "summary.json.tmp"
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     temporary.replace(destination / "summary.json")
     for filename, rows in (("chromosomes.csv", report["chromosomes"]),
+                           ("phase_groups.csv", report["phase_groups"]),
                            ("founders.csv", report["founders"]),
                            ("founder_components.csv", component_rows),
                            ("founder_matches.csv", matching_rows)):

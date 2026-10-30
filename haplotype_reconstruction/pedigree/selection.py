@@ -41,24 +41,28 @@ def _pack_presence(values):
 
 
 @njit(cache=True, nogil=True)
-def _count_present(packed, weights):
-    """int32 [items]: number of chromosomes with positive weight whose presence bit is set."""
+def _units_present(packed, weights, units):
+    """float64 [items]: map units (``units`` [C, items]) of the chromosomes with positive weight whose presence bit is
+    set."""
     n_words, n_items = packed.shape
-    active = np.zeros(n_words, dtype=np.uint64)
+    totals = np.zeros(n_items, dtype=np.float64)
     one = np.uint64(1)
     for contig in range(weights.shape[0]):
         if weights[contig] > 0:
-            active[contig // 64] |= one << np.uint64(contig % 64)
-    counts = np.zeros(n_items, dtype=np.int32)
-    for item in range(n_items):
-        total = 0
-        for word in range(n_words):
-            value = packed[word, item] & active[word]
-            while value != 0:
-                value &= value - one
-                total += 1
-        counts[item] = total
-    return counts
+            bit = one << np.uint64(contig % 64)
+            word = contig // 64
+            for item in range(n_items):
+                if packed[word, item] & bit:
+                    totals[item] += units[contig, item]
+    return totals
+
+
+def map_units(morgans, config: ExposureConfig) -> np.ndarray:
+    """float64: map units of measured map lengths ``morgans`` (Morgans; any shape), max(1, length / unit_morgans) (1
+    where the length is unknown): an unlinked chromosome counts once however short, a long one by its length."""
+    morgans = np.asarray(morgans, dtype=np.float64)
+    units = np.where(np.isfinite(morgans), morgans / config.unit_morgans, 1.0)
+    return np.ascontiguousarray(np.maximum(1.0, units))
 
 
 @dataclass(frozen=True)
@@ -68,8 +72,10 @@ class ExposureEvidence:
     edge_exposed: float64 [C, E] on the eligible edges (GenomeScores.edges); pair_exposed: float64 [C, T];
     total_bins: float64 [C].
     edge_present / pair_present: uint64 [W, E] / [W, T] packed per-chromosome flags of
-    exposure > 0 and >= the minimum bins (W = ceil(C / 64)), so a fit counts exposed chromosomes
-    with one popcount per item.
+    exposure > 0 and >= the minimum bins (W = ceil(C / 64)).
+    units: float64 [C] map units of each chromosome (map_units of its scored length); edge_units / pair_units:
+    float64 [C, E] / [C, T] the units each edge / pair earns there (map_units of its exposed map length:
+    GenomeScores.edge_exposed_morgans / pair_exposed_morgans); a fit sums them over its exposed chromosomes.
     row_edges: int64 [A, 2] edge-axis positions of each configuration row's (child, parent) edges, one per
     parent slot; -1 for an empty slot.
     """
@@ -80,11 +86,16 @@ class ExposureEvidence:
     edge_present: np.ndarray
     pair_present: np.ndarray
     row_edges: np.ndarray
+    units: np.ndarray
+    edge_units: np.ndarray
+    pair_units: np.ndarray
 
     @classmethod
     def build(cls, edges: np.ndarray, edge_exposed: np.ndarray, pair_exposed: np.ndarray,
-              total_bins: np.ndarray, alternatives: Alternatives,
-              config: ExposureConfig) -> "ExposureEvidence":
+              total_bins: np.ndarray, alternatives: Alternatives, config: ExposureConfig,
+              scored_morgans: np.ndarray | None = None, edge_exposed_morgans: np.ndarray | None = None,
+              pair_exposed_morgans: np.ndarray | None = None) -> "ExposureEvidence":
+        """Missing map lengths (earlier records) count one unit per chromosome, edge and pair."""
         edge_flags = (edge_exposed > 0.0) & (edge_exposed >= config.minimum_edge_exposed_bins)
         pair_flags = (pair_exposed > 0.0) & (pair_exposed >= config.minimum_pair_exposed_bins)
         rows = alternatives.rows
@@ -95,9 +106,14 @@ class ExposureEvidence:
                                                     rows[named, slot])
         if np.any(row_edges[rows[:, 1:] >= 0] < 0):
             raise ValueError("a configuration row names a parent outside the eligible edges")
+        def units(morgans, shape):
+            return map_units(np.full(shape, np.nan) if morgans is None else morgans, config)
         return cls(edge_exposed, pair_exposed, total_bins,
                    _pack_presence(np.ascontiguousarray(edge_flags)),
-                   _pack_presence(np.ascontiguousarray(pair_flags)), row_edges)
+                   _pack_presence(np.ascontiguousarray(pair_flags)), row_edges,
+                   units(scored_morgans, len(total_bins)),
+                   units(edge_exposed_morgans, edge_exposed.shape),
+                   units(pair_exposed_morgans, pair_exposed.shape))
 
 
 @dataclass(frozen=True)
@@ -115,7 +131,8 @@ class DecisionInputs:
 
 # ------------------------------------------------------------------------------- gate and scores
 def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig) -> np.ndarray:
-    """bool [A]: configurations testable on the weighted chromosomes (M0 always)."""
+    """bool [A]: configurations testable on the weighted chromosomes (M0 always): every edge (and an M2 pair) exposed
+    in enough bins, enough of the fit's painted bins and on chromosomes holding enough map units."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
     edge_exposed = np.tensordot(weights, exposure.edge_exposed, axes=(0, 0))
@@ -125,14 +142,16 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig
                               where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed),
                               where=total_bins > 0.0)
-    edge_contigs = _count_present(exposure.edge_present, weights)
-    pair_contigs = _count_present(exposure.pair_present, weights)
+    # Release 3.2: exposed chromosomes count by their map units (a short chromosome once), not one each.
+    weights = np.ascontiguousarray(weights, dtype=np.float64)
+    edge_units = _units_present(exposure.edge_present, weights, exposure.edge_units)
+    pair_units = _units_present(exposure.pair_present, weights, exposure.pair_units)
     edge_ok = ((edge_exposed >= config.minimum_edge_exposed_bins)
                & (edge_fraction >= config.minimum_exposed_fraction)
-               & (edge_contigs >= config.minimum_exposed_contigs))
+               & (edge_units >= config.minimum_exposed_units))
     pair_ok = ((pair_exposed >= config.minimum_pair_exposed_bins)
                & (pair_fraction >= config.minimum_exposed_fraction)
-               & (pair_contigs >= config.minimum_exposed_contigs))
+               & (pair_units >= config.minimum_exposed_units))
     rows, states = alternatives.rows, alternatives.states
     first, second = exposure.row_edges[:, 0], exposure.row_edges[:, 1]
     result = np.zeros(len(rows), dtype=np.bool_)

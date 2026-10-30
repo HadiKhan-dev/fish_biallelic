@@ -230,7 +230,8 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
     """Release M0/M1 counts that the exclusion bounds and the supported directions settle.
 
     A target child is released when every eligible candidate was scored, it is safe (eligible,
-    enough informative chromosomes, no graph conflict) and the candidates that survive exclusion
+    informative chromosomes holding enough map units: ``informative`` float64 [N]; no graph conflict) and the
+    candidates that survive exclusion
     (log E below log(2 N / alpha)) minus those it is the supported parent of form at most one
     sample, equal to both its supported marginal parents and its complete graph parents.
     """
@@ -274,7 +275,7 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
                     {int(p) for p in rows[complete_row, 1:] if p >= 0})
         complete_count = int(complete.state[child])
         safe = bool(eligibility.children[child]
-                    and informative[child] >= config.release.minimum_informative_contigs
+                    and informative[child] >= config.release.minimum_informative_units
                     and not graph_conflict[child])
         concordant = (survivors == supported_parents == selected
                       and complete.state[child] != UNRESOLVED and complete_count == len(survivors))

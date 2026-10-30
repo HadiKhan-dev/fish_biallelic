@@ -141,8 +141,9 @@ were measured one by one against the unfixed tree (changelog).
   ([painting](methods/painting.md)).
 - Painting errors and structured missingness can affect pedigree direction; ambiguous, missing-parent and highly
   structured-missingness designs need validation by simulation before their calls are trusted.
-- Tier-B pedigree calls need at least five informative chromosomes (Tier A six); with fewer, no Tier-B parent is
-  released, and family phase and recombination have no parent edges ([pedigree](methods/pedigree.md)).
+- Tier-B pedigree calls need enough map length: five informative chromosomes shorter than 1 Morgan or without a
+  genetic map (Tier A six), fewer long chromosomes on a supplied map; with less, no Tier-B parent is released, and
+  family phase and recombination have no parent edges ([pedigree](methods/pedigree.md#map-length-requirement-release-32)).
 - Support tiers, bootstrap fractions and posterior thresholds measure internal stability, not calibrated
   probabilities. The real crosses have no individual-level trio truth; a cohort label is not parentage.
 - Family phase is conditional on the released Tier-B edges and the maps on the final phase and the fixed inferred

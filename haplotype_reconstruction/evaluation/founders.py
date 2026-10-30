@@ -7,6 +7,14 @@ Neither metric rematches founder labels at individual markers. A separate
 segment-wise score does (at a fixed switch cost), splitting nearest-founder
 errors into wrong alleles and charges for chimeric row segments.
 
+Splitting and relabelling (release 3.2). Rows carry no identity across a component boundary, so every
+component-wise count (nearest-founder, one-to-one, truth-to-panel, segment-wise, strata) can fall when a component is
+cut without changing an allele: each piece re-matches its labels. ``split_charged_segment_cost`` cannot: it is the
+segment-wise cost (mismatches + SEGMENT_SWITCH_COST per label switch) plus SEGMENT_SWITCH_COST for every row of every
+component after the chromosome's first, i.e. a component boundary is charged as one label switch per row. A cut never
+lowers it (it rises by at most SEGMENT_SWITCH_COST per row, and is unchanged where every row already switches founder).
+A pure row permutation changes no count: exact ties of the one-to-one assignment are broken by row content.
+
 A founder panel is (positions int64 [L_c], calls int8 [K_c, L_c]) with calls -1 (no call), 0 (REF) or 1 (ALT);
 its founder labels are the row indices 0..K_c-1. Counts are integers reduced in a fixed order (per row, then
 per component), so results do not depend on the thread count.
@@ -242,11 +250,22 @@ def _count_panels(panels, indices, truth, represented):
             rep_counts)
 
 
-def _compare_counts(counts, missing, represented_counts, sites):
+def _content_order(calls) -> np.ndarray:
+    """Row indices sorted by row content (the calls' bytes): a canonical order, independent of the row labels."""
+    return np.asarray(sorted(range(len(calls)), key=lambda row: calls[row].tobytes()), dtype=np.int64)
+
+
+def _compare_counts(counts, missing, represented_counts, sites, order=None):
     k, f = counts.shape[:2]
     errors = counts[:, :, 0]
     called = sites - missing
-    predicted, actual = linear_sum_assignment(errors + missing[:, None])
+    # Release 3.2: solve on the rows in content order (``order``), so that exact ties of the assignment are broken
+    # by content, never by row label; matches are then listed by row as before.
+    order = np.arange(k) if order is None else np.asarray(order, dtype=np.int64)
+    predicted, actual = linear_sum_assignment((errors + missing[:, None])[order])
+    predicted = order[predicted]
+    by_row = np.argsort(predicted, kind="stable")
+    predicted, actual = predicted[by_row], actual[by_row]
     nearest = np.argmin(errors, axis=1) if k else np.empty(0, dtype=int)
     result = dict(founder_rows=k, truth_founders=f, markers=sites,
                   called_alleles=int(called.sum()), missing_alleles=int(missing.sum()),
@@ -320,15 +339,20 @@ def evaluate_founders(panels: Sequence[tuple[np.ndarray, np.ndarray]], positions
     segments = _segment_panels(calls_list, indices, truth)
     for component, (first, last, sites) in enumerate(spans):
         metrics, component_matches = _compare_counts(
-            counts[component], missing[component], rep_counts[component], sites)
+            counts[component], missing[component], rep_counts[component], sites,
+            order=_content_order(calls_list[component]))
         # Split nearest-founder errors into wrong alleles under segment-wise
         # labels and the remainder charged for chimeric row segments.
         segment_errors, segment_switches = map(int, segments[component])
+        # Release 3.2: the segment-wise cost, with one label switch per row charged at every component start after the
+        # chromosome's first (module docstring).
+        switches = segment_switches + (len(calls_list[component]) if component else 0)
         rows.append(dict(contig=contig, stage=stage, component=component,
                          first_position=first, last_position=last, **metrics,
                          segment_allele_errors=segment_errors,
                          segment_label_switches=segment_switches,
-                         chimeric_segment_charges=metrics["called_allele_errors"] - segment_errors))
+                         chimeric_segment_charges=metrics["called_allele_errors"] - segment_errors,
+                         split_charged_segment_cost=segment_errors + int(SEGMENT_SWITCH_COST * switches)))
         matches.extend(dict(contig=contig, stage=stage, component=component,
                             founder_key=str(match["predicted_row"]), **match)
                        for match in component_matches)
@@ -350,6 +374,7 @@ def evaluate_founders(panels: Sequence[tuple[np.ndarray, np.ndarray]], positions
     summary["one_to_one_errors_per_million"] = (
         1e6*summary["one_to_one_called_allele_errors"]/summary["matched_called_alleles"]
         if summary["matched_called_alleles"] else None)
-    for key in ("segment_allele_errors", "segment_label_switches", "chimeric_segment_charges"):
+    for key in ("segment_allele_errors", "segment_label_switches", "chimeric_segment_charges",
+                "split_charged_segment_cost"):
         summary[key] = sum(row[key] for row in rows)
     return summary, rows, matches

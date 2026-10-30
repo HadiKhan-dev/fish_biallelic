@@ -3,7 +3,8 @@
 Per painted component: the exact source factors of every sample (from the painting's emissions and
 its own normalised transition table), at most ``markers_per_bin`` evenly spaced selected markers per
 painting bin with their genotype likelihoods, the painted state classes (junction counts), the
-meiotic switch probability between bins, and the information exponent of the tempered view.
+meiotic switch probability and the measured map length between bins, and the information exponent of the
+tempered view.
 """
 from __future__ import annotations
 
@@ -114,8 +115,28 @@ def _evidence_sites(evidence_positions: np.ndarray, positions: np.ndarray) -> np
     return indices.astype(np.int64)
 
 
+def measured_coordinates(chromosome_map, positions, rate_is_measured: bool = False) -> np.ndarray:
+    """float64 [n]: map coordinates (Morgans) of ``positions`` (bp) as far as a measurement supports them (release
+    3.2). The difference of two coordinates is the measured map length of the interval between them, that is, of its
+    intersection with the measured span:
+    - ``rate_is_measured`` ([genetic_map] rate_is_measured: the fallback rate is the organism's stated genome-wide
+      average): the run's map everywhere;
+    - a supplied map: its coordinates with the positions clipped to its knots (the fallback rate extends a map's
+      tails, but a tail is a placeholder, not a measurement);
+    - otherwise zeros: the fallback rate measures no recombination."""
+    positions = np.asarray(positions, dtype=np.float64)
+    if rate_is_measured:
+        return np.asarray(chromosome_map.cumulative_morgans(positions), dtype=np.float64)
+    if not chromosome_map.has_map:
+        return np.zeros(len(positions))
+    knots = chromosome_map.positions_bp
+    return np.asarray(chromosome_map.cumulative_morgans(np.clip(positions, knots[0], knots[-1])),
+                      dtype=np.float64)
+
+
 def _prepare_component(index: int, painted, evidence, painting_config, chromosome_map,
-                       config: PreparationConfig, claim_threads) -> PreparedComponent | None:
+                       config: PreparationConfig, claim_threads,
+                       rate_is_measured: bool = False) -> PreparedComponent | None:
     """One component's scoring inputs, or None without observed non-uniform selected evidence."""
     states, bins = painted.states, painted.bins
     sites = _evidence_sites(evidence.positions, states.positions)
@@ -167,22 +188,25 @@ def _prepare_component(index: int, painted, evidence, painting_config, chromosom
         transition=transition, factors=factors,
         robustness_epsilon=float(painting_config.robustness_epsilon),
         selector_switch_probability=np.ascontiguousarray(theta),
+        measured_morgans=np.ascontiguousarray(
+            np.diff(measured_coordinates(chromosome_map, bins.centers, rate_is_measured))),
         genotype_likelihoods=gl, observed=observed,
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
         information_exponent=np.empty((gl.shape[0], 0)))
 
 
 def prepare_chromosome(painting, evidence, chromosome_map, config: PreparationConfig,
-                       claim_threads=lambda: None) -> PreparedChromosome:
+                       claim_threads=lambda: None, rate_is_measured: bool = False) -> PreparedChromosome:
     """Prepared components of one contig from its painting (ChromosomePainting) and evidence
-    (ContigEvidence, all samples), with the chromosome-wide information exponents."""
+    (ContigEvidence, all samples), with the chromosome-wide information exponents. ``rate_is_measured``: see
+    measured_coordinates."""
     prepared = []
     for index, painted in enumerate(painting.components):
         if painted.states.n_sites == 0 or painted.bins.n_bins == 0:
             continue
         claim_threads()
         component = _prepare_component(index, painted, evidence, painting.config, chromosome_map,
-                                       config, claim_threads)
+                                       config, claim_threads, rate_is_measured)
         if component is not None:
             prepared.append(component)
     if not prepared:

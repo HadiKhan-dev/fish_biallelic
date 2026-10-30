@@ -28,12 +28,18 @@ _GIB = 1 << 30
 
 
 def tier_b_minimum_contigs(config: PedigreeConfig) -> int:
-    """Smallest number of informative chromosomes for which Tier B can release a call.
+    """Smallest number of informative chromosomes shorter than one map unit for which Tier B can release a call.
 
-    For the run precheck: with fewer, every resampled fit lacks the exposed-chromosome count of the
-    exposure gate often enough that no configuration (not even M0) reaches the Tier-B support.
+    For the run precheck: with fewer such chromosomes, every resampled fit lacks the exposed map units of the
+    exposure gate often enough that no configuration (not even M0) reaches the Tier-B support. Longer chromosomes
+    count more units, so fewer can suffice; the pedigree's reach statement is exact for a run (release 3.2).
     """
-    return minimum_contigs_for_tier(config.release.tier_b, config.exposure.minimum_exposed_contigs)
+    return minimum_contigs_for_tier(config.release.tier_b, minimum_scored_contigs(config))
+
+
+def minimum_scored_contigs(config: PedigreeConfig) -> int:
+    """Informative chromosomes the stage needs at all: the exposure gate's units held by chromosomes of one unit."""
+    return int(np.ceil(config.exposure.minimum_exposed_units))
 
 
 # --------------------------------------------------------------------------- chromosome handlers
@@ -59,7 +65,8 @@ def _prepare_handler(contig, state, phase, common, budget):
         painting = painting_records.load(file, panels=False, emissions=True)
         evidence = evidence_records.load(file, nthreads=execution.claim_threads())
         prepared = prepare.prepare_chromosome(painting, evidence, chromosome_map,
-                                              config.preparation, execution.claim_threads)
+                                              config.preparation, execution.claim_threads,
+                                              config.exposure.rate_is_measured)
         del painting, evidence
         file.put(records.PREPARED, records.encode_prepared(prepared))
     return None, None
@@ -274,7 +281,7 @@ def _orient_report(report, sample_ids, orientation: slots.ParentOrientation):
 # --------------------------------------------------------------------------- the stage
 def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         eligibility: ParentEligibility | None, config: PedigreeConfig, genetic_maps,
-        budget) -> PedigreeProduct:
+        budget, relatedness) -> PedigreeProduct:
     """Infer the genome-wide pedigree; returns (and stores) the run record ``pedigree``.
 
     store:        the run's CheckpointStore. Reads per contig the painting record and the evidence
@@ -286,6 +293,8 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     config:       PedigreeConfig.
     genetic_maps: GeneticMapSet; the meiotic switch probability of the transmission selectors.
     budget:       the CPU budget (execution.CpuBudget) for this stage.
+    relatedness:  the run's RelatednessProduct (relatedness stage, recorded in the store): the sibling-as-parent
+                  guard of the released edges (pedigree.guard).
     """
     contigs, sample_ids = tuple(contigs), tuple(sample_ids)
     if len(sample_ids) < 3:
@@ -311,9 +320,9 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     summaries = {contig: _prepared_summary(store.contig(contig)) for contig in contigs}
     informative = tuple(contig for contig in contigs if summaries[contig][0])
     omitted = {contig: summaries[contig][1] for contig in contigs if not summaries[contig][0]}
-    if len(informative) < config.exposure.minimum_exposed_contigs:
+    if len(informative) < minimum_scored_contigs(config):
         raise ValueError(
-            f"pedigree inference needs evidence on at least {config.exposure.minimum_exposed_contigs} "
+            f"pedigree inference needs evidence on at least {minimum_scored_contigs(config)} "
             f"chromosomes (found {len(informative)}); Tier B needs at least "
             f"{tier_b_minimum_contigs(config)}")
 
@@ -322,8 +331,10 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     from . import selective_stage
     candidate_panel = selective_stage.score_prepared(store, informative, eligibility, config, budget)
 
+    from ..relatedness import records as relatedness_records
     identity = records.product_identity(store, contigs, informative, config, eligibility,
-                                        candidate_panel, scores_key=records.FLOORED_SCORES)
+                                        candidate_panel, scores_key=records.FLOORED_SCORES,
+                                        relatedness=relatedness_records.identity(store))
     store.bind_identity(store.run, records.PRODUCT, identity)
     if store.run.has(records.PRODUCT):
         return records.load_product(store)
@@ -359,7 +370,7 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
             pattern_fallback_samples=value.pattern_fallback_samples) for value in evidence])
     released = exclusion.release_counts(
         decided.tier_b, decided.partial_b, decided.complete, decided.evidence.graph_conflict,
-        decided.informative, rows, sample_ids, eligibility, dyads, log_e, observed, config,
+        decided.informative_units, rows, sample_ids, eligibility, dyads, log_e, observed, config,
         log_e_upper=log_e_upper)
     exclusion_summary["released"] = int(np.count_nonzero(released.released))
 
@@ -400,6 +411,11 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         report=replace(_orient_report(tables.build(decided, released, search, chromosome_summary, config),
                                       sample_ids, orientation), relative_contrasts=relative_table),
         tie_events=decided.tie_events)
+    # Release 3.2: the sibling-as-parent guard (pedigree.guard) on the released edges and calls.
+    from . import guard
+    product = guard.apply(product, guard.sibling_guard(product.edges, relatedness, config.guard))
+    print(f"PEDIGREE: sibling guard tested {product.sibling_guard['tested']} of {product.sibling_guard['edges']} "
+          f"released edges, withheld {product.sibling_guard['withheld']}", flush=True)
     store.run.put(records.PRODUCT, records.encode_product(product))
     store.mark_stage_complete(records.STAGE)
     print(f"PEDIGREE: {decided.reach.statement}", flush=True)

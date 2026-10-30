@@ -1,5 +1,125 @@
 # Changelog
 
+## 3.2.0 (30 October 2026)
+
+This release covers four changes:
+- a relatedness stage estimated from genotype likelihoods alone;
+- a guard against full siblings released as parents;
+- pedigree material measured in genetic map length rather than chromosome count;
+- `haplotypes evaluate` scoring the phase the pipeline actually releases.
+
+Evidence, discovery, local selection, assembly, painting and founder refit are unchanged. Pedigree records change
+schema (4). A run started with an earlier release cannot be resumed past painting: the pedigree identity changed, so
+use a new output root.
+
+**Relatedness stage** (`relatedness/`, [relatedness](docs/methods/relatedness.md)). It runs first among the
+genome-wide stages and reads only the evidence records: no founder panel, painting, phase or cohort label.
+- **Pairwise identity by descent.** A three-state chain (IBD0, IBD1, IBD2) along each chromosome gives IBD shares and
+  the evidence for stretches with no IBD (`lr_ibd0`) or with IBD on both homologues (`lr_ibd2`).
+- **Full-sib families** with latent or sequenced parents, from a composite family likelihood.
+  - Each sample's reads are counted once: a family conditions on a sequenced parent's reads, and the parent graph is
+    kept acyclic.
+  - Half-sib links connect latent families.
+  - Each membership and sequenced parent has a support: the share of support units (about one Morgan each on a
+    measured map) on which it is the best placement. This is a member-removal contrast against the fitted
+    partition, not held-out validation.
+- Tables in `OUTPUT/relatedness/`.
+
+Measured on saved simulations:
+- Full-sib precision and recall: TroMau-like 0.98/0.95; 8-chromosome F3 1.00/0.96; two new controls 0.86/0.80 and
+  0.94/0.86. Small families in parent-rich designs are resolved poorly, and the guard abstains there.
+- Families refitted without each chromosome confirm 84-95% of the supported members on the held-out chromosome, and
+  7-44% of the unsupported ones.
+- Real TroMau takes 165 s on 76 cores (116 samples, 6,670 pairs); its run's peak memory rises from 2.0 to 3.6 GB.
+
+**Sibling-as-parent guard** (`pedigree/guard.py`,
+[pedigree](docs/methods/pedigree.md#sibling-as-parent-guard-release-32)).
+- **The test.** A released Tier-B edge p → c is tested when c's supported full-sib family without p has at least
+  three members. It is withheld when the ratio of p's IBD0 evidence with that family to the family's own sib-sib
+  level lies in [0.75, 1.33]. The thresholds were fixed in the 3.1 study, before the 3.2 controls.
+- **Which family.** The comparison family excludes any member released as a parent or child of the child or of another
+  member: no full sib is anyone's parent or child.
+- **What withholding does.** The edge leaves the edges that family phase and recombination condition on. The child's
+  Tier-B and Tier-A calls become unresolved, whether they name the parent or state a count only, and so do every
+  published relationship table, the candidate sets and the final state calls. Its observed-parent bounds become
+  [remaining released edges, 2].
+- **8-chromosome F3, no metadata.** All 3 false edges are withheld:
+  - set-aligned phase errors 76,015 → 1,421 (sites);
+  - switch errors 132 → 119 and long switches 14 → 2 (events);
+  - phase sets 5,552 → 5,692.
+- **Independent sib-rich seed.** 2 of 3 false edges are withheld. The third is kept at r = 0.748, just below the
+  frozen bound. With the guard alone, set-aligned errors fall 102,023 → 54,172, switches 30 → 24 and long
+  switches 9 → 3. The missed edge's 14,359 error sites remain.
+- **True edges tested, all kept:** TroMau-like 23 of 48 (largest r 0.34), half-sib/backcross control 56 of 98
+  (largest r 0.45), random half-sib control 78 of 120 (largest r 0.57).
+- **Other designs and real TroMau:** the guard tests no edge (it abstains where families are small or unsupported).
+
+**Pedigree material in map units** (`pedigree/prepare.py`, `pedigree/exposure.py`, `pedigree/selection.py`,
+`pedigree/resampling.py`, [pedigree](docs/methods/pedigree.md#map-length-requirement-release-32)).
+- **Before.** The exposure gate needed 3 distinct exposed chromosomes in every resampled fit, so Tier B needed 5
+  informative chromosomes whatever their length.
+- **Now.** A chromosome counts max(1, L / 1 Morgan) map units. L is its measured map length: over adjacent scored
+  bins, the part of each interval that a **supplied** genetic map covers between its first and last knots.
+  - **New setting** `[genetic_map] rate_is_measured` (default false). Set it to true only when `rate_cm_per_mb` is
+    the organism's genome-wide average; lengths then count from that rate wherever no supplied map covers them.
+  - A chromosome with neither counts one unit: the fallback rate, and a map's extrapolated tails, measure no
+    recombination.
+  - An edge (or panel pair) earns max(1, E / 1 Morgan) units on a chromosome, where E is the measured map length it
+    is exposed over. An interval between adjacent bins counts as far as the edge is exposed at both ends: the
+    smaller of the two posterior-expected exposures, an optimistic endpoint approximation.
+    Painting bins hold about equal numbers of markers, not equal map lengths, so an edge exposed only on a short,
+    marker-dense stretch earns one unit.
+  - A child claims at most what its best-exposed candidate edge earns.
+  - The gate, the support reach and the per-child informative requirement count 3 map units.
+- **What a map unit is.** A working measure of material, not a count of independent replicates: resampling still
+  draws whole chromosomes, and the stage still needs three informative chromosomes.
+- **Without a map, results are identical by construction**, and the replays release the same edges on all 12 saved
+  designs, real TroMau included.
+- **With a map.** Two 3-chromosome designs generated and inferred at 5 cM/Mb with the map supplied:
+  - backcross: 0 → 118 released edges, all true, under the old and new rules respectively;
+  - sib-rich F3: 2 false sibling-as-parent edges, both withheld by the guard.
+
+  Stating the rate (`rate_is_measured = true`, no map file) gives the same decisions as the map file. An overstated
+  rate credits material the data do not have. On the 3-chromosome F3 with a rate 2.5 times the true one, 3 siblings
+  were released as parents and the guard abstained on all of them.
+- Relatedness support is measured on the same measured map.
+
+**Evaluation scores the released phase** (`evaluation/metrics.py`,
+[simulation](docs/simulation.md#phase-pedigree-and-map-metrics)).
+- Phase is scored per sample and released phase set, over correctly called true heterozygotes released phased:
+  set-aligned errors (sites), switch errors and long switches (events), sets and N50, and the phased share.
+- Genotype errors are counted separately.
+- Every count is reported per parent group (`phase_groups.csv`, `summary.json` `phase_totals`).
+- These are the definitions 3.0 and 3.1 were judged with. On seven saved runs the evaluation reproduces the lab
+  scorer exactly.
+- The component-level columns are removed. On std they reported 208 switch errors where the released sets carry 37.
+- Founder evaluation breaks exact assignment ties by row content, and adds `split_charged_segment_cost`, which cutting
+  a component without changing an allele cannot lower.
+
+**Validation.** Each of 14 designs ran end to end from scratch and was compared with 3.1 on the same input, contigs and
+seeds. The designs:
+- real TroMau;
+- the 8 earlier simulations;
+- 3 new pedigree controls (half-sib/backcross, random half-sib, an independent sib-rich F3);
+- 2 three-chromosome designs with a supplied 5 cM/Mb map (backcross, sib-rich F3).
+
+The map-less designs ran on an earlier candidate. Without a measured length the release credits nothing, so it has
+the same exposure gate, and its guard, replayed on each of those runs, gives the same calls, edges and bounds. The
+long-map designs ran on the release itself.
+- Painting and founder refit payloads are identical to 3.1 on every design.
+- Family phase is identical wherever the released edges are unchanged (11 of 14 designs).
+- Guard: 7 of the 8 false edges released are withheld. 157 of the 634 true simulated edges are tested, and none is
+  withheld.
+- Sib-rich F3 (8 chromosomes) and the independent sib-rich F3 are summarized above.
+- Long-map backcross:
+  - 0 → 118 released edges, all true;
+  - phase sets 3,158 → 378, phase-set N50 5.5 → 32 Mb;
+  - set-aligned errors 1,517 → 94 sites, with 1 switch and 1 long switch as before;
+  - genotype errors 5,789 → 5,516.
+- Cost: the relatedness stage adds 2-120 s on the simulations (165 s on real TroMau). The first run of a new
+  code version compiles its kernels, about 85 s on 76 cores, ahead of the scientific pools; the regenerated kernel
+  manifest lists the new kernels.
+
 ## 3.1.0 (30 October 2026)
 
 This release changes where family phase ends the phase sets of samples with no released parent and no children

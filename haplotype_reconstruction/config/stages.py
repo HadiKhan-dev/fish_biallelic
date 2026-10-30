@@ -47,8 +47,9 @@ def painting(config: RunConfig):
 
 
 def pedigree(config: RunConfig):
-    from ..pedigree.config import PedigreeConfig
-    return PedigreeConfig(evidence_calibration=config.pedigree.evidence_calibration)
+    from ..pedigree.config import ExposureConfig, PedigreeConfig
+    return PedigreeConfig(evidence_calibration=config.pedigree.evidence_calibration,
+                          exposure=ExposureConfig(rate_is_measured=config.genetic_map.rate_is_measured))
 
 
 def founder_refit(config: RunConfig):
@@ -93,6 +94,11 @@ def simulation(config: RunConfig):
                         fragment_mean_bp=reads.fragment_mean_bp, fragment_sd_bp=reads.fragment_sd_bp))
 
 
+def relatedness(config: RunConfig):
+    from ..relatedness.config import RelatednessConfig
+    return RelatednessConfig(rate_is_measured=config.genetic_map.rate_is_measured)
+
+
 def genetic_maps(config: RunConfig):
     """The inference genetic maps ([genetic_map]); contigs without a map get the fallback rate."""
     from ..model.genetic_map import load_genetic_maps
@@ -108,6 +114,7 @@ class StageConfigs:
     local_selection: Any
     assembly: Any
     painting: Any
+    relatedness: Any
     pedigree: Any
     founder_refit: Any
     family_phase: Any
@@ -118,6 +125,7 @@ class StageConfigs:
 def stage_configs(config: RunConfig) -> StageConfigs:
     return StageConfigs(
         evidence=evidence(config), discovery=discovery(config), local_selection=local_selection(config),
-        assembly=assembly(config), painting=painting(config), pedigree=pedigree(config),
+        assembly=assembly(config), painting=painting(config), relatedness=relatedness(config),
+        pedigree=pedigree(config),
         founder_refit=founder_refit(config), family_phase=family_phase(config),
         recombination=recombination(config), export=export(config))

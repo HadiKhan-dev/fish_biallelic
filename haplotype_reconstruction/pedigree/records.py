@@ -35,7 +35,9 @@ FLOORED_SCORES = "pedigree/floored_scores"
 EXCLUSION = "pedigree/exclusion"
 PRODUCT = "pedigree"
 # 2: release 2.2 released parent order (pedigree.slots: dam/sire or canonical), eligibility sexes.
-SCHEMA_VERSION = 3
+# 4: release 3.2 sibling-as-parent guard (pedigree.guard; report table and summary); scored map length of the
+#    chromosome scores and map units of the reach (ExposureConfig.unit_morgans).
+SCHEMA_VERSION = 4
 
 # Parent states: number of parents among the sequenced candidates (M0 is not "founder generation").
 M0, M1, M2 = 0, 1, 2
@@ -87,6 +89,9 @@ class PreparedComponent:
     factors:           exact source-posterior factors (SourceFactors).
     robustness_epsilon: painting emission robustness weight (uniform genotype mixture).
     selector_switch_probability: float64 [B-1] meiotic switch probability per boundary (pedigree map).
+    measured_morgans:  float64 [B-1] measured map length (Morgans) between adjacent bin centres
+                       (prepare.measured_coordinates; release 3.2): 0 where no supplied map or stated rate
+                       measures it.
     genotype_likelihoods: float64 [N, M, 3] normalised raw GLs at the selected markers.
     observed:          bool [N, M] read depth > 0 at the selected markers.
     state_classes:     int16 [N, B, 2] painting MAP state class per sample, bin and track; -1 = unknown
@@ -102,6 +107,7 @@ class PreparedComponent:
     factors: SourceFactors
     robustness_epsilon: float
     selector_switch_probability: np.ndarray
+    measured_morgans: np.ndarray
     genotype_likelihoods: np.ndarray
     observed: np.ndarray
     state_classes: np.ndarray
@@ -195,6 +201,12 @@ class ChromosomeScores:
         eligible edge, in row-major order (the same for every chromosome of a run).
     junction_log_cdf: float64 [D] log P(the junctions that c inherits from p and detects are at most c's own
         count) under linked transmission (pedigree.junctions.linked_log_cdf, release 2.16).
+    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (release 3.2;
+        PreparedComponent.measured_morgans, each interval at most ExposureConfig.unit_morgans; 0 without a
+        measured map; NaN in earlier records).
+    edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length
+        over which the pair (child and both panel parents) is exposed: each measured interval between adjacent
+        bins counts as far as it is exposed at both ends (release 3.2; None in earlier records).
     """
 
     contig: str
@@ -213,6 +225,9 @@ class ChromosomeScores:
     scored_component_count: int
     junction_dyads: np.ndarray
     junction_log_cdf: np.ndarray
+    scored_morgans: float = float("nan")
+    edge_exposed_morgans: np.ndarray | None = None
+    pair_exposed_morgans: np.ndarray | None = None
 
 
 # ChromosomeScores fields stacked whole ([C, N], [C, T], [C, D]) and the [N, N] fields of which the genome
@@ -244,7 +259,9 @@ class GenomeScores:
              of non-edges and self coverage) are never read by the decision or the report.
     zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C];
     informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
-    junction_log_cdf float64 [C, D] (ChromosomeScores).
+    junction_log_cdf float64 [C, D] (ChromosomeScores); scored_morgans float64 [C] (NaN where unknown);
+    edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier
+    records).
     """
 
     sample_ids: tuple[str, ...]
@@ -264,6 +281,9 @@ class GenomeScores:
     informative_markers: np.ndarray
     junction_dyads: np.ndarray
     junction_log_cdf: np.ndarray
+    scored_morgans: np.ndarray | None = None
+    edge_exposed_morgans: np.ndarray | None = None
+    pair_exposed_morgans: np.ndarray | None = None
 
     @classmethod
     def stack(cls, sample_ids: tuple[str, ...], panel: CandidatePanel, chromosomes,
@@ -277,7 +297,8 @@ class GenomeScores:
         edges = np.argwhere(eligibility.parents).astype(np.int64)
         flat = edges[:, 0] * n_samples + edges[:, 1]
         columns = {name: [] for name in _STACKED_FIELDS + _EDGE_FIELDS}
-        contigs, total_bins, markers = [], [], []
+        contigs, total_bins, markers, morgans = [], [], [], []
+        edge_morgans, pair_morgans = [], []
         dyads = np.zeros((0, 2), dtype=np.int64)
         for value in chromosomes:
             # The oriented dyads follow the eligibility only, so they are the same on every chromosome.
@@ -289,12 +310,19 @@ class GenomeScores:
                 raise ValueError("chromosome scores orient different dyads")
             contigs.append(value.contig)
             total_bins.append(value.total_bins)
+            morgans.append(float(getattr(value, "scored_morgans", float("nan"))))
             markers.append(value.informative_markers)
             for name in _STACKED_FIELDS:
                 columns[name].append(np.array(getattr(value, name), copy=True))
             for name in _EDGE_FIELDS:
                 columns[name].append(np.asarray(getattr(value, name), dtype=np.float64).reshape(-1)[flat])
-            del value  # before the next record is decoded
+            exposed = getattr(value, "edge_exposed_morgans", None)
+            edge_morgans.append(np.zeros(len(flat)) if exposed is None
+                                else np.asarray(exposed, dtype=np.float64).reshape(-1)[flat])
+            exposed = getattr(value, "pair_exposed_morgans", None)
+            pair_morgans.append(np.zeros(len(value.pair_exposed)) if exposed is None
+                                else np.array(exposed, dtype=np.float64, copy=True))
+            del value, exposed  # before the next record is decoded
 
         def stacked(name, dtype=np.float64):
             return np.ascontiguousarray(np.stack(columns.pop(name)), dtype=dtype)
@@ -306,7 +334,10 @@ class GenomeScores:
             total_bins=np.asarray(total_bins, dtype=np.float64),
             junctions=stacked("junctions"), callable_bins=stacked("callable_bins"),
             informative_markers=np.asarray(markers, dtype=np.int64),
-            junction_dyads=dyads, junction_log_cdf=stacked("junction_log_cdf"))
+            junction_dyads=dyads, junction_log_cdf=stacked("junction_log_cdf"),
+            scored_morgans=np.asarray(morgans, dtype=np.float64),
+            edge_exposed_morgans=np.ascontiguousarray(np.stack(edge_morgans), dtype=np.float64),
+            pair_exposed_morgans=np.ascontiguousarray(np.stack(pair_morgans), dtype=np.float64))
 
     def edge_starts(self) -> np.ndarray:
         """int64 [N + 1]: child c's eligible edges are edges[starts[c]:starts[c + 1]] (parents ascending)."""
@@ -382,10 +413,12 @@ class ParentEdges:
 class TierReach:
     """What the chromosome resampling can release with this many informative chromosomes.
 
-    A non-M0 configuration is testable in a fit only when its edges are exposed on at least
-    ``minimum_exposed_contigs`` distinct chromosomes, which caps the achievable support:
-    max_bootstrap_support = fraction of this run's bootstrap draws with that many distinct
-    chromosomes; max_loco_support = 1 if C - 1 >= minimum_exposed_contigs else 0.
+    A non-M0 configuration is testable in a fit only when its edges are exposed on chromosomes holding at least
+    ExposureConfig.minimum_exposed_units map units (release 3.2), which caps the achievable support:
+    max_bootstrap_support = fraction of this run's bootstrap draws whose distinct chromosomes hold that many units;
+    max_loco_support = fraction of the leave-one-out fits that do. ``minimum_exposed_contigs`` is the number of
+    chromosomes shorter than one unit that the gate needs; ``minimum_contigs_tier_*`` count such chromosomes too
+    (longer chromosomes need fewer). informative_units: the run's informative chromosomes' map units.
     tier_*_reachable: whether those caps meet the tier thresholds. minimum_contigs_tier_*: the
     smallest chromosome count for which they would (exact combinatorics). ``statement``: one line
     for the log and reports.
@@ -400,6 +433,8 @@ class TierReach:
     minimum_contigs_tier_a: int
     minimum_contigs_tier_b: int
     statement: str
+    informative_units: float = float("nan")
+    unit_morgans: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -423,6 +458,8 @@ class PedigreeReport:
     chromosome_summary: pd.DataFrame
     # Release 2.17: released-edge relative-proxy contrasts (pedigree.relatives; None in earlier records).
     relative_contrasts: pd.DataFrame | None = None
+    # Release 3.2: the sibling-as-parent guard's call per released edge (pedigree.guard; None in earlier records).
+    sibling_guard: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -439,6 +476,8 @@ class PedigreeProduct:
     panel:    the fixed M2 candidate panel (trios and screen utilities).
     report:   report tables.
     tie_events: full-data-fit decisions taken inside a tie (``maths.ties.TieCounter`` record; release 2.1).
+    sibling_guard: the guard's summary (release 3.2; edges tested and withheld). ``edges``, ``calls`` and ``tier_a``
+              are the views after the guard.
     """
 
     sample_ids: tuple[str, ...]
@@ -457,6 +496,7 @@ class PedigreeProduct:
     panel: CandidatePanel
     report: PedigreeReport = field(repr=False)
     tie_events: dict = field(default_factory=dict)
+    sibling_guard: dict = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------------------- identities
@@ -465,8 +505,10 @@ def _identity(config_part: dict, upstream: dict) -> dict:
 
 
 def prepared_identity(file, config, genetic_map) -> dict:
-    """Prepared factors <- this contig's painting and evidence records, preparation settings, map."""
-    return _identity({"preparation": config.preparation}, {
+    """Prepared factors <- this contig's painting and evidence records, preparation settings, map (and whether its
+    fallback rate is measured)."""
+    return _identity({"preparation": config.preparation,
+                      "rate_is_measured": config.exposure.rate_is_measured}, {
         "painting": file.info(PAINTING_KEY).identity, "evidence": file.info(EVIDENCE_KEY).identity,
         "genetic_map": json_digest(genetic_map.identity())})
 
@@ -510,10 +552,12 @@ def exclusion_identity(file, config, dyads: np.ndarray, *, certificate=None) -> 
 
 
 def product_identity(store, contigs, informative, config, eligibility, panel,
-                     *, scores_key=SCORES) -> dict:
-    """The pedigree <- every contig's prepared and scores records, the panel and all settings (the
-    exclusion targets and evidence are a deterministic function of these)."""
+                     *, scores_key=SCORES, relatedness=None) -> dict:
+    """The pedigree <- every contig's prepared and scores records, the panel, the relatedness product (the guard)
+    and all settings (the exclusion targets and evidence are a deterministic function of these)."""
     upstream = {"eligibility": eligibility.identity(), "panel": array_digest(panel.trios)}
+    if relatedness is not None:
+        upstream["relatedness"] = relatedness
     for contig in contigs:
         file = store.contig(contig)
         upstream[f"prepared/{contig}"] = file.info(PREPARED).identity
@@ -536,6 +580,7 @@ def encode_prepared(value: PreparedChromosome) -> dict:
                     right_weight=c.factors.right_weight, available=c.factors.available,
                     robustness_epsilon=c.robustness_epsilon,
                     selector_switch_probability=c.selector_switch_probability,
+                    measured_morgans=c.measured_morgans,
                     genotype_likelihoods=c.genotype_likelihoods, observed=c.observed,
                     state_classes=c.state_classes, information_exponent=c.information_exponent)
                     for c in value.components])
@@ -549,6 +594,7 @@ def decode_prepared(record: dict) -> PreparedChromosome:
         factors=SourceFactors(c["initial"], c["right_weight"], c["available"]),
         robustness_epsilon=float(c["robustness_epsilon"]),
         selector_switch_probability=c["selector_switch_probability"],
+        measured_morgans=c["measured_morgans"],
         genotype_likelihoods=c["genotype_likelihoods"], observed=c["observed"],
         state_classes=c["state_classes"], information_exponent=c["information_exponent"])
         for c in record["components"])
@@ -608,7 +654,7 @@ def encode_product(value: PedigreeProduct) -> dict:
         eligibility=value.eligibility,
         panel=dict(trios=value.panel.trios, screen_scores=value.panel.screen_scores),
         report={field.name: getattr(value.report, field.name) for field in fields(value.report)},
-        tie_events=dict(value.tie_events))
+        tie_events=dict(value.tie_events), sibling_guard=dict(value.sibling_guard))
 
 
 def _decode_calls(record: dict) -> PedigreeCalls:
@@ -630,7 +676,8 @@ def decode_product(record: dict) -> PedigreeProduct:
         family_solve=record["family_solve"], exclusion=record["exclusion"],
         eligibility=record["eligibility"],
         panel=CandidatePanel(record["panel"]["trios"], record["panel"]["screen_scores"]),
-        report=PedigreeReport(**record["report"]), tie_events=dict(record.get("tie_events", {})))
+        report=PedigreeReport(**record["report"]), tie_events=dict(record.get("tie_events", {})),
+        sibling_guard=dict(record.get("sibling_guard", {})))
 
 
 # ------------------------------------------------------------------------------- readers

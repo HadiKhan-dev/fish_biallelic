@@ -1,203 +1,166 @@
-"""Phase metrics of the final calls against the simulated truth (evaluation only).
+"""Phase metrics of the released family phase against the simulated truth (evaluation only; release 3.2).
 
-Both kernels take, for one chromosome, the final phased calls int8 [N, L, 2] (-1 unknown, 0 REF, 1 ALT), the
-true alleles int8 [N, L, 2] (maternal, paternal) and the supported component of every site int [L] (-1 between
-components). Samples are counted in parallel and summed in sample order: integer counts, independent of the
-thread count.
+Per sample, a released phase set is a maximal run of the sample's sites inside one painting component that none of the
+sample's released phase breaks separates (family phase's per-sample ``phase_breaks``: boundary i lies between sites
+i and i + 1; sites outside every component belong to no set). Phase is scored only at the sample's scored sites:
+correctly called true heterozygotes (both alleles called, called genotype equal to the true genotype, true genotype
+heterozygous) that are released phased (inside a component, displayed phase not undetermined: frame_undetermined
+bit 1 clear). A scored site's orientation is flipped when its first released allele differs from the first (maternal)
+true allele.
+
+- ``set_aligned_errors`` (sites): per set, the scored sites on its minority orientation (one strand alignment per set);
+- ``switch_errors`` (events): orientation changes between consecutive scored sites of a set;
+- ``long_switches`` (events): within a set, the orientation runs (maximal stretches of consecutive scored sites of one
+  orientation) of at least LONG_SWITCH_MIN_RUN sites are kept in order, and each orientation change between
+  consecutive kept runs is one long switch (a short opposite run between two long runs of one orientation is none);
+- ``phase_sets``: sets holding at least one scored site; a set's span (bp) runs from its first to its last scored
+  site, and the N50 is taken over these spans;
+- ``genotype_errors``: called genotypes (both alleles called) that differ from the true genotype, at every site. They
+  are reported separately and never enter the phase counts;
+- ``phased_true_heterozygotes`` / ``correct_true_heterozygotes``: scored sites over correctly called true
+  heterozygotes at every site (the phased share).
+Released (truth-free) sets, what a reader of the exported phase sets sees: sets holding at least one called
+heterozygote released phased, spanning first to last such site (``released_phase_sets``, their N50).
+
+These are the definitions of the lab scorer the releases since 3.0 were judged with. Samples are scored one at a time;
+every count is an integer, so results do not depend on the thread count.
 """
 from __future__ import annotations
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 
-
-@njit(cache=True, parallel=True)
-def phase_counts(calls, truth, components):
-    """Count called coverage and phase errors without crossing unsupported links.
-
-    Returns int64 [7]: called_alleles, called_genotypes, genotype_errors, eligible_heterozygotes,
-    phase_comparisons, phase_switch_errors, component_aligned_allele_errors.
-
-    Compare consecutive true heterozygotes only when both calls have the right
-    genotype and belong to the same supported component. An uncalled/incorrect
-    intervening heterozygote breaks the comparison. Allele mismatch counts are
-    aligned by one arbitrary strand swap per sample and component.
-    """
-    samples, sites, _ = calls.shape
-    result = np.zeros((samples, 7), dtype=np.int64)
-    component_count = max(0, int(components.max()) + 1)
-    for sample in prange(samples):
-        direct = np.zeros(component_count, dtype=np.int64)
-        swapped = np.zeros(component_count, dtype=np.int64)
-        previous_valid = False
-        previous_component = -1
-        previous_flip = False
-        for site in range(sites):
-            a, b = calls[sample, site]
-            x, y = truth[sample, site]
-            component = components[site]
-            result[sample, 0] += int(a >= 0) + int(b >= 0)
-            complete = a >= 0 and b >= 0
-            result[sample, 1] += int(complete)
-            correct = complete and a + b == x + y
-            result[sample, 2] += int(complete and not correct)
-            if component >= 0:
-                direct[component] += int(a >= 0 and a != x) + int(b >= 0 and b != y)
-                swapped[component] += int(a >= 0 and a != y) + int(b >= 0 and b != x)
-            if x != y:
-                valid = correct and component >= 0
-                result[sample, 3] += int(valid)
-                flip = a != x
-                if valid and previous_valid and component == previous_component:
-                    result[sample, 4] += 1
-                    result[sample, 5] += int(flip != previous_flip)
-                previous_valid = valid
-                previous_component = component
-                previous_flip = flip
-        for component in range(component_count):
-            result[sample, 6] += min(direct[component], swapped[component])
-    return result.sum(axis=0)
-
-
-@njit(cache=True, parallel=True)
-def long_switch_counts(calls, truth, components, minimum_runs):
-    """Count long-range orientation changes of true heterozygotes, per run threshold.
-
-    Returns int64 [R] for the R thresholds of ``minimum_runs`` (int64).
-
-    Orientation runs are formed over correct-genotype true heterozygotes of a
-    supported component, skipping (bridging) uncalled and wrong-genotype ones,
-    so one bad call at a switch point does not hide the switch. Runs break at
-    orientation and component changes. A change within one component counts
-    for threshold t when both adjacent runs hold at least t heterozygotes;
-    isolated flips and short flipped stretches are not long switches.
-    """
-    samples, sites, _ = calls.shape
-    result = np.zeros((samples, len(minimum_runs)), dtype=np.int64)
-    for sample in prange(samples):
-        # left: length of the run before the current one when an orientation
-        # change (not a component change) separates them; 0 otherwise.
-        left = length = 0
-        run_flip = False
-        run_component = -1
-        for site in range(sites):
-            a, b = calls[sample, site]
-            x, y = truth[sample, site]
-            component = components[site]
-            if x == y or component < 0 or a < 0 or b < 0 or a + b != x + y:
-                continue
-            flip = a != x
-            if length and component == run_component and flip == run_flip:
-                length += 1
-                continue
-            if left:
-                shorter = min(left, length)
-                for index in range(len(minimum_runs)):
-                    result[sample, index] += int(shorter >= minimum_runs[index])
-            left = length if length and component == run_component else 0
-            length = 1
-            run_flip = flip
-            run_component = component
-        if left:
-            shorter = min(left, length)
-            for index in range(len(minimum_runs)):
-                result[sample, index] += int(shorter >= minimum_runs[index])
-    return result.sum(axis=0)
+# Long switches: both orientation runs around the change hold at least this many scored sites.
+LONG_SWITCH_MIN_RUN = 20
+# Per-sample counts returned by released_phase_counts, in this column order.
+SAMPLE_COLUMNS = ("called_genotypes", "genotype_errors", "correct_true_heterozygotes", "phased_true_heterozygotes",
+                  "phase_sets", "set_aligned_errors", "switch_errors", "long_switches", "released_phase_sets")
 
 
 @njit(cache=True)
-def _phase_sets_of_sample(calls, truth, components, undetermined, positions, spans):
-    """One sample's exported phase sets (release 2.3; evaluation only).
+def _sample_phase(calls, truth, set_ids, undetermined, positions, minimum_run, spans, released_spans):
+    """One sample's released-phase counts (module docstring).
 
-    calls, truth int8 [L, 2]; components int [L] (-1 between components); undetermined bool [L] (the displayed phase
-    of the site is undetermined: family phase's frame_undetermined bit 1); positions int64 [L]; spans int64 [L]
-    (output buffer). Components are already split at the sample's explicit phase boundaries. Component/piece
-    changes or sites outside components end a set. An undetermined site is unphased but does not break the
-    surrounding set, matching the exported PS. Returns int64 [4]: allele errors aligned
-    by one strand swap per phase set (undetermined called sites add their per-site minimum, i.e. genotype-level
-    errors only), phase sets holding at least two called heterozygotes, called alleles at undetermined sites, and the
-    number of spans written (bp from the first to the last called heterozygote of each such set)."""
-    out = np.zeros(4, dtype=np.int64)
-    direct = swapped = 0
-    hets = 0
+    calls, truth int8 [L, 2]; set_ids int64 [L] (phase_set_ids: the sample's released set of each site, -1 outside
+    components); undetermined bool [L] (displayed phase undetermined); positions int64 [L]; minimum_run int (long
+    switches); spans, released_spans int64 [L] output buffers. Returns int64 [9] in SAMPLE_COLUMNS order; the first
+    ``phase_sets`` entries of ``spans`` and the first ``released_phase_sets`` of ``released_spans`` are written.
+    """
+    out = np.zeros(9, dtype=np.int64)
+    # The open scored set: its id (-1: none), scored sites, flipped sites, first/last scored position, the previous
+    # scored site's orientation, the current orientation run (orientation, length) and the last kept long run's
+    # orientation (-1: none yet in this set).
+    current = -1
+    scored = flipped = 0
     first = last = 0
-    current = -2               # component of the open set (-2: no open set)
-    for site in range(calls.shape[0]):
-        a, b = calls[site, 0], calls[site, 1]
-        x, y = truth[site, 0], truth[site, 1]
-        component = components[site]
-        d = int(a >= 0 and a != x) + int(b >= 0 and b != y)
-        w = int(a >= 0 and a != y) + int(b >= 0 and b != x)
-        closes = component < 0 or (current != -2 and component != current)
-        if closes and current != -2:
-            out[0] += min(direct, swapped)
-            if hets >= 2:
-                out[1] += 1
-                spans[out[3]] = last - first
-                out[3] += 1
-            direct = swapped = hets = 0
-            current = -2
-        if component < 0:
+    previous = 0
+    run_flip = run_length = 0
+    kept = -1
+    # The open released set: id (-1: none), first/last phased called heterozygote position.
+    released = -1
+    released_first = released_last = 0
+    for site in range(calls.shape[0] + 1):
+        end = site == calls.shape[0]
+        a = b = x = y = 0
+        set_id = -1
+        if not end:
+            a, b = calls[site, 0], calls[site, 1]
+            x, y = truth[site, 0], truth[site, 1]
+            set_id = set_ids[site]
+        called = (not end) and a >= 0 and b >= 0
+        correct = called and a + b == x + y
+        if called:
+            out[0] += 1
+            out[1] += int(not correct)
+        phased = called and set_id >= 0 and a != b and not undetermined[site]
+        if released >= 0 and (end or (phased and set_id != released)):
+            released_spans[out[8]] = released_last - released_first
+            out[8] += 1
+            released = -1
+        if phased:
+            if released < 0:
+                released = set_id
+                released_first = positions[site]
+            released_last = positions[site]
+        score = correct and x != y
+        if score:
+            out[2] += 1
+        score = score and phased
+        if current >= 0 and (end or (score and set_id != current)):
+            # Close the open set: its last run, then the set's counts and span.
+            if run_length >= minimum_run:
+                out[7] += int(kept >= 0 and kept != run_flip)
+            out[4] += 1
+            out[5] += min(flipped, scored - flipped)
+            spans[out[4] - 1] = last - first
+            current = -1
+        if not score:
             continue
-        if undetermined[site]:
-            out[0] += min(d, w)
-            out[2] += int(a >= 0) + int(b >= 0)
-            continue
-        if current == -2:
-            current = component
-        direct += d
-        swapped += w
-        if a >= 0 and b >= 0 and a != b:
-            if hets == 0:
-                first = positions[site]
-            last = positions[site]
-            hets += 1
-    if current != -2:
-        out[0] += min(direct, swapped)
-        if hets >= 2:
-            out[1] += 1
-            spans[out[3]] = last - first
-            out[3] += 1
+        flip = int(a != x)
+        out[3] += 1
+        if current < 0:
+            current = set_id
+            scored = flipped = 0
+            first = positions[site]
+            run_flip, run_length, kept = flip, 0, -1
+        elif flip != previous:
+            out[6] += 1
+            if run_length >= minimum_run:
+                out[7] += int(kept >= 0 and kept != run_flip)
+                kept = run_flip
+            run_flip, run_length = flip, 0
+        run_length += 1
+        scored += 1
+        flipped += flip
+        last = positions[site]
+        previous = flip
     return out
 
 
-def phase_set_components(components, boundaries):
-    """Split components after each released boundary (marker i separates i and i+1)."""
+def phase_set_ids(components, boundaries):
+    """int64 [L]: a sample's released phase set of every site (-1 outside components): a new set starts at each
+    component change and after each released boundary (marker i separates sites i and i + 1)."""
+    components = np.asarray(components)
     cut = np.zeros(len(components), dtype=np.bool_)
     cut[1:] = components[1:] != components[:-1]
     indices = np.asarray(boundaries, dtype=np.int64) + 1
     cut[indices[(indices > 0) & (indices < len(components))]] = True
-    return np.where(components >= 0, np.cumsum(cut), -1)
+    return np.where(components >= 0, np.cumsum(cut), -1).astype(np.int64)
 
 
-def phase_set_counts(calls, truth, components, undetermined, positions, *, phase_breaks=None):
-    """Released-phase-set metrics: (ps_aligned_allele_errors, phase_sets, undetermined_called_alleles, spans).
+def released_phase_counts(calls, truth, components, undetermined, positions, phase_breaks=None, *,
+                          minimum_run=LONG_SWITCH_MIN_RUN):
+    """Per-sample released-phase counts of one chromosome (module docstring).
 
-    ``undetermined`` is bool [N, L] or None. ``phase_breaks`` optionally supplies one array of released marker
-    boundaries per sample, in the calls' sample order. Boundary i splits before site i+1. Component changes also
-    split sets. Displayed-undetermined sites contribute unordered errors without breaking the surrounding PS;
-    its phased flanks keep one strand alignment, exactly as exported.
+    ``calls`` int8 [N, L, 2] (released alleles, -1 unknown); ``truth`` int8 [N, L, 2] (maternal, paternal);
+    ``components`` int [L] (-1 between components); ``undetermined`` bool [N, L] or None (none undetermined);
+    ``positions`` int64 [L]; ``phase_breaks``: one array of released marker boundaries per sample (calls' order) or
+    None. Returns (counts int64 [N, len(SAMPLE_COLUMNS)], [per-sample scored-set spans], [per-sample released-set
+    spans]); spans in bp.
     """
+    calls, truth = np.asarray(calls), np.asarray(truth)
     samples, sites, _ = calls.shape
-    if undetermined is None:
-        undetermined = np.zeros((samples, sites), dtype=np.bool_)
+    if truth.shape != calls.shape:
+        raise ValueError("released and true allele axes differ")
     positions = np.ascontiguousarray(positions, dtype=np.int64)
-    components = np.ascontiguousarray(components)
-    buffer = np.empty(sites + 1, dtype=np.int64)
-    errors = sets = loose = 0
-    spans = []
+    components = np.asarray(components)
+    counts = np.zeros((samples, len(SAMPLE_COLUMNS)), dtype=np.int64)
+    spans, released_spans = [], []
+    buffer = np.empty(sites, dtype=np.int64)
+    released_buffer = np.empty(sites, dtype=np.int64)
+    no_undetermined = np.zeros(sites, dtype=np.bool_)
     for sample in range(samples):
-        sample_components = components
-        if phase_breaks is not None and len(phase_breaks[sample]):
-            sample_components = phase_set_components(components, phase_breaks[sample])
-        result = _phase_sets_of_sample(np.ascontiguousarray(calls[sample]), np.ascontiguousarray(truth[sample]),
-                                       sample_components, np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
-                                       positions, buffer)
-        errors += int(result[0])
-        sets += int(result[1])
-        loose += int(result[2])
-        spans.append(buffer[:int(result[3])].copy())
-    return errors, sets, loose, (np.concatenate(spans) if spans else np.zeros(0, dtype=np.int64))
+        boundaries = () if phase_breaks is None else phase_breaks[sample]
+        result = _sample_phase(np.ascontiguousarray(calls[sample], dtype=np.int8),
+                               np.ascontiguousarray(truth[sample], dtype=np.int8),
+                               phase_set_ids(components, boundaries),
+                               no_undetermined if undetermined is None else
+                               np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
+                               positions, int(minimum_run), buffer, released_buffer)
+        counts[sample] = result
+        spans.append(buffer[:int(result[4])].copy())
+        released_spans.append(released_buffer[:int(result[8])].copy())
+    return counts, spans, released_spans
 
 
 def n50(lengths) -> int:

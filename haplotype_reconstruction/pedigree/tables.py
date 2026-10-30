@@ -227,6 +227,8 @@ def diagnostics(decision: Decision, config: PedigreeConfig) -> pd.DataFrame:
             "AdjustedAncestryJunctionBurden": float(decision.orientation.adjusted_burden[child]),
             "AncestryPaintingCallabilityFraction": float(decision.orientation.callability[child]),
             "InformativeContigCount": int(decision.informative[child]),
+            "InformativeMapUnits": (float(decision.informative_units[child])
+                                    if decision.informative_units is not None else np.nan),
             "LocalStateBootstrapFraction": evidence.state_bootstrap[child],
             "LocalConfigurationBootstrapFraction": evidence.configuration_bootstrap[child],
             "GraphConfigurationBootstrapFraction": evidence.configuration_graph_bootstrap[child],

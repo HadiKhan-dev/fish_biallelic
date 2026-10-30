@@ -251,7 +251,7 @@ final state. Label-pair posteriors per bin become ordered allele posteriors per 
 Records before the meiosis chains (schema below 4) are not read: rerun the stage. Evaluation and export read `sample_ids`,
 `positions`, `component_ids`, `calls` and the released ambiguity fields. Export starts phase sets at component edges
 and explicit phase breaks. Unphased calls are written unphased without splitting the set, and evaluation scores those
-same sets. `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`, `sites`, `components`, `sweeps`,
+same sets ([simulation](../simulation.md#phase-pedigree-and-map-metrics)). `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`, `sites`, `components`, `sweeps`,
 `settled`, `objective` (final J), `junction_candidates`, `withheld_joins`, `tie_breaks`, `called_alleles`,
 `phased_heterozygotes`, `unphased_heterozygotes`, `phase_sets` and `elapsed_seconds`.
 

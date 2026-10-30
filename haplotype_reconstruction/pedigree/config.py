@@ -70,9 +70,20 @@ class ExposureConfig:
     minimum_pair_exposed_bins: float = 1.0
     # Exposed bins / total painting bins of the selected chromosomes.
     minimum_exposed_fraction: float = 0.10
-    # Distinct exposed chromosomes in a fit (bootstrap draws count once). With the resampling
-    # thresholds this makes Tier B unreachable below 5 informative chromosomes (see resampling.reach).
-    minimum_exposed_contigs: int = 3
+    # Working map units a fit's exposed chromosomes must hold (release 3.2; bootstrap draws count once). A
+    # chromosome counts max(1, its scored map length / unit_morgans) units, and an edge (or panel pair) there
+    # max(1, the map length it is exposed over / unit_morgans): an unlinked chromosome is an independent replicate
+    # however short, and a long one holds several nearly independent stretches (one meiosis's transmission
+    # correlation between loci d Morgans apart is exp(-2 d) under Haldane, 0.14 at 1 Morgan). With the resampling
+    # thresholds Tier B needs 5 chromosomes shorter than unit_morgans, fewer when they are longer (resampling.reach).
+    # Lengths are measured by a supplied genetic map, over the span its knots cover, or by a stated rate
+    # (rate_is_measured); the fallback rate, and a map's extrapolated tails, are placeholders that measure no
+    # recombination (pedigree.prepare.measured_coordinates), so a chromosome with neither counts one unit.
+    minimum_exposed_units: float = 3.0
+    unit_morgans: float = 1.0
+    # [genetic_map] rate_is_measured: the fallback rate is the organism's stated genome-wide average, so map lengths
+    # count from it where no supplied map covers them (pedigree.prepare.measured_coordinates).
+    rate_is_measured: bool = False
     # Report-only thresholds of the C/X compatibility diagnostics (never gate a decision).
     report_edge_coverage: float = 0.95
     report_pair_explainability: float = 0.95
@@ -143,7 +154,10 @@ class TierThresholds:
 class ReleaseConfig:
     """Tier A / Tier B release rules (Tier B is the primary product)."""
 
-    minimum_informative_contigs: int = 3
+    # A tier call needs the child's own per-chromosome state evidence to pick a unique winner on chromosomes holding
+    # at least this many map units (ExposureConfig.unit_morgans; release 3.2: three chromosomes shorter than one unit
+    # or without a genetic map).
+    minimum_informative_units: float = 3.0
     tier_a: TierThresholds = field(default_factory=lambda: TierThresholds(0.95, 0.95, 0.95))
     tier_b: TierThresholds = field(default_factory=lambda: TierThresholds(0.70, 0.70, 0.80))
     # A released inferred edge needs full-data orientation log odds >= log((1 - p) / p) (3.9 nats);
@@ -165,6 +179,37 @@ class ExclusionConfig:
 
 
 @dataclass(frozen=True)
+class SiblingGuardConfig:
+    """The sibling-as-parent guard on released edges (release 3.2, pedigree.guard).
+
+    A released edge p -> c is tested when c's full-sib family in the relatedness product has enough supported
+    members, and withheld when the ratio r of p's IBD0 evidence with that family to the family's own sib-sib level
+    lies in [lower, upper] (a sib is exchangeable with the other sibs, r near 1; a parent is never IBD0 with its
+    children, r near 0).
+
+    Attributes:
+      minimum_family: an edge is tested only when c's family without p has at least this many supported members.
+      member_support: a family member counts when its family is its best placement on at least this share of
+        chromosomes (relatedness member support).
+      lower: the edge is withheld when r is at least this...
+      upper: ...and at most this (a more distant or unrelated candidate has r above 1).
+    """
+
+    minimum_family: int = 3
+    member_support: float = 0.75
+    lower: float = 0.75
+    upper: float = 1.33
+
+    def __post_init__(self) -> None:
+        if int(self.minimum_family) != self.minimum_family or self.minimum_family < 2:
+            raise ValueError("pedigree guard minimum_family must be an integer of at least 2")
+        if not 0.5 <= self.member_support <= 1.0:
+            raise ValueError("pedigree guard member_support must lie in [0.5, 1]")
+        if not 0.0 < self.lower < 1.0 < self.upper:
+            raise ValueError("pedigree guard needs 0 < lower < 1 < upper")
+
+
+@dataclass(frozen=True)
 class PedigreeConfig:
     """All pedigree settings; ``evidence_calibration`` is the only user-visible field."""
 
@@ -180,6 +225,7 @@ class PedigreeConfig:
     resampling: ResamplingConfig = field(default_factory=ResamplingConfig)
     release: ReleaseConfig = field(default_factory=ReleaseConfig)
     exclusion: ExclusionConfig = field(default_factory=ExclusionConfig)
+    guard: SiblingGuardConfig = field(default_factory=SiblingGuardConfig)
 
     def __post_init__(self) -> None:
         if self.evidence_calibration not in EVIDENCE_CALIBRATION_MODES:

@@ -346,11 +346,13 @@ A non-M0 configuration is testable in the fit only when each of its edges, and f
 exposed bins of at least `PedigreeConfig.exposure.minimum_edge_exposed_bins = 1.0` (pairs:
 `PedigreeConfig.exposure.minimum_pair_exposed_bins = 1.0`), at least
 `PedigreeConfig.exposure.minimum_exposed_fraction = 0.1` of the weighted painting bins of the fit's chromosomes, and
-exposure on at least `PedigreeConfig.exposure.minimum_exposed_contigs = 3` distinct chromosomes of positive
-multiplicity (a chromosome counts when it alone holds the minimum exposed bins; repeated bootstrap draws count once).
+exposure on chromosomes of positive multiplicity that together hold at least
+`PedigreeConfig.exposure.minimum_exposed_units = 3.0` map units (a chromosome counts, by its
+[map units](#map-length-requirement-release-32), when it alone holds the minimum exposed bins; repeated bootstrap
+draws count once).
 An untestable configuration keeps the child's M0 likelihood as its state score, so it dilutes its state's evidence
 towards M0, and its identity cannot be named (identity score −∞). This hard gate sets the
-[chromosome-count requirement](#chromosome-count-requirement). Matched-to-exposed ratios against the thresholds
+[map-length requirement](#map-length-requirement-release-32). Matched-to-exposed ratios against the thresholds
 `PedigreeConfig.exposure.report_edge_coverage = 0.95` and `PedigreeConfig.exposure.report_pair_explainability = 0.95`
 appear in the diagnostics only and never gate a decision.
 
@@ -536,9 +538,10 @@ tiers; they are not biological acceptance probabilities.
 
 ### Tier rules
 
-A tier releases a child's parent state when the full-data fit resolved the state, at least
-`PedigreeConfig.release.minimum_informative_contigs = 3` chromosomes are informative for the child (its own
-per-chromosome state evidence has a unique winner there), the state's bootstrap and LOCO fractions reach the
+A tier releases a child's parent state when the full-data fit resolved the state, the chromosomes informative for
+the child (its own per-chromosome state evidence has a unique winner there) hold at least
+`PedigreeConfig.release.minimum_informative_units = 3.0` map units (release 3.2; three chromosomes shorter than 1
+Morgan or with neither a map nor a stated rate), the state's bootstrap and LOCO fractions reach the
 tier's state bootstrap and LOCO cut-offs, and an M0 state survives every alternative prior. It releases the exact
 configuration when, in addition, the local configuration is also the graph's choice without a tie conflict, the
 configuration's bootstrap and LOCO fractions as local winner and as graph choice reach the cut-offs, an M0
@@ -584,25 +587,77 @@ and decisively oriented; retained marginal edges replace sides, and no complete 
 The complete view is the full-data acyclic selection itself: a best guess for every target, displaced and tied
 children included, and never a release.
 
-## Chromosome-count requirement
+## Map-length requirement (release 3.2)
 
-The exposure gate needs at least `PedigreeConfig.exposure.minimum_exposed_contigs = 3` distinct exposed chromosomes
-in a fit. In a bootstrap replicate that draws fewer distinct chromosomes, or a LOCO refit that leaves fewer, every
-non-M0 configuration is untestable, the state evidence cannot separate M0 from M1, and nothing is called, not even
-M0. The support of any call (for a target with at least one eligible candidate) is therefore at most the fraction of
-replicates that draw at least three distinct chromosomes, 0.22, 0.66, 0.90 and 0.98 in expectation for C = 3, 4, 5
-and 6 informative chromosomes, and its LOCO support is 0 unless C − 1 ≥ 3. With the cut-offs above, Tier B can
-release nothing with fewer than 5 informative chromosomes and Tier A nothing with fewer than 6
-(`pedigree.tier_b_minimum_contigs` derives the Tier-B count from the configuration by exact combinatorics).
+How much material a run has is measured in map units, not chromosomes. An informative chromosome holds
+max(1, L / U) units:
+- U = `PedigreeConfig.exposure.unit_morgans = 1.0` Morgan.
+- L is the measured map length of its scored components: over adjacent bins of each component, the measured map
+  length between the bins' centres, each interval at most U. Gaps between components add nothing.
+- A length counts only where it is measured, as `PedigreeConfig.exposure.rate_is_measured = False` sets by default:
+  - a supplied genetic map (`[genetic_map] file`) measures the part of each interval that lies between its first and
+    last knots;
+  - a stated rate counts everywhere: `[genetic_map] rate_is_measured = true` declares `rate_cm_per_mb` to be the
+    organism's genome-wide average ([genetic maps](../genetic_maps.md#map-length-as-pedigree-material-release-32));
+  - otherwise the fallback rate, which also extends a map's tails, is a placeholder that measures no recombination,
+    and a chromosome with neither a map nor a stated rate counts one unit.
+- An edge (or panel pair) earns max(1, E / U) units on a chromosome, where E is the measured map length it is
+  exposed over. Each interval between adjacent bins counts as far as the edge is exposed at both its ends: the
+  smaller of its two posterior-expected exposures. Painting bins hold about equal numbers of markers, not equal map
+  lengths, so an edge exposed only on a short, marker-dense island counts that island's length: one unit. The
+  smaller exposure is the largest joint probability the two marginals allow: an optimistic endpoint approximation,
+  not a calibrated joint exposure. An interval exposed at both ends counts in full, even a sparse stretch with no
+  bins inside, up to the one-unit cap.
 
-The run reacts in three places. Before any computation, the driver stops a genome-wide run configured with fewer than
-3 contigs and warns, when fewer than 5 are configured, that no Tier-B parent can be released, so that family phase
-and recombination will have no parent edges. After preparation, the stage stops when fewer than 3 chromosomes are
-informative. At the end, the product's `TierReach` records the informative-chromosome count, the largest bootstrap
-support this run's draws allow, the largest LOCO support, whether Tier A and Tier B are reachable and the minimum
-chromosome counts of both; its one-line statement is printed to the log and published in `OUTPUT/pedigree/summary.json`
-(`reach`). Omitted contigs lower the informative
-count, so the final statement, not the configured contig count, is authoritative.
+Why U = 1 Morgan. Map units are a working measure of material, not a count of independent replicates:
+- One meiosis's transmission at two loci d Morgans apart is correlated by exp(−2d), which is 0.14 at 1 Morgan.
+  Averages over adjacent 1-Morgan blocks still correlate about 0.33, so a long chromosome holds several partly
+  independent stretches, not that many replicates.
+- An unlinked chromosome is an independent replicate however short, so it counts at least once.
+- Resampling still draws whole chromosomes, and the stage still needs at least three informative chromosomes. One
+  or two long chromosomes are not supported.
+
+**Effect on support.** The [exposure gate](#configuration-likelihoods-and-the-exposure-gate) needs an edge's units on
+its exposed chromosomes to reach 3, so the support of any call is capped (shown for fully exposed edges):
+- bootstrap: at most the fraction of draws whose distinct chromosomes hold 3 units;
+- leave-one-out: at most the fraction of LOCO fits whose remaining chromosomes do.
+
+A child's tier call also needs its informative chromosomes (those where its own per-chromosome state evidence has a
+unique winner) to hold `PedigreeConfig.release.minimum_informative_units = 3.0` units. On each such chromosome the
+child claims at most the units its best-exposed candidate edge earns there.
+
+**Chromosomes shorter than one unit, including every run with neither a map nor a stated rate.** The rule is the earlier chromosome count:
+- the bootstrap caps are 0.22, 0.66, 0.90 and 0.98 for C = 3, 4, 5 and 6 informative chromosomes;
+- the LOCO cap is 0 unless C − 1 ≥ 3;
+- so Tier B needs 5 informative chromosomes and Tier A 6 (`pedigree.tier_b_minimum_contigs` counts such chromosomes).
+
+**Longer chromosomes** need fewer. Three chromosomes of at least 1.5 Morgans each, any two of which hold 3 units, give
+bootstrap support up to 0.89 and LOCO 1.0: Tier B is reachable, Tier A is not.
+
+**Where the run reports it.**
+- Before any computation, the driver stops a genome-wide run with fewer than 3 contigs.
+- With fewer than 5 contigs it warns that Tier B needs long chromosomes on a supplied map or a stated rate.
+- After preparation, the stage stops when fewer than 3 chromosomes are informative.
+- The product's `TierReach` states the informative chromosomes, their map units, the largest bootstrap and LOCO
+  support this run allows, and whether Tier A and Tier B are reachable. The same statement is printed to the log and
+  published in `OUTPUT/pedigree/summary.json` (`reach`).
+- Omitted contigs lower the informative count, so the final statement is authoritative.
+
+**Measured** by replaying the decision on saved scores of 12 designs:
+- **Without maps, nothing changes.** The chromosome-count rule and the map-unit rule release identical edges on
+  every design, real TroMau included.
+- **Why only supplied maps count.** The simulations infer at the fallback 5 cM/Mb but generate at 2 cM/Mb. Crediting
+  that fallback length would have opened Tier B to their 3-chromosome designs:
+  - the backcross releases 114 edges, all true (of 120);
+  - the sib-rich, metadata-free F3 releases 3 false sibling-as-parent edges that the
+    [guard](#sibling-as-parent-guard-release-32) cannot test, because its families need more chromosomes.
+- **Long chromosomes on a supplied map.** Two 3-chromosome designs were generated and inferred at 5 cM/Mb with the map
+  supplied: 5.5 Morgans, 5.5 map units.
+  - Tier B is assessable in both: bootstrap support up to 0.89, LOCO 1.0.
+  - Backcross: 118 edges released, all true, 114 of them in exact calls, against 0 under the chromosome-count rule.
+    Phase: 378 sets, 1 switch, N50 32 Mb.
+  - Sib-rich F3: the 2 false sibling-as-parent edges it releases are both withheld by the guard, whose families are
+    supported on long chromosomes (63 of 112 samples).
 
 ## Full-marker Mendelian exclusion of M0 and M1 counts
 
@@ -657,6 +712,64 @@ rules out a second observed parent. The bootstrap and LOCO fractions and `TierBS
 values, `TierBFinalStateCall` records the final call, and the exclusion evidence never enters the scores or the
 resampled fits. The release depends on the supported directions being correct and is not an unconditional accuracy
 guarantee; M0 still means no observed eligible parent, not founder generation.
+
+## Sibling-as-parent guard (release 3.2)
+
+Without cohort constraints, Tier B can release a full sib of a child as its parent: a full sib shares half its
+genome with the child, as a parent does. The guard tests each released Tier-B edge p -> c against the
+[relatedness](relatedness.md) product, which is read from genotype likelihoods alone.
+
+**The test.**
+- F is c's full-sib family: the members whose family is their best placement on at least
+  `PedigreeConfig.guard.member_support = 0.75` of the support units, without p. If c itself falls below that
+  support, F is c alone.
+- F also loses any member released as a parent or child of c or of another member: no full sib is anyone's parent or
+  child, and a parent-offspring pair inside F would lower the family's own level and inflate r. This rule was added
+  after a long-map backcross put a mother and her child in one family.
+- The edge is tested when |F| >= `PedigreeConfig.guard.minimum_family = 3`:
+
+      r = median_{s in F} LR0(p, s) / median_{s < t in F} LR0(s, t),
+
+  where LR0 is a pair's genome-wide evidence for stretches without identity by descent.
+- **A parent** of c is a parent of all c's full sibs and shares no IBD0 stretch with any of them: r near 0.
+- **A full sib** of c is a full sib of them all, exchangeable with them: r near 1.
+- **A more distant or unrelated candidate** has more IBD0 than the sibs: r above 1.
+
+**The decision.**
+- The edge is withheld when `PedigreeConfig.guard.lower = 0.75` <= r <= `PedigreeConfig.guard.upper = 1.33`.
+- Otherwise it is kept (tested), or untested when F is too small, unsupported, or has no positive sib-sib level.
+- A withheld edge leaves `ParentEdges`, so family phase and recombination do not condition on it.
+- The child's observed-parent minimum becomes its remaining released edges, and its maximum returns to 2: its count
+  becomes unresolved, including a count released without named parents.
+- A Tier-B or Tier-A call that names the withheld parent becomes unresolved (`tier_b_sibling_guard_withheld`).
+- `sibling_guard.csv` lists every released edge with |F|, r and the call. The product's `sibling_guard` summary
+  counts the edges tested and withheld.
+
+**Where it acts.** The guard tests an edge whenever the child's supported family is large enough, whether or not the
+family's parents were sampled. It abstains otherwise: in small families, in designs with too few chromosomes for
+supported families, and on real TroMau (37 of 37 released edges untested; its cohort constraints already exclude sibs
+as parents). It is a partial guard. Where it abstains, a sibling released as a parent stays released.
+
+**Measured, and its limits.** The thresholds were fixed in the 3.1 study, before the 3.2 controls.
+- Eight-chromosome F3 (saved 3.0/3.1 products): it withholds all three false edges (r = 0.77, 0.86, 1.09).
+- Independent sib-rich seed: it withholds two of three false edges (r = 0.81, 0.84). The third, a full sib, is kept at
+  r = 0.748, just below the frozen bound.
+- Long-map sib-rich F3 (5.5 Morgans over 3 chromosomes, map supplied): it withholds both false edges (r = 1.30,
+  1.24).
+- True edges: of 634 released across eleven simulated designs, 157 are tested and all are kept. TroMau-like: 23,
+  largest r 0.34. Half-sib/backcross control: 56, largest r 0.45. Random half-sib control: 78, largest r 0.57.
+- The other 477 true edges, and all of the backcross, standard, K30, long-map backcross and real TroMau edges, are
+  untested.
+- Before the parent-offspring rule above, the long-map backcross lost one true edge to the guard (r = 0.97).
+- Phase on the independent sib-rich seed, guard only, with 2 of 3 false edges withheld:
+  - set-aligned errors 102,023 -> 54,172 (sites);
+  - switch errors 30 -> 24 and long switches 9 -> 3 (events);
+  - phase sets 5,395 -> 5,470.
+
+  The missed edge's 14,359 error sites on one chromosome remain.
+- LR0 magnitudes grow with a pair's shared informative sites. At the simulated depths (5-10x) nearly every thinned
+  site is observed in both samples of a pair, so normalising LR0 per site changes no ratio. At much lower or
+  very uneven depth, a low-depth sibling could look parent-like and escape the guard.
 
 ## Products and published tables
 
@@ -931,8 +1044,9 @@ parent order's dam/sire basis.
   individual-level trio truth, so real-data calls cannot be scored for accuracy; supervised validation uses
   simulations with a known pedigree, and real data are judged by internal consistency, chromosome-level stability,
   competing-candidate margins and explicit unresolved outcomes ([validation](../validation.md)).
-- Known failure modes: fewer than 5 informative chromosomes (no chromosome-resampling Tier B call under the
-  defaults; the full-marker exclusion can still release zero- or one-parent counts), a true parent pair outside the
+- Known failure modes: fewer than 3 map units of informative chromosomes in most resamples (no Tier B call under
+  the defaults: 5 chromosomes shorter than 1 Morgan, or without a genetic map; the full-marker exclusion can still
+  release zero- or one-parent counts), a true parent pair outside the
   retained-parent screen (the M2 evidence is a lower bound; see `search_diagnostics.csv`), unsampled parents, closely
   related alternatives, long feedback loops and highly structured missingness.
 - The exclusion release assumes calibrated, independent read errors and correct supported directions. Samples

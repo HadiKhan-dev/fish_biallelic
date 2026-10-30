@@ -66,6 +66,18 @@ def screen_chromosome(prepared: PreparedChromosome, eligibility: ParentEligibili
     return ChromosomeScreen(prepared.contig, tuple(screens), prepared.informative_markers), states
 
 
+def interval_morgans(component, interval_cap: float) -> np.ndarray:
+    """float64 [B-1]: the component's measured map length between adjacent bins (PreparedComponent.measured_morgans),
+    each interval at most ``interval_cap`` (one interval is at most one map unit, however long a gap)."""
+    return np.ascontiguousarray(np.minimum(np.asarray(component.measured_morgans, dtype=np.float64), interval_cap))
+
+
+def scored_morgans(prepared: PreparedChromosome, interval_cap: float) -> float:
+    """Measured map length (Morgans) of the scored components: the capped measured lengths between adjacent bins of
+    each component (``interval_morgans``; gaps between components add nothing, and 0 without a measured map)."""
+    return float(sum(np.sum(interval_morgans(component, interval_cap)) for component in prepared.components))
+
+
 def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
                      states: list[ResidentComponent] | None, trios: np.ndarray,
                      eligibility: ParentEligibility, config: PedigreeConfig,
@@ -88,11 +100,12 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
         schedules.append(junctions.schedules(component.state_classes, component.named_alleles,
                                              component.bin_sizes))
         thetas.append(np.ascontiguousarray(component.selector_switch_probability, dtype=np.float64))
-        structure = exposure.expected_structure(state.pair_masses, component.anchored_states,
-                                                required, trios, component.factors.available,
-                                                claim_threads)
-        parts.append((component_screen.zero, component_screen.one, two, *structure, counts,
-                      callable_bins))
+        (matched, exposed, explained, pair_exposed,
+         exposed_morgans, pair_morgans) = exposure.expected_structure(
+            state.pair_masses, component.anchored_states, required, trios, component.factors.available,
+            claim_threads, interval_morgans(component, config.exposure.unit_morgans))
+        parts.append((component_screen.zero, component_screen.one, two, matched, exposed, explained,
+                      pair_exposed, counts, callable_bins, exposed_morgans, pair_morgans))
         if states is not None:
             states[index] = None    # release the component's resident arrays
         del state
@@ -123,7 +136,9 @@ def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
         informative_markers=prepared.informative_markers,
         component_count=prepared.component_count,
         scored_component_count=len(prepared.components),
-        junction_dyads=dyads, junction_log_cdf=junction_log_cdf)
+        junction_dyads=dyads, junction_log_cdf=junction_log_cdf,
+        scored_morgans=scored_morgans(prepared, config.exposure.unit_morgans),
+        edge_exposed_morgans=total(9), pair_exposed_morgans=total(10))
 
 
 def score_chromosome_selective(prepared: PreparedChromosome, one: np.ndarray,
