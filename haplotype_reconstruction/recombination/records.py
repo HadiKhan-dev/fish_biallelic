@@ -1,7 +1,7 @@
 """Recombination product types and checkpoint records.
 
-``identity/recombination``  per contig: config + identities of the family-phase record (and of the evidence
-                            record when read-free tracts are removed), the pedigree edges and the genetic map
+``identity/recombination``  per contig: config + identities of the family-phase record, the pedigree edges and the
+                            genetic map
 ``recombination``           per contig: the RecombinationProduct (frozen dataclasses of arrays)
 run ``recombination``       the per-contig RecombinationSummary rows
 """
@@ -11,17 +11,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..evidence import records as evidence_records
 from ..family_phase import records as phase_records
 from ..store.identity import json_digest, stage_identity as build_identity
 from .junctions import JunctionLocus
 from .map import RecombinationMap
-from .shared_orientation import SharedOrientationFit
 
 
 STAGE = "recombination"
 KEY = "recombination"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -45,17 +43,11 @@ class RecombinationSummary:
     observable_meioses: int
     crossovers: int
     expected_crossovers: float
-    artifact_uncertain_markers: int
+    unresolved_bins: int
     exposure_meiosis_bp: float
     covered_bp: float
     cumulative_observed_cM: float
     uncovered_bins: int
-    read_free_tracts: int
-    read_free_sample_sites: int
-    shared_family_evidence: bool
-    shared_orientation_converged: bool | None
-    shared_orientation_corrected_samples: int
-    shared_orientation_accepted_moves: int
     order_breakpoints: int
     order_breakpoint_masked_sites: int
     junction_loci: int
@@ -66,16 +58,17 @@ class RecombinationSummary:
 
 @dataclass(frozen=True)
 class RecombinationProduct:
-    """Recombination of one chromosome, conditional on the final decoder-frame phase and the fixed pedigree.
+    """Recombination of one chromosome, conditional on family phase's meiosis chains and the fixed pedigree.
 
     edge_parent/edge_child/edge_slot int64 [E]; per-edge tables packed with offsets int64 [E+1]:
-    crossovers float64 [n, 5] (left bp, right bp, homologue support left/right, assembly component: supported changes of
-    parental homologue between flanking informative markers; even crossovers within one interval are not
-    identifiable) with reported_intervals int64 [n, 2] (bin-honest, inclusive bp) and in_reversed_segment bool [n];
-    callable_spans float64 [m, 3] (between supported markers) and informative_spans float64 [k, 3] (between
-    informative markers) as (left bp, right bp, component); marker_counts int64 [E, 3] (informative, supported origin,
-    artifact-uncertain); expected_crossovers / exposure float64 [E, B] per map bin (posterior expected crossovers,
-    observable meiosis-bp).
+    crossovers float64 [n, 5] (left bp, right bp, released-homologue support left/right, assembly component: changes
+    of parental homologue between the centres of consecutive released chain bins; even crossovers within one
+    interval are not identifiable) with reported_intervals int64 [n, 2] (both bins, inclusive bp) and
+    in_reversed_segment bool [n]; callable_spans float64 [m, 3] and informative_spans float64 [k, 3] (the followed
+    stretches between released chain bins, as (left bp, right bp, component)); marker_counts int64 [E, 3] (released
+    chain bins, bins of followed stretches, of them without a released homologue); expected_crossovers / exposure
+    float64 [E, B] per map bin (working expected crossovers: Haldane interpolations conditional on the called
+    endpoint states of the released chain bins, not posterior means; followed meiosis-bp).
     """
 
     contig: str
@@ -96,7 +89,6 @@ class RecombinationProduct:
     exposure: np.ndarray
     map: RecombinationMap
     junctions: tuple[JunctionLocus, ...]
-    shared_orientation: SharedOrientationFit | None
     order_breakpoints: AppliedBreakpoints | None
     summary: RecombinationSummary
 
@@ -125,8 +117,6 @@ def stage_identity(file, edges, config, chromosome_map) -> dict:
     """Identity of a contig's recombination (module docstring)."""
     upstream = {"family_phase": file.info(phase_records.KEY).identity, "edges": edges.identity,
                 "genetic_map": json_digest(chromosome_map.identity())}
-    if config.read_free_tract_sites > 0:
-        upstream["evidence"] = file.info(evidence_records.EVIDENCE).identity
     return build_identity(STAGE, schema=SCHEMA_VERSION, config=config, upstream=upstream,
                           packages=("recombination", "family_phase"))
 

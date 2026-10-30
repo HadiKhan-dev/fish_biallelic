@@ -169,7 +169,7 @@ A run checks everything it can before computing anything:
 | [painting](methods/painting.md) | contig | diploid founder mosaics of every sample |
 | [pedigree](methods/pedigree.md) | genome | observed-parent calls with support tiers |
 | [founder refit](methods/founder_refit.md) | contig | founder alleles refitted from the painted carriers |
-| [family phase](methods/family_phase.md) | contig | pedigree-conditioned, genotype-preserving phase |
+| [family phase](methods/family_phase.md) | contig | pedigree-conditioned genotypes, phase and phase sets |
 | [recombination](methods/recombination.md) | contig | conditional maps, crossover intervals and exposure |
 | [export](#export) | contig | the final founder VCF and phased sample VCF in `OUTPUT/export` |
 

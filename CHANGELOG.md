@@ -1,5 +1,99 @@
 # Changelog
 
+## 3.0.0 (30 October 2026)
+
+This release rebuilds family phase (stage `family_phase`) from scratch and rebuilds recombination on the meiosis
+chains family phase now releases ([family phase](docs/methods/family_phase.md),
+[recombination](docs/methods/recombination.md)). Upstream stages are unchanged. Records of earlier family phase
+(schema below 4) and recombination (schema 1) are not read: rerun both stages ([migration](docs/migration.md)).
+
+**Family phase.** The 2.x scaffold, family MAP solver, root-frame repair and phase polish are replaced by one
+generative model per painting component:
+
+- every homologue is a mosaic of the painting's founder labels;
+- a homologue linked to a released parent copies one of that parent's homologues through a meiosis chain with a
+  not-a-copy state;
+- the painting's own pair emissions enter once per sample.
+
+The model's mode is found by exact block coordinate ascent; each block is one sample's sources and its children's
+gauge. Every component is solved under both tie conventions, and only their agreement is released. Every sample is
+released from the exact posterior of its block, conditional on the converged state of the others:
+
+- genotypes are called at a posterior of 0.9, so family phase may call, change or withdraw genotypes;
+- heterozygous phase is released at 0.99; phase sets are anchored per partition, so an uncertain stretch is released
+  unphased or as a new set rather than as a confident join;
+- **site model:** given its label pair, a sample carries the pair's panel alleles or, with mixture mass
+  `site_deviation` = 0.001, a uniform genotype, weighed by the sample's own reads at the site. The 2.x stages and the
+  first rebuild imputed genotypes from the panel alleles alone and never weighed the site's reads; in 52-69% of the
+  wrong calls those reads favoured the truth more than tenfold. The release is modular (label pairs from the
+  painting's emissions, alleles from the refit panel), and its scores are working conditional scores, not
+  calibrated probabilities;
+- **meiosis chains:** per parent edge and painting bin, the parental homologue the child copies, released where both
+  conventions give it a posterior of at least 0.99 (records schema 4).
+
+**Identity junctions are withheld, not resolved** (`family_phase/model.py`, `family_phase/release.py`). Where two
+panel rows continue different lineages than some samples, carriers of one row switch labels at the same bin edge
+while carriers of both keep continuous labels whose phase across the edge their own reads cannot show. Such a sample
+releases no phase join across the edge unless the parental homologue it copies there is pinned by the parent's own
+reads on both flanks, against every alternative pair the reads allow. Children do not pin (their evidence can lie
+beyond a reset), and a sample without a released parent breaks at every painting tie boundary. Relabelling the rows by
+the model's objective was tested and rejected (185 → 143,369 set-aligned errors on the TroMau-like simulation).
+
+**Recombination** follows the meiosis chains. A crossover is called between consecutive released bins of a chain
+whose parental homologues differ (reported intervals hold both bins); expected crossovers and exposure come from the
+released parity of consecutive released bins with the Haldane count conversion, as the 2.x decoder did on its
+markers. The per-meiosis decoder, the shared-orientation fit, the read-free-tract coverage and
+`[recombination] shared_family_evidence` are removed. The chain's own pairwise switch posteriors are not used: a
+homologue that leaves the copy states re-enters either parental homologue with probability 1/2, so the posterior
+routes part of many changes of homologue through not-a-copy, and copy-only counts were about 40% low on TroMau.
+
+**Owner decisions** (29 October 2026): crossovers are counted from changes of the called parental homologue, so
+expected counts are conditional on the called endpoint states rather than a full-data posterior mean; and there is
+no maximum gap, so a change of homologue across a long stretch without a released bin is called, correct in parity
+but placed only within the whole stretch (12-14 Mb on real TroMau chr3 and chr12; the 2.x decoder made no call
+across gaps above 1 Mb).
+
+**Measured** on the 2.18 saved inputs (stage replays). Phase is scored per sample and phase set, over correctly
+called true heterozygotes released phased: set-aligned errors count the sites on the minority orientation of their
+set (a wrong switch counts the sites on its smaller side), switch errors count orientation changes between
+consecutive sites, and long switches count changes between runs of at least 20 sites on both sides. Each set is
+aligned separately, so a phase break is never an error.
+
+| design | set-aligned errors (sites) | switch errors | long switches | genotype errors (first rebuild → 3.0) | correctly called true hets released phased |
+| --- | --- | --- | --- | --- | --- |
+| TroMau-like | 8,505 → 182 | 9 → 4 | 9 → 1 | 27,570 → 20,659 | 99.95% → 98.20% |
+| std seed 9217 | 167 → 26 | 205 → 20 | 0 → 0 | 17,348 → 14,177 | 100% → 98.14% |
+| f3 (no released edges) | 69,251 → 15 | 18 → 12 | 8 → 0 | 4,354 → 826 | 100% → 99.19% |
+| backcross (no released edges) | 29,269 → 2,003 | 7 → 1 | 3 → 1 | 7,979 → 5,989 | 100% → 98.80% |
+| K30 | 218 → 211 | 241 → 230 | 1 → 1 | 2,915 → 2,843 | 100% → 98.98% |
+| std (8 chromosomes) | 1,693 → 1,456 | 71 → 37 | 1 → 1 | 32,379 → 26,495 | 100% → 97.58% |
+
+- Genotype errors of the first rebuild equal the 2.18 stage's within 2%; the site model removes 18-81% of them on five
+  designs and 2.5% on K30, at a 0.03% cost in called genotypes.
+- The remaining std phase event comes from an upstream input: a chimeric panel row that no label switch reveals.
+  K30's confidently wrong joins are single-site phase errors of the founder panel (two rows carrying each other's
+  alleles at one site, already in the painting's panel), which no sample's reads can see.
+- Recombination, one-to-one matched against the true crossovers of correct edges (shipped 2.18 → 3.0; recall over all
+  true crossovers of those edges): TroMau-like precision 80.0% → 100%, recall 72.0% → 86.6%; std 97.4% → 99.6%,
+  84.6% → 88.1%; std seed 97.9% → 99.9%, 83.1% → 87.7%. Reported intervals are wider (median about 93 kb against
+  about 40 kb): changes are placed at painting-bin resolution.
+- The site model mostly abstains: on the TroMau-like simulation it withdraws 80,427 calls (7% of them wrong, against
+  0.01% of all calls), repairs 1,525 and newly miscalls 213, mostly at 3-10 reads; the other designs behave alike.
+- N ≈ 1,000 (chr1, chr8 and chr13 of a 1,003-sample simulation; the first rebuild against the shipped stage):
+  set-aligned errors 129,870 → 15,584, long switches 21 → 5, genotype errors −14%; chr1 takes 26 minutes at 6.4 GB.
+- Real TroMau: 94.0% of called heterozygotes released phased, N50 16.4 Mb; 461 crossovers, 469 expected on 28.8 Gb of
+  exposure, a 1,455 cM map (the 2.x decoder on the same family phase: 431, 531, 1,670 cM). One junction locus is flagged: at
+  1.3-2.1 Mb on chr3, 9 of 16 decidable meioses switch, as at a misordered reference segment; the removed
+  orientation fit had hidden it by "correcting" two parents.
+- End to end: the six simulated designs and real TroMau, run through every stage with this release, give
+  family-phase products byte-identical to the stage replays above on all 57 chromosomes (35 simulated, 22 TroMau),
+  and identical recombination summaries.
+- Exactness: exhaustive enumeration on tiny pedigrees gives a MAP gap of 0 and posterior errors below 2e-15; the site
+  kernel matches brute force to 2e-16.
+- Scores are conditional on the other samples' converged state and the fixed panel and pedigree. On the simulations,
+  genotype scores of at least 0.9999 are within about twice their nominal error on std and conservative on four
+  designs, but K30's are not (1,064 wrong against 61); see the methods' measured score behaviour.
+
 ## 2.18.0 (29 October 2026)
 
 This release works on the founder refit (stage `founder_refit`) and on the site filter at low read depth. The refit

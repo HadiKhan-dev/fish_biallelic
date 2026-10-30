@@ -119,41 +119,6 @@ def split_at_breakpoints(positions, components, breakpoints, bin_edges):
     return segments, np.asarray(origin, dtype=np.int32), int(excluded.sum())
 
 
-def _segment_limits(positions, segments):
-    """First and last site position of each segment."""
-    valid = np.flatnonzero(segments >= 0)
-    labels = segments[valid]
-    starts = np.r_[0, np.flatnonzero(np.diff(labels)) + 1]
-    stops = np.r_[starts[1:], len(labels)] - 1
-    limits = np.zeros((labels.max() + 1 if len(labels) else 0, 2), dtype=np.int64)
-    limits[labels[starts], 0] = positions[valid[starts]]
-    limits[labels[starts], 1] = positions[valid[stops]]
-    return limits
-
-
-def reported_intervals(crossovers, positions, segments, bin_edges, config):
-    """int64 (n, 2) reported intervals in bp (inclusive) of called crossovers (n, 5) carrying assembly components.
-
-    Where the decoder's flanking markers straddle painting-bin edges, the interval also covers the bins on both
-    sides of those edges, clipped to the call's segment of the decoded axis ``segments``.
-    """
-    limits = _segment_limits(positions, segments)
-    intervals = np.empty((len(crossovers), 2), dtype=np.int64)
-    for index, (left, right, _, _, component) in enumerate(crossovers):
-        lo, hi = int(left), int(right)
-        edges = bin_edges[int(component)]
-        inside = np.flatnonzero((edges > left) & (edges <= right))
-        if len(inside):
-            first = int(edges[max(inside[0] - 1, 0)])
-            last = int(edges[min(inside[-1] + 1, len(edges) - 1)]) - 1
-            if last - first + 1 >= config.snapped_bin_minimum_bp:
-                segment = segments[np.searchsorted(positions, left)]
-                lo = max(min(lo, first), int(limits[segment, 0]))
-                hi = min(max(hi, last), int(limits[segment, 1]))
-        intervals[index] = lo, hi
-    return intervals
-
-
 def in_reversed_segment(crossovers, breakpoints):
     """bool (n,): whether each called crossover lies inside a supplied reversed segment."""
     segments = np.zeros((0, 2), dtype=np.int64) if breakpoints is None else breakpoints[1]

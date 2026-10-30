@@ -3,8 +3,9 @@
 File format (docs): tab-separated, a header line ``chrom start end reason``, ``#`` comments, 1-based inclusive
 bp. The order discontinuity lies somewhere inside [start, end]. A row whose reason starts with
 ``reversed_segment`` declares an inverted reference segment instead (both of its ends are breakpoints).
-Family phase protects the ordinary breakpoint rows from root-frame repairs; recombination masks every
-breakpoint and flags calls inside reversed segments.
+Family phase resets its meiosis chains across every ordinary row's interval and at both ends of every reversed segment
+(the order is broken there, not inside the segment); recombination masks every breakpoint and flags calls inside
+reversed segments.
 """
 from __future__ import annotations
 
@@ -24,9 +25,15 @@ class BreakpointTable:
     rows: tuple[tuple[str, int, int, str], ...]
 
     def protected(self):
-        """(contig, start, end) of the ordinary breakpoint rows: family phase's protected intervals."""
-        return tuple((contig, start, end) for contig, start, end, reason in self.rows
-                     if not reason.startswith(REVERSED_SEGMENT))
+        """(contig, start, end) intervals across which family phase's meiosis chains reset: every ordinary row, and
+        the two end positions of every reversed segment."""
+        out = []
+        for contig, start, end, reason in self.rows:
+            if reason.startswith(REVERSED_SEGMENT):
+                out.extend(((contig, start, start), (contig, end, end)))
+            else:
+                out.append((contig, start, end))
+        return tuple(out)
 
 
 def read_breakpoint_table(path):

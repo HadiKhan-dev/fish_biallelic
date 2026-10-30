@@ -16,7 +16,7 @@ fails if a cited value differs from the code.
 | painting | [painting.md](painting.md) | label continuity across atomic spans, then each sample as a diploid mosaic of the founders with an explicit unknown state |
 | pedigree | [pedigree.md](pedigree.md) | observed-parent configurations from the paintings and genotype likelihoods, with direction, family evidence and support tiers |
 | founder refit | [founder_refit.md](founder_refit.md) | founder alleles refitted from the painted carriers |
-| family phase | [family_phase.md](family_phase.md) | pedigree-conditioned phase that preserves the called genotypes |
+| family phase | [family_phase.md](family_phase.md) | a founder-mosaic pedigree model: final genotypes, phase, phase sets and released ambiguity, conditioned on the released parent edges |
 | recombination | [recombination.md](recombination.md) | conditional recombination maps, crossover intervals and observable meiosis exposure |
 | export | [usage](../usage.md#export) | the final founder and sample VCFs, written from the records (no model) |
 | all stages | [ties.md](ties.md) | how ties are handled: tied alternatives carried forward and decided by the data, ambiguity released (unknowns, intervals, unordered slots, flagged alternatives), the stated priors, the remaining conventions and the reversal test |

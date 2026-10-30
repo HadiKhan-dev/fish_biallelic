@@ -31,4 +31,4 @@ rate_cm_per_mb = 5.0
 # file = "work/data/cross.map"
 
 [recombination]
-shared_family_evidence = true
+# order_breakpoints = "breakpoints.tsv"   # reference-order breakpoints (chrom, start, end, reason)

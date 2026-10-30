@@ -110,7 +110,7 @@ whole package source for provenance.
 | painting | `painting/summary`, `painting` |
 | pedigree | `pedigree/prepared`, `pedigree/screen`, `pedigree/scores`, `pedigree/exclusion` |
 | founder_refit | `founder_refit` |
-| family_phase | `family_phase` (resume state `work/<contig>/family_phase.p5.b2` while solving) |
+| family_phase | `family_phase` (no work state: an interrupted contig is recomputed) |
 | recombination | `recombination` |
 | export | `export` (the contig's exported files: identity and manifest entry) |
 

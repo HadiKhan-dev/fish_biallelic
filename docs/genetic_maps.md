@@ -63,11 +63,11 @@ linearly through their whole gap. Each model turns distances d (Morgans) into pr
 
 | form | used by |
 | --- | --- |
-| Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), pedigree's transmission selector between bins (within [1e-15, 0.5]; release 2.15, before which it used 1 - e^(-d)), family phase and phase polishing, the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
+| Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), pedigree's transmission selector between bins (within [1e-15, 0.5]; release 2.15, before which it used 1 - e^(-d)), family phase's meiosis chains between bin centres (1/2 across protected intervals), the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
 | the probability of at least one event of a Poisson process, 1 - e^(-d) | local selection's copying path model, with d multiplied by `LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0` |
 
-Family phase evaluates the Haldane fraction of its marker intervals with NumPy's vectorised `expm1`, which can
-differ from the compiled kernels' scalar `expm1` in the last bit.
+Family phase evaluates the Haldane fraction between bin centres with NumPy's vectorised `exp`, which can differ
+from the compiled kernels' scalar `expm1` in the last bit.
 
 Assembly's linker uses genetic distances for its within-block transitions. The linker and endpoint beam's
 maximum inter-component gap instead uses mean map span and the independent search-horizon scale
@@ -83,6 +83,6 @@ Informative data can support departures from a positive prior; regions without i
 prior-sensitive, and a zero prior forbids crossover mass in its interval. Posterior event mass inside a marker
 interval is allocated by the prior's integrated genetic mass, so structure entirely between uninformative markers
 is not learned. Expected crossover counts, called crossover intervals and observable meiosis exposure are separate
-outputs; unobserved gaps are not reported as measured regions without recombination. Shared-family
-orientation-error evidence (`[recombination] shared_family_evidence`, on by default) changes only the recombination
-stage's decoding, never the published phase. Neither an inferred map nor family phase feeds back upstream.
+outputs; unobserved gaps are not reported as measured regions without recombination. Recombination reads family
+phase's meiosis chains and never changes the published phase. Neither an inferred map nor family phase feeds back
+upstream.

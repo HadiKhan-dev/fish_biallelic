@@ -124,13 +124,13 @@ class PedigreeSection:
 
 @dataclass(frozen=True)
 class FamilyPhaseSection:
-    protected_intervals: Path | None = setting(None, "path", "TSV of intervals (chrom, start, end, reason) where "
-                                               "family phase keeps its frames.")
+    protected_intervals: Path | None = setting(None, "path", "TSV of intervals (chrom, start, end, reason) across "
+                                               "which family phase's meiosis chains reset (reference-order "
+                                               "breakpoints; a reversed_segment row resets at both ends).")
 
 
 @dataclass(frozen=True)
 class RecombinationSection:
-    shared_family_evidence: bool = setting(True, "bool", "Use shared-family phase-error evidence in the maps.")
     order_breakpoints: Path | None = setting(None, "path", "TSV of reference-order breakpoints (chrom, start, "
                                              "end, reason).")
 

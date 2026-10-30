@@ -58,7 +58,7 @@ the same command resumes from the checkpoints. See [usage](docs/usage.md) for in
 | painting | diploid founder mosaics of every sample, with an explicit unknown state | `painting/` |
 | pedigree | observed-parent calls (M0/M1/M2), parent identities, support tiers and ambiguity | `pedigree/` |
 | founder refit | founder alleles refitted from the painted carriers | `founder_refit/` |
-| family phase | pedigree-conditioned, genotype-preserving final phase | `family_phase/` |
+| family phase | pedigree-conditioned final genotypes, phase and phase sets | `family_phase/` |
 | recombination | conditional rates, crossover intervals and observable meiosis exposure | `recombination/` |
 | export | per contig a founder VCF and the phased sample VCF in `OUTPUT/export/` | `export/` |
 

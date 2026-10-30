@@ -28,7 +28,7 @@ STAGES: tuple[Stage, ...] = (
     Stage("painting", "contig", ("painting",)),
     Stage("pedigree", "genome", ("pedigree", "painting")),
     Stage("founder_refit", "contig", ("founder_refit", "painting")),
-    Stage("family_phase", "contig", ("family_phase",)),
+    Stage("family_phase", "contig", ("family_phase", "painting")),
     Stage("recombination", "contig", ("recombination", "family_phase")),
     Stage("export", "contig", ("export",)),
 )

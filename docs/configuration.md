@@ -274,7 +274,7 @@ Family phase.
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
-| `protected_intervals` | path | `""` (unset) | TSV of intervals (chrom, start, end, reason) where family phase keeps its frames. |
+| `protected_intervals` | path | `""` (unset) | TSV of intervals (chrom, start, end, reason) across which family phase's meiosis chains reset (reference-order breakpoints; a reversed_segment row resets at both ends). |
 
 ### [recombination]
 
@@ -282,7 +282,6 @@ Recombination maps.
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
-| `shared_family_evidence` | boolean | `true` | Use shared-family phase-error evidence in the maps. |
 | `order_breakpoints` | path | `""` (unset) | TSV of reference-order breakpoints (chrom, start, end, reason). |
 
 ### [export]
@@ -736,52 +735,32 @@ Stage `founder_refit`, `founder_refit/config.py`. Defaults are the production va
 
 ### FamilyPhaseConfig
 
-Stage `family_phase`, `family_phase/config.py`. Pedigree-conditioned phase of one chromosome.
+Stage `family_phase`, `family_phase/config.py`. Pedigree founder-mosaic phase of one chromosome (docs/methods/family_phase.md).
 
 | constant | default | meaning |
 | --- | --- | --- |
-| `transmission_error` | `0.001` | probability that a copy factor transmits the other parental allele. |
-| `scaffold_phase_error` | `0.01` | probability that a root's scaffold orientation is wrong at a heterozygous site. |
-| `phase_switch_probability` | `0.005` | probability of a frame switch at a painting-bin edge inside a component (the family phase chain and the polish's coarse bins); component edges switch with probability 1/2 and the family chain never switches phase inside a painting bin (the polish's refinement: polish_window_sites). |
-| `map_max_sweeps` | `60` | safety cap on the sweeps of one ascent (release 2.2: both sweep tiers count; the two-schedule estimator runs up to three ascents). Every accepted step raises the posterior by more than a tie quantum, so the solver terminates by construction; reaching the cap is an error. Measured (19 Oct 2026): at most 9 sweeps (stress_n80), TroMau and std_n80 at most 4. |
-| `map_long_moves` | `False` | run the long compound moves (change pairs longer than map_solver.LONG_SPAN sites and the |
-| `root_frame_window_bp` | `500000.0` | flank reach W around a bin edge |
-| `root_frame_location_bp` | `250000.0` | location tolerance (net votes ignore +- this around the edge) |
-| `root_frame_minimum_children` | `3` | children needed to move a frame (also the junction guard's parent size) |
-| `root_frame_informative_nats` | `2.0` | per-child vote threshold tau |
-| `root_frame_max_rounds` | `8` | repair rounds |
-| `protected_intervals` | `()` | *Set by* `[family_phase] protected_intervals`. (contig, start, end) closed bp intervals where no frame repair is made (reference-order breakpoints). |
-| `polish_copy_error` | `0.01` | copy-consistency error of called scaffold alleles |
-| `polish_window_sites` | `100` | fine phase boundaries allowed within this many sites of a current phase or selector change, inside the bin to the right of a bin edge (that edge's flip probability is split over them; the first painting bin of a chromosome or component has no such edge and stays rigid) |
-| `polish_max_sweeps` | `6` | colour sweeps before the polish must have converged |
-| `polish_minimum_gain` | `1e-06` | the polish's tie quantum q (nats): an interval is accepted only when its exact gain exceeds q, inside q the current configuration is kept (the score reads called scaffold alleles only, so q only has to exceed rounding) |
-| `polish_minimum_biological_gain` | `0.0` | smallest copy-consistency gain for an interval that changes an observable phase, compared with a band of q. |
+| `not_copy_rate_per_bp` | `1e-08` | rate per bp at which a homologue linked to a parent enters the not-a-copy state (a painting or panel error, conversion or mutation, or a false edge); its label is then free. |
+| `not_copy_mean_bp` | `50000.0` | mean length of a not-a-copy run. |
+| `max_sweeps` | `30` | work cap on block sweeps. Every applied block raises the objective by more than ``gain_quantum`` nats, so the ascent terminates without it; a component that reaches the cap keeps its (valid) current state and is recorded as not settled. |
+| `gain_quantum` | `1e-06` | smallest objective gain (nats) for which a block path is applied. |
+| `tie_quantum` | `1e-09` | Viterbi scores within this many nats are tied; ties keep the current state, then the lowest index (the highest under the convention reversal, maths.ties.reverse_conventions). |
+| `junction_min_samples` | `2` | distinct samples whose free or not-a-copy tracks must switch between the same two labels at one bin edge for the edge to be a junction candidate. |
+| `junction_pin_nats` | `10.0` | a carrier of both junction labels keeps its phase join across a candidate only when the parental homologue it copies there is pinned by the parent's own reads: on each flank the parent's pair beats every pair putting the other junction label on that homologue, whatever the partner, by at least this many nats. |
+| `junction_pin_bins` | `10` | the flank window of that test (bins, cut at the relative's own label changes). |
+| `site_deviation` | `0.001` | mixture mass of the release's site model: given its label pair, a sample's ordered alleles at a site are the pair's panel alleles, or with this probability redrawn from a uniform genotype (a panel allele error, a label error shorter than a bin, a conversion or mutation; the genotype then changes with probability 2/3 of it). Weighed by the sample's own reads at the site, reads that contradict the labels' genotype lower, withdraw or move the call. A working value chosen on the validation simulations (0.01 unphases 12-13% of phased joins; 3e-4 keeps more genotype errors), not an estimate of an error rate. |
+| `genotype_posterior` | `0.9` | a genotype is called where its posterior reaches this value (the painting's tau). |
+| `phase_posterior` | `0.99` | a heterozygous call is released phased where its ordered allele posterior reaches this value; a gauge sample's set continues while the posterior of its decoded ordered label pair, given the set's anchor, stays at or above it at its heterozygous bins (a different event from a site's allele marginal). Phase sets also break at junction candidates for samples carrying both labels unless a parental homologue pins them, and, for samples without a linked parent, at every painting tie boundary (release.py). |
+| `protected_intervals` | `()` | *Set by* `[family_phase] protected_intervals`. (contig, start, end) closed bp intervals across which meiosis chains reset (the switch probability is 1/2): reference-order breakpoints, and both ends of reversed segments. |
 
 ### RecombinationConfig
 
-Stage `recombination`, `recombination/config.py`. Per-meiosis decoding and map aggregation.
+Stage `recombination`, `recombination/config.py`. Map aggregation of the meiosis chains.
 
 | constant | default | meaning |
 | --- | --- | --- |
-| `copy_error` | `0.01` | probability that a transmitted allele reads as the other parental homologue |
-| `artifact_rate` | `1e-08` | correlated orientation-artifact process of a meiosis (entry rate per bp, mean length) |
-| `artifact_mean_bp` | `50000.0` | correlated orientation-artifact process of a meiosis (entry rate per bp, mean length) |
-| `minimum_origin_probability` | `0.98` | posterior support of a marker's parental homologue (and of no artifact) for a called crossover |
-| `maximum_gap_bp` | `1000000` | informative markers further apart restart the decoder |
 | `bin_bp` | `1000000` | map bin width |
-| `read_free_tract_sites` | `1000` | runs of at least this many zero-depth sites of a sample are uncovered for it (its calls there are imputed; 1000 sites = ten 100-SNP painting bins; chance runs are <= 15 sites in the 5x simulations, <= 604 in real tromau3 data; 0 disables) |
-| `shared_family_evidence` | `True` | *Set by* `[recombination] shared_family_evidence`. fit shared sample-orientation corrections before decoding (user setting) |
 | `order_breakpoints` | `()` | *Set by* `[recombination] order_breakpoints`. (contig, start, end, reason) rows of the reference-order breakpoint table (user setting). |
-| **shared_orientation** (SharedOrientationConfig) |  | Screened coordinate ascent of shared sample-orientation corrections (rates per physical bp). |
-| `shared_orientation.error_rate` | `1e-08` | asymmetric orientation-error CTMC prior of a sample's track orientation (entry rate per bp, mean tract length) |
-| `shared_orientation.error_mean_bp` | `50000.0` | asymmetric orientation-error CTMC prior of a sample's track orientation (entry rate per bp, mean tract length) |
-| `shared_orientation.maximum_candidate_bp` | `1000000` | longest candidate tract |
-| `shared_orientation.minimum_incident_edges` | `2` | meioses a sample must share for its tracts to be candidates |
-| `shared_orientation.maximum_sweeps` | `4` | coordinate-ascent sweeps |
-| `shared_orientation.minimum_objective_gain` | `2.0` | nats a flip must gain |
-| `shared_orientation.candidate_support` | `0.9` | screening posterior that marks a supported run. |
-| **junctions** (JunctionConfig) |  | Bin-honest call intervals and the reference-order junction detector (bp, probabilities, nats). |
-| `junctions.snapped_bin_minimum_bp` | `0` | report the two bins around a straddled painting-bin edge when they span at least this many bp (0 widens every straddled call) |
+| **junctions** (JunctionConfig) |  | The reference-order junction detector (probabilities, nats). |
 | `junctions.minimum_parents` | `3` | parents with calls at a locus |
 | `junctions.hotspot_switch_probability` | `0.05` | point-hotspot part of the recombination ceiling (no single locus gives a real crossover in more than 5% of meioses beyond the background rate) |
 | `junctions.flag_log_likelihood_ratio` | `4.605170185988092` | flag at 100:1 (about 30 candidate loci per genome; a ratio reaches c under its null with probability about 1/c). |

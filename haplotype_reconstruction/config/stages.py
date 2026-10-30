@@ -3,8 +3,8 @@
 Stage configs are frozen dataclasses owned by their stages; their defaults are base production values and are
 internal model constants. Only settings base exposed are mapped from the run configuration:
 [quality] -> evidence; [pedigree] evidence_calibration -> pedigree; [family_phase] protected_intervals and
-[recombination] order_breakpoints (breakpoint TSVs, parsed here so identities hold their content) and
-shared_family_evidence -> family phase / recombination; [export] full_length -> the export stage (its
+[recombination] order_breakpoints (breakpoint TSVs, parsed here so identities hold their content) -> family phase /
+recombination; [export] full_length -> the export stage (its
 enabled switch is read by the driver); [simulation] -> the simulation source; [genetic_map] -> the
 GeneticMapSet every stage receives. Stage modules are imported inside the functions: the configuration layer
 does not depend on the stages at import time.
@@ -67,8 +67,7 @@ def recombination(config: RunConfig):
     from ..family_phase.breakpoints import read_breakpoint_table
     from ..recombination.config import RecombinationConfig
     path = config.recombination.order_breakpoints
-    return RecombinationConfig(shared_family_evidence=config.recombination.shared_family_evidence,
-                               order_breakpoints=() if path is None else read_breakpoint_table(path).rows)
+    return RecombinationConfig(order_breakpoints=() if path is None else read_breakpoint_table(path).rows)
 
 
 def export(config: RunConfig):

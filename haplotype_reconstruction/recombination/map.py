@@ -1,6 +1,7 @@
 """Map bins, interval-censored event mass and the aggregated recombination map of one chromosome.
 
-Rates are posterior expected crossovers per observable meiosis-bp; bins without exposure have NaN rates, not
+Rates are expected crossovers per observable meiosis-bp, given the switch probabilities of the meioses' marker
+intervals (in release 3.0 the parity of consecutive released chain bins); bins without exposure have NaN rates, not
 zero recombination. No event or exposure crosses an assembly break (map bins are split at component edges).
 """
 from __future__ import annotations
@@ -15,7 +16,8 @@ from numba import njit
 @dataclass(frozen=True)
 class RecombinationMap:
     """Per map bin (edges_bp float64 [B+1]): crossover_count (called events, spread over their intervals),
-    exposure_meiosis_bp (observable meiosis-bp), expected_crossovers (posterior mean), called_exposure_meiosis_bp,
+    exposure_meiosis_bp (observable meiosis-bp), expected_crossovers (given the marker intervals' switch
+    probabilities), called_exposure_meiosis_bp,
     called_rate_cM_per_Mb, covered_bp (union of observable sequence), effective_meioses, rate_cM_per_Mb,
     cM_on_covered_bp; cumulative_observed_cM float64 [B+1] (cumulative over covered sequence; gaps omitted)."""
 
@@ -81,8 +83,10 @@ def posterior_intervals(positions, components, resets, switch, bins, rate,
     """Per bin expected crossovers and exposure of one meiosis, and its informative spans (left, right, component).
 
     Between consecutive informative markers with genetic length lambda, Poisson/Haldane endpoint parity gives
-    E[N | even] = lambda tanh(lambda) and E[N | odd] = lambda / tanh(lambda) (-> 1 as lambda -> 0); the posterior
-    switch probability mixes them. Event mass is uniform in genetic distance (physical without a map).
+    E[N | even] = lambda tanh(lambda) and E[N | odd] = lambda / tanh(lambda) (-> 1 as lambda -> 0); the interval's
+    switch probability mixes them. Event mass is uniform in genetic distance; it is uniform in bp without a map and
+    where the map gives the interval no genetic length (there an odd parity still counts its lambda -> 0 limit, one
+    crossover: the data override the map's zero prior).
     """
     counts = np.zeros(len(bins) - 1)
     exposure = np.zeros_like(counts)
@@ -96,9 +100,9 @@ def posterior_intervals(positions, components, resets, switch, bins, rate,
         tangent = math.tanh(lam)
         odd_mean = lam / tangent if lam > 0 else 1.
         expected = lam * tangent + switch[i] * (odd_mean - lam * tangent)
-        if genetic is None:
+        if genetic is None or lam <= 0:
             add_interval(bins, counts, left, right, expected / distance)
-        elif lam > 0:
+        else:
             add_genetic_interval(bins, counts, left, right, expected / lam, map_positions_bp, map_genetic_morgans)
         add_interval(bins, exposure, left, right, 1.)
         component = float(components[i])
@@ -117,8 +121,8 @@ def aggregate_map(bins, crossovers, callable_spans, expected, exposure, informat
     """RecombinationMap from the decoded meioses.
 
     ``crossovers`` (n, 5) and ``callable_spans`` (m, 3) of all edges (called events are spread over their flanking
-    interval by genetic mass for binning only); ``expected``/``exposure`` float64 [E, B] posterior per-edge
-    bins; ``informative_spans`` (k, 3) of all edges (their union is the covered sequence).
+    interval by genetic mass for binning only, uniformly in bp where it has none); ``expected``/``exposure`` float64 [E, B] per edge and map
+    bin; ``informative_spans`` (k, 3) of all edges (their union is the covered sequence).
     """
     counts = np.zeros(len(bins) - 1)
     called_exposure = np.zeros_like(counts)
@@ -129,6 +133,8 @@ def aggregate_map(bins, crossovers, callable_spans, expected, exposure, informat
             mass = np.interp(right, knots, knot_genetic) - np.interp(left, knots, knot_genetic)
             if mass > 0:
                 add_genetic_interval(bins, counts, left, right, 1 / mass, knots, knot_genetic)
+            else:
+                add_interval(bins, counts, left, right, 1 / (right - left))
     for left, right, _ in callable_spans:
         add_interval(bins, called_exposure, left, right, 1.)
     expected_total = expected.sum(axis=0)

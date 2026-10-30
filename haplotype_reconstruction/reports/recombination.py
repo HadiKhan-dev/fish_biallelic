@@ -68,21 +68,21 @@ def meiosis_tables(product) -> tuple[list, list, list, list]:
             for left, right, component in spans.tolist():
                 rows.append({**labels, "left_bp": int(left), "right_bp": int(right), "component_id": int(component)})
         counts = product.marker_counts[edge]
-        meioses.append({**labels, "informative_markers": int(counts[0]), "supported_origin_markers": int(counts[1]),
-                        "orientation_artifact_uncertain_markers": int(counts[2]), "called_crossovers": len(calls),
+        meioses.append({**labels, "released_chain_bins": int(counts[0]), "followed_chain_bins": int(counts[1]),
+                        "unresolved_chain_bins": int(counts[2]), "called_crossovers": len(calls),
                         "expected_crossovers": float(product.expected_crossovers[edge].sum()),
                         "exposure_meiosis_bp": float(product.exposure[edge].sum())})
     return crossovers, coverage, called_coverage, meioses
 
 
 def write_plot(path: Path, contig: str, curve) -> Path:
-    """<contig>.png: posterior-mean and called rates, and effective meioses (no global plotting state)."""
+    """<contig>.png: expected and called rates, and effective meioses (no global plotting state)."""
     from matplotlib.figure import Figure
     bins = np.asarray(curve.edges_bp)
     figure = Figure(figsize=(9, 6))
     axes = figure.subplots(2, 1, sharex=True)
     centres = (bins[:-1] + bins[1:]) / 2e6
-    axes[0].plot(centres, curve.rate_cM_per_Mb, color="#24557b", label="Posterior mean")
+    axes[0].plot(centres, curve.rate_cM_per_Mb, color="#24557b", label="Expected (called endpoints)")
     axes[0].plot(centres, curve.called_rate_cM_per_Mb, color="#777777", linestyle="--",
                  label="High-confidence calls")
     axes[0].legend()

@@ -26,7 +26,7 @@ positional arguments.
 | `example --output D` | `haplotypes example D` |
 | `batch-worker --queue Q` | `haplotypes batch-worker Q` |
 | `recombination ... --recombination-map M --rate-cm-per-mb X` | none: `haplotypes recombination RUN` uses the run's own genetic map; only `--set recombination.KEY=VALUE` and `--order-breakpoints FILE` change |
-| `recombination ... --shared-family-evidence` / `--no-shared-family-evidence` | `haplotypes recombination RUN --set recombination.shared_family_evidence=true` / `false` |
+| `recombination ... --shared-family-evidence` / `--no-shared-family-evidence` | none since 3.0 (the shared-family orientation fit was removed; in 2.x a `--set` override of the recombination setting) |
 
 ### Export
 
@@ -74,7 +74,7 @@ metadata = "data/AsAc_metadata.xlsx"
 | `--founder-refinement on\|off` | none: founder refinement always runs |
 | `--recombination-map FILE` | `--set genetic_map.file=FILE` |
 | `--rate-cm-per-mb X` | `--set genetic_map.rate_cm_per_mb=X` |
-| `--shared-family-evidence` / `--no-shared-family-evidence` | `--set recombination.shared_family_evidence=true` / `false` |
+| `--shared-family-evidence` / `--no-shared-family-evidence` | none since 3.0 (in 2.x a `--set` override of the recombination setting) |
 | `--order-breakpoints FILE` (simulate, reconstruct, astcal, tropheops) | `--set recombination.order_breakpoints=FILE` (`--order-breakpoints` stays on `haplotypes recombination`) |
 | `--eligibility FILE` | `--set pedigree.eligibility.policy=constraints --set pedigree.eligibility.constraints=FILE` |
 | `--metadata FILE`, `--metadata-sheet S` | `--set samples.metadata=FILE`, `--set samples.sheet=S` |
@@ -105,7 +105,7 @@ and sections are errors (1.0 ignored them silently), so a 1.0 file must be conve
 | `[run] pedigree_calibration` | `[pedigree] evidence_calibration` |
 | `[run] founder_refinement` | none (always on) |
 | `[recombination] rate_cm_per_mb`, `[recombination] recombination_map` | `[genetic_map] rate_cm_per_mb`, `[genetic_map] file` |
-| `[recombination] shared_family_evidence`, `[recombination] order_breakpoints` | `[recombination] shared_family_evidence`, `[recombination] order_breakpoints` |
+| `[recombination] order_breakpoints` (and the 2.x shared-family switch) | `[recombination] order_breakpoints` (the switch was removed in 3.0) |
 | environment `BHD_FAMILY_PHASE_PROTECTED_INTERVALS` | `[family_phase] protected_intervals` |
 | `[simulation] generations`, `backcross_start_generation`, `observe_generations` | `[simulation] cohorts`, `[simulation] backcross_start_cohort`, `[simulation] observe_cohorts` |
 | `[simulation] generating_error_rate`, `depth_cv`, `heterozygote_alt_probability`, `dropout_fraction`, `read_length_bp`, `fragment_mean_bp`, `fragment_sd_bp` | `[simulation.reads] error_rate`, `[simulation.reads] depth_cv`, `[simulation.reads] heterozygote_alt_probability`, `[simulation.reads] dropout_fraction`, `[simulation.reads] read_length_bp`, `[simulation.reads] fragment_mean_bp`, `[simulation.reads] fragment_sd_bp` |
@@ -275,3 +275,15 @@ Regenerate the merged configuration reference after integrating all owners' chan
 Painting, pedigree, sample phase and recombination remain conditional on the assembly
 representative where alternatives are unresolved. Segmentation does not marginalize
 those models or change sample VCF calls and phase sets by itself.
+
+## Family phase and recombination in 3.0
+
+Family phase was rebuilt as one generative founder-mosaic model per component ([family phase](methods/family_phase.md))
+and recombination now follows the meiosis chains it releases ([recombination](methods/recombination.md)).
+
+| old | new |
+| --- | --- |
+| `[recombination] shared_family_evidence` (and `--set recombination.shared_family_evidence=...`) | none: the shared-family orientation fit and the per-meiosis decoder are gone. Unknown keys are errors; delete it |
+| family-phase records of schema 1-3, recombination records of schema 1 | refused: rerun both stages (a new output root, or `haplotypes recombination RUN` after family phase) |
+| recombination summary columns `artifact_uncertain_markers`, `read_free_tracts`, `read_free_sample_sites`, `shared_family_evidence`, `shared_orientation_converged`, `shared_orientation_corrected_samples`, `shared_orientation_accepted_moves` | `unresolved_bins`; the others have no counterpart |
+| `<contig>.meioses.csv` columns `informative_markers`, `supported_origin_markers`, `orientation_artifact_uncertain_markers` | `released_chain_bins`, `followed_chain_bins`, `unresolved_chain_bins` |
