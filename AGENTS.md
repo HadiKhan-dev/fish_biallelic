@@ -42,6 +42,9 @@ These override cost, speed and convenience. Each is detailed in the section cite
     print `.env` files, credentials or tokens (§3.4, §7.1).
 13. **One end-to-end validation per release candidate.** Validate individual fixes with targeted checks where they
     act. Run the pipeline end to end only once, on the final integrated candidate (§2.6, §5.5).
+14. **Never stall on an unanswered question.** Keep independent work moving while a question is open. After 15
+    minutes without an answer, proceed with the recommended option and report it. Approvals this file requires are
+    never assumed (§4.1).
 
 ## 2. Science
 
@@ -143,17 +146,28 @@ otherwise. In every pedigree task:
   Every sequenced sample in the cross is labelled G0, F1 or F2.
 - No sequenced G0 individual, or pairing of them, is a known parent. Any of them may be a parent of some members and
   unrelated to others.
-- An individual is a parent candidate only when eligibility rules, breeding records, metadata or an owner-approved
-  design make it legitimate.
-- Individuals outside a cross's pedigree are never candidates, anchors, positive controls or inferred relatives.
+- **Every sequenced sample of the input is a parent candidate of every other** (owner, 30 October 2026): "G0 can be
+  allowed as parents here, but that's because they are present in the dataset we feed in rather than because their
+  labelling is G0 and the F1s are labelled F1."
+  - The main pipeline reads no sample metadata (owner, 30 October 2026): "we shouldn't be using any metadata or
+    anything for our main pipeline, just the VCF and recombination map stuff where the sample labels are names that
+    don't mean anything beyond being an identifier."
+  - Never reintroduce eligibility from generation, cohort or sex labels, breeding records or workbooks into
+    `haplotypes run` or any stage. Direction comes from the data: orientation, family terms, the sibling guard and the
+    release tiers.
+  - Cohort labels may still describe the data in lab analyses and in reports outside the pipeline, as descriptions,
+    never as truth. The bullets above and below still apply.
+- Individuals outside a cross's pedigree are left out of the input VCF: the pipeline cannot exclude them by label. In
+  analyses they are never anchors, positive controls or inferred relatives.
 - Never label pairs or trios true, false, positive, negative or decoy without independent truth.
 - Never calibrate any of these against assumed G0 parentage: thresholds, IBS0, Mendelian error,
   genotype-likelihood compatibility, founder-label consistency or rankings.
-- Keep species, cohort, parent eligibility, known parentage and inferred parentage distinct.
+- Keep species, cohort, known parentage and inferred parentage distinct.
 - Without truth, validate through:
   - simulations, internal consistency and chromosome-level stability;
   - resampling and legitimate negative controls;
-  - generation constraints and competing-candidate margins;
+  - competing-candidate margins, and biologically implausible configurations checked in lab analyses (labels as
+    descriptions, never truth);
   - explicit ambiguous or unresolved outcomes.
 - Preserve support for missing, single-observed, ambiguous and unresolved parents.
 
@@ -231,6 +245,9 @@ From a multi-sample VCF or BCF it:
 5. infers the pedigree and corrects phase;
 6. estimates recombination maps.
 
+It reads only the VCF/BCF and the genetic map: sample names are identifiers, and no sample metadata enters (owner,
+30 October 2026; §2.4).
+
 It is one pipeline of stage packages run by the `haplotypes` command: evidence, relatedness, discovery,
 local_selection, assembly, painting, pedigree, founder_refit, family_phase, recombination and export.
 - **The primary real workflow is the TroMau cichlid cross:** `haplotypes run CONFIG` with `preset = "tromau"`. The
@@ -274,8 +291,9 @@ Infrastructure, under `haplotype_reconstruction/`:
 - local selection chooses paths with assembly feedback contexts;
 - assembly is hierarchical (L1-L4) with joint founder completion;
 - painting is component-local;
-- pedigree inference uses the paintings and raw genotype likelihoods, with Tier B as the primary output; its sibling
-  guard withholds edges whose parent looks like one more full sib of the child's relatedness family;
+- pedigree inference uses the paintings and raw genotype likelihoods, with Tier B as the primary output; every
+  sequenced sample is a candidate parent of every other (no sample metadata), and its sibling guard withholds edges
+  whose parent looks like one more full sib of the child's relatedness family;
 - family phase refines phase conditioned on the pedigree;
 - recombination estimates maps from the final phase.
 
@@ -325,6 +343,17 @@ At the start of non-trivial work, identify:
 
 Then:
 - **Ask** a focused question when a request is materially ambiguous.
+- **Never stall waiting for an answer** (owner, 31 October 2026).
+  - The incident: on 31 October an agent asked the owner a blocking question at about 02:00, while the owner slept.
+    It did nothing more until the answer at 08:10, and ten paid nodes sat idle for up to six hours.
+  - Every question states the option you recommend and what you will do if no answer comes.
+  - While it is open, keep all independent work moving: launches, validations, reviews and node use.
+  - After 15 minutes without an answer, proceed with the recommended option. Record the decision and its reasons
+    in the progress file, and tell the owner they can override it.
+  - Never assume an approval this file requires: Git history, deletion, overwriting accepted results, non-SL4
+    allocations, installs, AulStu, or a full pipeline the request did not authorize. Leave those pending, and keep
+    everything else moving.
+  - Prefer reversible defaults, and work that a later answer would not waste.
 - **Stay in scope.** Never widen a task into an audit, redesign, security review, provenance overhaul or cleanup.
   Report an unrelated concern briefly. Pursue it only if it invalidates the requested work or the owner agrees.
 - **Match the process to the change** (owner, 5 October 2026).

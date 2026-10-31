@@ -7,6 +7,17 @@ specific to Claude Code. Shared rules go in `AGENTS.md`, never here.
 
 - **Answer the owner's questions in a reply of their own.** When the owner asks a question during a task, answer it
   fully in its own reply, then continue the work. Text written between tool calls is easily missed.
+- **Never stall on an unanswered question** (owner, 31 October 2026: "the tool is fine. Stalling over unanswered
+  questions isn't"; shared rule in `AGENTS.md` §1 item 14 and §4.1).
+  - AskUserQuestion pauses this session until the owner answers, and it has no timeout. On 31 October one such
+    question stalled the campaign for six hours overnight.
+  - Before asking, launch everything that can proceed. Use the tool only when the owner is evidently present (they
+    replied within the last few minutes) and no running work will need you before they can answer.
+  - Otherwise ask in a normal reply. Give your recommended option and the 15-minute default.
+  - Then start a background timer (Bash with `run_in_background`, for example `sleep 900`), so that the session wakes
+    up and applies the default even if no other notification arrives. Keep working meanwhile.
+  - When the 15 minutes pass with no answer, proceed with the recommended option and say so. Approvals `AGENTS.md`
+    requires are never assumed.
 - **Claude subagents run at xhigh effort, not max** (owner, 22 October 2026). Set the effort explicitly on every
   subagent you create.
 - **Asking a reviewer never replaces your own work on the problem** (owner, 26 October 2026).
