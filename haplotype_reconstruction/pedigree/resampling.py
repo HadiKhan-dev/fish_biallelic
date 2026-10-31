@@ -162,7 +162,6 @@ def _shared_arrays(inputs: DecisionInputs) -> dict[str, np.ndarray]:
               for name, (group, field) in _ARRAY_FIELDS.items()}
     lengths = np.asarray([len(rows) for rows in inputs.alternatives.child_rows], dtype=np.int64)
     arrays["child_offsets"] = np.concatenate(([0], np.cumsum(lengths))).astype(np.int64)
-    arrays["chronology"] = inputs.chronology
     return arrays
 
 
@@ -181,7 +180,7 @@ def _inputs_from_shared(shared) -> DecisionInputs:
                                  shared["junction_total_bins"], shared["pair_child"], shared["pair_parent"],
                                  shared["pair_log_odds"],
                                  shared["compared"])
-    return DecisionInputs(alternatives, exposure, junctions, shared["chronology"])
+    return DecisionInputs(alternatives, exposure, junctions)
 
 
 def _pool_task(task, shared, budget):
@@ -216,15 +215,19 @@ def run(inputs: DecisionInputs, config: PedigreeConfig, budget) -> Resampling:
     work = len(alternatives.rows) * fitted
     worker_count = (1 if cpus <= 1 or fitted < 32 or work < _MINIMUM_POOL_WORK
                     else min(cpus, fitted))
-    chunk = max(1, int(math.ceil(fitted / float(worker_count * 4))))
-    tasks = [(False, np.ascontiguousarray(distinct[start:start + chunk]),
-              np.ascontiguousarray(draws[start:start + chunk]), config)
-             for start in range(0, fitted, chunk)]
+    # One fit per pool task, the leave-one-out fits (the slowest) first: fit costs vary (slow-converging family
+    # solves), and the pool's last tasks widen onto the CPUs that the finished ones free (family._claim), so small
+    # tasks keep the tail short. Support counts are integer sums: neither order nor grouping changes them.
+    chunk = 1 if worker_count > 1 else max(1, fitted)
+    tasks = []
     if n_contigs > 1:
         for omitted in range(n_contigs):
             weights = np.ones((1, n_contigs), dtype=np.float64)
             weights[0, omitted] = 0.0
             tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
+    tasks += [(False, np.ascontiguousarray(distinct[start:start + chunk]),
+               np.ascontiguousarray(draws[start:start + chunk]), config)
+              for start in range(0, fitted, chunk)]
     edges = named_edges(alternatives.rows, n_samples)
     bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)
     loco = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)

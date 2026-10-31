@@ -125,24 +125,17 @@ def reconstruct_contig(store, contig, context: ContigContext, budget) -> ContigS
     with execution.stage_timer("reconstruction", contig):
         from ..assembly import AssemblyEvidence
         from ..assembly import records as assembly_records
-        from ..evidence import records as evidence_records
         if assembly_records.complete(file):
             check_reused(store, file, configs, genetic_map)
         else:
-            # One founder-view evidence for the context assemblies and the final assembly (as base).
-            decoded = evidence_records.load(file)
-            view = AssemblyEvidence.from_record(file, decoded)
-            # Local selection takes the decoded evidence instead of decoding the record again when the founder
-            # view is the evidence itself (no QC-flagged sample); otherwise this copy would stay referenced beside
-            # local selection's founder copy during the whole selection.
-            evidence = None if decoded.founder_excluded.any() else decoded
-            del decoded
+            # One founder view for local selection, the context assemblies and the final assembly (as base). The
+            # likelihoods decode directly into its shared neutral array; local selection reads the view.
+            view = AssemblyEvidence.from_record(file)
             with execution.stage_timer("local_selection", contig):
                 # The final round's panels in block order (as recorded): final assembly need not decode them again.
                 panels = select_local_panels(store, contig, configs.local_selection, configs.assembly, genetic_map,
                                              budget, discovery_config=configs.discovery, queue=context.queue,
-                                             assembly_evidence=view, evidence=evidence)
-            del evidence
+                                             assembly_evidence=view)
             with execution.stage_timer("assembly", contig):
                 final_assembly(store, contig, configs.assembly, genetic_map, budget, view=view,
                                queue=context.queue, panels=panels)

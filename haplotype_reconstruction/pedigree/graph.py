@@ -149,25 +149,6 @@ def select_acyclic(rows: np.ndarray, states: np.ndarray, decision_scores: np.nda
     direction_resolved: set[int] = set()
     role_probability: dict[int, float] = {}
 
-    def path_exists(start: int, target: int) -> bool:
-        if start == target:
-            return True
-        stack = [start]
-        seen = {start}
-        while stack:
-            node = stack.pop()
-            for neighbour in adjacency[node]:
-                if neighbour == target:
-                    return True
-                if neighbour not in seen:
-                    seen.add(neighbour)
-                    stack.append(neighbour)
-        return False
-
-    def can_add(row: int) -> bool:
-        child = int(rows[row, 0])
-        return not any(path_exists(child, parent) for parent in _parents(rows, row))
-
     def add(row: int, displaced: bool) -> None:
         child = int(rows[row, 0])
         for parent in _parents(rows, row):
@@ -188,17 +169,36 @@ def select_acyclic(rows: np.ndarray, states: np.ndarray, decision_scores: np.nda
                 adjacency[parent].discard(child)
         return row
 
+    def reachable(child: int) -> np.ndarray:
+        """bool [N]: the child and every sample reachable from it, i.e. every x with a path child -> x (one
+        search per child visit instead of one per candidate row and parent; release 3.4, PEDFAST)."""
+        reach = np.zeros(n_samples, dtype=np.bool_)
+        reach[child] = True
+        stack = [child]
+        while stack:
+            node = stack.pop()
+            for neighbour in adjacency[node]:
+                if not reach[neighbour]:
+                    reach[neighbour] = True
+                    stack.append(neighbour)
+        return reach
+
     def best_feasible(child: int) -> tuple[int | None, bool]:
         """The local row if it fits, else the unique finite winner of the highest feasible state
-        at or below the local state; (row, displaced)."""
+        at or below the local state; (row, displaced). A row fits when none of its parents is reachable
+        from the child; the graph does not change within one call, so the reachable set is searched once."""
         local = int(local_rows[child])
-        if can_add(local):
+        reach = reachable(child)
+        if not any(reach[parent] for parent in _parents(rows, local)):
             return local, False
+        candidates = np.asarray(child_rows[child], dtype=np.int64)
+        first, second = rows[candidates, 1], rows[candidates, 2]
+        blocked = (((first >= 0) & reach[np.maximum(first, 0)])
+                   | ((second >= 0) & reach[np.maximum(second, 0)]))
+        open_rows = candidates[~blocked & np.isfinite(decision_scores[candidates])]
+        open_states = states[open_rows]
         for target_state in range(int(states[local]), -1, -1):
-            feasible = np.asarray([
-                int(row) for row in child_rows[child]
-                if int(states[row]) == target_state and np.isfinite(decision_scores[row])
-                and can_add(int(row))], dtype=np.int64)
+            feasible = open_rows[open_states == target_state]
             winner, _ = unique_finite_winner(feasible, decision_scores)
             if winner is not None:
                 return winner, winner != local

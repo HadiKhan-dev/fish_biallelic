@@ -214,7 +214,10 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
         contig) are recorded as they complete, and a rerun with identical inputs resumes from them.
     budget: the CPU budget (``execution.CpuBudget``, or a thread count) of this contig's assembly.
     queue: the cross-node batch queue directory (``[execution] batch_queue``) or None (local pool).
-    Inputs are never modified.
+    The local panels and every scientific input are never modified. The final assembly consumes one workspace of
+    the evidence view: after its last level's join, the last reader, it releases the view's neutral float64 copy
+    (AssemblyEvidence.release_neutral; refinement reads the float32 copy), so that view cannot start another
+    assembly afterwards.
     """
     from ..execution.budget import as_budget
     from .completion.stage import CompletionSummary, complete
@@ -289,6 +292,10 @@ def assemble(inputs: AssemblyInputs, config: AssemblyConfig, *, role: Role,
         _log_level(role, record)
         working = output
         if role is Role.FINAL:
+            if record.stop_reason is not None:
+                # The last level: its join was the last reader of the float64 founder view (refinement reads the
+                # float32 scoring evidence), so the view's 24 N L bytes leave before the level's refinement.
+                evidence.release_neutral()
             working, record, refined_alternatives = _refine(
                 level, record, working, prepared, evidence, l1_context, config,
                 records, _phase(budget, role, levels, f"refinement_l{level}"),

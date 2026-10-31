@@ -116,11 +116,10 @@ gives the first (maternal) haplotype. `observed` (0/1) chooses who is sequenced,
 (one more than the deeper parent), each depth drawing its seeds as one cohort of the random design does; the table's
 contents, not its path, enter the simulation identity. A founder's truth is its own two template haplotypes.
 
-Because the sequenced samples are known before simulating, such a design may also carry sample metadata: point
-`[samples] metadata` at the same table (a `.tsv`/`.csv` table is read without a sheet) with `id_column = "sample"`,
-`generation_column = "generation"` and `sex_column = "sex"`, and set `[pedigree.eligibility]` as for real data.
-`haplotypes evaluate` then counts pedigree calls of the eligibility's targets only (`targets` in the pedigree
-counts). `tools/cross_pedigree.py` writes a two-generation cross table (G0 dams and sires, F1 from each dam and sire
+The table's `sex` and `generation` columns describe the generating design only: like the rest of the table they are
+simulation truth, read by the simulator and by `haplotypes evaluate`, never by inference, which treats every
+sequenced sample as a candidate parent of every other as for real data. `tools/cross_pedigree.py` writes a
+two-generation cross table (G0 dams and sires, F1 from each dam and sire
 with a sequenced subset, F2 from F1 x F1 matings with Zipf-distributed family sizes, so that most F2 parents are
 unsequenced and the sequenced F1 are their sibs):
 
@@ -131,20 +130,7 @@ python tools/cross_pedigree.py work/designs/cross.tsv --dams 2 --sires 1 --f1-pe
 ```toml
 [simulation]
 pedigree = "work/designs/cross.tsv"
-
-[samples]
-metadata = "work/designs/cross.tsv"
-id_column = "sample"
-generation_column = "generation"
-sex_column = "sex"
-
-[pedigree.eligibility]
-policy = "cohorts"
-parent_generations = {F2 = "F1"}
-opposite_sex_pairs = true
 ```
-
-The design states structure only: cohort labels constrain eligibility in inference and never assign parents.
 
 ### Reads
 
@@ -285,7 +271,7 @@ sites, `ps_aligned_allele_errors` included genotype errors, and `eligible_hetero
 keep their names with the definitions above (they counted sets with at least two phased called heterozygotes), so
 compare them across releases only together with `phase_set_metric`.
 - Pedigree: exact observed-parent configurations and edges of the Tier-B calls (correct, extra, missing), per true
-  parent-count state; with metadata eligibility, over the eligibility's targets only (`targets`).
+  parent-count state, over every sequenced sample (each is an inference target).
 - Maps: true crossovers are counted only on correctly inferred edges within the inferred observable exposure (not
   whole-genome sensitivity). `called_interval_hit_rate` is the fraction of called crossover intervals on correct
   edges that contain a true crossover; `reported_interval_hit_rate` applies the rule to the bin-honest reported

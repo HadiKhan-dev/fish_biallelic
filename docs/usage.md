@@ -25,8 +25,7 @@ The program is `haplotypes` (or `python -m haplotype_reconstruction`):
 
 A run is described by one TOML file; command-line options and `--set SECTION.KEY=VALUE` override it. Relative
 paths are resolved against the working directory, not the file's location. A run of the TroMau cross starts from
-the built-in preset, which supplies the contigs, the workbook columns, the parent-eligibility design and the
-reference-consistency report; the configuration adds the data paths:
+the built-in preset, which supplies the contigs; the configuration adds the data path:
 
 <!-- check_docs: config -->
 ```toml
@@ -37,17 +36,16 @@ output = "work/runs/tromau"
 
 [input]
 vcf = "data/AcTm.bcf"
-
-[samples]
-metadata = "data/AcTm_metadata.xlsx"
 ```
 
 ```bash
 haplotypes run tromau.toml --cores 112
 ```
 
-A generic cross needs no workbook. The contigs must be listed (in the order to analyse them); without an
-eligibility policy every sample is a candidate parent of every other:
+Inference reads only the variant file and the genetic map: no sample metadata (generation, cohort or sex labels,
+breeding records) is read, and sample names are identifiers only. Every sequenced sample is a candidate parent of
+every other ([parent candidates](#parent-candidates)). A generic cross is configured the same way; the contigs must
+be listed (in the order to analyse them):
 
 <!-- check_docs: config -->
 ```toml
@@ -88,7 +86,10 @@ alleles, `*`, no ALT). When two or more biallelic SNP records share a position, 
 (`duplicate_position`), because which of them is the site cannot be decided from the file. The counts appear in
 the log line of each contig's evidence stage, in the evidence record and in the run record. Multiallelic depths
 are never truncated to a biallelic pair. A missing AD value is zero reads (unobserved, not reference support).
-Unreadable files, unknown contigs, records out of position order and malformed AD values are errors.
+Unreadable files, unknown contigs, records out of position order and malformed AD values are errors. The input's
+FILTER and QUAL columns are ignored: every biallelic SNP record is analysed whatever its FILTER or QUAL, so to keep
+only records that passed an upstream filter, pre-filter the file (`bcftools view -f PASS`). The FILTER column of
+the [export](#export) is the package's own site filter, not the input's.
 
 Select populated physical contigs explicitly: a contig must be declared in the header and have indexed records.
 The genome-wide stages need at least three contigs, and Tier-B pedigree calls need enough map length: five
@@ -98,42 +99,15 @@ informative chromosomes shorter than 1 Morgan or without a genetic map, fewer lo
 The input file's path, size and modification time and its sample list enter the evidence identity: a run directory
 belongs to one input file. Do not modify or replace the file while its runs are in use.
 
-### Sample metadata
+### Parent candidates
 
-`[samples]` names an optional workbook (`.xlsx`) with one row per sample: the column of the VCF sample IDs
-(`id_column`), generation or cohort labels (`generation_column`) and recorded sex (`sex_column`). Every analysed
-sample must occur exactly once; rows of other samples are ignored. Labels are read as text; a generation label
-that starts with one of `generation_prefixes` is read as that prefix (the AulStu preset reads `G0_...` labels as
-`G0`), and when `generations` or `sexes` are listed, other labels are errors. The workbook serves the cohort
-eligibility policy and the reference-consistency report; it never supplies individual parentage.
-
-### Parent eligibility
-
-`[pedigree.eligibility] policy` decides who may be whose parent:
-
-- `none` (default): every sample is an inference target and a candidate parent of every other sample.
-- `cohorts`: the workbook's generations define the design. `parent_generations` maps each target generation to
-  the generation its observed parents may come from, e.g. `{F2 = "F1", F3 = "F2"}`; samples of other generations
-  are neither targets nor candidates. With `opposite_sex_pairs = true`, a two-parent configuration needs one
-  recorded female and one recorded male (parent order remains arbitrary). The generation steps are design
-  chronology, not parentage: cohort labels never assert that a particular sample is a parent.
-- `constraints`: a JSON file (`constraints = "FILE"`) for any other design:
-
-```json
-{
-  "candidate_parents": {"fish_c": ["fish_a", "fish_b"], "fish_d": []},
-  "excluded_samples": ["outside_pedigree"],
-  "ineligible_children": [],
-  "direction_supported_edges": [["fish_a", "fish_c"]]
-}
-```
-
-  A child not listed in `candidate_parents` keeps every other sample as a candidate; an empty list allows no
-  observed parent. Excluded samples are neither parents nor children; `ineligible_children` may still be parents.
-  `direction_supported_edges` are `[parent, child]` pairs whose direction is independently established (for example
-  by generation), not assumed parent pairs. Candidate restrictions alone assert neither direction nor parentage.
-
-Eligibility affects the pedigree stage only. Discovery, assembly and painting use every analysed sample.
+Every sequenced sample of the input is an inference target, and every other sample is a candidate parent of it; any
+two candidates may form a parent pair. A sample is a candidate because it is in the data, never because of a label:
+the pipeline reads no sample metadata, and parent order (`Parent1`, `Parent2`) carries no sex. Which sample is the
+parent and which the child is inferred from the data: the orientation of the painted junctions, the family terms
+of the decision, the sibling-as-parent guard and the release tiers
+([pedigree](methods/pedigree.md#parent-candidates)). Samples that do not belong to the cross (for example unrelated
+outgroups) are left out by subsetting the variant file.
 
 ### Genetic map
 
@@ -148,10 +122,8 @@ A run checks everything it can before computing anything:
    naming the valid choices ([consistency rules](configuration.md#consistency-rules)).
 2. The variant file has `FORMAT/AD`, at least three uniquely named samples, and every configured contig is declared
    and has indexed records.
-3. The workbook, sheet and columns exist, every sample occurs exactly once, and labels are allowed; the
-   eligibility policy is built (a constraints file is parsed).
-4. `[execution] cores` fits the CPU affinity.
-5. A run that reaches the genome-wide stages needs at least three contigs (set `[run] stop_after = "painting"` for
+3. `[execution] cores` fits the CPU affinity.
+4. A run that reaches the genome-wide stages needs at least three contigs (set `[run] stop_after = "painting"` for
    fewer). Tier-B pedigree calls need informative chromosomes holding about three map units in most resamples
    ([pedigree](methods/pedigree.md#map-length-requirement-release-32)): five chromosomes shorter than 1 Morgan or
    without a measured length, fewer long chromosomes on a supplied map or a stated rate
@@ -159,7 +131,7 @@ A run checks everything it can before computing anything:
    warns at the start that, unless the chromosomes are long on a supplied map, it can release no Tier-B parent (so
    family phase and recombination have no parent edges). The pedigree stage states its informative chromosomes and
    their map units at its end, which is authoritative (a contig can turn out uninformative).
-6. An existing checkpoint directory carries this release's layout mark, a shard of a simulation finds the
+5. An existing checkpoint directory carries this release's layout mark, a shard of a simulation finds the
    simulated inputs of every contig recorded, and every shard finds the relatedness product recorded.
 
 ## What a run computes
@@ -383,8 +355,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `logs/contigs/reconstruction_<contig>_<stamp>_<pid>.log` | the log of each contig processed in a concurrent lane |
 | `run_records/<stamp>_<pid>.json` | per invocation: command, resolved configuration, source digest and commit, environment and dependency versions, host, CPU affinity, state, exclusive stage timings, per-contig summaries, memory statistics, error |
 | `checkpoints/` | the checkpoint store (above) |
-| `quality/<contig>.samples.tsv`, `quality/<contig>.segments.tsv` | per-contig library-contamination QC per sample, and inherited heterozygous segments shared by pairs of samples (reported, never flagged); only where the sample QC ran |
-| `discovery/reference_consistency.csv` | with `[reports] reference_consistency`: discovered blocks compared with the reference generation's genotypes (descriptive; not founder truth) |
+| `quality/<contig>.samples.tsv`, `quality/<contig>.segments.tsv` | per-contig sample quality exclusion per sample (a foreign-like minor-read component; flagged samples leave founder construction on that contig), and inherited heterozygous segments shared by pairs of samples (reported, never flagged); only where the sample QC ran |
 | `painting/<contig>/founder_support.tsv` | per component and founder row: called and missing alleles, observed carriers, called sites without an observed carrier |
 | `painting/<contig>/founder_support_windows.tsv` | the same per window of at most 200 sites (1-based inclusive coordinates) |
 | `painting/<contig>/assembly_search.tsv` | every record of the final assembly's join searches: budgets, truncations, leading alternatives, count decisions |
@@ -394,7 +365,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `pedigree/tier_b_relationships.csv` | the primary pedigree calls (one row per sample: parents, parent-count state, status) |
 | `pedigree/*.csv` | partial-edge, Tier-A and complete-data views, candidate sets, state calls, explanations, alternative explanations, search and exclusion diagnostics, evidence and chromosome summaries, and the released edges' relative-proxy contrasts (`relative_contrasts.csv`) |
 | `pedigree/evidence_calibration.json` | the cross-chromosome evidence scaling and its fit |
-| `pedigree/summary.json` | informative and omitted contigs, the chromosome-count statement (whether Tier A and Tier B were reachable), the family solve, the exclusion and the eligibility summaries |
+| `pedigree/summary.json` | informative and omitted contigs, the chromosome-count statement (whether Tier A and Tier B were reachable), the family solve, the exclusion summary and the candidate universe (every sequenced sample) |
 | `founder_refit/summary.csv` | per contig: components, founder rows, called and changed alleles, changed sites, median gain of a change, samples excluded from founder construction |
 | `family_phase/summary.csv` | per contig: family-MAP sweeps, convergence, final objective, called alleles, observable phase changes, root-frame repairs |
 | `recombination/<contig>.map.csv` | per map bin: called and expected crossovers, observable exposure, rates, cumulative cM |
@@ -449,7 +420,7 @@ and r4 are evaluated only at sites passing r1 and r2), so `bcftools view -f PASS
 removed site every sample is `./.`. In the founder VCF, a site removed by `r5` alone (fewer than two expected
 carriers of a non-major genotype: effectively monomorphic in the cross) carries the common allele in every column
 whose component span contains it: the allele with more reads in total over the samples r5 counts, i.e. the run's
-analysed samples that the contamination QC did not flag (FORMAT/AD of the input file, read at export time; those
+analysed samples that the sample quality exclusion did not flag (FORMAT/AD of the input file, read at export time; those
 samples' GT allele counts for a record without AD; equal totals give `.`). A site removed by any of r1-r4 (likely mapping artefacts or paralogs) is `.` in every column. Records the
 loader drops never reach the filter and are not written: non-biallelic records (multiallelic records, indels, MNPs,
 symbolic alleles) and biallelic SNPs sharing a position; the header counts them. With `full_length = false`

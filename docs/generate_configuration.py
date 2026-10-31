@@ -50,7 +50,6 @@ KIND_TEXT = {
     "path": "path",
     "strings": "array of strings",
     "ints": "array of integers",
-    "table": "table of strings",
     "cores": "\"auto\" or integer >= 1",
     "seed": "integer >= 0 or \"random\"",
     "memory": "\"auto\", integer bytes, or a size with a binary unit (K, M, G, T), e.g. \"200G\"",
@@ -123,8 +122,6 @@ def toml_value(value) -> str:
         return json.dumps(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(toml_value(item) for item in value) + "]"
-    if isinstance(value, dict):
-        return "{" + ", ".join(f"{key} = {toml_value(item)}" for key, item in value.items()) + "}"
     return repr(value)
 
 
@@ -253,9 +250,14 @@ def rules_section() -> list[str]:
             rules.append((node.lineno, _message(node.exc.args[0])))
     lines = ["## Consistency rules", "",
              "Checked when the configuration is loaded, before any input is read (the error messages of "
-             "`config/load.py`). Checks that need the inputs (VCF header, workbook, contig counts) run next, "
+             "`config/load.py`). Checks that need the inputs (VCF header, contig counts) run next, "
              "still before any computation; see [usage](usage.md#checks-before-computation).", ""]
     lines += [f"- {cell(text)}" for _, text in sorted(rules)]
+    lines += ["", "Removed in 3.4: the pipeline uses no sample metadata (inference reads only the observations and "
+              "the genetic map; sample names are identifiers, and every sequenced sample is a candidate parent of "
+              "every other). A configuration that still sets one of these sections fails at load, naming them "
+              "(`config/load.py` `REMOVED_SECTIONS`):", ""]
+    lines += [f"- [{'.'.join(path)}]: {cell(reason)}" for path, reason in load.REMOVED_SECTIONS.items()]
     return lines + [""]
 
 
@@ -407,8 +409,7 @@ def user_settings_of_constants(base) -> dict[str, list[str]]:
         table.write_text("chrom\tstart\tend\treason\nchrProbe\t10\t20\tprobe\n")
         for row in reference_rows():
             section = row["section"]
-            if not section or section.split(".")[0] in ("run", "execution", "input", "samples", "reports",
-                                                         "genetic_map"):
+            if not section or section.split(".")[0] in ("run", "execution", "input", "genetic_map"):
                 continue
             value = _probe_value(row, table)
             if value is None:
@@ -523,6 +524,22 @@ def runtime_constants_section() -> list[str]:
             "directory. Checkpoints are kept for resume; unfinished units must be rerun.", ""]
 
 
+def streaming_constants_section() -> list[str]:
+    from haplotype_reconstruction.assembly.founder_refinement.checkpoints import (
+        CHECKPOINT_BLOCKS, CACHE_SEGMENTS, MESSAGE_BYTES, MESSAGE_BOUNDARY_BYTES)
+    from haplotype_reconstruction.painting.evidence import WINDOW_BYTES
+    from haplotype_reconstruction.store.slices import CACHE_BYTES
+    return ["## Streaming buffer constants", "",
+            "Storage limits only; these do not change the scientific model or checkpoint format.", "",
+            "| constant | default | meaning |", "| --- | ---: | --- |",
+            f"| `assembly.founder_refinement.checkpoints.MESSAGE_BYTES` | `{MESSAGE_BYTES}` bytes | Minimum dense-message allowance per fixed-K search. Checkpoint only when dense scores/counts exceed both this and `(B+1) * MESSAGE_BOUNDARY_BYTES`. |",
+            f"| `assembly.founder_refinement.checkpoints.MESSAGE_BOUNDARY_BYTES` | `{MESSAGE_BOUNDARY_BYTES}` bytes | Dense-message allowance per boundary; permits long modest-N searches to retain the dense fast path. |",
+            f"| `assembly.founder_refinement.checkpoints.CHECKPOINT_BLOCKS` | `{CHECKPOINT_BLOCKS}` blocks | Retained boundary spacing above the message allowance; below it, every boundary is stored (k=1). |",
+            f"| `assembly.founder_refinement.checkpoints.CACHE_SEGMENTS` | `{CACHE_SEGMENTS}` | Reconstructed segments per checkpoint reader; dense readers allocate no segment cache. |",
+            f"| `painting.evidence.WINDOW_BYTES` | `{WINDOW_BYTES}` bytes | Target decoded likelihood/observation window; at least one whole bin. Masks, emissions and one sparse-row scratch span are additional. |",
+            f"| `store.slices.CACHE_BYTES` | `{CACHE_BYTES}` bytes | Compressed-chunk cache; one oversized chunk alone is allowed. A miss also holds one temporary compressed input copy. |", ""]
+
+
 # --------------------------------------------------------------------------------------------- environment
 def environment_section() -> list[str]:
     lines = ["## Environment", "",
@@ -546,13 +563,14 @@ def render() -> str:
              "options and `--set SECTION.KEY=VALUE` overrides on top. Later sources win, key by key: schema "
              "defaults < preset < TOML file < command-line options < `--set`. The resolved configuration is "
              "written to `OUTPUT/config.toml` and into every run record; it loads again unchanged. Only the "
-             "scientific sections (all but `[run]`, `[execution]` and `[reports]`) can change results; "
+             "scientific sections (all but `[run]`, `[execution]` and `[export]`) can change results; "
              "[usage](usage.md) explains the commands and the run directory.", "",
              "`--set` takes TOML values: `--set quality.read_calibration=false`, `--set execution.cores=32`, "
              "`--set 'input.contigs=[\"chr1\", \"chr2\"]'`; a value that is not valid TOML is read as a string.",
              "", "Contents:", ""]
     sections = [command_line_section(), toml_section(), rules_section(), presets_section(),
-                constants_section(), pressure_section(), runtime_constants_section(), environment_section()]
+                constants_section(), pressure_section(), runtime_constants_section(),
+                streaming_constants_section(), environment_section()]
     for section in sections:
         title = section[0].removeprefix("## ")
         lines.append(f"- [{title}](#{anchor(title)})")

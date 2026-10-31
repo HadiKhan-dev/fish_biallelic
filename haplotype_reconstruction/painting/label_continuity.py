@@ -99,6 +99,7 @@ from numba import njit, prange
 from .. import execution
 from ..maths import ties
 from ..model.components import _SITE_FOUNDER_FIELDS, ComponentPanel, relabel_rows
+from . import evidence as evidence_windows
 from . import fidelity, hmm
 from .config import PaintingConfig
 from .release import LabelContinuity, RelabelMove
@@ -372,44 +373,35 @@ def relabel_bytes(n_samples: int, n_states: int, n_bins: int, n_links: int, n_si
 
 
 class _SampleBatches:
-    """The component's samples in contiguous batches: their gathered evidence and part emissions, kept
-    when one batch holds every sample, else recomputed for each batch when needed."""
+    """Contiguous sample batches; retain part emissions and eligibility when one batch holds all samples."""
 
     def __init__(self, likelihoods, observed, sites, states, part_start, part_stop, config, size, bin_starts,
-                 part_bin):
+                 bin_stops, part_bin):
         self.likelihoods, self.observed, self.sites = likelihoods, observed, sites
         self.states, self.part_start, self.part_stop, self.config = states, part_start, part_stop, config
-        self.bin_starts, self.part_bin = bin_starts, part_bin
+        self.bin_starts, self.bin_stops, self.part_bin = bin_starts, bin_stops, part_bin
+        self.alt_probability = states.alt_probability()
         n_samples = likelihoods.shape[0]
         self.spans = [(start, min(start + size, n_samples)) for start in range(0, n_samples, size)]
         self._kept = {}
 
-    def gathered(self, start, stop):
-        key = ("gathered", start)
-        if key in self._kept:
-            return self._kept[key]
-        value = hmm.gather_sites(self.likelihoods, self.observed, self.sites, slice(start, stop))
+    def _values(self, start, stop):
+        if start in self._kept:
+            return self._kept[start]
+        raw, observed, informative = evidence_windows.tempered_emissions(
+            self.likelihoods, self.observed, self.sites, slice(start, stop), self.alt_probability,
+            self.states.background_frequency, self.bin_starts, self.bin_stops, self.config,
+            parts=(self.part_start, self.part_stop, self.part_bin))
+        value = raw, np.any(informative, axis=1)
         if len(self.spans) == 1:
-            self._kept[key] = value
+            self._kept[start] = value
         return value
+
+    def eligible(self, start, stop):
+        return self._values(start, stop)[1]
 
     def part_emissions(self, start, stop):
-        key = ("parts", start)
-        if key in self._kept:
-            return self._kept[key]
-        value = self._emissions(*self.gathered(start, stop))
-        if len(self.spans) == 1:
-            self._kept[key] = value
-        return value
-
-    def _emissions(self, likelihoods, observed):
-        # Tempered as painting's: every part divided by its whole bin's design effect (painting.hmm.design_effect),
-        # so the parts of a bin sum to the bin's tempered emission.
-        design = hmm.design_effect(likelihoods, observed, self.bin_starts, self.config.emission_site_correlation)
-        return np.ascontiguousarray(hmm.binned_emissions(
-            likelihoods, observed, self.states.alt_probability(), self.states.background_frequency,
-            self.part_start, self.part_stop, robustness_epsilon=self.config.robustness_epsilon,
-            log_floor=self.config.emission_log_floor) / design[:, None, self.part_bin])
+        return self._values(start, stop)[0]
 
 
 def _leftmost_equivalent_link(panel, offsets, links, perms, row_of_class, first, second, link, steps=None):
@@ -452,11 +444,11 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
     part_segment = np.searchsorted(link_sites, part_start, side="right").astype(np.int64)
     size = max(1, int(batch))
     samples = _SampleBatches(likelihoods, observed, evidence_sites[site_indices], states, part_start,
-                             np.asarray(part_stops, dtype=np.int64), config, size, bins.starts, part_bin)
+                             np.asarray(part_stops, dtype=np.int64), config, size, bins.starts, bins.stops, part_bin)
     spans = samples.spans
     eligible = np.empty(n_samples, dtype=np.bool_)
     for start, stop in spans:
-        eligible[start:stop] = np.any(hmm.informative_sites(*samples.gathered(start, stop)), axis=1)
+        eligible[start:stop] = samples.eligible(start, stop)
     if not np.any(eligible):
         return panel, _outcome("no_evidence", **counts)
 
@@ -694,12 +686,9 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
         return panel, _outcome("error_capabilities_changed", after=switches_before, **counts)
     switches_after = 0
     for start, stop in spans:
-        gathered = samples.gathered(start, stop)
-        new_emissions = hmm.binned_emissions(
-            *gathered, new_states.alt_probability(),
-            new_states.background_frequency, bins.starts, bins.stops,
-            robustness_epsilon=config.robustness_epsilon, log_floor=config.emission_log_floor
-        ) / hmm.design_effect(*gathered, bins.starts, config.emission_site_correlation)[:, None, :]
+        new_emissions, _, _ = evidence_windows.tempered_emissions(
+            likelihoods, observed, evidence_sites[site_indices], slice(start, stop),
+            new_states.alt_probability(), new_states.background_frequency, bins.starts, bins.stops, config)
         switches_after += int(np.sum(fidelity.painted_switches(new_emissions, model, capable, eligible[start:stop])))
         del new_emissions
     if switches_after >= switches_before:

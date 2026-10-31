@@ -1,8 +1,11 @@
 """Genome-retained parent identities define the fixed M2 panel.
 
-Every eligible pair of retained identities is included. The robust M1 utility
-keeps all eligible identities, floor multiplicities and contamination; it is
-reported for diagnostics and does not select an arbitrary tied subset.
+Release 3.4: the panel holds the bounded pairs of retained identities (``bounded_panel``): a pair enters when a valid
+upper bound on its joint M2 likelihood (``pedigree.pair_bound``) comes within ``PanelConfig.pair_relevance_margin`` of
+the child's best known configuration in the full-data fit or in a leave-one-chromosome-out fit. Pairs outside the
+panel contribute nothing to the M2 evidence (a lower bound), as pairs of non-retained identities already did. The
+robust M1 utility keeps all eligible identities, floor multiplicities and contamination; it is reported for
+diagnostics and does not select an arbitrary tied subset.
 """
 from __future__ import annotations
 
@@ -112,6 +115,70 @@ def retained_panel(keep: np.ndarray, screen_scores: np.ndarray,
                 if eligibility.pair_allowed(int(child), int(first), int(second)):
                     rows.append((int(child), int(first), int(second)))
     return CandidatePanel(np.asarray(rows, dtype=np.int64).reshape(-1, 3), screen_scores)
+
+
+def relevance_fits(n_contigs: int) -> np.ndarray:
+    """float64 [F, C]: the chromosome multiplicities the panel is screened for: the full-data fit (all ones), then
+    each leave-one-chromosome-out refit (one zero), as the decision weights them (pedigree.resampling)."""
+    full = np.ones((1, n_contigs))
+    if n_contigs < 2:
+        return full
+    return np.vstack([full, np.ones((n_contigs, n_contigs)) - np.eye(n_contigs)])
+
+
+def _fit_sums(fits: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """float64 [F, P]: for each fit, the weighted sum of the chromosome rows of values [C, P] with positive weight.
+    A zero-weight chromosome is left out, never multiplied (0 x inf would be NaN); a sum meeting +inf and -inf is
+    NaN, which the caller treats as no evidence for exclusion."""
+    out = np.zeros((len(fits), values.shape[1]))
+    with np.errstate(invalid="ignore"):
+        for fit, weights in enumerate(fits):
+            for contig in np.flatnonzero(weights > 0):
+                out[fit] += weights[contig] * values[contig]
+    return out
+
+
+def bounded_panel(compact, zero: np.ndarray, bounds: np.ndarray, screen_scores: np.ndarray,
+                  eligibility: ParentEligibility, config: PedigreeConfig) -> tuple[CandidatePanel, dict]:
+    """The eligible retained pairs whose joint M2 bound reaches the child's best known configuration (release 3.4),
+    and counts for the log.
+
+    ``compact`` the certified M1 profile (raw chromosome M1 of each child's retained parents), ``zero`` float64 [C, N]
+    the chromosome M0 scores of the same screen, ``bounds`` [C, P] each chromosome's pair bounds in the canonical
+    retained-pair order (``pair_bound.retained_batches``). A pair enters when, for some fit w of ``relevance_fits``,
+    w . bound >= max(w . M0, max_r w . M1_r) - margin, r over the child's retained parents: a pair left out has an M2
+    below the best configuration by more than the margin in every such fit (the bound is >= M2 on every chromosome
+    and w >= 0). Chromosomes a fit leaves out are omitted from its sums, and a pair whose bound sum is not a number is
+    kept (a numerical failure is never evidence for exclusion). Membership is a function of the scores only; rows are
+    serialized by child, then by ascending parent indices.
+    """
+    margin = float(config.panel.pair_relevance_margin)
+    fits = relevance_fits(compact.n_contigs)
+    counts = np.diff(compact.indptr)
+    offsets = np.concatenate([[0], np.cumsum(counts * (counts - 1) // 2)])
+    if bounds.shape != (compact.n_contigs, int(offsets[-1])):
+        raise ValueError("pair bounds do not match the retained pairs of the screen")
+    rows = []
+    for child in np.flatnonzero(eligibility.children):
+        start, stop = compact.indptr[child:child + 2]
+        if stop - start < 2:
+            continue
+        parents = compact.parents[start:stop]
+        known = np.maximum(_fit_sums(fits, zero[:, child][:, None])[:, 0],
+                           np.max(_fit_sums(fits, compact.raw[:, start:stop]), axis=1))
+        bound = np.asarray(bounds[:, offsets[child]:offsets[child + 1]], dtype=np.float64)
+        with np.errstate(invalid="ignore"):
+            gap = _fit_sums(fits, bound) - known[:, None]
+        admitted = np.any(gap >= -margin, axis=0) | np.any(np.isnan(gap), axis=0)
+        first, second = np.triu_indices(stop - start, 1)
+        first, second = parents[first[admitted]], parents[second[admitted]]
+        allowed = eligibility.pair_mask(int(child), first, second)
+        trio = np.column_stack([np.full(int(np.sum(allowed)), child, dtype=np.int64), first[allowed],
+                                second[allowed]])
+        rows.append(trio[np.lexsort((trio[:, 2], trio[:, 1]))])
+    trios = np.concatenate(rows) if rows else np.empty((0, 3), dtype=np.int64)
+    log = dict(retained_pairs=int(offsets[-1]), panel_rows=int(len(trios)), margin=margin, fits=int(len(fits)))
+    return CandidatePanel(np.ascontiguousarray(trios, dtype=np.int64), screen_scores), log
 
 
 def genome_panel(raw_one: np.ndarray, markers: np.ndarray,

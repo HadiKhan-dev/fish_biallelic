@@ -312,7 +312,11 @@ below can admit work over the limit.
   overlapping selection generations, context proposals and checkpoint copies. Named array subtotals reach
   138 bytes per founder-site in selection and 167 in the second context; 200 is a planning allowance, not an exact
   bound on every Python object, memo or decoded backing buffer. `SEARCH_GROWTH = 8` estimates growth and does not
-  cap founder counts. Pool-owned evidence copies remain additional reservations.
+  cap founder counts. Pool-owned evidence copies remain additional reservations. Release 3.4 decodes production
+  likelihoods straight into the shared neutral view after depth-key construction, masks in place, then builds the
+  float32 scoring copy. The view-build array transient is about 38 bytes per sample-site, plus bounded codec
+  scratch (a separately supplied decoded input uses the 50-byte staged path). Local selection reads the view and
+  its pools attach the view's shared arrays, so through local selection a lane holds 37 bytes per sample-site.
 - **Caller residence.** Each concurrent lane also holds a process allowance until its executor joins. A driver
   executing reconstruction directly holds its allowance across later contigs and genome-wide stages, through
   cache publication. Both serial and planned one-lane routes additionally reserve each contig's arrays. The driver
@@ -322,6 +326,24 @@ below can admit work over the limit.
   caches and sparse carried history remain reserved across proposal waits; worker/lane residence and live
   availability checks are unchanged. Moving the scratch hold changes admission timing, not the guard or
   scientific decisions.
+- **Refinement evidence windows.** Founder refinement reads its robust log evidence and switch costs through windows
+  (`assembly/founder_refinement/window.py`, release 3.4): a component whose tables fit `RESIDENT_BYTES` (4 GiB) keeps
+  them resident, shared by its searches; a larger one gives each search its own window sized by `WINDOW_BYTES`
+  (512 MiB of codes 0-2 and costs, plus 32 bytes per sample and partial site: up to 1,097 MiB at N = 2,503 when
+  every site is partial), and any value a window does not hold is recomputed exactly where it is read. Through 3.3 every component held
+  140 bytes per sample-site (seven float64 codes, a reversed copy and up to seven float32 cost arrays), all at once
+  for the chromosome-wide last levels: the term that set a lane's peak at large N. Window sizes change time and
+  memory only, never a value.
+- **Adaptive refinement messages.** A fixed-K search keeps dense block-boundary scores/counts and the original
+  dense kernels unless its potential message payload exceeds `max(512 MiB, (B+1) * 1 MiB)`, for B blocks.
+  The payload is `(B+1) * N * K(K+1)/2 * 8` bytes times four arrays when the search can use the guard, otherwise
+  two. Above the allowance, both ends and every 16th boundary are kept; missing segments are recomputed exactly
+  with a two-segment cache. The length allowance keeps N=1,003, K<=7 searches dense even on long contigs;
+  N=2,503, K=5-7 last-level half-chr8 searches checkpoint. Short large-N components can stay dense, and high-K
+  small-N searches can checkpoint. Dense sweeps retain forward-message reuse and direct proposal access.
+  Normalisers, proposal-cache/flank copies, guard history, traceback and polish scratch are additional. This
+  policy trades recomputation for memory only on large, wide message sets; it is not a hard RSS bound. Constants
+  are in `assembly/founder_refinement/checkpoints.py`; the exact rule is in [founder refinement](methods/founder_refinement.md).
 - **Admission.** A request starts when its bytes fit alongside existing reservations and current availability;
   otherwise it waits. Nested waiting work takes precedence, then arrival order. A smaller request passes a larger
   waiting one only if both fit. At depth d, the ledger ceiling is the limit minus
@@ -784,3 +806,52 @@ omitted release controls remain follow-up. After2.3, the owner permits a few ULP
 floating-point difference for SIMD/FMA or reassociated reductions only when released
 decisions remain unchanged. That policy is not used for2.3 identity swaps. The C8
 orientation estimator is deferred to2.4; honest phase breaks remain the2.3 output.
+
+## Painting evidence windows in 3.4
+
+Painting constructs emissions from original float64 evidence through checked partial record reads. The reader avoids retaining full
+contig likelihood and count arrays. It retains complete emissions and two boolean masks
+per sample batch, plus a 64 MiB target likelihood/observation window (at least one whole bin), one sparse-row
+scratch span and a bounded 1 GiB compressed-chunk cache. A cache miss temporarily holds an input copy of its
+compressed chunk. Internal sample tiles preserve locality in the sample-major record. Label continuity caches
+part emissions and eligibility instead of full gathered likelihoods. Scientific kernels and summation order are
+unchanged; existing batch memory estimates remain conservative. Peak savings depend on the assembled components
+and the relative size of the unchanged HMM workspace.
+
+Single-contig baseline/candidate pairs on exclusive 76-core Ice Lake nodes preserved every field of both painting
+records, including packed emissions, with zero byte differences and no comparison exclusions. Main-process peak
+RSS was sampled every 50 ms through record writing:
+
+| Saved input / contig | RSS before → after (GiB) | Painting wall before → after (s) |
+| --- | ---: | ---: |
+| std / chr20 (N=40) | 1.255 → 1.071 | 36.165 → 35.988 |
+| K30 / m1 | 0.938 → 0.922 | 38.240 → 36.531 |
+| TroMau / chr18 | 1.122 → 0.976 | 36.095 → 36.480 |
+| TroMau / chr20 | 1.037 → 0.922 | 35.920 → 36.259 |
+| N=1,003 / half chr8 | 6.663 → 4.210 | 51.313 → 116.817 |
+
+The N=1,003 pair trades 36.8% lower peak RSS for 2.28 times the wall time. These are single ordered pairs with
+mixed existing JIT caches, not repeated speed estimates. TroMau establishes consistency only. Receipts and exact
+comparison paths are in the release 3.4 lab's `v34/codex/sw2/RESULTS.md`.
+
+For the direct shared assembly view, separate 8-core pairs measured 6.137 → 4.635 GiB at N=1,003 and
+15.048 → 11.476 GiB at N=2,503 (both half chr8, L=128,124; 10 ms main-process RSS sampling). These match the
+~50 → ~38 N L build transient; permanent shared view storage remains 37 N L. Local selection and final assembly
+preserved every scientific field on std chr20 and both scale inputs. Timing/diagnostic fields and changed
+code-identity digests are enumerated separately in the lab comparisons. This saving concerns view construction;
+whole final-assembly peak need not fall (N=2,503: 33.64 → 34.50 GiB in the paired replay).
+
+## Exact pedigree constant-factor improvements in 3.4
+
+PEDFAST preserves the all-pairs M1 screen and the existing decision algorithm: it reuses candidate-independent
+M1 products and graph reachability, parallelizes independent family updates with contiguous message reads,
+skips exactly known transcendental results, and schedules one resampling fit per task with LOCO first. All
+product fields match c34k on 18 saved-input stage replays; this is consistency evidence on TroMau. The screen
+remains O(N^2); PEDFAST adds no pruning or change to the fixed point, tolerance, model or release rules. Its
+release manifest includes the new observed kernel signatures. Numba's dynamic-global warning for the current
+family lane-count helper still prevents disk caching of several family kernels; listing those signatures
+does not by itself eliminate compilation in fresh workers. Timings and the conditional N=2,503 projection
+are recorded in the release lab's PEDFAST_RESULTS.md. That benchmark used the rejected PEDSCALE panel; its
+projection does not transfer to PEDSCALE2. The N=1,003 stage fell from 5,246.9 to 4,416.6 seconds with storage
+interference; its separately timed decision was 1,728.1 seconds against an approximate 4,380-second baseline.
+This is local, conditional evidence, not a full-length runtime guarantee.

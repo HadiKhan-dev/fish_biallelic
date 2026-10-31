@@ -26,6 +26,20 @@ family-phase product). Nothing downstream feeds back into the painting or the as
 `PaintingConfig` has no user-visible field; its constants are internal model constants listed in
 [the configuration reference](../configuration.md).
 
+## Evidence windows
+
+The record entry point reads original likelihoods and observations in sample tiles and consecutive whole-bin
+windows. All samples remain eligible for painting, including those excluded from founder construction. Each bin
+uses the same site order, float64 arithmetic and kernels as the decoded-array entry point. Label-continuity parts
+retain their whole bin's design effect. Full emissions and the observed/informative boolean masks survive a window;
+its likelihoods are released before the next window. HMM recurrences, model fitting and cross-sample reductions
+still operate on the same complete emission arrays.
+
+The decoded likelihood/observation window targets 64 MiB, with a floor of one whole bin. Sparse selected columns
+need one additional sample-row scratch span. The compressed record cache is bounded at 1 GiB plus one temporary
+input copy on a miss. These buffer constants change storage, not the scientific model; they are listed in the
+[configuration reference](../configuration.md). Existing conservative sample-batch estimates remain in use.
+
 ## Label continuity
 
 Each founder row of an assembled component is a path through the local rows of consecutive atomic blocks (the

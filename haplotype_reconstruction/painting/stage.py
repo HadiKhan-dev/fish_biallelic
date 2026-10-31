@@ -27,9 +27,9 @@ import numpy as np
 from .. import execution
 from ..assembly import records as assembly_records
 from ..maths import ties
-from ..evidence import records as evidence_records
 from ..model.components import ComponentPanel
 from ..model.evidence import ContigEvidence
+from . import evidence as evidence_windows
 from . import fidelity, hmm, records
 from .config import PaintingConfig
 from .label_continuity import relabel_component
@@ -124,10 +124,9 @@ def batch_size(n_samples: int, threads: int, bytes_per_sample: int, fixed_bytes:
 
 def _raw_batches(states, bins, likelihoods, observed, sites, config, size):
     """Generator factory: for each contiguous batch of ``size`` samples, (tempered label emissions float64[n, S*S, B],
-    eligible bool[n], start, stop, gathered likelihoods, gathered observed)."""
+    eligible bool[n], start, stop, informative mask, gathered observed)."""
     alt_probability = states.alt_probability()
     n_samples = likelihoods.shape[0]
-    correlation = float(config.emission_site_correlation)
 
     def batches():
         for start in range(0, n_samples, size):
@@ -135,14 +134,11 @@ def _raw_batches(states, bins, likelihoods, observed, sites, config, size):
             # A boundary: the team follows the live share (a lane's lease grows as other lanes finish); the batch
             # size was fixed by the caller, so results and memory do not depend on it.
             execution.claim_threads()
-            batch_likelihoods, batch_observed = hmm.gather_sites(likelihoods, observed, sites, slice(start, stop))
-            raw = hmm.binned_emissions(batch_likelihoods, batch_observed, alt_probability,
-                                       states.background_frequency, bins.starts, bins.stops,
-                                       robustness_epsilon=config.robustness_epsilon,
-                                       log_floor=config.emission_log_floor)
-            raw /= hmm.design_effect(batch_likelihoods, batch_observed, bins.starts, correlation)[:, None, :]
-            eligible = np.any(hmm.informative_sites(batch_likelihoods, batch_observed), axis=1)
-            yield raw, eligible, start, stop, batch_likelihoods, batch_observed
+            raw, batch_observed, informative = evidence_windows.tempered_emissions(
+                likelihoods, observed, sites, slice(start, stop), alt_probability,
+                states.background_frequency, bins.starts, bins.stops, config)
+            eligible = np.any(informative, axis=1)
+            yield raw, eligible, start, stop, informative, batch_observed
 
     return batches
 
@@ -242,7 +238,7 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
         qaf = np.empty((n_samples, n_bins))
         support = np.empty((n_samples, 2, n_bins), dtype=np.bool_)
         eligible = np.empty(n_samples, dtype=np.bool_)
-        for raw, batch_eligible, start, stop, batch_likelihoods, batch_observed in _raw_batches(
+        for raw, batch_eligible, start, stop, informative, batch_observed in _raw_batches(
                 states, bins, likelihoods, observed, sites, config, size)():
             if packed is not None:
                 hmm.pack_emissions(raw, packed, start, n_states)
@@ -255,7 +251,6 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
              qaf[start:stop]) = fidelity.release_posteriors(raw, model, capable, batch_paths, other_paths,
                                                             public_ids, local_keys)
             del raw
-            informative = hmm.informative_sites(batch_likelihoods, batch_observed)
             batch_support = hmm.direct_support(batch_paths, states.named_alleles, informative,
                                                bins.starts, bins.stops, states.n_classes)
             batch_support[~batch_eligible] = False
@@ -303,7 +298,7 @@ def release_component(panel: ComponentPanel, decoding: ComponentDecoding,
         packed_emissions=decoding.packed_emissions)
 
 
-def paint_chromosome(panels: tuple[ComponentPanel, ...], evidence: ContigEvidence,
+def paint_chromosome(panels: tuple[ComponentPanel, ...], evidence: ContigEvidence | evidence_windows.RecordEvidence,
                      config: PaintingConfig, genetic_map, *,
                      available_memory: int | None = None) -> ChromosomePainting:
     """Label continuity, then the painting of every component of one chromosome.
@@ -349,9 +344,8 @@ def run_contig(store, contig: str, config: PaintingConfig, genetic_map, budget) 
     if records.complete(file):
         return records.progress(file)
     panels = assembly_records.founder_panels(file)
-    evidence = evidence_records.load(file)
     threads = budget.phase("painting").threads()
-    with execution.numba_threads(threads):
+    with evidence_windows.read_evidence(file) as evidence, execution.numba_threads(threads):
         painting = paint_chromosome(panels, evidence, config, genetic_map)
     del panels, evidence
     moves = sum(len(outcome.moves) for outcome in painting.label_continuity if outcome.accepted)

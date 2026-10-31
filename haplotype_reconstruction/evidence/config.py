@@ -49,8 +49,9 @@ class SiteQualityConfig:
     core_posterior_level: float = 0.5
     histogram_smoothing_bins: int = 5
     # r3/r4: a site is flagged when P(clean core) < this level, and only if the artefact class is
-    # separated from the clean core by this factor (rate ratio, or binomial standard deviations
-    # at the median depth).
+    # separated from the clean core by this factor (r3: rate ratio; r4: latent standard deviation or
+    # mean offset over max(clean latent standard deviation, binomial standard deviation at the
+    # median depth)).
     clean_posterior_level: float = 0.5
     minimum_artefact_separation: float = 3.0
     # r5 (informativeness, not quality): fewer expected carriers of a non-major genotype than
@@ -63,22 +64,67 @@ class SiteQualityConfig:
 
 @dataclass(frozen=True)
 class SampleQualityConfig:
-    """Per-sample, per-contig contamination QC (``evidence/sample_quality.py``).
+    """Per-sample, per-contig quality exclusion from founder construction (``evidence/sample_quality.py``).
 
-    Runs only where the site filter is applied (it uses the r1-r4-passing SNPs and r4's clean
-    heterozygote balance). A sample is flagged on a contig when the robust z of its
-    low-fraction private-allele statistic exceeds ``flag_robust_z``; flagged samples leave
-    founder construction on that contig (``ContigEvidence.founder_view``) and the r5 carrier
-    count. Heterozygous near-private alleles (inherited segments) never flag; they are reported.
+    Runs only where the site filter is applied (it uses the r1-r4-passing SNPs, r3's clean error rate and r4's clean
+    heterozygote balance h0, widened to r4's two component means when r4 records an unresolved fit). Per library, a
+    mixture over its eligible cells (no other library carries the minor allele) tests for a foreign-like minor-read
+    component above ``minimum_foreign_fraction`` / 2, with a common share within the non-artefact mixture, against the
+    library's own errors (any distribution below that amplitude), its own heterozygotes (beta-binomial, the same in
+    both orientations) and local artefacts (a free share per region, each with its own fraction); the library is
+    flagged on a contig when the statistic reaches the working threshold. A flag is a quality exclusion, not a
+    contamination diagnosis: elevated library error, dispersed variable-fraction artefacts and biased private alleles
+    can flag too, even in a short tract if other regions have little eligible information. Flagged samples leave founder construction on that contig
+    (``ContigEvidence.founder_view``) and the r5 carrier count. Heterozygous near-private alleles (inherited segments)
+    are reported.
     """
 
     enabled: bool = True
-    # Extreme-outlier bar on the variance-stabilised scale (real TroMau, 22 contigs: samples
-    # without a contamination signature reach at most z 4.0).
-    flag_robust_z: float = 5.0
-    # The median/MAD spread needs a cohort; smaller cohorts flag nothing.
+    # q: a library carries the cohort-minor allele when P(K >= k | d, e) <= q / (N - 1) (a site nobody carries
+    # shows a carrier anywhere with probability <= q). The same q sets the working threshold of the per-library test:
+    # T >= u with P(chi2_1 >= u) = 2 q / (G N) (the boundary law (chi2_0 + chi2_1) / 2 of one foreign fraction, by
+    # Bonferroni over the G fractions and the N libraries). That level is nominal only for a regular, correctly
+    # specified likelihood of independent windows; the measured clean false-flag rate is what supports it.
+    carrier_tail_level: float = 0.05
+    # alpha_min: twice the working foreign-allele amplitude a_min. The null admits any error distribution of the
+    # library up to a_min = alpha_min / 2; a flag needs a component above it. Motivation (not a derived safety
+    # boundary): the founder-construction and painting emissions mix each observed site's genotype evidence with a
+    # uniform genotype error of mass r = 0.01 (assembly LinkerConfig.robustness, PaintingConfig.robustness_epsilon,
+    # the founder refit), which limits the influence of discordant observations. At a site where foreign DNA at read
+    # fraction alpha is homozygous for an allele the sample lacks, a cell of depth d shows K ~ Bin(d, alpha) foreign
+    # reads; two or more contradict a homozygote decisively (heterozygote likelihood ratio above 3 (1 - r) / r at
+    # clean error rates 1e-4..1e-3 and depths of about 4 to 16) with probability ~ C(d, 2) alpha^2, which is of the
+    # order of r at alpha = 0.8-1.4% over 11-18x (alpha 1%: 0.72% at 13x; alpha 2%: 2.7%). A foreign allele shows at
+    # alpha (foreign homozygote) or alpha/2 (heterozygote), so a = alpha_min / 2 aims to catch 1% contamination of
+    # either zygosity; a flag does not establish alpha >= 1%, and sensitivity near the amplitude is measured, not
+    # guaranteed. Libraries whose cells are mostly at 1-5x are more fragile; the QC has little power there. Not
+    # calibrated on any real library.
+    minimum_foreign_fraction: float = 0.01
+    # f: foreign alleles are resolved up to a_hi = f h_lo / 2 (h0/4: a foreign heterozygote at alpha/2 with alpha up
+    # to h0/2), with h_lo the lower end of the balance interval (h0, or the lower of r4's two component means when r4's
+    # labelling is unresolved); grosser contamination is detected at that ceiling, its fraction reported as at least
+    # it. Own private heterozygotes are beta-binomial about the balance interval with a latent SD up to 0.1, the same
+    # for a private ALT and a private REF allele. Own private alleles shown below about h_lo - 0.2 (reference or
+    # haplotype bias) can resemble foreign alleles, even locally if other regions carry little eligible information.
+    # The fitted fraction is not a calibrated contamination estimate.
+    heterozygote_floor_ratio: float = 0.5
+    # Own private heterozygotes and errors may be commoner at some depths (mapping bias lowers depth and allele
+    # fraction together): their weights are fitted in this many depth classes (the library's eligible-cell depth
+    # quantiles), foreign alleles' share in none (foreign reads do not depend on a site's depth).
+    heterozygote_depth_classes: int = 4
+    # Kept from release 2.16: smaller cohorts flag nothing (with few libraries most alleles absent from every other
+    # library are the library's own, and the eligible set is too small to separate foreign alleles from them).
     minimum_samples: int = 20
-    # Cells of one sample closer than one sequenced fragment can share reads: one event.
+    # Local artefacts (both hypotheses): the contig's passing sites are cut into this many regions of equal site
+    # counts, and in each region a free share of the library's cells may be local artefacts (a collapsed repeat, a
+    # mismapped paralog, a private tract with mapping bias), each with a minor fraction of its own (uniform on [0, 1],
+    # so k is uniform on 0..d). The foreign share c is common within the non-artefact mixture; its marginal weight
+    # is (1 - pi_R) c in region R. No independent regional support is required; local excesses can be absorbed,
+    # but need not be. The uniform law and region count are working choices. 1: one contig-wide artefact share.
+    artefact_regions: int = 16
+    # Cells of one sample closer than one sequenced fragment can share reads: each eligible cell weighs 1 / (the
+    # library's eligible cells in its fragment_bp window, counted from the first passing site), and segment-report
+    # cells form one event.
     fragment_bp: int = 1000
     # Inherited-segment report only: heterozygous near-private events of one (sample, partner)
     # less than segment_gap_bp apart form a region; regions with fewer events are not listed.

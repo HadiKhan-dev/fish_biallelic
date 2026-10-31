@@ -41,8 +41,10 @@ Every complete run now ends with an export stage that writes the final products 
 | `export --synthetic-alleles` | none: a simulation's alleles are always written as A (0) and C (1) |
 | `export --checkpoints K` | none: the checkpoints are found from `RUN` |
 
-A configuration that the TroMau or AulStu commands found in code (contigs, workbook columns, eligibility design,
-reference report) is in the presets; the data paths that were hard-coded in the drivers must now be given:
+The contigs that the TroMau or AulStu commands found in code are in the presets; the data path that was hard-coded
+in the drivers must now be given. Since release 3.4 the pipeline reads no sample metadata: the workbook, the
+eligibility designs and the reference report of those commands have no counterpart, and every sequenced sample is a
+candidate parent of every other.
 
 <!-- check_docs: config -->
 ```toml
@@ -50,9 +52,6 @@ preset = "aulstu"
 
 [input]
 vcf = "data/AsAc.AulStuGenome.biallelic.bcf.gz"
-
-[samples]
-metadata = "data/AsAc_metadata.xlsx"
 ```
 
 ## Command-line options
@@ -76,8 +75,8 @@ metadata = "data/AsAc_metadata.xlsx"
 | `--rate-cm-per-mb X` | `--set genetic_map.rate_cm_per_mb=X` |
 | `--shared-family-evidence` / `--no-shared-family-evidence` | none since 3.0 (in 2.x a `--set` override of the recombination setting) |
 | `--order-breakpoints FILE` (simulate, reconstruct, astcal, tropheops) | `--set recombination.order_breakpoints=FILE` (`--order-breakpoints` stays on `haplotypes recombination`) |
-| `--eligibility FILE` | `--set pedigree.eligibility.policy=constraints --set pedigree.eligibility.constraints=FILE` |
-| `--metadata FILE`, `--metadata-sheet S` | `--set samples.metadata=FILE`, `--set samples.sheet=S` |
+| `--eligibility FILE` | none since 3.4 (in 2.0 to 3.3 a constraints eligibility policy): every sequenced sample is a candidate parent |
+| `--metadata FILE`, `--metadata-sheet S` | none since 3.4 (in 2.0 to 3.3 a sample workbook): no sample metadata is read |
 | `--seed N`, `--depth X` | `--set simulation.seed=N`, `--set simulation.depth=X` |
 | `--generations A B C` | `--set 'simulation.cohorts=[A, B, C]'` |
 | `--backcross-fraction`, `--backcross-start-generation`, `--observe-generations`, `--observed-fraction` | `--set simulation.backcross_fraction=X`, `simulation.backcross_start_cohort=N`, `simulation.observe_cohorts=[...]`, `simulation.observed_fraction=X` |
@@ -98,9 +97,9 @@ and sections are errors (1.0 ignored them silently), so a 1.0 file must be conve
 | `[run] contig_workers`, `[run] serial_contigs` | `[execution] contig_lanes`, `[execution] serial` |
 | `[inputs] vcf`, `[inputs] contigs` | `[input] vcf`, `[input] contigs` (and `[input] kind`) |
 | `[inputs] templates` | `[simulation] templates` |
-| `[inputs] metadata`, `[inputs] metadata_sheet` | `[samples] metadata`, `[samples] sheet` |
-| `[inputs] eligibility` | `[pedigree.eligibility] policy = "constraints"` and `constraints` |
-| eligibility designs built into the tropheops and astcal drivers | `[pedigree.eligibility] policy = "cohorts"`, `parent_generations`, `opposite_sex_pairs` (in the presets) |
+| `[inputs] metadata`, `[inputs] metadata_sheet` | none since 3.4 (in 2.0 to 3.3 a sample workbook section): no sample metadata is read |
+| `[inputs] eligibility` | none since 3.4 (in 2.0 to 3.3 a constraints eligibility policy): every sequenced sample is a candidate parent |
+| eligibility designs built into the tropheops and astcal drivers | none since 3.4 (in 2.0 to 3.3 cohort policies in the presets): every sequenced sample is a candidate parent |
 | `[run] read_calibration`, `[run] site_quality_filter`, `[run] sample_quality_filter` | `[quality] read_calibration`, `[quality] site_filter`, `[quality] sample_filter` |
 | `[run] pedigree_calibration` | `[pedigree] evidence_calibration` |
 | `[run] founder_refinement` | none (always on) |
@@ -113,10 +112,8 @@ and sections are errors (1.0 ignored them silently), so a 1.0 file must be conve
 | `[simulation] seed = "none"` | `[simulation] seed = "random"` |
 | `[run] founder_scaling`, `[refinement] impute_missing`, `[run] assembly_model`, `assembly_search`, `discovery_search`, `feedback_selection`, `feedback_segment_exchange` | none: unknown keys are errors; delete them |
 
-New settings: `preset`, `[input] kind`, `[execution] memory_limit` (`--memory-limit`), `[execution] profile`, the
-`[samples]` columns (`id_column`, `generation_column`, `sex_column`, `reference_generation`,
-`generation_prefixes`, `generations`, `sexes`), `[reports] reference_consistency`, and `[export] enabled` and
-`[export] full_length`. `[input] contigs` is required for VCF input unless a preset lists
+New settings: `preset`, `[input] kind`, `[execution] memory_limit` (`--memory-limit`), `[execution] profile`, and
+`[export] enabled` and `[export] full_length`. `[input] contigs` is required for VCF input unless a preset lists
 them (the 1.0 `reconstruct` command took every header contig). Paths still resolve against the working
 directory.
 
@@ -162,7 +159,7 @@ evaluation stage.
 | `logs/reconstruction_<contig>_<stamp>_<pid>.log` | `logs/contigs/reconstruction_<contig>_<stamp>_<pid>.log` |
 | run records with the environment settings | `run_records/<stamp>_<pid>.json` with the resolved configuration; `config.toml` holds it too |
 | `sample_quality/<contig>.tsv`, `sample_quality/<contig>.segments.tsv` | `quality/<contig>.samples.tsv`, `quality/<contig>.segments.tsv` |
-| `reference_consistency.csv` | `discovery/reference_consistency.csv` |
+| `reference_consistency.csv` | none since 3.4 (it compared discovered blocks with the generation-labelled reference rows) |
 | `reports/painting/<contig>/*.tsv` | `painting/<contig>/*.tsv` (same five tables) |
 | `pedigree/scientific_relationships.csv` (a copy of the Tier-B table) | `pedigree/tier_b_relationships.csv` |
 | `pedigree/*.csv`, `pedigree/evidence_calibration.json` | unchanged names |

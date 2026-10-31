@@ -118,15 +118,11 @@ class ExposureEvidence:
 
 @dataclass(frozen=True)
 class DecisionInputs:
-    """What every weighted fit reads; shared read-only with resampling workers.
-
-    chronology: bool [N, N] [child, parent] design-ordered edges (exempt from direction terms).
-    """
+    """What every weighted fit reads; shared read-only with resampling workers."""
 
     alternatives: Alternatives
     exposure: ExposureEvidence
     junctions: JunctionEvidence
-    chronology: np.ndarray
 
 
 # ------------------------------------------------------------------------------- gate and scores
@@ -180,8 +176,7 @@ def fit_scores(weights: np.ndarray, inputs: DecisionInputs, orientation: Orienta
         trace.update(genetic=aggregate.copy(), structural_state=state_scores.copy(),
                      structural_identity=identity_scores.copy(), testable=gate)
     return family.adjust(state_scores, identity_scores, alternatives.rows, alternatives.states,
-                         alternatives.full_counts, orientation, config.direction,
-                         inputs.chronology, trace)
+                         alternatives.full_counts, orientation, config.direction, trace)
 
 
 # ------------------------------------------------------------------------------- selection

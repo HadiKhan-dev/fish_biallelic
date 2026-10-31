@@ -445,7 +445,8 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
     """Context proposals of every panel (one per LocalPanel, same order) and a summary.
 
     panels: the current round's LocalPanels; components: the context assembly's materialised
-    ComponentPanels (first/stop index ``panels``); evidence: the founder-view ContigEvidence;
+    ComponentPanels (first/stop index ``panels``); evidence: the founder evidence
+    (assembly.evidence.SelectionEvidence; the pool attaches its shared likelihoods);
     census_key: the round's key for the valley census (diagnostics only).
     """
     refit_config = config.context_refit
@@ -496,12 +497,12 @@ def refine(panels, components, evidence, genetic_map, config, redraw_rate, budge
         samples = evidence.likelihoods.shape[0]
         sizes = [refit_task_bytes(samples, len(task[2]), len(task[3]), len(task[1])) for task in tasks]
         planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
-        # One shared evidence copy for the pool, counted once in the largest concurrent group.
+        # The pool's shared copies (its own mask; the view's likelihoods are attached), counted once in the largest
+        # concurrent group.
         largest = max(range(len(planned)), key=planned.__getitem__)
-        planned[largest] += evidence.likelihoods.nbytes + observed.nbytes
+        planned[largest] += evidence.pool_copy_bytes(observed)
         workers = memory_worker_limit(planned, min(int(budget.threads()), len(tasks)), label="context-refit")
-        with BudgetedPool(budget, processes=workers,
-                          shared=dict(likelihoods=evidence.likelihoods, observed=observed),
+        with BudgetedPool(budget, processes=workers, shared=evidence.pool_arrays(observed),
                           label="context-refit") as pool:
             # Each task returns its blocks' finished proposals: the coordinator only places them and adds counts.
             for index, finished, changed, filled, sites, founders, report in pool.imap_unordered(

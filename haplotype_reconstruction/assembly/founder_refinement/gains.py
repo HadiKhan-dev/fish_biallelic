@@ -18,6 +18,7 @@ from numba import njit, prange
 
 from .messages import segments
 from .objective import forward_sites, forward_sites_lex, normalise, pair_code7, unordered_pairs
+from .window import capacity, cover, samples_of
 
 
 @njit(cache=True, nogil=True)
@@ -155,20 +156,20 @@ def item_dosages(haps, leaves, offsets, k, rows, row_start, b0, b1, first, secon
 
 
 @njit(inline="always")
-def dense_blocks(dos, lo, logs, offsets, costs, row, R, b0, b1, s, scale):
+def dense_blocks(dos, lo, win, offsets, row, R, e, b0, b1, s, scale):
     """The all-state recursion of sample s over blocks [b0, b1) on a candidate's dosage table, in
     place on row; returns scale plus the blocks' normalisers, added in block order."""
     for b in range(b0, b1):
-        forward_sites(row, dos, lo, logs, s, offsets[b], offsets[b + 1], costs, R)
+        forward_sites(row, dos, lo, win, s, offsets[b], offsets[b + 1], R, e)
         scale += normalise(row)
     return scale
 
 
 @njit(inline="always")
-def dense_blocks_lex(dos, lo, logs, offsets, costs, row, cnt, R, Rc, b0, b1, s, scale):
+def dense_blocks_lex(dos, lo, win, offsets, row, cnt, R, Rc, e, b0, b1, s, scale):
     """dense_blocks() with the lexicographic switch costs."""
     for b in range(b0, b1):
-        forward_sites_lex(row, cnt, dos, lo, logs, s, offsets[b], offsets[b + 1], costs, R, Rc)
+        forward_sites_lex(row, cnt, dos, lo, win, s, offsets[b], offsets[b + 1], R, Rc, e)
         scale += normalise(row)
     return scale
 
@@ -197,7 +198,7 @@ def lex_close(row, cnt, g, gcnt):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def candidate_gains(haps, leaves, logs, offsets, costs, f_start, g_start, focal, first_block,
+def candidate_gains(haps, leaves, win, offsets, f_start, g_start, focal, first_block,
                     end_block, rows, row_offsets, g_end, scale_sum):
     """Exact per-sample F gains (count x S) of one-founder content moves.
 
@@ -207,13 +208,14 @@ def candidate_gains(haps, leaves, logs, offsets, costs, f_start, g_start, focal,
     first_block[i], g_end[i] the current backward message at end_block[i] and scale_sum[i] the
     backward normalisers of those blocks, the gain of sample s is max_q [f_start (x) T_new (x)
     g_end] + new normalisers - max_q [f_start + g_start] - scale_sum. The all-state recursion runs
-    on per-segment dosage tables (item_dosages; a window candidate is normally one segment); each
+    on per-segment dosage tables (item_dosages; a window candidate is normally one segment; a
+    segment holds at most the window's capacity of sites and is covered before it is read); each
     sample's state carries from segment to segment. Candidates one after another, their samples in
     parallel."""
     first, second = unordered_pairs(len(haps))
     founders = len(haps)
     states = len(first)
-    samples = logs.shape[0]
+    samples = samples_of(win)
     count = len(focal)
     gains = np.empty((count, samples))
     row_all = np.empty((samples, states))
@@ -221,21 +223,23 @@ def candidate_gains(haps, leaves, logs, offsets, costs, f_start, g_start, focal,
     for i in range(count):
         k = focal[i]
         start, stop = first_block[i], end_block[i]
-        bounds = segments(offsets[start:stop + 1], states)
+        bounds = segments(offsets[start:stop + 1], states, capacity(win))
         for u in range(len(bounds) - 1):
             b0, b1 = start + bounds[u], start + bounds[u + 1]
             lo = offsets[b0]
+            cover(win, lo, offsets[b1], 0, samples, False)
             dos = item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
                                first, second)
             for s in prange(samples):
                 R = np.empty(founders)
+                e = np.empty(7)
                 row = row_all[s]
                 if b0 == start:
                     row[:] = f_start[i, s]
                     scale = 0.0
                 else:
                     scale = scale_all[s]
-                scale = dense_blocks(dos, lo, logs, offsets, costs, row, R, b0, b1, s, scale)
+                scale = dense_blocks(dos, lo, win, offsets, row, R, e, b0, b1, s, scale)
                 scale_all[s] = scale
                 if b1 == stop:
                     old = max_close(f_start[i, s], g_start[i, s])
@@ -244,7 +248,7 @@ def candidate_gains(haps, leaves, logs, offsets, costs, f_start, g_start, focal,
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def candidate_gains_lex(haps, leaves, logs, offsets, costs, f_start, fcnt_start, g_start,
+def candidate_gains_lex(haps, leaves, win, offsets, f_start, fcnt_start, g_start,
                         gcnt_start, focal, first_block, end_block, rows, row_offsets, g_end,
                         gcnt_end, scale_sum):
     """candidate_gains() plus the per-sample change of the lexicographic maximum path's switch
@@ -252,7 +256,7 @@ def candidate_gains_lex(haps, leaves, logs, offsets, costs, f_start, fcnt_start,
     first, second = unordered_pairs(len(haps))
     founders = len(haps)
     states = len(first)
-    samples = logs.shape[0]
+    samples = samples_of(win)
     count = len(focal)
     gains = np.empty((count, samples))
     switches = np.empty((count, samples))
@@ -262,15 +266,17 @@ def candidate_gains_lex(haps, leaves, logs, offsets, costs, f_start, fcnt_start,
     for i in range(count):
         k = focal[i]
         start, stop = first_block[i], end_block[i]
-        bounds = segments(offsets[start:stop + 1], states)
+        bounds = segments(offsets[start:stop + 1], states, capacity(win))
         for u in range(len(bounds) - 1):
             b0, b1 = start + bounds[u], start + bounds[u + 1]
             lo = offsets[b0]
+            cover(win, lo, offsets[b1], 0, samples, False)
             dos = item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
                                first, second)
             for s in prange(samples):
                 R = np.empty(founders)
                 Rc = np.empty(founders)
+                e = np.empty(7)
                 row = row_all[s]
                 cnt = cnt_all[s]
                 if b0 == start:
@@ -279,7 +285,7 @@ def candidate_gains_lex(haps, leaves, logs, offsets, costs, f_start, fcnt_start,
                     scale = 0.0
                 else:
                     scale = scale_all[s]
-                scale = dense_blocks_lex(dos, lo, logs, offsets, costs, row, cnt, R, Rc, b0, b1, s,
+                scale = dense_blocks_lex(dos, lo, win, offsets, row, cnt, R, Rc, e, b0, b1, s,
                                          scale)
                 scale_all[s] = scale
                 if b1 == stop:

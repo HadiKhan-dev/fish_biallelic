@@ -27,7 +27,6 @@ from ..config import RunConfig, default_output, stages, write_config
 from ..store.registry import STAGE_NAMES
 from .contig_work import ContigContext, check_reused, contig_done, planning_bytes, reconstruct_contig
 from .outputs import publish
-from .samples import SampleTable, build_eligibility, read_sample_table
 from .sources import observation_source
 
 # Modules the forkserver imports once, before forking any worker (copy-on-write): every stage package and the
@@ -110,8 +109,6 @@ class PreparedRun:
     source: object
     configs: stages.StageConfigs
     genetic_maps: object
-    samples: SampleTable | None
-    eligibility: object
 
 
 def memory_limit(config: RunConfig) -> int | None:
@@ -129,7 +126,7 @@ def resolve_cores(config: RunConfig) -> int:
 
 
 def check_run(config: RunConfig) -> PreparedRun:
-    """Fail before any computation: inputs, workbook and eligibility, stage configs, contig counts."""
+    """Fail before any computation: inputs, stage configs, contig counts."""
     from ..pedigree import tier_b_minimum_contigs
     from ..pedigree.stage import minimum_scored_contigs
     paths = RunPaths.from_config(config)
@@ -138,18 +135,8 @@ def check_run(config: RunConfig) -> PreparedRun:
     # harness puts around observation_source, so every record's sample axis is the samples sorted by name.
     from ..evidence.sample_order import canonical_order_source
     source = canonical_order_source(observation_source(config))
-    samples = eligibility = None
     if config.input.kind == "vcf":
         source.check()
-        samples = read_sample_table(config.samples, source.sample_ids())
-        eligibility = build_eligibility(config, samples)
-    elif config.samples.metadata is not None:
-        # A simulated design with metadata (2.17): only an explicit pedigree fixes its samples before simulating.
-        if config.simulation.pedigree is None:
-            raise ValueError("[samples] metadata in a simulation needs [simulation] pedigree (the sequenced samples "
-                             "are otherwise known only after simulating)")
-        samples = read_sample_table(config.samples, source.sample_ids())
-        eligibility = build_eligibility(config, samples)
     configs = stages.stage_configs(config)
     maps = stages.genetic_maps(config)
     _check_store(paths, config, source)
@@ -166,7 +153,7 @@ def check_run(config: RunConfig) -> PreparedRun:
               "unless these chromosomes are long on the genetic map, this run can release no Tier-B parent and "
               "family phase and recombination then have no parent edges (the pedigree's reach statement decides)",
               flush=True)
-    return PreparedRun(config, paths, cores, source, configs, maps, samples, eligibility)
+    return PreparedRun(config, paths, cores, source, configs, maps)
 
 
 def _check_store(paths: RunPaths, config: RunConfig, source) -> None:
@@ -327,9 +314,6 @@ def _run_stages(prepared: PreparedRun, ensure_driver_resident) -> RunResult:
     discover(todo)
     if not shard:
         _mark_when(store, "discovery", contigs, lambda contig: discovery_records.complete(store.contig(contig)))
-        if config.reports.reference_consistency:
-            publish("write_reference_consistency", paths.output, store, contigs, sample_ids,
-                    prepared.samples.reference_rows, label=config.samples.reference_generation)
     if config.run.stop_after == "discovery":
         print("[STOP] discovery recorded; local selection, assembly and painting not started", flush=True)
         return RunResult("stopped", "discovery", todo)
@@ -429,8 +413,7 @@ def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, outp
     configs, maps = prepared.configs, prepared.genetic_maps
     from ..evidence.sample_order import store_input_order
     with execution.stage_timer("pedigree"):
-        product = pedigree.run(store, contigs, sample_ids, prepared.eligibility, configs.pedigree, maps, budget,
-                               related)
+        product = pedigree.run(store, contigs, sample_ids, configs.pedigree, maps, budget, related)
     publish("write_pedigree", output, product, input_ids=store_input_order(store))
     with execution.stage_timer("founder_refit"):
         summaries = founder_refit.run(store, contigs, configs.founder_refit, budget)

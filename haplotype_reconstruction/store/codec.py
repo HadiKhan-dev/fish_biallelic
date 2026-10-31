@@ -307,6 +307,8 @@ class _BufferWriter:
             self.handle.write(prefix)
             self.handle.write(_CHUNK_DESC.pack(raw_size, len(compressed), checksum))
             self.handle.write(compressed)
+            from .mapped import discard_pages
+            discard_pages(raw)
             raw.release()
             if release is not None:
                 self._release(release)
@@ -526,12 +528,12 @@ def _read_chunk(handle, chunk, destination, nthreads, context):
     _decompress_into(compressed, destination, nthreads, context)
 
 
-def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context, reader=None):
+def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context, reader=None, out=None):
     """Decode a chunk list into one aligned buffer (through ``reader``'s pipeline when given)."""
     chunks = _chunk_layout(handle, raw_total, n_chunks, limit, context)
     if not chunks:
         return bytearray()
-    backing = _aligned_buffer(raw_total)
+    backing = _aligned_buffer(raw_total) if out is None else out
     destination = memoryview(backing)
     raw_offset = 0
     for index, chunk in enumerate(chunks):
@@ -649,14 +651,18 @@ def _plain_arrays(value):
     raise TypeError(f"selective reads select plain data, not {type(value).__name__}")
 
 
-def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nthreads, context):
+def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nthreads, context, *, out=None):
     """Selected top-level entries of a dict payload, decoding only their arrays.
 
     Entries must be plain data. The metadata is first unpickled against untouched placeholder buffers (an
     unwritten allocation holds no memory) to find which buffers the selected arrays use; only the buffer groups
     holding those are read, checked and decoded, and the metadata is unpickled again with them. Missing keys
-    are omitted.
+    are omitted. ``out`` maps selected array keys to writable contiguous ndarrays of the same shape and dtype.
+    A full array in its own buffer group is decoded straight into the destination when its storage order matches;
+    packed groups and other layouts use the ordinary checked decode followed by a copy. Returned entries are the
+    caller's arrays. No on-disk format changes are needed.
     """
+    out = {} if out is None else out
     nthreads = cpu_threads(nthreads)
     handle.seek(start)
     groups = []
@@ -678,15 +684,28 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
         spans = sorted((buffer.ctypes.data, buffer.nbytes, index)
                        for index, buffer in enumerate(buffers) if buffer.nbytes)
         starts = [begin for begin, _, _ in spans]
-        needed = set()
-        for array in _plain_arrays(items):
+
+        def buffer_index(array):
             if array.nbytes:
                 address = array.ctypes.data
                 position = bisect.bisect_right(starts, address) - 1
                 if position >= 0 and address < spans[position][0] + spans[position][1]:
-                    needed.add(spans[position][2])
-        if not needed:
-            return items
+                    return spans[position][2]
+            return None
+
+        destinations = {}
+        for key, target in out.items():
+            source = items[key]
+            if (not isinstance(source, np.ndarray) or not isinstance(target, np.ndarray)
+                    or target.shape != source.shape or target.dtype != source.dtype
+                    or not target.flags.writeable
+                    or not (target.flags.c_contiguous or target.flags.f_contiguous)):
+                raise ValueError(f"{context}: out[{key!r}] must be a writable contiguous array of matching shape/dtype")
+            index = buffer_index(source)
+            if (index is not None and source.ctypes.data == buffers[index].ctypes.data
+                    and source.nbytes == buffers[index].nbytes and source.strides == target.strides):
+                destinations[index] = memoryview(target.ravel(order="K")).cast("B")
+        needed = {index for array in _plain_arrays(items) if (index := buffer_index(array)) is not None}
         first = 0
         for descriptors, offsets, total, n_chunks, chunk_list in groups:
             indices = range(first, first + len(descriptors))
@@ -694,11 +713,18 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
             if needed.isdisjoint(indices):
                 continue
             handle.seek(chunk_list)
-            backing = memoryview(_read_chunks(handle, total, n_chunks, metadata_offset, nthreads, "buffer group"))
+            destination = destinations.get(indices.start) if len(descriptors) == 1 else None
+            backing = memoryview(_read_chunks(handle, total, n_chunks, metadata_offset, nthreads, "buffer group",
+                                             out=destination))
             for index, (size, readonly), offset in zip(indices, descriptors, offsets):
                 view = backing[offset:offset + size]
                 buffers[index] = view.toreadonly() if readonly else view
-        return selected(buffers)
+        result = selected(buffers)
+        for key, target in out.items():
+            if not np.shares_memory(result[key], target):
+                np.copyto(target, result[key], casting="no")
+            result[key] = target
+        return result
 
 
 def _read_header(handle, path):

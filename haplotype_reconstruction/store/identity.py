@@ -82,7 +82,8 @@ def array_digest(array) -> str:
     contiguous = np.ascontiguousarray(array)
     digest = hashlib.sha256()
     digest.update(contiguous.dtype.str.encode() + b"\0" + repr(contiguous.shape).encode() + b"\0")
-    digest.update(memoryview(contiguous).cast("B"))
+    if contiguous.size:                     # an empty array (e.g. an empty M2 panel) has no bytes to add
+        digest.update(memoryview(contiguous).cast("B"))
     return digest.hexdigest()
 
 

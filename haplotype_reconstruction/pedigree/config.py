@@ -48,10 +48,21 @@ class ScoringConfig:
 
 @dataclass(frozen=True)
 class PanelConfig:
-    """Genome-wide retained-parent M2 panel; legacy screen constants remain for compatibility."""
+    """Genome-wide M2 panel of bounded retained-parent pairs; legacy screen constants remain for compatibility."""
 
-    # Legacy reference only; production includes every eligible pair of genome-retained M1 parents.
+    # Legacy reference only; production scores the admitted pairs of genome-retained M1 parents (below).
     parents_per_child: int = 20
+    # Release 3.4: a pair (p, q) of genome-retained M1 parents enters the M2 panel when, in the full-data fit or in
+    # some leave-one-chromosome-out fit, a valid upper bound on its joint M2 likelihood (pedigree.pair_bound: both
+    # parents' transmission chains against the child's genotypes, bin by bin, summed over the fit's chromosomes)
+    # comes within this many raw nats of the child's best known configuration there (M0 or a retained M1). A pair
+    # left out therefore has an M2 more than this far below the best configuration in every such fit. 150 raw nats
+    # are 33 nats at the 0.22 evidence scale fitted on bc8. Pairs outside contribute nothing to the M2 evidence (a
+    # lower bound).
+    pair_relevance_margin: float = 150.0
+    # States with at least this transmitted-state mass keep their own group in the pair bound (a parent's other named
+    # states are aggregated). Any value keeps the bound valid; it only sets its tightness and cost.
+    pair_bound_high_mass: float = 0.01
     # Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power.
     information_tempering_power: float = 0.5
     # Chromosome weights sqrt(markers) / median are clipped to [1 / ratio, ratio].
@@ -160,8 +171,7 @@ class ReleaseConfig:
     minimum_informative_units: float = 3.0
     tier_a: TierThresholds = field(default_factory=lambda: TierThresholds(0.95, 0.95, 0.95))
     tier_b: TierThresholds = field(default_factory=lambda: TierThresholds(0.70, 0.70, 0.80))
-    # A released inferred edge needs full-data orientation log odds >= log((1 - p) / p) (3.9 nats);
-    # caller chronology is exempt.
+    # A released edge needs full-data orientation log odds >= log((1 - p) / p) (3.9 nats).
     orientation_reversal_probability: float = 0.02
     # Candidate sets carry this much configuration probability mass.
     support_set_coverage: float = 0.95
@@ -180,33 +190,28 @@ class ExclusionConfig:
 
 @dataclass(frozen=True)
 class SiblingGuardConfig:
-    """The sibling-as-parent guard on released edges (release 3.2, pedigree.guard).
+    """The sibling-as-parent guard on released edges (release 3.4: family consistency, pedigree.guard).
 
-    A released edge p -> c is tested when c's full-sib family in the relatedness product has enough supported
-    members, and withheld when the ratio r of p's IBD0 evidence with that family to the family's own sib-sib level
-    lies in [lower, upper] (a sib is exchangeable with the other sibs, r near 1; a parent is never IBD0 with its
-    children, r near 0).
+    A released edge p -> c is tested when c's full-sib family in the relatedness product, without p, without members
+    released as a parent or child of c or of another member, and without members with a released parent other than p
+    and c's released parents, has enough supported members; it is withheld when a strict majority of the tested
+    members (c excluded) are Mendelian-excluded from p at the exclusion release's threshold (a parent of c is a parent
+    of every full sib of c).
 
     Attributes:
-      minimum_family: an edge is tested only when c's family without p has at least this many supported members.
+      minimum_family: an edge is tested only when at least this many supported members remain, counting c.
       member_support: a family member counts when its family is its best placement on at least this share of
-        chromosomes (relatedness member support).
-      lower: the edge is withheld when r is at least this...
-      upper: ...and at most this (a more distant or unrelated candidate has r above 1).
+        chromosomes (relatedness member support); c itself must reach it.
     """
 
     minimum_family: int = 3
     member_support: float = 0.75
-    lower: float = 0.75
-    upper: float = 1.33
 
     def __post_init__(self) -> None:
         if int(self.minimum_family) != self.minimum_family or self.minimum_family < 2:
             raise ValueError("pedigree guard minimum_family must be an integer of at least 2")
         if not 0.5 <= self.member_support <= 1.0:
             raise ValueError("pedigree guard member_support must lie in [0.5, 1]")
-        if not 0.0 < self.lower < 1.0 < self.upper:
-            raise ValueError("pedigree guard needs 0 < lower < 1 < upper")
 
 
 @dataclass(frozen=True)

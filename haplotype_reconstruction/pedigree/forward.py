@@ -126,6 +126,45 @@ def _common_products(state_alt, child_gl, coefficient, site_index, site_start, s
 
 
 @njit(cache=True, parallel=True)
+def _fill_named_first_products(products, state_alt, child_gl, coefficient, site_index, site_start, site_stop,
+                               mismatch, child_start):
+    """Complete, in place, the cached products that no candidate changes when the first slot transmits a named state
+    and the second slot is the child's null source (M0/M1 configurations; release 3.4, PEDFAST).
+
+    A named state passes through every candidate's projection unchanged (projection._transmitted_alt), so under M0
+    and M1 the entries with a named first state depend on the child, bin and state pair only, also where the second
+    state is BACKGROUND or a named allele is uncalled (which _common_products leaves NaN). Each such entry is
+    computed exactly as _score_path's general path computes it (site order, likelihood, the zero-likelihood rule);
+    an entry that path would find unstable (underflow) stays NaN, so the general path still meets it and switches
+    to log space as before. The powered (tempered) cache is not extended: those entries keep their direct power.
+    Not valid for M2, whose second slot is a candidate's.
+    """
+    children, bins, states, _ = products.shape
+    for task in prange(children * bins):
+        local_child, block = task // bins, task % bins
+        child = child_start + local_child
+        for first in range(states - 1):
+            for second in range(states):
+                if np.isfinite(products[local_child, block, first, second]):
+                    continue
+                product = 1.0
+                stable = True
+                for slot in range(site_start[child, block], site_stop[child, block]):
+                    site = site_index[slot]
+                    value = _site_likelihood(child_gl[child, site], coefficient[child, site],
+                                             state_alt[first, site], state_alt[second, site], mismatch)
+                    if value <= 0.0:
+                        product = 0.0
+                        break
+                    product *= value
+                    if not np.isfinite(product) or product < _SMALLEST_NORMAL:
+                        stable = False
+                        break
+                if stable:
+                    products[local_child, block, first, second] = product
+
+
+@njit(cache=True, parallel=True)
 def _powered_products(products, exponent, child_start):
     """The cached products raised to each child's fractional bin exponent (NaN otherwise)."""
     powered = np.full(products.shape, np.nan)
@@ -490,6 +529,222 @@ def _score_path(child, first_parent, second_parent, mode, pi, candidate_alt, sta
 
 
 @njit(cache=True, parallel=True)
+def _named_column_powers(products, exponent, child_start):
+    """For the M1 screen's completed cache (_fill_named_first_products): per child and bin, the largest named-first
+    product (NaN unless every named-first entry is cached) and, for each named first state, the tempered power
+    pow(product[first, BACKGROUND] * (1 / that maximum), exponent) that _apply_probability_emission takes for the
+    BACKGROUND-second entry when the bin's maximum is that same value (fractional exponents only; NaN otherwise)."""
+    children, bins, states, _ = products.shape
+    last = states - 1
+    maximum = np.full((children, bins), np.nan)
+    powered = np.full((children, bins, last), np.nan)
+    for task in prange(children * bins):
+        child, block = task // bins, task % bins
+        largest = -np.inf
+        complete = True
+        for first in range(last):
+            for second in range(states):
+                value = products[child, block, first, second]
+                if not np.isfinite(value):
+                    complete = False
+                    break
+                largest = max(largest, value)
+            if not complete:
+                break
+        if not complete:
+            continue
+        maximum[child, block] = largest
+        eta = exponent[child_start + child, block]
+        if largest > 0.0 and np.isfinite(largest) and eta != 1.0 and eta != 0.0:
+            inverse = 1.0 / largest
+            for first in range(last):
+                powered[child, block, first] = math.pow(products[child, block, first, last] * inverse, eta)
+    return maximum, powered
+
+
+@njit(cache=True)
+def _apply_tempered_m1(current, emission, exponent, powered, named_maximum, column_powered):
+    """_apply_probability_emission for a fractional exponent with the M1 screen's caches: the same values, except that
+    a BACKGROUND-second entry with a named first state takes its cached power when the bin's maximum equals the
+    named-first maximum (the power is then of the identical base)."""
+    maximum = np.max(emission)
+    if maximum <= 0.0 or not np.isfinite(maximum):
+        return -np.inf
+    inverse = 1.0 / maximum
+    states = current.shape[0]
+    last = states - 1
+    log_maximum = math.log(maximum)
+    common_scale = 0.0
+    if abs(exponent * log_maximum) < 300.0:
+        common_scale = math.pow(maximum, exponent)
+    column = maximum == named_maximum
+    for first in range(states):
+        for second in range(states):
+            base = emission[first, second] * inverse
+            saved = powered[first, second]
+            if common_scale > 0.0 and np.isfinite(saved) and base >= _SMALLEST_NORMAL:
+                value = saved / common_scale
+            elif column and second == last and first < last and np.isfinite(column_powered[first]):
+                value = column_powered[first]
+            else:
+                value = math.pow(base, exponent)
+            current[first, second] *= value
+    increment = _normalise(current)
+    return increment + exponent * log_maximum if np.isfinite(increment) else -np.inf
+
+
+@njit(cache=True)
+def _score_m1_cached(child, parent, pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot, excursion,
+                     branch, state_alt, child_gl, coefficient, site_index, site_start, site_stop, exponent,
+                     null_diagonal, null_off, null_frequency, mismatch, common_products, first_cached_child,
+                     common_powered, named_maximum, column_powered):
+    """_score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches (release 3.4, PEDFAST): the same
+    forward recursion, emission values and operations, so the same (tempered, full) log likelihoods.
+
+    Where every named-first product of the bin is cached, the candidate's BACKGROUND row is accumulated site by site
+    for all second states together (each entry still multiplies its own site likelihoods in site order, with the
+    zero rule; any underflow sends the bin to the log path, which recomputes every entry as before); otherwise the
+    general loop of _score_path runs unchanged.
+    """
+    states = state_alt.shape[0]
+    last = states - 1
+    bins = exponent.shape[1]
+    local = child - first_cached_child
+    tempered = np.empty((states, states), dtype=np.float64)
+    full = np.empty_like(tempered)
+    work = np.empty_like(tempered)
+    scratch = np.empty_like(tempered)
+    prefix = np.empty(states + 1, dtype=np.float64)
+    suffix = np.empty(states + 1, dtype=np.float64)
+    row = np.empty(states, dtype=np.float64)
+    zeroed = np.empty(states, dtype=np.bool_)
+    for first in range(states):
+        for second in range(states):
+            tempered[first, second] = pi[parent, 0, first] * null_frequency[child, 0, second]
+            full[first, second] = tempered[first, second]
+    tempered_log = 0.0
+    full_log = 0.0
+    tempered_alive = True
+    full_alive = True
+    for block in range(bins):
+        if block > 0:
+            boundary = block - 1
+            if tempered_alive:
+                _advance(tempered, scratch, child, parent, 0, 1, boundary,
+                         stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
+                         null_diagonal, null_off, null_frequency, prefix, suffix)
+            if full_alive:
+                _advance(full, scratch, child, parent, 0, 1, boundary,
+                         stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
+                         null_diagonal, null_off, null_frequency, prefix, suffix)
+
+        stable_product = True
+        complete = np.isfinite(named_maximum[local, block])
+        if complete:
+            for first in range(last):
+                for second in range(states):
+                    work[first, second] = common_products[local, block, first, second]
+            for second in range(states):
+                row[second] = 1.0
+                zeroed[second] = False
+            for slot in range(site_start[child, block], site_stop[child, block]):
+                site = site_index[slot]
+                first_alt = candidate_alt[parent, site, last]
+                for second in range(states):
+                    if zeroed[second]:
+                        continue
+                    value = _site_likelihood(child_gl[child, site], coefficient[child, site],
+                                             first_alt, state_alt[second, site], mismatch)
+                    if value <= 0.0:
+                        row[second] = 0.0
+                        zeroed[second] = True
+                        continue
+                    row[second] *= value
+                    if not np.isfinite(row[second]) or row[second] < _SMALLEST_NORMAL:
+                        stable_product = False
+                        break
+                if not stable_product:
+                    break
+            for second in range(states):
+                work[last, second] = row[second]
+        else:
+            for first in range(states):
+                for second in range(states):
+                    saved = common_products[local, block, first, second]
+                    if np.isfinite(saved):
+                        work[first, second] = saved
+                        continue
+                    product = 1.0
+                    for slot in range(site_start[child, block], site_stop[child, block]):
+                        site = site_index[slot]
+                        value = _site_likelihood(child_gl[child, site], coefficient[child, site],
+                                                 candidate_alt[parent, site, first], state_alt[second, site],
+                                                 mismatch)
+                        if value <= 0.0:
+                            product = 0.0
+                            break
+                        product *= value
+                        if not np.isfinite(product) or product < _SMALLEST_NORMAL:
+                            stable_product = False
+                            break
+                    work[first, second] = product
+                    if not stable_product:
+                        break
+                if not stable_product:
+                    break
+        if not stable_product:
+            for first in range(states):
+                for second in range(states):
+                    log_emission = 0.0
+                    for slot in range(site_start[child, block], site_stop[child, block]):
+                        site = site_index[slot]
+                        value = _site_likelihood(child_gl[child, site], coefficient[child, site],
+                                                 candidate_alt[parent, site, first], state_alt[second, site],
+                                                 mismatch)
+                        if value <= 0.0:
+                            log_emission = -np.inf
+                            break
+                        log_emission += math.log(value)
+                    work[first, second] = log_emission
+
+        if tempered_alive:
+            eta = exponent[child, block]
+            powered = common_powered[local, block]
+            if eta == 0.0:
+                # A zero exponent makes the tempered emission uniform.
+                scratch[:] = 1.0
+                increment = _apply_probability_emission(tempered, scratch, eta, powered)
+            elif stable_product and complete and eta != 1.0:
+                increment = _apply_tempered_m1(tempered, work, eta, powered, named_maximum[local, block],
+                                               column_powered[local, block])
+            elif stable_product:
+                increment = _apply_probability_emission(tempered, work, eta, powered)
+            else:
+                for first in range(states):
+                    for second in range(states):
+                        scratch[first, second] = eta * work[first, second]
+                increment = _apply_log_emission(tempered, scratch)
+            if np.isfinite(increment):
+                tempered_log += increment
+            else:
+                tempered_alive = False
+                tempered_log = -np.inf
+        if full_alive:
+            if stable_product:
+                increment = _apply_probability_emission(full, work, 1.0, None)
+            else:
+                increment = _apply_log_emission(full, work)
+            if np.isfinite(increment):
+                full_log += increment
+            else:
+                full_alive = False
+                full_log = -np.inf
+        if not tempered_alive and not full_alive:
+            break
+    return tempered_log, full_log
+
+
+@njit(cache=True, parallel=True)
 def _m0_kernel(pi, candidate_alt, stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch,
                state_alt, child_gl, coefficient, site_index, site_start, site_stop, exponent,
                null_diagonal, null_off, null_frequency, mismatch, eligible_child):
@@ -626,6 +881,15 @@ class ChildTerms:
                                     self.mismatch, child_start, child_stop)
         powered = (_powered_products(products, self.exponent, child_start)
                    if self.fractional else None)
+        return products, powered
+
+    def common_null_second(self, projection: Projection, child_start: int, child_stop: int):
+        """``common`` for M0/M1 configurations only (the M1 screen): the products also hold every entry with a named
+        first state (_fill_named_first_products); the powered cache is ``common``'s."""
+        products, powered = self.common(projection, child_start, child_stop)
+        if products is not None:
+            _fill_named_first_products(products, projection.state_alt, self.gl, self.coefficient, self.site_index,
+                                       self.site_start, self.site_stop, self.mismatch, child_start)
         return products, powered
 
 

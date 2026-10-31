@@ -5,10 +5,11 @@ are the Tier-A and complete views, partial relationships, candidate sets, explan
 release 2.17 relative_contrasts.csv, the released edges' relative-proxy contrasts),
 evidence_calibration.json (the cross-chromosome evidence scaling) and summary.json (the scored and omitted
 chromosomes, what Tier A/B can release with them, the final family solve, the full-marker exclusion and the
-eligibility design: why a tier may release nothing; from release 3.2 the sibling-as-parent guard's summary, with its
-per-edge calls in sibling_guard.csv). The relationship tables, candidate sets and final state calls are the released
-views after the guard; complete_relationships.csv and the selection diagnostics keep the pre-guard decisions.
-Real-data calls are inferences conditional on the paintings and the stated eligibility design, not pedigree truth.
+candidate universe (every sequenced sample): why a tier may release nothing; from release 3.2 the sibling-as-parent
+guard's summary, with its per-edge calls in sibling_guard.csv). The relationship tables, candidate sets and final
+state calls are the released views after the guard; complete_relationships.csv and the selection diagnostics keep
+the pre-guard decisions.
+Real-data calls are inferences conditional on the paintings, not pedigree truth.
 """
 from __future__ import annotations
 

@@ -112,8 +112,7 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
                                scores.edge_exposed_morgans, scores.pair_exposed_morgans),
         junction_evidence(scores.junctions, scores.callable_bins, scores.total_bins,
                           config.direction.chromosome_error_probability, scores.junction_dyads,
-                          scores.junction_log_cdf),
-        eligibility.chronology)
+                          scores.junction_log_cdf))
     trace: dict = {}
     from ..maths import ties as tie_rules
     from . import ties as pedigree_ties
@@ -140,7 +139,7 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
     pedigree_ties.FULL_FIT_COUNTER = None
     log_odds = trace["orientation_log_odds"]
     evidence = release.child_evidence(full, list(sensitivity), resampled, alternatives, informative_units,
-                                      log_odds, eligibility.chronology, config)
+                                      log_odds, config)
     tier_a = release.tier_calls("tier_a", config.release.tier_a, full, evidence, eligibility, config)
     tier_b = release.tier_calls("tier_b", config.release.tier_b, full, evidence, eligibility, config)
     complete = release.complete_calls(full, eligibility, alternatives)
@@ -148,8 +147,7 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
                                       alternatives, config)
     partial_b = release.partial_edges("tier_b", config.release.tier_b, tier_b, evidence,
                                       alternatives, config)
-    candidates = release.candidate_sets(tier_b, partial_b, full, alternatives, resampled, log_odds,
-                                        eligibility.chronology, config)
+    candidates = release.candidate_sets(tier_b, partial_b, full, alternatives, resampled, log_odds, config)
     direction = config.direction
     family_solve = dict(
         iterations=int(trace["final_family_iterations"]),

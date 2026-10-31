@@ -247,25 +247,23 @@ def _edges(partial, sample_ids, orientation: slots.ParentOrientation | None = No
                        partial.count_minimum.copy(), partial.count_maximum.copy())
 
 
-def _orientation(store, contigs, sample_ids, eligibility, parent_arrays) -> slots.ParentOrientation:
-    """The released parent order (pedigree.slots): recorded sexes from the eligibility, canonical ranks from the
-    evidence observed masks, read contig by contig only while an unsexed released pair is still undecided."""
-    sexes = eligibility.sexes
+def _orientation(store, contigs, sample_ids, parent_arrays) -> slots.ParentOrientation:
+    """The released parent order (pedigree.slots): canonical ranks from the evidence observed masks, read contig by
+    contig only while a released pair is still undecided."""
     pairs = set()
     for parents in parent_arrays:
         for first, second in np.asarray(parents, dtype=np.int64).tolist():
             if first >= 0 and second >= 0:
-                if sexes is None or {sexes[first], sexes[second]} != {slots.DAM, slots.SIRE}:
-                    pairs.add((first, second))
+                pairs.add((first, second))
     if not pairs:
-        return slots.ParentOrientation(sexes, np.arange(len(sample_ids), dtype=np.int64))
+        return slots.ParentOrientation(np.arange(len(sample_ids), dtype=np.int64))
 
     def counts():
         for contig in contigs:
             observed = evidence_records.load_arrays(store.contig(contig), ("observed",))["observed"]
             yield np.count_nonzero(observed, axis=1).astype(np.int64)
 
-    return slots.ParentOrientation(sexes, slots.canonical_ranks(counts(), sample_ids, pairs))
+    return slots.ParentOrientation(slots.canonical_ranks(counts(), sample_ids, pairs))
 
 
 def _orient_report(report, sample_ids, orientation: slots.ParentOrientation):
@@ -279,8 +277,7 @@ def _orient_report(report, sample_ids, orientation: slots.ParentOrientation):
 
 
 # --------------------------------------------------------------------------- the stage
-def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
-        eligibility: ParentEligibility | None, config: PedigreeConfig, genetic_maps,
+def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...], config: PedigreeConfig, genetic_maps,
         budget, relatedness) -> PedigreeProduct:
     """Infer the genome-wide pedigree; returns (and stores) the run record ``pedigree``.
 
@@ -288,20 +285,18 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
                   record (through their stages' records API); writes pedigree/prepared, /screen,
                   /scores and /exclusion per contig and ``pedigree`` in the run file.
     contigs:      configured contigs in order (all must be painted).
-    sample_ids:   the run's sample axis (N); every per-sample array uses this order.
-    eligibility:  caller design assumptions over ``sample_ids``; None = unrestricted (simulations).
+    sample_ids:   the run's sample axis (N); every per-sample array uses this order. Every sample is a target and
+                  every other sample a candidate parent (pedigree.eligibility: no sample metadata).
     config:       PedigreeConfig.
     genetic_maps: GeneticMapSet; the meiotic switch probability of the transmission selectors.
     budget:       the CPU budget (execution.CpuBudget) for this stage.
-    relatedness:  the run's RelatednessProduct (relatedness stage, recorded in the store): the sibling-as-parent
-                  guard of the released edges (pedigree.guard).
+    relatedness:  the run's RelatednessProduct (relatedness stage, recorded in the store): the full-sib families of
+                  the sibling-as-parent guard of the released edges (pedigree.guard).
     """
     contigs, sample_ids = tuple(contigs), tuple(sample_ids)
     if len(sample_ids) < 3:
         raise ValueError("pedigree inference needs at least three samples")
-    eligibility = eligibility or ParentEligibility.unrestricted(sample_ids)
-    if eligibility.sample_ids != sample_ids:
-        raise ValueError("parent eligibility sample order differs from the run's samples")
+    eligibility = ParentEligibility.unrestricted(sample_ids)
     store.require(painting_records.KEY, contigs)
     for contig in contigs:
         painting_records.require_evidence_binding(store.contig(contig))
@@ -347,36 +342,69 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
     decided = decision_module.decide_floored(scores, eligibility, config, budget)
     rows = decided.alternatives.rows
     dyads = exclusion.target_dyads(decided.tier_b, rows, eligibility)
+    # Release 3.4: the sibling-as-parent guard (pedigree.guard) needs the exclusion evidence of each released edge's
+    # parent against the tested members of the child's family. The released edges are those of the decision: the
+    # count release below adds none and removes none. Its dyads join the same full-marker pass after the targets.
+    from . import guard
+    pre_guard = decided.partial_b
+    guard_children, guard_slots = np.nonzero(pre_guard.supported)
+    guard_parents = pre_guard.parents[guard_children, guard_slots].astype(np.int64)
+    edge_set = set(zip(guard_parents.tolist(), guard_children.tolist()))
+    target_set = {(int(c), int(p)) for c, p in dyads}
+    pre_families = guard.edge_families(sample_ids, guard_parents, guard_children, relatedness, config)
+    extra = np.asarray([(int(s), int(p)) for s, p in guard.guard_dyads(pre_families, config, all_supported=True)
+                        if (int(s), int(p)) not in target_set], dtype=np.int64).reshape(-1, 2)
+    scored = np.concatenate([dyads.reshape(-1, 2), extra]).astype(np.int64)
     exclusion_summary = dict(
         model="full-marker-mendelian-directed-v1", alpha=config.exclusion.alpha,
         genotype_replacement_probability=config.exclusion.genotype_replacement_probability,
         conditional_on_supported_edge_directions=True, candidate_dyads=int(len(dyads)),
-        contigs=len(contigs), status="no_unresolved_candidates")
-    log_e, observed = np.empty(0), np.empty(0, dtype=np.int64)
-    log_e_upper = None
-    if len(dyads):
+        guard_dyads=int(len(extra)), contigs=len(contigs), status="no_unresolved_candidates")
+    scored_log_e, scored_observed = np.empty(0), np.empty(0, dtype=np.int64)
+    scored_upper = None
+    if len(scored):
         weights = [store.contig(c).info(evidence_records.EVIDENCE).stored_bytes for c in contigs]
         estimates = [_exclusion_bytes(store, c) for c in contigs]
         limit = execution.memory_worker_limit(estimates, len(contigs), label="PEDIGREE EXCLUSION")
         with execution.ChromosomeExecutor(contigs, _exclusion_handler, budget=budget, weights=weights,
                                           max_workers=limit, label="PEDIGREE EXCLUSION",
                                           task_bytes=estimates) as pool:
-            evidence = pool.run("exclusion", dict(common, dyads=dyads,
+            evidence = pool.run("exclusion", dict(common, dyads=scored,
                                 exclusion_contigs=len(contigs), exclusion_samples=len(sample_ids)))
         from . import exclusion_bound
-        log_e, log_e_upper, observed = exclusion_bound.combine(list(evidence))
-        exclusion_summary.update(status="evaluated", chromosomes=[dict(
+        scored_log_e, scored_upper, scored_observed = exclusion_bound.combine(list(evidence))
+        exclusion_summary.update(chromosomes=[dict(
             contig=value.contig, markers=value.markers,
             pattern_fallback_samples=value.pattern_fallback_samples) for value in evidence])
+        if len(dyads):
+            exclusion_summary.update(status="evaluated")
+    # The guard decides before the count release, so that the release uses the final supported directions: an edge
+    # the guard withholds excludes no reverse candidate (pedigree.exclusion.release_counts, ``withheld``).
+    guard_edges = _edges(pre_guard, sample_ids)
+    guard_table = guard.fixed_point(guard_edges, relatedness, scored, scored_log_e, scored_upper, config)
+    withheld = frozenset((int(p), int(c)) for p, c, call in
+                         zip(guard_edges.parents, guard_edges.children, guard_table["Call"])
+                         if call == guard.WITHHELD)
+    # The count release reads only its target dyads (the first rows).
+    targets = len(dyads)
+    log_e, observed = scored_log_e[:targets], scored_observed[:targets]
+    log_e_upper = None if scored_upper is None or not targets else scored_upper[:targets]
     released = exclusion.release_counts(
         decided.tier_b, decided.partial_b, decided.complete, decided.evidence.graph_conflict,
         decided.informative_units, rows, sample_ids, eligibility, dyads, log_e, observed, config,
-        log_e_upper=log_e_upper)
+        log_e_upper=log_e_upper, withheld=withheld)
+    index = {name: i for i, name in enumerate(sample_ids)}
+    for record in released.records:
+        child = index[record["Sample"]]
+        if record["Released"] and (
+                any((child, index[r]) in withheld for r in record["SupportedReverseCandidates"])
+                or any(parent_child[1] == child for parent_child in withheld)):
+            raise ValueError(f"the count release of {record['Sample']} rests on an edge the sibling guard withholds")
     exclusion_summary["released"] = int(np.count_nonzero(released.released))
 
-    # Released parent order (release 2.2, pedigree.slots): dam/sire where the metadata records sexes {F, M},
-    # else a canonical rename-invariant order; scoring and the internal slots are unchanged.
-    orientation = _orientation(store, contigs, sample_ids, eligibility, [
+    # Released parent order (release 2.2, pedigree.slots): a canonical rename-invariant order; scoring and the
+    # internal slots are unchanged.
+    orientation = _orientation(store, contigs, sample_ids, [
         _calls(released.tier_b, rows).parents, _calls(decided.tier_a, rows).parents,
         _calls(decided.complete, rows).parents, decided.candidates.parents,
         np.where(released.partial_b.supported, released.partial_b.parents, NO_PARENT),
@@ -411,9 +439,15 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         report=replace(_orient_report(tables.build(decided, released, search, chromosome_summary, config),
                                       sample_ids, orientation), relative_contrasts=relative_table),
         tie_events=decided.tie_events)
-    # Release 3.2: the sibling-as-parent guard (pedigree.guard) on the released edges and calls.
-    from . import guard
-    product = guard.apply(product, guard.sibling_guard(product.edges, relatedness, config.guard))
+    # The sibling-as-parent guard (pedigree.guard; release 3.4 family consistency) on the released edges and calls.
+    edges = product.edges
+    if set(zip(edges.parents.tolist(), edges.children.tolist())) != edge_set:
+        raise ValueError("the count release changed the released edges the guard was scored for")
+    table = guard.fixed_point(edges, relatedness, scored, scored_log_e, scored_upper, config)
+    if {(index[p], index[c]) for p, c, call in zip(table["Parent"], table["Child"], table["Call"])
+            if call == guard.WITHHELD} != withheld:
+        raise ValueError("the sibling guard's withheld edges differ from those the count release used")
+    product = guard.apply(product, table)
     print(f"PEDIGREE: sibling guard tested {product.sibling_guard['tested']} of {product.sibling_guard['edges']} "
           f"released edges, withheld {product.sibling_guard['withheld']}", flush=True)
     store.run.put(records.PRODUCT, records.encode_product(product))

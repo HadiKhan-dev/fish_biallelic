@@ -1,7 +1,7 @@
 # AulStu cross (AsAc BCF), whole genome: `haplotypes run configs/astcal.toml`.
-# The aulstu preset supplies the 22 autosomes, the workbook columns and cohort eligibility (F2 <- F1, F3 <- F2,
-# opposite-sex parent pairs). Paths are relative to the working directory. Large-K data: expect long, memory-paced
-# runs; use full nodes and resume from checkpoints.
+# The aulstu preset supplies the 22 autosomes. Inference reads only the BCF and the genetic map (no sample metadata):
+# every sequenced sample is a candidate parent of every other. Paths are relative to the working directory. Large-K
+# data: expect long, memory-paced runs; use full nodes and resume from checkpoints.
 preset = "aulstu"
 
 [run]
@@ -10,10 +10,6 @@ output = "work/runs/astcal"
 [input]
 kind = "vcf"
 vcf = "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
-
-[samples]
-metadata = "work/data/fish_vcf_restriped/X_AsAc_metafile.xlsx"
-sheet = "main_data"
 
 # [execution]
 # cores = "auto"

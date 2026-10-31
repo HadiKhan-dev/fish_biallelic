@@ -343,18 +343,38 @@ class CheckpointFile:
     def info(self, key) -> RecordInfo | None:
         return self._records().get(key)
 
-    def get(self, key, *, nthreads=None, items=None):
+    def get(self, key, *, nthreads=None, items=None, out=None):
         """Decode the latest record of ``key`` (KeyError if absent).
 
         ``items`` selects top-level entries of a dict payload (missing ones are omitted), decoding only the
-        arrays they use.
+        arrays they use. ``out`` supplies caller-owned arrays for selected items (codec.decode_items).
         """
+        if out is not None and items is None:
+            raise ValueError("out requires selected items")
         info = self.info(key)
         if info is None:
             raise KeyError(f"{self.label}: no checkpoint record {key!r}")
-        return self._read(info, self.nthreads if nthreads is None else nthreads, items)
+        return self._read(info, self.nthreads if nthreads is None else nthreads, items, out)
 
-    def _read(self, info, nthreads, items=None):
+    @contextmanager
+    def open_arrays(self, key, items, *, nthreads=None):
+        """Read selected C-contiguous numeric arrays by bounded windows while this context is open."""
+        from .slices import ArrayReader
+
+        info = self.info(key)
+        if info is None:
+            raise KeyError(f"{self.label}: no checkpoint record {key!r}")
+        threads = codec.cpu_threads(self.nthreads if nthreads is None else nthreads)
+        with open(self.path, "rb") as handle:
+            reader = ArrayReader(handle, info.payload_offset, info.payload_end,
+                                 info.payload_offset + info.metadata_offset, info.n_buffers,
+                                 tuple(items), threads, f"{self.label}:{info.key}")
+            try:
+                yield reader
+            finally:
+                reader.close()
+
+    def _read(self, info, nthreads, items=None, out=None):
         nthreads = codec.cpu_threads(nthreads)
         with open(self.path, "rb") as handle:
             metadata_offset = info.payload_offset + info.metadata_offset
@@ -362,7 +382,7 @@ class CheckpointFile:
                 return codec.decode(handle, info.payload_offset, info.payload_end, metadata_offset,
                                     info.n_buffers, nthreads)
             return codec.decode_items(handle, info.payload_offset, info.payload_end, metadata_offset,
-                                      info.n_buffers, tuple(items), nthreads, f"{self.label}:{info.key}")
+                                      info.n_buffers, tuple(items), nthreads, f"{self.label}:{info.key}", out=out)
 
     def put(self, key, payload, *, nthreads=None, clevel=None) -> RecordInfo:
         """Append a record superseding any earlier ``key``; return its RecordInfo (durable on return)."""

@@ -115,8 +115,14 @@ def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
             f"{error_text}, {balance_text}")
     samples = site.sample_quality
     if samples is not None:
-        lines.append(f"    [Sample quality] {summary.contig}: contamination flagged "
-                     f"{len(summary.flagged_samples)} (z > {samples.config['flag_robust_z']})"
+        rule = ("" if not samples.applied else f" (a foreign-like minor-read component above "
+                f"{samples.minimum_fraction:g} at one fraction and share over {samples.artefact_regions} regions with "
+                f"local artefacts: LRT >= {samples.significance_threshold:.1f}"
+                + ("" if samples.balance_reason is None else
+                   f"; balance interval {samples.balance_interval[0]:.3f}-{samples.balance_interval[1]:.3f}")
+                + ")")
+        lines.append(f"    [Sample quality] {summary.contig}: excluded from founder construction "
+                     f"{len(summary.flagged_samples)}{rule}"
                      + (f": {', '.join(summary.flagged_samples)}" if summary.flagged_samples else "")
                      + ("" if samples.applied else f" (not applied: {samples.reason})")
                      + f"; {len(samples.segments)} inherited-segment regions reported")
@@ -140,20 +146,22 @@ def _cell(value, digits):
 
 
 def sample_table(report: EvidenceReport, sample_ids) -> tuple[list[str], list[list[str]]] | None:
-    """Rows of OUTPUT/quality/<contig>.samples.tsv (the contamination QC per sample), or None when
+    """Rows of OUTPUT/quality/<contig>.samples.tsv (the sample quality exclusion per sample), or None when
     the QC did not run on this contig."""
     samples = report.site_quality.sample_quality
     if samples is None:
         return None
-    header = ["sample", "observed_cells", "near_private_cells", "private_cells", "private_events",
-              "low_fraction_events", "fitted_low_fraction", "private_minor_read_fraction",
-              "heterozygous_like_events", "statistic", "robust_z", "flagged"]
-    rows = [[str(name), str(int(samples.observed_cells[i])), str(int(samples.near_private_cells[i])),
-             str(int(samples.private_cells[i])), _cell(samples.private_events[i], 1),
-             _cell(samples.low_fraction_events[i], 2), _cell(samples.fitted_low_fraction[i], 4),
-             _cell(samples.private_minor_read_fraction[i], 3),
-             _cell(samples.heterozygous_like_events[i], 1), _cell(samples.statistic[i], 5),
-             _cell(samples.robust_z[i], 3), str(int(samples.flagged[i]))]
+    header = ["sample", "observed_cells", "eligible_cells", "eligible_windows", "minor_cells",
+              "near_private_cells", "lrt", "foreign_fraction", "foreign_share", "artefact_share", "artefact_peak",
+              "heterozygote_fit", "heterozygote_dispersion", "error_fit", "flagged"]
+    rows = [[str(name), str(int(samples.observed_cells[i])), str(int(samples.eligible_cells[i])),
+             _cell(samples.eligible_windows[i], 1), str(int(samples.minor_cells[i])),
+             str(int(samples.near_private_cells[i])), _cell(samples.lrt[i], 2),
+             _cell(samples.foreign_fraction[i], 4), _cell(samples.foreign_share[i], 5),
+             _cell(samples.artefact_share[i], 5), _cell(samples.artefact_peak[i], 4),
+             _cell(samples.heterozygote_fit[i], 3), _cell(samples.heterozygote_dispersion[i], 4),
+             _cell(samples.error_fit[i], 6),
+             str(int(samples.flagged[i]))]
             for i, name in enumerate(sample_ids)]
     return header, rows
 

@@ -15,7 +15,7 @@ the rules for changing the code. Paths are relative to the package `haplotype_re
 | `maths/` | numerical kernels shared by stages: `maths/logspace.py` (log-space sums), `maths/chains.py` (binary-hypercube chain kernels: two-state and two-bit four-state forward-backward and Viterbi, the max-product butterfly step, run contraction; family phase and recombination), `maths/emissions.py` (founder-pair genotype classes and the robust log emission with its normalisation and skip rule; the linker, the joins and founder refinement) |
 | `evidence/` ... `recombination/`, `export/` | the ten stages (below) |
 | `simulation/` | generating code only: design, pedigree and meiosis, reads, the observation source, truth records |
-| `pipeline/` | the driver (`pipeline/driver.py`), observation sources, the sample table and eligibility, one contig's work (`pipeline/contig_work.py`), status, published-table hook |
+| `pipeline/` | the driver (`pipeline/driver.py`), observation sources, one contig's work (`pipeline/contig_work.py`), status, published-table hook |
 | `reports/`, `evaluation/`, `templates/` | published tables, evaluation against simulation truth, template building and the example |
 
 Dependencies point one way. Infrastructure (`config/`, `store/`, `execution/`) is below the shared types
@@ -38,7 +38,7 @@ and cache directory) and does nothing else; no module has other import-time effe
 | `local_selection` | contig | `local_selection`, `discovery`, `assembly` | `local_selection.run_contig(store, contig, config, assembly_config, genetic_map, budget, ...)` |
 | `assembly` | contig | `assembly` | `assembly.assemble(inputs, config, role=..., records=..., budget=...)` |
 | `painting` | contig | `painting` | `painting.run_contig(store, contig, config, genetic_map, budget)` |
-| `pedigree` | genome | `pedigree`, `painting` | `pedigree.run(store, contigs, sample_ids, eligibility, config, genetic_maps, budget)` |
+| `pedigree` | genome | `pedigree`, `painting` | `pedigree.run(store, contigs, sample_ids, config, genetic_maps, budget, relatedness)` |
 | `founder_refit` | contig | `founder_refit`, `painting` | `founder_refit.run(store, contigs, config, budget)` |
 | `family_phase` | contig | `family_phase` | `family_phase.stage.run(store, contigs, edges, config, genetic_maps, budget)` |
 | `recombination` | contig | `recombination`, `family_phase` | `recombination.stage.run(store, contigs, edges, config, genetic_maps, budget)` |
@@ -73,6 +73,11 @@ instead of refusing the run, and no stage reads the export record.
 
 A checkpoint directory holds `run.ckpt` (genome-wide records), one `contigs/<contig>.ckpt` per contig, and
 `work/` only while transient resume state is live.
+
+Selective dict reads accept `file.get(key, items=names, out={name: array})`. Each destination is a writable
+contiguous ndarray of matching shape and dtype. A full array in a separate buffer group decompresses into that
+storage; packed groups or differing storage orders decode normally and then copy. Checksums and payload formats
+are unchanged. `evidence.records.load_arrays` forwards the same destinations.
 
 **Container** (`store/container.py`). One file is a header (magic, format version, kind, name, file identity, CRC)
 followed by records, each a header (magic, sequence, write time, stored and decoded sizes, payload layout, record
@@ -205,3 +210,13 @@ itself, and with it every job and session running there.
 
 Signalling a run's main process is enough to stop it (Ctrl-C, or SIGTERM to its PID): contig lanes stop with it,
 pool workers end after their current task, and every record already written is kept for the resume.
+
+### Checked array windows
+
+`CheckpointFile.open_arrays(key, items)` owns a file handle and compressed-chunk cache for the duration of its
+context. Selected items must be C-contiguous numeric arrays with at least two axes. Their `gather(samples, columns)`
+reads a contiguous sample slice at increasing column indices, returning an owned C array with every trailing axis.
+`store/slices.py` uses the existing codec metadata and chunk checksums; Blosc2 partially decompresses checked chunks.
+The record format and ordinary `get`/caller-buffer decoding remain compatible. The cache keeps at most 1 GiB of
+compressed chunks (one oversized chunk alone), with one temporary input copy on a miss. No decoded contig is retained.
+Painting uses these readers only while constructing emissions and boolean masks; its decoded-array API remains usable.

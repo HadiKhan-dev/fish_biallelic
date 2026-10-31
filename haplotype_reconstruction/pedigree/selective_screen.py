@@ -27,17 +27,21 @@ class Component:
     cache_range: object=None
     products: object=None
     powered: object=None
+    columns: object=None
 
     def bound(self,children):
-        self.cache_range=self.products=self.powered=None
+        self.cache_range=self.products=self.powered=self.columns=None
         return self.geometry.upper(self.resident.projection,self.resident.terms,children,self.zero,execution.claim_threads)
 
     def exact(self,pairs,first,stop):
         p,t=self.resident.projection,self.resident.terms
         if self.cache_range!=(first,stop):
-            execution.claim_threads();self.products,self.powered=t.common(p,first,stop)
+            execution.claim_threads();self.products,self.powered=t.common_null_second(p,first,stop)
+            self.columns=(forward._named_column_powers(self.products,t.exponent,first)
+                          if self.products is not None and self.powered is not None else None)
             self.cache_range=(first,stop)
-        return search.exact_pairs(p,t,pairs,self.zero,first,self.products,self.powered,execution.claim_threads)
+        return search.exact_pairs(p,t,pairs,self.zero,first,self.products,self.powered,execution.claim_threads,
+                                  self.columns)
 
 
 def prepare(prepared,eligibility,config):

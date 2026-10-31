@@ -4,7 +4,8 @@ families.csv: one row per sample (its family, the share of chromosomes on which 
 the family's two parents: a sequenced sample or empty for a latent parent, with the parent's chromosome support).
 pairs.csv: one row per sample pair (posterior IBD0/IBD1/IBD2 shares of jointly observed sites, their count, and the
 IBD0 and IBD2 stretch evidence). half_sib_links.csv: latent families better explained as sharing one latent parent.
-summary.json: the fit. These are inferences from genotype likelihoods alone, not pedigree truth.
+summary.json: the fit (with the family search kept and its margin). These are inferences from genotype likelihoods
+alone, not pedigree truth.
 """
 from __future__ import annotations
 
@@ -39,7 +40,9 @@ def write_relatedness(output, product, input_ids=None) -> list[Path]:
     written.append(write_json(directory / "summary.json", dict(
         families=int(len(product.parents)), sequenced_parent_slots=int(np.count_nonzero(product.parents >= 0)),
         half_sib_links=int(len(product.half_sib)), loglik=float(product.loglik), sweeps=int(product.sweeps),
-        converged=bool(product.converged), family_sites=int(product.family_sites),
+        converged=bool(product.converged), search=str(product.search),
+        search_margin=float(product.search_margin) if np.isfinite(product.search_margin) else None,
+        family_sites=int(product.family_sites),
         chromosome_sites=dict(zip(product.contigs, product.chromosome_sites)))))
     print(f"Relatedness output: {directory / 'families.csv'}", flush=True)
     return written

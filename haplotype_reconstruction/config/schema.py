@@ -1,11 +1,14 @@
 """The run configuration: one typed tree of user settings (TOML sections), strictly validated.
 
 Sections: run (where results go, where to stop), execution (CPUs, lanes, shards; never part of any scientific
-identity), input (VCF or simulation, contigs), samples (optional metadata workbook), quality (evidence QC and read
-calibration), genetic_map (inference prior), pedigree (+ eligibility), family_phase, recombination, export (the
-final founder and sample VCFs), reports, simulation (+ reads; generating parameters only). Stage-internal
-constants are not settings: they are the defaults of each stage's own config (config/stages.py maps these sections
-into them).
+identity), input (VCF or simulation, contigs), quality (evidence QC and read calibration), genetic_map (inference
+prior), pedigree, family_phase, recombination, export (the final founder and sample VCFs), simulation (+ reads;
+generating parameters only). Stage-internal constants are not settings: they are the defaults of each stage's own
+config (config/stages.py maps these sections into them).
+
+The pipeline reads no sample metadata (release 3.4): inference uses only the observations (VCF/BCF, or the
+simulated reads) and the genetic map, and sample names are identifiers. config/load.py names the sections that
+were removed for this reason.
 
 Every field carries its kind (how TOML values are parsed and checked) and a one-line description (docs are
 generated from it). Paths are resolved against the working directory when the configuration is loaded.
@@ -20,8 +23,7 @@ CICHLID_AUTOSOMES = tuple(f"chr{index}" for index in (*range(1, 21), 22, 23))
 
 
 def setting(default, kind: str, doc: str, choices: tuple = ()):
-    """A configuration field: ``kind`` is one of bool, int, float, str, path, strings, ints, table, cores, seed,
-    memory."""
+    """A configuration field: ``kind`` is one of bool, int, float, str, path, strings, ints, cores, seed, memory."""
     if isinstance(default, (dict, list)):
         raise TypeError("mutable defaults are not allowed")
     return field(default=default, metadata=dict(kind=kind, doc=doc, choices=tuple(choices)))
@@ -72,22 +74,6 @@ class InputSection:
 
 
 @dataclass(frozen=True)
-class SamplesSection:
-    metadata: Path | None = setting(None, "path", "Metadata workbook (.xlsx), or a .tsv/.csv table, describing "
-                                    "the samples.")
-    sheet: str = setting("main_data", "str", "Workbook sheet.")
-    id_column: str = setting("primary_ID", "str", "Column holding the VCF sample IDs.")
-    generation_column: str = setting("generation", "str", "Column holding generation/cohort labels.")
-    sex_column: str = setting("sex", "str", "Column holding recorded sex (F/M).")
-    reference_generation: str = setting("", "str", "Generation whose rows the reference-consistency report "
-                                        "compares with discovered blocks (e.g. G0).")
-    generation_prefixes: tuple[str, ...] = setting((), "strings", "Labels starting with one of these are read "
-                                                   "as that prefix (e.g. G0 for G0_AulStu).")
-    generations: tuple[str, ...] = setting((), "strings", "Allowed generation labels (empty: any).")
-    sexes: tuple[str, ...] = setting((), "strings", "Allowed sex labels (empty: any).")
-
-
-@dataclass(frozen=True)
 class QualitySection:
     site_filter: str = setting("auto", "str", "Self-calibrated per-contig site filter; auto = on for VCF input, "
                                "off for simulations.", ("auto", "on", "off"))
@@ -110,22 +96,9 @@ class GeneticMapSection:
 
 
 @dataclass(frozen=True)
-class EligibilitySection:
-    policy: str = setting("none", "str", "Parent candidates: none (every sample), constraints (JSON file), "
-                          "cohorts (workbook generations).", ("none", "constraints", "cohorts"))
-    constraints: Path | None = setting(None, "path", "JSON constraints (policy = constraints): candidate_parents, "
-                                       "excluded_samples, ineligible_children, direction_supported_edges.")
-    parent_generations: tuple[tuple[str, str], ...] = setting((), "table", "Cohorts: child generation -> parent "
-                                                              "generation, e.g. {F2 = \"F1\", F3 = \"F2\"}.")
-    opposite_sex_pairs: bool = setting(True, "bool", "Cohorts: two-parent configurations need one recorded "
-                                       "female and one recorded male.")
-
-
-@dataclass(frozen=True)
 class PedigreeSection:
     evidence_calibration: str = setting("predictive", "str", "Cross-chromosome pedigree evidence scaling: "
                                         "predictive, or off for unscaled evidence.", ("predictive", "off"))
-    eligibility: EligibilitySection = section(EligibilitySection, "Who may be whose parent.")
 
 
 @dataclass(frozen=True)
@@ -149,12 +122,6 @@ class ExportSection:
     full_length: bool = setting(True, "bool", "Write every input biallelic SNP that reached the site filter (FILTER "
                                 "PASS for kept sites, the rule codes r1-r5 for removed ones); false writes only "
                                 "the kept sites.")
-
-
-@dataclass(frozen=True)
-class ReportsSection:
-    reference_consistency: bool = setting(False, "bool", "Compare discovered blocks with the reference-generation "
-                                          "rows ([samples] reference_generation).")
 
 
 @dataclass(frozen=True)
@@ -194,22 +161,19 @@ class RunConfig:
     run: RunSection = section(RunSection, "Where results go and where to stop.")
     execution: ExecutionSection = section(ExecutionSection, "CPUs, lanes and shards (never part of results).")
     input: InputSection = section(InputSection, "Observations and contigs.")
-    samples: SamplesSection = section(SamplesSection, "Optional sample metadata.")
     quality: QualitySection = section(QualitySection, "Evidence quality control and read model.")
     genetic_map: GeneticMapSection = section(GeneticMapSection, "Inference genetic map.")
     pedigree: PedigreeSection = section(PedigreeSection, "Pedigree inference.")
     family_phase: FamilyPhaseSection = section(FamilyPhaseSection, "Family phase.")
     recombination: RecombinationSection = section(RecombinationSection, "Recombination maps.")
     export: ExportSection = section(ExportSection, "Final products: founder and sample VCFs.")
-    reports: ReportsSection = section(ReportsSection, "Optional reports.")
     simulation: SimulationSection = section(SimulationSection, "Simulation (input kind = simulation).")
 
     # Sections that never influence scientific results.
-    EXECUTION_SECTIONS = ("run", "execution", "export", "reports")
+    EXECUTION_SECTIONS = ("run", "execution", "export")
 
     def scientific(self) -> dict:
-        """The settings that can change results (all sections but run, execution, export and reports), as plain
-        data."""
+        """The settings that can change results (all sections but run, execution and export), as plain data."""
         data = to_dict(self)
         for name in self.EXECUTION_SECTIONS:
             data.pop(name, None)
@@ -236,16 +200,9 @@ def schema_fields(cls) -> list:
 
 
 def to_dict(value) -> Any:
-    """Plain data (paths as strings, tables as dicts, None as "") of a config object."""
+    """Plain data (paths as strings, None as "") of a config object."""
     if hasattr(value, "__dataclass_fields__"):
-        result = {}
-        for item in schema_fields(type(value)):
-            entry = getattr(value, item.name)
-            if item.metadata["kind"] == "table":
-                result[item.name] = dict(entry)
-            else:
-                result[item.name] = to_dict(entry)
-        return result
+        return {item.name: to_dict(getattr(value, item.name)) for item in schema_fields(type(value))}
     if isinstance(value, tuple):
         return [to_dict(item) for item in value]
     if isinstance(value, Path):
@@ -266,7 +223,7 @@ def reference_rows(cls=RunConfig, prefix: tuple = ()) -> list[dict]:
             continue
         default = item.default
         rows.append(dict(section=".".join(prefix), key=item.name, kind=kind,
-                         default=to_dict(default) if kind != "table" else dict(default),
+                         default=to_dict(default),
                          choices=[choice for choice in item.metadata["choices"] if choice != ""],
                          doc=item.metadata["doc"]))
     return rows

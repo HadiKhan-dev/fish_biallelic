@@ -1,4 +1,4 @@
-"""OUTPUT/quality/<contig>.samples.tsv and <contig>.segments.tsv: the per-contig library-contamination QC.
+"""OUTPUT/quality/<contig>.samples.tsv and <contig>.segments.tsv: the per-contig sample quality exclusion.
 
 The rows are the evidence stage's (evidence.reports.sample_table / segment_table): per sample the contamination
 statistics and whether its reads were kept out of founder construction on this contig, and the inherited-segment

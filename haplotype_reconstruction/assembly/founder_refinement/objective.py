@@ -24,8 +24,14 @@ are called; otherwise the predictive class of the unknown allele(s) under a unif
 sample calls and missing founder alleles are never imputed into the panel.
 
 Robust emission of dosage d: max(log(0.99 p_d + 0.01/3), -2) - log(1/3) with p the normalised
-genotype likelihoods (prepare_log_evidence stores the uncentred term, exactly 0 at skipped sites;
-CENTER is subtracted as the site is read).
+genotype likelihoods (window.site_values gives the uncentred term; CENTER is subtracted as the site
+is read).
+
+Release 3.4: kernels read the log evidence and switch costs of a sample-site through a window
+(window.py: a stretch of sites held in memory, anything else computed on the spot with the same
+arithmetic), never through whole-component arrays; a whole-component kernel runs stretch by stretch,
+covering each before it reads it. The values, and so every kernel's result, are those of 3.3's
+arrays bit for bit.
 
 Site steps. Forward (carried) messages take the transition entering the site, then emit; backward
 (stored) messages emit, then take the transition entering the site. A sample's first informative
@@ -46,41 +52,12 @@ import numpy as np
 from numba import njit, prange
 
 from ... import execution
-from ...maths.emissions import CENTER, normalised_likelihoods, predictive_likelihood, robust_log_likelihood
+from ...maths.emissions import CENTER
+from .window import capacity, cover, locate, site_cost, site_logs, sites_of
 
 # The binned surrogate's (proposals only) uniform cost of a diplotype state change. The exact
 # objective uses the map-derived per-homologue costs instead.
 SWITCH_PENALTY = 20.0
-
-
-@njit(inline="always")
-def robust_log_evidence(p0, p1, p2):
-    """Uncentred robust emissions of dosages 0, 1, 2; exactly (0, 0, 0) for uniform or empty
-    evidence (such a site is skipped)."""
-    informative, p0, p1, p2 = normalised_likelihoods(p0, p1, p2)
-    if not informative:
-        return 0.0, 0.0, 0.0
-    return robust_log_likelihood(p0), robust_log_likelihood(p1), robust_log_likelihood(p2)
-
-
-@njit(parallel=True, cache=True, nogil=True)
-def prepare_log_evidence(evidence, kept):
-    """float64 (S, L, 7) uncentred robust log evidence of the pair codes (objective.pair_code7) at the
-    objective's sites (workspace.kept: kept sites with at least one called prepared row; zero elsewhere and
-    for uniform evidence), once per component; evidence is the component's float32 (S, L, 3)
-    neutral evidence. Codes 3-6 are the predictive classes of unknown alleles (maths.emissions)."""
-    result = np.zeros((evidence.shape[0], evidence.shape[1], 7), np.float64)
-    for sample in prange(evidence.shape[0]):
-        for site in range(evidence.shape[1]):
-            if kept[site]:
-                informative, p0, p1, p2 = normalised_likelihoods(
-                    evidence[sample, site, 0], evidence[sample, site, 1], evidence[sample, site, 2])
-                if not informative:
-                    continue
-                for code in range(7):
-                    result[sample, site, code] = robust_log_likelihood(
-                        predictive_likelihood(p0, p1, p2, code))
-    return result
 
 
 @njit(inline="always")
@@ -150,23 +127,6 @@ def pair_dosages(haps, first, second, lo, hi):
 
 
 # ------------------------------------------------------------------ inline site steps
-@njit(inline="always")
-def is_skipped(logs, s, j):
-    """Site j carries no evidence for sample s (not an objective site, or uniform): it is skipped."""
-    return logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0
-
-
-@njit(inline="always")
-def site_emissions(logs, s, j):
-    """The centred emissions of dosages 0, 1, 2 of sample s at site j."""
-    return logs[s, j, 0] - CENTER, logs[s, j, 1] - CENTER, logs[s, j, 2] - CENTER
-
-
-@njit(inline="always")
-def pick(d, e0, e1, e2):
-    return e0 if d == 0 else (e1 if d == 1 else e2)
-
-
 @njit(inline="always")
 def row_max(row):
     """max(row) of a non-empty row (no NaN): eight interleaved running maxima, then combined. The
@@ -368,53 +328,58 @@ def transition_count(row, cnt, c, R, Rc):
 
 
 @njit(inline="always")
-def emit(row, dos, i, logs, s, j):
-    """row[q] += the centred emission of pair code dos[i, q] of sample s at site j, every state."""
+def emit(row, dos, i, e):
+    """row[q] += the centred emission of pair code dos[i, q] (e: the site's uncentred log evidence of
+    the seven codes, window.site_logs), every state."""
     for q in range(len(row)):
-        row[q] += logs[s, j, dos[i, q]] - CENTER
+        row[q] += e[dos[i, q]] - CENTER
 
 
 @njit(inline="always")
-def forward_sites(row, dos, lo, logs, s, j0, j1, costs, R):
-    """Carry sample s's forward message row over sites [j0, j1): per informative site the
-    transition entering it (costs[s, j]) then its emission (dosage rows dos[j - lo]). R: (K,)
-    scratch."""
+def forward_sites(row, dos, lo, win, s, j0, j1, R, e):
+    """Carry sample s's forward message row over sites [j0, j1) of the window's orientation: per
+    informative site the transition entering it (its switch cost) then its emission (dosage rows
+    dos[j - lo]). R: (K,) and e: (7,) scratch."""
     for j in range(j0, j1):
-        if is_skipped(logs, s, j):
+        f, k, r = locate(win, s, j)
+        if not site_logs(win, s, f, k, r, e):
             continue
-        transition(row, costs[s, j], R)
-        emit(row, dos, j - lo, logs, s, j)
+        transition(row, site_cost(win, s, f, k, r), R)
+        emit(row, dos, j - lo, e)
 
 
 @njit(inline="always")
-def backward_sites(row, dos, lo, logs, s, j0, j1, costs, R):
+def backward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's backward (stored-convention) row over sites [j0, j1) from right to left:
     per informative site its emission, then the transition entering it."""
     for j in range(j1 - 1, j0 - 1, -1):
-        if is_skipped(logs, s, j):
+        f, k, r = locate(win, s, j)
+        if not site_logs(win, s, f, k, r, e):
             continue
-        emit(row, dos, j - lo, logs, s, j)
-        transition(row, costs[s, j], R)
+        emit(row, dos, j - lo, e)
+        transition(row, site_cost(win, s, f, k, r), R)
 
 
 @njit(inline="always")
-def forward_sites_lex(row, cst, dos, lo, logs, s, j0, j1, costs, R, Rc):
+def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """forward_sites() with the lexicographic switch costs."""
     for j in range(j0, j1):
-        if is_skipped(logs, s, j):
+        f, k, r = locate(win, s, j)
+        if not site_logs(win, s, f, k, r, e):
             continue
-        transition_lex(row, cst, costs[s, j], R, Rc)
-        emit(row, dos, j - lo, logs, s, j)
+        transition_lex(row, cst, site_cost(win, s, f, k, r), R, Rc)
+        emit(row, dos, j - lo, e)
 
 
 @njit(inline="always")
-def backward_sites_lex(row, cst, dos, lo, logs, s, j0, j1, costs, R, Rc):
+def backward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """backward_sites() with the lexicographic switch costs."""
     for j in range(j1 - 1, j0 - 1, -1):
-        if is_skipped(logs, s, j):
+        f, k, r = locate(win, s, j)
+        if not site_logs(win, s, f, k, r, e):
             continue
-        emit(row, dos, j - lo, logs, s, j)
-        transition_lex(row, cst, costs[s, j], R, Rc)
+        emit(row, dos, j - lo, e)
+        transition_lex(row, cst, site_cost(win, s, f, k, r), R, Rc)
 
 
 @njit(inline="always")
@@ -440,72 +405,104 @@ def normalise(row):
 
 
 # ------------------------------------------------------------------ per-sample scores
+# The whole-component score kernels run stretch by stretch (at most the window's capacity of sites, the
+# whole component for a resident window), each sample's row carried from stretch to stretch: the same
+# site steps in the same order as one pass.
 @njit(cache=True, parallel=True, nogil=True)
-def score_dosages(dosages, logs, costs):
-    """Per-sample max-path F_s (without the panel-independent normalisers) from the panel's
-    site-major pair-dosage table (L x Q int8); costs (S, L): per-homologue switch costs."""
-    samples, sites = logs.shape[:2]
-    founders = pair_founders(dosages.shape[1])
-    answer = np.empty(samples)
-    for s in prange(samples):
-        row = np.zeros(dosages.shape[1])
-        R = np.empty(founders)
-        forward_sites(row, dosages, 0, logs, s, 0, sites, costs, R)
-        answer[s] = row_max(row)
+def score_dosages(dosages, win, s0, s1):
+    """Per-sample max-path F_s (without the panel-independent normalisers) of samples [s0, s1) from the
+    panel's site-major pair-dosage table (L x Q int8); the window gives the log evidence and the
+    per-homologue switch costs of the panel's K."""
+    sites = sites_of(win)
+    states = dosages.shape[1]
+    founders = pair_founders(states)
+    rows = np.zeros((s1 - s0, states))
+    step = capacity(win)
+    for lo in range(0, sites, step):
+        hi = min(sites, lo + step)
+        cover(win, lo, hi, s0, s1, False)
+        for s in prange(s0, s1):
+            R = np.empty(founders)
+            e = np.empty(7)
+            forward_sites(rows[s - s0], dosages, 0, win, s, lo, hi, R, e)
+    answer = np.empty(s1 - s0)
+    for s in prange(s0, s1):
+        answer[s - s0] = row_max(rows[s - s0])
     return answer
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def score_direct(haps, logs, costs):
-    """Per-sample F_s without a dosage table (O(threads x Q) memory; the same arithmetic)."""
-    samples, sites = logs.shape[:2]
+def score_direct(haps, win, s0, s1):
+    """Per-sample F_s of samples [s0, s1) without a dosage table (O(threads x Q) memory; the same
+    arithmetic)."""
+    sites = sites_of(win)
     first, second = unordered_pairs(len(haps))
-    answer = np.empty(samples)
-    for s in prange(samples):
-        row = np.zeros(len(first))
-        R = np.empty(len(haps))
-        for j in range(sites):
-            if is_skipped(logs, s, j):
-                continue
-            transition(row, costs[s, j], R)
-            for q in range(len(first)):
-                row[q] += logs[s, j, pair_code7(haps[first[q], j], haps[second[q], j])] - CENTER
-        answer[s] = row_max(row)
+    rows = np.zeros((s1 - s0, len(first)))
+    step = capacity(win)
+    for lo in range(0, sites, step):
+        hi = min(sites, lo + step)
+        cover(win, lo, hi, s0, s1, False)
+        for s in prange(s0, s1):
+            row = rows[s - s0]
+            R = np.empty(len(haps))
+            e = np.empty(7)
+            for j in range(lo, hi):
+                f, k, r = locate(win, s, j)
+                if not site_logs(win, s, f, k, r, e):
+                    continue
+                transition(row, site_cost(win, s, f, k, r), R)
+                for q in range(len(first)):
+                    row[q] += e[pair_code7(haps[first[q], j], haps[second[q], j])] - CENTER
+    answer = np.empty(s1 - s0)
+    for s in prange(s0, s1):
+        answer[s - s0] = row_max(rows[s - s0])
     return answer
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def score_switches_direct(haps, logs, costs):
-    """Exact score and the fewest homologue switches among its exact maximisers, per sample."""
-    samples, sites = logs.shape[:2]
+def score_switches_direct(haps, win, s0, s1):
+    """Exact score and the fewest homologue switches among its exact maximisers, per sample of
+    [s0, s1)."""
+    sites = sites_of(win)
     first, second = unordered_pairs(len(haps))
-    scores = np.empty(samples)
-    switches = np.empty(samples, np.int64)
-    for s in prange(samples):
-        row = np.zeros(len(first))
-        counts = np.zeros(len(first), np.int64)
-        R = np.empty(len(haps))
-        Rc = np.empty(len(haps), np.int64)
-        for j in range(sites):
-            if is_skipped(logs, s, j):
-                continue
-            transition_count(row, counts, costs[s, j], R, Rc)
-            for q in range(len(first)):
-                row[q] += logs[s, j, pair_code7(haps[first[q], j], haps[second[q], j])] - CENTER
+    rows = np.zeros((s1 - s0, len(first)))
+    counts = np.zeros((s1 - s0, len(first)), np.int64)
+    step = capacity(win)
+    for lo in range(0, sites, step):
+        hi = min(sites, lo + step)
+        cover(win, lo, hi, s0, s1, False)
+        for s in prange(s0, s1):
+            row = rows[s - s0]
+            count = counts[s - s0]
+            R = np.empty(len(haps))
+            Rc = np.empty(len(haps), np.int64)
+            e = np.empty(7)
+            for j in range(lo, hi):
+                f, k, r = locate(win, s, j)
+                if not site_logs(win, s, f, k, r, e):
+                    continue
+                transition_count(row, count, site_cost(win, s, f, k, r), R, Rc)
+                for q in range(len(first)):
+                    row[q] += e[pair_code7(haps[first[q], j], haps[second[q], j])] - CENTER
+    scores = np.empty(s1 - s0)
+    switches = np.empty(s1 - s0, np.int64)
+    for s in prange(s0, s1):
+        row = rows[s - s0]
+        count = counts[s - s0]
         m = row[0]
-        k = counts[0]
+        k = count[0]
         for q in range(1, len(row)):
-            if row[q] > m or (row[q] == m and counts[q] < k):
+            if row[q] > m or (row[q] == m and count[q] < k):
                 m = row[q]
-                k = counts[q]
-        scores[s] = m
-        switches[s] = k
+                k = count[q]
+        scores[s - s0] = m
+        switches[s - s0] = k
     return scores, switches
 
 
-def score_panel(haps, logs, costs, ranges, table_bytes):
-    """Per-sample F_s of the panel with alleles haps (int8 K x L) on the log evidence logs and
-    switch costs costs (S x L, the panel's K).
+def score_panel(haps, win, ranges, table_bytes):
+    """Per-sample F_s of the panel with alleles haps (int8 K x L) through the window win (forward
+    orientation, the panel's K: window.Windows.view).
 
     ranges: consecutive sample ranges (s0, s1, threads) covering every sample
     (workspace.sample_ranges), each scored by its own call at its thread count (a sample's score
@@ -513,15 +510,15 @@ def score_panel(haps, logs, costs, ranges, table_bytes):
     table_bytes, else the direct kernel runs; both give the same values."""
     founders, sites = haps.shape
     states = founders * (founders + 1) // 2
-    answer = np.empty(len(logs))
+    answer = np.empty(win[0].shape[0])
     if sites * states > table_bytes:
         for s0, s1, threads in ranges:
             with execution.numba_threads(threads):
-                answer[s0:s1] = score_direct(haps, logs[s0:s1], costs[s0:s1])
+                answer[s0:s1] = score_direct(haps, win, s0, s1)
         return answer
     first, second = unordered_pairs(founders)
     dosages = pair_dosages(haps, first, second, 0, sites)
     for s0, s1, threads in ranges:
         with execution.numba_threads(threads):
-            answer[s0:s1] = score_dosages(dosages, logs[s0:s1], costs[s0:s1])
+            answer[s0:s1] = score_dosages(dosages, win, s0, s1)
     return answer

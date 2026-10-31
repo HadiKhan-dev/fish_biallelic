@@ -67,13 +67,13 @@ def load(file, *, counts: bool = False, nthreads: int | None = None) -> ContigEv
                           **{name: payload[name] for name in names if name != "counts"})
 
 
-def load_arrays(file, names, *, nthreads: int | None = None) -> dict:
-    """Selected arrays of a contig's evidence ({name: array}), decoding only those (e.g. positions, observed)."""
+def load_arrays(file, names, *, nthreads: int | None = None, out=None) -> dict:
+    """Selected evidence arrays; ``out`` optionally supplies caller-owned destinations (file.get)."""
     names = tuple(names)
     unknown = sorted(set(names) - set(ARRAYS))
     if unknown:
         raise KeyError(f"not evidence arrays: {unknown}")
-    payload = file.get(EVIDENCE, items=names, nthreads=nthreads)
+    payload = file.get(EVIDENCE, items=names, nthreads=nthreads, out=out)
     return {name: payload[name] for name in names}
 
 

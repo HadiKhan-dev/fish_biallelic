@@ -34,11 +34,15 @@ class FamilyPhaseConfig:
       junction_pin_bins: the flank window of that test (bins, cut at the relative's own label changes).
     Release (release.py):
       site_deviation: mixture mass of the release's site model: given its label pair, a sample's ordered alleles at a
-        site are the pair's panel alleles, or with this probability redrawn from a uniform genotype (a panel allele
-        error, a label error shorter than a bin, a conversion or mutation; the genotype then changes with probability
-        2/3 of it). Weighed by the sample's own reads at the site, reads that contradict the labels' genotype lower,
-        withdraw or move the call. A working value chosen on the validation simulations (0.01 unphases 12-13% of
-        phased joins; 3e-4 keeps more genotype errors), not an estimate of an error rate.
+        site are the pair's panel alleles (each with its own leave-one-out flip probability, allele_evidence.py), or
+        with this probability redrawn from a uniform genotype (a label error shorter than a bin, a conversion or
+        mutation; the genotype then changes with probability 2/3 of it). Weighed by the sample's own reads at the
+        site, reads that contradict the labels' genotype lower, withdraw or move the call. A working value chosen on
+        the validation simulations (0.01 unphases 12-13% of phased joins; 3e-4 keeps more genotype errors), not an
+        estimate of an error rate. The panel alleles' own uncertainty is not part of it (3.4): it is each state's
+        capped empirical-Bayes per-copy disagreement with the selected allele, conditional on the fitted carriers
+        and panel, with the sample's direct own likelihood term removed. The copies flip independently; this is not
+        a cross-fitted refit or exact integration over carrier/panel selection or one shared latent allele.
       genotype_posterior: a genotype is called where its posterior reaches this value (the painting's tau).
       phase_posterior: a heterozygous call is released phased where its ordered allele posterior reaches this
         value.
@@ -53,7 +57,13 @@ class FamilyPhaseConfig:
         heterozygous site under the site model, (1 - 5 site_deviation / 6) / (1 - 2 site_deviation / 3)
         (0.99983 at the default site_deviation), or every bin would end a set.
         Phase sets also break at junction candidates for samples carrying both labels unless a parental homologue
-        pins them, and, for samples without a linked parent, at every painting tie boundary (release.py).
+        pins them, and, for samples without a linked parent, at painting tie boundaries (release.py); a sample with
+        children keeps a tie break only where its children-anchored orientation certainty at the nearest
+        confidently heterozygous bin on either side is below this value. Its odds, log(set_posterior /
+        (1 - set_posterior)) = 6.9 nats, also decide a parent's pairing at a double label change (model.py): a joint
+        move to the other pairing is kept only when it raises the objective by more than that, and a pairing whose
+        alternative is closer breaks the parent's and its children's sets there (a working margin against one
+        optimized alternative, not a calibrated pairing posterior).
       protected_intervals: (contig, start, end) closed bp intervals across which meiosis chains reset (the switch
         probability is 1/2): reference-order breakpoints, and both ends of reversed segments.
     """

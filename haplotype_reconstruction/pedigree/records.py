@@ -4,6 +4,7 @@ Per contig (one current record each, bound to its stage identity):
   pedigree/prepared   PreparedChromosome   painting + raw evidence -> transmission inputs
   pedigree/screen     ChromosomeScreen     M0 and all-pairs M1 per component (panel input)
   pedigree/scores     ChromosomeScores     RAW M0/M1/M2 + exposure + junctions for the fixed panel
+  pedigree/pair_bounds  float32 [P]         upper bound on M2 of every retained pair (pedigree.pair_bound)
   pedigree/exclusion  ExclusionEvidence    full-marker Mendelian exclusion of the target dyads
 Run:
   pedigree            PedigreeProduct      decisions, typed views for family phase / evaluation, reports
@@ -32,6 +33,7 @@ SCREEN = "pedigree/screen"
 SCORES = "pedigree/scores"
 SELECTIVE_SCREEN = "pedigree/selective_screen"
 FLOORED_SCORES = "pedigree/floored_scores"
+PAIR_BOUNDS = "pedigree/pair_bounds"
 EXCLUSION = "pedigree/exclusion"
 PRODUCT = "pedigree"
 # 2: release 2.2 released parent order (pedigree.slots: dam/sire or canonical), eligibility sexes.
@@ -458,7 +460,8 @@ class PedigreeReport:
     chromosome_summary: pd.DataFrame
     # Release 2.17: released-edge relative-proxy contrasts (pedigree.relatives; None in earlier records).
     relative_contrasts: pd.DataFrame | None = None
-    # Release 3.2: the sibling-as-parent guard's call per released edge (pedigree.guard; None in earlier records).
+    # The sibling-as-parent guard's call per released edge (pedigree.guard: release 3.2 ratio columns, release 3.4
+    # family-consistency columns; None in earlier records).
     sibling_guard: pd.DataFrame | None = None
 
 
@@ -476,8 +479,8 @@ class PedigreeProduct:
     panel:    the fixed M2 candidate panel (trios and screen utilities).
     report:   report tables.
     tie_events: full-data-fit decisions taken inside a tie (``maths.ties.TieCounter`` record; release 2.1).
-    sibling_guard: the guard's summary (release 3.2; edges tested and withheld). ``edges``, ``calls`` and ``tier_a``
-              are the views after the guard.
+    sibling_guard: the guard's summary (release 3.2; family consistency since 3.4; edges tested and withheld).
+              ``edges``, ``calls`` and ``tier_a`` are the views after the guard.
     """
 
     sample_ids: tuple[str, ...]
@@ -532,6 +535,15 @@ def selective_screen_identity(store, contigs, config, eligibility) -> dict:
     upstream.update({f"prepared/{c}": store.contig(c).info(PREPARED).identity for c in contigs})
     return _identity({"scoring": config.scoring, "m1": m1.identity(config),
                       "representation": "genome-floor-csr-v1"}, upstream)
+
+
+def pair_bounds_identity(store, file, config) -> dict:
+    """Pair bounds <- this contig's prepared factors, the genome screen (its retained parents), scoring settings and
+    the bound's grouping threshold."""
+    return _identity({"scoring": config.scoring, "pair_bound_high_mass": config.panel.pair_bound_high_mass,
+                      "representation": "retained-pairs-float32-up-v1"}, {
+        "prepared": file.info(PREPARED).identity,
+        "selective_screen": store.run.info(SELECTIVE_SCREEN).identity})
 
 
 def floored_scores_identity(store, file, panel) -> dict:

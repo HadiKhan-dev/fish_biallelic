@@ -1,19 +1,16 @@
 """Released order of a child's two observed parents (release 2.2; Parent1/Parent2, family-phase slots).
 
-Scoring treats a parent pair as unordered; only the released products order it. The order carries biology only
-when the configured sample metadata records the parents' sexes:
+Scoring treats a parent pair as unordered; only the released products order it. The pipeline reads no sample
+metadata (release 3.4), so no sex is recorded and none is inferred: the slots carry no biological meaning (neither
+maternal nor paternal).
 
-* ``dam_sire``: the two parents have recorded sexes exactly {F, M}: Parent1 / slot 0 = the dam (F), Parent2 /
-  slot 1 = the sire (M). Family phase gives the child's homologue 0 to slot 0, so the phased GT of such a child
-  reads maternal | paternal.
-* ``unordered``: otherwise (no metadata, unknown or equal sexes) the slots carry no biological meaning. Their order
-  is a canonical label that does not depend on sample names or input order: the parent with more observed sites
-  (read depth > 0) first, compared over the run's contigs in configured order until they differ; the sample name
-  decides only between parents whose observed patterns have identical counts on every contig. Renaming samples
-  changes no released order; the convention reversal (maths.ties) flips the label.
-* ``single``: one observed parent: slot 1 when its recorded sex is M (the sire), else slot 0.
-
-Sexes are never inferred: a blank or other label is unknown.
+* ``unordered``: two observed parents. Their order is a canonical label that does not depend on sample names or
+  input order: the parent with more observed sites (read depth > 0) first, compared over the run's contigs in
+  configured order until they differ; the sample name decides only between parents whose observed patterns have
+  identical counts on every contig. Renaming samples changes no released order; the convention reversal
+  (maths.ties) flips the label.
+* ``single``: one observed parent, in slot 0.
+* ``none``: no observed parent.
 """
 from __future__ import annotations
 
@@ -23,20 +20,15 @@ import numpy as np
 
 from ..maths import ties
 
-DAM, SIRE = "F", "M"
-BASES = ("dam_sire", "unordered", "single", "none")
+BASES = ("unordered", "single", "none")
 
 
 @dataclass(frozen=True)
 class ParentOrientation:
-    """Orders released parent pairs: ``sexes`` (recorded labels per sample, or None) and ``ranks`` int64 [N]
-    (canonical rank of each sample, lower first; :func:`canonical_ranks`)."""
+    """Orders released parent pairs by ``ranks`` int64 [N] (canonical rank of each sample, lower first;
+    :func:`canonical_ranks`)."""
 
-    sexes: tuple[str, ...] | None
     ranks: np.ndarray
-
-    def _sex(self, sample: int) -> str:
-        return "" if self.sexes is None else self.sexes[sample]
 
     def order(self, first: int, second: int) -> tuple[tuple[int, int], str]:
         """((slot 0, slot 1), basis) of a released parent pair (-1 = no parent)."""
@@ -44,12 +36,8 @@ class ParentOrientation:
         if not named:
             return (-1, -1), "none"
         if len(named) == 1:
-            parent = named[0]
-            return ((-1, parent) if self._sex(parent) == SIRE else (parent, -1)), "single"
+            return (named[0], -1), "single"
         a, b = named
-        sexes = (self._sex(a), self._sex(b))
-        if set(sexes) == {DAM, SIRE}:
-            return ((a, b) if sexes[0] == DAM else (b, a)), "dam_sire"
         before = (int(self.ranks[a]) <= int(self.ranks[b])) != ties.reverse_conventions()
         return ((a, b) if before else (b, a)), "unordered"
 
@@ -113,8 +101,8 @@ def orient_edges(parents: np.ndarray, children: np.ndarray, slots: np.ndarray,
 def orient_frame(frame, sample_ids, orientation: ParentOrientation, *, first: str = "Parent1",
                  second: str = "Parent2"):
     """A report table with its Parent1*/Parent2* column pairs swapped where the released order of the row's
-    (``first``, ``second``) names moves them, and a ParentSlotBasis column (dam_sire / unordered / single /
-    none). Rows whose parent columns are empty keep their values."""
+    (``first``, ``second``) names moves them, and a ParentSlotBasis column (unordered / single / none). Rows whose
+    parent columns are empty keep their values."""
     import pandas as pd
     if frame is None or first not in frame.columns or second not in frame.columns or not len(frame):
         return frame

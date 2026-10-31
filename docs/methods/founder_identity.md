@@ -207,7 +207,7 @@ assumptions, with this persistent failure unresolved.
 
 ## Separating rollback evidence from refinement acceptance
 
-A computational stop can retain a component's incoming panel and its previously evaluated
+A computational stop can retain a component's incoming panel and its evaluated
 alternatives. That intervention is useful for diagnosis, but the work limit is not evidence that
 the retained biological correspondence is correct. Compare the complete incoming and returned
 panels; a partial fit or window recorded at the stop is not necessarily either endpoint.

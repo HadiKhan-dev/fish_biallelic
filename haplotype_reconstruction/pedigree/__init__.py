@@ -1,6 +1,7 @@
 """Pedigree stage: observed-parent states and identities from paintings and raw genotype likelihoods.
 
-Entry point ``run(store, axes, eligibility, config, budget) -> PedigreeProduct``; family phase and
+Entry point ``run(store, contigs, sample_ids, config, genetic_maps, budget, relatedness) -> PedigreeProduct``; every
+sequenced sample is a candidate parent of every other (pedigree.eligibility: no sample metadata). Family phase and
 recombination read ``PedigreeProduct.edges`` (ParentEdges), evaluation reads ``.calls``.
 """
 from .config import PedigreeConfig

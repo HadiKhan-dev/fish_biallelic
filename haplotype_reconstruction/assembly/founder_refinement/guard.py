@@ -29,7 +29,9 @@ import numpy as np
 from numba import njit, prange
 
 from ...maths.emissions import CENTER
-from .objective import is_skipped, lex_better, pair_code7, row_max, unordered_pairs
+from .objective import lex_better, pair_code7, row_max, unordered_pairs
+from .window import cover, locate, samples_of, site_logs, skipped
+from .window import site_cost as cost_at
 
 
 @njit(inline="always")
@@ -40,7 +42,7 @@ def _lex_take(v, k, w, l, reverse):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, g_end, gcnt_end,
+def path_switch_events(haps, leaves, win, offsets, f_start, fcnt_start, g_end, gcnt_end,
                        a, c, samples, focal, p1, p2, rows, reverse):
     """Switch events of each listed sample's lexicographic maximum path on blocks [a, c).
 
@@ -53,9 +55,11 @@ def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, 
     first state among exact ties (last under the convention reversal). Returns the path's state at
     boundaries a and c, its whole switch cost (prefix and suffix costs from the messages), its
     number of events inside [a, c), the events (site, state before, state after) and their costs
-    (c at the site per changed homologue)."""
+    (c at the site per changed homologue). The window covers [a, c) first (a longer stretch is read
+    beyond its capacity through the exact fallback)."""
     founders = len(haps)
     first, second = unordered_pairs(founders)
+    cover(win, offsets[a], offsets[c], 0, samples_of(win), False)
     index = np.empty((founders, founders), np.int64)
     for q in range(len(first)):
         index[first[q], second[q]] = q
@@ -79,6 +83,7 @@ def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, 
         R = np.empty(founders)
         Rc = np.empty(founders)
         Ry = np.zeros(founders, np.int64)
+        e = np.empty(7)
         row = f_start[i].copy()
         cst = fcnt_start[i].copy()
         for b in range(a, c):
@@ -87,9 +92,10 @@ def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, 
             leaf = leaves[b]
             base = offsets[b]
             for j in range(offsets[b], offsets[b + 1]):
-                if is_skipped(logs, s, j):
+                fj, kj, rj = locate(win, s, j)
+                if not site_logs(win, s, fj, kj, rj, e):
                     continue
-                cj = costs[s, j]
+                cj = cost_at(win, s, fj, kj, rj)
                 if cj < np.inf:
                     G = -np.inf
                     Gc = 0.0
@@ -139,7 +145,7 @@ def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, 
                                        leaf[r, j - base] if y == focal else haps[y, j])
                     else:
                         d = pair_code7(haps[x, j], haps[y, j])
-                    row[q] += logs[s, j, d] - CENTER
+                    row[q] += e[d] - CENTER
             m = row_max(row)
             for q in range(states):
                 row[q] -= m
@@ -185,7 +191,7 @@ def path_switch_events(haps, leaves, logs, offsets, costs, f_start, fcnt_start, 
 
 
 @njit(cache=True, nogil=True)
-def transition_intervals(haps, logs, samples, from_founder, to_founder, sites, lo_site, hi_site):
+def transition_intervals(haps, win, samples, from_founder, to_founder, sites, lo_site, hi_site):
     """Evidence interval (lo, hi] of founder transitions in sample paths.
 
     For the transition of sample samples[e] from founder from_founder[e] to to_founder[e] placed at
@@ -202,12 +208,12 @@ def transition_intervals(haps, logs, samples, from_founder, to_founder, sites, l
         j = sites[e]
         lo = lo_site - 1
         for i in range(j - 1, lo_site - 1, -1):
-            if haps[u, i] != haps[v, i] and not is_skipped(logs, s, i):
+            if haps[u, i] != haps[v, i] and not skipped(win, s, i):
                 lo = i
                 break
         hi = hi_site
         for i in range(j, hi_site):
-            if haps[u, i] != haps[v, i] and not is_skipped(logs, s, i):
+            if haps[u, i] != haps[v, i] and not skipped(win, s, i):
                 hi = i
                 break
         out[e, 0] = lo
@@ -258,7 +264,7 @@ def event_order(events, count):
 
 
 @njit(cache=True, nogil=True)
-def canonical_sites(events, count, s, haps, leaves, logs, offsets, first, second, focal, p1, p2, rows,
+def canonical_sites(events, count, s, haps, leaves, win, offsets, first, second, focal, p1, p2, rows,
                     lo_site):
     """A copy of one path's first `count` switch events (site, state before, state after) with every site moved to
     the leftmost site of the event's evidence interval: lo + 1, lo the last site before it (lo_site - 1 when there is
@@ -279,7 +285,7 @@ def canonical_sites(events, count, s, haps, leaves, logs, offsets, first, second
         for i in range(j - 1, lo_site - 1, -1):
             while b > 0 and offsets[b] > i:
                 b -= 1
-            if is_skipped(logs, s, i):
+            if skipped(win, s, i):
                 continue
             if focal >= 0 and lo_override <= i < hi_override:
                 r = rows[b - p1]
@@ -332,7 +338,7 @@ def removed_events(old_events, old_count, new_events, new_count, old_costs):
 
 @njit(cache=True, nogil=True)
 def shared_savings(rem_sample, rem_offsets, rem_events, rem_costs, saved, focal, first, second,
-                   haps, logs, total_sites):
+                   haps, win, total_sites):
     """Uncredited saved switch cost of the guard on flattened removed events: sample rem_sample[i]
     has the sorted events rem_events[rem_offsets[i]:rem_offsets[i + 1]] with costs rem_costs;
     saved[s] = net switch cost sample s saves. Returns the sum over samples of min(saved, the cost
@@ -412,7 +418,7 @@ def shared_savings(rem_sample, rem_offsets, rem_events, rem_costs, saved, focal,
                 ent_v[m] = trans[t, 1]
                 ent_site[m] = rem_events[e, 0]
                 m += 1
-    intervals = transition_intervals(haps, logs, ent_sample, ent_u, ent_v, ent_site, 0, total_sites)
+    intervals = transition_intervals(haps, win, ent_sample, ent_u, ent_v, ent_site, 0, total_sites)
     # group by (u, v), sort by (lo, hi, sample, event), mark overlapping pairs of samples
     order = np.arange(n_entries)
     for i in range(1, n_entries):

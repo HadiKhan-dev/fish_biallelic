@@ -48,6 +48,11 @@ that is not as expected is an error: unreadable files, unknown contigs or sample
 position order, and AD fields that do not hold one REF and one ALT depth per sample. A contig with
 no biallelic SNP, or with no site left after the site filter, is an error too.
 
+The loader reads POS, REF, ALT and FORMAT/AD only. The input's FILTER and QUAL are ignored: a record
+that an upstream filter marked as failing is analysed like any other. To keep only records that
+passed an upstream filter, pre-filter the file (`bcftools view -f PASS`). The FILTER written by the
+export is this package's own site filter (below), not the input's.
+
 ## Site quality filter
 
 With `[quality] site_filter` on (the default for VCF input), each contig's SNPs pass a
@@ -61,7 +66,7 @@ when any of these rules fires:
 | r1 | total depth D_l | outside the clean-core window of the total-depth histogram (both tails) |
 | r2 | depth heterogeneity X_l = sum_s (d_sl - E_sl)^2 / E_sl / (N - 1), with E_sl = D_l m_s / sum_t m_t and m_s sample s's mean depth over r1-passing sites | above the clean-core window of log X over r1-passing sites |
 | r3 | wrong-allele reads in samples classified homozygous | a negative-binomial artefact class explains them better than the Poisson clean core |
-| r4 | ALT fraction in samples classified heterozygous | a beta-binomial artefact class explains it better than the binomial clean core |
+| r4 | ALT fraction in samples classified heterozygous | of two beta-binomial classes, the minority artefact class explains it better than the majority clean class |
 | r5 | expected carriers of a non-major genotype, c_l (1 - max_g F_lg) | below `EvidenceConfig.site_quality.minimum_expected_carriers = 2.0` |
 
 **Clean cores (r1, r2).** The statistic's histogram (Freedman-Diaconis bin width over its 0.5-99.5
@@ -103,23 +108,26 @@ not fixed:
   neither r3 removed any). On real TroMau (about 13x) the leaked reads are 22-23% of W, the clean rate falls from about
   0.0014 to 0.0003 and r3 changes on about 2% of the sites it tests: the sites it now removes that 2.17 kept fit
   the released painting worse than kept sites (0.55-0.59 against 0.08 nats per sample);
-- r4, among r1-r3-passing sites with H_l >= 1: clean A ~ Binomial(H, h0), artefact
-  A ~ beta-binomial(mean m, concentration c, clipped to [1e-2, 1e5]). The clean heterozygote ALT
-  fraction h0 is also the balance the sample QC uses.
+- r4, among r1-r3-passing sites with H_l >= 1 (release 3.4): A_l ~ Binomial(H_l, theta_l), with the
+  site's latent heterozygote ALT fraction theta_l drawn from a mixture of two beta distributions, each
+  with mean m and inverse concentration t (latent variance m (1 - m) t / (1 + t); t = 0 is exactly the
+  binomial, so the clean sites' balances may vary or not). The clean class is the component with the
+  larger weight (at exactly equal weights, the one with the smaller latent variance); its mean h0 is
+  also the balance the sample QC uses. A_l and H_l are non-integer, so the binomial is written with
+  gamma functions.
 
-Both are fitted by EM: closed-form mixing updates and clean updates (r3's clean rate by the bracketed Newton
-search above, closed form when no site has leakage), and an artefact M-step that maximises
-the weighted artefact log likelihood over its two parameters (log rate and log shape; logit mean
-and log concentration) jointly within the box of those clips, by projected Newton steps with
-analytic gradients and Hessians. An M-step stops when the full Newton step moves no transformed
+r3 is fitted by EM: closed-form mixing updates, the clean rate by the bracketed Newton search above
+(closed form when no site has leakage), and an artefact M-step that maximises the weighted artefact
+log likelihood over its two parameters (log rate and log shape) jointly within the box of the shape
+clip, by projected Newton steps with analytic gradients and Hessians. An M-step stops when the full Newton step moves no transformed
 parameter q by more than 1e-8 max(1, |q|); it is certified stationary when its projected gradient,
 divided by the artefact class's posterior weight, is then at most 1e-9 (a dispersion held at its
 clip needs only an outward gradient), and otherwise recorded as a small-step stop whose gradient
 certificate is unmet (`precision`). Each mixture records its M-step outcomes (`m_steps`:
 stationary, precision, line-search and iteration-cap counts, and the largest gradient over all
-its M-steps). On TroMau in release 2.11, 2,060 of 3,236 M-steps were certified and the rest were small-step stops
+its M-steps). On TroMau in release 2.11, 2,060 of 3,236 M-steps (r3's and those of the then r4) were certified and the rest were small-step stops
 (largest normalized gradient 3.1e-7); none failed its line search or reached the cap. The EM stops when the summed parameter change
-falls below 1e-5 (r3) or 1e-6 (r4), or after 300 iterations. Where the data hold no artefact
+falls below 1e-5, or after 300 iterations. Where the data hold no artefact
 class (clean reads) the two components nearly coincide and the EM can run to its cap; each
 iteration then costs a few likelihood passes. Releases 2.10 and earlier searched the unbounded
 parameters with Nelder-Mead and then clipped the dispersion alone, which could leave the stored
@@ -129,30 +137,90 @@ of one site on each of five contigs, each with a clean posterior of about 1/2 (0
 0.50002 in the comparisons); three of them become kept sites, each of which can also enter the
 calibration sample (below).
 
+r4 is fitted by maximum likelihood in all five parameters jointly (logit weight, the two logit means
+and log1p(t / 0.001) for each component), within +/-18 on the logits and t <= 1e6, from five fixed
+starts about the pooled mean: each by L-BFGS-B, restarted up to three times while its projected
+gradient exceeds the certificate, then up to eight positive-curvature Newton steps on the score
+(near the maximum, likelihood gains fall below floating-point resolution, so the score is solved
+instead). The component likelihoods are written relative to Binomial(H, 1/2) with gamma-ratio
+remainders (a Stirling series at small t), so non-integer counts and concentrations up to the
+binomial limit keep full precision, and sites enter in canonical (H, A) order, so the fit does not
+depend on site order or thread count. A start is certified when the projected gradient of the mean
+per-site log likelihood is at most 1e-8; the certified start with the highest likelihood is used
+(exact ties by its parameters, then its start). This certifies numerical stationarity, not a global
+maximum or biological class labels. If no start is certified, r4 removes nothing and its record
+says why; the best available fit still supplies h0 to sample QC. The record lists every start.
+An exact t = 0 is a valid binomial boundary. A positive component weight at its numerical bound
+does not prevent a minority posterior above 0.5 when its likelihood ratio exceeds the prior odds;
+a stationary endpoint also need not inherit the global maximum's nesting guarantee.
+
 A site is flagged by r3 or r4 when its posterior probability of the clean class is below
 `EvidenceConfig.site_quality.clean_posterior_level = 0.5`, and only when the artefact class
-separates from the clean core: eps1 >= 3 eps0 for r3; for r4 an artefact standard deviation, or a
-mean offset |m - h0|, of at least 3 binomial standard deviations at the median heterozygote depth
-(`EvidenceConfig.site_quality.minimum_artefact_separation = 3.0`). A mixture whose artefact class
-does not separate removes nothing.
+separates from the clean core (`EvidenceConfig.site_quality.minimum_artefact_separation = 3.0`):
+eps1 >= 3 eps0 for r3; for r4 an artefact latent standard deviation, or a mean offset |m - h0|, of
+at least 3 s, with s = max(the clean latent standard deviation, the binomial standard deviation
+sqrt(h0 (1 - h0) / H) at the median heterozygote depth H of r4's sites). This is a conservative
+contig-level working gate defined at typical pooled depth; it can miss well-resolved high-H sites.
+It is not a per-site resolution limit or a guarantee on clean-site error: overlapping classes can
+lose clean sites when the gate opens. With a binomial clean class, s is the binomial standard
+deviation used by releases 2.18-3.3. A mixture whose artefact class does not separate removes nothing.
 
-**Retained r4 limitation and deferred replacement.** The evidence-only memory refactor keeps
-base23's r4 model, eligibility, fit and gate unchanged. The clean class is exactly binomial,
-so it cannot represent intrinsic variation in clean site balance. Its separation scale uses
-median pooled heterozygote depth H (not individual sample coverage) and shrinks as H increases.
-At TroMau coverage the fitted components do not meet the three-binomial-SD gate, so r4 does not
-apply. On chr1/chr3/chr8, median H is approximately 632/600/636 and the artefact widths are
-2.18/2.56/2.26 binomial SDs. This inactivity does not establish an absence of allele-balance
-artefacts. Increasing coverage or cohort size can activate the gate even for unchanged latent
-allele-fraction distributions.
+r4 also abstains when abs(h0 - 0.5) - abs(m - 0.5) >= 3 s: the majority mean is substantially farther
+from 1/2 than the minority mean, contradicting the working clean label. The record reports
+unresolved class labelling; the components are not relabelled. The fitted h0 still feeds sample QC,
+now on all r1-r3-passing sites. This protects balanced minority sites, at the cost of abstaining on
+some genuinely shifted clean cores; it does not identify which class is biologically clean.
 
-A proposed replacement fits clean and artefact beta-binomial components, including exact
-binomial limits, and assesses separation using the clean component's intrinsic allele-fraction
-SD. The bounded diagnosis supported this change through read-quality and painting-conditioned
-consistency checks. It is deferred in this variant: integration exposed a pre-existing
-family-phase limitation for siblings with indistinguishable discrete coordinate keys. That
-limitation requires work beyond the evidence stage; it is not evidence that the r4 diagnosis
-was wrong. The replacement is not used by this implementation.
+**r4 before release 3.4.** Releases up to 3.3 modelled the clean class as exactly binomial, beside
+one beta-binomial artefact class, so clean sites whose balance varies slightly had no place in it.
+In a planted test (truth haplotypes of the TroMau-like simulation, depth 13, clean balance standard
+deviation 0.02, 3% of sites with heterozygote ALT fraction 0.30) the gate stayed shut at N = 115,
+and the biased sites were caught only by r3 (62-65%); at N = 2,500 the beta-binomial class absorbed
+the clean bulk, the gate opened as the binomial standard deviation shrank with depth, r4 removed 94%
+of the clean sites, and no site was left. A replacement prepared in 2.4 fitted two beta-binomials
+but called the narrower component clean, and a tight bias class is the narrower one: it removed
+94-98% of the clean sites at every N. Release 3.4 keeps that fit and identifies the clean class by
+weight. In the same planted test (36 cells: N = 115, 580 and 2,500; clean balance standard deviation
+0 or 0.02; a tight bias class, or a broad one of standard deviation 0.08; harmless per-cell
+heterozygote overdispersion of standard deviation 0.05 or 0.10; two draws each) r4 flags at most
+0.12% of the clean sites, those in one cell whose broad bias class reaches into the clean range, and
+at most 0.05% elsewhere; no cell loses its kept sites to r4. With clean balances varying it catches
+the tight bias class at N = 115 (with r1-r3, 96-97% against 62-65%) and the broad one (85-87%
+against 56%). These clean-loss figures describe this planted matrix, not all class prevalences
+or shapes. The stricter predeclared 0.1% clean-loss and no-recall-regression criteria were narrowly
+exceeded: some boundary sites trade recall against clean-site retention.
+
+On TroMau (116 samples, about 13x) the clean component holds 86-95% of r4's sites, with a
+latent standard deviation of 0.002-0.007, and the artefact component (mean 0.47, latent standard
+deviation 0.040-0.053) lies only 2.0-2.6 binomial standard deviations out in spread and 1.1-1.4 in
+mean, so r4 removes nothing there. Scaled by the clean latent standard deviation alone,
+as the 2.4 replacement proposed, the same fit would remove 1.7-5.5% of the kept sites. This
+inactivity does not show that TroMau has no allele-balance artefacts: as a cohort grows, the
+binomial standard deviation shrinks, and a fixed artefact spread separates sooner.
+
+The E1-scale sensitivity arm would remove 2.69% overall, with a 3.08-fold larger painting deficit
+under a fixed 0.5-balance read model. That is read/model inconsistency, compatible with completely
+correct founder alleles and tracks: a known-truth fixture changing only heterozygote balance from
+0.50 to 0.38 produced a 3.23-fold deficit while recovering every founder vector correctly.
+Selection by extreme balance makes this same-read diagnostic partly self-selected. It does not
+prove wrong founder alleles or mismapping, and does not justify adopting E1's scale on its own.
+
+TroMau's measured cell-level latent SD of 0.022-0.033 is the fitted bulk dispersion among retained
+r1-r4 sites and unflagged samples, under a truncated beta-binomial model. The likelihood normalizes
+the read window (2 <= ALT <= depth - 2, depths 8-60), but not the preceding site and sample
+selection. Site-level spread contributes to the estimate; selection and a single Beta fit to a
+mixture or heavy tail can instead underestimate latent variance. It is conditional evidence of a
+small bulk effect on present TroMau, not a distribution-free upper bound, clean-site accuracy
+measurement or N = 2,500 safety certificate. The reported binomial likelihood contrast holds h at
+the alternative estimate; it is not a maximized likelihood-ratio statistic without refitting h
+under the null.
+
+In planted Beta cell-noise tests, r3 loses clean sites at N = 2,500 as cell SD rises from 0.05 to
+0.07, reaching 87% loss at 0.10. r3 is unchanged here. Extrapolation to larger real cohorts needs
+unfiltered/filtered tails and depth/library strata. A future r3 repair needs per-cell dispersion,
+not r4's pooled-site SD: independent deviations average down approximately as 1/n in variance
+across n equally covered heterozygotes. TroMau has no truth; these observations establish
+consistency and model-conditional evidence only.
 
 The r1/r2 diagnosis also remains unchanged: on bounded TroMau contigs, sites removed by the
 depth rules had worse read balance, homozygote error and painting-conditioned founder
@@ -170,13 +238,14 @@ admit more workers when a chromosome lease grows. The task count bounds worker s
 The same queue recomputes r5 among unflagged samples. Fixed read likelihoods are evaluated
 once per site, outside the frequency EM iterations, preserving sample order and convergence.
 
-The expensive sitewise r3/r4 mixture likelihoods run in compiled parallel kernels calling
+The expensive sitewise r3 mixture likelihoods run in compiled parallel kernels calling
 SciPy's scalar special functions. Each objective evaluation reclaims the currently available
-CPU allowance, with no fixed division between stages or fits. r4 remains dependent on the
-completed r3 classification. Parameter updates and inexpensive reductions retain the original
-order and optimizer; the scientific model and thresholds are unchanged. The compiled
-negative-binomial arithmetic can differ from NumPy by rounding, which is checked against
-SciPy and complete filter records in the bounded validation.
+CPU allowance, with no fixed division between stages or fits. r3's parameter updates and
+inexpensive reductions retain the original order and optimizer. The compiled negative-binomial
+arithmetic can differ from NumPy by rounding, which is checked against SciPy and complete filter
+records in the bounded validation. r4's kernels are compiled and parallel over sites, take the
+allowance available when its fit starts, and reduce per-site terms in a fixed order. r4 remains
+dependent on the completed r3 classification.
 
 `peak_scratch_bytes(n_samples, n_input_sites)` supplies the complete conservative workspace
 reservation for site vectors, bounded depth tiles, per-worker genotype scratch and sparse
@@ -200,45 +269,119 @@ heterozygous and r4 separates spuriously; and r5 removes founder-monomorphic sim
 
 ## Sample quality
 
-Inside the site filter, each contig checks every analysed sample for library contamination
-(`evidence/sample_quality.py`). Foreign DNA at read fraction alpha < 1/2 shows alleles that no
-other sample carries, on every contig, at a minor-read fraction near alpha (foreign homozygote) or
-alpha/2 (foreign heterozygote). A sample's own heterozygous allele that no other sample carries (an
-inherited segment absent from the sequenced founders, or a founder segment no sequenced descendant
-received) shows the heterozygote balance instead, about one half, and is regional. Only the first
-is flagged.
+Inside the site filter, each contig checks every analysed sample for a foreign-like minor-read component, the
+signature of library contamination, and excludes a flagged sample from founder construction on that contig
+(`evidence/sample_quality.py`). Foreign DNA at read fraction alpha < 1/2 shows, at a site where the foreign genome
+carries an allele the library's own genome lacks, a minor-read fraction a = alpha (foreign homozygote) or alpha/2
+(foreign heterozygote), at the same a wherever such sites fall. A library's own heterozygous allele that no other
+library carries (an inherited segment absent from the other sequenced samples) shows its heterozygote balance instead,
+and a local artefact (a collapsed repeat, a mismapped paralog, a private tract with mapping bias) whatever fraction it
+has, in a few places. Only the first is flagged.
 
-At the SNPs that pass r1-r4 (whole analysed cohort), the cohort-minor allele is ALT when the
-cohort's ALT reads do not exceed its REF reads; a sample's cell carries it with at least one minor
-read. Per sample on one contig:
+**Eligible cells.** At the SNPs that pass r1-r4 (whole analysed cohort), the cohort-minor allele is ALT when the
+cohort's ALT reads do not exceed its REF reads. A library carries it at a site when its k minor reads of depth d are
+improbable as errors at the scale of the cohort: P(K >= k | d, e) <= q / (N - 1), K ~ Binomial(d, e), with e r3's
+clean rate eps0 (the classification error when r3 has no fit) and
+q = `EvidenceConfig.sample_quality.carrier_tail_level = 0.05`. Under a homogeneous binomial error null, a site whose
+allele nobody carries then shows a carrier anywhere with probability at most q, whatever N (union bound); a single
+error read does not make a carrier, so private cells persist as the cohort grows. A cell (library, site) is
+eligible when the library is observed there and no other library carries the minor allele: its minor reads can only
+be errors, the library's own private heterozygous allele, or foreign reads. Every eligible cell enters, k = 0
+included, so depth enters exactly.
 
-- **Private cells** are those where the sample is the only carrier. Consecutive private cells less
-  than `EvidenceConfig.sample_quality.fragment_bp = 1000` bp apart can come from the same sequenced
-  fragments and form one event; each cell weighs 1 / (event size).
-- **Mixture.** The minor reads k of depth d of each private cell follow a mixture of a heterozygous
-  allele (fraction h = h0 from r4, or 1 - h0 when the minor allele is REF) and one low-fraction
-  allele (fraction a, fitted per sample in (0, h/2]: h/2 is the largest fraction of a foreign
-  heterozygous allele while foreign DNA is under half the library), both binomial and truncated at
-  k >= 1. The mixing weight (exactly, for the current a) and a are fitted by coordinate ascent; the
-  low-fraction events are the event-weighted posterior mass of the low component at that fit, so
-  heterozygous cells, however many, are not counted.
-- **Statistic.** sqrt(low-fraction events / observed cells), the variance-stabilising scale of an
-  event count. The sample's robust z is taken against the cohort on that contig: median and
-  1.4826 x MAD over samples with observed cells, the spread never smaller than the statistic's
-  counting noise 0.5 / sqrt(median observed cells).
-- **Flag.** A sample is flagged on the contig when
-  z > `EvidenceConfig.sample_quality.flag_robust_z = 5.0`. With fewer than `EvidenceConfig.sample_quality.minimum_samples = 20` samples with observed cells
-  nothing is flagged and the reason is recorded.
+**Composite weights.** Cells of a library closer than one sequenced fragment share reads. Each eligible cell weighs
+1 / (the library's eligible cells in the same `EvidenceConfig.sample_quality.fragment_bp = 1000` bp window, counted
+from the contig's first passing site, so translating every coordinate changes nothing), so a window counts once
+however dense the SNPs: evidence and exposure are in the same units, and a local cluster of artefact cells is one
+event.
 
-No labels, pedigree, benchmark or absolute rate enter. The decision is per contig, so a contig's
-result does not depend on which other contigs a run includes. The QC runs only where the site filter
-is applied. Collection visits bounded tiles and stores only the at-most-two carriers at each
-near-private site, including any partner's counts. Private-cell/event fitting, the robust-z
-rule and the r4 balance supplied to QC are unchanged in this variant; bounded-contig QC records
-match fresh base23 execution exactly.
+**Cell model.** Let a_min = `EvidenceConfig.sample_quality.minimum_foreign_fraction = 0.01` / 2, a working
+foreign-allele amplitude. Per library, an eligible cell in depth class j (the library's weighted eligible-cell depth
+quantiles, `EvidenceConfig.sample_quality.heterozygote_depth_classes = 4`) has minor reads k with probability
 
-**Inherited segments (reported, never flagged).** Near-private cells (the sample and at most one
-partner carry the allele) whose reads favour the heterozygous fraction over h/2 are grouped per
+    x0(k) = sum_u pi_ju Bin(k; d, eps_u) + sum_v w_jv BB(k; d, h_v^o, rho_v)       (no foreign component)
+    x1(k) = the same + c Bin(k; d, a),   a in (a_min, a_hi]                           (foreign component)
+
+with each class's weights (plus c under H1) summing to 1. The terms are:
+
+- the library's own errors: a free mixture over a log grid of rates eps_u from e / 10 to a_min (neighbouring rates
+  at most 1.6x apart), fitted per depth class. Any error rate of the library, or spread of error rates over its
+  sites, up to a_min belongs to the null, so library-specific error is not read as foreign reads;
+- the library's own private heterozygotes: beta-binomial components with ALT mean h_v and latent dispersion rho_v,
+  rho_v in {0, 1e-4, 4e-4, 1.6e-3, 6.4e-3, 0.0256, 0.04} (latent SD up to 0.1 at h = 1/2). The means are r4's clean
+  balance h0; when r4 records an unresolved class labelling or no certified fit, h0 is only one of two candidate clean
+  balances, and the means are the ends and middle of the interval spanning r4's two component means (the QC records
+  it and r4's reason). A private REF allele uses 1 - h_v with the same rho_v, so both tails are modelled alike in both
+  orientations: complementing every count of a library leaves its likelihood unchanged. The weights may differ
+  between depth classes, because mapping bias lowers a site's depth together with its allele fraction;
+- c, the foreign-component share within the non-artefact mixture, common to depth classes and regions. Its
+  marginal weight in region R is (1 - pi_R)c, which can vary by region;
+- a, the foreign allele's read fraction, on G = 24 log-spaced values over (a_min, a_hi], with
+  a_hi = f h_lo / 2 (f = `EvidenceConfig.sample_quality.heterozygote_floor_ratio = 0.5`; about 0.12). Grosser
+  contamination is detected at the ceiling, its fraction reported as at least the ceiling.
+
+**Local artefacts.** The contig's passing sites are cut into `EvidenceConfig.sample_quality.artefact_regions = 16`
+regions of equal site counts (at fragment-window boundaries). In region R a cell is, with probability pi_R, a local
+artefact whose minor fraction is modelled as uniform on [0, 1], so that its k is uniform on 0..d:
+A(k) = 1 / (d + 1). Each region's artefact share pi_R is free under both hypotheses:
+
+    L(H) = prod_R max_{pi_R} prod_{b in R} [ (1 - pi_R) x_H(b) + pi_R A(b) ]^{n_b}
+
+The fraction a and the non-artefact share c are common. The marginal foreign weight (1 - pi_R)c can differ
+between regions; no region must independently support contamination. Empty or ineligible regions provide no
+penalty. A local excess can be absorbed by the regional shares, but absorption is not guaranteed: it depends on
+the distribution of eligible weighted information, not physical coverage or passing-site counts. The uniform
+artefact law and 16 regions are working modelling choices. In the selected 4/8/16/32-region study, flags agreed,
+but statistics changed (one planted 2% case: 51.0 to 48.9; largest other TroMau statistic: 15.2 to 4.2).
+
+The fit maximises each likelihood over the mixture weights, c and the regions' shares by generalised EM: each E-step
+sets every region's pi_R to its exact maximum (a concave one-dimensional problem) and weighs each cell by its
+posterior of being an ordinary cell; each M-step takes damped Newton steps on the weighted mixture problem, which is
+concave in the weights (each class's sum constraint eliminated through its largest weight). The objective never
+decreases. The alternatives are warm-started across the grid of a, and the null is also polished from the best
+alternative's weights, reducing the risk of false evidence from incomplete null optimisation. Conditional
+concavity and polishing do not certify a global joint optimum.
+
+**Statistic and working threshold.** T = max over the grid of 2 (log L(H1, a) - log L(H0)). For one a, c = 0 lies on
+the boundary, and the regular asymptotic law of the statistic is (chi2_0 + chi2_1) / 2 (Self and Liang 1987).
+Bonferroni over the G values of a and the union bound over the N libraries give the threshold: T >= u_N with
+P(chi2_1 >= u_N) = 2 q / (G N), with q = `carrier_tail_level`. That is 17.1 at N 115, 20.1 at N 580 and 22.9 at
+N 2,500. This level is nominal only for a regular, correctly specified likelihood of independent windows. The
+composite weights, mixing weights on their boundary, the artefact components and misspecification all break it. u_N
+is therefore a working threshold, supported by the clean false-flag rate measured on simulated libraries, not a
+certified family-wise level.
+
+**What a flag means.** A pooled likelihood preference for the foreign-component model above a_min over the
+fitted error, own-heterozygote and artefact mixture. A flag excludes the library from founder construction on the
+contig; it is not a contamination diagnosis. Elevated own error, biased private heterozygotes and dispersed
+variable-fraction artefacts can also trigger exclusion. The reported `foreign_share` is c from the winning
+alternative; reported artefact shares describe the null. They are not parts of one fitted decomposition.
+The fitted fraction is not a calibrated contamination estimate: depth correlated with donor-private status can
+push a much smaller true fraction to the fitted ceiling.
+
+The amplitude a_min is a working effect threshold, not a derived safety boundary. The founder-construction and
+painting emissions mix every observed site's genotype evidence with a uniform genotype error of mass r = 0.01, which
+limits the influence of discordant observations. Where foreign DNA at alpha is homozygous for an allele the sample
+lacks, a cell of depth d shows Bin(d, alpha) foreign reads. Two or more contradict a homozygote decisively at depths
+of about 4-16x (at clean error rates 1e-4 to 1e-3), with probability about C(d, 2) alpha^2. That is of the order of
+r at alpha 0.8-1.4% over 11-18x (alpha 1%: 0.72% at 13x; alpha 2%: 2.7%). A foreign allele shows at alpha or alpha/2,
+so a_min = 0.5% aims at 1% contamination of either zygosity. A flag does not establish alpha >= 1%, and sensitivity
+near the amplitude is measured, not guaranteed.
+
+The QC is not applied, nothing is flagged and the reason is recorded, in any of these cases:
+- fewer than `EvidenceConfig.sample_quality.minimum_samples = 20` samples have observed cells;
+- there is no eligible cell;
+- the cohort's clean error is not below a_min / 2 (errors and foreign alleles could not separate);
+- the foreign range ends below 1.25 a_min.
+
+No labels, pedigree, benchmark or cohort-relative scale enter. The decision is per contig, so a contig's result does
+not depend on which other contigs a run includes. The QC runs only where the site filter is applied. Collection
+visits bounded tiles of the passing sites and keeps per-library histograms of (orientation, depth, minor reads) with
+summed weights per region, plus at most two near-private carriers per site; the profiles run per library in
+parallel.
+
+**Inherited segments (reported, never flagged).** Near-private carrier cells (the sample and at most one
+partner carry the allele, carriers as above) whose reads favour the heterozygous fraction over h/2 are grouped per
 (sample, partner) into fragment events and into regions of events less than
 `EvidenceConfig.sample_quality.segment_gap_bp = 1000000` bp apart. Regions with at least
 `EvidenceConfig.sample_quality.segment_minimum_events = 3.0` events are listed for unflagged samples
@@ -394,7 +537,7 @@ indices. These are the units of [discovery](discovery.md) and
 | --- | --- | --- | --- |
 | loading | `evidence/vcf.py` | worker processes scan disjoint physical windows, then decode directly into one shared sample-major array | O(N M_in); two BCF passes, no count-array result transfers |
 | site filter | `evidence/site_quality.py` | per-site genotype EM parallel over sites; elementwise mixture terms in thread chunks | O(N M_in) (at most 60 EM iterations per site) plus O(M_in) per mixture iteration |
-| sample QC | `evidence/sample_quality.py` | vectorised | O(N M_in), then per-sample fits over private cells |
+| sample QC | `evidence/sample_quality.py` | vectorised collection; per-library profiles in parallel | O(N M_in), then per library O(G I (B Q^2 + (J Q)^3 + R_B S_b)) for I EM iterations (each a few Newton steps), B histogram bins, R_B region-bin pairs, S_b = 48 share bisections, G = 24 fractions, J <= 4 depth classes and Q = E + V components (E error rates, about 12; V = 7 or 21 own-heterozygote components); measured at N 2,500 on 16 cores: about 40 s for a contig of 150,000 sites |
 | read model | `evidence/read_model/fit.py`, `evidence/read_model/calibrate.py` | per-sample fits in threads; objectives parallel over samples | histograms and held-out stretch scores O(N M_kept); each objective O(N C), C <= 1,224, independent of chromosome length |
 | likelihoods | `evidence/read_model/emission.py` | samples in parallel; a lookup/prefix table per active sample | O(N M_kept) |
 
@@ -489,9 +632,22 @@ boundary at tau = 0.
   population prior. Uncertainty in the error rates is not propagated into the likelihoods.
 - The site filter's depth rules cannot distinguish benign sample-specific missingness from mapping
   artefacts, and r5 removes sites without segregating information by design.
-- The contamination QC detects foreign DNA through private alleles only: contamination shared by
-  several libraries from one source is seen in part, and DNA from another analysed sample brings
-  no private alleles, so contamination within the cohort is not detected.
+- Sample quality exclusion uses private alleles: shared or related donors can evade it, and donors concentrated
+  in a few regions can be absorbed by artefact shares. The fitted fraction has a ceiling f h_lo / 2 (about 0.12)
+  and is not a calibrated contamination estimate. Local artefacts need not be absorbed. Independent full-filter
+  controls flagged 20 dispersed mapping-artefact sites with fractions varying over [0.1, 0.3], where 3.3 kept the
+  clean library; another flagged a biased private tract within 1/16 of the contig when most outside cells were
+  ineligible (both rules flagged it). There is no general half-contig safety boundary, minimum of 60 clusters,
+  or requirement that artefacts share one fraction. Sixteen regions need not supply 16 informative comparisons.
+- QC4 reduced clean grid flags from 7 to 0 in 38,313 fits and required-control flags from 33 to 0. Main-grid 2%
+  detection rose 8/9 to 9/9 and 5% stayed 9/9, but 1% detection fell 7/9 to 0/9 and combined Q4-fixture 2%
+  detection fell 2/2 to 0/2. The heterogeneous 2% cases total 10/11 versus 9/11 descriptively, not as a population
+  sensitivity estimate. Repeated controls do not certify a false-positive rate. The N580 seed-2 2% statistic was
+  only 22.04 against 20.14. Libraries mostly at 1-5x have little power near the working amplitude.
+- Own error above a_min = 0.5% can also trigger quality exclusion. The global Q4 balance interval is not a
+  guarantee for each library's private-allele bias. The composite-mixture threshold remains a working choice;
+  boundary nuisance parameters, unidentifiable components and weighting prevent a general chi-bar-square
+  calibration, which Bonferroni alone cannot restore.
 - Calibration cannot resolve ancestral phase that the descendants do not identify.
 
 ### Shared-binomial stationarity validation

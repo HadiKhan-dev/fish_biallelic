@@ -43,6 +43,7 @@ from numba.typed import List
 
 from . import gains as gains_kernels
 from . import messages as kernels
+from . import checkpoints
 from .. import tie_rules
 from ...maths import ties
 from .acceptance import AHEAD_BLOCKS, JUNCTION_BATCH, MOVE_COARSE, MOVE_FINE, TOL, accept_pass
@@ -167,19 +168,18 @@ class Fit:
 
 
 class Orientation:
-    """Leaves, log evidence and block offsets in forward or reversed site order."""
+    """Leaves and block offsets in forward or reversed site order; window(K) reads the log evidence
+    and the switch costs of K in that order (window.Windows.view: no reversed copy of the evidence)."""
 
     def __init__(self, workspace, reverse):
         sites = int(workspace.offsets[-1])
         self.reverse = reverse
         self.workspace = workspace
         if reverse:
-            self.logs = kernels.reverse_sites(workspace.logs)
             self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
             self.leaves = List([np.ascontiguousarray(leaf[:, ::-1])
                                 for leaf in list(workspace.leaves)[::-1]])
         else:
-            self.logs = workspace.logs
             self.offsets = np.ascontiguousarray(workspace.offsets, np.int64)
             self.leaves = workspace.leaves
         self.blocks = len(self.offsets) - 1
@@ -188,9 +188,9 @@ class Orientation:
         """int8 (K, L) alleles of the panel (K x B rows in this orientation's block order)."""
         return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
 
-    def costs(self, founders):
-        """float32 (S, L) switch costs of K = founders in this orientation's site order."""
-        return self.workspace.costs(founders, self.reverse)
+    def window(self, founders):
+        """The window of K = founders in this orientation's site order (window.Windows.view)."""
+        return self.workspace.windows.view(founders, self.reverse)
 
 
 # Only components with multiple incoming roots retain these optional window results.
@@ -487,7 +487,7 @@ class SweepEngine:
         founders = len(panel)
         with execution.numba_threads(max(1, int(budget.threads()))):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(panel, np.int64))
-            scores = np.asarray(score_panel(alleles, ws.logs, ws.costs(founders),
+            scores = np.asarray(score_panel(alleles, ws.windows.view(founders),
                                             sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES))
         # The panel-independent terms of K (start and stay): scores of different K compare.
         return scores + ws.normalisers(founders)
@@ -505,10 +505,10 @@ class SweepEngine:
         with execution.numba_threads(max(1, int(budget.threads()))):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.asarray(key, np.int64))
         total = 0
-        costs = ws.costs(len(alleles))
+        win = ws.windows.view(len(alleles))
         for s0, s1, threads in sample_ranges(ws.samples, budget):
             with execution.numba_threads(threads):
-                _, counts = score_switches_direct(alleles, ws.logs[s0:s1], costs[s0:s1])
+                _, counts = score_switches_direct(alleles, win, s0, s1)
             total += int(counts.sum())
         self._minimum_switches[key] = total
         return total
@@ -529,37 +529,55 @@ class SweepEngine:
         """Memory of one fixed-K search (its reservation, execution.memory): the message arrays its pass holds
         (stored backward values, + counts and the forward history of the guard), its proposal cache's
         boundaries, and the pass transients per junction (f/g starts and ends of up to 3K candidates, the
-        lookahead and backward chain: K30 map 3.2), plus 32 MiB. Guard traceback scratch is
+        lookahead and backward chain: K30 map 3.2), its streaming window of a large component (window.py; 0 for a
+        resident one), plus 32 MiB. Guard traceback scratch is
         reserved separately during acceptance; it is not resident during window proposals. A polish fit's chains
         and lookahead can span a long repair's LONG_WINDOW blocks."""
         states = founders * (founders + 1) // 2
         arrays = 4 if self.guarded else 2
-        boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
+        step = checkpoints.stride(founders, self.blocks, self.workspace.samples, self.guarded)
+        ncheck = len(checkpoints.boundaries(self.blocks, step))
+        # A pass has one two-segment score/count cache; proposals materialise their
+        # flanks temporarily beside the previous sweep's proposal-cache copies.
+        if step == 1:
+            boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
+        else:
+            boundaries = (ncheck * arrays + 2 * self.cached_boundaries
+                          + (2 if self.guarded else 1) * checkpoints.CACHE_SEGMENTS
+                          * (min(self.blocks, step) + 1))
         if self.guarded:
             boundaries += 2 * ((self.blocks - 1) // JUNCTION_BATCH + 1)
         samples = self.workspace.samples
         span = max(48, LONG_WINDOW) if polish else 48
         transients = 8 * samples * states * (3 * 3 * founders + 2 * span)
-        return 8 * boundaries * samples * states + transients + (32 << 20)
+        return (8 * boundaries * samples * states + transients + self.workspace.windows.window_bytes()
+                + (32 << 20))
 
     # ------------------------------------------------------------------ messages and proposals
     def _full_messages(self, X, lex, budget):
         """messages(_lex) of panel X: (fwd, bwd, fcnt, bcnt, fscale, bscale), counts None without
         lex; over consecutive sample ranges at the budget's live share."""
-        logs, offsets = self.workspace.logs, self.forward.offsets
-        costs = self.forward.costs(len(X))
+        samples, offsets = self.workspace.samples, self.forward.offsets
+        win = self.forward.window(len(X))
         with execution.numba_threads(max(1, int(budget.threads()))):
             haps = self.forward.haps(X)
-        arrays = kernels.message_arrays(len(X), self.blocks, len(logs), lex)
+        step = checkpoints.stride(len(X), self.blocks, samples, self.guarded)
+        arrays = checkpoints.allocate(len(X), self.blocks, samples, lex, haps, self.forward, step)
         fwd, bwd, fcnt, bcnt, fscale, bscale = arrays
-        for s0, s1, n in sample_ranges(len(logs), budget):
+        changed = np.ones(self.blocks, np.bool_)
+        count3 = np.zeros((1, 1, 1))
+        for s0, s1, n in sample_ranges(samples, budget):
             with execution.numba_threads(n):
-                if lex:
-                    kernels.messages_lex(haps, logs, offsets, costs, s0, s1, fwd, bwd, fcnt,
-                                         bcnt, fscale, bscale)
+                if fwd.dense:
+                    if lex:
+                        kernels.messages_lex(haps, win, offsets, s0, s1, fwd.data, bwd.data,
+                                             fcnt, bcnt, fscale, bscale)
+                    else:
+                        kernels.messages(haps, win, offsets, s0, s1, fwd.data, bwd.data, fscale, bscale)
                 else:
-                    kernels.messages(haps, logs, offsets, costs, s0, s1, fwd, bwd, fscale,
-                                     bscale)
+                    for msg, cnt, scale in ((fwd, fcnt, fscale), (bwd, bcnt, bscale)):
+                        checkpoints.update(haps, win, offsets, msg.bounds, changed, msg.data,
+                                           cnt if lex else count3, scale, False, msg.forward, lex, s0, s1)
         return arrays
 
     def _messages(self, X, budget, held=None, lex=None):
@@ -577,8 +595,8 @@ class SweepEngine:
             held = None
         if held is None:
             return self._full_messages(X, lex, budget), time.perf_counter() - started
-        logs, offsets = self.workspace.logs, self.forward.offsets
-        costs = self.forward.costs(len(X))
+        samples, offsets = self.workspace.samples, self.forward.offsets
+        win = self.forward.window(len(X))
         with execution.numba_threads(max(1, int(budget.threads()))):
             haps = self.forward.haps(X)
         panel, (fwd, bwd, fcnt, bcnt, fscale, bscale) = held
@@ -586,17 +604,28 @@ class SweepEngine:
             fcnt = bcnt = None
         known = bwd is not None
         if not known:
-            bwd, bscale = np.zeros_like(fwd), np.zeros_like(fscale)
-            bcnt = None if fcnt is None else np.zeros_like(fcnt)
+            bcnt = None if not lex else np.zeros_like(fcnt)
+            bwd = checkpoints.BoundaryMessages(np.zeros_like(fwd.data), bcnt, fwd.bounds,
+                                               haps, self.forward, False)
+            bscale = np.zeros_like(fscale)
+        for msg, cnt in ((fwd, fcnt), (bwd, bcnt)):
+            msg.haps, msg.counts = haps, cnt
+            msg.clear()
         changed = np.any(panel != X, axis=0)
-        for s0, s1, n in sample_ranges(len(logs), budget):
+        count3 = np.zeros((1, 1, 1))
+        for s0, s1, n in sample_ranges(samples, budget):
             with execution.numba_threads(n):
-                if lex:
-                    kernels.update_messages_lex(haps, logs, offsets, costs, changed, fwd, bwd,
-                                                fcnt, bcnt, fscale, bscale, known, s0, s1)
+                if fwd.dense:
+                    if lex:
+                        kernels.update_messages_lex(haps, win, offsets, changed, fwd.data, bwd.data,
+                                                    fcnt, bcnt, fscale, bscale, known, s0, s1)
+                    else:
+                        kernels.update_messages(haps, win, offsets, changed, fwd.data, bwd.data,
+                                                fscale, bscale, known, s0, s1)
                 else:
-                    kernels.update_messages(haps, logs, offsets, costs, changed, fwd, bwd,
-                                            fscale, bscale, known, s0, s1)
+                    for msg, cnt, scale, valid in ((fwd, fcnt, fscale, True), (bwd, bcnt, bscale, known)):
+                        checkpoints.update(haps, win, offsets, msg.bounds, changed, msg.data,
+                                           cnt if lex else count3, scale, valid, msg.forward, lex, s0, s1)
         return (fwd, bwd, fcnt, bcnt, fscale, bscale), time.perf_counter() - started
 
     def proposals(self, X, fwd, bwd, budget, cache=None, convention=None):
@@ -608,6 +637,9 @@ class SweepEngine:
         whose inputs equal the cached ones takes its cached result. The templates to solve run one
         Numba thread each, as many at once as the live share allows (budget.thread_map)."""
         frontier_bytes = self.config.frontier_bytes
+        with execution.numba_threads(max(1, int(budget.threads()))):
+            fwd = fwd.flanks(a for a, _ in self.windows.spans)
+            bwd = bwd.flanks(c for _, c in self.windows.spans)
 
         memo = self._window_memo
 
@@ -673,15 +705,23 @@ class SweepEngine:
         best response of the copy alone (the other rows fixed, messages of Y) is applied by one
         copy-only acceptance pass in block order (exact gains above TOL, no exchanges, no guard).
         Returns (gain, record)."""
+        with self.workspace.windows.lease(len(Y)):
+            return self._copy_response(Y, budget)
+
+    def _copy_response(self, Y, budget):
         copy = len(Y) - 1
         fwd, bwd, _, _, _, bscale = self._full_messages(Y, False, budget)
         fine = [(a, c) for kind, a, c in self.windows.templates if kind == "fine"]
         frontier_bytes = self.config.frontier_bytes
         sizes = [self.windows.template_bytes("fine", a, c, self.workspace.samples, len(Y)) for a, c in fine]
+        with execution.numba_threads(max(1, int(budget.threads()))):
+            ff = fwd.flanks(a for a, _ in fine)
+            bb = bwd.flanks(c for _, c in fine)
         solved = budget.thread_map(
-            lambda span: self.windows.fine(Y, fwd, bwd, span[0], span[1], frontier_bytes,
+            lambda span: self.windows.fine(Y, ff, bb, span[0], span[1], frontier_bytes,
                                            focals=(copy,)), fine, item_bytes=sizes,
             label="founder_refinement window solves")
+        del ff, bb
         props, windows, truncations, fallbacks = {}, 0, 0, 0
         for result in solved:
             for _, a, c, _, rows, diagnostic in result:
@@ -692,7 +732,7 @@ class SweepEngine:
                 if rows is not None:
                     props.setdefault(a, []).append((MOVE_FINE, c, copy, np.asarray(rows, np.int64)))
         acc, _, _ = accept_pass(self.forward, np.ascontiguousarray(Y, np.int64).copy(), bwd, None,
-                                bscale, props, self.forward.costs(len(Y)), False, budget,
+                                bscale, props, self.forward.window(len(Y)), False, budget,
                                 exchanges=False, start_fwd=fwd)
         return float(acc["fine_gain"]), dict(windows=windows,
                                              proposals=int(sum(map(len, props.values()))),
@@ -739,7 +779,7 @@ class SweepEngine:
         with execution.reserve_memory(self.message_bytes(len(X), self.guarded),
                                       label="founder_refinement beam escape messages"):
             fwd, bwd, fcnt, bcnt, fscale, bscale = self._full_messages(X, self.guarded, budget)
-            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, self.forward.costs(len(X)),
+            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, self.forward.window(len(X)),
                                     self.guarded, budget, start_fwd=fwd, start_fcnt=fcnt, scale=abs(F),
                                     reverse=convention)
             del fwd, bwd, fcnt, bcnt, fscale, bscale
@@ -817,7 +857,7 @@ class SweepEngine:
         with execution.reserve_memory(nbytes, label="founder_refinement long repair"):
             fwd, bwd, fcnt, bcnt, fscale, bscale = self._full_messages(X, self.guarded, budget)
             orient = self.forward
-            costs = orient.costs(founders)
+            win = orient.window(founders)
             threads = max(1, int(budget.threads()))
             with execution.numba_threads(threads):
                 haps = orient.haps(X)
@@ -838,7 +878,7 @@ class SweepEngine:
                 # Each chunk re-reads the live share (a sample's gain is its own recursion).
                 with execution.numba_threads(max(1, int(budget.threads()))):
                     per = gains_kernels.candidate_gains(
-                        haps, orient.leaves, self.workspace.logs, orient.offsets, costs,
+                        haps, orient.leaves, win, orient.offsets,
                         np.ascontiguousarray(fwd[fb]), np.ascontiguousarray(bwd[fb]), focal, fb, eb, rows, ro,
                         np.ascontiguousarray(bwd[eb]), sums)
                 gains.extend(float(sum(per[m])) for m in range(len(part)))
@@ -859,7 +899,7 @@ class SweepEngine:
             for (a, c, k), (_, r) in sorted(best.items()):
                 props.setdefault(a, []).append((MOVE_COARSE, c, k, r))
             Xo = X.copy()
-            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, costs, self.guarded, budget,
+            acc, _, _ = accept_pass(self.forward, Xo, bwd, bcnt, bscale, props, win, self.guarded, budget,
                                     start_fwd=fwd, start_fcnt=fcnt, scale=abs(F), reverse=convention)
             del fwd, bwd, fcnt, bcnt, fscale, bscale
         accepted = int(acc["fine"] + acc["coarse"] + acc["exchange"])
@@ -886,10 +926,12 @@ class SweepEngine:
         return Xo, scores, actual, record
 
     def message_bytes(self, founders, lex):
-        """Bytes of one full message set of a panel of `founders` rows (messages.message_arrays)."""
+        """Bytes of the selected dense or checkpointed message set, including normalisers."""
         states = founders * (founders + 1) // 2
         samples = self.workspace.samples
-        return 8 * samples * ((self.blocks + 1) * states * (4 if lex else 2) + 2 * self.blocks)
+        return 8 * samples * (len(checkpoints.boundaries(self.blocks, checkpoints.stride(
+            founders, self.blocks, samples, self.guarded))) * states * (4 if lex else 2)
+                              + 2 * self.blocks)
 
     def bridge(self, X, fine_props, budget, convention=None):
         """bridge_search under a reservation of its transients: a full message set,
@@ -923,8 +965,8 @@ class SweepEngine:
         X = np.ascontiguousarray(X, np.int64)
         fwd, bwd, _, _, _, bscale = self._full_messages(X, False, budget)
         orient = self.forward
-        costs = orient.costs(founders)
-        logs, offsets, leaves = ws.logs, orient.offsets, orient.leaves
+        win = orient.window(founders)
+        offsets, leaves = orient.offsets, orient.leaves
         threads = max(1, int(budget.threads()))
         with execution.numba_threads(threads):
             haps = orient.haps(X)
@@ -947,7 +989,7 @@ class SweepEngine:
             ro = row_offsets[m0:m1 + 1] - row_offsets[m0]
             with execution.numba_threads(max(1, int(budget.threads()))):     # the live share, per chunk
                 per = gains_kernels.candidate_gains(
-                    haps, leaves, logs, offsets, costs, np.ascontiguousarray(fwd[fb[m0:m1]]),
+                    haps, leaves, win, offsets, np.ascontiguousarray(fwd[fb[m0:m1]]),
                     np.ascontiguousarray(bwd[fb[m0:m1]]), focal[m0:m1], fb[m0:m1], eb[m0:m1],
                     rows[row_offsets[m0]:row_offsets[m1]], ro, np.ascontiguousarray(bwd[eb[m0:m1]]), sums)
             content.extend(float(sum(per[m])) for m in range(m1 - m0))
@@ -971,10 +1013,9 @@ class SweepEngine:
             Y[k, a:c] = r
             with execution.numba_threads(max(1, int(budget.threads()))):     # the live share, per window
                 haps_y = orient.haps(Y)
-                local_f = kernels.forward_boundaries(haps_y, logs, offsets, costs,
-                                                     np.ascontiguousarray(fwd[a]), a, c)
-                local_b, _ = kernels.backward_chain(haps_y, logs, offsets, costs,
-                                                    np.ascontiguousarray(bwd[c]), ident, a, c)
+                local_f = kernels.forward_boundaries(haps_y, win, offsets, np.ascontiguousarray(fwd[a]), a, c)
+                local_b, _ = kernels.backward_chain(haps_y, win, offsets, np.ascontiguousarray(bwd[c]), ident,
+                                                    a, c)
                 for cut in range(max(1, a), min(blocks - 1, c) + 1):
                     swap = gains_kernels.exchange_gains(np.ascontiguousarray(local_f[cut - a]),
                                                         np.ascontiguousarray(local_b[cut - a]))
@@ -1144,6 +1185,12 @@ class SweepEngine:
 
     def _converge_direction(self, start, label, first, budget, shared=None, initial_scores=None,
                             polish=False):
+        """_search under one window lease of the panel's K: every kernel of the search reads the same
+        streaming window (window.Windows.lease; nothing for a resident component)."""
+        with self.workspace.windows.lease(len(start)):
+            return self._search(start, label, first, budget, shared, initial_scores, polish)
+
+    def _search(self, start, label, first, budget, shared=None, initial_scores=None, polish=False):
         """One search from start: sweeps until one accepts nothing (or the reported sweep limit);
         the first pass runs forward (first "fwd") or reversed ("rev"), later passes alternate.
         Records <label>.<first>.sweep<n> (that sweep's state and history entry) and .done. shared:
@@ -1237,24 +1284,24 @@ class SweepEngine:
                         # The reversed pass stores the clamped forward messages; their per-block
                         # normalisers are the forward ones in reversed block order.
                         orientation = self._reversed
-                        forward_costs = self.forward.costs(founders)
-                        if lex:
-                            stored, stored_cnt = kernels.clamp_reverse_lex(
-                                fwd, fcnt, self.forward.logs, forward_costs, self.forward.offsets)
-                        else:
-                            stored, stored_cnt = kernels.clamp_reverse(
-                                fwd, self.forward.logs, forward_costs, self.forward.offsets), None
+                        entering = kernels.boundary_costs(self.forward.window(founders), self.forward.offsets)
+                        stored = fwd.reversed(entering)
+                        stored_cnt = stored.counts
                         stored_scale = np.ascontiguousarray(fscale[::-1])
                         Xo = np.ascontiguousarray(X[:, ::-1])
                         start_fwd = start_fcnt = None
                         kept = (fwd, None, fcnt, None, fscale, None)
+                        # A reversed pass reads the clamped forward messages, and its backward half is not
+                        # kept for the next sweep: drop this search's references now, so it does not hold
+                        # both message sets during the pass (memory only, release 3.4).
+                        bwd = bcnt = bscale = None
                     else:
                         orientation, stored, stored_cnt, stored_scale = self.forward, bwd, bcnt, bscale
                         Xo = X.copy()
                         start_fwd, start_fcnt = fwd, fcnt
                         kept = (fwd, bwd, fcnt, bcnt, fscale, bscale)
                 acc, gains, pairs = accept_pass(orientation, Xo, stored, stored_cnt, stored_scale, props,
-                                                orientation.costs(founders), lex, budget,
+                                                orientation.window(founders), lex, budget,
                                                 start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F),
                                                 reverse=(first == "rev"), optimistic=self.guarded and not lex)
                 if not acc["lex_abort"]:

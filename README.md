@@ -1,9 +1,10 @@
 # Founder haplotype reconstruction
 
 Reconstruct founder haplotypes, sample ancestry, pedigrees, phase and recombination maps from low-coverage
-sequencing of experimental crosses. The pipeline works from allele read depths, keeps missing observations
-unknown from local discovery to the final maps, and needs neither pedigree truth nor generation labels (a cross
-design can be supplied as parent eligibility).
+sequencing of experimental crosses. The pipeline works from allele read depths and a genetic map, keeps missing
+observations unknown from local discovery to the final maps, and reads no sample metadata: no pedigree truth,
+generation labels or sexes. Sample names are identifiers, and every sequenced sample is a candidate parent of every
+other.
 
 The primary applications are cichlid crosses; simulations with a known pedigree validate the methods.
 
@@ -42,16 +43,18 @@ haplotypes status work/runs/my_cross
 A complete run ends by writing its final products to `OUTPUT/export/`: per contig a founder VCF (one haploid
 column per founder row of every component) and the phased sample VCF.
 
-Larger runs use a configuration file; the built-in presets `tromau` and `aulstu` describe the two cichlid crosses
-(contigs, workbook columns, parent-eligibility design), so their configurations add only the data paths. Rerunning
-the same command resumes from the checkpoints. See [usage](docs/usage.md) for inputs, allocations and outputs, and
-[configuration](docs/configuration.md) for every setting.
+Larger runs use a configuration file; the built-in presets `tromau` and `aulstu` list the contigs of the two
+cichlid crosses, so their configurations add only the data path. Rerunning
+the same command resumes compatible checkpoints. Upgrading from 3.3 to 3.4 requires a new output and checkpoint
+root; see the [release notes](CHANGELOG.md#340-31-october-2026). See [usage](docs/usage.md) for inputs, allocations
+and outputs, and [configuration](docs/configuration.md) for every setting.
 
 ## One pipeline
 
 | stage | product | package |
 | --- | --- | --- |
 | evidence | allele depths of biallelic SNPs, site and sample quality control, calibrated genotype likelihoods | `evidence/` |
+| relatedness | pairwise IBD and full-sib families from genotype likelihoods, before assembly | `relatedness/` |
 | discovery | missing-aware founder panels of 200-site blocks | `discovery/` |
 | local selection | path-selected local panels, refined after context assemblies through L1 and L1+L2 | `local_selection/` |
 | assembly | component-preserving founder chromosomes: completion, linker, joins, L1-L4 hierarchy, founder refinement after each level | `assembly/` |
@@ -79,6 +82,13 @@ How to read the results:
 - Founder reconstruction can be ambiguous where ancestry is unsampled or many descendants repeat one ancestral
   recombinant, and painting errors or structured missingness can affect pedigree direction. Successful simulations
   do not establish individual-level parentage in real crosses.
+
+For N around 2,500, streamed refinement, shared local-selection evidence and windowed painting reduce memory,
+while relatedness and family-phase optimizations reduce computation. Relatedness is projected at 30-32 minutes on
+76 cores, and concurrent-lane memory remains a projection. The joint pair-bound pass still enumerates retained pairs and can grow cubically;
+full-length N = 2,500 pedigree feasibility is not established. See [performance](docs/performance.md) and the
+[release notes](CHANGELOG.md#340-31-october-2026) for the pruning decision, streaming time costs and large-cohort QC
+limits.
 
 ## Documentation
 

@@ -67,8 +67,9 @@ from ..count_rule import shadow_bounds
 from .. import tie_rules
 from ...maths import ties
 from .acceptance import TOL
-from .objective import (CENTER, forward_sites, is_skipped, pair_code7, row_max, selected_alleles, transition,
+from .objective import (CENTER, forward_sites, pair_code7, row_max, selected_alleles, transition,
                         unordered_pairs)
+from .window import capacity, cover, locate, samples_of, site_cost, site_logs, stretch
 from .workspace import sample_ranges
 from ... import execution
 
@@ -244,10 +245,10 @@ class CountPass:
 
 # ------------------------------------------------------------------ optimistic count bound
 @njit(cache=True)
-def _block_sample_scores(haps, logs, start, stop, costs, removed):
+def _block_sample_scores(haps, win, start, stop, removed):
     """Per-sample optimistic scores of one block: its rows (minus row `removed` if >= 0) as a free
-    panel with the target K's switch costs, every sample's chain started fresh at the block (the
-    transition into the block's first informative site is free: switch costs are >= 0)."""
+    panel with the target K's switch costs (the window's), every sample's chain started fresh at the
+    block (the transition into the block's first informative site is free: switch costs are >= 0)."""
     rows = np.arange(len(haps))
     if removed >= 0:
         rows = rows[rows != removed]
@@ -256,17 +257,19 @@ def _block_sample_scores(haps, logs, start, stop, costs, removed):
     for j in range(stop - start):
         for q in range(len(first)):
             dos[j, q] = pair_code7(haps[rows[first[q]], j], haps[rows[second[q]], j])
-    result = np.empty(logs.shape[0], np.float64)
+    samples = samples_of(win)
+    result = np.empty(samples, np.float64)
     R = np.empty(len(rows))
-    for s in range(logs.shape[0]):
+    e = np.empty(7)
+    for s in range(samples):
         row = np.zeros(len(first), np.float64)
-        forward_sites(row, dos, start, logs, s, start, stop, costs, R)
+        forward_sites(row, dos, start, win, s, start, stop, R, e)
         result[s] = row_max(row)
     return result
 
 
 @njit(cache=True, parallel=True)
-def upper_bound(leaves, offsets, logs, costs, target):
+def upper_bound(leaves, offsets, win, target):
     """Per-block optimistic scores bounding every panel with at most `target` distinct rows per
     block, and their per-sample form.
 
@@ -280,28 +283,35 @@ def upper_bound(leaves, offsets, logs, costs, target):
     workspace.normalisers(target)).
     bounds[b] is the block's total over samples; per_sample[b] lets every sample drop a different
     row of a target+1-row block (a maximum of sums becomes a sum of maxima): summed over blocks it
-    bounds each sample. constrained[b] = 1 for a target+1-row block."""
-    samples = logs.shape[0]
-    bounds = np.empty(len(leaves), np.float64)
-    constrained = np.zeros(len(leaves), np.int64)
-    per_sample = np.empty((len(leaves), samples), np.float64)
-    for block_index in prange(len(leaves)):
-        block = np.int64(block_index)
-        haps = leaves[block]
-        deletion = len(haps) == target + 1
-        best = -np.inf
-        best_sample = np.full(samples, -np.inf)
-        for removed in range(len(haps) if deletion else 1):
-            scores = _block_sample_scores(haps, logs, offsets[block], offsets[block + 1], costs,
-                                          removed if deletion else -1)
-            total = 0.
-            for sample in range(samples):
-                total += scores[sample]
-            best = max(best, total)
-            best_sample = np.maximum(best_sample, scores)
-        bounds[block] = best
-        per_sample[block] = best_sample
-        constrained[block] = int(deletion)
+    bounds each sample. constrained[b] = 1 for a target+1-row block. The window (the target K's
+    costs) covers one stretch of blocks at a time; the blocks of a stretch run in parallel."""
+    samples = samples_of(win)
+    blocks = len(leaves)
+    bounds = np.empty(blocks, np.float64)
+    constrained = np.zeros(blocks, np.int64)
+    per_sample = np.empty((blocks, samples), np.float64)
+    b0 = 0
+    while b0 < blocks:
+        b1 = stretch(offsets, b0, blocks, capacity(win))
+        cover(win, offsets[b0], offsets[b1], 0, samples, False)
+        for block_index in prange(b0, b1):
+            block = np.int64(block_index)
+            haps = leaves[block]
+            deletion = len(haps) == target + 1
+            best = -np.inf
+            best_sample = np.full(samples, -np.inf)
+            for removed in range(len(haps) if deletion else 1):
+                scores = _block_sample_scores(haps, win, offsets[block], offsets[block + 1],
+                                              removed if deletion else -1)
+                total = 0.
+                for sample in range(samples):
+                    total += scores[sample]
+                best = max(best, total)
+                best_sample = np.maximum(best_sample, scores)
+            bounds[block] = best
+            per_sample[block] = best_sample
+            constrained[block] = int(deletion)
+        b0 = b1
     return bounds, constrained, per_sample
 
 
@@ -330,61 +340,74 @@ def _shadow_codes(leaves, site_offsets, choices, starts):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _full_site_costs(logs, site_offsets, dosages, dose_offsets, starts, costs, founders):
+def _full_site_costs(win, site_offsets, dosages, dose_offsets, starts, founders):
     """shadow_bounds._full_site on the refinement objective (per-homologue transitions with the
-    switch costs of K = founders): per sample the maximum over every block's local row choices,
-    carried across blocks (an exact per-sample envelope of the shadow family, without the
-    normalisers)."""
-    samples, states = len(logs), dosages.shape[1]
+    switch costs of K = founders, the window's): per sample the maximum over every block's local row
+    choices, carried across blocks (an exact per-sample envelope of the shadow family, without the
+    normalisers). Stretch by stretch of blocks, each covered before it is read."""
+    samples, states = samples_of(win), dosages.shape[1]
+    blocks = len(starts) - 1
+    rows = np.zeros((samples, states))
+    b0 = 0
+    while b0 < blocks:
+        b1 = stretch(site_offsets, b0, blocks, capacity(win))
+        cover(win, site_offsets[b0], site_offsets[b1], 0, samples, False)
+        for sample in prange(samples):
+            row = rows[sample]
+            trial = np.empty(states)
+            target = np.empty(states)
+            R = np.empty(founders)
+            e = np.empty(7)
+            for block in range(b0, b1):
+                target[:] = -np.inf
+                lo, hi = site_offsets[block], site_offsets[block + 1]
+                for choice in range(starts[block], starts[block + 1]):
+                    trial[:] = row
+                    forward_sites(trial, dosages, lo - dose_offsets[choice], win, sample, lo, hi, R, e)
+                    for state in range(states):
+                        target[state] = max(target[state], trial[state])
+                row[:] = target
+        b0 = b1
     result = np.empty(samples, np.float64)
     for sample in prange(samples):
-        row = np.zeros(states)
-        trial = np.empty(states)
-        target = np.empty(states)
-        R = np.empty(founders)
-        for block in range(len(starts) - 1):
-            target[:] = -np.inf
-            lo, hi = site_offsets[block], site_offsets[block + 1]
-            for choice in range(starts[block], starts[block + 1]):
-                trial[:] = row
-                forward_sites(trial, dosages, lo - dose_offsets[choice], logs, sample, lo, hi, costs,
-                              R)
-                for state in range(states):
-                    target[state] = max(target[state], trial[state])
-            row[:] = target
-        result[sample] = row_max(row)
+        result[sample] = row_max(rows[sample])
     return result
 
 
 @njit(inline="always")
-def _family_sites(row, R, haps, col0, logs, costs, s, j0, j1, first, second):
+def _family_sites(row, R, e, haps, col0, win, s, j0, j1, first, second):
     """score_direct's site step over sites [j0, j1): haps column j - col0 holds site j's coded alleles."""
     for j in range(j0, j1):
-        if is_skipped(logs, s, j):
+        f, k, r = locate(win, s, j)
+        if not site_logs(win, s, f, k, r, e):
             continue
-        transition(row, costs[s, j], R)
+        transition(row, site_cost(win, s, f, k, r), R)
         for q in range(len(first)):
-            row[q] += logs[s, j, pair_code7(haps[first[q], j - col0], haps[second[q], j - col0])] - CENTER
+            row[q] += e[pair_code7(haps[first[q], j - col0], haps[second[q], j - col0])] - CENTER
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _family_forward(base, logs, costs, unit_start, unit_stop, unit_offsets, unit_alleles, out):
+def _family_forward(base, win, s0, s1, unit_start, unit_stop, unit_offsets, unit_alleles, out):
     """Raw max-path scores of every member of a factored shadow family, sharing prefixes.
 
     base: int16 (K, L) coded alleles of the family's first member; unit u (sorted, disjoint site ranges
     [unit_start[u], unit_stop[u])) has n_u = unit_offsets[u + 1] - unit_offsets[u] alternative allele
-    slabs unit_alleles[unit_offsets[u] + c] (K x width_u used). out: float64 (S, M), M = prod n_u members
-    in depth-first order (unit 0 slowest). A sample's forward row at a site depends only on the alleles
-    before it, so a member shares the row of its common prefix bit for bit: every member's score equals
-    score_panel's on its full allele matrix (the same site steps in the same order)."""
+    slabs unit_alleles[unit_offsets[u] + c] (K x width_u used). out: float64 (s1 - s0, M), M = prod n_u
+    members in depth-first order (unit 0 slowest), for the samples [s0, s1) (the window should hold every
+    site of them: a sample's depth-first walk revisits the whole component). A sample's forward row at a
+    site depends only on the alleles before it, so a member shares the row of its common prefix bit for
+    bit: every member's score equals score_panel's on its full allele matrix (the same site steps in the
+    same order)."""
     founders, sites = base.shape
     first, second = unordered_pairs(founders)
     units = len(unit_start)
-    for s in prange(logs.shape[0]):
+    cover(win, 0, sites, s0, s1, False)
+    for s in prange(s0, s1):
         R = np.empty(founders)
+        e = np.empty(7)
         stack = np.zeros((units + 1, len(first)))
         row = np.zeros(len(first))
-        _family_sites(row, R, base, 0, logs, costs, s, 0, unit_start[0], first, second)
+        _family_sites(row, R, e, base, 0, win, s, 0, unit_start[0], first, second)
         stack[0, :] = row
         index = np.zeros(units, np.int64)
         depth = 0
@@ -392,16 +415,16 @@ def _family_forward(base, logs, costs, unit_start, unit_stop, unit_offsets, unit
         while True:
             row[:] = stack[depth]
             slab = unit_alleles[unit_offsets[depth] + index[depth]]
-            _family_sites(row, R, slab, unit_start[depth], logs, costs, s, unit_start[depth], unit_stop[depth],
+            _family_sites(row, R, e, slab, unit_start[depth], win, s, unit_start[depth], unit_stop[depth],
                           first, second)
             following = unit_start[depth + 1] if depth + 1 < units else sites
-            _family_sites(row, R, base, 0, logs, costs, s, unit_stop[depth], following, first, second)
+            _family_sites(row, R, e, base, 0, win, s, unit_stop[depth], following, first, second)
             if depth + 1 < units:
                 depth += 1
                 stack[depth, :] = row
                 index[depth] = 0
                 continue
-            out[s, leaf] = row_max(row)
+            out[s - s0, leaf] = row_max(row)
             leaf += 1
             while depth >= 0:
                 index[depth] += 1
@@ -458,11 +481,13 @@ def _family_scores(engine, choices, shape, budget):
         with execution.numba_threads(max(1, int(budget.threads()))):
             base = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(base_rows))
         raw = np.empty((ws.samples, members))
-        costs = ws.costs(founders)
         for s0, s1, threads in sample_ranges(ws.samples, budget):
-            with execution.numba_threads(threads):
-                _family_forward(base, ws.logs[s0:s1], costs[s0:s1], unit_start, unit_stop, offsets, slabs,
-                                raw[s0:s1])
+            # A streaming component reads each sample range through windows that hold every site of a
+            # bounded slice of its samples (window.Windows.samples_view).
+            for c0, c1 in ws.windows.sample_slices(s0, s1):
+                with execution.numba_threads(threads):
+                    _family_forward(base, ws.windows.samples_view(founders, c0, c1), c0, c1, unit_start,
+                                    unit_stop, offsets, slabs, raw[c0:c1])
         del slabs, base
         # Depth-first leaf -> product index (cells in founder-major order, the last cell fastest).
         radix = [len(choices[i]) for i in varying]
@@ -625,8 +650,8 @@ def _shadow_decision(engine, geometry, larger, larger_scores, smaller_scores, re
             founders = int(larger.shape[0])
             with execution.numba_threads(threads):
                 dosages, dose_offsets = _shadow_codes(ws.leaves, ws.offsets, plan.choices, plan.starts)
-                scores = _full_site_costs(ws.logs, ws.offsets, dosages, dose_offsets, plan.starts,
-                                          ws.costs(founders), founders)
+                scores = _full_site_costs(ws.windows.view(founders), ws.offsets, dosages, dose_offsets,
+                                          plan.starts, founders)
             return view(scores + ws.normalisers(founders))
         proof, audit = shadow_bounds.attempt_certificate(
             choices, larger.shape, np.diff(ws.offsets), view(larger_scores), view(smaller_scores),
@@ -1408,8 +1433,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
             # proves the sequence test too; the round is skipped only when the replicate-wise form
             # of the bound also proves the band (the decision's own bootstrap stream).
             with execution.numba_threads(max(1, int(budget.threads()))):
-                bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.logs,
-                                                          ws.costs(K - 1), K - 1)
+                bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K - 1),
+                                                          K - 1)
             normalisers = ws.normalisers(K - 1)
             per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
             optimistic = float(bounds.sum() + normalisers.sum())
@@ -1527,8 +1552,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, add
         round_index += 1
         F = float(scores.sum())
         with execution.numba_threads(max(1, int(budget.threads()))):
-            bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.logs,
-                                                      ws.costs(K + 1), K + 1)
+            bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K + 1),
+                                                      K + 1)
         normalisers = ws.normalisers(K + 1)
         optimistic = float(bounds.sum() + normalisers.sum())
         tolerance = 1e-8 * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))

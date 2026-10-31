@@ -99,10 +99,11 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
     the DiscoveryConfig of the discovery records (the candidate bank refits with the same fixed-K
     model and cavity score); queue: the cross-node batch queue directory or None;
     assembly_evidence: the contig's ``assembly.AssemblyEvidence`` view when the caller already
-    built it (one view for the context and final assemblies), else built here on first use;
-    evidence: the contig's ``ContigEvidence`` (as recorded, e.g. the one the caller decoded to
-    build ``assembly_evidence``; its founder view is taken here), else decoded from the evidence
-    record when a round must be computed.
+    built it (one view for the context and final assemblies), else built here when a round must be
+    computed (from ``evidence``, the contig's decoded ``ContigEvidence``, when given, else from the
+    record). Release 3.4: the rounds and the context refits read the view itself
+    (``AssemblyEvidence.founder_evidence``: the same values at every cell they read), so local selection
+    holds no decoded float64 likelihoods and its pools attach the view's shared arrays.
     Returns tuple[LocalPanel, ...] of the last round, one per informative block, in block order.
     A contig whose rounds are all recorded decodes neither the evidence nor the fits.
     """
@@ -115,7 +116,10 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
     if first == len(ROUNDS):
         print(f"[Local selection] {contig}: resumed all rounds", flush=True)
         return records.load_panels(file, ROUNDS[-1])
-    evidence = (evidence_records.load(file) if evidence is None else evidence).founder_view()
+    if assembly_evidence is None:
+        assembly_evidence = AssemblyEvidence.from_record(file, evidence)
+    del evidence
+    evidence = assembly_evidence.founder_evidence()
     discovered = discovery_records.load(file)
     shared = _block_tasks(discovered, evidence, genetic_map)
     del discovered
@@ -136,8 +140,6 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
             level = config.context_levels[round_index - 1]
             saved = scope.load("proposals")
             if saved is None:
-                if assembly_evidence is None:
-                    assembly_evidence = AssemblyEvidence.from_record(file, evidence)
                 print(f"[Local selection] {contig}: assembling the selected context through "
                       f"L{level}", flush=True)
                 result = assemble(AssemblyInputs(tuple(panels), assembly_evidence, genetic_map),

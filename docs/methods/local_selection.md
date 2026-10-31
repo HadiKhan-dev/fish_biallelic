@@ -563,6 +563,14 @@ scratch, at most 64 L (S(S + 1)/2 + S) float64 values per active thread (one lan
 by the block's sequential fits. The memory estimate retains width 64; layout transitions can briefly
 retain old arrays. A context refit holds one (N, B, S, S) array per component.
 
+The stage reads its evidence from the contig's assembly view (`assembly/evidence.py`,
+`AssemblyEvidence.founder_evidence`, release 3.4): the neutral float64 likelihoods, which equal the founder view's at
+every observed discovery-site cell, and the observed-at-a-discovery-site mask. Block fits read discovery-site
+columns and set unobserved cells to 1/3, and the context refits and their site posteriors skip unobserved cells, so
+the values they compute are unchanged. The decoded float64 likelihoods are dropped once the view is built, and the
+block and refit pools attach the view's shared arrays instead of copying the likelihoods: the stage's evidence
+memory is the view's 37 bytes per sample-site instead of about 87 (decoded likelihoods, the view and a pool copy).
+
 The path kernels evaluate the likelihood and its statistics in one pass per lane block of
 up to `local_selection.path_model.LANE_WIDTH = 64` samples (forward, then backward at once), so a fit keeps the
 trajectories of one lane block per thread, not of every sample, in one scratch buffer per block search

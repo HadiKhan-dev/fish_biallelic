@@ -445,8 +445,9 @@ determined founder labels, never used downstream.
 | Module | Role |
 |---|---|
 | `assembly/founder_refinement/stage.py` | `refine_level`: component scheduling, surrogate bins, L1 context, count calls, census |
-| `assembly/founder_refinement/workspace.py` | a component's fixed inputs: evidence view, site mask, coded leaves, log evidence of the pair codes, map hazards, switch costs and normalisers, surrogate emissions |
-| `assembly/founder_refinement/objective.py`, `assembly/founder_refinement/messages.py` | F, the shared max-plus site steps and the exact block messages |
+| `assembly/founder_refinement/workspace.py` | a component's fixed inputs: evidence view, site masks, coded leaves, map hazards, normalisers, surrogate emissions and the component's windows |
+| `assembly/founder_refinement/window.py` | the log evidence of the pair codes and the switch costs, read through windows (resident or streamed; [memory](#implementation-and-cost)) |
+| `assembly/founder_refinement/objective.py`, `assembly/founder_refinement/messages.py`, `assembly/founder_refinement/checkpoints.py` | F, the shared max-plus site steps, adaptive message storage and the exact block messages |
 | `assembly/founder_refinement/gains.py` | exact gains of content moves and suffix exchanges |
 | `assembly/founder_refinement/acceptance.py` | the compiled Gauss-Seidel acceptance pass |
 | `assembly/founder_refinement/proposals.py` | window programmes, their frontier cap and memory budgets |
@@ -493,13 +494,95 @@ cubic in K for R = O(K) (the bound is per sweep; the number of sweeps, refits, r
 are data-dependent factors); the window frontier, which was data-dependent up to R^W, is capped by the
 restart's 512 children per unit, and every binding cap is reported.
 
-**Memory.** Per search: O(B N Q) message arrays (two in plain sweeps, four in lexicographic ones), plus two carried-history arrays at every16th block boundary and the
-boundaries the proposal cache keeps. Values and lexicographic switch costs are float64. Per
-component: the float64 log evidence of the seven pair codes (56 N L bytes) and a reversed copy for
-reversed passes, the coded leaves (int16, both orientations), the surrogate emissions
+**Memory.** Message storage is selected once per fixed-K search from its dimensions,
+independently of available RAM or cores. Let Q = K(K+1)/2 and A = 4 when the search can
+use the shared-junction guard (scores and switch costs), otherwise A = 2. The potential
+dense score/count payload is D = A x 8 x (B+1) x N x Q bytes. Per-block normalisers are
+unchanged and excluded from this decision. The storage allowance is
+`max(MESSAGE_BYTES, (B+1) * MESSAGE_BOUNDARY_BYTES)`, using
+`assembly.founder_refinement.checkpoints.MESSAGE_BYTES = 536870912` (512 MiB) and
+`assembly.founder_refinement.checkpoints.MESSAGE_BOUNDARY_BYTES = 1048576` (1 MiB).
+
+At or below that allowance, k = 1: retain every boundary and use the original dense
+message/update kernels, direct proposal-array access, eager reverse clamping, and the
+pristine forward-message shortcut. Above it, keep both ends and every
+`assembly.founder_refinement.checkpoints.CHECKPOINT_BLOCKS = 16` boundary. This is a
+storage choice; the recursions, normalisation, move order and scientific values are identical.
+The guard's potential four-array footprint chooses the mode even for an initially plain
+sweep, so one search does not switch representation between its passes.
+
+Both a large total payload and a wide boundary are required to checkpoint. This avoids
+slowing a long contig merely because it has many small boundary rows. At N = 1,003 and
+K <= 7, even four arrays use at most 898,688 bytes per boundary, so all lengths stay dense.
+At N = 2,503 and K = 5-7, a guarded 641-block search exceeds both limits and checkpoints. Shorter
+components at N = 2,503 can stay dense. Larger K can select checkpoints even at smaller N;
+there is no sample-count or founder-count cap. The allowance is a storage policy, not a
+hard bound on total RSS. A fixed total-byte cutoff alone cannot separate a long N = 1,003
+contig from a shorter N = 2,503 contig with a similar total message payload.
+
+A checkpointed search retains
+two float64 arrays of shape `(ceil(B / 16) + 1, N, Q)`, or four with lexicographic switch
+costs, plus the two `(B, N)` arrays of per-block normalisers. Updates propagate each
+sample through a segment and stop when its checkpoint score and switch cost match the
+previous sweep. The same block-normalised site recursions reconstruct intermediate
+boundaries, so this changes storage and work without changing the values.
+
+Each checkpoint reader caches at most `CACHE_SEGMENTS = 2` reconstructed segments (at most
+17 boundaries each), with counts in lexicographic sweeps. On the checkpointed path, acceptance carries its
+forward message block by block; its stored backward reads reconstruct from checkpoints of
+the unchanged start panel. A reversed pass reconstructs the original forward recursion and
+then clamps it, including at intermediate boundaries, preserving the original floating-point
+operations. Its checkpoint data share the retained forward arrays. The current-panel chain,
+label permutations and shared-junction guard retain their existing meaning and move order.
+
+Checkpointed proposal solves receive flank dictionaries reconstructed before the parallel solves;
+the prior sweep's proposal cache still holds its own boundary copies. Coarse templates need
+no alignment to the checkpoint stride. The same boundary indexing serves copy responses,
+beam escape, long repair and bridge scoring. There are still two carried-history arrays at
+every 16th boundary for the guard, plus its existing traceback scratch. Thus checkpointing
+reduces the retained sweep arrays; proposal flanks, guard work and polish transients also
+contribute to peak memory. Dense sweeps use `assembly/founder_refinement/messages.py`; checkpointed sweeps use
+`assembly/founder_refinement/checkpoints.py` and the same bounded reconstruction kernels.
+
+At K = 6 and about 200 sites per block, the four retained message arrays fall asymptotically
+from 3.36 to 0.21 bytes per sample-site per search, before the bounded reconstruction caches.
+In forced-checkpoint measurements, stride 16 used approximately the same time as stride 8
+in the matched std L4 comparison while retaining half as many checkpoints; stride 4 was faster but retains four times as many.
+The sparse stride, cache size and selection budgets are fixed storage constants.
+
+Per component: the coded leaves (int16, both orientations), the surrogate emissions
 (8 N sum_b [R_b(R_b+1)/2] bins_b bytes) and, with the polish, the beam's per-bin table
-(8 N J (4 + R_max(R_max+1)/2) bytes for J bins); the polish's escape messages, bridge and long-repair
-batches and beam scratch are reserved when they run. Per window programme:
+(8 N J (4 + R_max(R_max+1)/2) bytes for J bins); the polish's escape messages, bridge and
+long-repair batches and beam scratch are reserved when they run.
+
+**Log evidence and switch costs (release 3.4).** Every kernel reads the robust log evidence of a
+sample-site (float64, pair codes 0-2 everywhere and codes 3-6 at the partial sites, where a prepared row
+of the block is uncalled: the only sites where a panel's pair codes reach 3-6) and its switch cost
+(float32, of the panel's K and the pass's orientation) through a window
+(`assembly/founder_refinement/window.py`). A window holds them
+for a stretch of sites and a range of samples; a read outside it computes the value on the spot from
+the float32 evidence, the site masks and the map, with the same arithmetic, so the values are 3.3's
+whole-component arrays bit for bit wherever they come from and windows change time and memory only.
+Whole-component kernels (messages, scores, the count pass's bounds) run stretch by stretch, covering
+each stretch before reading it and carrying every sample's row between stretches; the acceptance pass
+covers the blocks ahead of its junction as it moves, and a window that moves keeps its overlap. A
+component whose tables take at most `assembly.founder_refinement.window.RESIDENT_BYTES` (4 GiB:
+24 N L bytes of codes 0-2, 32 bytes per partial sample-site and up to
+`assembly.founder_refinement.window.COST_ARRAYS = 6` cost arrays of 4 N L bytes) keeps one resident
+window over all its sites, shared by every search and filled once. A larger component gives each
+consumer (each search, under a lease of its K; each count computation) its own window of
+W = max(`WINDOW_MIN_SITES` = 4096, `assembly.founder_refinement.window.WINDOW_BYTES` / 28 N) sites
+(`WINDOW_BYTES` = 512 MiB). It takes 28 N W + 8 W + 32 N max(1, P_W) bytes, P_W the most partial sites in any
+W-site stretch: 512 MiB of codes 0-2 and costs plus the partial sites' codes, up to as much again when every
+site is partial (1,097 MiB at N = 2,503; the simulations have no partial sites at the last levels, TroMau
+1-6%, K30 41-66%). So its refinement evidence takes about 28 N W bytes per concurrent search (more with
+partial sites) instead of 3.3's 140 N L for the whole chromosome (the log evidence of the seven codes, its
+reversed copy and up to seven cost arrays). The reversed orientation reads the same forward-ordered log
+evidence (a site's index is mirrored); only its switch costs differ. The prefix-sharing shadow-family
+scores walk the whole component per sample, so a streamed component scores them through windows over
+every site of bounded slices of the samples. The window sizes are fixed constants, never the memory
+that happens to be free; recomputation costs about one log-evidence pass of the component per window
+fill. Per window programme:
 up to four times its frontier of 8 N (Q + K + bins + 2)-byte entries, within its current budget. Guard
 tracebacks allocate per affected sample an events array and a site-by-state traceback over a window
 that doubles until the paths with and without the move agree (at worst the whole component).

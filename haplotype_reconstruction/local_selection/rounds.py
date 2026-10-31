@@ -361,7 +361,8 @@ LOCAL_FIT = BatchKind(name="local_fit", bundles=_bundles, execute=_execute_bundl
 
 def run_round(round_scope, tasks, settings, evidence, budget, *, queue=None, label=""):
     """Select every task's block (resuming the recorded chunks); returns BlockSelections by task
-    index. ``round_scope``: the round's bound RecordScope; ``evidence``: founder view."""
+    index. ``round_scope``: the round's bound RecordScope; ``evidence``: the founder evidence
+    (assembly.evidence.SelectionEvidence: its pool attaches the view's shared arrays)."""
     writer = records.SelectionChunks(round_scope)
     done = {selection.index: selection for selection in writer.load()}
     pending = [task for task in tasks if task.index not in done]
@@ -383,11 +384,12 @@ def run_round(round_scope, tasks, settings, evidence, budget, *, queue=None, lab
                 sizes = [block_task_bytes(task, evidence.likelihoods.shape[0]) for task in pending]
                 workers = max(1, min(int(budget.threads()), len(payloads)))
                 planned = [size + WORKER_RESIDENT_BYTES for size in sizes]
-                # Plan the pool's shared copy once, before reserving its worker residence.
-                planned[planned.index(max(planned))] += int(evidence.likelihoods.nbytes + evidence.observed.nbytes)
+                # Plan the pool's shared copy (none when it attaches the view's arrays) once, before reserving its
+                # worker residence.
+                planned[planned.index(max(planned))] += evidence.pool_copy_bytes()
                 workers = max(1, min(workers, memory_worker_limit(planned, workers,
                                                                   label="local-selection")))
-                shared = dict(likelihoods=evidence.likelihoods, observed=evidence.observed)
+                shared = evidence.pool_arrays()
                 results = pooled_results = _pooled(budget, workers, shared, payloads, sizes)
             for count, selection in enumerate(results, 1):
                 done[selection.index] = selection

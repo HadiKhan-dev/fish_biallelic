@@ -1,14 +1,15 @@
 """Inputs of one component's refinement, built once per level and shared by every fit.
 
-The prepared panels (alleles and evidence masks), the objective's site mask, the robust log evidence
-and the binned surrogate emissions are fixed across count rounds and fits. The component's evidence
-is a view of the chromosome's float32 neutral evidence (the joins' copy; a gathered copy only when
-the component's prepared panels are not adjacent on the site axis).
+The prepared panels (alleles and evidence masks), the objective's site mask and the binned surrogate
+emissions are fixed across count rounds and fits. The component's evidence is a view of the
+chromosome's float32 neutral evidence (the joins' copy; a gathered copy only when the component's
+prepared panels are not adjacent on the site axis). Release 3.4: the robust log evidence and the switch
+costs are not held for the whole component; kernels read them through windows (window.py, `windows`),
+resident for a small component and streamed per consumer for a large one.
 """
 from __future__ import annotations
 
 import math
-from collections import OrderedDict
 import threading
 
 import numpy as np
@@ -19,7 +20,9 @@ from ...maths.emissions import (CENTER, normalised_likelihoods, pair_code, predi
                                 robust_log_likelihood)
 from ..join.emissions import pair_index
 from .config import DEFAULT_GENOTYPE_ERROR, DEFAULT_RESET_RATE, MAP_PROBABILITY_FLOOR
-from .objective import SWITCH_PENALTY, is_skipped, prepare_log_evidence
+from .objective import SWITCH_PENALTY
+from .window import (PARTIAL_SITE_BYTES, Windows, informative_samples, map_normalisers, resident_bytes,
+                     switch_cost, window_sites)
 
 # A search's messages and per-sample scores run over consecutive sample ranges and re-read its
 # thread share before each range (sample_ranges), so a search whose share grows while it computes
@@ -97,98 +100,6 @@ def map_hazards(positions, genetic_map, reset_rate, probability_floor):
     return result
 
 
-@njit(inline="always")
-def switch_cost(rho, founders):
-    """Per changed homologue log(1 - rho (1 - 1/K)) - log(rho / K) >= 0; +inf without a preceding
-    informative site (rho = 0), 0 for an exact uniform reset."""
-    if rho == 0.0:
-        return np.inf
-    if rho == 1.0:
-        return 0.0
-    return math.log1p(-rho * (1.0 - 1.0 / founders)) - math.log(rho) + math.log(founders)
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def map_switch_costs(logs, hazards, founders, reverse):
-    """float32 (S, L) switch cost entering each informative site of every sample (+inf at a
-    sample's first informative site and at skipped sites), in forward site order or, with reverse,
-    in the reversed orientation's site order (entering reversed site L - 1 - j is the gap from j to
-    the sample's next informative forward site). rho = 1 - exp(-sum of the hazards since the
-    previous informative site)."""
-    samples, sites = logs.shape[:2]
-    out = np.empty((samples, sites), np.float32)
-    for s in prange(samples):
-        forward = np.empty(sites)
-        seen = False
-        mass = 0.0
-        for j in range(sites):
-            if seen:
-                mass += hazards[j]
-            if is_skipped(logs, s, j):
-                forward[j] = np.inf
-                continue
-            forward[j] = switch_cost(-math.expm1(-mass), founders) if seen else np.inf
-            seen = True
-            mass = 0.0
-        if not reverse:
-            for j in range(sites):
-                out[s, j] = forward[j]
-            continue
-        pending = np.inf
-        for j in range(sites - 1, -1, -1):
-            if is_skipped(logs, s, j):
-                out[s, sites - 1 - j] = np.inf
-                continue
-            out[s, sites - 1 - j] = pending
-            pending = forward[j]
-    return out
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def map_normalisers(logs, hazards, founders):
-    """float64 (S,) panel-independent terms of every sample's max-path score: -2 log K at its first
-    informative site (the uniform start), 2 log(1 - rho (1 - 1/K)) at every later one (0 without evidence)."""
-    samples, sites = logs.shape[:2]
-    out = np.zeros(samples)
-    for s in prange(samples):
-        seen = False
-        mass = 0.0
-        total = 0.0
-        for j in range(sites):
-            if seen:
-                mass += hazards[j]
-            if is_skipped(logs, s, j):
-                continue
-            if seen:
-                total += 2.0 * math.log1p(-(-math.expm1(-mass)) * (1.0 - 1.0 / founders))
-            else:
-                total = -2.0 * math.log(founders)
-                seen = True
-            mass = 0.0
-        out[s] = total
-    return out
-
-
-# At most this many (K, orientation) cost arrays are held per component (K and K +- 1 of the count
-# pass in both orientations).
-COST_ARRAYS = 6
-
-
-@njit(cache=True, nogil=True)
-def informative_samples(logs):
-    """bool (S,): samples with evidence at one of the component's objective sites (a site that is
-    not skipped). Every other sample's F_s is exactly 0 for every panel (no site step ever runs), so it
-    adds an exact 0 to every per-sample difference of every count decision. A sample's scan stops
-    at its first such site."""
-    result = np.zeros(logs.shape[0], np.bool_)
-    for sample in range(logs.shape[0]):
-        for site in range(logs.shape[1]):
-            if not is_skipped(logs, sample, site):
-                result[sample] = True
-                break
-    return result
-
-
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
 COMPONENT_BASE_BYTES = 64 << 20
@@ -198,9 +109,10 @@ WORKER_RESIDENT_BYTES = 3584 << 20
 
 
 def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
-    """Peak bytes of one component's workspace (the component task's memory reservation, execution.memory): the
-    robust log evidence and the reversed orientation's copy (2 x 24 S L float64), up to COST_ARRAYS float32 switch
-    cost arrays (4 S L each), a gathered evidence copy when the
+    """Peak bytes of one component's workspace (the component task's memory estimate, execution.memory): its log
+    evidence and switch costs (window.py: the resident tables of a small component, 24 S L float64 codes 0-2, the
+    partial sites' codes 3-6 and up to COST_ARRAYS float32 cost arrays; for a streaming component one window of the
+    count pass's own kernels: each search's window is in its fit_bytes), a gathered evidence copy when the
     panels are not adjacent (12 S L float32), the binned emissions (8 S R_b(R_b + 1)/2 bins_b per block) and the coded
     leaves (R_b x L_b int16, forward and reversed orientation), plus COMPONENT_BASE_BYTES. The fits' message arrays, the window solves and the score tables
     reserve their own bytes (additive estimates); calibrated on K30's map (founder_refinement.md 3.2-3.3)."""
@@ -218,7 +130,12 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
     bins = sum((panel.sites + bin_size - 1) // bin_size for panel in panels)
     rmax = max(panel.rows for panel in panels)
     beam_table = 8 * samples * bins * (4 + rmax * (rmax + 1) // 2)
-    return ((112 + 4 * (COST_ARRAYS + 1)) * samples * sites + (0 if adjacent else 12 * samples * sites)
+    partials = sum(int(np.count_nonzero(np.any(panel.inference < 0, axis=0))) for panel in panels)
+    tables = resident_bytes(samples, sites, partials)
+    if not Windows.fits_resident(samples, sites, partials):
+        width = min(sites, window_sites(samples))
+        tables = samples * width * 28 + samples * min(partials, width) * PARTIAL_SITE_BYTES
+    return (tables + (0 if adjacent else 12 * samples * sites)
             + emissions + leaves + beam_table + COMPONENT_BASE_BYTES)
 
 
@@ -241,15 +158,16 @@ class ComponentWorkspace:
     leaves: typed List of the blocks' coded calls int16 (R_b, L_b): the called allele, or -2 - local
         row where uncalled (objective.pair_code7); every likelihood reads them. offsets: int64 (B + 1)
         block site offsets. kept: bool (L_c), the objective's sites: kept sites with at least one
-        called local row (candidate-independent). logs: float64 (S, L_c, 7) robust log evidence of
-        the seven pair codes at those sites (zero elsewhere and for uniform evidence).
+        called local row (candidate-independent). partial: bool (L_c), kept sites where a local row is
+        uncalled (the only sites where pair codes 3-6 occur). windows: window.Windows over them, the
+        robust log evidence of the seven pair codes and the switch costs (resident or streamed).
     count_samples: int64 evidence rows of the informative samples (informative_samples), the
         samples the count rule reads (count_rule.founder_cost's S); None when every sample is
         informative (or, degenerate, none is: every score is then 0 and every row is kept).
     bin_size: surrogate bin (sites) = max(min_sites_per_bin, ceil(L_c / max_bins)).
     emissions: per block float64 (S, R_b(R_b + 1)/2, bins_b) binned surrogate emissions.
-    hazards: float64 (L_c,) physical-edge reset hazards of the genetic map (map_hazards); costs(K,
-        reverse) and normalisers(K) derive the objective's switch costs and normalisers from them.
+    hazards: float64 (L_c,) physical-edge reset hazards of the genetic map (map_hazards); the windows
+        and normalisers(K) derive the objective's switch costs and normalisers from them.
     """
 
     def __init__(self, panels, evidence, *, min_sites_per_bin, max_bins, genetic_map=None,
@@ -275,8 +193,8 @@ class ComponentWorkspace:
         # the site would only weigh same-row against different-row pairs through the uniform allele prior.
         self.kept = np.concatenate([np.asarray(panel.kept, np.bool_) & np.any(panel.inference >= 0, axis=0)
                                     for panel in self.panels])
-        self.logs = prepare_log_evidence(evidence, self.kept)
-        informative = informative_samples(self.logs)
+        self.partial = self.kept & np.concatenate([np.any(panel.inference < 0, axis=0) for panel in self.panels])
+        informative = informative_samples(evidence, self.kept)
         self.count_samples = (None if informative.all() or not informative.any()
                               else np.flatnonzero(informative))
         self.emissions = self._binned_emissions()
@@ -285,33 +203,17 @@ class ComponentWorkspace:
         self.genetic_map = genetic_map
         self.reset_rate = float(reset_rate)
         self.map_probability_floor = float(map_probability_floor)
-        self._costs = OrderedDict()
+        self.windows = Windows(evidence, self.kept, self.partial, self.hazards)
         self._normalisers = {}
         self._cost_lock = threading.Lock()
 
-    def costs(self, founders, reverse=False):
-        """float32 (S, L_c) switch costs of K = founders in forward or reversed site order
-        (map_switch_costs), cached (at most COST_ARRAYS)."""
-        key = (int(founders), bool(reverse))
-        # Built under the lock: concurrent cold requests never construct duplicate S x L arrays
-        # a construction is one linear scan of the evidence.
-        with self._cost_lock:
-            found = self._costs.get(key)
-            if found is None:
-                found = map_switch_costs(self.logs, self.hazards, float(founders), bool(reverse))
-                self._costs[key] = found
-            self._costs.move_to_end(key)
-            while len(self._costs) > COST_ARRAYS:
-                self._costs.popitem(last=False)
-        return found
-
     def normalisers(self, founders):
-        """float64 (S,) per-sample normalisers of K = founders (map_normalisers), cached."""
+        """float64 (S,) per-sample normalisers of K = founders (window.map_normalisers), cached."""
         key = int(founders)
         with self._cost_lock:
             found = self._normalisers.get(key)
         if found is None:
-            found = map_normalisers(self.logs, self.hazards, float(founders))
+            found = map_normalisers(self.evidence, self.kept, self.hazards, float(founders))
             with self._cost_lock:
                 found = self._normalisers.setdefault(key, found)
         return found

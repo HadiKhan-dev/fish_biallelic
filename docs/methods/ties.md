@@ -25,7 +25,7 @@ distinguishes implemented treatments from remaining conventions and unfinished v
   - founder alleles that no carrier observes are written as `.`;
   - painted switches inside stretches where the founders are identical become intervals;
   - a phase set breaks where family evidence does not decide the orientation;
-  - parent slots follow recorded sexes, and are unordered otherwise;
+  - parent slots are unordered (no sex is recorded or inferred);
   - tied alternatives left at the end of a stage are flagged and released with the decision taken by a stated prior.
 - **Stated priors decide the remaining exact ties.** They are model preferences with a biological or statistical
   reason, listed in [Stated priors](#stated-priors). They are never index or content order.
@@ -156,7 +156,7 @@ must hold under every sample permutation of the original fixed bootstrap draws.
 | founder refinement ([founder_refinement.md](founder_refinement.md)) | tied refits decided by content | members that disagree on K take the smaller K (prior); otherwise the member whose margin most strongly supports the decision; remaining equal-F alternatives are flagged (`ambiguous_k`, `alternatives`) |
 | founder refit ([founder_refit.md](founder_refit.md)) | the first acceptable move in row order | mutually exclusive tied moves release the affected cells unknown |
 | painting ([painting.md](painting.md)) | a switch inside a stretch of identical founders placed at the leftmost edge, and the bins named by the prior | the switch is released as an interval (`SWITCH_INTERVAL`), and the other track is gated on the pair-consistent posterior; the per-sample segments are published |
-| pedigree ([pedigree.md](pedigree.md)) | Parent1 is the lower sample name | parent slots follow recorded sexes (dam, sire); otherwise they are unordered (`ParentSlotBasis`) |
+| pedigree ([pedigree.md](pedigree.md)) | Parent1 is the lower sample name | parent slots are unordered, in a canonical rename-invariant order (`ParentSlotBasis`) |
 | family phase ([family_phase.md](family_phase.md)) | frames left free by the data took state 0 and the leftmost switch position | `frame_undetermined` marks frames another tied configuration sets differently, and the export breaks the phase set there |
 | export ([usage](../usage.md#export)) | unobserved founder alleles written with the seed's value | written `.`, with counts in the manifest and the founder VCF header |
 

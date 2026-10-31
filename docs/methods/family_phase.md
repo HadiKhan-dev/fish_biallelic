@@ -97,6 +97,23 @@ S = C + 1.
   3. Sweep blocks in pedigree order: ancestors first, within a depth by sample index. A block's path is applied
      only when it raises J by more than `gain_quantum`, so the ascent is monotone and terminates. `max_sweeps` is a
      work cap: a component that reaches it keeps its current, valid state and is recorded as not settled.
+  4. Joint moves on the parents' pairings at double label changes (below, "Parents' pairings"), each evaluated by
+     its change of J, then the sweeps again, until no move is kept.
+- **Local gains.** J is a sum of per-sample terms, and each sample's terms read only its own labels and chains (a
+  linked homologue's transitions depend on its source states, not on the copied labels). A block of sample n
+  changes only n's labels and chains, its children's chains (the gauge) and the copied labels of its descendants,
+  and a pairing move of parent p only p and its descendants. A move's gain is therefore the change in the terms of
+  those samples, computed sample by sample, and only their rows are saved and restored; J itself is evaluated once
+  per sweep, for the recorded history. The decisions are those of comparing the full objective before and after
+  each move, as releases before 3.4 did, except where a gain lies within floating-point rounding of a threshold.
+  Full-objective subtraction and the old block rule's addition of `gain_quantum` carry rounding; the local gain
+  carries only that of the changed samples' terms. The observed full/local differences depend on the component
+  and are not a universal bound. `LabelModel.check_deltas` re-evaluates every move with the full objective and
+  records every move where the full-objective rule decides differently (a validation path, off in runs). For
+  blocks it compares the literal old rule `J1 > J0 + gain_quantum` with `local_gain > gain_quantum`, rather than
+  subtracting the two totals. For D2 pairing moves it retains the old full-difference predicates: keep when
+  `J1 - J0 > max(pairing_odds, gain_quantum)` (if keeping moves), and ambiguous when `J1 - J0 > -pairing_odds`.
+  Each flip records both decisions; the solve still follows the local gain.
 - **Ties and conventions.** Viterbi scores within `tie_quantum` are tied. Ties keep the current state and gauge 0 (a
   stated prior), then the lowest index; the mirrored convention takes the highest index and reverses the within-depth
   order.
@@ -140,10 +157,48 @@ crossovers as exchanges and flipped the phase of a founder sample at every one.
     edge, whose odds depend on the interval (none across a protected interval) and on uncertainty the children
     share.
   - No relabelling is made.
-- **Painting ties.** A sample without a released parent also breaks its sets at every painting tie boundary. These
+- **Painting ties.** A sample without a released parent also breaks its sets at painting tie boundaries. These
   are the released chunk boundaries where the painting's track order was set by a tie: the ordered and the swapped
   continuation change equally many candidate rows and allele-visible keys. A linked homologue is ordered by parental
   origin, so painting ties do not affect it.
+  - A sample with neither parent nor children (a gauge sample) breaks at every tie.
+  - A sample with children and no released parent takes its orientation from its children's meiosis chains on both
+    sides of a tie, so the painting's arbitrary track order there does not bind it. It keeps a tie break only where
+    that orientation is uncertain beside the tie: where the orientation certainty (below) under its
+    children-anchored posterior is below `set_posterior` at the nearest bin with a confidently heterozygous site on
+    either side, or where one side has no such bin. Each solve decides for itself, and the agreement keeps a break
+    that either solve keeps. A tie that is also a withheld join stays a break. Its calls do not depend on breaks, so
+    a bridged tie releases exactly the as-solved join.
+  - On the validation simulations (replays of 13 designs and of the similar-founder stress design, and fresh seeds
+    of two of them), none of about 3,000 bridged joins scored against truth was wrong. Without the gate, 4 of 1,961
+    were wrong (three founders of a full-sib design beside locally equivalent rows, and the parent of the stress
+    design), each with an orientation certainty of 0.85-0.9988 on one side.
+  - The certainty is conditional on the children's chains at the final state. It cannot see which child recombined
+    when the children disagree at the tie, nor an identity exchange that every child follows.
+  - The children's meiosis chains do not reset at a bridged tie (below), so [recombination](recombination.md) can
+    call a crossover there. On the simulations this added about 1% more calls, 64 of 66 holding a true crossover.
+- **Parents' pairings.** Where both homologues of a sample without a released parent change label at one bin edge,
+  its own emissions (of unordered pairs) cost the same under both pairings of the old labels with the new: only its
+  children decide the pairing. A child that copies the arbitrary pairing absorbs it with a label switch of its other
+  homologue, and no single block can undo that, because the better configuration changes the parent and the child
+  together.
+  - After the block ascent, each solve tries the other pairing at every such edge: the parent's homologue labels are
+    swapped from the edge on, its children's chains are left as they are (so they copy the swapped content), and
+    every child gets its exact block optimum. The move is kept only when it raises J by more than
+    log(`set_posterior` / (1 − `set_posterior`)) = 6.9 nats, the odds at which a set continues; the block sweeps then
+    resume, and the passes repeat until none is kept (at most `max_sweeps`). A move that leaves every label and chain
+    as it was (for example a homozygous pair on both sides of the edge) is no competing pairing and is ignored.
+  - The margin is a working value against one optimized alternative, not a calibrated posterior of the pairing: the
+    children are re-solved one block at a time rather than marginalized jointly, and other configurations can
+    contribute.
+  - A pairing whose alternative is closer than that, in either solve, is not decided by the data: the parent and all
+    its children break their sets at that edge, and neither orientation gate bridges these breaks. All children
+    break, not only those the alternative relabels: a child can keep its labels under the evaluated alternative
+    (crossing over instead) and still have its phase across the edge decided by the pairing.
+  - The breaks reach the parent and its children, not further descendants, and their number grows with the size of
+    the family.
+  - On the validation simulations this occurs once, in the similar-founder stress design, where the child of such a
+    parent carried a wrong set of 11,330 sites; it is now broken there (0 error sites).
 - **Releases across breaks.** A sample with a released parent or with children keeps its orientation from origin or
   from its children's chains on both sides of a break, but the phase across the break is not released. The
   meiosis chains of every edge involving the sample reset there (below).
@@ -157,16 +212,37 @@ final state. Label-pair posteriors per bin become ordered allele posteriors per 
 - A label's allele at a site is the common refit inference allele of its class's rows when all of them are called
   and agree; otherwise it is unknown, and BACKGROUND's is unknown. A label pair with an unknown allele contributes to
   no genotype, so its posterior mass leaves the call undecided.
-- Given a label pair with known alleles, the sample carries those alleles with probability 1 - `site_deviation`
-  (1e-3), or else departs from them with a uniform genotype: a panel allele error, a label error shorter than a bin,
-  a conversion or a mutation.
+- Given a label pair (x, y) with known alleles, the sample's ordered alleles (u, v) have probability
+  (1 - `site_deviation`) f_x(u) f_y(v) + `site_deviation` U(u, v).
+  - U is a uniform genotype (ordered weights 1/3, 1/6, 1/6, 1/3), with `site_deviation` = 1e-3: a label error
+    shorter than a bin, a conversion or a mutation.
+  - f_x is the panel allele of label x with its own uncertainty: f_x(a_x) = 1 - d_x and f_x(1 - a_x) = d_x. The flip
+    acts independently on each homologue, including repeated pairs (x, x). This is not exact integration over
+    one shared latent allele; a certain partner can still set the orientation.
+- **Panel-allele uncertainty, leave-one-out** (3.4, `family_phase/allele_evidence.py`). A label's panel allele was
+  made from the reads of the samples painted on it. Where few samples carry a label, a sample's own reads are a large
+  part of that evidence, and a model that took the allele as known would count them twice: once inside the allele,
+  once as the sample's own evidence. Up to 3.3 this made the genotype scores of samples on weakly carried rows
+  over-confident (about 18 times nominal at scores of at least 0.9999 on K30, 4 times on std).
+  - d_x is a capped empirical-Bayes per-copy uncertainty, conditional on the fitted carriers and panel, with the
+    sample's direct own likelihood term removed. Carriers are samples whose solved MAP pair holds x and whose
+    partner has a known allele; founder-QC-excluded samples are not carriers. This is not a cross-fitted refit or
+    a posterior integrating over carrier/panel selection. Same-data selection dependence remains.
+  - Each carrier adds e = l(g1) - l(g0), the refit's robust genotype log likelihood (robustness 0.01) of the allele
+    1 against allele 0 given its other label's allele (2x for a carrier of x on both homologues). The released
+    sample's own term is removed from the labels of its own MAP pair.
+  - The empirical prior P(A = 1) is the share of allele 1 among the chromosome's called refit row-by-site cells. It
+    reads no truth, label or metadata; it is estimated in each run.
+  - d_x = sigmoid(logit prior + evidence) for a panel allele 0, one minus it for an allele 1, at most 1/2 (the refit
+    decides the alleles; the cap therefore depends on the selected allele), and 0 below 1e-15.
+  - Where every d is 0 (well-carried labels) the site model is the 3.3 model exactly.
 - The sample's own genotype likelihood at the site weighs these alternatives, normalised per label pair. Reads that
   contradict the labels' genotype lower, withdraw or change the call; a site without reads keeps the labels'
-  genotype at a score of at most 1 - 2/3 `site_deviation`.
+  genotype at a score of at most 1 - 2/3 `site_deviation` (lower where a label's allele is uncertain).
 - This is a modular conditional release, not the posterior of one generative model: the label-pair posterior comes
   from the painting's emissions (pre-refit panel, robustness 0.01, tempered by the design effect), while the site
-  model uses the refit alleles and its own mixture. Within a label pair the site's reads enter once, but the two
-  recipes are not reconciled. `site_deviation` = 1e-3 was chosen on the validation simulations (0.01 unphased
+  model uses the refit alleles and its own mixture. Direct own-term subtraction leaves indirect dependence through
+  carrier/panel selection; the two recipes are not reconciled. `site_deviation` = 1e-3 was chosen on the validation simulations (0.01 unphased
   12-13% of the phased joins; 3e-4 kept more genotype errors).
 
 - **Genotypes** come from the unanchored posterior, since the homologue order does not change unordered genotypes.
@@ -196,7 +272,8 @@ final state. Label-pair posteriors per bin become ordered allele posteriors per 
     the same alleles at the sample's sites, the orientation is determined and the set continues. (Until 3.1 a set
     ended wherever the posterior of the decoded ordered label pair fell below `phase_posterior`. On real data most
     gauge-sample sets started at such label-uncertainty stops, although their allele orientation was still certain.)
-  - Other samples' sets break only at forced breaks.
+  - Other samples' sets break only at forced breaks (for a sample with children and no released parent, the tie
+    breaks it keeps; above).
   - Component edges always start a new set.
 - **Phased calls.** A heterozygous call is released phased where its ordered posterior reaches `phase_posterior`
   (0.99). Otherwise it is released unphased: `frame_undetermined` bits 0 and 1.
@@ -271,11 +348,15 @@ same sets ([simulation](../simulation.md#phase-pedigree-and-map-metrics)). `OUTP
     pressure; the estimate does not bound the number of workers.
 - **Cost.** With K founders, S ≤ K + 1:
   - a block has at most 2(S + 2)² states and costs O(B S³) per sweep, plus O(B S² A_n) for its A_n descendants;
-  - every applied or rejected block is checked against the full objective, O(N B) per block, so a sweep is O(N² B)
-    without the block terms;
+  - a block's or pairing move's gain is evaluated over the samples it can change, the sample and its A_n
+    descendants, O(B (1 + A_n)), and J once per sweep, O(N B); a sweep is O(B (N S³ + S² Σ_n A_n)), linear in N
+    when ancestries are bounded (Σ_n A_n is the number of ancestor-descendant pairs, at most N times the number of
+    ancestors per sample). Before 3.4 every block was checked against the full objective, O(N B) per block and
+    O(N² B) per sweep: ~3 h per chromosome at N = 2,500;
   - the release costs one forward-backward per sample, plus one per new anchor of a gauge sample, and a projection
     of O(m S²) for its m sites (a gauge sample's partition also projects the sites from its anchor to its next forced
-    break, to find where its orientation becomes uncertain);
+    break, to find where its orientation becomes uncertain; a sample with children reads its tie gate from its own
+    projection);
   - both the ascent and the release run once per tie convention: about 1.6 times the cost of one.
 
   The ascent settles in one to three sweeps on the validation designs.
@@ -286,6 +367,10 @@ same sets ([simulation](../simulation.md#phase-pedigree-and-map-metrics)). `OUTP
     likelihoods (m × 3). It never holds a per-site pair tensor.
   - The stage holds the chromosome's evidence likelihoods as float32 N × L × 3 for the site model: about 4 GB at
     N = 1,000 and L = 330,000.
+- **Panel-allele uncertainty.** Per component and solve, the carriers' evidence costs O(N m) (in site chunks), and
+  each release adds its own pair's terms, O(m). The site posterior stays O(m S^2) additions; only pairs of two
+  uncertain labels are normalised one by one. On the validation designs family phase took 1.07-1.28 times as long
+  (paired timings, 8 CPUs).
 - **Resume.** `identity/family_phase` is bound per contig before any work and checked on resume. A contig with a
   `family_phase` record is not recomputed; an interrupted contig is recomputed.
 - **Determinism.** Block order, ties and releases are fixed, and the pool returns the releases in sample order, so
@@ -313,9 +398,89 @@ same sets ([simulation](../simulation.md#phase-pedigree-and-map-metrics)). `OUTP
   error rate, a per-site 0.99 phase threshold bounds a two-site join only at 0.98, and shared panel errors, read-model
   errors and the uncertainty of conditioning relatives are not represented.
   - Without the site model, genotype scores were overconfident in every top bucket (std, scores at least 0.9999:
-    22,885 wrong against a nominal 52). With it they are conservative on four designs and within about twice
-    nominal on std, but still overconfident on K30 (1,064 wrong against 61).
+    22,885 wrong against a nominal 52). With the 3.3 site model they were conservative on most designs but
+    overconfident where rows have few carriers: at scores of at least 0.9999, 18 times nominal for K30 samples
+    without a released parent and 4 times for std's. With the leave-one-out panel-allele uncertainty (3.4) no
+    genotype bucket at or above 0.999 exceeds twice nominal on any of the 13 validation designs (K30 0.24 times, std
+    0.30 times); genotype errors fell on 12 of them (std -37%, K30 -51%). The cost is phase where a sample's
+    heterozygote rests on weakly carried rows: K30 phases 2.5 points fewer correctly called true heterozygotes, std
+    0.4 and seed 0.2.
+  - Gate 1 measured min(p, 1-p) on mapped single-row labels, while release uses capped disagreement with the
+    selected allele. Pooled and unmapped labels are unvalidated. Few-carrier classes were conservative; correlated
+    carrier identity errors remain a failure mode, with 3-9 times overconfidence in four designs' well-carried
+    classes. These observations do not establish calibration for the selected-allele-dependent capped quantity.
+  - A heterozygous call where both labels carry the same allele is phased by the label whose allele is more likely
+    to be wrong. Where the other label's homologue departed instead (a conversion or a label error), the site is
+    misphased. The independent main totals show 2-10 added switch events on four designs while the total falls
+    from 693 to 495.
+    Across the 13 saved CAL2 replays, within-released-set neighbour scoring identified 29 misphased sites
+    among 2,005 assessable gains out of 2,028 newly phased heterozygotes (21 lacked a neighbour and two had
+    tied frames; f3 remained 5 of 22), and 3,886 among 165,229 assessable losses out of 165,241 heterozygotes
+    phased by K but released unphased by CAL2 (11 lacked a neighbour and one had a tied frame).
+    This auxiliary diagnostic does not establish that each misphased gained site causes an added switch event;
+    the main genotype/switch totals are unchanged by the recount. TroMau gained/lost counts measure coverage and
+    consistency only, because individual truth is unavailable.
   - Adjacent phase joins are conservative except on K30. There, single-site phase errors of the founder panel (two
     rows carrying each other's alleles at one site, already in the painting's panel) make confidently wrong joins
     that no sample's reads can see: 180 wrong against a nominal 132 in the 0.999-0.9999 bucket.
 - **Resolution.** Inheritance switches are placed at bin resolution.
+
+### Site storage and memory
+
+Each chromosome uses resident storage while its decoded likelihood array is at most **8 GiB**; larger arrays
+use site windows and temporary mapped outputs. The footprint is computed from the record's exact shape and dtype
+(24*N*L bytes for float64 genotype likelihoods). It is an evidence-buffer budget, not a fitted peak-RSS estimate,
+a worker-admission rule or a scientific threshold. All eight measured N=1,003 chromosomes fit (largest 7.385 GiB).
+At the same chr1 site count, N=2,503 needs 18.43 GiB of evidence and selects windows. Short chromosomes can remain
+resident at larger N: the 10%-site n2500c chr1 crop has 1.843 GiB and remains resident automatically.
+
+Resident storage retains dense likelihood reads, whole-sample site projections and the original per-solve release
+scheduling. Windowed storage uses the bounded buffers described below. Both modes use the same B/D2/FPD solver,
+CAL2 evidence and leave-one-out arithmetic, priors and decisions. The stage API's `storage="resident"` and
+`storage="windowed"` overrides support exact replay comparisons; production uses `storage="auto"`. Storage mode
+is not part of the scientific configuration or record schema. Windowing trades additional I/O and site-loop work
+for memory; resident mode avoids that cost when evidence fits the budget.
+
+In windowed mode, the coordinate ascent, D2 parent-label moves and both tie conventions still see each complete component's bin
+state. Site evidence is read from checked checkpoint chunks for one sample at a time, in windows of 4096 sites
+extended to the end of the last bin. Site projections and orientation medians use these same whole-bin windows;
+phase-set construction and the agreement between conventions retain their complete sample context. No likelihood,
+reduction order, threshold or scientific decision changes.
+
+Completed samples are consumed immediately. The chromosome's calls, ambiguity, legacy zero frames, optional scores
+and final chain arrays are ordinary ndarrays backed by temporary files. Initialisation and checkpoint compression
+use bounded byte chunks; completed contiguous output pages are flushed and removed from process mappings, with clean file-cache eviction advised. The files are unlinked while
+their mappings remain owned by the arrays, and disappear when the arrays are released. The record schema and values
+are unchanged. Temporary disk space is required (5 bytes per sample/site for the mandatory site arrays, another 8
+when diagnostic scores are requested, plus chain arrays). These files and the CAL2 spool below use the checkpoint
+store's root on the run's own storage, independently of TMPDIR or Python's temporary directory. They are anonymous
+and unlinked while open; checkpoint scans and resume never see or depend on them, and no name survives a crash.
+V4 changes only this location; four forced-windowed replays give bitwise-identical results to v3.
+
+Provision disk space on the checkpoint filesystem for the chromosomes that family phase runs at once. If that
+filesystem is memory-backed, the file backing still consumes memory. Together with the CAL2 component spool
+(12 N m bytes for m component sites),
+the mandatory site arrays (5 N L bytes) and optional scores (another 8 N L bytes) sum conservatively to 13.05 GiB,
+or 19.20 GiB with scores, at N = 2,503 and L = m = 329,391, before chains and checkpoint-writing space. This is
+logical-array accounting, not a measured simultaneous peak or allocated disk blocks: lifetimes differ and
+zero-filled files can be sparse. File truncation does not reserve the disk blocks in advance. Process RSS/PSS
+excludes some filesystem cache, and eviction advice does not impose a hard job-memory bound.
+
+The memory saving relies on whole mapped products not being pickled between workers: unpickling can create a
+resident copy. Production never pickles these products between workers: the chromosome worker writes its product
+locally and returns a summary, and release tasks transfer bounded sample rows and results.
+
+The working memory bound applies to the site tensors, not to the whole inference model. Full bin emissions,
+forward/backward posteriors, pedigree label states, painting/refit inputs and phase boundaries remain resident.
+One checked compressed-chunk cache serves the coordinating process. It gathers at most twice the worker count
+of float32 sample likelihood rows (12 bytes per released site per row) for each release batch. Workers retain
+one sample's release arrays and project sites through windows; compressed caches are not duplicated in workers. A bin larger
+than the target window is processed whole to preserve its median. Consumers requesting dense copies of the final
+arrays can still allocate chromosome-sized memory; the family-phase writer streams them.
+CAL2's carrier evidence uses its original 4096-site chunks, reading only that chunk's genotype likelihoods
+for all samples from a temporary float32 component spool (12 bytes per sample and released site). The spool is
+filled one sample/window at a time so the compressed evidence is not repeatedly decompressed per site block; its
+resident pages are discarded between carrier chunks. Each site's homologue-0 and homologue-1 additions keep their original order. Both solves' S x sites
+evidence and flip matrices remain resident, as do each worker's current sample leave-one-out terms. The original
+CAL2 flip-probability and own-term functions keep their full input shapes and arithmetic. Each solve receives its
+own uncertainty matrices; neither the panel prior nor any flip threshold changes.

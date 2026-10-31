@@ -38,6 +38,8 @@ class RelatednessProduct:
     half_sib:   int64 [H, 2] latent families better explained as sharing one latent parent; half_sib_gain [H].
     loglik, sweeps, converged: the family fit's objective and search.
     family_sites, chromosome_sites: thinned family-model sites (total, per contig); support_units: units scored.
+    search: the family search kept ("best_improvement" or "content_order", release 3.4); search_margin: its
+    objective minus the other search's.
     """
 
     sample_ids: tuple[str, ...]
@@ -59,6 +61,8 @@ class RelatednessProduct:
     family_sites: int
     chromosome_sites: tuple[int, ...]
     support_units: int = 0
+    search: str = ""
+    search_margin: float = float("nan")
 
     def pair_matrix(self, values) -> np.ndarray:
         """float64 [N, N] symmetric matrix of a per-pair value (NaN on the diagonal)."""
@@ -93,7 +97,8 @@ def encode_product(value: RelatednessProduct) -> dict:
                 member_support=value.member_support, parent_support=value.parent_support, half_sib=value.half_sib,
                 half_sib_gain=value.half_sib_gain, loglik=float(value.loglik), sweeps=int(value.sweeps),
                 converged=bool(value.converged), family_sites=int(value.family_sites),
-                chromosome_sites=[int(n) for n in value.chromosome_sites], support_units=int(value.support_units))
+                chromosome_sites=[int(n) for n in value.chromosome_sites], support_units=int(value.support_units),
+                search=str(value.search), search_margin=float(value.search_margin))
 
 
 def decode_product(record: dict) -> RelatednessProduct:

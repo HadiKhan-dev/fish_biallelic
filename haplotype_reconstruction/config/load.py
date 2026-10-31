@@ -1,9 +1,10 @@
 """Loading the run configuration: preset, TOML file, command-line options and `--set` overrides, strictly.
 
 Precedence (later wins): schema defaults < preset (config/presets/<name>.toml) < the TOML file < command-line
-options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones; values are
-type-checked by their field kind; relative paths resolve against the working directory. The resolved
-configuration is written back as TOML (`config_text`) to OUTPUT/config.toml and into the run record.
+options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones (a section removed
+from the schema names its removal: REMOVED_SECTIONS); values are type-checked by their field kind; relative paths
+resolve against the working directory. The resolved configuration is written back as TOML (`config_text`) to
+OUTPUT/config.toml and into the run record.
 """
 from __future__ import annotations
 
@@ -24,7 +25,15 @@ class ConfigError(ValueError):
 
 PRESETS = ("tromau", "aulstu")
 
-_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+# Release 3.4: the pipeline uses no sample metadata. Inference reads only the observations (VCF/BCF, or the simulated
+# reads) and the genetic map, and sample names are identifiers; every sequenced sample is a candidate parent of every
+# other. A configuration (file, preset, option or --set) that still sets one of these sections fails at load.
+REMOVED_SECTIONS = {
+    ("samples",): "the [samples] workbook and its generation and sex labels",
+    ("pedigree", "eligibility"): "parent eligibility is every sequenced sample: no cohort or constraints policy and "
+                                 "no opposite-sex pair rule",
+    ("reports",): "the reference-consistency report ([reports] reference_consistency), which read generation labels",
+}
 _MEMORY_SIZE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:I?B)?\s*$", re.IGNORECASE)
 _MEMORY_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 
@@ -135,10 +144,6 @@ def _convert(kind: str, value, where: str, choices: tuple, cwd: Path):
                 isinstance(item, int) and not isinstance(item, bool) for item in value):
             fail("an array of integers")
         return tuple(value)
-    if kind == "table":
-        if not isinstance(value, dict) or not all(isinstance(item, str) for item in value.values()):
-            fail("a table of strings")
-        return tuple(sorted(value.items()))
     if kind == "cores":
         if value != "auto" and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
             fail("\"auto\" or a positive integer")
@@ -177,8 +182,25 @@ def _build(cls, mapping, prefix: tuple, cwd: Path):
     return cls(**values)
 
 
+def _check_removed(mapping: dict) -> None:
+    """Refuse a mapping that sets any of REMOVED_SECTIONS, naming all of them at once."""
+    found = []
+    for path, reason in REMOVED_SECTIONS.items():
+        table = mapping
+        for part in path[:-1]:
+            table = table.get(part) if isinstance(table, dict) else None
+        if isinstance(table, dict) and path[-1] in table:
+            found.append((".".join(path), reason))
+    if found:
+        names = ", ".join(f"[{name}]" for name, _ in found)
+        reasons = "; ".join(reason for _, reason in found)
+        raise ConfigError(f"{names}: removed in 3.4: the pipeline uses no sample metadata ({reasons}); delete "
+                          f"{'it' if len(found) == 1 else 'them'} from the configuration")
+
+
 def build_config(mapping: dict, *, cwd=None) -> RunConfig:
     """A typed RunConfig from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
+    _check_removed(mapping)
     return _build(RunConfig, mapping, (), Path.cwd() if cwd is None else Path(cwd))
 
 
@@ -251,26 +273,6 @@ def validate(config: RunConfig, given: set = frozenset()) -> None:
         if inputs.vcf is not None:
             raise ConfigError("[input] vcf is not read by simulations (templates are built with the templates "
                               "command)")
-        if (config.samples.metadata is not None or config.pedigree.eligibility.policy != "none") and \
-                config.simulation.pedigree is None:
-            # 2.17: an explicit pedigree fixes the sequenced samples before simulating, so its design may carry
-            # metadata and an eligibility policy; the random design's samples exist only after simulating.
-            raise ConfigError("simulations take [samples] metadata or a parent-eligibility policy only with an "
-                              "explicit [simulation] pedigree")
-    eligibility = config.pedigree.eligibility
-    if eligibility.policy == "cohorts":
-        if config.samples.metadata is None:
-            raise ConfigError("[pedigree.eligibility] policy = \"cohorts\" needs [samples] metadata")
-        if not eligibility.parent_generations:
-            raise ConfigError("[pedigree.eligibility] policy = \"cohorts\" needs parent_generations")
-    elif eligibility.parent_generations:
-        raise ConfigError("[pedigree.eligibility] parent_generations needs policy = \"cohorts\"")
-    if (eligibility.policy == "constraints") != (eligibility.constraints is not None):
-        raise ConfigError("[pedigree.eligibility] policy = \"constraints\" and a constraints file go together")
-    if config.reports.reference_consistency and not config.samples.reference_generation:
-        raise ConfigError("[reports] reference_consistency needs [samples] reference_generation")
-    if config.samples.reference_generation and config.samples.metadata is None:
-        raise ConfigError("[samples] reference_generation needs [samples] metadata")
     if not config.simulation.cohorts or min(config.simulation.cohorts) < 1:
         raise ConfigError("[simulation] cohorts must be positive sizes")
 
@@ -302,20 +304,12 @@ def _toml_value(value) -> str:
         return json.dumps(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    if isinstance(value, dict):
-        return "{" + ", ".join(f"{_toml_key(key)} = {_toml_value(item)}" for key, item in value.items()) + "}"
     raise TypeError(f"no TOML form for {type(value).__name__}")
-
-
-def _toml_key(key: str) -> str:
-    return key if _BARE_KEY.match(key) else json.dumps(key)
 
 
 def _plain(kind: str, value):
     if kind == "path":
         return "" if value is None else str(value)
-    if kind == "table":
-        return dict(value)
     return value
 
 

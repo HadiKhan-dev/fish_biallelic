@@ -297,7 +297,8 @@ def block_viterbi(n, kinds, parents, E, X, V, par, desc, child_tracks, mark, S,
 
 @njit(cache=True)
 def objective(E, X, V, par, lstay, lmove, mstay, mmove, ain, astay, bout, init_copy, init_bottom):
-    """The joint log posterior (up to constants) of the current configuration."""
+    """The joint log posterior (up to constants) of the current configuration: the sum of every sample's terms
+    (row_terms), O(N B). The ascent evaluates moves by row_terms of the samples they change; this is its reference."""
     N = X.shape[0]
     B = X.shape[2]
     total = 0.0
@@ -319,6 +320,40 @@ def objective(E, X, V, par, lstay, lmove, mstay, mmove, ain, astay, bout, init_c
                     total += slot_log_transition(1, p, ss, tt, X, b, lstay, lmove, mstay, mmove, ain, astay, bout,
                                                  E.shape[1])
     return total
+
+
+@njit(cache=True)
+def row_terms(E, X, V, par, rows, lstay, lmove, mstay, mmove, ain, astay, bout, init_copy, init_bottom):
+    """float64 [R]: the objective's terms of samples ``rows`` [R] in the configuration X int64 [R, 2, B], V int8
+    [R, 2, B] (row i holds sample rows[i]): its emissions, its homologues' label or chain transitions and its linked
+    homologues' initial terms. A sample's terms read only its own labels and chains (a linked homologue's transitions
+    depend on its source states, not on the copied labels: ⊥ entry draws a uniform label), so J is the sum of every
+    sample's terms and a move changes J by the change in the terms of the samples whose labels or chains it alters.
+    O(R B)."""
+    R = rows.shape[0]
+    B = X.shape[2]
+    out = np.zeros(R)
+    for i in range(R):
+        n = rows[i]
+        total = 0.0
+        for b in range(B):
+            total += E[n, X[i, 0, b], X[i, 1, b], b]
+        for k in range(2):
+            p = par[n, k]
+            if p >= 0:
+                total += init_copy if V[i, k, 0] < 2 else init_bottom
+            for b in range(1, B):
+                if p < 0:
+                    total += lstay[b - 1] if X[i, k, b] == X[i, k, b - 1] else lmove[b - 1]
+                else:
+                    s = V[i, k, b - 1]
+                    t = V[i, k, b]
+                    ss = s if s < 2 else 2 + X[i, k, b - 1]
+                    tt = t if t < 2 else 2 + X[i, k, b]
+                    total += slot_log_transition(1, p, ss, tt, X, b, lstay, lmove, mstay, mmove, ain, astay, bout,
+                                                 E.shape[1])
+        out[i] = total
+    return out
 
 
 @njit(cache=True)
@@ -499,37 +534,102 @@ def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask):
 
 
 @njit(cache=True)
-def site_posteriors(P, site_bin, alleles, gl, epsilon):
+def _flip_pair(f1x, f1y, keep, epsilon, g0, g1, g2, weight, out, i):
+    """Adds weight x the ordered allele posterior of one label pair (P(homologue 0 carries allele 1) = f1x, homologue
+    1: f1y), with independent per-homologue flips, given the site's reads to out[:, i] (site_posteriors' law)."""
+    w00 = (keep * (1.0 - f1x) * (1.0 - f1y) + epsilon / 3.0) * g0
+    w01 = (keep * (1.0 - f1x) * f1y + epsilon / 6.0) * g1
+    w10 = (keep * f1x * (1.0 - f1y) + epsilon / 6.0) * g1
+    w11 = (keep * f1x * f1y + epsilon / 3.0) * g2
+    z = w00 + w01 + w10 + w11
+    if z <= 0.0:
+        return
+    f = weight / z
+    out[0, i] += f * w00
+    out[1, i] += f * w01
+    out[2, i] += f * w10
+    out[3, i] += f * w11
+
+
+@njit(cache=True)
+def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_flip):
     """float64 [4, m]: ordered allele posteriors (00, 01, 10, 11) of each site under the release's site model.
 
-    Given the bin's ordered label pair (x, y) (posterior P [B, S, S]) with known panel alleles (alleles [S, m]; a pair
-    with an unknown allele, -1, contributes to none, so its mass leaves the call undecided), the sample's ordered
-    alleles at a site are the labels' alleles with probability 1 - epsilon, else redrawn from a uniform genotype
-    (ordered weights 1/3, 1/6, 1/6, 1/3; the mixture mass epsilon is not itself the probability of a change). The sample's own site likelihood gl [m, 3] (P(reads | genotype), flat where
-    unobserved) weighs the four ordered states given each pair, normalised per pair, so the site's reads enter once:
-    out[:, i] = sum over known pairs of P[b, x, y] P(alleles | x, y, reads). With epsilon -> 0 it is the labels'
-    allele projection (project_alleles); at a site without reads it is that projection smoothed by the departure law.
-    O(m S^2) time.
+    Given the bin's ordered label pair (x, y) (posterior P [B, S, S]) with panel alleles a_x, a_y (alleles [S, m]; a
+    pair with an unknown allele, -1, contributes to none, so its mass leaves the call undecided), the sample's ordered
+    alleles (u, v) have probability (1 - epsilon) f_x(u) f_y(v) + epsilon U(u, v): each homologue carries its label's
+    panel allele except for a flip of that allele with probability d_x (f_x(a_x) = 1 - d_x, f_x(1 - a_x) = d_x: the
+    capped empirical-Bayes per-copy uncertainty conditional on the fitted carriers and panel, allele_evidence.py),
+    and with mixture mass
+    epsilon the pair is redrawn from a uniform genotype (ordered weights 1/3, 1/6, 1/6, 1/3: a label error shorter than
+    a bin, a conversion or mutation; the mass is not itself the probability of a change). d_x is flips[x, i], except
+    for the labels of the sample's own MAP pair at the site (own_state [2, m], -1 none), which take own_flip [2, m]
+    (their flips with the sample's direct own likelihood term removed). The selected allele determines the cap.
+    The copies flip independently per homologue, including (x, x); this is not exact integration over one shared
+    latent allele. Carrier and panel selection are not integrated out, and this is not a cross-fitted refit.
+    With every d = 0 this is the 3.3 model. The sample's own
+    site likelihood gl [m, 3] (P(reads | genotype), flat where unobserved) weighs the four ordered states given each
+    pair, normalised per pair; the direct own term enters here, while indirect selection dependence remains:
+    out[:, i] = sum over known pairs of
+    P[b, x, y] P(alleles | x, y, reads).
+    A pair's normalised posterior depends only on its two homologues' allele-1 probabilities, so pairs are summed by
+    them before normalising: pairs of two labels without a flip by their allele pattern (four normalisations per
+    site), pairs with one flipped label by that label and the other's allele (two per flipped label and side), and
+    only pairs of two flipped labels one by one. O(m S^2) additions and O(m (4 + 4 F + F^2)) normalisations for F
+    flipped labels at the site.
     """
     S = P.shape[1]
     m = site_bin.shape[0]
     out = np.zeros((4, m))
     mass = np.zeros(4)
+    flip = np.zeros(S)
+    side0 = np.zeros((S, 2))                        # flipped label on homologue 0, mass by homologue 1's allele
+    side1 = np.zeros((S, 2))                        # flipped label on homologue 1, mass by homologue 0's allele
     keep = 1.0 - epsilon
     for i in range(m):
         b = site_bin[i]
         mass[:] = 0.0
+        g0 = float(gl[i, 0])
+        g1 = float(gl[i, 1])
+        g2 = float(gl[i, 2])
+        for x in range(S):
+            flip[x] = flips[x, i]
+        for t in range(2):
+            if own_state[t, i] >= 0:
+                flip[own_state[t, i]] = own_flip[t, i]
+        side0[:] = 0.0
+        side1[:] = 0.0
         for x in range(S):
             ax = alleles[x, i]
             if ax < 0:
                 continue
+            dx = flip[x]
             for y in range(S):
                 ay = alleles[y, i]
-                if ay >= 0:
-                    mass[2 * ax + ay] += P[b, x, y]
-        g0 = float(gl[i, 0])
-        g1 = float(gl[i, 1])
-        g2 = float(gl[i, 2])
+                if ay < 0:
+                    continue
+                dy = flip[y]
+                p = P[b, x, y]
+                if dx == 0.0:
+                    if dy == 0.0:
+                        mass[2 * ax + ay] += p
+                    else:
+                        side1[y, ax] += p
+                elif dy == 0.0:
+                    side0[x, ay] += p
+                elif p != 0.0:
+                    _flip_pair(dx if ax == 0 else 1.0 - dx, dy if ay == 0 else 1.0 - dy, keep, epsilon, g0, g1, g2,
+                               p, out, i)
+        for x in range(S):
+            dx = flip[x]
+            if dx == 0.0 or alleles[x, i] < 0:
+                continue
+            f1 = dx if alleles[x, i] == 0 else 1.0 - dx     # P(the flipped label's homologue carries allele 1)
+            for c in range(2):
+                if side0[x, c] != 0.0:
+                    _flip_pair(f1, float(c), keep, epsilon, g0, g1, g2, side0[x, c], out, i)
+                if side1[x, c] != 0.0:
+                    _flip_pair(float(c), f1, keep, epsilon, g0, g1, g2, side1[x, c], out, i)
         for h in range(4):
             if mass[h] == 0.0:
                 continue

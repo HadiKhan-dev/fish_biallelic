@@ -11,6 +11,7 @@ upstream.
 from __future__ import annotations
 
 import time
+from functools import partial
 
 import numpy as np
 
@@ -21,11 +22,14 @@ from ..founder_refit import records as refit_records
 from ..painting import hmm as painting_hmm
 from ..painting import records as painting_records
 from ..store import CheckpointStore
+from ..store.mapped import mapped_array, discard_pages
 from . import records
+from .allele_evidence import EVIDENCE_CHUNK, allele_evidence, chromosome_prior, flip_probabilities
 from .model import LabelModel, haldane
 from .painting_inputs import component_bin_edges, coverage, tie_boundaries
 from .records import FamilyPhaseDiagnostics, FamilyPhaseProduct
 from .release import release_sample
+from .window import SampleSites, SITE_WINDOW, site_windows, use_windows
 
 
 @timed_stage("family_phase")
@@ -50,17 +54,26 @@ def run(store, contigs, edges, config, genetic_maps, budget):
 
 
 def _task_bytes(file, samples) -> int:
-    """Peak estimate of one chromosome: the dense pair emissions of its largest component (float64 N x S x S x B)
-    and their shared copy for the release pool, the release's per-sample arrays over the chromosome's sites (24
-    bytes per sample and site), the chromosome's float32 genotype likelihoods and a component's slice of them for the
-    site model (12 + 12), and 2 GiB for Python and the kernels. Release workers report their own per-sample estimate (_release_bytes) to the
-    pool, whose dispatch follows measured memory pressure (execution.pools)."""
+    """Diagnostic estimate: full component bin emissions and release-pool shared copy, plus 2 GiB.
+
+    Above the evidence-byte budget, site projections are windowed and final arrays are file-backed.
+    Below it, include c34fin's resident evidence/release arrays. Each release worker reports
+    its bin tables and single-sample results (including CAL2 own terms) separately (_release_component). One checked compressed cache serves
+    all workers in the coordinating process.
+    CAL2 retains both solves' S x sites evidence/flip matrices.
+    Dispatch still follows measured memory pressure.
+    """
     if file.has(records.KEY):
         return 2 * file.info(records.KEY).decoded_bytes + (1 << 30)
     shape = painting_records.load_summary(file)
-    sites = len(evidence_records.load_arrays(file, ("positions",))["positions"])
     largest = max((8 * samples * s.states * s.states * s.bins for s in shape.components), default=0)
-    return int(4 * largest + 48 * samples * sites + (2 << 30))
+    sites = len(evidence_records.load_arrays(file, ("positions",))["positions"])
+    states = max((s.states for s in shape.components), default=0)
+    with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods",)) as arrays:
+        gl = arrays["likelihoods"]
+        windowed = use_windows(int(np.prod(gl.shape)) * gl.dtype.itemsize)
+    resident = 0 if windowed else 48 * samples * sites
+    return int(4 * largest + resident + 32 * states * sites + (2 << 30))
 
 
 def _phase_contig(contig, state, phase, common, budget):
@@ -73,7 +86,7 @@ def _phase_contig(contig, state, phase, common, budget):
     if file.has(records.KEY):
         return state, records.summary(records.load(file, nthreads=claim_threads()))
     painting_records.require_evidence_binding(file)
-    product = phase_chromosome(file, contig, edges, config, chromosome_map, budget)
+    product = phase_chromosome(file, contig, edges, config, chromosome_map, budget, root=store.root)
     records.write(file, product)
     summary = records.summary(product)
     del product
@@ -86,23 +99,49 @@ def _phase_contig(contig, state, phase, common, budget):
     return state, summary
 
 
-def _component_emissions(painted, chromosome_painting, file, positions, samples):
+def _component_emissions(painted, chromosome_painting, file, positions, samples, windowed=True):
     """float64 [N, S, S, B] tempered ordered-pair emissions: the painting's stored cache, else recomputed with the
     painting's own kernel and design effect (the cache is optional; values are identical)."""
     S = painted.states.n_states
     if painted.packed_emissions is not None:
         return painting_hmm.unpack_emissions(painted.packed_emissions, S).reshape(samples, S, S, -1)
-    evidence = evidence_records.load(file, nthreads=claim_threads())
-    sites = np.searchsorted(evidence.positions, np.asarray(painted.states.positions, dtype=np.int64))
-    gl, observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites)
-    del evidence
+    if not windowed:
+        evidence = evidence_records.load(file, nthreads=claim_threads())
+        sites = np.searchsorted(evidence.positions, np.asarray(painted.states.positions, dtype=np.int64))
+        gl, observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites)
+        del evidence
+        pcfg = chromosome_painting.config
+        emissions = painting_hmm.binned_emissions(gl, observed, painted.states.alt_probability(),
+                                                  painted.states.background_frequency, painted.bins.starts,
+                                                  painted.bins.stops, robustness_epsilon=pcfg.robustness_epsilon,
+                                                  log_floor=pcfg.emission_log_floor, before_block=claim_threads)
+        emissions /= painting_hmm.design_effect(gl, observed, painted.bins.starts,
+                                                painted.transitions.site_correlation)[:, None, :]
+        return emissions.reshape(samples, S, S, -1)
+    sites = np.searchsorted(positions, np.asarray(painted.states.positions, dtype=np.int64))
     pcfg = chromosome_painting.config
-    emissions = painting_hmm.binned_emissions(gl, observed, painted.states.alt_probability(),
-                                              painted.states.background_frequency, painted.bins.starts,
-                                              painted.bins.stops, robustness_epsilon=pcfg.robustness_epsilon,
-                                              log_floor=pcfg.emission_log_floor, before_block=claim_threads)
-    emissions /= painting_hmm.design_effect(gl, observed, painted.bins.starts,
-                                            painted.transitions.site_correlation)[:, None, :]
+    starts, stops = painted.bins.starts, painted.bins.stops
+    emissions = np.empty((samples, S * S, len(starts)), dtype=np.float64)
+    alt, background = painted.states.alt_probability(), painted.states.background_frequency
+    # Optional packed painting caches need not exist. Recompute the same complete bins, one sample at a time.
+    with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods", "observed")) as arrays:
+        for n in range(samples):
+            first = 0
+            while first < len(starts):
+                last = first + 1
+                while last < len(starts) and stops[last] - starts[first] <= SITE_WINDOW:
+                    last += 1
+                left, right = int(starts[first]), int(stops[last - 1])
+                gl = arrays["likelihoods"].gather(slice(n, n + 1), sites[left:right])
+                observed = arrays["observed"].gather(slice(n, n + 1), sites[left:right])
+                raw = painting_hmm.binned_emissions(gl, observed, alt[:, left:right], background[left:right],
+                    starts[first:last] - left, stops[first:last] - left,
+                    robustness_epsilon=pcfg.robustness_epsilon, log_floor=pcfg.emission_log_floor,
+                    before_block=claim_threads)
+                raw /= painting_hmm.design_effect(gl, observed, starts[first:last] - left,
+                                                  painted.transitions.site_correlation)[:, None, :]
+                emissions[n:n + 1, :, first:last] = raw
+                first = last
     return emissions.reshape(samples, S, S, -1)
 
 
@@ -158,46 +197,183 @@ def _phase_set_count(phased, component_ids, breaks):
 
 def _release_bytes(model, sites):
     """Peak bytes of one sample's release: its block tables (emissions, three transition factors, forward and
-    backward), three per-bin label-pair posteriors, its site likelihoods and the per-site projections."""
+    backward), three per-bin label-pair posteriors, its site likelihoods, per-site projections and CAL2 own terms."""
     states = (model.S + 2) ** 2 * 2
-    return int(8 * model.B * (4 * states + 3 * model.S * model.S) + 92 * sites)
+    return int(8 * model.B * (4 * states + 3 * model.S * model.S) + 220 * sites)
 
 
-# Worker-side model of the component a release pool serves: (token, LabelModel) built once per worker.
+# Each pool serves a component: both solved models, with site likelihoods sent in bounded sample batches.
 _WORKER_MODEL = [None, None]
 
 
+def _paired_release(models, n, ctx, uncertainty):
+    releases = []
+    for model, terms in zip(models, uncertainty):
+        common = {k: v for k, v in terms.items() if k != "excluded"}
+        releases.append(release_sample(model, n, dict(ctx, excluded=bool(terms["excluded"][n]), **common)))
+    first, second = releases
+    bridged = len(set(ctx["tie_bins"]) - set(first[2]) - set(second[2]))
+    return n, _agreement(first, second, ctx["site_bin"]), first[3]["chain"], second[3]["chain"], bridged
+
+
 def _release_task(task, shared, budget):
-    """Pool task (worker side): one sample's release from the shared converged state of its component."""
-    n, break_bins, site_gl, token, config, scores = task
+    """One sample, both conventions; only this sample's site results leave the worker."""
+    n, break_bins, tie_bins, site_gl, token, config, scores = task
     if _WORKER_MODEL[0] != token:
+        # Preserve the baseline worker descendant order for BOTH attached solves: it determines the exact
+        # summation order in block_tables, independently of the convention that produced X and V.
+        models = []
+        for prefix in ("", "mirror_"):
+            model = LabelModel(shared["E"], shared["par"], shared["theta_l"], shared["theta_m"], shared["alpha"],
+                               shared["beta"], config)
+            model.X, model.V = shared[prefix + "X"], shared[prefix + "V"]
+            models.append(model)
+        _WORKER_MODEL[:] = [token, models]
+    ctx = dict(config=config, site_bin=shared["site_bin"], site_alleles=shared["site_alleles"], site_gl=site_gl,
+               break_bins=break_bins, tie_bins=tie_bins, scores=scores, chain=True)
+    uncertainty = [dict(allele_evidence=shared[prefix + "allele_evidence"], flips=shared[prefix + "flips"],
+                        logit_prior=float(shared["flip_params"][0]),
+                        robust_epsilon=float(shared["flip_params"][1]), excluded=shared["excluded"])
+                   for prefix in ("", "mirror_")]
+    return _paired_release(_WORKER_MODEL[1], n, ctx, uncertainty)
+
+
+def _release_component(model, mirror, rates, site_bin, site_alleles, file, columns, break_bins, tie_bins, config,
+                       budget, token, uncertainty, scores=False):
+    """Yield completed sample releases. Bin posteriors stay global; evidence/projections use whole-bin windows."""
+    task = _release_bytes(model, len(site_bin))
+    workers = min(model.N, max(1, int(budget.threads())))
+    if workers <= 1:
+        with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods",), nthreads=1) as arrays:
+            for n in range(model.N):
+                source = SampleSites(arrays["likelihoods"], n, columns)
+                site_gl = np.empty((len(site_bin), 3), dtype=np.float32)
+                for left, right in site_windows(site_bin):
+                    site_gl[left:right] = source[left:right]
+                ctx = dict(config=config, site_bin=site_bin, site_alleles=site_alleles,
+                           site_gl=site_gl, break_bins=break_bins[n],
+                           tie_bins=tie_bins[n], scores=scores, chain=True)
+                yield _paired_release((model, mirror), n, ctx, uncertainty)
+        return
+    shared = dict(E=model.E, X=model.X, V=model.V, mirror_X=mirror.X, mirror_V=mirror.V, par=model.par,
+                  theta_l=rates[0], theta_m=rates[1], alpha=rates[2], beta=rates[3], site_bin=site_bin,
+                  site_alleles=site_alleles,
+                  flip_params=np.asarray([uncertainty[0]["logit_prior"], uncertainty[0]["robust_epsilon"]]),
+                  excluded=np.asarray(uncertainty[0]["excluded"], dtype=np.bool_))
+    for prefix, terms in zip(("", "mirror_"), uncertainty):
+        shared[prefix + "allele_evidence"] = terms["allele_evidence"]
+        shared[prefix + "flips"] = terms["flips"]
+    # One checked compressed cache per chromosome, not one per release worker. Likelihoods cross the process
+    # boundary as float32 sample rows (12*m bytes each); at most 2*workers rows are queued. Decoding and all site
+    # projections still use whole-bin windows, and the reader follows the sample-major record in order.
+    with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods",), nthreads=1) as arrays:
+        with BudgetedPool(budget, processes=workers, shared=shared, label="family-phase release") as pool:
+            for first in range(0, model.N, 2 * workers):
+                tasks = []
+                for n in range(first, min(model.N, first + 2 * workers)):
+                    source = SampleSites(arrays["likelihoods"], n, columns)
+                    site_gl = np.empty((len(site_bin), 3), dtype=np.float32)
+                    for left, right in site_windows(site_bin):
+                        site_gl[left:right] = source[left:right]
+                    tasks.append((n, break_bins[n], tie_bins[n], site_gl, token, config, scores))
+                yield from pool.imap_unordered(_release_task, tasks, task_bytes=task)
+
+
+_RESIDENT_WORKER_MODEL = [None, None]
+
+
+def _resident_release_task(task, shared, budget):
+    """Pool task (worker side): one sample's release from the shared converged state of its component."""
+    n, break_bins, tie_bins, site_gl, token, config, scores = task
+    if _RESIDENT_WORKER_MODEL[0] != token:
         model = LabelModel(shared["E"], shared["par"], shared["theta_l"], shared["theta_m"], shared["alpha"],
                            shared["beta"], config)
         model.X, model.V = shared["X"], shared["V"]
-        _WORKER_MODEL[:] = [token, model]
-    ctx = dict(config=config, site_bin=shared["site_bin"], site_alleles=shared["site_alleles"], site_gl=site_gl,
-               break_bins=break_bins, scores=scores, chain=True)
-    return release_sample(_WORKER_MODEL[1], n, ctx)
+        _RESIDENT_WORKER_MODEL[:] = [token, model]
+    ctx = dict(windowed=False, config=config, site_bin=shared["site_bin"], site_alleles=shared["site_alleles"], site_gl=site_gl,
+               break_bins=break_bins, tie_bins=tie_bins, scores=scores, chain=True,
+               allele_evidence=shared["allele_evidence"], flips=shared["flips"],
+               logit_prior=float(shared["flip_params"][0]), robust_epsilon=float(shared["flip_params"][1]),
+               excluded=bool(shared["excluded"][n]))
+    return release_sample(_RESIDENT_WORKER_MODEL[1], n, ctx)
 
 
-def _release_component(model, rates, site_bin, site_alleles, site_gl, break_bins, config, budget, token,
-                       scores=False):
+def _resident_release_component(model, rates, site_bin, site_alleles, site_gl, break_bins, tie_bins, config, budget, token,
+                       uncertainty, scores=False):
     """Every sample's release (in sample order, with its meiosis chains' posteriors: release_sample's "chain") from
-    the solved component (site_gl float32 [N, m, 3]: the samples' genotype likelihoods at the released sites).
+    the solved component (site_gl float32 [N, m, 3]: the samples' genotype likelihoods at the released sites;
+    break_bins and tie_bins per sample, release_sample's; ``uncertainty``: the solve's allele uncertainty, a dict of
+    allele_evidence and flips [S, m], logit_prior, robust_epsilon and excluded bool [N], as release_sample reads it).
     Releases are independent given the converged state: one process when the budget has one CPU, else an
     execution.BudgetedPool sharing that state."""
     task = _release_bytes(model, len(site_bin))            # reported to the pool (its memory pacing measures)
     workers = min(model.N, max(1, int(budget.threads())))
     if workers <= 1:
-        return [release_sample(model, n, dict(config=config, site_bin=site_bin, site_alleles=site_alleles,
-                                              site_gl=site_gl[n], break_bins=break_bins[n], scores=scores,
-                                              chain=True))
+        common = {k: v for k, v in uncertainty.items() if k != "excluded"}
+        return [release_sample(model, n, dict(windowed=False, config=config, site_bin=site_bin, site_alleles=site_alleles,
+                                              site_gl=site_gl[n], break_bins=break_bins[n], tie_bins=tie_bins[n],
+                                              scores=scores, chain=True, excluded=bool(uncertainty["excluded"][n]),
+                                              **common))
                 for n in range(model.N)]
     shared = dict(E=model.E, X=model.X, V=model.V, par=model.par, theta_l=rates[0], theta_m=rates[1],
-                  alpha=rates[2], beta=rates[3], site_bin=site_bin, site_alleles=site_alleles)
-    tasks = [(n, break_bins[n], site_gl[n], token, config, scores) for n in range(model.N)]
+                  alpha=rates[2], beta=rates[3], site_bin=site_bin, site_alleles=site_alleles,
+                  allele_evidence=uncertainty["allele_evidence"], flips=uncertainty["flips"],
+                  flip_params=np.asarray([uncertainty["logit_prior"], uncertainty["robust_epsilon"]]),
+                  excluded=np.asarray(uncertainty["excluded"], dtype=np.bool_))
+    tasks = [(n, break_bins[n], tie_bins[n], site_gl[n], token, config, scores) for n in range(model.N)]
     with BudgetedPool(budget, processes=workers, shared=shared, label="family-phase release") as pool:
-        return pool.map(_release_task, tasks, task_bytes=task)
+        return pool.map(_resident_release_task, tasks, task_bytes=task)
+
+
+def _resident_releases(model, mirror, rates, site_bin, site_alleles, site_gl, break_bins, tie_bins, config,
+                       budget, token, excluded, logit_prior, robust_epsilon, scores):
+    """c34fin's resident CAL2 calculation and per-solve scheduling, sharing the same release arithmetic."""
+    uncertainty = []
+    for solved in (model, mirror):
+        evidence = allele_evidence(solved.X, site_bin, site_alleles, site_gl, excluded, robust_epsilon)
+        uncertainty.append(dict(allele_evidence=evidence,
+                                flips=flip_probabilities(evidence, site_alleles, logit_prior),
+                                logit_prior=logit_prior, robust_epsilon=robust_epsilon, excluded=excluded))
+    first = _resident_release_component(model, rates, site_bin, site_alleles, site_gl, break_bins, tie_bins,
+                                        config, budget, token, uncertainty[0], scores)
+    second = _resident_release_component(mirror, rates, site_bin, site_alleles, site_gl, break_bins, tie_bins,
+                                         config, budget, token + ":mirror", uncertainty[1], scores)
+    for n, (a, b) in enumerate(zip(first, second)):
+        bridged = len(set(tie_bins[n]) - set(a[2]) - set(b[2]))
+        yield n, _agreement(a, b, site_bin), a[3]["chain"], b[3]["chain"], bridged
+
+
+def _resident_array(shape, dtype, fill=0):
+    """Match mapped_array's allocation signature for resident output buffers."""
+    return np.full(shape, fill, dtype=dtype)
+
+
+def _allele_uncertainty(models, file, columns, site_bin, site_alleles, excluded, logit_prior, robust_epsilon, *, root):
+    """CAL2's unchanged carrier sums over its original EVIDENCE_CHUNK boundaries.
+
+    A temporary float32 spool supplies N x chunk likelihoods. Within each site CAL2 adds all homologue-0 terms in
+    sample order, then all homologue-1 terms. The S x sites evidence/flip outputs remain whole, and the original
+    flip_probabilities call sees its original shape; CAL2's arithmetic, prior and leave-one-out terms are unchanged.
+    """
+    # Stage sample-major reads once; gathering all samples from the compressed record for each site window
+    # would repeatedly decompress that record. The temporary float32 spool has the baseline's shape/dtype.
+    site_gl = mapped_array((models[0].N, len(site_bin), 3), np.float32, root=root)
+    with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods",), nthreads=1) as arrays:
+        for n in range(models[0].N):
+            source = SampleSites(arrays["likelihoods"], n, columns)
+            for left, right in site_windows(site_bin):
+                site_gl[n, left:right] = source[left:right]
+            discard_pages(site_gl[n])
+    evidence = [np.zeros(site_alleles.shape, dtype=np.float64) for _ in models]
+    for left in range(0, len(site_bin), EVIDENCE_CHUNK):
+        right = min(len(site_bin), left + EVIDENCE_CHUNK)
+        for solved, target in zip(models, evidence):
+            target[:, left:right] = allele_evidence(solved.X, site_bin[left:right],
+                site_alleles[:, left:right], site_gl[:, left:right], excluded, robust_epsilon)
+        discard_pages(site_gl)
+    del site_gl
+    return [dict(allele_evidence=e, flips=flip_probabilities(e, site_alleles, logit_prior),
+                 logit_prior=logit_prior, robust_epsilon=robust_epsilon, excluded=excluded) for e in evidence]
 
 
 def _set_start_bins(set_starts, site_bin, B):
@@ -303,20 +479,32 @@ def _agreement(first, second, site_bin):
     return calls, het & ~phased, np.flatnonzero(starts)
 
 
-def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, scores=False):
+def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, scores=False, *, root, storage="auto"):
     """FamilyPhaseProduct of one chromosome (``budget``: the CPUs of its releases; None = this process's
     affinity). With ``scores``, also float32 [N, L, 2]: each released site's genotype score and ordered allele score
-    (_agreement; -1 where nothing is released), for reporting how the scores behave."""
+    (_agreement; -1 where nothing is released), for reporting how the scores behave.
+    Storage is selected by decoded likelihood bytes; ``storage="resident"`` or ``"windowed"`` forces a mode for
+    numerical/replay checks. It changes buffers and site batching only, never the model or scientific records.
+    ``root`` is the checkpoint store's root, also used for anonymous windowed scratch files."""
     started = time.perf_counter()
     budget = CpuBudget.fixed(affinity_cpus()) if budget is None else budget
-    loaded = evidence_records.load_arrays(file, ("positions", "likelihoods"), nthreads=claim_threads())
+    loaded = evidence_records.load_arrays(file, ("positions", "founder_excluded"), nthreads=claim_threads())
     positions = np.asarray(loaded["positions"], dtype=np.int64)
-    likelihoods = np.asarray(loaded["likelihoods"], dtype=np.float32)    # [N, L, 3] P(reads | genotype), run order
+    excluded = np.asarray(loaded["founder_excluded"], dtype=np.bool_)
     del loaded
     sample_ids = tuple(edges.sample_ids)
     N, L = len(sample_ids), len(positions)
-    if likelihoods.shape[:2] != (N, L):
-        raise ValueError(f"{contig}: the evidence's likelihoods do not match the pedigree's samples and sites")
+    with file.open_arrays(evidence_records.EVIDENCE, ("likelihoods",)) as arrays:
+        gl = arrays["likelihoods"]
+        if gl.shape[:2] != (N, L):
+            raise ValueError(f"{contig}: the evidence's likelihoods do not match the pedigree's samples and sites")
+        windowed = use_windows(int(np.prod(gl.shape)) * gl.dtype.itemsize, storage)
+    likelihoods = None
+    if not windowed:
+        loaded_gl = evidence_records.load_arrays(file, ("likelihoods",), nthreads=claim_threads())
+        likelihoods = np.asarray(loaded_gl["likelihoods"], dtype=np.float32)
+        del loaded_gl
+    new_array = partial(mapped_array, root=root) if windowed else _resident_array
     par = np.full((N, 2), -1, dtype=np.int64)
     for p, c, k in zip(edges.parents, edges.children, edges.slots):
         par[int(c), int(k)] = int(p)
@@ -325,14 +513,17 @@ def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, s
         raise ValueError(f"{contig}: the painting's samples differ from the pedigree's")
     painting = chromosome_painting.components
     panels = refit_records.founder_panels(file)
+    logit_prior = chromosome_prior(panels)
+    robust_epsilon = float(chromosome_painting.config.robustness_epsilon)
     ties = tie_boundaries(painting, positions, np.arange(N))
     cover, cover_offsets = coverage(painting, positions, N)
-    calls = np.full((N, L, 2), -1, dtype=np.int8)
-    undetermined = np.zeros((N, L), dtype=np.int8)
-    site_scores = np.full((N, L, 2), -1.0, dtype=np.float32) if scores else None
+    calls = new_array((N, L, 2), np.int8, -1)
+    undetermined = new_array((N, L), np.int8)
+    site_scores = new_array((N, L, 2), np.float32, -1) if scores else None
     component_ids = np.full(L, -1, dtype=np.int32)
     breaks = [[] for _ in range(N)]
     all_edges, sweeps, settled, objective, candidates, mirrored_solves, chain_parts = [], [], [], [], [], [], []
+    pairing_rows = []
     all_centers = []
     withheld_joins = tie_breaks = 0
     protected = config.protected_for(contig)
@@ -353,8 +544,9 @@ def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, s
             objective.append(())
             candidates.append(0)
             mirrored_solves.append({})
+            pairing_rows.append({})
             continue
-        E = _component_emissions(painted, chromosome_painting, file, positions, N)
+        E = _component_emissions(painted, chromosome_painting, file, positions, N, windowed)
         S, B = E.shape[1], E.shape[3]
         rates = _edge_rates(painted, chromosome_map, config, protected)
         # both tie conventions, whatever the run's (maths.ties.reverse_conventions): the release is their agreement
@@ -377,6 +569,17 @@ def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, s
         withheld = model.withheld_joins(junction)
         for n, bins_n in mirror.withheld_joins(mirror_junction).items():
             withheld[n] = sorted(set(withheld.get(n, ())) | set(bins_n))
+        # parents' pairings the data do not decide (model.ambiguous_pairings, in either solve): the parent and every
+        # child break there; the orientation gates never bridge these breaks
+        pairing = {}
+        for solved in (model, mirror):
+            for p, j in solved.ambiguous_pairings():
+                for c in [p] + solved.children_of(p):
+                    pairing.setdefault(c, set()).add(int(j))
+        pairing_rows.append(dict(candidates=len(model.pairings), moves=len(model.pairing_moves),
+                                 mirrored_moves=len(mirror.pairing_moves),
+                                 ambiguous=len({pj for m in (model, mirror) for pj in m.ambiguous_pairings()}),
+                                 breaks=int(sum(len(v) for v in pairing.values()))))
         local = positions[lo:hi]
         cols = np.searchsorted(source, local)
         valid = cols < len(source)
@@ -386,62 +589,87 @@ def phase_chromosome(file, contig, edges, config, chromosome_map, budget=None, s
         site_idx = np.flatnonzero(inside)
         site_bin = bins[site_idx]
         site_alleles = _state_alleles(painted.states, np.asarray(panel.inference, dtype=np.int8), S)[:, cols[site_idx]]
-        break_bins = []
+        break_bins, tie_cuts = [], []
         for n in range(N):
             tie_bins = {int(np.searchsorted(bin_edges, positions[m + 1], side="right") - 1)
                         for m in ties.get(n, ()) if lo <= m < hi - 1}
             # painting ties matter only to a sample with no linked parent (a linked homologue is ordered by origin)
             tie_bins = {b for b in tie_bins if 0 < b < B} if np.all(par[n] < 0) else set()
             joins = set(withheld.get(n, ()))
+            pairs = {b for b in pairing.get(n, ()) if 0 < b < B}
             tie_breaks += len(tie_bins)
             withheld_joins += len(joins - tie_bins)
-            break_bins.append(sorted(tie_bins | joins))
-        site_gl = np.ascontiguousarray(likelihoods[:, lo + site_idx])
-        releases = _release_component(model, rates, site_bin, site_alleles, site_gl, break_bins, config, budget,
-                                      f"{contig}:{index}:{id(model)}", scores)
-        mirrored = _release_component(mirror, rates, site_bin, site_alleles, site_gl, break_bins, config, budget,
-                                      f"{contig}:{index}:{id(mirror)}", scores)
-        del site_gl
-        starts = []
-        for n, (first, second) in enumerate(zip(releases, mirrored)):
-            agreed = _agreement(first, second, site_bin)
+            break_bins.append(sorted(tie_bins | joins | pairs))
+            tie_cuts.append(sorted(tie_bins - joins - pairs))   # a sample anchored by its children may bridge these
+        starts = [None] * N
+        chains, mirrored_chains = [None] * N, [None] * N
+        token = f"{contig}:{index}:{id(model)}"
+        if windowed:
+            uncertainty = _allele_uncertainty((model, mirror), file, lo + site_idx, site_bin, site_alleles,
+                                             excluded, logit_prior, robust_epsilon, root=root)
+            releases = _release_component(model, mirror, rates, site_bin, site_alleles, file, lo + site_idx,
+                                          break_bins, tie_cuts, config, budget, token, uncertainty, scores)
+        else:
+            site_gl = np.ascontiguousarray(likelihoods[:, lo + site_idx])
+            releases = _resident_releases(model, mirror, rates, site_bin, site_alleles, site_gl, break_bins,
+                                          tie_cuts, config, budget, token, excluded, logit_prior,
+                                          robust_epsilon, scores)
+        for n, agreed, chain, mirrored_chain, bridged in releases:
+            tie_breaks -= bridged
             sample_calls, sample_undetermined, set_starts = agreed[:3]
             if site_scores is not None:
                 site_scores[n, lo + site_idx] = agreed[3].T
+                discard_pages(site_scores[n])
             calls[n, lo + site_idx] = sample_calls
             undetermined[n, lo + site_idx] = np.where(sample_undetermined, 3, 0)
+            discard_pages(calls[n])
+            discard_pages(undetermined[n])
             breaks[n].extend(lo + int(site_idx[i]) - 1 for i in set_starts)
-            starts.append(_set_start_bins(set_starts, site_bin, B))
-        chain_parts.append((index, _edge_chains(model, mirror, [r[3]["chain"] for r in releases],
-                                                [r[3]["chain"] for r in mirrored], rates[1], starts,
+            starts[n] = _set_start_bins(set_starts, site_bin, B)
+            chains[n], mirrored_chains[n] = chain, mirrored_chain
+        chain_parts.append((index, _edge_chains(model, mirror, chains, mirrored_chains, rates[1], starts,
                                                 config.phase_posterior)))
-        del model, mirror, releases, mirrored
-    het = (calls[..., 0] >= 0) & (calls[..., 1] >= 0) & (calls[..., 0] != calls[..., 1])
-    unphased = het & (undetermined > 0)
+        del model, mirror, releases, chains, mirrored_chains
+        if windowed:
+            del uncertainty
+        else:
+            del site_gl
+    called_alleles = phased_heterozygotes = unphased_heterozygotes = sets = 0
+    # Summaries read one sample at a time; no chromosome-sized boolean temporaries.
+    for n in range(N):
+        row = calls[n]
+        het = (row[:, 0] >= 0) & (row[:, 1] >= 0) & (row[:, 0] != row[:, 1])
+        unphased = het & (undetermined[n] > 0)
+        called_alleles += int(np.sum(row >= 0))
+        phased_heterozygotes += int(np.sum(het & ~unphased))
+        unphased_heterozygotes += int(np.sum(unphased))
+        sets += _phase_set_count((het & ~unphased)[None, :], component_ids, [breaks[n]])
+        discard_pages(row)
+        discard_pages(undetermined[n])
     phase_breaks = np.asarray([b for sample in breaks for b in sorted(set(sample))], dtype=np.int64)
     break_offsets = np.r_[0, np.cumsum([len(set(sample)) for sample in breaks])].astype(np.int64)
-    sets = _phase_set_count(het & ~unphased, component_ids, breaks)
     diagnostics = FamilyPhaseDiagnostics(
         sweeps=tuple(sweeps), settled=tuple(settled), objective=tuple(objective),
         junction_candidates=tuple(candidates), withheld_joins=withheld_joins, tie_breaks=tie_breaks,
-        called_alleles=int(np.sum(calls >= 0)), phased_heterozygotes=int(np.sum(het & ~unphased)),
-        unphased_heterozygotes=int(np.sum(unphased)), phase_sets=sets,
-        elapsed_seconds=time.perf_counter() - started, extra=dict(mirrored_solves=mirrored_solves))
+        called_alleles=called_alleles, phased_heterozygotes=phased_heterozygotes,
+        unphased_heterozygotes=unphased_heterozygotes, phase_sets=sets,
+        elapsed_seconds=time.perf_counter() - started, extra=dict(mirrored_solves=mirrored_solves,
+                                                                  pairings=pairing_rows))
     edge_offsets = np.r_[0, np.cumsum([len(e) for e in all_edges])].astype(np.int64)
-    chain = _chain_arrays(edges, all_edges, chain_parts)
-    zeros = np.zeros((N, L), dtype=np.int8)
+    chain = _chain_arrays(edges, all_edges, chain_parts, windowed, root=root)
+    zeros = new_array((N, L), np.int8)
     product = FamilyPhaseProduct(
         contig=contig, sample_ids=sample_ids, positions=positions, component_ids=component_ids,
         bin_edges=np.concatenate(all_edges).astype(np.int64) if all_edges else np.zeros(0, dtype=np.int64),
         bin_edge_offsets=edge_offsets,
         bin_centers=np.concatenate(all_centers).astype(np.float64) if all_centers else np.zeros(0),
-        calls=calls, displayed_frame=zeros, decoder_frame=zeros.copy(),
+        calls=calls, displayed_frame=zeros, decoder_frame=new_array((N, L), np.int8),
         coverage=cover, coverage_offsets=cover_offsets, edges_identity=edges.identity, diagnostics=diagnostics,
         frame_undetermined=undetermined, phase_breaks=phase_breaks, phase_break_offsets=break_offsets, **chain)
     return (product, site_scores) if scores else product
 
 
-def _chain_arrays(edges, all_edges, chain_parts):
+def _chain_arrays(edges, all_edges, chain_parts, windowed=True, *, root):
     """The product's meiosis-chain arrays, one row per pedigree edge (edges order) over the chromosome's painting
     bins (components concatenated in bin_edges order): chain_source int8 (-1 = no released source), chain_support
     float32 and chain_reset bool (True at each component's first bin and at every reset)."""
@@ -449,9 +677,10 @@ def _chain_arrays(edges, all_edges, chain_parts):
     sizes = [len(e) - 1 for e in all_edges]
     offsets = np.r_[0, np.cumsum(sizes)].astype(np.int64)
     total = int(offsets[-1])
-    source = np.full((len(rows), total), -1, dtype=np.int8)
-    support = np.zeros((len(rows), total), dtype=np.float32)
-    reset = np.zeros((len(rows), total), dtype=bool)
+    new_array = partial(mapped_array, root=root) if windowed else _resident_array
+    source = new_array((len(rows), total), np.int8, -1)
+    support = new_array((len(rows), total), np.float32)
+    reset = new_array((len(rows), total), bool)
     reset[:, offsets[:-1][np.asarray(sizes) > 0]] = True
     for index, part in chain_parts:
         first = int(offsets[index])
@@ -459,4 +688,6 @@ def _chain_arrays(edges, all_edges, chain_parts):
             i = rows[key]
             stop = first + len(s)
             source[i, first:stop], support[i, first:stop], reset[i, first:stop] = s, w, r
+            for array in (source, support, reset):
+                discard_pages(array[i])
     return dict(chain_source=source, chain_support=support, chain_reset=reset)

@@ -35,7 +35,9 @@ class FamilyPhaseDiagnostics:
     ascents). Over the chromosome: withheld_joins and tie_breaks (sample phase-set breaks at junction candidates and
     at painting tie boundaries), called_alleles, phased and unphased heterozygous calls, phase sets (with at least
     one phased heterozygous call); elapsed seconds; extra["mirrored_solves"] per component: the mirrored ascent's
-    sweeps, settled, objective and junction candidates."""
+    sweeps, settled, objective and junction candidates; extra["pairings"] per component: the parents' double label
+    changes examined (candidates), the joint moves kept by each ascent (moves, mirrored_moves), the pairings neither
+    decided (ambiguous) and the sample phase-set breaks they add (breaks)."""
 
     sweeps: tuple[int, ...]
     settled: tuple[bool, ...]

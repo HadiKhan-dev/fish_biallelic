@@ -2,9 +2,10 @@
 
 A tier releases a child's marginal parent state when its informative chromosomes hold enough map units, the state
 survives the bootstrap and leave-one-chromosome-out (LOCO) cut-offs and, for M0, every alternative
-prior; it releases the exact configuration when the local configuration is also the graph's choice,
+prior, and, for M1 and M2, some parent of the local configuration is stable (release 3.4); it releases the exact
+configuration when the local configuration is also the graph's choice,
 is resampling-stable as local and graph configuration, each named parent is stable, and every
-inferred (non-chronology) edge has a decisive full-data orientation. Marginal ("partial") edges are
+edge has a decisive full-data orientation (direction is always inferred). Marginal ("partial") edges are
 released one by one from the same acyclic solution when the exact configuration is not. Candidate
 sets report the identities carrying most of the evidence when identity stays unresolved.
 """
@@ -35,7 +36,7 @@ class ChildEvidence:
     parent_bootstrap / parent_loco: float64 [N, 2] local-parent support per slot.
     graph_parent_bootstrap / graph_parent_loco: float64 [N, 2] graph-parent support per slot.
     graph_configuration_bootstrap / _loco: support of the graph row as graph configuration.
-    orientation_resolved: bool [N, 2] per local parent slot (True for empty slots / chronology).
+    orientation_resolved: bool [N, 2] per local parent slot (True for empty slots).
     m0_state_agreement / m0_graph_agreement / m0_veto: bool [N] prior-sensitivity checks of M0.
     """
 
@@ -129,8 +130,7 @@ def orientation_cutoff(config: PedigreeConfig) -> float:
 
 def child_evidence(full: Selection, sensitivity: list[tuple[tuple, Selection]],
                    resampling: Resampling, alternatives: Alternatives, informative: np.ndarray,
-                   orientation_log_odds: np.ndarray, chronology: np.ndarray,
-                   config: PedigreeConfig) -> ChildEvidence:
+                   orientation_log_odds: np.ndarray, config: PedigreeConfig) -> ChildEvidence:
     """Collect the per-child support quantities of the full fit and the resampled fits."""
     rows, states = alternatives.rows, alternatives.states
     n = alternatives.n_samples
@@ -171,8 +171,7 @@ def child_evidence(full: Selection, sensitivity: list[tuple[tuple, Selection]],
                 continue
             parent_bootstrap[child, slot] = boot.fraction(boot.local_parent[child, parent])
             parent_loco[child, slot] = loco.fraction(loco.local_parent[child, parent])
-            oriented[child, slot] = bool(chronology[child, parent]
-                                         or orientation_log_odds[child, parent] >= cutoff)
+            oriented[child, slot] = bool(orientation_log_odds[child, parent] >= cutoff)
         if graph_row >= 0:
             values["graph_configuration_bootstrap"][child] = boot.fraction(
                 boot.graph_configuration[graph_row])
@@ -216,9 +215,16 @@ def tier_calls(label: str, thresholds: TierThresholds, full: Selection, evidence
                       and evidence.state_loco[child] >= thresholds.loco_fraction
                       and evidence.m0_state_agreement[child])
         named = [slot for slot in range(2) if evidence.local_parents[child, slot] >= 0]
-        stable = [bool(passed and evidence.parent_bootstrap[child, slot] >= thresholds.parent_bootstrap
-                       and evidence.parent_loco[child, slot] >= thresholds.loco_fraction)
-                  for slot in named]
+        identified = [bool(evidence.parent_bootstrap[child, slot] >= thresholds.parent_bootstrap
+                           and evidence.parent_loco[child, slot] >= thresholds.loco_fraction)
+                      for slot in named]
+        # Release 3.4: a count of observed parents needs an identifiable observed parent. An M1 or M2 state passes
+        # only when some parent of the local configuration meets the parent cut-offs (the identity half of the
+        # parent rule; orientation is not required). A count that stays stable while the winning candidate changes
+        # across resamples (typically relatives of an unsampled parent) is not released.
+        unidentified = bool(passed and state in (M1, M2) and not any(identified))
+        passed = passed and not unidentified
+        stable = [passed and value for value in identified]
         oriented = [stable[index] and bool(evidence.orientation_resolved[child, slot])
                     for index, slot in enumerate(named)]
         configuration = bool(
@@ -238,6 +244,7 @@ def tier_calls(label: str, thresholds: TierThresholds, full: Selection, evidence
             status.append("excluded_by_parent_eligibility")
         elif not passed:
             status.append(f"unresolved_{label}_m0_prior_sensitivity" if evidence.m0_veto[child]
+                          else f"unresolved_{label}_no_stable_parent" if unidentified
                           else f"unresolved_below_{label}_state_support")
         else:
             state_out[child] = state
@@ -395,8 +402,7 @@ def support_sides(child_rows: np.ndarray, state: int, row: int, alternatives: Al
 
 def candidate_sets(calls: TierCalls, partial: PartialEdges, full: Selection,
                    alternatives: Alternatives, resampling: Resampling,
-                   orientation_log_odds: np.ndarray, chronology: np.ndarray,
-                   config: PedigreeConfig) -> CandidateSets:
+                   orientation_log_odds: np.ndarray, config: PedigreeConfig) -> CandidateSets:
     """Tier-B candidate sets: supported singleton sides, side candidates, configuration sets."""
     thresholds = config.release.tier_b
     cutoff = orientation_cutoff(config)
@@ -420,11 +426,11 @@ def candidate_sets(calls: TierCalls, partial: PartialEdges, full: Selection,
             parent = int(side[0])
             if (boot.fraction(boot.local_parent[child, parent]) >= thresholds.parent_bootstrap
                     and loco.fraction(loco.local_parent[child, parent]) >= thresholds.loco_fraction
-                    and (chronology[child, parent]
-                         or orientation_log_odds[child, parent] >= cutoff)):
+                    and orientation_log_odds[child, parent] >= cutoff):
                 parents[child, slot] = parent
         if state == UNRESOLVED:
-            status = "unresolved_below_tier_b_state_support"
+            status = (calls.status[child] if calls.status[child] == "unresolved_tier_b_no_stable_parent"
+                      else "unresolved_below_tier_b_state_support")
         elif exact[child]:
             status = "tier_b_exact_configuration"
         elif np.any(parents[child] >= 0):

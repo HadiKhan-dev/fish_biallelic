@@ -172,15 +172,14 @@ def _stage_bytes(file, stage: str) -> int:
 
 
 # ------------------------------------------------------------------------------------------- downstream counts
-def pedigree_counts(sample_ids, calls, truth, names, targets=None) -> dict:
+def pedigree_counts(sample_ids, calls, truth, names) -> dict:
     """Tier-B calls vs the true pedigree of the analysed samples.
 
     ``sample_ids``/``calls``: pedigree.records.load_calls (PedigreeCalls: state -1 unresolved, parents -1 none);
     ``truth``: the simulation manifest's PedigreeTable of the analysed samples (parents outside the analysed
     samples are not observable edges); ``names``: the analysed sample axis. The calls' axis may be any order of
-    ``names`` (release 2.1 records hold the run's canonical sample order); edges are matched by sample name.
-    ``targets`` (release 2.17): the eligibility's inference targets by name (a simulated design with metadata);
-    only they are counted, and the count is reported. None: every sample is a target.
+    ``names`` (release 2.1 records hold the run's canonical sample order); edges are matched by sample name. Every
+    analysed sample is an inference target (release 3.4: no metadata eligibility), so every sample is counted.
     """
     sample_ids = tuple(map(str, sample_ids))
     if len(set(sample_ids)) != len(sample_ids) or set(sample_ids) != set(names) or len(sample_ids) != len(names):
@@ -192,8 +191,6 @@ def pedigree_counts(sample_ids, calls, truth, names, targets=None) -> dict:
     expected_states = {state: 0 for state in PARENT_STATES}
     for sample, state, parents in zip(sample_ids, np.asarray(calls.state).tolist(),
                                       np.asarray(calls.parents).tolist()):
-        if targets is not None and sample not in targets:
-            continue
         expected = set(true_parents[sample]) & known
         actual = {sample_ids[parent] for parent in parents if parent >= 0}
         called_state = PARENT_STATES[state] if state >= 0 else None
@@ -208,26 +205,7 @@ def pedigree_counts(sample_ids, calls, truth, names, targets=None) -> dict:
                   expected_states=expected_states, true_edges=true_edges,
                   correct_edges=shared_edges, extra_edges=inferred_edges-shared_edges,
                   missing_edges=true_edges-shared_edges)
-    if targets is not None:
-        result["targets"] = len(set(targets) & set(sample_ids))
     return result
-
-
-def pedigree_targets(run_directory, names):
-    """Inference targets of a simulated design with metadata eligibility (release 2.17), by name; None when the
-    run's configuration supplies no [samples] metadata (every sample a target)."""
-    from ..config.load import load_config
-    from ..pipeline.samples import build_eligibility, read_sample_table
-    path = Path(run_directory) / "config.toml"
-    if not path.is_file():
-        return None
-    config = load_config(path)
-    if config.samples.metadata is None:
-        return None
-    eligibility = build_eligibility(config, read_sample_table(config.samples, names))
-    if eligibility is None:
-        return None
-    return {name for name, child in zip(eligibility.sample_ids, eligibility.children) if child}
 
 
 def map_counts(product, events, names) -> dict:
@@ -520,8 +498,7 @@ def evaluate_run(run_directory, *, checkpoints=None, cores=None, stages=("availa
     if automatic or "pedigree" in requested:
         if pedigree_records.complete(store):
             sample_ids, calls = pedigree_records.load_calls(store)
-            report["pedigree"] = pedigree_counts(sample_ids, calls, manifest.observed, names,
-                                                 targets=pedigree_targets(output, names))
+            report["pedigree"] = pedigree_counts(sample_ids, calls, manifest.observed, names)
         elif not automatic:
             raise FileNotFoundError("no completed genome-wide pedigree")
     tasks = []

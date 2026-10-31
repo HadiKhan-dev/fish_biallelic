@@ -226,7 +226,8 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
                    graph_conflict: np.ndarray, informative: np.ndarray, rows: np.ndarray,
                    sample_ids: tuple[str, ...], eligibility: ParentEligibility,
                    dyads: np.ndarray, log_e: np.ndarray, observed_sites: np.ndarray,
-                   config: PedigreeConfig, *, log_e_upper: np.ndarray | None = None) -> CountRelease:
+                   config: PedigreeConfig, *, log_e_upper: np.ndarray | None = None,
+                   withheld: frozenset = frozenset()) -> CountRelease:
     """Release M0/M1 counts that the exclusion bounds and the supported directions settle.
 
     A target child is released when every eligible candidate was scored, it is safe (eligible,
@@ -234,13 +235,17 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
     candidates that survive exclusion
     (log E below log(2 N / alpha)) minus those it is the supported parent of form at most one
     sample, equal to both its supported marginal parents and its complete graph parents.
+
+    ``withheld``: (parent, child) edges the sibling guard withholds (pedigree.guard). The release uses the final
+    supported directions: a withheld edge neither removes its child as a reverse candidate of its parent nor counts
+    as a supported parent, and a child with a withheld edge is not released (the guard leaves its count unresolved).
     """
     n = len(sample_ids)
     evidence = {(int(c), int(p)): float(e) for (c, p), e in zip(dyads, log_e)}
     outgoing: list[set[int]] = [set() for _ in range(n)]
     for child in range(n):
         for slot in range(2):
-            if partial_b.supported[child, slot]:
+            if partial_b.supported[child, slot] and (int(partial_b.parents[child, slot]), child) not in withheld:
                 outgoing[int(partial_b.parents[child, slot])].add(child)
     threshold = math.log(2 * n / config.exclusion.alpha)
     if log_e_upper is not None:
@@ -269,7 +274,9 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
         compatible = {p for p in candidates if not covered or evidence[child, p] < threshold}
         reverse = compatible & outgoing[child]
         survivors = compatible - reverse
-        supported_parents = {int(p) for p in partial_b.parents[child][partial_b.supported[child]]}
+        named = {int(p) for p in partial_b.parents[child][partial_b.supported[child]]}
+        supported_parents = {p for p in named if (p, child) not in withheld}
+        guard_withheld = len(supported_parents) != len(named)
         complete_row = int(complete.row[child])
         selected = (set() if complete_row < 0 else
                     {int(p) for p in rows[complete_row, 1:] if p >= 0})
@@ -279,7 +286,7 @@ def release_counts(tier_b: TierCalls, partial_b: PartialEdges, complete: TierCal
                     and not graph_conflict[child])
         concordant = (survivors == supported_parents == selected
                       and complete.state[child] != UNRESOLVED and complete_count == len(survivors))
-        is_released = bool(covered and safe and len(survivors) <= 1 and concordant)
+        is_released = bool(covered and safe and len(survivors) <= 1 and concordant and not guard_withheld)
         excluded = [evidence[child, p] for p in candidates if covered and p not in compatible]
         names = lambda indices: tuple(sorted(name(i) for i in indices))  # noqa: E731
         records.append(dict(

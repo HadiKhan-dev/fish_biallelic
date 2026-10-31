@@ -8,8 +8,8 @@ benchmark, pedigree or simulation truth. A site is removed when any applied rule
       depth factor, above its clean core;
   r3  wrong-allele reads in samples classified homozygous: a negative-binomial artefact class is
       more likely than the Poisson clean core;
-  r4  heterozygote allele balance: a beta-binomial artefact class is more likely than the
-      binomial clean core;
+  r4  heterozygote allele balance: of two beta-binomial classes (each including its binomial
+      limit), the minority artefact class is more likely than the majority clean class;
   r5  (informativeness, switchable) fewer than two expected carriers of a non-major genotype
       (among samples the per-sample contamination QC does not flag).
 
@@ -32,6 +32,7 @@ import numpy as np
 from numba import njit, prange, config as numba_config
 from numba.extending import get_cython_function_address
 from scipy import special
+from scipy.optimize import minimize
 
 from ..maths import ties
 from ..execution import numba_threads
@@ -39,7 +40,9 @@ from ..execution.budget import current_budget, CpuBudget
 from .config import SampleQualityConfig, SiteQualityConfig
 from . import sample_quality
 
-VERSION = "self-calibrated-site-quality-v2"  # v2: release 2.18 r3 clean expectation with heterozygote leakage
+# v2: release 2.18 r3 clean expectation with heterozygote leakage; v3: release 3.4 r4 as two beta-binomials, the clean
+# class the majority by weight; v4: abstain when the means strongly contradict those labels
+VERSION = "self-calibrated-site-quality-v4"
 RULES = ("r1", "r2", "r3", "r4", "r5")
 QUALITY_RULES = RULES[:4]          # r1-r4; r5 is informativeness
 
@@ -380,8 +383,8 @@ def _core_record(core):
 
 
 # ---------------------------------------------------------------------------------------------
-# Clean-core / artefact mixtures (log pmfs; the parameter-free leading terms log W! and
-# log C(H, A) are evaluated once per fit)
+# Clean-core / artefact mixture of r3 (log pmfs; the parameter-free leading term log W! is
+# evaluated once per fit)
 # ---------------------------------------------------------------------------------------------
 
 def _log_poisson_pmf(W, mu, log_w_factorial):
@@ -393,25 +396,14 @@ def _log_negative_binomial_pmf(W, mu, k, log_w_factorial):
             + k * np.log(k / (k + mu)) + W * np.log(mu / (k + mu)))
 
 
-def _log_binomial_pmf(A, H, h, log_choose):
-    return log_choose + A * np.log(h) + (H - A) * np.log(1 - h)
-
-
-def _log_beta_binomial_pmf(A, H, m, c, log_choose):
-    a = m * c; b = (1 - m) * c
-    return log_choose + special.betaln(A + a, H - A + b) - special.betaln(a, b)
-
-
 def _posterior_clean(log_clean, log_artefact):
     return 1 / (1 + np.exp(np.clip(log_artefact - log_clean, -700, 700)))
 
 
-# Use the same SciPy scalar special functions as its NumPy ufuncs. Passing the
-# pointers as kernel arguments keeps cached machine code process-independent.
+# Use the same SciPy scalar special function as its NumPy ufunc. Passing the
+# pointer as a kernel argument keeps cached machine code process-independent.
 _GAMMALN = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double, ctypes.c_int)(
     get_cython_function_address("scipy.special.cython_special", "gammaln"))
-_BETALN = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int)(
-    get_cython_function_address("scipy.special.cython_special", "betaln"))
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -422,14 +414,6 @@ def _negative_binomial_values(W, lam, kap, lw, rate, shape, gamma_shape, functio
         result[i] = (function(W[i] + shape, 1) - gamma_shape - lw[i]
                      + shape * math.log(shape / (shape + mu))
                      + W[i] * math.log(mu / (shape + mu)))
-    return result
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def _beta_values(A, H, a, b, function):
-    result = np.empty(len(A))
-    for i in prange(len(A)):
-        result[i] = function(A[i] + a, H[i] - A[i] + b, 1)
     return result
 
 
@@ -464,19 +448,14 @@ class _Chunks:
             return _negative_binomial_values(W, lam, kap, lw, rate, shape,
                                              special.gammaln(shape), _GAMMALN)
 
-    def beta_binomial(self, A, H, lc, mean, concentration):
-        a = mean * concentration; b = (1 - mean) * concentration
-        with numba_threads(self.budget.threads()):
-            beta = _beta_values(A, H, a, b, _BETALN)
-        return lc + beta - special.betaln(a, b)
-
 
 # ---------------------------------------------------------------------------------------------
-# Exact artefact M-steps (release 2.11). Each maximises the weighted artefact log likelihood over its two
-# parameters on the log/logit scale, jointly within the box of the stored dispersion clips, by projected Newton steps
-# with analytic gradients and Hessians, and records whether the result is certified stationary. Releases 2.3-2.10
-# instead searched the unbounded parameters with Nelder-Mead (xatol 1e-4) and then clipped the dispersion alone, so
-# the stored rate or mean could be non-stationary for the stored dispersion; a different, not just more precise, M-step.
+# Exact artefact M-step of r3 (release 2.11; r4 used the same scheme until release 3.4). It maximises the weighted
+# artefact log likelihood over its two parameters on the log scale, jointly within the box of the stored dispersion
+# clip, by projected Newton steps with analytic gradients and Hessians, and records whether the result is certified
+# stationary. Releases 2.3-2.10 instead searched the unbounded parameters with Nelder-Mead (xatol 1e-4) and then clipped
+# the dispersion alone, so the stored rate could be non-stationary for the stored dispersion; a different, not just
+# more precise, M-step.
 # ---------------------------------------------------------------------------------------------
 
 @njit(cache=True)
@@ -535,30 +514,6 @@ def _negative_binomial_terms(W, lam, kap, w, rate, k):
     return out
 
 
-@njit(cache=True, parallel=True, nogil=True)
-def _beta_binomial_terms(A, H, w, a, b):
-    """Weighted sums over fixed site chunks of the site parts of log B(A + a, H - A + b) and their derivatives in
-    (a, b): rows of (value, da, db, daa, dbb, dab)."""
-    n = len(A)
-    out = np.zeros((_M_STEP_CHUNKS, 6))
-    for chunk in prange(_M_STEP_CHUNKS):
-        s0 = s1 = s2 = s3 = s4 = s5 = 0.0
-        for i in range(chunk * n // _M_STEP_CHUNKS, (chunk + 1) * n // _M_STEP_CHUNKS):
-            if w[i] == 0.0:
-                continue
-            x, y, t = A[i] + a, H[i] - A[i] + b, H[i] + a + b
-            digamma_t, trigamma_t = _digamma(t), _trigamma(t)
-            s0 += w[i] * (math.lgamma(x) + math.lgamma(y) - math.lgamma(t))
-            s1 += w[i] * (_digamma(x) - digamma_t)
-            s2 += w[i] * (_digamma(y) - digamma_t)
-            s3 += w[i] * (_trigamma(x) - trigamma_t)
-            s4 += w[i] * (_trigamma(y) - trigamma_t)
-            s5 -= w[i] * trigamma_t
-        out[chunk, 0], out[chunk, 1], out[chunk, 2] = s0, s1, s2
-        out[chunk, 3], out[chunk, 4], out[chunk, 5] = s3, s4, s5
-    return out
-
-
 def _chunk_totals(rows):
     total = np.zeros(rows.shape[1])
     for row in rows:                 # fixed order
@@ -570,25 +525,6 @@ def _negative_binomial_objective(q, W, lam, kap, w, weight_total):
     """Weighted artefact log likelihood of r3 at q = (log eps1, log k), its gradient and Hessian."""
     total = _chunk_totals(_negative_binomial_terms(W, lam, kap, w, math.exp(q[0]), math.exp(q[1])))
     return total[0], total[1:3], np.array([[total[3], total[5]], [total[5], total[4]]])
-
-
-def _beta_binomial_objective(q, A, H, w, weight_total):
-    """Weighted artefact log likelihood of r4 at q = (logit mean, log concentration), its gradient and Hessian."""
-    mean, concentration = 1.0 / (1.0 + math.exp(-q[0])), math.exp(q[1])
-    a, b = mean * concentration, (1.0 - mean) * concentration
-    total = _chunk_totals(_beta_binomial_terms(A, H, w, a, b))
-    value = total[0] - weight_total * (math.lgamma(a) + math.lgamma(b) - math.lgamma(concentration))
-    fa = total[1] - weight_total * (_digamma(a) - _digamma(concentration))
-    fb = total[2] - weight_total * (_digamma(b) - _digamma(concentration))
-    faa = total[3] - weight_total * (_trigamma(a) - _trigamma(concentration))
-    fbb = total[4] - weight_total * (_trigamma(b) - _trigamma(concentration))
-    fab = total[5] + weight_total * _trigamma(concentration)
-    d = concentration * mean * (1.0 - mean)          # da/du = -db/du for u = logit mean; da/dv = a, db/dv = b
-    gradient = np.array([(fa - fb) * d, fa * a + fb * b])
-    huu = (faa - 2 * fab + fbb) * d * d + (fa - fb) * d * (1.0 - 2.0 * mean)
-    huv = (faa * a + fab * (b - a) - fbb * b) * d + (fa - fb) * d
-    hvv = faa * a * a + 2 * fab * a * b + fbb * b * b + fa * a + fb * b
-    return value, gradient, np.array([[huu, huv], [huv, hvv]])
 
 
 def _newton_maximum(objective, start, lower, upper, scale):
@@ -652,16 +588,14 @@ def _tally(statuses, status, gradient):
     statuses["worst_gradient"] = max(statuses.get("worst_gradient", 0.0), gradient)
 
 
-# Search boxes of the M-steps: the shape and concentration boxes are the clips of the fitted values; the rate and mean
-# boxes only keep the arithmetic finite.
-# np.log as for the M-steps' starts, so that a clipped dispersion starts exactly on its bound.
+# Search box of the r3 M-step: the shape box is the clip of the fitted value; the rate box only keeps the arithmetic
+# finite. np.log as for the M-step's start, so that a clipped dispersion starts exactly on its bound.
 _ERROR_LOWER, _ERROR_UPPER = np.log([1e-12, 1e-3]), np.log([10.0, 1e4])
 # Release 2.18: the r3 clean rate's search interval (the artefact rate's lower bound; a rate of one half is no
 # longer an error), and the relative size below which a site's leakage slope kap is numerical zero (no
 # information on the error rate, e.g. only depth-1 cells at a balanced site).
 _CLEAN_RATE_BOUNDS = (1e-12, 0.5)
 _LEAKAGE_SLOPE_FLOOR = 1e-9
-_BALANCE_LOWER, _BALANCE_UPPER = np.array([-30.0, np.log(1e-2)]), np.array([30.0, np.log(1e5)])
 
 
 def _clean_rate(W, lam, kap, wc, start):
@@ -734,37 +668,275 @@ def _error_mixture(W, lam, kap, evaluate):
                 clean_leakage=float((wc * lam).sum() / clean) if clean > 0 else 0.0), wc
 
 
-def _balance_mixture(A, H, evaluate):
-    """Clean: A ~ Binomial(H, h0). Artefact: beta-binomial with its own mean and concentration."""
-    pi = 0.6; h0 = float(np.clip(A.sum() / H.sum(), 0.2, 0.8)); m1 = 0.75 * h0; c1 = 5.0
-    lc = special.gammaln(H + 1) - special.gammaln(A + 1) - special.gammaln(H - A + 1)
-    m_steps = {}
+# ---------------------------------------------------------------------------------------------
+# r4 heterozygote balance (release 3.4: the two-component fit of the deferred 2.4 replacement, with the clean class
+# identified by weight). A site's pooled heterozygote counts are A ~ Binomial(H, theta), theta from a mixture of two
+# Beta(mean m, inverse concentration t) components, latent variance m (1 - m) t / (1 + t); t = 0 is exactly the
+# binomial. The kernels are relative to Binomial(H, 1/2) and use gamma-ratio remainders, so non-integer expected
+# counts and very high concentrations keep full precision. Sites are taken in canonical (H, A) order; each fixed
+# start is fitted jointly in all five parameters by L-BFGS-B and polished by positive-curvature Newton steps on the
+# score.
+# ---------------------------------------------------------------------------------------------
 
-    def artefact(mean, concentration):
-        return evaluate.beta_binomial(A, H, lc, mean, concentration)
-    for it in range(_MIXTURE_ITERATIONS):
-        wc = _posterior_clean(np.log(pi) + _log_binomial_pmf(A, H, h0, lc),
-                              np.log1p(-pi) + artefact(m1, c1))
-        pi2 = float(np.clip(wc.mean(), 1e-6, 1 - 1e-6)); h02 = float((wc * A).sum() / (wc * H).sum())
-        wa = 1 - wc
-        if wa.sum() > 1e-6:
-            weight = float(wa.sum())
-            with numba_threads(evaluate.budget.threads()):
-                q, status, gradient = _newton_maximum(
-                    lambda q: _beta_binomial_objective(q, A, H, wa, weight),
-                    [np.log(m1 / (1 - m1)), np.log(c1)], _BALANCE_LOWER, _BALANCE_UPPER, weight)
-            _tally(m_steps, status, gradient)
-            m12 = float(1 / (1 + np.exp(-q[0]))); c12 = float(np.clip(np.exp(q[1]), 1e-2, 1e5))
-        else:
-            m12, c12 = m1, c1
-        change = abs(h02 - h0) + abs(pi2 - pi) + abs(m12 - m1)
-        pi, h0, m1, c1 = pi2, h02, m12, c12
-        if change < 1e-6:
+# B_2k / (2k (2k - 1)): the coefficients of the Stirling log-gamma remainder in the inverse argument.
+_BALANCE_STIRLING = np.array([1 / 12, -1 / 360, 1 / 1260, -1 / 1680, 1 / 1188, -691 / 360360, 1 / 156,
+                              -3617 / 122400], dtype=np.float64)
+_BALANCE_T_SCALE = 0.001       # scale of the coordinate log1p(t / scale), not a bound on the concentration
+# Numerical limits of the coordinates (logit pi, logit m1, log1p(t1 / scale), logit m2, log1p(t2 / scale)): +/-18 on
+# the logits, t at most 1e6. t = 0 is the exact binomial boundary (a scientific value, not a clip).
+_BALANCE_BOUNDS = ((-18.0, 18.0), (-18.0, 18.0), (0.0, math.log1p(1e6 / _BALANCE_T_SCALE)),
+                   (-18.0, 18.0), (0.0, math.log1p(1e6 / _BALANCE_T_SCALE)))
+# A start is certified when the projected gradient of the mean per-site log likelihood is at most this.
+_BALANCE_GRADIENT = 1e-8
+
+
+@njit(cache=True)
+def _balance_log1pmx_over_square(r):
+    """(log(1 + r) - r) / r^2; near zero its Horner series through r^8."""
+    if abs(r) < 0.01:
+        return -0.5 + r * (1 / 3 + r * (-0.25 + r * (0.2 + r * (-1 / 6 + r * (1 / 7 + r * (-0.125 + r * (
+            1 / 9 - r * 0.1)))))))
+    return (math.log1p(r) - r) / (r * r)
+
+
+@njit(cache=True)
+def _balance_gamma_ratio_remainder(t, y):
+    """J(t, y) = log Gamma(1/t + y) - log Gamma(1/t) + y log t and dJ/dt; J(0, y) = 0 with the exact limiting
+    derivative y (y - 1) / 2 (the binomial boundary)."""
+    if t == 0.0:
+        return 0.0, 0.5 * y * (y - 1.0)
+    if t > 0.125:
+        x = 1.0 / t
+        value = math.lgamma(x + y) - math.lgamma(x) + y * math.log(t)
+        derivative = (_digamma(x) - _digamma(x + y) + y * t) / (t * t)
+        return value, derivative
+    r = y * t
+    lr = math.log1p(r)
+    q = _balance_log1pmx_over_square(r)
+    value = (y - 0.5) * lr + y * y * t * q
+    derivative = -0.5 * y / (1.0 + r) - y * y * q
+    power = t
+    for i in range(len(_BALANCE_STIRLING)):
+        k = 2 * i + 1
+        coefficient = _BALANCE_STIRLING[i]
+        value += coefficient * power * math.expm1(-k * lr)
+        derivative += k * coefficient * (power / t) * math.expm1(-(k + 1) * lr)
+        power *= t * t
+    return value, derivative
+
+
+@njit(cache=True)
+def _balance_beta_kernel(a, h, m, t):
+    """A component's log likelihood of (A, H) = (a, h) relative to Binomial(h, 1/2), and its derivatives in m and t."""
+    b = h - a
+    q = 1.0 - m
+    ja, da = _balance_gamma_ratio_remainder(t / m, a)
+    jb, db = _balance_gamma_ratio_remainder(t / q, b)
+    jh, dh = _balance_gamma_ratio_remainder(t, h)
+    value = a * math.log(2 * m) + b * math.log(2 * q) + ja + jb - jh
+    dm = a / m - b / q - t * da / (m * m) + t * db / (q * q)
+    dt = da / m + db / q - dh
+    return value, dm, dt
+
+
+@njit(cache=True, parallel=True)
+def _balance_mixture_terms(a, h, pi, m0, t0, m1, t1):
+    """Per site: the mixture log likelihood (relative to Binomial(h, 1/2)) and its derivatives in the five
+    coordinates (logit pi, logit m0, log1p(t0 / scale), logit m1, log1p(t1 / scale))."""
+    out = np.empty((len(a), 6), np.float64)
+    lpi = math.log(pi)
+    lq = math.log1p(-pi)
+    for i in prange(len(a)):
+        v0, d0, e0 = _balance_beta_kernel(a[i], h[i], m0, t0)
+        v1, d1, e1 = _balance_beta_kernel(a[i], h[i], m1, t1)
+        x = lpi + v0
+        y = lq + v1
+        z = max(x, y)
+        u = math.exp(x - z)
+        v = math.exp(y - z)
+        den = u + v
+        w = u / den
+        out[i, 0] = z + math.log(den)
+        out[i, 1] = w - pi
+        out[i, 2] = w * d0 * m0 * (1 - m0)
+        out[i, 3] = w * e0 * (_BALANCE_T_SCALE + t0)
+        out[i, 4] = (1 - w) * d1 * m1 * (1 - m1)
+        out[i, 5] = (1 - w) * e1 * (_BALANCE_T_SCALE + t1)
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _balance_posterior(a, h, pi, m0, t0, m1, t1):
+    """Per site: the posterior probability of the first component."""
+    out = np.empty(len(a))
+    for i in prange(len(a)):
+        v0, _, _ = _balance_beta_kernel(a[i], h[i], m0, t0)
+        v1, _, _ = _balance_beta_kernel(a[i], h[i], m1, t1)
+        difference = math.log1p(-pi) + v1 - math.log(pi) - v0
+        out[i] = 1.0 / (1.0 + math.exp(min(max(difference, -700.0), 700.0)))
+    return out
+
+
+def _balance_encode(pi, m0, t0, m1, t1):
+    return np.array([math.log(pi / (1 - pi)), math.log(m0 / (1 - m0)), math.log1p(t0 / _BALANCE_T_SCALE),
+                     math.log(m1 / (1 - m1)), math.log1p(t1 / _BALANCE_T_SCALE)])
+
+
+def _balance_decode(p):
+    return (1 / (1 + math.exp(-p[0])), 1 / (1 + math.exp(-p[1])), _BALANCE_T_SCALE * math.expm1(p[2]),
+            1 / (1 + math.exp(-p[3])), _BALANCE_T_SCALE * math.expm1(p[4]))
+
+
+def _balance_objective(p, a, h):
+    """Minus the mean per-site mixture log likelihood at coordinates p, and its gradient."""
+    totals = _balance_mixture_terms(a, h, *_balance_decode(p)).sum(axis=0) / len(a)
+    return -totals[0], -totals[1:]
+
+
+def _balance_projected_gradient(p, g):
+    out = np.array(g, copy=True)
+    for i, (low, high) in enumerate(_BALANCE_BOUNDS):
+        if (p[i] <= low and g[i] > 0) or (p[i] >= high and g[i] < 0):
+            out[i] = 0.0
+    return out
+
+
+def _balance_polish(p, a, h):
+    """At most eight positive-curvature Newton steps on the score (finite-difference Hessian of the analytic
+    gradient), active bounds held, each step accepted only when it reduces the projected gradient. Near the optimum
+    the objective's improvements, of order score^2, fall below floating-point resolution, so solving the score avoids
+    a false stop on rounded likelihood changes."""
+    p = np.array(p, copy=True)
+    value, g = _balance_objective(p, a, h)
+    iterations = 0
+    smallest_eigenvalue = None
+    for _ in range(8):
+        pg = _balance_projected_gradient(p, g)
+        if np.max(np.abs(pg)) < 1e-11:
             break
-    wc = _posterior_clean(np.log(pi) + _log_binomial_pmf(A, H, h0, lc),
-                          np.log1p(-pi) + artefact(m1, c1))
-    return dict(pi_clean=pi, h0=h0, artefact_mean=m1, artefact_concentration=c1, iterations=it + 1,
-                m_steps=m_steps), wc
+        free = np.array([i for i, (low, high) in enumerate(_BALANCE_BOUNDS)
+                         if not ((p[i] <= low and g[i] >= 0) or (p[i] >= high and g[i] <= 0))])
+        if not len(free):
+            break
+        hessian = np.empty((len(free), len(free)))
+        for j, index in enumerate(free):
+            step = 1e-4 * max(1.0, abs(p[index]))
+            low, high = _BALANCE_BOUNDS[index]
+            left = p.copy()
+            right = p.copy()
+            left[index] = max(low, p[index] - step)
+            right[index] = min(high, p[index] + step)
+            hessian[:, j] = ((_balance_objective(right, a, h)[1][free] - _balance_objective(left, a, h)[1][free])
+                             / (right[index] - left[index]))
+        hessian = (hessian + hessian.T) * 0.5
+        eigenvalues = np.linalg.eigvalsh(hessian)
+        smallest_eigenvalue = float(eigenvalues[0])
+        if eigenvalues[0] <= 0:
+            break
+        delta = np.linalg.solve(hessian, -g[free])
+        alpha = 1.0
+        for j, index in enumerate(free):
+            low, high = _BALANCE_BOUNDS[index]
+            if delta[j] < 0:
+                alpha = min(alpha, (low - p[index]) / delta[j])
+            if delta[j] > 0:
+                alpha = min(alpha, (high - p[index]) / delta[j])
+        accepted = False
+        for _backtrack in range(8):
+            candidate = p.copy()
+            candidate[free] += alpha * delta
+            for index in free:
+                candidate[index] = min(max(candidate[index], _BALANCE_BOUNDS[index][0]), _BALANCE_BOUNDS[index][1])
+            candidate_value, candidate_g = _balance_objective(candidate, a, h)
+            if np.linalg.norm(_balance_projected_gradient(candidate, candidate_g)) < np.linalg.norm(pg):
+                p, value, g = candidate, candidate_value, candidate_g
+                accepted = True
+                iterations += 1
+                break
+            alpha *= 0.5
+        if not accepted:
+            break
+    return p, float(value), g, iterations, smallest_eigenvalue
+
+
+def _balance_fit(A, H):
+    """The two-component fit from fixed starts. Each start's parameters (pi, m0, t0, m1, t1) are labelled by weight:
+    the majority component first (pi >= 1/2; at exactly equal weights, the smaller (latent variance, mean, t) first).
+    Returns the best start's record (the highest likelihood among certified starts, else among all; exact ties by the
+    parameters, then the start), all starts' records, whether any start is certified, and each site's posterior of
+    the first component in input order."""
+    a = np.asarray(A, float)
+    h = np.asarray(H, float)
+    if len(a) == 0 or not np.all((h >= 1) & (a >= 0) & (a <= h)):
+        raise ValueError("expected H >= 1 and 0 <= A <= H")
+    order = np.lexsort((a, h))         # canonical order: no dependence on site order
+    aa = np.ascontiguousarray(a[order])
+    hh = np.ascontiguousarray(h[order])
+    mean = float(aa.sum() / hh.sum())
+    low, high = 1 / (1 + math.exp(18.0)), 1 / (1 + math.exp(-18.0))
+    starts = sorted(set(
+        (float(pi), float(np.clip(m0, low, high)), float(t0), float(np.clip(m1, low, high)), float(t1))
+        for pi, m0, t0, m1, t1 in ((0.9, mean, 0.0, mean - 0.02, 0.01), (0.8, mean, 0.001, mean - 0.03, 0.02),
+                                   (0.6, mean, 0.003, mean - 0.05, 0.05), (0.95, mean, 0.0, mean + 0.02, 0.03),
+                                   (0.5, mean - 0.03, 0.01, mean + 0.02, 0.001))))
+    results = []
+    for start in starts:
+        r = minimize(_balance_objective, _balance_encode(*start), args=(aa, hh), jac=True, method="L-BFGS-B",
+                     bounds=_BALANCE_BOUNDS, options=dict(ftol=2e-15, gtol=1e-9, maxiter=1000, maxls=40, maxcor=20))
+        value, g = _balance_objective(r.x, aa, hh)
+        projected = float(np.max(np.abs(_balance_projected_gradient(r.x, g))))
+        retries = 0
+        while projected > _BALANCE_GRADIENT and retries < 3:   # defeat relative-objective stops before stationarity
+            r = minimize(_balance_objective, r.x, args=(aa, hh), jac=True, method="L-BFGS-B", bounds=_BALANCE_BOUNDS,
+                         options=dict(ftol=0.0, gtol=1e-10, maxiter=500, maxls=60, maxcor=10))
+            value, g = _balance_objective(r.x, aa, hh)
+            projected = float(np.max(np.abs(_balance_projected_gradient(r.x, g))))
+            retries += 1
+        polished, value, g, polish_iterations, curvature = _balance_polish(r.x, aa, hh)
+        projected = float(np.max(np.abs(_balance_projected_gradient(polished, g))))
+        pi, m0, t0, m1, t1 = _balance_decode(polished)
+        if pi < 0.5 or (pi == 0.5 and (m0 * (1 - m0) * t0 / (1 + t0), m0, t0)
+                        > (m1 * (1 - m1) * t1 / (1 + t1), m1, t1)):
+            pi, m0, t0, m1, t1 = 1 - pi, m1, t1, m0, t0
+        results.append(dict(start=list(start), parameters=[pi, m0, t0, m1, t1], objective=float(value),
+                            projected_gradient=projected, converged=bool(projected <= _BALANCE_GRADIENT),
+                            optimizer_success=bool(r.success), message=str(r.message), iterations=int(r.nit),
+                            retries=retries, polish_iterations=polish_iterations, minimum_curvature=curvature))
+    certified = [result for result in results if result["converged"]]
+    best = min(certified or results,
+               key=lambda result: (result["objective"], tuple(result["parameters"]), tuple(result["start"])))
+    return best, results, bool(certified), _balance_posterior(a, h, *best["parameters"])
+
+
+def _balance_mixture(A, H, separation):
+    """r4's fit and gate on its domain (expected heterozygote ALT reads A and depth H, H >= 1). The clean class is the
+    majority component, with mean h0 (the balance the sample QC uses). The artefact class separates when its latent SD,
+    or its mean offset, is at least ``separation`` times max(clean latent SD, binomial SD at the median H). This
+    contig-level working gate can miss well-resolved high-H sites. Returns the record and P(clean) per site;
+    r4 abstains when no start is certified or the majority mean is farther from 1/2 than the minority mean by
+    at least ``separation`` times that scale. Labels and the h0 supplied to sample QC are unchanged."""
+    best, starts, certified, clean = _balance_fit(A, H)
+    pi, m0, t0, m1, t1 = best["parameters"]
+    clean_sd = math.sqrt(m0 * (1 - m0) * t0 / (1 + t0))
+    artefact_sd = math.sqrt(m1 * (1 - m1) * t1 / (1 + t1))
+    binomial_sd = math.sqrt(m0 * (1 - m0) / float(np.median(H)))
+    scale = max(clean_sd, binomial_sd)
+    record = dict(model="two-beta-binomial", pi_clean=pi, h0=m0, clean_inverse_concentration=t0, clean_sd=clean_sd,
+                  artefact_mean=m1, artefact_inverse_concentration=t1, artefact_sd=artefact_sd,
+                  binomial_sd_at_median_reads=binomial_sd, separation_scale=scale, objective=best["objective"],
+                  projected_gradient=best["projected_gradient"], starts=starts)
+    for component, inverse in (("clean", t0), ("artefact", t1)):
+        record[component + "_binomial"] = inverse == 0.0
+        # None denotes an infinite concentration (the binomial) in the JSON record.
+        record[component + "_concentration"] = None if inverse == 0.0 else 1.0 / inverse
+    if abs(m0 - 0.5) - abs(m1 - 0.5) >= separation * scale:
+        record.update(applied=False, reason="unresolved class labelling: the majority mean is farther from 1/2 "
+                      "than the minority mean by at least the minimum artefact separation times the scale")
+    elif certified:
+        record["applied"] = bool(artefact_sd >= separation * scale or abs(m1 - m0) >= separation * scale)
+    else:
+        record.update(applied=False, reason="no start of the balance fit reached its stationarity certificate")
+    return record, clean
 
 
 # ---------------------------------------------------------------------------------------------
@@ -888,18 +1060,12 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=Non
         else:
             error = dict(applied=False, reason="no site with expected homozygote reads >= 1 and a leakage "
                                                  "slope above 1e-9 of them")
-        # r4 heterozygote allele balance
-        m4 = base & ~r3 & (H >= 1)
-        if m4.any():
-            balance, clean = _balance_mixture(A[m4], H[m4], _Chunks(pool, int(m4.sum()), threads))
+    # r4 heterozygote allele balance (its compiled kernels take the live CPU allowance when the fit starts)
+    m4 = base & ~r3 & (H >= 1)
     if m4.any():
-        typical = float(np.median(H[m4]))
-        balance["binomial_sd_at_median_reads"] = float(np.sqrt(balance["h0"] * (1 - balance["h0"]) / typical))
-        balance["artefact_sd"] = float(np.sqrt(balance["artefact_mean"] * (1 - balance["artefact_mean"])
-                                               / (balance["artefact_concentration"] + 1)))
-        balance["applied"] = bool(
-            balance["artefact_sd"] >= separation * balance["binomial_sd_at_median_reads"]
-            or abs(balance["artefact_mean"] - balance["h0"]) >= separation * balance["binomial_sd_at_median_reads"])
+        budget = current_budget()
+        with numba_threads(budget.threads() if budget.live else min(threads, budget.threads())):
+            balance, clean = _balance_mixture(A[m4], H[m4], separation)
         if balance["applied"]:
             r4[np.where(m4)[0][clean < config.clean_posterior_level]] = True
     else:
@@ -942,7 +1108,8 @@ def filter_sites(positions, counts, config: SiteQualityConfig, sample_config: Sa
 
     positions int64[L], counts int32[N, L, 2] of the analysed samples. With an enabled
     ``sample_config``, the per-sample QC is decided on this contig's r1-r4-passing SNPs with r4's
-    clean heterozygote balance, and r5 counts carriers among unflagged samples only.
+    clean heterozygote balance (its interval when r4 records an unresolved fit) and r3's clean error rate, and r5
+    counts carriers among unflagged samples only.
     """
     n_sites = len(positions)
     if not config.enabled:
@@ -958,9 +1125,13 @@ def filter_sites(positions, counts, config: SiteQualityConfig, sample_config: Sa
     samples = None
     if sample_config.enabled:
         passing = ~np.any([flags[rule] for rule in QUALITY_RULES], axis=0)
+        # r3's clean rate is the carrier rule's error rate (the classification error when r3 has no fit); r4's
+        # balance is widened to both component means when r4 records an unresolved fit.
+        interval, why = sample_quality.balance_support(parameters["balance"])
         samples = sample_quality.assess_counts(
-            counts, positions, passing, parameters["balance"]["h0"], sample_config,
-            chunk_sites=_tile_sites(counts.shape[0]))
+            counts, positions, passing, parameters["balance"]["h0"],
+            parameters["error"].get("eps0", config.classification_error), sample_config,
+            balance_interval=interval, balance_reason=why, chunk_sites=_tile_sites(counts.shape[0]))
         counted = ~samples.flagged
         if not np.all(counted):
             tile = _tile_sites(counts.shape[0])

@@ -71,8 +71,11 @@ same prepared row at a site share one latent allele there). A `CountCall` record
 last count step (founder refinement at the final level): K before and after, each decision (kind,
 K, kept or added, skipped by a bound, margin, bootstrap band, ambiguity), count cycles and the
 overall ambiguity; components with one block or one founder carry the reason
-`single_block_or_founder` instead. Stage inputs are never modified: completion returns prepared
-panels without touching the local panels, and phase breaks are carried on fresh components.
+`single_block_or_founder` instead. The local panels and every scientific input are never modified:
+completion returns prepared panels without touching the local panels, and phase breaks are carried on fresh
+components. The final assembly consumes one workspace of the evidence view it is given: it releases the view's
+neutral float64 copy after its last level's join ([memory](#implementation-and-cost)), so that view cannot start
+another assembly afterwards.
 
 ## Founder completion
 
@@ -290,9 +293,9 @@ samples.
   forward M-step, or after `AssemblyConfig.linker.max_iterations = 50` applied updates. The
   cap increased from 20 to 50 in 2.7. Full steps replace the decaying rate in 2.8 without
   changing the M-map, uniform initialization or stopping tolerance. Finite-tolerance answers
-  and downstream decisions can change, especially for previously capped fits. Neither
+  and downstream decisions can change, especially for iteration-limited fits. Neither
   satisfying the residual criterion nor using a higher cap proves a unique fixed point.
-  Column-normalised reverse summaries no longer enter the stopping rule: they are not parameters
+  Column-normalised reverse summaries do not enter the stopping rule: they are not parameters
   of this fixed-point problem. A uniform starting point that already satisfies the criterion
   takes zero updates.
 
@@ -689,7 +692,14 @@ overcommitting memory; this never changes a result.
 **Memory.** The contig's assembly evidence (`assembly/evidence.py`, `AssemblyEvidence`: the neutral float64
 likelihoods, their float32 copy and the observation mask) lives in shared memory from the start; completion,
 hierarchy and founder-refinement workers attach it instead of copying it, and a completion task copies only its
-blocks' columns. Constructing completion depth keys transiently decodes the int32 REF/ALT counts
+blocks' columns. Production construction first reads the observation mask and depth counts, hashes the depth
+rows and releases the counts. It then decodes the likelihoods directly into shared neutral storage, applies the
+founder/discovery mask in place, and casts that buffer once to float32. The view has 37 bytes per sample/site;
+the transient source observation mask adds one byte, plus bounded codec scratch. Packed small-array groups
+fall back to checked decoding and copying; callers supplying decoded evidence keep the staged copy path.
+Both routes produce the same values. The final assembly frees the neutral float64 copy (24 bytes per sample/site) after its last
+level's join, its last reader, before that level's founder refinement (which reads the float32 copy only;
+release 3.4, memory only). Constructing completion depth keys transiently decodes the int32 REF/ALT counts
 (8 bytes per sample/site), uses one int64 depth row plus a mask as scratch, and retains only
 32 key bytes per sample. Reconstruction planning and memory admission include that transient
 count/scratch footprint. Every task reserves an upper estimate of its peak memory with the run's
@@ -740,7 +750,7 @@ Search budgets and incomplete families are reported explicitly. A search stopped
 computational bound is not certified by the work that was left unperformed.
 
 **Memory.** Completion's growing ball stores O(C r + K) support entries per site, plus
-O(K^2) pair statistics; it no longer stores O(C K) allele rows and shell flags. Cross-fit EM retains
+O(K^2) pair statistics; it does not store O(C K) allele rows and shell flags. Cross-fit EM retains
 O(L K^2 + sum_l C_l r_l + N K^2) workspace, in addition to evidence. Cavity bin emissions retain
 the existing O(N K^2 min(L,50)) arrays. The evidence view holds 37 N L bytes (float64 and float32 likelihoods and the observed
 mask), shared by every worker. A join's packed binned emissions hold

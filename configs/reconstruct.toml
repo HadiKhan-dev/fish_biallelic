@@ -1,5 +1,6 @@
 # General AD-based reconstruction of any cross: `haplotypes run configs/reconstruct.toml`.
-# Paths are relative to the working directory. Inference is metadata-free unless eligibility is configured.
+# Paths are relative to the working directory. Inference reads only the VCF/BCF and the genetic map: sample names
+# are identifiers, and every sequenced sample is a candidate parent of every other.
 [run]
 output = "work/runs/cross"
 # stop_after = "painting"
@@ -8,10 +9,6 @@ output = "work/runs/cross"
 kind = "vcf"
 vcf = "work/data/cross.bcf"
 contigs = ["chr1", "chr2", "chr3"]       # required: the contigs to analyse, in order
-
-# [pedigree.eligibility]            # named constraints, never inferred from sample IDs
-# policy = "constraints"
-# constraints = "work/data/eligibility.json"
 
 # [quality]
 # read_calibration = true           # fit the read model from allele depths (default)

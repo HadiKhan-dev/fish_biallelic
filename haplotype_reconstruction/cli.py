@@ -143,7 +143,7 @@ def _command_run(args, parser) -> int:
     except ConfigError as error:
         parser.error(str(error))
     from .pipeline.driver import check_run, run_pipeline
-    try:   # fail-fast checks (inputs, workbook, eligibility, checkpoint directory, shard preconditions)
+    try:   # fail-fast checks (inputs, checkpoint directory, shard preconditions)
         prepared = check_run(config)
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(2, f"haplotypes run: {error}\n")

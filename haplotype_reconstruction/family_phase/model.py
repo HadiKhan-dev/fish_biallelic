@@ -5,8 +5,15 @@ that parent's homologues (its meiosis chain V switches with the Haldane fraction
 not a copy (V = 2: a painting or panel error, conversion or mutation, or a false edge), with a free label then.
 Homologue k of a sample without a slot-k parent is a free label path under the painting's copying process. Emissions
 are the painting's own tempered log emissions of the sample's unordered label pair. The MAP is found by exact block
-coordinate ascent over one block per sample (kernels.block_viterbi): a block's path is applied only when the full
-objective rises by more than the gain quantum, so the ascent is monotone and terminates.
+coordinate ascent over one block per sample (kernels.block_viterbi): a block's path is applied only when it raises the
+objective by more than the gain quantum, so the ascent is monotone and terminates.
+
+Local gains: J is a sum of per-sample terms, each reading only that sample's labels and chains (kernels.row_terms).
+A block of sample n changes only n's labels and chains, its children's chains (the gauge) and the copied labels of
+its descendants, so its gain is the change in the terms of those samples, O(B) per sample changed instead of O(N B)
+for the whole objective, and only their rows are saved and restored. The joint pairing moves below are evaluated the
+same way over the parent and its descendants. ``check_deltas`` (a reference path for validation) also evaluates every
+move with the full objective, as releases before 3.4 did, and records where the two rules decide differently.
 
 Identity junctions: a panel row is a trajectory through assembled blocks, not a certified biological homologue; rows
 can exchange founder identity at a block junction. Carriers of one of the two rows then switch between them at that
@@ -16,8 +23,21 @@ children) produces the same switch pattern with continuous rows, so the switches
 ``junction_candidates`` lists edges where at least ``junction_min_samples`` samples switch, by free or not-a-copy
 tracks, between the same two labels; the release withholds the phase join of every sample carrying both labels there
 (``withheld_joins``, release.py).
+
+Parents' pairings: where both homologues of a sample without a released parent change label at one bin edge, its own
+emissions (of unordered pairs) cost the same under both pairings of the old labels with the new, so only its children
+decide the pairing. A child copying the arbitrary one absorbs it with a label switch of its other homologue, and no
+block can undo that alone: the better configuration changes the parent and the child together. ``solve`` therefore
+ends with joint moves (``pairing_pass``) that swap the parent's homologues from that edge on and give every child its
+exact block optimum; a move is kept only when it raises J by more than log(set_posterior / (1 - set_posterior)), the
+odds at which the release continues a set. Pairings whose alternative is closer than that (``ambiguous_pairings``)
+are not decided by the data; the stage breaks the parent's and its children's phase sets there. The margin is a working
+value against one optimized alternative (the children are re-solved one block at a time, not marginalized jointly),
+not a calibrated posterior of the pairing.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -37,6 +57,10 @@ class LabelModel:
     and exit from not-a-copy. ``config`` FamilyPhaseConfig. ``reverse``: the tie convention of the ascent (None: the
     run's, maths.ties.reverse_conventions).
     """
+
+    # reference path (validation only): evaluate every move also by the full objective (O(N B) each) and record the
+    # agreement in ``delta_checks``; the ascent's decisions still follow the local gains
+    check_deltas = False
 
     def __init__(self, E, par, theta_l, theta_m, alpha, beta, config, reverse=None):
         self.E = np.ascontiguousarray(E, dtype=np.float64)
@@ -81,6 +105,7 @@ class LabelModel:
                                 dtype=np.int64)
         rank = np.empty(N, dtype=np.int64)
         rank[self.order] = np.arange(N)
+        self.rank = rank
         self.desc = []
         for n in range(N):
             seen, stack = set(), [n]
@@ -92,6 +117,8 @@ class LabelModel:
                         seen.add(c)
                         stack.append(c)
             self.desc.append(np.asarray(sorted(seen, key=lambda i: rank[i]), dtype=np.int64))
+        # the samples whose labels or chains a block of n (or a pairing move of n) can change: n and its descendants
+        self.affected = [np.concatenate(([n], self.desc[n])).astype(np.int64) for n in range(N)]
         self.mark = np.full(2 * N, -1, dtype=np.int8)
         self.X = np.zeros((N, 2, self.B), dtype=np.int64)
         self.V = np.full((N, 2, self.B), -1, dtype=np.int8)
@@ -101,11 +128,60 @@ class LabelModel:
                     self.V[n, k] = 0
         self.history = []
         self.settled = False
+        # parents' pairings at double label changes (pairing_pass): moves kept, and (parent, edge, gain) of every
+        # candidate in the final state
+        self.pairing_odds = float(np.log(config.set_posterior / (1.0 - config.set_posterior)))
+        self.pairing_moves = []
+        self.pairings = []
+        self.delta_checks = dict(moves=0, max_discrepancy=0.0, flips=[])
 
     # ------------------------------------------------------------------------------------------- objective
     def objective(self):
         return kernels.objective(self.E, self.X, self.V, self.par, self.lstay, self.lmove, self.mstay, self.mmove,
                                  self.ain, self.astay, self.bout, self.init_copy, self.init_bottom)
+
+    def _terms(self, X, V, rows):
+        return kernels.row_terms(self.E, X, V, self.par, rows, self.lstay, self.lmove, self.mstay, self.mmove,
+                                 self.ain, self.astay, self.bout, self.init_copy, self.init_bottom)
+
+    def _gain(self, rows, X0, V0):
+        """(change of J, positions in ``rows`` of the samples whose labels or chains changed) from the saved rows X0,
+        V0 of samples ``rows`` to the current state; every other sample's terms are unchanged. Each changed sample's
+        terms are differenced before summing (math.fsum), so unchanged samples add exactly nothing."""
+        X1, V1 = self.X[rows], self.V[rows]
+        changed = np.flatnonzero((X1 != X0).any(axis=(1, 2)) | (V1 != V0).any(axis=(1, 2)))
+        if not len(changed):
+            return 0.0, changed
+        sub = rows[changed]
+        after = self._terms(X1[changed], V1[changed], sub)
+        before = self._terms(X0[changed], V0[changed], sub)
+        return math.fsum(after - before), changed
+
+    def _restore(self, rows, X0, V0, changed):
+        sub = rows[changed]
+        self.X[sub] = X0[changed]
+        self.V[sub] = V0[changed]
+
+    def _check(self, kind, key, J0, gain, rule):
+        """Reference path: compare the local ``rule(gain)`` with the literal old block rule
+        J(now) > J0 + gain_quantum, or with ``rule(J(now) - J0)`` for D2 pairing moves. Records the largest gain
+        discrepancy and every move where the decisions differ; returns J(now). The production decision still uses
+        the local gain."""
+        J1 = self.objective()
+        full = J1 - J0
+        checks = self.delta_checks
+        checks["moves"] += 1
+        discrepancy = abs(full - gain)
+        checks["max_discrepancy"] = max(checks["max_discrepancy"], discrepancy)
+        full_decision = bool(J1 > J0 + self.config.gain_quantum) if kind == "block" else rule(full)
+        decision = rule(gain)
+        if full_decision != decision:
+            checks["flips"].append(dict(kind=kind, key=key, reverse=self.reverse, gain=gain, full_gain=full,
+                                        decision=decision, full_decision=full_decision))
+        if discrepancy > 1e-9 * (1.0 + abs(J0)):
+            raise AssertionError(f"family phase: local gain {gain!r} of {kind} {key} differs from the full "
+                                 f"objective's change {full!r}")
+        return J1
 
     def kinds(self, n):
         return np.asarray([1 if self.par[n, k] >= 0 else 0 for k in range(2)], dtype=np.int64)
@@ -188,23 +264,31 @@ class LabelModel:
 
     def sweeps(self):
         """Block coordinate ascent from the current state until a sweep applies no block (``settled``) or
-        ``max_sweeps`` sweeps have run (every applied block raised the objective, so the state is still valid)."""
-        J = self.objective()
+        ``max_sweeps`` sweeps have run (every applied block raised the objective, so the state is still valid). A
+        block is applied when its local gain (_gain over n and its descendants) exceeds the gain quantum; J itself is
+        evaluated once per sweep, for ``history``."""
         quantum = self.config.gain_quantum
+        accept = lambda change: change > quantum     # noqa: E731
+        J = self.objective()
         self.history.append(float(J))
         for _ in range(self.config.max_sweeps):
             accepted = 0
+            J_full = J                                  # reference path: J of the current state
             for n in self.order:
-                X0, V0 = self.X.copy(), self.V.copy()
+                n = int(n)
+                rows = self.affected[n]
+                X0, V0 = self.X[rows], self.V[rows]
                 kinds = self.kinds(n)
                 path0, path1, gpath, _ = self.block(n, kinds)
                 self.apply(n, path0, path1, gpath, kinds)
-                J1 = self.objective()
-                if J1 > J + quantum:
-                    J = J1
+                gain, changed = self._gain(rows, X0, V0)
+                J1 = self._check("block", n, J_full, gain, accept) if self.check_deltas else None
+                if accept(gain):
                     accepted += 1
+                    J_full = J1
                 else:
-                    self.X[:], self.V[:] = X0, V0
+                    self._restore(rows, X0, V0, changed)
+            J = self.objective()
             self.history.append(float(J))
             if accepted == 0:
                 self.settled = True
@@ -214,7 +298,81 @@ class LabelModel:
 
     def solve(self):
         self.initialise()
-        return self.sweeps()
+        J = self.sweeps()
+        for _ in range(self.config.max_sweeps):
+            if not self.pairing_pass():
+                break                               # the pass's gains were measured in the final state
+            J = self.sweeps()
+        else:
+            self.pairing_pass(keep=False)
+        return J
+
+    # ------------------------------------------------------------------------------------------- parents' pairings
+    def pairing_candidates(self):
+        """(p, j): every sample p without a released parent and with children (pedigree order) and every bin edge j
+        (ascending) where both of p's homologues change label."""
+        out = []
+        for p in self.order:
+            p = int(p)
+            if np.any(self.par[p] >= 0) or not len(self.child_tracks[p]):
+                continue
+            x0, x1 = self.X[p, 0], self.X[p, 1]
+            out.extend((p, int(j)) for j in np.flatnonzero((x0[1:] != x0[:-1]) & (x1[1:] != x1[:-1])) + 1)
+        return out
+
+    def children_of(self, p):
+        """p's children (samples with a homologue linked to p), in pedigree order."""
+        return sorted({int(t // 2) for t in self.child_tracks[p]}, key=lambda c: self.rank[c])
+
+    def _pairing_move(self, p, j):
+        """pairing_move, also returning the saved rows of p and its descendants (the only samples it can change)
+        and the positions of those that changed: (gain, rows, X0, V0, changed)."""
+        rows = self.affected[p]
+        X0, V0 = self.X[rows], self.V[rows]
+        self.X[p, :, j:] = self.X[p, ::-1, j:].copy()
+        self.propagate(self.desc[p])
+        for c in self.children_of(p):
+            kinds = self.kinds(c)
+            path0, path1, gpath, _ = self.block(c, kinds)
+            self.apply(c, path0, path1, gpath, kinds)
+        gain, changed = self._gain(rows, X0, V0)
+        return gain, rows, X0, V0, changed
+
+    def pairing_move(self, p, j):
+        """The other pairing of p's labels at edge j: p's homologue labels swapped on bins j.. (its own terms change
+        only at edge j) with its children's chains unchanged, so that they copy the swapped content, then each child
+        given its exact block optimum (pedigree order). Leaves the state moved; returns the change of J (local: the
+        terms of p and its descendants)."""
+        return self._pairing_move(p, j)[0]
+
+    def pairing_pass(self, keep=True):
+        """One pass over pairing_candidates: each move is kept when it raises J by more than ``pairing_odds`` (and
+        ``keep``), else undone. Records (p, j, gain) of every candidate in ``pairings``; returns the number kept. A move
+        that leaves every label and chain as it was (the parent's swapped suffix is the same configuration, e.g. a
+        homozygous pair on both sides) is no competing pairing and is not recorded."""
+        kept = 0
+        records = []
+        margin = max(self.pairing_odds, self.config.gain_quantum)
+        for p, j in self.pairing_candidates():
+            J0 = self.objective() if self.check_deltas else None
+            gain, rows, X0, V0, changed = self._pairing_move(p, j)
+            if not len(changed):
+                continue                            # the same state: nothing to choose between
+            if self.check_deltas:
+                self._check("pairing", (p, j), J0, gain,
+                            lambda change: (bool(keep and change > margin), bool(change > -self.pairing_odds)))
+            records.append((p, j, float(gain)))
+            if keep and gain > margin:
+                kept += 1
+                self.pairing_moves.append((p, j, float(gain)))
+            else:
+                self._restore(rows, X0, V0, changed)
+        self.pairings = records
+        return kept
+
+    def ambiguous_pairings(self):
+        """(p, j) of the final state whose other pairing is within ``pairing_odds`` of J: not decided by the data."""
+        return [(p, j) for p, j, gain in self.pairings if gain > -self.pairing_odds]
 
     # ------------------------------------------------------------------------------------------- junctions
     def junction_candidates(self):

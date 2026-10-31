@@ -28,6 +28,24 @@ def _dyads(pairs,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,excur
     return output
 
 
+@njit(cache=True,parallel=True)
+def _dyads_cached(pairs,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,excursion,branch,
+                  available,state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,
+                  null_frequency,mismatch,zero,products,first_child,powered,named_maximum,column_powered):
+    """_dyads with the completed M1 caches (forward._score_m1_cached: the same values)."""
+    output=np.empty(len(pairs))
+    for i in prange(len(pairs)):
+        c,p=pairs[i]
+        if not available[p]:
+            output[i]=zero[c]
+        else:
+            a,b=forward._score_m1_cached(c,p,pi,candidate_alt,stay,alpha,beta,row_arm,column_arm,pivot,
+                excursion,branch,state_alt,gl,coefficient,indices,starts,stops,exponent,null_diag,null_off,
+                null_frequency,mismatch,products,first_child,powered,named_maximum,column_powered)
+            output[i]=.5*(a+b)
+    return output
+
+
 def terms_args(p,t):
     return (p.state_alt,t.gl,t.coefficient,t.site_index,t.site_start,t.site_stop,t.exponent,
             t.null_diagonal,t.null_off,t.null_frequency,t.mismatch)
@@ -39,8 +57,11 @@ def zero(p,t,eligible_children,claim_threads):
     return .5*(a+b)
 
 
-def exact_pairs(p,t,pairs,zero_scores,first_child,products,powered,claim_threads):
+def exact_pairs(p,t,pairs,zero_scores,first_child,products,powered,claim_threads,columns=None):
     claim_threads()
+    if columns is not None and products is not None and powered is not None:
+        return _dyads_cached(np.ascontiguousarray(pairs,dtype=np.int64),*forward._model(p),p.available,
+                             *terms_args(p,t),zero_scores,products,first_child,powered,*columns)
     return _dyads(np.ascontiguousarray(pairs,dtype=np.int64),*forward._model(p),p.available,*terms_args(p,t),
                   zero_scores,products,first_child,powered)
 

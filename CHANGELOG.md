@@ -1,5 +1,369 @@
 # Changelog
 
+## 3.4.0 (31 October 2026)
+
+This release infers parentage without sample metadata, changes the pedigree's count and family-consistency rules,
+and improves phase continuity where children support it while cutting unsupported inherited joins. It also replaces
+r4's allele-balance model and reduces the time and memory needed for larger crosses, with N = 2,500 as the scaling
+target. It adds an in-run family-phase calibration and a contamination-QC model with explicit local artefacts.
+
+**Inputs and parent candidates** ([usage](docs/usage.md#parent-candidates),
+[pedigree](docs/methods/pedigree.md#parent-candidates)). By the owner's decision, the main pipeline reads the VCF/BCF
+observations and genetic map, with no sample workbook, generation, cohort or sex information. Sample names identify
+samples; every sequenced sample is an inference target and a candidate parent of every other sample.
+
+- A sample is a candidate because it is present in the input, never because a label assigns it a generation. Parent
+  direction must pass the evidence-based orientation and release rules. Any two distinct candidates may form a
+  parent pair; individuals outside the cross must be left out of the input VCF.
+- Removed configuration sections: `[samples]`, `[pedigree.eligibility]` and `[reports]`. Old keys fail at load, even
+  when their values were inert. The presets list contigs only; the generation-based reference-consistency report
+  is removed. Simulation pedigree labels remain generating truth and evaluation inputs only.
+- Parent slots have no maternal or paternal meaning. Two-parent calls use canonical unordered slots, and a single
+  parent occupies slot 0. The canonical ordering can still use names as a last tie-break; it is not a biological
+  orientation. Exported phased GTs must not be read as maternal | paternal.
+- In the isolated label-free TroMau-like simulation comparison, released true edges rose from 48 to all 80 edges
+  with both ends sequenced, with no false edges; all 115 parent-count states were correct. Real TroMau has no
+  individual parentage truth: its changed edges and phase are consistency results, not measured accuracy.
+
+**Evidence: r4 heterozygote balance** ([evidence](docs/methods/evidence.md)). Q4 replaces the binomial clean class
+with a two-beta-binomial mixture, allowing genuine clean-site balances to vary. The larger-weight component is
+labelled clean. The artefact mean or spread must separate by three times the larger of the clean latent standard
+deviation and the binomial standard deviation at median heterozygote depth.
+
+- The majority label is an assumption. Q4 v2 abstains with `unresolved class labelling` when the majority mean lies
+  sufficiently farther from 0.5 than the minority mean; it does not relabel the fit. This prevents the demonstrated
+  artefact-majority reversal from removing balanced sites. The gate can also abstain on genuinely shifted clean data.
+- On planted N = 2,500 inputs with varying clean balances, about 39% of all input sites were retained where 3.3
+  retained none. The largest clean r4 loss in the 36-cell grid was 0.115%; some boundary sites trade artefact recall
+  for clean-site retention. These are measured cases, not universal bounds.
+- All 22 TroMau contigs retained the same sites, rule bits and sample-QC flags as 3.3; r4 remained inactive there.
+  These are Q4-only comparisons; QC4 below changes sample QC and TroMau chr3 admission. Fitted diagnostics need
+  not be identical. The r3 rule is unchanged. Strong per-cell
+  heterozygote overdispersion still makes r3 remove clean sites at large N; the r4 improvement does not resolve it.
+- The input VCF's FILTER and QUAL fields are ignored. The usage and methods pages now state this explicitly;
+  pre-filter the input when those fields should restrict the analysed sites.
+
+**Evidence: contamination QC with local artefacts** ([evidence](docs/methods/evidence.md)). QC4 replaces 3.3's
+sample-quality rule with a symmetric beta-binomial model of private heterozygotes and an explicit artefact mixture
+under both hypotheses. Sixteen contiguous regions have separate artefact shares; the foreign fraction and its share
+within the non-artefact mixture are common. A flag is a pooled preference for that model and excludes the library
+from founder construction on the contig; it is not a contamination diagnosis. Later stages still use its reads.
+
+- Under the owner's overall trade-off policy, QC4 reduced clean grid exclusions from 7 to 0 in 38,313 fits and
+  required clean-control exclusions from 33 to 0. Main-grid 2% detection rose from 8/9 to 9/9 and 5% stayed 9/9.
+  **Sensitivity losses remain:** 1% detection fell from 7/9 to 0/9, and both combined Q4-fixture 2% detections were
+  lost (2/2 to 0/2). Pooling those heterogeneous 2% cases descriptively gives 10/11 versus 9/11, not a population
+  sensitivity estimate. Repeated controls do not establish a false-positive bound.
+- Independent review found clean counterexamples beyond the initial controls: 20 dispersed mapping-artefact sites
+  with different fractions caused exclusion where 3.3 kept the library; a biased private tract within 1/16 of a
+  contig caused exclusion when the rest supplied little eligible information (both rules flagged it). There is no
+  safe half-contig boundary, minimum of 60 clusters, or requirement that artefacts share one fraction.
+- The uniform artefact law and region count are working assumptions. The marginal foreign weight is (1-pi_R)c,
+  so it can vary by region; empty or ineligible regions give no independent support. A related donor can evade
+  private-allele QC, and a donor concentrated in a few regions can be absorbed. Fitted fractions are not calibrated
+  contamination estimates. Elevated own error and private-allele bias can also trigger exclusion. The likelihood
+  threshold remains nominal; Bonferroni does not repair a misspecified mixture reference. Null polishing reduces
+  optimisation risk but does not certify a global optimum.
+- TroMau retains only library 13611465 as excluded on all 22 contigs; 13611489 returns to founder construction on
+  chr3, whose kept set gains two sites and loses three. Other contigs retain their sites. These are consistency
+  observations. Warm QC at N = 2,500 took 38.9 versus 9.9 seconds on 16 cores in the measured comparison.
+
+**Relatedness: reproducible family search and lower cost** ([relatedness](docs/methods/relatedness.md)). The family
+objective is unchanged, but 3.3's first-improvement visiting order depended on sample names. The search now keeps
+the better of best-improvement and content-ordered first-improvement searches from one agglomeration, with exact
+lexicographic ranks of each sample's complete retained evidence vector resolving residual ties. Identical vectors
+remain interchangeable; the method cannot identify distinct roles between observationally identical individuals.
+
+- Family partitions, parents and support can change because the search reaches a different local optimum. The
+  retained objective is not a certificate of biological correctness or a global optimum; one saved design remains
+  about 810 nats below 3.3's original order. Final canonical ordering passed the 12-order tie reproducer and 47
+  listed rename/permutation checks.
+- The owner requested the speed-up in this release. RELFAST caches gains until their family changes, uses bounded
+  screens with exact evaluation near decisions, and reduces repeated parent, support and IBD work. Evidence
+  decoding and numerical work share the CPU allowance. The reference family-search implementation is retained.
+- The speed-up preserved every product field on the checked replays of the canonical search. Allele-frequency EM
+  is mathematically equivalent; other array shapes can differ in the last bits. Full-length relatedness at
+  N = 2,500 on 76 cores is projected at 30-32 minutes, against 4.9-5.3 hours for the unaccelerated canonical search.
+  This is a projection from crops and N near 1,000, not a measured full-length N = 2,500 stage. All-pairs IBD remains
+  quadratic in N; screening copies add about 9 GB to the projected family fit.
+
+- **SW9: smaller exact family-fit storage.** Packed pair gains, bounded batches, shared singleton sums and
+  copy-on-write search snapshots preserve both searches and their reductions. All 19 saved stage comparisons and
+  39 saved orders were bitwise identical. Family-fit RSS fell 24-32%; an N = 10,000 fit projects at about 95 rather
+  than 142 GiB under the measured site density and family structure. This is not a whole-stage saving: the
+  full-length N = 1,003 stage pair rose from 19.157 to 19.656 GiB and from 351.2 to 370.5 seconds. Evidence and IBD
+  storage remain substantial, and quadratic output/storage and all-pairs runtime remain.
+
+**Pedigree: supported counts and family consistency** ([pedigree](docs/methods/pedigree.md)).
+
+- **R1: a parent count needs a stable named parent.** Tier A and Tier B release an M1 or M2 state only when at least
+  one parent in the local configuration passes that tier's parent-bootstrap and leave-one-chromosome-out (LOCO)
+  cut-offs. Otherwise the count is unresolved (`unresolved_<tier>_no_stable_parent`), with bounds 0 to 2. This
+  prevents relatives taking turns as the winning parent from supporting a stable count without a stable identity.
+  On saved inputs it withdrew 34 of 37 wrong count-only states and one of 12 correct ones; on four fresh seeds it
+  withdrew four wrong counts and no correct ones. R1 alone changed no released edge and was inactive on label-free
+  TroMau. Its trade-off remains: a real parent and that parent's sequenced sibling can split the support, and a
+  stable relative can still pass.
+- **S4e: family consistency replaces the IBD0-ratio sibling guard.** A parent of a child should be compatible with
+  that child's full sibs. The guard cleans the supported relatedness family of linked members and members whose
+  released parents mark them as half sibs, then withholds an edge when a strict majority of at least three remaining
+  members, including the child, exclude the proposed parent by the full-marker Mendelian test at log(2N/alpha).
+  Cleaning is repeated using retained edges; withdrawals are never reinstated. A veto that loses its final majority
+  is recorded as `prior_veto_abstention`, rather than asserted as a current majority.
+- The guard runs before the exclusion count release, so a count cannot depend on a direction the guard withdrew.
+  Five stale counts in the earlier candidate become unresolved. The guard report records tested, excluded and
+  dropped members and the withholding basis; the old ratio columns and ratio thresholds are removed.
+- In 17 simulation replays, S4e retained all 746 true released edges and caught 12 of 13 pre-guard false edges,
+  including all three testable false edges that survived the old guard. The remaining false sibling edge had an
+  unsupported child and was untestable. On label-free TroMau, it tested 30 of 70 edges and withheld none, including
+  eight edges withheld by the ratio guard. This is consistency evidence only.
+- **Limits.** A child without enough supported family members remains untestable. Shared unsequenced parents can
+  cause half-sibships to merge, and incomplete or wrong released-parent markers can remove genuine witnesses or
+  retain a wrong majority. A bounded control with a deliberately merged family and missing parent markers lost all
+  four supplied true edges. This conditional failure is not a population error rate; convergence does not make the
+  family-composition assumption true.
+
+**Pedigree pair pruning: joint upper bounds** ([pedigree](docs/methods/pedigree.md)). PEDSCALE2 replaces the
+rejected additive screen. It relaxes the joint M2 forward pass by grouping low-mass states, retaining both parents'
+transmission chains and their joint emission. Group transition maxima and emission bounds upper-bound each
+chromosome's exact M2 score; stored float32 bounds round upward. A retained-parent pair is scored if its joint bound
+comes within 150 raw nats of the best known M0/M1 configuration on the full data or any LOCO fit. Every sequenced
+sample remains a candidate; the exact all-pairs M1 screen and its retention rule remain.
+
+- The complementary-parent fixtures that defeated the additive rule retain their true pair. Bound checks covered
+  348 million row-chromosomes on the large crop plus 17 simulation products and TroMau. The N = 1,003 crop panel
+  falls from 43.5 million to 1.01 million pairs, and N = 2,503 from 413.6 million to 4.98 million.
+- **Post-matrix bound fixes** include unavailable candidates' null BACKGROUND allele in the emission/partner
+  range, accumulate per-bin log normalisers with LOCO sums that keep NaN gaps, and index emission tables by the
+  listed children. Independent review confirmed the targeted failures fixed. All 32 whole-stage pedigree replays
+  were identical to the matrix candidate, including the 14 final-matrix designs; all 55 matrix cases' stored
+  bounds were reproduced bitwise with the same panels. The existing final matrix therefore stands for these fixes.
+- This remains a model change: omitted rows contribute neither their likelihood nor their M0-mixture floor mass.
+  M2 state log evidence moved by up to 106 nats. The fitted pedigree scale was unchanged on 18 replays, which is
+  an observation, not a guarantee. Bootstrap fits are not screened: their support is conditional on the full/LOCO
+  panel. A valid raw-score bound does not preserve graph fallbacks, bootstrap fractions or released decisions.
+- Calls matched the all-retained reference on 16/18 saved products. K30 gained two true edges. Longf3 gained one
+  wrong count-only state at a fragile graph-bootstrap boundary: the named relative became unresolved, leaving no
+  released edge for the guard to test. This local result and the final integrated matrix below use different
+  baselines and must not be substituted for each other.
+- On the label-free N = 1,003 crop, 125/129 released edges were true (four false: two full sibs and two half sibs),
+  and 21/87 called states were wrong. No completed all-retained baseline exists at this size. The stage took
+  70 minutes; at N = 2,503 the bound phase took about 2 h 13 min, then M2 about 13 min, with the decision unfinished
+  at reporting. The bound still enumerates retained pairs and is cubic in N in the worst case. Full-length retained
+  parent counts and completion at N = 2,500 were not measured; the smaller kernel constant is not a scaling guarantee.
+
+**Pedigree constant-factor speed-up.** PEDFAST reuses candidate-independent M1 products and graph reachability,
+parallelizes independent family updates, makes message reads contiguous, skips exactly known transcendental
+results, and schedules one resampling fit per task. It preserves the decision algorithm, convergence rule, model
+and release thresholds. All scientific/released fields matched on 18 saved stage replays and the N = 1,003 crop.
+That crop took 5,246.9 versus 4,416.6 seconds, with storage delays; its separately timed decision was 1,728.1 seconds
+against an approximate 4,380-second baseline. These measurements used the rejected PEDSCALE panel. They establish
+local gains, not a full-length runtime promise for PEDSCALE2. Five family kernels cannot persist to the Numba disk
+cache because of dynamic globals and may compile again in fresh workers despite the regenerated warm-up manifest.
+
+**Family phase and recombination** ([family phase](docs/methods/family_phase.md)).
+
+- **B: bridge painting ties supported by children.** For a sample with no released parent but with children, a tie
+  boundary stays a cut unless the nearest informative bin on each side has orientation certainty at least
+  `set_posterior` (0.999) in both convention solves. Withheld junctions stay cuts, and samples with neither parents
+  nor children keep every tie cut. Genotypes and per-site phase are unchanged by B alone.
+- There were no wrong scored bridges among 3,011 and no new long-switch events. Longer sets can nevertheless expose
+  more of an existing error: the standard simulation's parentless-with-children group rose from 1,450 to 6,044
+  set-aligned error sites at unchanged event count. Bridging also removes meiosis resets: 64 of 66 added simulated
+  crossover calls contained a true
+  crossover; two did not. On label-free TroMau, the affected group's sets per sample-chromosome fell from 8.18 to
+  5.02, total sets fell 1%, and ten crossover calls were added. The coordinator accepted this trade-off.
+- **D2: do not inherit an arbitrary parental pairing.** At a parentless parent's double label change, jointly
+  reconsider its pairing and its children's chains. Keep a changed alternative only above the working log-odds
+  margin derived from `set_posterior`; an unresolved alternative cuts the parent and immediate children. Identical
+  no-op alternatives create no cut. The margin compares one optimized alternative; it is not a calibrated pairing
+  posterior. On 135 chromosome replays against B, a stress child's 11,330 error sites and one long claim disappeared
+  by a cut, with unchanged calls and no new long events. On TroMau, 49 crossover calls were removed at D2 family
+  cuts. No D2 move was retained in these replays; fixtures cover retained moves, and descendant safety beyond the
+  immediate children is not established by this matrix.
+- **FPD: evaluate local gains.** The ascent computes only the objective terms of the sample and descendants a move
+  changes, and saves/restores those rows. On the checked chromosomes the released arrays and solve histories were
+  identical. Solves were 4.3-4.4 times faster at N = 1,003 and 8.4-9.1 times faster on N = 2,503 crops. Work still
+  depends on descendant count. The optional reference checks the literal old full-objective decision; a synthetic
+  rounding-boundary fixture demonstrates a possible threshold flip, so universal bit identity is not claimed.
+
+**Family phase: in-run allele uncertainty** ([family phase](docs/methods/family_phase.md#release)). CAL2 gives
+each homologue's refit panel allele a capped empirical-Bayes per-copy uncertainty, conditional on the fitted
+carriers and panel, with the sample's direct own likelihood term removed. QC-excluded samples are not carriers;
+the empirical prior is the chromosome's allele-1 share among called refit cells. The cap depends on the selected
+allele. This is not a cross-fitted refit or a posterior integrating over carrier/panel selection. Flips are
+independent per homologue, including two copies of the same label, rather than exact integration over one shared
+latent allele. The uniform departure probability remains 0.001, and zero flips recover the old site model.
+
+- No constants are trained on simulations. On 13 family-phase replays, none of the assessed genotype-score buckets
+  at or above 0.999 failed the declared overconfidence gate (at least five errors and more than twice nominal).
+  The worst parentless ratio fell from 56 to 0.44 on K30 and 9.9 to 0.31 on std. Genotype errors fell 15.9% and
+  switch events 28.6%; long switches fell 20 to 17, with none added per design. These are replay results against
+  the prior 3.4 stack; the integrated release comparison is below.
+- The estimator is not an exact posterior of the whole inference procedure. Carrier assignments and refit alleles
+  are inferred. Correlated carrier identity errors remain a failure mode: one well-carried class was 3-9 times
+  overconfident on TL, famhs, bc8 and hsrand. Pooled and unmapped labels are unvalidated. Gate 1 measured min(p, 1-p)
+  on mapped single rows; release uses capped disagreement with the selected allele. Few-carrier classes were conservative. Passing the
+  downstream genotype-score gate does not establish calibration for every row, site or phase set.
+- K30 lost 2.47 percentage points of phased heterozygotes and had 29% more parentless sets; std lost 0.36 points
+  and seed 0.21. Four designs gained 2-10 single-site switch events. Paired family-phase times rose by 1.07-1.28
+  times. The owner chose an in-run estimator and accepted the overall gains with these coverage, error and time costs.
+- Across the 13 saved CAL2 replays, within-released-set neighbour scoring identified 29 misphased sites among
+  2,005 assessable gains out of 2,028 newly phased heterozygotes (21 lacked a neighbour and two had tied
+  frames; f3 remained 5 of 22), and 3,886 among 165,229 assessable losses out of 165,241 heterozygotes phased
+  by K but released unphased by CAL2 (11 lacked a neighbour and one had a tied frame).
+  This auxiliary diagnostic does not establish that each misphased gained site causes an added switch event.
+  The main genotype/switch totals are unchanged by the recount. Corresponding TroMau gains have unknown accuracy.
+
+**Streaming for N = 2,500** ([performance](docs/performance.md)). The owner chose to stream the workspace and then
+extend streaming elsewhere, keeping measured-memory admission rather than adding a predicted-memory lane cap.
+
+- Founder refinement computes log evidence and switch costs through windows, with exact fallback outside a window;
+  small components stay resident. Reverse sweeps release unused messages, and final assembly releases its neutral
+  evidence view after the last join. Local selection shares that view, and checkpoint arrays can decode directly
+  into shared buffers. Painting builds evidence in whole-bin windows and sample tiles without retaining a decoded
+  whole-contig likelihood array. These changes preserve the scientific computations; checkpoint format is unchanged.
+- A full-length N = 2,503 single-chromosome lane completed in 10,744 seconds, with a 143.9 GiB overall peak and
+  69.1 GiB at the last refinement level. Eight concurrent lanes are projected below about 400 GiB in every lane
+  phase on the studied design, versus about 1,279 GiB at the old last-level refinement. This is not a measured
+  eight-lane whole-run memory bound; chromosome lengths, partial sites and search concurrency matter.
+- Streaming costs time: a matched streamed refinement level took 21.4% longer; local selection plus assembly was
+  about 4% slower in its separate-node comparison. Windowed painting at N = 1,003 reduced peak RSS from about
+  6.7 to 4.2 GiB but took 117 rather than 51 seconds (2.28 times as long). These stage measurements are not
+  whole-pipeline speedups. Resident refinement did not show that overhead.
+
+**Adaptive message and family-phase storage (SW5 v2, SW8 v4).** These post-matrix changes preserve the
+scientific computations in forced-route replays against the matrix candidate; their evidence is separate from the
+end-to-end matrix.
+
+- SW5 stores every 16th refinement boundary only when A x 8 x (B+1) x N x Q exceeds
+  max(512 MiB, (B+1) x 1 MiB), where A is four score/count arrays for a guarded search and two otherwise,
+  B is the block count and Q the pair-state width. Smaller footprints use dense messages. Forced dense/checkpoint
+  routes passed 64/64 replay arms and 16/16 kernel cases bitwise. The two N = 1,003 adaptive dense pairs took
+  775.1 -> 772.7 s and 772.5 -> 770.3 s.
+  At N = 2,503 (half chr8, one exclusive pair), the automatic checkpointed route took 1.43 times as long
+  (2,107 -> 3,004 s) and lowered peak RSS from 29.9 to 23.4 GiB; at N = 1,003 it stays dense (-0.3%).
+  The large pair used 10 cores on one exclusive node; its second repetition is not part of this release receipt.
+- SW8 keeps decoded likelihoods resident while 24 N L bytes are at most 8 GiB, and uses windows above that budget.
+  Both routes passed 240/240 comparisons over 119 chromosomes (238 forced-route comparisons plus two automatic
+  routing checks) on v3. V4 changes only temporary-file location, with bitwise-identical results in four
+  forced-windowed replays. In the retained v3 measurements at N = 1,003 chr1, resident time was 0.994 times the
+  reference; forced windows took 1.904 times
+  as long and reduced sampled process-tree PSS from 16.41 to 7.70 GiB. On the short N = 2,503 chr1 crop, resident
+  time was 0.984 times, forced windows 1.495 times, and PSS fell from 5.78 to 3.95 GiB. Both measured inputs select
+  resident mode automatically; the forced-window measurements expose its cost and saving. These are paired local
+  observations, not whole-run speed or memory guarantees.
+- Windowed family phase places its temporary outputs and CAL2 spool in anonymous files under the run's checkpoint
+  directory, independently of TMPDIR. Disk space includes a float32 spool of 12 N m bytes for m component sites,
+  mandatory final site arrays of 5 N L bytes, optional scores of another 8 N L bytes, plus chain arrays.
+  At N = 2,503 and L = m = 329,391, these sum conservatively to 13.05 GiB, or 19.20 GiB with scores, before chains
+  and checkpoint writing; this is logical storage, not a measured simultaneous peak or reserved disk space.
+  Provision that space on the checkpoint filesystem for the chromosomes that family phase runs at once. The saving
+  relies on mapped products not being pickled between workers, which production never does: products are written
+  locally. Whole-bin and model arrays remain, and large bins stay whole. Both mode rules are
+  storage policies, not RSS bounds; process PSS excludes some filesystem cache, and eviction advice is not a
+  job-memory guarantee. Windowing trades I/O/recomputation for retained-array memory.
+
+**Investigated, not included.**
+
+- **PEDSCALE, the 150-nat additive M2 panel:** an explicit model change that omitted retained pairs and their
+  M0-mixture floor mass. It cut the two crop panels from 43.5 million to 3.0 million and 414 million to 17.1 million
+  pairs; released calls were identical on 16 of 18 saved products, with one true edge and one correct state gained
+  in K30 and one wrong state withdrawn in the 8-chromosome F3. These measurements did not establish completeness.
+  Independent review rejected the rule: in a connected-component fixture with a fitted painting rate, both true
+  parents passed M1 retention, but their pair failed the additive screen on the full data and every LOCO fit. The
+  pair was about 29.8 nats better than the best M1 and 2,210 nats better than every other M2 pair; its 281.6-nat
+  synergy exceeded the empirical margin. Separate M1 gains do not bound the joint evidence. A larger empirical
+  margin alone does not repair the mechanism. Removing M2 alternatives can also change the fitted pedigree scale
+  and global decisions; reduced M2 mass does not make competing states or bootstrap support conservative.
+- **Large-cohort limitation found in that investigation:** the label-free N near 1,000 crop (10% of sites), with
+  PEDSCALE and S4e present, released 136 edges: 131 true and **five false** (two full sibs, two half sibs and one
+  other relative); 25 of 91 called states were wrong. There was no completed all-retained-pair baseline, so this
+  does not isolate the pruning effect and is not an accuracy measurement of the PEDSCALE2 release.
+  Its N = 2,503 crop decision was cancelled unfinished; the rejected branch's 4-6-hour full-length pedigree
+  projection must not be attributed to PEDSCALE2 or PEDFAST on the final stack.
+- **E, the allele-orientation anchor:** reduced fragmentation but introduced new released long switches and a long
+  hidden-parent disagreement under the strengthened product gate. **C, bridging withheld junctions:** failed a
+  planted panel-row-exchange control even after D2. Both are withheld; their gains are absent from this release.
+- **Earlier calibration candidates:** constant panel-error priors traded fewer genotype errors for lost phase
+  coverage and more sets. The simulation-trained support table did not pass every design; the earlier in-run
+  estimator was circular. At the owner's request, sample-split cross-fitting was tested: estimator accuracy failed
+  for refit-changed cells in three of six designs, and with B only two of six downstream gates passed. TroMau
+  cross-fitting was not run after that failure. Those candidates remain excluded; CAL2 above is the later in-run
+  replacement. The painting's extreme-tail allele-error comparison is not a calibration guarantee for every
+  founder-row allele or the event used by its release threshold.
+- **Contamination QC v2, v3 and v2.1:** v2's spatial rule missed a required planted case and its own-heterozygote
+  null failed a REF/ALT complement control. V3's heterogeneity test recovered sensitivity but excluded clean local
+  artefacts and extra TroMau libraries. V2.1's symmetric spatial rule gained a clean-library exclusion and missed
+  its declared sensitivity threshold. These candidates and the heterogeneity test do not ship. QC4 above supersedes
+  the interim decision to retain 3.3's QC; its measured sensitivity losses are part of the adoption trade-off.
+
+**Compatibility and resume** ([migration](docs/migration.md), [checkpoints](docs/development.md#checkpoint-store)).
+
+- Use a **new output and checkpoint root** for a 3.4 run. Unlike 3.3's barrier-only change, this release cannot
+  resume a 3.3 scientific run in place. Q4 changes evidence identity (`self-calibrated-site-quality-v4`); old
+  evidence and records downstream of it cannot be reused as 3.4 evidence, even where the retained sites coincide.
+  QC4 changes the sample-quality identity (`private-allele-artefact-mixture-qc-v7`) and can change r5 admission.
+- Relatedness code identity changes with the canonical search and its acceleration. Pedigree identity changes with
+  the candidate universe, release/guard code, PEDSCALE2 pair bounds and PEDFAST; its exclusion scores include the
+  guard's witness dyads. Pair-bound records have their own identity.
+  Local-selection/assembly identities and assembly join digests change with streaming, painting identity changes
+  with windowed evidence, and family-phase/recombination identities change with B, D2, FPD, CAL2 and their inputs.
+  Unchanged record schema numbers or decodable old records do not imply resume compatibility. Identity mismatches
+  stop the append-only store; they do not silently replace old results. Earlier per-change notes about reusing
+  records through painting do not apply to this combined release.
+- Delete the removed sections from a copied configuration before using it with 3.4. In particular,
+  `haplotypes recombination RUN` reloads the saved configuration and refuses those old sections; removing them
+  fixes parsing only, not checkpoint identity. Preserve old runs for inspection with their original version.
+
+### Final validation
+
+The integrated candidate completed all 55 pipeline runs and evaluations with exit status 0: 13 truth simulations,
+TroMau, three additional reference runs and 38 perturbations. Comparisons use the supplied saved 3.3-equivalent
+baseline. The two native-simulation VCF-permutation entries are not applicable. These results cover the integrated
+stack through PEDSCALE2, PEDFAST v2, QC4, CAL2 and SW9. Post-matrix bound fixes preserve all 55 stored panels
+and the 32 replayed pedigree products; SW5/SW8 have the separate forced-route identity checks above. Their local
+performance measurements are outside the matrix's end-to-end time and memory totals.
+
+| Measure across 13 simulations | Baseline | 3.4 candidate |
+| --- | ---: | ---: |
+| Genotype errors | 121,243 | 101,387 |
+| Set-aligned phase-error sites | 60,106 | 50,096 |
+| Switch events | 692 | 494 |
+| Long switches | 20 | 16 |
+| Released phase sets | 32,766 | 31,204 |
+| Phased share of correctly called true heterozygotes | 98.710% | 98.694% |
+
+Founder evaluation metrics are unchanged on all 13 simulations, including nearest-row and one-to-one assignment
+errors, missingness and unmatched rows. Genotype calls fell from 1,864,412,958 to 1,864,155,960; phased correctly
+called true heterozygotes fell from 349,126,100 to 349,008,086. Error-count reductions must be read with this coverage.
+
+- Std's set-aligned errors rise 1,456 to 6,001 while switch events fall 37 to 19 and long switches stay at one;
+  its parentless group's set-aligned errors rise 1,450 to 5,991. K30's phased share falls 99.033% to 96.570% and its
+  sets rise 421 to 527. Switch events rise on f3, f3x8, longf3, seed and TL; no design's long-switch count rises.
+  Set-aligned sites, switch events and long switches measure different aspects of error.
+- On the common-sample partial-edge product, TL gains 32 true edges (48 to 80 of 80 observable), K30 gains two
+  (10 to 12), and sibrich loses its false edge and wrong final state. F3x8 and longf3 each lose two correct final
+  states to unresolved. Backcross stays entirely unresolved. Compact configuration calls and partial edges have
+  different definitions; these edge counts do not imply every exact configuration is resolved.
+- Recombination exposure changes with released parents and phase sets. TL's calls rise 646 to 1,070 as observable
+  meiosis exposure grows from 13.928 to 23.288 billion meiosis-bp; 1,069 candidate intervals hit a true event.
+  A zero call count with no observable exposure is not evidence of no recombination.
+- TroMau releases 70 Tier-B edges, retaining all 37 baseline edges and adding 33. S4e tests 30 and withholds none;
+  final zero/one/two-parent/unresolved states are 68/25/22/1 and recombination intervals rise 461 to 888.
+  Its evidence, genotypes, phase and chr3 founder products change: these are consistency observations with no
+  established individual parentage or phase truth, not accuracy improvements.
+- All 34 non-reversal perturbations preserve scientific outputs under the declared comparisons, including sample
+  ordering, read perturbations, core count and execution environment. The raw scorer flags 49 report files:
+  34 timing manifests, 12 exact-cache counters and three alternative-search margins. Every flag was audited;
+  search-margin changes are real diagnostic changes, not small numerical drift. Floating released values stayed
+  within the declared tolerances. The four permitted reversal cells differ and are reported separately; they are
+  not counted as invariant.
+- All 13 simulation runs were slower (1.10-1.44 times) and had higher sampled job-memory peaks in these runs.
+  TroMau fell from 7,325 to 7,072 seconds and from 53.74 to 51.17 GiB sampled job memory. Runs used 76 cores on
+  different nodes/dates; cache and scheduling varied. The peak is a sampled job working set, not summed RSS or an
+  exact maximum. These end-to-end observations do not isolate a patch's cost or override the local speed-up claims.
+
 ## 3.3.0 (30 October 2026)
 
 This release moves the relatedness stage ahead of assembly. No result changes: relatedness reads only the evidence
