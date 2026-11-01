@@ -153,6 +153,7 @@ def _worker(connection, partition, handler, state, index, settings, label, recyc
                 results = []
                 # Positions before first_position were done by a retired predecessor in this phase.
                 for position, (task_index, task) in _tasks(connection, partition, first_position, dynamic):
+                    state.begin_task(index, task_index)
                     _, threads = seat.grow(floor=1)       # task start: this worker's own boundary
                     request, resumed = memory.acquire(task_index, sizes[task_index], seat=seat)
                     threads = resumed or threads
@@ -166,6 +167,7 @@ def _worker(connection, partition, handler, state, index, settings, label, recyc
                     except BaseException:
                         request.release()
                         raise
+                    state.end_task(index, task_index)
                     memory.finish(task_index, request, sizes[task_index], state_sizes[task_index],
                                   task_peak_bytes(start))
                     results.append((task_index, result))
@@ -214,11 +216,15 @@ class ChromosomeExecutor:
     ``task_bytes`` (None, an int for every task, or one per task in task order) are each handler call's peak bytes
     and ``state_bytes`` the part the task's retained state keeps between calls (execution.memory); `run` may give
     a phase its own ``task_bytes``; ``envelope``: a call's bytes also cover what its nested constructs reserve.
+    ``straggler_ratio`` (with ``weights``): a worker whose task weighs at least this many times the median task, and
+    whose task's share of the work not yet finished is larger than its equal share of the CPUs, keeps that
+    proportional share (execution.budget.floor_shares), so one task much larger than the others does not run its
+    end alone.
     """
 
     def __init__(self, tasks, handler, *, budget, weights=None, max_workers=None, label="CHROMOSOME",
                  task_bytes=None, state_bytes=None, envelope=False, recycle_bytes=None,
-                 frontload=False, dynamic=False):
+                 frontload=False, dynamic=False, straggler_ratio=None):
         self.tasks = tuple(tasks)
         self.handler = handler
         self.label = label
@@ -249,7 +255,9 @@ class ChromosomeExecutor:
         self._ran = False
         self._initial_loads = ([values[partition[0][0]] for partition in self.partitions]
                                if frontload and self.tasks else None)
-        self._state = LeaseState(FORKSERVER, self.worker_count, self.cpu_budget)
+        self._state = LeaseState(FORKSERVER, self.worker_count, self.cpu_budget,
+                                 task_weights=values if straggler_ratio and weights is not None else None,
+                                 straggler_ratio=straggler_ratio or 0.0)
         # Worker processes are recycled (execution.pools.recycle_threshold); the in-process worker never is.
         self.recycle_bytes = recycle_threshold(self.worker_count, recycle_bytes) if self.worker_count > 1 else 0
         self._command = None

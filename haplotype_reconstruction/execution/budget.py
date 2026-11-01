@@ -12,11 +12,12 @@ CPUs.
 
 * Fixed: a count (the run's cores in serial mode, a pool's or executor's total).
 * Lease: a chromosome-executor worker's (a contig lane's) claim on the executor's CPUs. Its share is an equal split
-  of the executor's CPUs among the running workers (the remainder to the lower indices); at its boundaries (task
-  starts, `phase()` starts, `threads()` and `claim_threads()` calls in its coordinating thread, and its pools'
-  re-reads) it takes free CPUs up to that share, borrows idle ones beyond it when no peer is short, and returns
-  CPUs above its share that it is not using when a peer is short. A lane waiting for memory lends all but one CPU
-  until it resumes. Claims sum to at most the budget.
+  of the executor's CPUs among the running workers (the remainder to the lower indices; contig lanes add a
+  straggler floor: a lane whose contig is a larger part of the work not yet finished keeps that proportional share,
+  `floor_shares`); at its boundaries (task starts, `phase()` starts, `threads()` and `claim_threads()` calls in its
+  coordinating thread, and its pools' re-reads) it takes free CPUs up to that share, borrows idle ones beyond it
+  when no peer is short, and returns CPUs above its share that it is not using when a peer is short. A lane
+  waiting for memory lends all but one CPU until it resumes. Claims sum to at most the budget.
 * Pool share: a pool worker's share of its pool's total: floor(total / (active + waiting workers)), plus one of the
   remainder CPUs while it holds a remainder claim. Until a batch's start-up gate opens (min(tasks, workers)
   distinct workers have started, or every task has), each worker runs one thread, so an early worker cannot take
@@ -589,15 +590,81 @@ def apportion(budget: int, work) -> list[int]:
     return result
 
 
+def floor_shares(budget: int, weights, total: float) -> list[int]:
+    """Equal shares of ``budget`` CPUs among workers, with a proportional floor for stragglers.
+
+    A worker's entitlement is one CPU plus its weight's fraction of the other CPUs, the fraction taken of
+    ``total``: the work not yet finished (the running workers' tasks and the tasks not yet started). A worker whose
+    entitlement exceeds its equal share keeps the entitlement; the others split the rest equally (water-filling,
+    remainder to the lower indices). With no weights, or weights small against the work still to start, this is
+    the equal split. Each share is at least one CPU and the shares sum to at most ``budget``.
+    """
+    weights = [max(0.0, float(value)) for value in weights]
+    n = len(weights)
+    total = max(float(total), float(sum(weights)))
+    if n == 0 or total <= 0.0:
+        return apportion(budget, [1.0] * n)
+    spare = budget - n
+    entitled = [1 + int(spare * value / total) for value in weights]
+    fixed = [False] * n
+    while True:
+        rest = [i for i in range(n) if not fixed[i]]
+        left = budget - sum(entitled[i] for i in range(n) if fixed[i])
+        equal = apportion(left, [1.0] * len(rest)) if rest else []
+        grow = [i for i, share in zip(rest, equal) if entitled[i] > share]
+        if not grow:
+            break
+        for i in grow:
+            fixed[i] = True
+    shares = list(entitled)
+    for i, share in zip(rest, equal):
+        shares[i] = share
+    return shares
+
+
 class LeaseState:
     """Shared lease state of one executor: per worker its claim and whether it lends (while it waits for memory
-    it wants one CPU, not its share), one lock, the budget."""
+    it wants one CPU, not its share), one lock, the budget.
 
-    def __init__(self, context, workers: int, budget: int):
+    ``task_weights`` (one nonnegative work estimate per task, or None) turn on the straggler floor of the shares
+    (floor_shares): a worker's floor weight is its running task's weight when that is at least ``straggler_ratio``
+    times the median task weight (else zero: it takes the equal split), and ``remaining`` is the weight of the tasks
+    not yet finished."""
+
+    def __init__(self, context, workers: int, budget: int, task_weights=None, straggler_ratio: float = 0.0):
         self.claims = context.Array("i", workers, lock=False)
         self.lent = context.Array("i", workers, lock=False)
         self.lock = context.Lock()
         self.budget = int(budget)
+        self.proportional = task_weights is not None
+        if self.proportional:
+            values = [max(0.0, float(value)) for value in task_weights]
+            positive = sorted(value for value in values if value > 0.0)
+            median = positive[len(positive) // 2] if positive else 0.0
+            self.threshold = float(straggler_ratio) * median
+            self.task_weights = context.Array("d", values, lock=False)
+            self.weights = context.Array("d", workers, lock=False)
+            self.remaining = context.Value("d", float(sum(values)), lock=False)
+
+    def begin_task(self, worker: int, task_index: int) -> None:
+        """Worker ``worker`` starts task ``task_index``: its weight is the task's (straggler floor only)."""
+        if self.proportional:
+            weight = self.task_weights[task_index]
+            with self.lock:
+                self.weights[worker] = weight if weight >= self.threshold else 0.0
+
+    def end_task(self, worker: int, task_index: int) -> None:
+        """Worker ``worker`` finished task ``task_index``: its weight leaves the work not yet finished."""
+        if self.proportional:
+            with self.lock:
+                self.remaining.value = max(0.0, self.remaining.value - self.task_weights[task_index])
+                self.weights[worker] = 0.0
+
+    def shares(self, active) -> list[int]:
+        """The shares of the ``active`` workers (equal, or with the straggler floor), under the lock."""
+        if not self.proportional:
+            return apportion(self.budget, [1.0] * len(active))
+        return floor_shares(self.budget, [self.weights[i] for i in active], self.remaining.value)
 
     def start_phase(self, loads, initial=None) -> list[int]:
         """Initial claims follow initial work (or whole load); after that every running worker's share is equal."""
@@ -613,7 +680,9 @@ class _LeaseSeat:
     """An executor worker's lease during one phase.
 
     Its share is an equal split of the CPUs among the workers still running (initial claims follow the workers'
-    loads; remaining-work estimates can be far off inside long tasks, so they never take CPUs from a lane). At
+    loads; remaining-work estimates can be far off inside long tasks, so they never take CPUs from a lane), or,
+    with task weights, the straggler floor (floor_shares: a task's whole weight against the work not yet finished,
+    never an estimate of a running task's progress). At
     its boundaries a worker takes free CPUs up to that share; when no peer is below its own want it also borrows
     every idle CPU (work-conserving); when a peer is short, a worker above its share returns the excess, but only
     down to what it is using (``floor``), so no running team ever loses CPUs. A worker that lends (while it waits
@@ -631,10 +700,11 @@ class _LeaseSeat:
 
     def _balance(self):
         """(this worker's share, CPUs other workers lack, free CPUs), under the state lock. Shares are equal
-        among the running workers; a worker that lends wants one CPU."""
+        among the running workers (with the straggler floor when the executor has task weights); a worker that
+        lends wants one CPU."""
         state, index = self.state, self.index
         active = [i for i, value in enumerate(state.claims) if value > 0 or i == index]
-        shares = apportion(state.budget, [1.0] * len(active))
+        shares = state.shares(active)
         others_short = sum(max(0, (1 if state.lent[i] else share) - state.claims[i])
                            for i, share in zip(active, shares) if i != index)
         return shares[active.index(index)], others_short, state.budget - sum(state.claims)
@@ -689,6 +759,8 @@ class _LeaseSeat:
         with self.state.lock:
             self.state.claims[self.index] = 0
             self.state.lent[self.index] = 0
+            if self.state.proportional:
+                self.state.weights[self.index] = 0.0
 
     def owner_boundary(self) -> bool:
         """Whether the calling thread may return CPUs now: the coordinating thread with no open pool or map."""

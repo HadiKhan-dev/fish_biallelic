@@ -144,7 +144,10 @@ three times the plain ones. A guarded search computes them only for sweeps that 
 whose predecessor read none runs its acceptance pass on plain messages and, at the first coarse
 proposal whose gain exceeds the tolerance, is run again on lexicographic messages from its start
 (a search's first sweep starts lexicographic). The plain and lexicographic scores are bitwise equal,
-so the decisions are those of a fully lexicographic search.
+so the decisions are those of a fully lexicographic search. Within a lexicographic pass every proposal is
+scored with the plain kernel, and a coarse proposal is rescored with the lexicographic kernel only when the
+ranking reaches it (release 3.5; 3.4 rescored every coarse proposal above the tolerance, and most of those
+switch costs were never read).
 
 **Surrogate bins.** The window surrogate cuts each prepared block's sites into bins of
 max(b_min, ceil(L_c / 2000)) sites for a component of L_c sites

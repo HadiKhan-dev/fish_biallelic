@@ -102,7 +102,7 @@ def decide_floored(scores: GenomeScores, eligibility: ParentEligibility,
     chromosome scores must use ``decide`` instead. ``eligibility`` must be the one ``scores`` was stacked with.
     """
     alternatives = alternatives_module.build(scores, eligibility)
-    scale, calibration_report = calibration.fit_scale(scores, alternatives, config)
+    scale, calibration_report = calibration.fit_scale(scores, alternatives, config, budget)
     if scale != 1.0:
         alternatives = alternatives.scaled(scale)
     inputs = DecisionInputs(

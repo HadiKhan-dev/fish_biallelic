@@ -8,6 +8,11 @@ work and are rebalanced at the lanes' boundaries, never inside a running kernel 
 free CPUs up to its equal share of the cores, borrows idle ones while no other lane is short, and returns what it
 does not use when another lane is short.
 
+A straggler contig (planning size at least STRAGGLER_RATIO times the median) whose size is a larger part of the
+work not yet finished (the running and unstarted contigs) than its lane's equal share of the cores keeps that
+proportional share (execution.budget.floor_shares): a contig several times larger than the others then runs beside
+them instead of finishing alone.
+
 The plan: one lane per CONTIG_LANE_CORES cores (or the requested count), at most one per pending contig.
 Measured pressure paces each contig's start; planning bytes are diagnostic metadata, never an admission input
 or a lifetime reservation. Pools and nested work share the same governor. Computation never reads another contig's work in
@@ -46,6 +51,11 @@ from .run_record import record_product, timed_stage, worker_stages
 # 8% less lane wall than 4 of 16 with identical results). Lanes take their contigs from one queue, longest first,
 # and grow their leases as other lanes finish, so the longest contig's tail regains the cores.
 CONTIG_LANE_CORES = 8
+# A contig is a straggler when its planning size is at least this many times the median contig's: planning sizes
+# then predict its lane's work well enough to act on (between comparable contigs they do not: TroMau's lane time per
+# planning byte varies 2.5-fold, and equal shares serve them better). A straggler's lane keeps its proportional share
+# of the work not yet finished when that exceeds the equal share (execution.budget.floor_shares).
+STRAGGLER_RATIO = 2.0
 
 # Resident arrays of a lane per planning byte (contig_work.planning_bytes): decoded evidence, records and
 # overlapping selection/context arrays. Retained process memory is held separately below. Its pools,
@@ -92,7 +102,7 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     """
     contigs = tuple(contigs)
     executor = ChromosomeExecutor(contigs, _lane_contig, budget=cores, weights=weights, max_workers=lanes,
-                                  label=label.upper(), dynamic=True,
+                                  label=label.upper(), dynamic=True, straggler_ratio=STRAGGLER_RATIO,
                                   task_bytes=None if weights is None else [lane_resident_bytes(w) for w in weights])
     if executor.worker_count < 2:
         return run_sequentially(store, contigs, work, context, cores=cores)
@@ -103,7 +113,9 @@ def run_lanes(store, contigs, work, context, *, cores: int, lanes: int, weights,
     first = [contig for partition in executor.partitions for _, contig in partition]
     queued = [contigs[index] for index in executor._queue]
     print(f"  Contigs: {executor.worker_count} concurrent lanes share {executor.cpu_budget} cores (leases in "
-          "equal shares, rebalanced at every boundary: idle CPUs borrowed and returned); lanes start with "
+          f"equal shares, or a straggler contig's share of the work not yet finished when larger (planning size >= "
+          f"{STRAGGLER_RATIO:g} x the median); rebalanced at every "
+          "boundary: idle CPUs borrowed and returned); lanes start with "
           f"{', '.join(first)}, then take the next of {', '.join(queued) or 'none'} (longest first)", flush=True)
     for contig in contigs:
         print(f"    {contig} log: {logs[contig]}", flush=True)

@@ -30,7 +30,7 @@ import numpy as np
 from ...maths import ties
 from ...model.components import ComponentPanel
 from ..linker.em import Transitions
-from ..tie_rules import count_vector_classes, motion, path_class_order, quantum
+from ..tie_rules import count_vector_classes, motion, path_class_order, path_codes, quantum
 
 # Beam-cut census: scores of the paths within this many ranks of an endpoint's quota are recorded per cut.
 _CENSUS_RANKS = 3
@@ -78,10 +78,12 @@ class CartesianBeamFamily:
 def _ordered_archive(archive, blocks):
     if not archive:
         return []
-    paths = np.asarray(list(archive.keys()), dtype=np.int64).reshape(len(archive), blocks)
+    keys = list(archive.keys())
+    paths = np.asarray(keys, dtype=np.int64).reshape(len(archive), blocks)
     scores = np.asarray(list(archive.values()), dtype=np.float64)
     ranked, _, _, _ = _ranked(paths, scores)
-    return [(tuple(int(row) for row in paths[i]), float(scores[i])) for i in ranked.tolist()]
+    # The archive's keys are tuples of Python ints already (scores: Python floats of the same float64 values).
+    return list(zip([keys[i] for i in ranked.tolist()], scores[ranked].tolist()))
 
 
 def _constant_family(transitions: Transitions, gap_limit: int) -> CartesianBeamFamily | None:
@@ -166,6 +168,25 @@ def _step_scores(path, lookup, gap_limit: int) -> np.ndarray:
     return step_scores
 
 
+def _step_scores_many(paths, lookup, gap_limit: int) -> np.ndarray:
+    """float64[P, n] per-step scores of every path (rows of ``paths``): :func:`_step_scores` vectorised over the
+    paths, each element the same float64 sum in past-block order divided by the same count (bit for bit)."""
+    n_paths, num_blocks = paths.shape
+    steps = np.zeros((n_paths, num_blocks), dtype=np.float64)
+    for current in range(1, num_blocks):
+        earliest = max(0, current - gap_limit)
+        step_total = np.zeros(n_paths, dtype=np.float64)
+        count = 0
+        for past in range(earliest, current):
+            matrix = lookup[past][current]
+            if matrix is not None:
+                step_total += matrix[paths[:, past], paths[:, current]]
+                count += 1
+        if count > 0:
+            steps[:, current] = step_total / count
+    return steps
+
+
 def _affected_steps(paths, step_scores, changed_block, choices, lookup, gap_limit: int):
     """float64[P, choices, n] per-step scores of every path with every founder choice at ``changed_block``.
 
@@ -205,11 +226,19 @@ def _ranked(paths, scores):
     scores = np.asarray(scores, dtype=np.float64)
     count = len(paths)
     if count > 1:
-        grouped = np.lexsort((-scores,) + tuple(paths[:, column]
-                                                for column in range(paths.shape[1] - 1, -1, -1)))
-        ordered = paths[grouped]
-        first = np.ones(count, dtype=bool)
-        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+        codes = path_codes(paths)
+        if codes is not None:
+            # One mixed-radix code per path: the same stable sort as by the columns (release 3.5).
+            grouped = np.lexsort((-scores, codes))
+            ordered = codes[grouped]
+            first = np.ones(count, dtype=bool)
+            first[1:] = ordered[1:] != ordered[:-1]
+        else:
+            grouped = np.lexsort((-scores,) + tuple(paths[:, column]
+                                                    for column in range(paths.shape[1] - 1, -1, -1)))
+            ordered = paths[grouped]
+            first = np.ones(count, dtype=bool)
+            first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
         representatives = grouped[first]
     else:
         representatives = np.arange(count, dtype=np.int64)
@@ -350,7 +379,7 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
 
     # Pass 2 (backward refinement of the forward paths as scaffolds, with cached step scores).
     scaffold_paths = beam_paths
-    scaffold_steps = np.stack([_step_scores(path, lookup, gap_limit) for path in beam_paths.tolist()])
+    scaffold_steps = _step_scores_many(beam_paths, lookup, gap_limit)
     scaffold_totals = np.array([np.sum(steps) for steps in scaffold_steps])
     archive = {}
     for path, total in zip(map(tuple, scaffold_paths.tolist()), scaffold_totals):

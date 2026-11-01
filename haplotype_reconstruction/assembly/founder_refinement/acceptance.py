@@ -61,13 +61,16 @@ TOL = 2.0 ** -9
 # at its 2.1 value in release 2.13 (raising it would let moves with small negative dE bypass the guard; its contrast
 # under 1e-6 GL noise is not yet measured).
 GUARD_TOLERANCE = 1e-6
-# Forward messages of the current panel computed ahead of the pass position at a time.
-AHEAD_BLOCKS = 16
+# Forward messages of the current panel computed ahead of the pass position at a time: at least this many blocks,
+# further when a candidate starts further ahead. Release 3.5: 4 (16 before). An acceptance truncates the lookahead
+# at its edit and discards what lay beyond it, so a shorter floor wastes less; the extent never changes a value
+# (TroMau chr15 L3: about 1% less time).
+AHEAD_BLOCKS = 4
 # Junctions per nogil call (the Numba team is re-read between calls).
 JUNCTION_BATCH = 16
 # Release 3.4: on reaching a junction the pass covers the blocks it reads first (the lookahead and a fine
 # window ahead of it), so a streaming window slides with the pass instead of jumping between its reads.
-JUNCTION_REACH = AHEAD_BLOCKS + 8
+JUNCTION_REACH = 16 + 8      # 3.4's AHEAD_BLOCKS + 8, kept by release 3.5 (a streaming window's reach)
 # A tie class wider than this many quanta keeps value order (maths.ties.WIDE_CLASS_QUANTA).
 WIDE_QUANTA = 4.0
 # Release 2.8: K-independent bounds on rescoring at one junction, so a pass stays
@@ -87,7 +90,9 @@ MOVE_FINE, MOVE_COARSE = 1, 2
 # the last full ranking was rescored alone (a junction that reaches the cap with no positive untried item exits
 # without it); stale_evaluated: those single rescorings (their decisions compare one item, so content_tie does
 # not count ties there); exchange_cap: junctions left with a positive exchange after EXCHANGE_ROUNDS; lex_items:
-# coarse items rescored lexicographically; lex_abort: plain passes stopped for a guarded rerun.
+# coarse items above TOL in guarded rounds (3.4 rescored all of them lexicographically; since 3.5 only those the
+# ranking reaches are, see _score_items; the count keeps its 3.4 value, which decides a search's next sweep mode);
+# lex_abort: plain passes stopped for a guarded rerun.
 ACC_KEYS = ("fine", "coarse", "exchange", "fine_gain", "coarse_gain", "exchange_gain", "evaluated",
             "false_positive", "guard_rejected", "guard_shared_tests", "guard_relaxed",
             "guard_shared_switches", "guard_traced_blocks", "chain_blocks", "ahead_blocks",
@@ -299,14 +304,15 @@ def _active_items(q, X, lab, cand_start, cand_kind, cand_end, cand_k0, cand_row_
 @njit(cache=True, nogil=True)
 def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
                  win, offsets, stored, stored_cnt, stored_scale, gperm, permuted, guarded,
-                 f, fcnt, chain, ahead, acc):
-    """Exact gains of the items at junction p: every item with the plain kernel, then (lazy
-    lexicographic scoring) under the guard only the coarse items whose gain exceeds TOL again
-    with the lexicographic kernel, for their switch-cost changes (its gains equal the plain ones:
-    the lexicographic recursion's scores are the plain recursion's). Items at or below TOL are
-    never ranked, so the guard never reads their switch changes. Returns (total gains, total switch
-    changes, per-sample gains, per-sample switch changes, chain, ahead); totals are summed in
-    sample order."""
+                 f, fcnt, chain, ahead, acc, lex_item):
+    """Exact gains of the items at junction p: with lex_item < 0 every item with the plain kernel (switch
+    changes zero); with lex_item = i >= 0 item i alone with the lexicographic kernel, for its switch-cost
+    changes (its gains equal the plain ones: the lexicographic recursion's scores are the plain recursion's).
+    Lazy lexicographic scoring (release 3.5): under the guard the ranking loop rescores lexicographically
+    only the coarse items it reaches in decision order (up to the chosen one); 3.4 rescored every coarse
+    item above TOL, most of whose switch changes were never read. Items the loop does not reach are not
+    decided on in this round, so the decisions are unchanged. Returns (total gains, total switch changes,
+    per-sample gains, per-sample switch changes, chain, ahead); totals are summed in sample order."""
     samples, states = stored[0].shape[1], stored[0].shape[2]
     gain = np.zeros(n_items)
     switch = np.zeros(n_items)
@@ -316,20 +322,19 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
         members = np.empty(n_items, np.int64)
         n_mem = 0
         for i in range(n_items):
-            if group == 0 or (guarded and it_kind[i] == MOVE_COARSE and gain[i] > TOL):
+            if (group == 0 and lex_item < 0) or (group == 1 and i == lex_item):
                 members[n_mem] = i
                 n_mem += 1
         if n_mem == 0:
             continue
         lex = group == 1
-        if lex:
-            acc[_A_LEX_ITEMS] += n_mem
         members = members[:n_mem]
-        # The lookahead covers every member's blocks: the background fast paths of both kernels
-        # read the current chain up to the candidates' ends.
-        last = it_p2[members[0]]
+        # The lookahead covers every member's first block, the only forward message the candidate kernels
+        # read (f_start; release 3.5: 2.6's background fast paths, which read the chain up to the
+        # candidates' ends, are gone since 2.8, so a lookahead to the ends was discarded at every acceptance).
+        last = it_p1[members[0]]
         for i in members:
-            last = max(last, it_p2[i])
+            last = max(last, it_p1[i])
         ahead = _forward_to(ahead, p, last, f, fcnt, haps, win, offsets, guarded, acc)
         a0 = ahead.start
         focal = np.empty(n_mem, np.int64)
@@ -413,6 +418,11 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
                     total += member_gains[m, s]
                 gain[i] = total
                 gains_s[i] = member_gains[m]
+    if guarded and lex_item < 0:
+        # 3.4's count of lexicographic rescorings (ACC_KEYS), which the next sweep's mode reads.
+        for i in range(n_items):
+            if it_kind[i] == MOVE_COARSE and gain[i] > TOL:
+                acc[_A_LEX_ITEMS] += 1
     return gain, switch, gains_s, switches_s, chain, ahead
 
 
@@ -777,7 +787,7 @@ def pass_chunk(haps, X, leaves, win, offsets, j0, j1, frontier0, f0, fcnt0, loca
                 act_gain, act_switch, act_gains_s, act_switches_s, chain, ahead = _score_items(
                     n_act, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
                     win, offsets, stored, stored_cnt, stored_scale, gperm, permuted,
-                    guarded, f, fcnt, chain, ahead, acc)
+                    guarded, f, fcnt, chain, ahead, acc, -1)
                 if optimistic:
                     for i in range(n_act):
                         if it_kind[i] == MOVE_COARSE and act_gain[i] > TOL:
@@ -805,6 +815,17 @@ def pass_chunk(haps, X, leaves, win, offsets, j0, j1, frontier0, f0, fcnt0, loca
                 for r in range(n_ranked):
                     i = order[r]
                     gain = act_gain[i]
+                    if guarded and it_kind[i] == MOVE_COARSE:
+                        # Lazy lexicographic rescoring of the coarse item the loop reaches (_score_items).
+                        lex_gain, lex_switch, lex_gains_s, lex_switches_s, chain, ahead = _score_items(
+                            n_act, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
+                            win, offsets, stored, stored_cnt, stored_scale, gperm, permuted,
+                            guarded, f, fcnt, chain, ahead, acc, i)
+                        if lex_gain[i] != gain:
+                            raise AssertionError("founder refinement: lexicographic and plain gains differ")
+                        act_switch[i] = lex_switch[i]
+                        act_gains_s[i] = lex_gains_s[i]
+                        act_switches_s[i] = lex_switches_s[i]
                     if guarded and it_kind[i] == MOVE_COARSE and (
                             gain + act_switch[i] < -GUARD_TOLERANCE):
                         # the move lowers the genotype fit E = F + switch cost

@@ -806,6 +806,7 @@ No setting is read from the environment: every setting is in the configuration. 
 | `HAPLOTYPES_FAMILY_WORK_BOUND` | Experimental diagnostic family-witness bound; `0` (default) keeps complete families. Positive bounds are not part of the accepted 2.3 model; bound64 was rejected. Included in checkpoint identity. |
 | `HAPLOTYPES_COMPOUND_WORK_BOUND` | Experimental diagnostic compound-update bound; `0` (default) keeps the complete search. Positive bounds are not part of the accepted 2.3 model. Included in checkpoint identity. |
 | `HAPLOTYPES_DISCOVERY_CLIQUE_STATS` | Diagnostic, unset in normal use: a directory into which discovery's tie-carrying residual clustering appends its alternative-pool statistics (one file per process). Results do not depend on it. |
+| `HAPLOTYPES_KERNEL_AUDIT` | Release check, unset in normal use: a new directory into which the driver and each scientific worker write one manifest (`HOST-PID.pkl`) of the Numba compilations they performed, for `python -m haplotype_reconstruction.execution.kernel_manifest --check` ([performance](performance.md)). Results do not depend on it; leave it unset for timings. |
 
 and sets these for itself and its worker processes:
 

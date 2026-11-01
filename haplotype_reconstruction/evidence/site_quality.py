@@ -175,7 +175,7 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
 
 
 @njit(cache=True)
-def _leakage_terms(n, f, eps, h):
+def _leakage_terms(n, f, eps, h, binomial=None):
     """Release 2.18: the expectation of a site's homozygote wrong-read statistic W under a clean site with error
     rate e, E[W] = lam + kap e, exact to first order in e. W weights each cell's reads by the classification's
     posteriors, w(a, d) = p0 a + p2 (d - a). A heterozygote's reads ~ Bin(d, h), so heterozygotes add
@@ -214,7 +214,10 @@ def _leakage_terms(n, f, eps, h):
                 e1 = math.exp(l1 - m)
                 e2 = math.exp(l2 - m)
                 w = (e0 * a + e2 * (d - a)) / (e0 + e1 + e2)
-                het += math.exp(lgd - math.lgamma(a + 1.0) - math.lgamma(d - a + 1.0) + a * lh + (d - a) * l1h) * w
+                probability = (binomial[d, a] if binomial is not None and d < len(binomial)
+                               else math.exp(lgd - math.lgamma(a + 1.0) - math.lgamma(d - a + 1.0)
+                                             + a * lh + (d - a) * l1h))
+                het += probability * w
                 if a == 0:
                     w0 = w
                 if a == 1:
@@ -257,9 +260,23 @@ def _genotype_expectations(alt, dep, eps, h, iters):
     return frequencies, wrong, homn, heta, hetn, covered, leak, slope
 
 
+@njit(cache=True)
+def _depth_binomial(h):
+    """Read-model terms shared by every site's leakage calculation. Deeper cells use the original expression."""
+    width = 129
+    out = np.zeros((width, width))
+    lh, l1h = math.log(h), math.log(1.0 - h)
+    for d in range(width):
+        lgd = math.lgamma(d + 1.0)
+        for a in range(d + 1):
+            out[d, a] = math.exp(lgd - math.lgamma(a + 1.0) - math.lgamma(d - a + 1.0)
+                                 + a * lh + (d - a) * l1h)
+    return out
+
+
 @njit(cache=True, nogil=True)
 def _genotype_counts_into(counts, samples, eps, h, iters, start, stop,
-                          frequencies, wrong, homn, heta, hetn, covered, leak, slope):
+                          frequencies, wrong, homn, heta, hetn, covered, leak, slope, binomial):
     S = len(samples)
     for i in range(start, stop):
         a = np.empty(S); n = np.empty(S)
@@ -277,7 +294,7 @@ def _genotype_counts_into(counts, samples, eps, h, iters, start, stop,
         f = np.zeros(3); ll = np.zeros((S, 3))
         w, hn, ha, hh = _site_genotype_fit(a, n, eps, h, iters, f, ll)
         wrong[i] = w; homn[i] = hn; heta[i] = ha; hetn[i] = hh
-        leak[i], slope[i] = _leakage_terms(n, f, eps, h)
+        leak[i], slope[i] = _leakage_terms(n, f, eps, h, binomial)
         frequencies[i, 0] = f[0]; frequencies[i, 1] = f[1]; frequencies[i, 2] = f[2]
 
 
@@ -295,11 +312,12 @@ def _genotype_expectations_counts(counts, samples, eps, h, iters):
     span = max(1, (L + tasks - 1) // tasks)
     chunks = [(start, min(start + span, L)) for start in range(0, L, span)]
     chunks.sort(key=lambda bounds: bounds[1] - bounds[0], reverse=True)
+    binomial = _depth_binomial(h)
     # Compile once before dispatch, preventing compilation races among workers.
-    _genotype_counts_into(counts, samples, eps, h, iters, 0, 0, *values)
+    _genotype_counts_into(counts, samples, eps, h, iters, 0, 0, *values, binomial)
 
     def work(bounds):
-        _genotype_counts_into(counts, samples, eps, h, iters, *bounds, *values)
+        _genotype_counts_into(counts, samples, eps, h, iters, *bounds, *values, binomial)
 
     # The outer stage reservation covers the output vectors and all worker scratch.
     # Freed workers immediately take the next task; a live lease can admit more.

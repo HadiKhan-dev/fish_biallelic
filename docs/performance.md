@@ -264,7 +264,16 @@ contig lane -> pool -> worker), never exceeded by the product of processes and t
   per pending contig, limited by memory. Lanes start with the longest contigs, one each; a lane that finishes a
   contig takes the next from one shared queue, longest first. Leases start in proportion to each lane's work;
   every running lane's share is equal (remaining-work estimates can be far off inside a contig's long final
-  refinement, and a lane starved on that estimate became the run's critical path). At every boundary (contig and
+  refinement, and a lane starved on that estimate became the run's critical path), with one floor for stragglers:
+  a contig whose planning size is at least `execution.contig_lanes.STRAGGLER_RATIO = 2` times the median contig's
+  and a larger part of the planned work not yet finished (the planning sizes of the running and unstarted contigs)
+  than its equal share keeps that proportional share, one CPU plus its fraction of the others
+  (`execution.budget.floor_shares`); the other lanes split the rest equally. A contig several times larger than
+  the others (the standard simulation's chr3, 4.6 times the median) then runs beside them from the start instead
+  of finishing alone on more CPUs than its last refinement levels can use. Between comparable contigs planning
+  sizes predict lane time poorly (TroMau: 2.5-fold spread in seconds per planning byte), so no floor applies there
+  (TroMau has no straggler: its largest contig is 1.9 times the median). The floor reads whole-contig planning
+  sizes, never a running contig's progress. At every boundary (contig and
   phase starts, its coordinating thread's thread claims, and every 0.25 s through its open pool,
   `execution.pools.LIVE_TOTAL_SECONDS`) a lane takes free CPUs up to that share, borrows idle CPUs beyond it while
   no other lane is short, and returns borrowed CPUs it is not using once another lane is short. A lane keeps its
@@ -489,6 +498,23 @@ and the learned manifest uses the same serializer; standard pickle readers remai
 function pointer address or compiled machine code is shipped. Type portability still
 depends on compatible Python/Numba types and importable names. Signatures that cannot be decoded or compiled in
 the current environment are skipped and keep the usual lazy-compilation fallback.
+
+As a release gate, set `HAPLOTYPES_KERNEL_AUDIT` to a new attempt-local directory before the
+representative cold-cache run. The driver and its workers write one atomic `*.pkl` manifest per process
+of successful Numba compilations, including kernels that cannot persist to disk. Keep that directory
+with the run receipt. Check the shipped list against those observations and the learned cache manifest:
+
+```bash
+PYTHONPATH="$CANDIDATE" python -m haplotype_reconstruction.execution.kernel_manifest \
+  --check reference-a/manifest.pkl reference-a/kernel-audit/*.pkl
+```
+
+The command prints every missing function/signature and exits nonzero for missing coverage, an unreadable
+release list, or empty observations. It does not regenerate the list during the check. An obsolete
+signature therefore cannot stand in for the signature actually compiled in the reference run. Regenerate
+from these same manifests after a failure, then repeat the check. Use a fresh store and run-local cache:
+a compile-event audit of a fully warm run alone does not observe cache hits. Keep the cold warm-up log
+as well and resolve skipped entries before release. Audit I/O is opt-in and should be disabled for timings.
 
 Reference coverage is finite. A new input dtype, configuration, kernel or dependency version can require an
 unseen signature; a release manifest cannot guarantee that all future scientific workers avoid compilation.

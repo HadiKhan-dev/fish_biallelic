@@ -39,6 +39,7 @@ O(D k |pool|) bounds plus exact scores restricted to the samples a bound cannot 
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import copy
 import itertools
 import math
 import threading
@@ -46,11 +47,28 @@ import threading
 import numpy as np
 
 from .. import count_rule
+from ..count_rule.criterion import _test as margin_test
 from ..count_rule.geometry import shadow_choices
 from ...maths import ties
 from .. import tie_rules
 from .certify import PanelForwards
 from .objective import column_sums, score_samples
+
+
+# Bytes of persistent storage the birth memo of one panel may hold, as charged (context, scored births and
+# novelty flags; beyond it: recompute). Transient work (bootstrap draws while a decision resolves, copies returned
+# to the caller) and the search's own arrays are outside it.
+BIRTH_MEMO_BYTES = 256 << 20
+# Upper charges (bytes) of the memo's Python objects (CPython 3.14 sizes with margin; the memory probe checks
+# them against deep sizes): an object header (array, bytes, tuple, small record), one dict slot (key and value
+# references, index and growth slack), one sequence item, a float, a count-rule margin test (measured 1.5-1.6 KB),
+# a recorded count decision (measured 3.5 KB).
+_OBJECT_BYTES = 128
+_SLOT_BYTES = 128
+_ITEM_BYTES = 16
+_FLOAT_BYTES = 32
+_MARGIN_TEST_BYTES = 2048
+_DECISION_BYTES = 5120
 
 
 def _test_record(test) -> dict:
@@ -59,6 +77,115 @@ def _test_record(test) -> dict:
     for name in ("top_samples", "top_differences", "top_shares"):
         record[name] = list(record[name])
     return record
+
+
+class PendingDecision:
+    """A count decision whose bootstrap band is computed only when a caller records it.
+
+    The point part (both effective-carrier tests, the verdict and min(m_d, m_q)) equals
+    count_rule.decide's: the same differences and the same test. The band of min(m_d, m_q)
+    (count_rule.decide or the shadow family's shared draws) depends only on the decision's own
+    scores, cost, configuration and seed key, and only the decision a record reports reads it:
+    the shadow and birth choices compare verdicts, margins and gains. :meth:`resolve` returns the
+    CountDecision count_rule.decide would have returned (with accept_larger False where the
+    shadow family's opposed verdicts withheld the larger panel), so every recorded field is
+    unchanged; the other candidates' bands are never drawn (release 3.5, speed only).
+    """
+
+    __slots__ = ('kind', 'accept_larger', 'margin', 'total', 'sequence', '_inputs', '_resolved')
+
+    def __init__(self, kind, accept_larger, margin, total, sequence, inputs):
+        self.kind = kind
+        self.accept_larger = accept_larger
+        self.margin = margin
+        self.total = total
+        self.sequence = sequence
+        self._inputs = inputs
+        self._resolved = None
+
+    def withheld(self) -> "PendingDecision":
+        """The same decision with the larger panel withheld (opposed shadow verdicts)."""
+        withheld = PendingDecision(self.kind, False, self.margin, self.total, self.sequence, self._inputs)
+        if self._resolved is not None:
+            withheld._resolved = (replace(self._resolved, accept_larger=False) if self._resolved.accept_larger
+                                  else self._resolved)
+        return withheld
+
+    def retained_bytes(self) -> int:
+        """Upper charge of what this decision keeps: its point tests, and either its recorded decision or the
+        inputs it needs to compute one (scores, shadow, seed panel and shadow family; the smaller panel's scores
+        are the memo context's)."""
+        charge = _OBJECT_BYTES + 2 * _MARGIN_TEST_BYTES
+        if self._resolved is not None:
+            return charge + _DECISION_BYTES
+        larger, smaller, shadow, seed_panel, family = self._inputs
+        charge += _OBJECT_BYTES + _array_bytes(shadow)
+        # The decision's and the family's seed-panel tuples; their paths are the memo context's panel paths and
+        # the entry's key path, charged there.
+        charge += 2 * (_OBJECT_BYTES + _ITEM_BYTES * len(seed_panel))
+        if family is not None:
+            charge += 2 * _OBJECT_BYTES + _MARGIN_TEST_BYTES
+        return charge + _DECISION_BYTES             # room for the decision a later resolve records
+
+    def resolve(self, cost, config) -> count_rule.CountDecision:
+        if self._resolved is not None:
+            return self._resolved
+        larger, smaller, shadow, seed_panel, family = self._inputs
+        if family is None:
+            decision = count_rule.decide(larger, smaller, shadow, cost, kind=self.kind, config=config,
+                                         seed_key=('join_count', self.kind, sorted(seed_panel)))
+        else:
+            decision = family.family().decide(shadow)
+        if decision.accept_larger and not self.accept_larger:
+            decision = replace(decision, accept_larger=False)
+        self._resolved = decision
+        # The recorded decision is all a later caller reads: release the scores, the shadow and a shadow
+        # family's bootstrap draws (2,000 x S indices) that only this computation needed.
+        self._inputs = None
+        return decision
+
+
+class _ShadowFamily:
+    """One shadow family's shared total test, and its count_rule.ShadowDecisionFamily (bootstrap draws)
+    built when the first of its decisions is resolved."""
+
+    __slots__ = ('total', '_arguments', '_family')
+
+    def __init__(self, larger, smaller, cost, kind, config, seed_panel):
+        self.total = margin_test(larger - smaller, cost, len(larger))
+        self._arguments = (larger, smaller, cost, kind, config, seed_panel)
+        self._family = None
+
+    def family(self) -> count_rule.ShadowDecisionFamily:
+        if self._family is None:
+            larger, smaller, cost, kind, config, seed_panel = self._arguments
+            self._family = count_rule.ShadowDecisionFamily(larger, smaller, cost, kind=kind, config=config,
+                                                           seed_key=('join_count', kind, sorted(seed_panel)))
+        return self._family
+
+
+def _array_bytes(array) -> int:
+    """Upper charge of an array: the bytes of the buffer that owns its data (a view keeps its whole owner alive)
+    and a header."""
+    owner = array
+    while isinstance(owner.base, np.ndarray):
+        owner = owner.base
+    return _OBJECT_BYTES + max(int(owner.nbytes), int(array.nbytes))
+
+
+def _panel_bytes(paths) -> int:
+    """Upper charge of a list or tuple of path tuples (small int entries are shared objects)."""
+    return _OBJECT_BYTES + sum(_OBJECT_BYTES + _ITEM_BYTES * len(path) for path in paths)
+
+
+def _details_bytes(details) -> int:
+    """Upper charge of a shadow-decision details record: its dict, the nearest-row choices, the incumbent shadow
+    and the per-shadow verdict and margin lists."""
+    charge = _OBJECT_BYTES + _SLOT_BYTES * len(details)
+    charge += _panel_bytes(details['nearest_choices']) + _panel_bytes([details['incumbent_shadow']])
+    for name in ('verdicts', 'sequence_margins', 'sequence_loso_margins'):
+        charge += _OBJECT_BYTES + (_ITEM_BYTES + _FLOAT_BYTES) * len(details[name])
+    return charge
 
 
 def main_coverer(panel, path) -> int:
@@ -100,6 +227,12 @@ class CountStep:
         self._counts = threading.Lock()     # concurrent seed refits settle on one CountStep
         self.tie_counter = tie_counter
         self.label = label
+        # Birth memo (release 3.5): the pure numerics of the births at one panel (its novelty tests, sparse
+        # exact scores and point decisions per pool path), reused when the search decides births again at the
+        # same panel with the same scores and forwards (after a pool extension and again after tier 2).
+        self._memo_context = None
+        self._memo = {}
+        self._memo_bytes = 0
 
     def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll', link=None, panel=None):
         """The tie-class winner of ``items`` by value(item) (descending; nats of the join log
@@ -139,9 +272,17 @@ class CountStep:
             self.exact_sample_scores += samples
 
     def _decision(self, larger, smaller, shadow, kind, seed_panel, key=None, family=None):
-        decision = (count_rule.decide(larger, smaller, shadow, self.cost, kind=kind, config=self.config,
-                                     seed_key=('join_count', kind, sorted(map(tuple, seed_panel))))
-                    if family is None else family.decide(shadow))
+        """The point part of count_rule.decide (the family's total test when given); the band waits for
+        PendingDecision.resolve."""
+        larger = np.asarray(larger, np.float64)
+        smaller = np.asarray(smaller, np.float64)
+        shadow = np.asarray(shadow, np.float64)
+        samples = len(larger)
+        total = margin_test(larger - smaller, self.cost, samples) if family is None else family.total
+        sequence = margin_test(larger - shadow, self.cost, samples)
+        decision = PendingDecision(kind, bool(total.passes and sequence.passes),
+                                   float(min(total.margin, sequence.margin)), total, sequence,
+                                   (larger, smaller, shadow, tuple(map(tuple, seed_panel)), family))
         if key is not None and self.label is not None and ties.census_enabled():
             # Valley census of the count rule's continuous thresholds (margins at 0, units of c).
             with self._counts:
@@ -167,9 +308,8 @@ class CountStep:
         complete = combinations <= int(self.config.shadow_combinations)
         paths = (list(itertools.product(*choices)) if complete and total_passes
                  else [tuple(rows[0] for rows in choices)])
-        family = (count_rule.ShadowDecisionFamily(
-            larger, smaller, self.cost, kind=kind, config=self.config,
-            seed_key=('join_count', kind, sorted(map(tuple, larger_panel))))
+        family = (_ShadowFamily(np.asarray(larger, np.float64), np.asarray(smaller, np.float64), self.cost,
+                                kind, self.config, tuple(map(tuple, larger_panel)))
                   if len(paths) > 1 else None)
         decisions = []
         for path in paths:
@@ -188,7 +328,7 @@ class CountStep:
         # Pick diagnostics consistently. The prior, when used, is explicit alongside them.
         decision = min(decisions, key=lambda d: (d.accept_larger, d.margin, d.sequence.loso_margin))
         if unresolved:
-            decision = replace(decision, accept_larger=False)
+            decision = decision.withheld()
         details = dict(nearest_choices=choices, combinations=combinations,
                        evaluated=len(paths), complete=len(paths) == combinations,
                        resolved_by_total=not total_passes, unresolved=unresolved,
@@ -249,7 +389,9 @@ class CountStep:
                                    link=lambda f: -self.linkage(panel[f]),
                                    panel=lambda f: [path for i, path in enumerate(panel) if i != f]))
         rest = [path for i, path in enumerate(panel) if i != founder]
-        smaller = removal[:, founder]
+        # An owned copy: the column becomes the incumbent's scores (and may be held by the birth memo); a view
+        # would keep the whole samples x founders removal matrix alive.
+        smaller = removal[:, founder].copy()
         shadow_details = None
         if len(pure):
             lost = 0
@@ -260,6 +402,7 @@ class CountStep:
                 panel, rest, founder, base, smaller, 'deletion',
                 None if key is None else f"{key}/margin")
             self._record_shadow_family(panel, rest, shadow_details, key)
+        decision = decision.resolve(self.cost, self.config)
         record = dict(kind='death', founder=founder, pure_mosaic=bool(len(pure)), lost_cells=int(lost),
                       panel_size=k, deleted=not decision.accept_larger, margin=decision.margin,
                       band=list(decision.band), ambiguous=decision.ambiguous,
@@ -272,6 +415,70 @@ class CountStep:
         if decision.accept_larger:
             return record, None, None
         return record, rest, smaller
+
+    def _birth_memo(self, panel, base, forwards):
+        """The birth memo of this panel: a dict reused only by births at an identical panel (path order),
+        per-sample scores and forwards; any other panel starts an empty one. None (recompute) while the valley
+        census records per-call margins, or when the panel's context alone would exceed BIRTH_MEMO_BYTES.
+        birth() runs only in the search's own thread (never in seed refits)."""
+        if self.label is not None and ties.census_enabled():
+            return None
+        context = (tuple(map(tuple, panel)), np.asarray(base, np.float64).tobytes(), forwards.rows.tobytes(),
+                   forwards.rows.shape)
+        if context != self._memo_context:
+            # The context key itself (panel, score bytes and forwards' rows), the empty novelty table, and the
+            # panel's score array (its owning buffer), which the kept decisions reference while the memo lives.
+            charge = (_panel_bytes(context[0]) + 3 * _OBJECT_BYTES + len(context[1]) + len(context[2])
+                      + 2 * _OBJECT_BYTES + _array_bytes(np.asarray(base)))
+            if charge > BIRTH_MEMO_BYTES:
+                # A context larger than the cap is not kept: these births are recomputed (no memo).
+                self._memo_context, self._memo, self._memo_bytes = None, {'novelty': {}}, 0
+                return None
+            self._memo_context = context
+            self._memo = {'novelty': {}}
+            self._memo_bytes = charge
+        return self._memo
+
+    def _remember(self, memo, key, value, nbytes) -> bool:
+        """Keep a memo entry when everything the memo then holds is charged within BIRTH_MEMO_BYTES (beyond it,
+        the caller recomputes)."""
+        nbytes += _SLOT_BYTES
+        if self._memo_bytes + nbytes > BIRTH_MEMO_BYTES:
+            return False
+        memo[key] = value
+        self._memo_bytes += nbytes
+        return True
+
+    def _scored_birth(self, memo, path, larger_panel, panel, base, bound, key, forwards, cover):
+        """(larger, decision, lost, shadow details) of one birth: _sparse then _shadow_decision, or their
+        memo entry (the counters advance as the computation would advance them; values are copies)."""
+        entry = None if memo is None else memo.get(('birth', path, bound.tobytes()))
+        if entry is not None:
+            larger, decision, lost, details, scores, samples = entry
+            self._counted(scores=scores, samples=samples)
+            details = (copy.deepcopy(details) if details is not None
+                       else dict(unresolved=False, count_unverified=False))
+            return larger.copy(), decision, lost, details
+        before = (self.exact_scores, self.exact_sample_scores)
+        larger = self._sparse(larger_panel, base, bound)
+        decision, lost, details = self._shadow_decision(
+            larger_panel, panel, len(panel), larger, base, 'addition', key, forwards=forwards, cover=cover)
+        if memo is not None:
+            counted = (self.exact_scores - before[0], self.exact_sample_scores - before[1])
+            # The entry keeps the key (path and bound bytes), the scores the decision also references (the
+            # caller gets a copy) and the decision: an unresolved decision's inputs stay until it is resolved,
+            # then only its record (PendingDecision.resolve). birth() reads a birth's shadow details only when
+            # they are unresolved or count-unverified (it then records them), otherwise only those two flags, so
+            # the entry keeps a copy of the details only then.
+            entry_key = ('birth', path, bound.tobytes())
+            kept = (copy.deepcopy(details) if details['unresolved'] or details.get('count_unverified', False)
+                    else None)
+            charge = (3 * _OBJECT_BYTES + _OBJECT_BYTES + _ITEM_BYTES * len(path) + len(entry_key[2])
+                      + _array_bytes(larger) + decision.retained_bytes()
+                      + (_details_bytes(kept) if kept is not None else 0))
+            if self._remember(memo, entry_key, (larger, decision, lost, kept, *counted), charge):
+                return larger.copy(), decision, lost, details
+        return larger, decision, lost, details
 
     def birth(self, panel, pool, forwards, base, key=None):
         """The pool birth of largest total gain among those the rule accepts.
@@ -291,9 +498,20 @@ class CountStep:
         cover = count_rule.covered_rows(rows)
         present = set(map(tuple, panel))
         outside = [path for path in dict.fromkeys(pool) if path not in present]
-        is_novel = np.array([count_rule.has_novelty(path, panel, cover, self.geometry,
-                                                    self.near_identity) for path in outside],
-                            dtype=bool)
+        memo = self._birth_memo(panel, base, forwards)
+        novelty = {} if memo is None else memo['novelty']
+        flags = []
+        for path in outside:
+            found = novelty.get(path)
+            if found is None:
+                found = count_rule.has_novelty(path, panel, cover, self.geometry, self.near_identity)
+                # A novelty entry: one table slot and the path tuple it keeps alive (the flag is a shared bool).
+                charge = _SLOT_BYTES + _OBJECT_BYTES + _ITEM_BYTES * len(path)
+                if memo is not None and self._memo_bytes + charge <= BIRTH_MEMO_BYTES:
+                    novelty[path] = found
+                    self._memo_bytes += charge
+            flags.append(found)
+        is_novel = np.array(flags, dtype=bool)
         record = dict(kind='birth', panel_size=k, pool=len(pool), novel=int(is_novel.sum()),
                       survivors=0, exact=0, accepted=None, trap_indicators=0)
         if not outside:
@@ -343,10 +561,9 @@ class CountStep:
                 break
             path = novel[index]
             larger_panel = list(panel) + [path]
-            larger = self._sparse(larger_panel, base, bounds[:, index])
-            decision, lost, shadow_details = self._shadow_decision(
-                larger_panel, panel, len(panel), larger, base, 'addition',
-                None if key is None else f"{key}/add{index}/margin", forwards=forwards, cover=cover)
+            larger, decision, lost, shadow_details = self._scored_birth(
+                memo, path, larger_panel, panel, base, np.ascontiguousarray(bounds[:, index]),
+                None if key is None else f"{key}/add{index}/margin", forwards, cover)
             record['exact'] += 1
             if shadow_details['unresolved'] or shadow_details.get('count_unverified', False):
                 unresolved_births.append((float((larger - base).sum()), larger_panel, shadow_details))
@@ -365,6 +582,7 @@ class CountStep:
             'assembly.join_birth', accepted, lambda item: item[0], lambda item: tie_rules.path_key(novel[item[1]]),
             scale, None if key is None else f"{key}/birth", link=lambda item: self.linkage(novel[item[1]]),
             panel=lambda item: list(panel) + [novel[item[1]]])
+        decision = decision.resolve(self.cost, self.config)
         record.update(accepted=list(novel[index]), lost_cells=int(lost), total_gain=total,
                       margin=decision.margin, band=list(decision.band), ambiguous=decision.ambiguous,
                       total=_test_record(decision.total), sequence=_test_record(decision.sequence))
@@ -398,7 +616,7 @@ class CountStep:
                                        None if key is None else f"{key}/pure{removed}",
                                        quantum_kind='join_ll_wide', link=lambda f: -self.linkage(panel[f]),
                                        panel=lambda f: [path for i, path in enumerate(panel) if i != f]))
-            scores = removal[:, founder]
+            scores = removal[:, founder].copy()     # owned: a settled panel's scores outlive the removal matrix
             panel = [path for i, path in enumerate(panel) if i != founder]
             removed += 1
         if len(panel) < 2:

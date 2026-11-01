@@ -223,6 +223,30 @@ def _fill_pattern_rows(diff1, w, kw_diff, new_bins, new_patterns, new_slots,
                     kw_diff_row[s] = kw_diff_row[s] + kw_diff_bit[s]
 
 
+@njit(cache=True, nogil=True)
+def _pack_state(matrix):
+    """The existing little-endian packed key, directly from the ordered panel."""
+    k, length = matrix.shape
+    packed = np.zeros((k * length + 7) // 8, dtype=np.uint8)
+    for row in range(k):
+        for site in range(length):
+            index = row * length + site
+            if np.uint8(matrix[row, site]) != 0:
+                packed[index // 8] |= np.uint8(1 << (index % 8))
+    return packed
+
+
+@njit(cache=True, nogil=True)
+def _unpack_state(packed, k, length):
+    """Decode directly to int64, without an intermediate unpacked uint8 panel."""
+    matrix = np.empty((k, length), dtype=np.int64)
+    for row in range(k):
+        for site in range(length):
+            index = row * length + site
+            matrix[row, site] = (packed[index // 8] >> (index % 8)) & 1
+    return matrix
+
+
 class PatternTables:
     """Lazily filled contractions of the within-bin allele patterns a block's panels use.
 
@@ -363,16 +387,13 @@ class FixedKWorkspace:
     @staticmethod
     def state_key(haplotypes) -> tuple:
         matrix = np.asarray(haplotypes)
-        packed = np.packbits(np.ascontiguousarray(matrix, dtype=np.uint8).reshape(-1),
-                             bitorder="little")
+        packed = _pack_state(matrix)
         return (int(matrix.shape[0]), int(matrix.shape[1]), packed.tobytes())
 
     @staticmethod
     def state_from_key(key) -> np.ndarray:
         k, length, packed = key
-        bits = np.unpackbits(np.frombuffer(packed, dtype=np.uint8), count=k * length,
-                             bitorder="little")
-        return np.ascontiguousarray(bits.reshape((k, length)), dtype=np.int64)
+        return _unpack_state(np.frombuffer(packed, dtype=np.uint8), k, length)
 
     # -- caches
     def cached_assignment(self, key):

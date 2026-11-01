@@ -36,6 +36,9 @@ from .path_model import COUNTS, EXACT, FLIPS, PathWorkspace
 # _tied_move). Far above the rounding of the gains (~1e-16 relative) and their motion under GL noise:
 # 2^-20 placed against 1e-9 relative noise, times maths.ties.NOISE_SCALE since 2.13 (1e-6 noise).
 FLIP_TIE = 2.0 ** -20 * NOISE_SCALE
+# Largest panel whose first GEM update computes the exact one-bit gains with its frequency step (fit_fixed;
+# release 3.5, a cost choice only: no value depends on it).
+EXACT_FIRST_UPDATE_MAX_K = 16
 
 
 def tied_within(values, tie=FLIP_TIE) -> np.ndarray:
@@ -301,15 +304,20 @@ def fit_fixed(panel, frequencies, prepared, search_config, buffers=None, census_
         best = (selection(panel, frequencies, score), panel.copy(), frequencies.copy(), score, -1)
     converged = False
     termination = "update_backstop"
-    # After an update without a positive expected flip the next one usually has none either
-    # (the frequency-only tail): its E-step then computes the exact gains in the same pass.
+    # The frequency step's E-step computes the exact one-bit gains in the same pass (release 3.5) unless
+    # the next state is unlikely to be stationary: the first update of a panel with more than
+    # EXACT_FIRST_UPDATE_MAX_K founders. A stationary state needs the exact gains, and a FLIPS-level
+    # pass would be redone at EXACT: stationary after the first update in 0.88-0.95 of TroMau fits
+    # (K ~ 6-7), 0.56 at std (K ~ 4), 0.14 at K30; after a GEM flip in about half everywhere; the EXACT
+    # pass costs 1.45-1.75 FLIPS passes. Every level computes its lower statistics identically, so the
+    # level choice changes no value, only which passes are computed.
     stationary = False
     for update in range(search_config.update_backstop(len(panel), panel.shape[1])):
         claim_threads()
         state = workspace.state(panel, frequencies, COUNTS)
         counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
         trial_frequencies = (counts + 1. / len(panel)) / (counts.sum() + 1.)
-        level = EXACT if stationary else FLIPS
+        level = EXACT if (stationary or update or len(panel) <= EXACT_FIRST_UPDATE_MAX_K) else FLIPS
         trial_score = workspace.state(panel, trial_frequencies, level)["log_likelihood"]
         trial_objective = trial_score + regularizer(panel, trial_frequencies)
         frequency_gain = 0.

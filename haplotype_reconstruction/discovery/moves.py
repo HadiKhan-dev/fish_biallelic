@@ -636,18 +636,30 @@ def data_birth_order(excess, observed_sites, samples, quantum):
     return order, groups, classes
 
 
+# Samples per bulk seed array when the omitted data-birth starts are counted (a memory bound only: at most
+# (dosage families x K + seed families) x chunk x L int8 cells at a time).
+_COUNT_CHUNK = 256
+
+
 def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int, omissions=None,
-                         *, key_of=panel_key):
+                         *, key_of=panel_key, count_rest=None):
     """Union each excess/coverage class's distinct starts before its hard-cap decision.
 
     The attempt budget is checked between groups. A class crossing the hard cap is omitted whole;
     no sample, founder-row or seed enumeration order can select a privileged prefix.
     ``key_of`` also accepts deferred starts: omitted classes need their identities only.
+    ``count_rest(items, seen) -> int`` (optional; release 3.5): once collection has stopped, the number of
+    distinct start keys of ``items`` (the rest of ``order``) not in ``seen``, computed in bulk. The omitted
+    classes are only counted (the ranked-truncation diagnostic), and the count is the size of the same union,
+    so it equals the group-by-group enumeration it replaces.
     """
     collected, seen = [], set()
     total = position = ranked = 0
     cut = stopped = False
     while position < len(order):
+        if stopped and count_rest is not None:
+            ranked += count_rest(order[position:], seen)
+            break
         group_id = groups[position]
         unique = {}
         while position < len(order) and groups[position] == group_id:
@@ -731,9 +743,41 @@ def data_births(workspace, solution, growth: GrowthInputs, max_iterations, searc
             base = parent_keys[parent_index]
             yield base[:offset] + key + base[offset:], parent_index, key
 
+    def count_rest(pairs, seen_keys) -> int:
+        """Distinct start keys of the stopped pairs not in ``seen_keys``: the union of seeds_of over ``pairs``
+        (a parent's own rows excluded; its earlier yields are in ``seen_keys``), in sample chunks of whole
+        int8 row arrays instead of one Python generator per sample (release 3.5; the same count)."""
+        if width == 0:
+            return 0
+        pairs = np.asarray(pairs, dtype=np.int64)
+        novel = set()
+        for parent_index, parent in enumerate(parents):
+            samples = pairs[pairs // len(growth.active) == parent_index] % len(growth.active)
+            if not len(samples):
+                continue
+            own = set(parent_rows[parent_index])
+            base = parent_keys[parent_index]
+            haplotypes = np.asarray(parent.haplotypes, dtype=np.int8)
+            rows = set()
+            for start in range(0, len(samples), _COUNT_CHUNK):
+                chunk = samples[start:start + _COUNT_CHUNK]
+                blocks = [np.clip(np.asarray(dosage[chunk], dtype=np.int8)[:, None, :] - haplotypes[None, :, :],
+                                  0, 1).reshape(-1, width) for dosage in growth.dosages]
+                blocks.extend(np.asarray(seed[chunk], dtype=np.int8) for seed in growth.seed_rows)
+                # Row keys straight from the contiguous int8 buffer (no structured dtype per call: see
+                # local_selection.fit.unique_rows on numpy's per-dtype retention).
+                packed = np.ascontiguousarray(np.concatenate(blocks), dtype=np.int8).tobytes()
+                rows.update(packed[offset:offset + width] for offset in range(0, len(packed), width))
+            for key in rows - own:
+                offset = bisect_left(parent_rows[parent_index], key) * width
+                full = base[:offset] + key + base[offset:]
+                if full not in seen_keys:
+                    novel.add(full)
+        return len(novel)
+
     omissions = []
     collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap, omissions,
-                                         key_of=itemgetter(0))
+                                         key_of=itemgetter(0), count_rest=count_rest)
     children = []
     child_keys: set[bytes] = set()
     fitted = []

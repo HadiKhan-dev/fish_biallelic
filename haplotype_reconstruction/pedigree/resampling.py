@@ -219,14 +219,17 @@ def run(inputs: DecisionInputs, config: PedigreeConfig, budget) -> Resampling:
     # solves), and the pool's last tasks widen onto the CPUs that the finished ones free (family._claim), so small
     # tasks keep the tail short. Support counts are integer sums: neither order nor grouping changes them.
     chunk = 1 if worker_count > 1 else max(1, fitted)
+    # Release 3.5: then the bootstrap vectors that omit the most chromosomes (weaker evidence, typically the slowest
+    # family solves), so that long fits start early rather than in the pool's tail.
+    order = np.argsort(-np.count_nonzero(distinct == 0.0, axis=1), kind="stable")
     tasks = []
     if n_contigs > 1:
         for omitted in range(n_contigs):
             weights = np.ones((1, n_contigs), dtype=np.float64)
             weights[0, omitted] = 0.0
             tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
-    tasks += [(False, np.ascontiguousarray(distinct[start:start + chunk]),
-               np.ascontiguousarray(draws[start:start + chunk]), config)
+    tasks += [(False, np.ascontiguousarray(distinct[order[start:start + chunk]]),
+               np.ascontiguousarray(draws[order[start:start + chunk]]), config)
               for start in range(0, fitted, chunk)]
     edges = named_edges(alternatives.rows, n_samples)
     bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)

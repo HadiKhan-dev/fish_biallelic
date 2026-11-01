@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+from functools import lru_cache
 
 import numpy as np
 from numba import njit
@@ -124,6 +125,41 @@ def _canonical_panel_kernel(haplotypes, assignments):
     return canonical_haplotypes, canonical_assignments, canonical_bytes, inverse
 
 
+@njit(cache=True, nogil=True)
+def lexicographic_row_order(rows):
+    """The stable lexicographic order of a panel's rows compared numerically, first site most significant: the
+    permutation ``np.lexsort(rows.T[::-1])`` (release 3.5: one compiled insertion sort instead of L sort keys)."""
+    k = rows.shape[0]
+    n_sites = rows.shape[1]
+    order = np.arange(k)
+    for index in range(1, k):
+        current = order[index]
+        position = index
+        while position > 0:
+            previous = order[position - 1]
+            less = False
+            for site in range(n_sites):
+                a = rows[current, site]
+                b = rows[previous, site]
+                if a != b:
+                    less = a < b
+                    break
+            if not less:
+                break
+            order[position] = previous
+            position -= 1
+        order[position] = current
+    return order
+
+
+@lru_cache(maxsize=64)
+def _state_pairs(k):
+    """Read-only state endpoints, shared by panels with the same founder count."""
+    first, second = np.triu_indices(k)
+    return (_readonly(np.concatenate((first, np.arange(k), [k]))),
+            _readonly(np.concatenate((second, np.full(k + 1, k)))))
+
+
 def canonical_solution(fit, workspace, quanta=None) -> FixedKSolution:
     """The canonical solution of a fit ``(H, A, per_sample_cost, unknown_slots, iterations, nll)``.
 
@@ -138,19 +174,19 @@ def canonical_solution(fit, workspace, quanta=None) -> FixedKSolution:
     offsets, states = (fit[6], fit[7]) if len(fit) > 6 else (None, None)
     if offsets is not None:
         k = len(haplotypes)
-        first, second = np.triu_indices(k)
-        state_first = np.concatenate((first, np.arange(k), [k]))
-        state_second = np.concatenate((second, np.full(k + 1, k)))
+        state_first, state_second = _state_pairs(k)
         mapping = np.append(inverse, k)
         a = mapping[state_first[states]]
         b = mapping[state_second[states]]
         lo, hi = np.minimum(a, b), np.maximum(a, b)
-        n_pairs = len(first)
+        n_pairs = k * (k + 1) // 2
         remapped = np.where(hi < k, lo * k - lo * (lo - 1) // 2 + hi - lo,
-                            np.where(lo < k, n_pairs + lo, n_pairs + k)).astype(np.int32)
-        for sample in range(len(offsets) - 1):
-            remapped[offsets[sample]:offsets[sample + 1]].sort()
-        states = _readonly(remapped)
+                            np.where(lo < k, n_pairs + lo, n_pairs + k)).astype(np.int64)
+        # Each sample's state IDs sorted ascending, all segments in one sort (release 3.5): state IDs lie in
+        # [0, n_pairs + k], so segment * (n_pairs + k + 1) + ID orders by segment first, then ID.
+        segment = np.repeat(np.arange(len(offsets) - 1, dtype=np.int64), np.diff(offsets))
+        stride = segment * (n_pairs + k + 1)
+        states = _readonly((np.sort(stride + remapped) - stride).astype(np.int32))
     certified = bool(workspace is not None and workspace.certifies_fixed_point(haplotypes))
     return FixedKSolution(
         haplotypes=_readonly(haplotypes), assignments=_readonly(assignments),
@@ -171,15 +207,31 @@ def restricted(solution: FixedKSolution, samples: np.ndarray) -> FixedKSolution:
         tie_offsets=offsets, tie_states=states)
 
 
+@njit(cache=True, nogil=True)
+def _compact_ties(mask):
+    offsets = np.zeros(len(mask) + 1, dtype=np.int64)
+    for sample in range(len(mask)):
+        count = 0
+        for state in range(mask.shape[1]):
+            count += int(mask[sample, state] != 0)
+        offsets[sample + 1] = offsets[sample] + (count if count > 1 else 0)
+    states = np.empty(offsets[-1], dtype=np.int32)
+    for sample in range(len(mask)):
+        if offsets[sample + 1] == offsets[sample]:
+            continue
+        position = offsets[sample]
+        for state in range(mask.shape[1]):
+            if mask[sample, state]:
+                states[position] = state
+                position += 1
+    return offsets, states
+
+
 def compact_ties(mask):
     """Retain state IDs only for multi-state samples (singletons use the pair summary)."""
-    counts = np.count_nonzero(mask, axis=1)
-    multiple = counts > 1
-    if not multiple.any():
+    offsets, states = _compact_ties(mask)
+    if len(states) == 0:
         return None, None
-    offsets = np.zeros(len(mask) + 1, dtype=np.int64)
-    offsets[1:] = np.cumsum(np.where(multiple, counts, 0))
-    states = np.nonzero(mask[multiple])[1].astype(np.int32)
     return _readonly(offsets), _readonly(states)
 
 
@@ -202,18 +254,25 @@ def solution_tie_mask(solution):
     return assignment_tie_mask(solution.assignments, solution.k, solution.tie_offsets, solution.tie_states)
 
 
+@njit(cache=True, nogil=True)
 def assignment_tie_mask(assignments, k, offsets=None, states=None):
+    """Full state membership; explicit multi-state segments replace the singleton pair."""
     n_pairs = k * (k + 1) // 2
     mask = np.zeros((len(assignments), n_pairs + k + 1), dtype=np.uint8)
-    a = assignments[:, 0]
-    b = assignments[:, 1]
-    single = np.where(b < k, a * k - a * (a - 1) // 2 + b - a,
-                      np.where(a < k, n_pairs + a, n_pairs + k))
-    mask[np.arange(len(assignments)), single] = 1
-    if offsets is not None:
-        for sample in np.flatnonzero(np.diff(offsets)):
-            mask[sample] = 0
-            mask[sample, states[offsets[sample]:offsets[sample + 1]]] = 1
+    for sample in range(len(assignments)):
+        if offsets is not None and states is not None:
+            if offsets[sample + 1] != offsets[sample]:
+                for position in range(offsets[sample], offsets[sample + 1]):
+                    mask[sample, states[position]] = 1
+                continue
+        a, b = assignments[sample, 0], assignments[sample, 1]
+        if b < k:
+            state = a * k - a * (a - 1) // 2 + b - a
+        elif a < k:
+            state = n_pairs + a
+        else:
+            state = n_pairs + k
+        mask[sample, state] = 1
     return mask
 
 
@@ -301,10 +360,32 @@ def unknown_alleles(assignments, observed, k, tie_mask=None):
     return ~known
 
 
+@njit(cache=True, nogil=True)
+def _known_content_bytes(haplotypes, unknown):
+    k, length = haplotypes.shape
+    masked = np.empty((k, length), dtype=np.uint8)
+    for row in range(k):
+        for site in range(length):
+            masked[row, site] = np.uint8(255) if unknown[row, site] else np.uint8(haplotypes[row, site])
+    # Unsigned byte order is the original bytes order, including unknown (-1 -> 255).
+    order = lexicographic_row_order(masked)
+    result = np.empty(k * length + max(0, k - 1), dtype=np.uint8)
+    position = 0
+    for index in range(k):
+        if index:
+            result[position] = 124  # the existing b"|" row separator
+            position += 1
+        for site in range(length):
+            result[position] = masked[order[index], site]
+            position += 1
+    return result
+
+
 def known_content_key(haplotypes, unknown) -> bytes:
     """A panel's science: its rows with unknown alleles masked (-1), as a sorted multiset (bytes)."""
-    masked = np.where(np.asarray(unknown, dtype=bool), -1, np.asarray(haplotypes, dtype=np.int64)).astype(np.int8)
-    return b"|".join(sorted(row.tobytes() for row in masked)) + b"#" + str(masked.shape).encode()
+    haplotypes = np.asarray(haplotypes, dtype=np.int64)
+    unknown = np.asarray(unknown, dtype=bool)
+    return _known_content_bytes(haplotypes, unknown).tobytes() + b"#" + str(haplotypes.shape).encode()
 
 
 def whole_class_cut(ordered, classes, width: int, omissions=None, *, cause="beam", scope="NLL classes"):
@@ -348,17 +429,32 @@ def class_beam(solutions, width: int, quanta=None):
     return tuple(kept)
 
 
+@njit(cache=True, nogil=True)
+def _unique_binary_indices(rows):
+    # packbits compares truth values. Preserve its equivalence classes and keep-first rule.
+    binary = rows != 0
+    order = lexicographic_row_order(binary)
+    keep = np.empty(len(rows), dtype=np.int64)
+    count = 0
+    for position in range(len(order)):
+        distinct = position == 0
+        if position:
+            for site in range(rows.shape[1]):
+                if binary[order[position], site] != binary[order[position - 1], site]:
+                    distinct = True
+                    break
+        if distinct:
+            keep[count] = order[position]
+            count += 1
+    return keep[:count]
+
+
 def unique_rows(matrix: np.ndarray) -> np.ndarray:
     """Distinct binary rows in lexicographic order (first occurrence kept), C-contiguous."""
     rows = np.asarray(matrix)
     if len(rows) <= 1:
         return np.array(rows, copy=True, order="C")
-    packed = np.packbits(rows, axis=1, bitorder="big")
-    first_index_by_key: dict[bytes, int] = {}
-    for index, packed_row in enumerate(packed):
-        first_index_by_key.setdefault(packed_row.tobytes(), index)
-    indices = [first_index_by_key[key] for key in sorted(first_index_by_key)]
-    return np.ascontiguousarray(rows[indices])
+    return np.ascontiguousarray(rows[_unique_binary_indices(rows)])
 
 
 def panel_key(haplotypes: np.ndarray) -> bytes:

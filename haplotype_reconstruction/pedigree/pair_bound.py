@@ -344,7 +344,7 @@ def _absorb_view(alpha, saved, factor, log_group, n_p, n_q, group_p, group_q, lo
 
 @njit(cache=True)
 def _pair_row(row, trios, row_child, entry_p, entry_q, partner, log_emission, full_e, tempered_e, top, exponent,
-              group, count, initial, transfer, available):
+              group, count, initial, transfer, available, partner_full, partner_tempered):
     states = log_emission.shape[2]
     bins = log_emission.shape[1]
     background = states - 1
@@ -376,10 +376,10 @@ def _pair_row(row, trios, row_child, entry_p, entry_q, partner, log_emission, fu
         eta = exponent[child, block]
         cap_p = partner[entry_p[row], block] - maximum if available[p] else np.inf
         cap_q = partner[entry_q[row], block] - maximum if available[q] else np.inf
-        pf_p = math.exp(cap_p) if cap_p < 0.0 else 1.0
-        pf_q = math.exp(cap_q) if cap_q < 0.0 else 1.0
-        pt_p = 1.0 if eta == 0.0 else (math.exp(eta * cap_p) if cap_p < 0.0 else 1.0)
-        pt_q = 1.0 if eta == 0.0 else (math.exp(eta * cap_q) if cap_q < 0.0 else 1.0)
+        pf_p = partner_full[entry_p[row], block] if available[p] else 1.0
+        pf_q = partner_full[entry_q[row], block] if available[q] else 1.0
+        pt_p = partner_tempered[entry_p[row], block] if available[p] else 1.0
+        pt_q = partner_tempered[entry_q[row], block] if available[q] else 1.0
         for i in range(n_p):
             for j in range(n_q):
                 g_full[i, j] = 0.0
@@ -426,10 +426,29 @@ def pair_bounds(trios, row_child, entry_p, entry_q, partner, log_emission, full_
                 offset_tempered, exponent, group, count, initial, transfer, available):
     """float64 [T]: the bound on 0.5 (tempered + full) M2 of each row (child, first, second) on one component;
     ``row_child`` is each row's position in the batch's child list (the emission tables' first axis)."""
+    # Every retained-parent entry belongs to one child. Its cap is reused by all
+    # that child's pairs, so exponentiate it once per entry and bin, not per pair.
+    entry_child = np.zeros(partner.shape[0], dtype=np.int64)
+    entry_local = np.zeros(partner.shape[0], dtype=np.int64)
+    for row in range(trios.shape[0]):
+        entry_child[entry_p[row]] = trios[row, 0]
+        entry_child[entry_q[row]] = trios[row, 0]
+        entry_local[entry_p[row]] = row_child[row]
+        entry_local[entry_q[row]] = row_child[row]
+    partner_full = np.ones(partner.shape)
+    partner_tempered = np.ones(partner.shape)
+    for entry in prange(partner.shape[0]):
+        for block in range(partner.shape[1]):
+            cap = partner[entry, block] - top[entry_local[entry], block]
+            eta = exponent[entry_child[entry], block]
+            if cap < 0.0:
+                partner_full[entry, block] = math.exp(cap)
+                if eta != 0.0:
+                    partner_tempered[entry, block] = math.exp(eta * cap)
     out = np.empty(trios.shape[0])
     for row in prange(trios.shape[0]):
         value = _pair_row(row, trios, row_child, entry_p, entry_q, partner, log_emission, full_e, tempered_e, top,
-                          exponent, group, count, initial, transfer, available)
+                          exponent, group, count, initial, transfer, available, partner_full, partner_tempered)
         local = row_child[row]
         out[row] = value + 0.5 * (offset_full[local] + offset_tempered[local])
     return out
@@ -482,7 +501,8 @@ def retained_batches(compact, bins: int, states: int):
         cands.append(parents)
         offsets.append(base + r)
         rows += len(i)
-        workspace = len(kids) * per_child + offsets[-1] * bins * 8
+        # Partner log bounds plus the full/tempered probability factors.
+        workspace = len(kids) * per_child + offsets[-1] * bins * 24
         if rows >= BATCH_ROWS or workspace >= WORKSPACE_BYTES:
             yield PairBatch(np.concatenate(trios), np.asarray(kids, np.int64), np.asarray(offsets, np.int64),
                             np.concatenate(cands), np.concatenate(ep), np.concatenate(eq), np.concatenate(local))

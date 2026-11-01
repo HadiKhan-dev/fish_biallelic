@@ -133,6 +133,27 @@ def sort_panel(panel) -> list:
 
 
 # ------------------------------------------------------------------------------------------- tie-class orders
+def path_codes(paths) -> np.ndarray | None:
+    """int64[n] mixed-radix codes of the rows of an int matrix whose numeric order is the rows' lexicographic
+    order (each column shifted by its minimum, radix its range; the first column most significant), or None
+    when the product of the ranges does not fit below 2^62 (callers then sort by the columns)."""
+    paths = np.asarray(paths, dtype=np.int64)
+    if paths.ndim != 2 or paths.shape[0] == 0:
+        return np.zeros(paths.shape[0] if paths.ndim else 0, dtype=np.int64)
+    low = paths.min(axis=0)
+    ranges = paths.max(axis=0) - low + 1
+    total = 1
+    for value in ranges.tolist():
+        total *= int(value)
+    if total >= 1 << 62:
+        return None
+    codes = np.zeros(paths.shape[0], dtype=np.int64)
+    for column in range(paths.shape[1]):
+        codes *= ranges[column]
+        codes += paths[:, column] - low[column]
+    return codes
+
+
 def path_class_order(values, paths, quantum_value: float, *, descending: bool = False,
                      motion_value: float | None = None):
     """Vectorised tie classes of ``values`` with the lexicographic ``paths`` (int[n, B]) as content keys, the same
@@ -149,7 +170,11 @@ def path_class_order(values, paths, quantum_value: float, *, descending: bool = 
         raise ValueError("tie classes of NaN are undefined")
     sign = -1.0 if descending else 1.0
     signed = sign * values
-    columns = tuple(paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
+    # One mixed-radix code per path orders the paths exactly as their columns do (release 3.5: two sort keys
+    # instead of B + 1; the same stable sorts, so the same permutations).
+    codes = path_codes(paths)
+    columns = ((codes,) if codes is not None
+               else tuple(paths[:, column] for column in range(paths.shape[1] - 1, -1, -1)))
     exact = np.lexsort(columns + (signed,))
     ordered = signed[exact]
     with np.errstate(invalid="ignore"):
@@ -165,12 +190,15 @@ def path_class_order(values, paths, quantum_value: float, *, descending: bool = 
     spans = np.where(np.isfinite(spans), spans, 0.0)
     wide = spans > ties.WIDE_CLASS_QUANTA * quantum_value
     value_key = np.where(wide[class_sorted], ordered, 0.0)
-    sorted_paths = paths[exact]
     # Content order inside a class: lexicographic paths, reversed under ties.reverse_conventions() (release 2.2
     # convention reversal; classes and values are not reversed).
     direction = -1 if ties.reverse_conventions() else 1
-    inner = np.lexsort(tuple(direction * sorted_paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
-                       + (value_key, class_sorted))
+    if codes is not None:
+        content = (direction * codes[exact],)
+    else:
+        sorted_paths = paths[exact]
+        content = tuple(direction * sorted_paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
+    inner = np.lexsort(content + (value_key, class_sorted))
     order = exact[inner]
     classes = np.empty(n, dtype=np.int64)
     classes[exact] = class_sorted

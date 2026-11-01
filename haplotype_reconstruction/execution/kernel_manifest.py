@@ -83,13 +83,94 @@ def generate(manifests: list[Path], output: Path = RELEASE_MANIFEST) -> dict:
                 skipped=skipped, output=str(output))
 
 
+
+def check(manifests: list[Path], release: Path = RELEASE_MANIFEST) -> dict:
+    """Fail release validation when observed signatures are absent from the packaged requests.
+
+    Accept learned cache manifests and the compile-event manifests written by start_audit. The latter
+    include kernels that cannot persist to disk. This checks reference coverage, not future inputs.
+    """
+    # Unlike runtime warm-up, release validation must not silently ignore an unreadable list.
+    data = json.loads(release.read_text())
+    if data["format"] != 1:
+        raise ValueError("unknown release manifest format")
+    listed = {}
+    for entry in data["overloads"]:
+        key = entry["module"], entry["function"]
+        listed.setdefault(key, set()).update(
+            pickle.loads(base64.b85decode(s["pickle"])) for s in entry["signatures"])
+    observed = {}
+    for path in manifests:
+        with path.open("rb") as handle:
+            for key, signatures in pickle.load(handle)["overloads"].items():
+                observed.setdefault(key, set()).update(signatures)
+    missing = [dict(module=key[0], function=key[1], signature=str(sig))
+               for key in sorted(observed)
+               for sig in sorted(observed[key] - listed.get(key, set()), key=str)]
+    return dict(observed=sum(map(len, observed.values())), missing=missing, release=str(release))
+
+
+_AUDIT_STARTED = False
+
+
+def start_audit() -> None:
+    """Opt-in release receipt: save successful compiler events, including non-cacheable kernels.
+
+    HAPLOTYPES_KERNEL_AUDIT names an attempt-local directory. Called in the driver and each scientific
+    worker; one atomic manifest per process avoids competing writers. Normal runs install no listener.
+    """
+    import os
+    global _AUDIT_STARTED
+    directory = os.environ.get("HAPLOTYPES_KERNEL_AUDIT")
+    if not directory or _AUDIT_STARTED:
+        return
+    import socket
+    from numba.core import event
+    from numba.core.serialize import dumps
+    from .kernel_cache import _write_atomically
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+
+    class CompileAudit(event.Listener):
+        def __init__(self):
+            self.overloads = {}
+
+        def on_start(self, event):
+            pass
+
+        def on_end(self, event):
+            dispatcher, args = event.data["dispatcher"], event.data["args"]
+            function = dispatcher.py_func
+            if not function.__module__.startswith("haplotype_reconstruction."):
+                return
+            # The dispatcher adds the overload before the successful end event. Failed typing and
+            # literal-specialisation retries have no overload and are not actual compiled signatures.
+            if args not in dispatcher.overloads:
+                return
+            key = function.__module__, function.__qualname__
+            signatures = self.overloads.setdefault(key, set())
+            if args in signatures:
+                return
+            signatures.add(args)
+            _write_atomically(root / f"{socket.gethostname()}-{os.getpid()}.pkl",
+                              dumps(dict(overloads=self.overloads, seconds={})))
+
+    event.register("numba:compile", CompileAudit())
+    _AUDIT_STARTED = True
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifests", type=Path, nargs="+", help="trusted reference-run manifest.pkl files")
     parser.add_argument("--output", type=Path, default=RELEASE_MANIFEST,
                         help="generated package JSON (default: this candidate's execution/kernel_manifest.json)")
+    parser.add_argument("--check", action="store_true",
+                        help="check observed manifests against --output; do not regenerate it")
     args = parser.parse_args(argv)
-    print(json.dumps(generate(args.manifests, args.output), indent=2))
+    result = check(args.manifests, args.output) if args.check else generate(args.manifests, args.output)
+    print(json.dumps(result, indent=2))
+    if args.check and (result["missing"] or not result["observed"]):
+        raise SystemExit("Release kernel coverage failed: missing signatures or empty observations")
 
 
 if __name__ == "__main__":

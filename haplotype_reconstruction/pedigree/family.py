@@ -34,6 +34,8 @@ class FamilyMessageNonConvergence(FloatingPointError):
 # (no floating-point reduction is split across threads: the residual's maximum is folded serially), so the results do
 # not depend on the thread count. Work is dealt to threads in interleaved lanes (item = lane, lane + lanes, ...) so
 # that children with many configuration rows spread over the team.
+# Read the current thread count at each Python entry after claiming the CPU share. Passing it into
+# compiled code keeps the same lane schedule without embedding a dynamic runtime address in its cache.
 _LANES_PER_THREAD = 8
 # exp(x) is exactly +0.0 in float64 for every x < -745.14 (below half the smallest subnormal), and log(1) and log1p(0)
 # are exactly 0: the kernels skip those evaluations, whose results they already know, so every value is unchanged
@@ -71,8 +73,8 @@ def _logaddexp(a, b):
 
 
 @njit(cache=True, nogil=True)
-def _lane_count(items):
-    return max(1, min(items, _LANES_PER_THREAD * get_num_threads()))
+def _lane_count(items, threads):
+    return max(1, min(items, _LANES_PER_THREAD * threads))
 
 
 @njit(cache=True, nogil=True)
@@ -125,7 +127,7 @@ def _child_log_odds(log_scores, rows, states, log_multiplicity, samples, child, 
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def _family_log_odds(log_scores, rows, states, log_multiplicity, samples):
+def _family_log_odds(log_scores, rows, states, log_multiplicity, samples, threads):
     """Included/excluded log odds of every [child, parent] in O(A + N^2), stably.
 
     Included masses have an independent scale per parent, so a tiny included probability survives
@@ -134,7 +136,7 @@ def _family_log_odds(log_scores, rows, states, log_multiplicity, samples):
     """
     output = np.full((samples, samples), -np.inf)
     starts = np.searchsorted(rows[:, 0], np.arange(samples + 1))
-    lanes = _lane_count(samples)
+    lanes = _lane_count(samples, threads)
     for lane in prange(lanes):
         for child in range(lane, samples, lanes):
             _child_log_odds(log_scores, rows, states, log_multiplicity, samples, child, starts[child],
@@ -159,13 +161,13 @@ def _with_incoming(log_scores, rows, incoming):
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def _cavity_passes(log_scores, rows, states, log_multiplicity, samples, passes):
+def _cavity_passes(log_scores, rows, states, log_multiplicity, samples, passes, threads):
     """Bounded synchronous cavity-message passes (immediate reverse feedback excluded)."""
     previous = np.zeros((samples, samples))
     for _ in range(passes):
         incoming = np.ascontiguousarray(previous.T)
         adjusted = _with_incoming(log_scores, rows, incoming)
-        odds = _family_log_odds(adjusted, rows, states, log_multiplicity, samples)
+        odds = _family_log_odds(adjusted, rows, states, log_multiplicity, samples, threads)
         updated = np.empty((samples, samples))
         for child in prange(samples):
             for parent in range(samples):
@@ -176,34 +178,174 @@ def _cavity_passes(log_scores, rows, states, log_multiplicity, samples, passes):
     return previous
 
 
+@njit(cache=True, nogil=True)
+def _child_cavity(scores, rows, states, log_multiplicity, samples, child, start, stop, incoming, previous, values,
+                  included_max, mass, included_sum, row_odds, messages):
+    """One child's row of a final-solve iteration: _with_incoming, _child_log_odds and the cavity update of
+    _cavity_iterations fused (release 3.5). Every value is computed by the same operations in the same order as
+    there: the child's adjusted row values are computed once and reused by every scan, and the best row's two
+    parents share one pair of exclusion scans (each parent's own maximum and sum, over the rows in order).
+    Writes messages[child] and returns the row's residual (the maximum of its changes) and whether a change is NaN.
+    """
+    maximum = -np.inf
+    best = -1
+    for parent in range(samples):
+        included_max[parent] = -np.inf
+        row_odds[parent] = -np.inf
+    for row in range(start, stop):
+        # _with_incoming, then _child_log_odds's value.
+        value = scores[row]
+        for slot in range(1, 3):
+            parent = rows[row, slot]
+            if parent >= 0:
+                value += incoming[child, parent]
+        value = value + log_multiplicity[child, states[row]]
+        values[row - start] = value
+        if value > maximum:
+            maximum, best = value, row
+        for slot in range(1, 3):
+            parent = rows[row, slot]
+            if parent >= 0:
+                included_max[parent] = max(included_max[parent], value)
+    if best >= 0:
+        for parent in range(samples):
+            mass[parent] = 0.0
+            included_sum[parent] = 0.0
+        total = 0.0
+        for row in range(start, stop):
+            value = values[row - start]
+            scaled = _exp_or_zero(value - maximum)
+            total += scaled
+            for slot in range(1, 3):
+                parent = rows[row, slot]
+                if parent >= 0 and np.isfinite(included_max[parent]):
+                    mass[parent] += scaled
+                    included_sum[parent] += _exp_or_zero(value - included_max[parent])
+        # The best row's parents: excluded masses need their own scans (both in one pass).
+        first, second = rows[best, 1], rows[best, 2]
+        scan_first = first >= 0 and np.isfinite(included_max[first])
+        scan_second = second >= 0 and np.isfinite(included_max[second])
+        first_max = -np.inf
+        second_max = -np.inf
+        first_excluded = -np.inf
+        second_excluded = -np.inf
+        if scan_first or scan_second:
+            for row in range(start, stop):
+                a, b = rows[row, 1], rows[row, 2]
+                value = values[row - start]
+                if scan_first and a != first and b != first:
+                    first_max = max(first_max, value)
+                if scan_second and a != second and b != second:
+                    second_max = max(second_max, value)
+            first_sum = 0.0
+            second_sum = 0.0
+            for row in range(start, stop):
+                a, b = rows[row, 1], rows[row, 2]
+                value = values[row - start]
+                if scan_first and a != first and b != first:
+                    first_sum += _exp_or_zero(value - first_max)
+                if scan_second and a != second and b != second:
+                    second_sum += _exp_or_zero(value - second_max)
+            first_excluded = first_max + _log_or_zero(first_sum)
+            second_excluded = second_max + _log_or_zero(second_sum)
+        for parent in range(samples):
+            if not np.isfinite(included_max[parent]):
+                continue
+            if parent == first:
+                log_excluded = first_excluded
+            elif parent == second:
+                log_excluded = second_excluded
+            else:
+                # Exact: the best row excludes this parent, so the excluded mass is >= 1.
+                log_excluded = maximum + _log_or_zero(max(1.0, total - mass[parent]))
+            row_odds[parent] = included_max[parent] + _log_or_zero(included_sum[parent]) - log_excluded
+    residual = 0.0
+    undefined = False
+    for parent in range(samples):
+        value = row_odds[parent] - incoming[child, parent]
+        value = -max(0.0, value) - _softplus_tail(abs(value))
+        change = abs(value - previous[child, parent])
+        messages[child, parent] = value
+        residual = max(residual, change)
+        undefined |= change != change
+    return residual, undefined
+
+
+@njit(cache=True, nogil=True)
+def _lane_cavity(scores, rows, states, log_multiplicity, samples, lane, lanes, starts, widest, incoming, previous,
+                 messages, row_residual, row_undefined):
+    """The children lane, lane + lanes, ... of one final-solve iteration, with this lane's own scratch rows."""
+    values = np.empty(widest)
+    included_max = np.empty(samples)
+    mass = np.empty(samples)
+    included_sum = np.empty(samples)
+    row_odds = np.empty(samples)
+    for child in range(lane, samples, lanes):
+        residual, undefined = _child_cavity(
+            scores, rows, states, log_multiplicity, samples, child, starts[child], starts[child + 1], incoming,
+            previous, values, included_max, mass, included_sum, row_odds, messages)
+        row_residual[child] = residual
+        row_undefined[child] = undefined
+
+
 @njit(cache=True, nogil=True, parallel=True)
 def _cavity_iterations(scores, rows, states, log_multiplicity, samples, previous, history, first, stop,
-                       tolerance, damping, window, horizon, residual):
+                       tolerance, damping, window, horizon, residual, threads):
     """Iterations ``first`` .. ``stop - 1`` of the converged cavity solve (see _converged_cavity), resumable.
 
     Returns (messages, iterations done, residual, status): status 1 = converged (the messages are the converged
     odds), 2 = paused, 0 = ``stop`` reached (the messages are the damped state to continue from). ``history`` (the
-    pause rule's residual ring) is updated in place.
+    pause rule's residual ring) is updated in place. ``previous`` is read, never written.
+
+    Release 3.5: one fused parallel pass per iteration (_child_cavity) and reused buffers; the values are those of
+    the 3.4 iteration (_with_incoming, _family_log_odds, then the cavity update): each element by the same
+    operations in the same order. The residual is a maximum of non-negative changes, which any grouping returns
+    exactly; when a change is NaN it is refolded serially in the 3.3 order, whose NaN handling depends on order.
     """
+    starts = np.searchsorted(rows[:, 0], np.arange(samples + 1))
+    widest = 0
+    for child in range(samples):
+        widest = max(widest, starts[child + 1] - starts[child])
+    lanes = _lane_count(samples, threads)
+    incoming = np.empty((samples, samples))
+    messages = np.empty((samples, samples))
+    current = previous
+    following = np.empty((samples, samples))
+    spare = np.empty((samples, samples))
+    row_residual = np.empty(samples)
+    row_undefined = np.zeros(samples, dtype=np.bool_)
+    block = 64
+    blocks = (samples + block - 1) // block
     for iteration in range(first, stop):
-        incoming = np.ascontiguousarray(previous.T)
-        adjusted = _with_incoming(scores, rows, incoming)
-        odds = _family_log_odds(adjusted, rows, states, log_multiplicity, samples)
-        change = np.empty((samples, samples))
+        # incoming = current.T (blocked transpose).
+        for tile in prange(blocks * blocks):
+            row0 = (tile // blocks) * block
+            column0 = (tile % blocks) * block
+            for i in range(row0, min(row0 + block, samples)):
+                for j in range(column0, min(column0 + block, samples)):
+                    incoming[i, j] = current[j, i]
+        for lane in prange(lanes):
+            _lane_cavity(scores, rows, states, log_multiplicity, samples, lane, lanes, starts, widest, incoming,
+                         current, messages, row_residual, row_undefined)
+        residual = 0.0
+        if np.any(row_undefined):
+            # The 3.3 serial fold over the changes, recomputed from the same operands.
+            for child in range(samples):
+                for parent in range(samples):
+                    residual = max(residual, abs(messages[child, parent] - current[child, parent]))
+        else:
+            for child in range(samples):
+                residual = max(residual, row_residual[child])
+        if residual <= tolerance:
+            return messages, iteration + 1, residual, 1
         for child in prange(samples):
             for parent in range(samples):
-                value = odds[child, parent] - incoming[child, parent]
-                value = -max(0.0, value) - _softplus_tail(abs(value))
-                change[child, parent] = abs(value - previous[child, parent])
-                odds[child, parent] = value
-        # The residual is folded serially, in the 3.3 order.
-        residual = 0.0
-        for child in range(samples):
-            for parent in range(samples):
-                residual = max(residual, change[child, parent])
-        if residual <= tolerance:
-            return odds, iteration + 1, residual, 1
-        previous = (1.0 - damping) * previous + damping * odds
+                following[child, parent] = (1.0 - damping) * current[child, parent] + damping * messages[child, parent]
+        # The damped state becomes current; its old buffer (never the caller's array) is reused next.
+        if iteration == first:
+            current, following = following, spare
+        else:
+            current, following = following, current
         if window > 0:
             done = iteration + 1
             position = done % window
@@ -214,8 +356,8 @@ def _cavity_iterations(scores, rows, states, log_multiplicity, samples, previous
                 # needs more than ``horizon`` iterations in all to reach the tolerance.
                 if residual >= earlier or done + window * math.log(tolerance / residual) / math.log(
                         residual / earlier) > horizon:
-                    return previous, done, residual, 2
-    return previous, stop, residual, 0
+                    return current, done, residual, 2
+    return current, stop, residual, 0
 
 
 # A fit claims its CPU share (execution.claim_threads) before each family kernel and between chunks of the converged
@@ -251,7 +393,7 @@ def _converged_cavity(scores, rows, states, log_multiplicity, samples, maximum, 
         _claim(work)
         previous, done, residual, status = _cavity_iterations(
             scores, rows, states, log_multiplicity, samples, previous, history, done, min(maximum, done + chunk),
-            tolerance, damping, window, horizon, residual)
+            tolerance, damping, window, horizon, residual, get_num_threads())
         if status == 1:
             return previous, done, residual, False
         if status == 2:
@@ -277,7 +419,7 @@ def _pair_orientation_log_odds(adjusted, rows, states, log_multiplicity, samples
     pair's joint states p -> c, c -> p and neither weigh e^a : e^b : 1. Infinite where only one
     orientation is scored; NaN where neither is.
     """
-    cavity = _family_log_odds(adjusted, rows, states, log_multiplicity, samples) - applied.T
+    cavity = _family_log_odds(adjusted, rows, states, log_multiplicity, samples, get_num_threads()) - applied.T
     with np.errstate(invalid="ignore"):
         return cavity - cavity.T
 
@@ -314,13 +456,13 @@ def _sample_panel(scores, rows, states, log_multiplicity, parent, start, stop, b
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def _configuration_panels(scores, rows, states, log_multiplicity, samples, budget):
+def _configuration_panels(scores, rows, states, log_multiplicity, samples, budget, threads):
     """Top ``budget`` configurations per sample; boundary ties move to the neutral tail."""
     starts = np.searchsorted(rows[:, 0], np.arange(samples + 1))
     selected = np.full((samples, budget), -1, dtype=np.int64)
     weights = np.full((samples, budget), -np.inf)
     tail = np.full(samples, -np.inf)
-    lanes = _lane_count(samples)
+    lanes = _lane_count(samples, threads)
     for lane in prange(lanes):
         for parent in range(lane, samples, lanes):
             _sample_panel(scores, rows, states, log_multiplicity, parent, starts[parent], starts[parent + 1],
@@ -367,6 +509,9 @@ def _path_target(target, rows, scores, selected, weights, tail, retained, denomi
     # Tail configurations are fully compatible, including omitted direct reversals; this can
     # only dilute the conditional penalty.
     numerator = _logaddexp(tail[p] + denominator[q, child], retained[p, child] + tail[q])
+    # Stable scaled sum of the same terms: one exponential per panel pair and one final logarithm,
+    # rather than a logarithm at every addition. Rescale whenever a larger term is encountered.
+    maximum, total = numerator, 1.0
     for i in range(budget):
         ri = selected[p, i]
         if ri < 0:
@@ -392,30 +537,35 @@ def _path_target(target, rows, scores, selected, weights, tail, retained, denomi
                 if slot >= 3 and g == d:
                     continue
                 value += excluded_by_child[child, g]
-            numerator = _logaddexp(numerator, value)
+            if value > maximum:
+                total = total * _exp_or_zero(maximum - value) + 1.0
+                maximum = value
+            elif value != -np.inf:
+                total += _exp_or_zero(value - maximum)
+    numerator = maximum + _log_or_zero(total)
     return min(0., numerator - denominator[p, child] - denominator[q, child])
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def _path_correction(scores, rows, states, log_multiplicity, excluded, budget):
+def _path_correction(scores, rows, states, log_multiplicity, excluded, budget, threads):
     """Reverse two-edge path factor per row; O(R A + R N^2 + R^2 A2), R = budget.
 
     ``excluded[g, c]`` is the outgoing cavity log probability that g does not choose c as parent.
     """
     n = len(excluded)
     selected, weights, tail = _configuration_panels(scores, rows, states, log_multiplicity, n,
-                                                    budget)
+                                                    budget, threads)
     retained = np.full((n, n), -np.inf)
     denominator = np.full((n, n), -np.inf)
     single = np.zeros((n, n))
-    lanes = _lane_count(n)
+    lanes = _lane_count(n, threads)
     for lane in prange(lanes):
         for parent in range(lane, n, lanes):
             _path_singles(parent, n, rows, selected, weights, tail, excluded, budget, retained, denominator, single)
     excluded_by_child = np.ascontiguousarray(excluded.T)
     result = np.zeros(len(states))
     count = len(states)
-    lanes = _lane_count(count)
+    lanes = _lane_count(count, threads)
     for lane in prange(lanes):
         for target in range(lane, count, lanes):
             result[target] = _path_target(target, rows, scores, selected, weights, tail, retained, denominator,
@@ -452,11 +602,11 @@ def adjust(state_scores: np.ndarray, identity_scores: np.ndarray, rows: np.ndarr
     work = len(rows) + samples * samples
     _claim(work)
     avoidance = _cavity_passes(identity_scores, rows, states, log_multiplicity, samples,
-                               config.message_passes)
+                               config.message_passes, get_num_threads())
     preparatory = _incoming_messages(avoidance, rows, eligible)
     _claim(work)
     paths = _path_correction(identity_scores + preparatory, rows, states, log_multiplicity,
-                             avoidance, config.ancestry_path_budget)
+                             avoidance, config.ancestry_path_budget, get_num_threads())
     # The path factor is frozen; the final reciprocal solve replaces the preparatory term.
     state_scores = state_scores + paths
     identity_scores = identity_scores + paths

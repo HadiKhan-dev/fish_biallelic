@@ -28,7 +28,7 @@ from numba import njit, prange
 
 from ...execution import claim_threads
 from ..conventions import rev
-from ..panel import (assignment_tie_mask, canonical_solution, compact_ties, deduplicate,
+from ..panel import (assignment_tie_mask, canonical_solution, compact_ties, deduplicate, lexicographic_row_order,
                      panel_key, unique_rows)
 from .assign import assign, haplotype_patterns, meet_pairs, pair_indices
 from .update import (founder_buckets, fractional_buckets, fractional_sweep_one_thread,
@@ -626,7 +626,7 @@ def fit_families(workspace, starts, max_iterations, *, with_initial=False, quant
     """
     starts = [np.ascontiguousarray(start, dtype=np.int64) for start in starts]
     if max_iterations > 0:
-        starts = [np.ascontiguousarray(start[np.lexsort(start.T[::-1])]) for start in starts]
+        starts = [np.ascontiguousarray(start[lexicographic_row_order(start)]) for start in starts]
     primary, tied = _scheduled_starts(workspace, starts, max_iterations, with_initial, quanta, False)
     branch = [index for index, value in enumerate(tied) if value]
     workspace.fit_schedule_counts["family_starts"] += len(starts)

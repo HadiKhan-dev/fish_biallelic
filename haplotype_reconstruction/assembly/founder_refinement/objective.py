@@ -336,50 +336,327 @@ def emit(row, dos, i, e):
 
 
 @njit(inline="always")
+def founder_maxima(row, R):
+    """R[x] = the maximum of row over the states containing founder x: transition()'s scan (row
+    segments {a, b >= a} and their columns, in that order)."""
+    K = len(R)
+    for x in range(K):
+        R[x] = -np.inf
+    q = 0
+    for a in range(K):
+        m = R[a]
+        for t in range(K - a):
+            v = row[q + t]
+            m = max(m, v)
+            R[a + t] = max(R[a + t], v)
+        R[a] = m
+        q += K - a
+
+
+@njit(inline="always")
+def centred(e, ec):
+    """ec[code] = e[code] - CENTER, the subtraction emit() makes per state, once per site."""
+    for x in range(7):
+        ec[x] = e[x] - CENTER
+
+
+@njit(inline="always")
+def fused_step(row, c, R, Rn, ec, dos, i, scanned):
+    """Release 3.5: transition(row, c, R) (c finite; R the founder maxima of row when scanned, else
+    computed here) then the emission ec[dos[i, q]], in one pass over the states that also collects
+    the emitted row's founder maxima into Rn in founder_maxima()'s order. Every state takes the
+    same operations in the same order as transition() then emit(), and Rn's maxima are taken over
+    the same values in the same order, so rows and maxima are bitwise theirs (about 25% fewer
+    cycles per state: the separate scan pass of the next transition is gone)."""
+    K = len(R)
+    if not scanned:
+        founder_maxima(row, R)
+    G = R[0]
+    for x in range(1, K):
+        G = max(G, R[x])
+    both = G - 2.0 * c
+    for x in range(K):
+        Rn[x] = -np.inf
+    q = 0
+    for a in range(K):
+        ra = R[a]
+        m = Rn[a]
+        for t in range(K - a):
+            v = max(max(row[q + t], max(ra, R[a + t]) - c), both) + ec[dos[i, q + t]]
+            row[q + t] = v
+            m = max(m, v)
+            Rn[a + t] = max(Rn[a + t], v)
+        Rn[a] = m
+        q += K - a
+
+
+@njit(inline="always")
+def emit_scan(row, Rn, ec, dos, i):
+    """emit() with centred evidence ec, collecting the emitted row's founder maxima into Rn
+    (founder_maxima()'s order)."""
+    K = len(Rn)
+    for x in range(K):
+        Rn[x] = -np.inf
+    q = 0
+    for a in range(K):
+        m = Rn[a]
+        for t in range(K - a):
+            v = row[q + t] + ec[dos[i, q + t]]
+            row[q + t] = v
+            m = max(m, v)
+            Rn[a + t] = max(Rn[a + t], v)
+        Rn[a] = m
+        q += K - a
+
+
+@njit(inline="always")
+def finish_transition(row, c, R):
+    """transition() given R = the founder maxima of row (c finite)."""
+    K = len(R)
+    G = R[0]
+    for x in range(1, K):
+        G = max(G, R[x])
+    both = G - 2.0 * c
+    q = 0
+    for a in range(K):
+        ra = R[a]
+        for t in range(K - a):
+            row[q + t] = max(max(row[q + t], max(ra, R[a + t]) - c), both)
+        q += K - a
+
+
+@njit(inline="always")
 def forward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's forward message row over sites [j0, j1) of the window's orientation: per
     informative site the transition entering it (its switch cost) then its emission (dosage rows
-    dos[j - lo]). R: (K,) and e: (7,) scratch."""
+    dos[j - lo]). R: (K,) and e: (7,) scratch.
+
+    Release 3.5: each site's transition and emission run as one pass (fused_step) that also takes
+    the founder maxima the next site's transition reads; bitwise transition() then emit()."""
+    K = len(R)
+    Rn = np.empty(K)
+    ec = np.empty(7)
+    scanned = False
     for j in range(j0, j1):
         f, k, r = locate(win, s, j)
         if not site_logs(win, s, f, k, r, e):
             continue
-        transition(row, site_cost(win, s, f, k, r), R)
-        emit(row, dos, j - lo, e)
+        centred(e, ec)
+        c = site_cost(win, s, f, k, r)
+        if c < np.inf:
+            fused_step(row, c, R, Rn, ec, dos, j - lo, scanned)
+        else:
+            emit_scan(row, Rn, ec, dos, j - lo)
+        for x in range(K):
+            R[x] = Rn[x]
+        scanned = True
 
 
 @njit(inline="always")
 def backward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's backward (stored-convention) row over sites [j0, j1) from right to left:
-    per informative site its emission, then the transition entering it."""
+    per informative site its emission, then the transition entering it.
+
+    Release 3.5: a site's transition is completed in the same pass as the next site's emission
+    (fused_step), which also takes that site's founder maxima; the last transition is completed
+    alone. Bitwise emit() then transition() per site."""
+    K = len(R)
+    Rn = np.empty(K)
+    ec = np.empty(7)
+    owed = False
+    owed_c = 0.0
     for j in range(j1 - 1, j0 - 1, -1):
         f, k, r = locate(win, s, j)
         if not site_logs(win, s, f, k, r, e):
             continue
-        emit(row, dos, j - lo, e)
-        transition(row, site_cost(win, s, f, k, r), R)
+        centred(e, ec)
+        if owed:
+            fused_step(row, owed_c, R, Rn, ec, dos, j - lo, True)
+        else:
+            emit_scan(row, Rn, ec, dos, j - lo)
+        for x in range(K):
+            R[x] = Rn[x]
+        c = site_cost(win, s, f, k, r)
+        owed = c < np.inf
+        owed_c = c
+    if owed:
+        finish_transition(row, owed_c, R)
+
+
+@njit(inline="always")
+def lex_founder_maxima(row, cst, R, Rc):
+    """(R[x], Rc[x]) = the lexicographic maximum (score, then lower switch cost) of the states containing
+    founder x: transition_lex()'s first scan, with its comparisons in its order."""
+    K = len(R)
+    for x in range(K):
+        R[x] = -np.inf
+        Rc[x] = 0.0
+    q = 0
+    for a in range(K):
+        m = R[a]
+        mc = Rc[a]
+        for t in range(K - a):
+            v = row[q + t]
+            k = cst[q + t]
+            take = v > m or (v == m and k < mc)
+            m = v if take else m
+            mc = k if take else mc
+            r = R[a + t]
+            rc = Rc[a + t]
+            take = v > r or (v == r and k < rc)
+            R[a + t] = v if take else r
+            Rc[a + t] = k if take else rc
+        R[a] = m
+        Rc[a] = mc
+        q += K - a
+
+
+@njit(inline="always")
+def lex_fused_step(row, cst, c, R, Rc, Rn, Rcn, ec, dos, i, emit_here):
+    """Release 3.5: the rest of transition_lex(row, cst, c, R, Rc) given (R, Rc) = lex_founder_maxima(row, cst)
+    (c finite), then, when emit_here, emit()'s addition ec[dos[i, q]] (ec = the site's e[code] - CENTER), in one
+    pass over the states that also collects the resulting row's founder maxima into (Rn, Rcn) with
+    lex_founder_maxima()'s comparisons in its order. Every state takes transition_lex()'s operations, then emit()'s,
+    so rows, switch costs and maxima are bitwise theirs; only the separate scan of the next transition is gone."""
+    K = len(R)
+    G = R[0]
+    Gc = Rc[0]
+    for x in range(1, K):
+        take = R[x] > G or (R[x] == G and Rc[x] < Gc)
+        G = R[x] if take else G
+        Gc = Rc[x] if take else Gc
+    both = G - 2.0 * c
+    both_c = Gc + 2.0 * c
+    for x in range(K):
+        Rn[x] = -np.inf
+        Rcn[x] = 0.0
+    q = 0
+    for a in range(K):
+        ra = R[a]
+        rac = Rc[a]
+        m = Rn[a]
+        mc = Rcn[a]
+        for t in range(K - a):
+            rb = R[a + t]
+            rbc = Rc[a + t]
+            useb = rb > ra or (rb == ra and rbc < rac)
+            w = (rb if useb else ra) - c
+            wc = (rbc if useb else rac) + c
+            v = row[q + t]
+            k = cst[q + t]
+            take = w > v or (w == v and wc < k)
+            v = w if take else v
+            k = wc if take else k
+            take = both > v or (both == v and both_c < k)
+            v = both if take else v
+            k = both_c if take else k
+            if emit_here:
+                v += ec[dos[i, q + t]]
+            row[q + t] = v
+            cst[q + t] = k
+            take = v > m or (v == m and k < mc)
+            m = v if take else m
+            mc = k if take else mc
+            r = Rn[a + t]
+            rc = Rcn[a + t]
+            take = v > r or (v == r and k < rc)
+            Rn[a + t] = v if take else r
+            Rcn[a + t] = k if take else rc
+        Rn[a] = m
+        Rcn[a] = mc
+        q += K - a
+
+
+@njit(inline="always")
+def lex_emit_scan(row, cst, Rn, Rcn, ec, dos, i):
+    """emit() with centred evidence ec, collecting the emitted row's founder maxima into (Rn, Rcn)
+    (lex_founder_maxima()'s comparisons in its order)."""
+    K = len(Rn)
+    for x in range(K):
+        Rn[x] = -np.inf
+        Rcn[x] = 0.0
+    q = 0
+    for a in range(K):
+        m = Rn[a]
+        mc = Rcn[a]
+        for t in range(K - a):
+            v = row[q + t] + ec[dos[i, q + t]]
+            k = cst[q + t]
+            row[q + t] = v
+            take = v > m or (v == m and k < mc)
+            m = v if take else m
+            mc = k if take else mc
+            r = Rn[a + t]
+            rc = Rcn[a + t]
+            take = v > r or (v == r and k < rc)
+            Rn[a + t] = v if take else r
+            Rcn[a + t] = k if take else rc
+        Rn[a] = m
+        Rcn[a] = mc
+        q += K - a
 
 
 @njit(inline="always")
 def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
-    """forward_sites() with the lexicographic switch costs."""
+    """forward_sites() with the lexicographic switch costs.
+
+    Release 3.5: each site's transition and emission run as one pass (lex_fused_step) that also takes the
+    founder maxima the next site's transition reads; bitwise transition_lex() then emit()."""
+    K = len(R)
+    Rn = np.empty(K)
+    Rcn = np.empty(K)
+    ec = np.empty(7)
+    scanned = False
     for j in range(j0, j1):
         f, k, r = locate(win, s, j)
         if not site_logs(win, s, f, k, r, e):
             continue
-        transition_lex(row, cst, site_cost(win, s, f, k, r), R, Rc)
-        emit(row, dos, j - lo, e)
+        for x in range(7):
+            ec[x] = e[x] - CENTER
+        c = site_cost(win, s, f, k, r)
+        if c < np.inf:
+            if not scanned:
+                lex_founder_maxima(row, cst, R, Rc)
+            lex_fused_step(row, cst, c, R, Rc, Rn, Rcn, ec, dos, j - lo, True)
+        else:
+            lex_emit_scan(row, cst, Rn, Rcn, ec, dos, j - lo)
+        for x in range(K):
+            R[x] = Rn[x]
+            Rc[x] = Rcn[x]
+        scanned = True
 
 
 @njit(inline="always")
 def backward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
-    """backward_sites() with the lexicographic switch costs."""
+    """backward_sites() with the lexicographic switch costs.
+
+    Release 3.5: a site's transition is completed in the same pass as the next site's emission
+    (lex_fused_step), which also takes that site's founder maxima; the last transition is completed alone.
+    Bitwise emit() then transition_lex() per site."""
+    K = len(R)
+    Rn = np.empty(K)
+    Rcn = np.empty(K)
+    ec = np.empty(7)
+    owed = False
+    owed_c = 0.0
     for j in range(j1 - 1, j0 - 1, -1):
         f, k, r = locate(win, s, j)
         if not site_logs(win, s, f, k, r, e):
             continue
-        emit(row, dos, j - lo, e)
-        transition_lex(row, cst, site_cost(win, s, f, k, r), R, Rc)
+        for x in range(7):
+            ec[x] = e[x] - CENTER
+        if owed:
+            lex_fused_step(row, cst, owed_c, R, Rc, Rn, Rcn, ec, dos, j - lo, True)
+        else:
+            lex_emit_scan(row, cst, Rn, Rcn, ec, dos, j - lo)
+        for x in range(K):
+            R[x] = Rn[x]
+            Rc[x] = Rcn[x]
+        c = site_cost(win, s, f, k, r)
+        owed = c < np.inf
+        owed_c = c
+    if owed:
+        lex_fused_step(row, cst, owed_c, R, Rc, Rn, Rcn, ec, dos, 0, False)
 
 
 @njit(inline="always")

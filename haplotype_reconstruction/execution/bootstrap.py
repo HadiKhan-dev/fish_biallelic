@@ -290,6 +290,8 @@ def start_run(cores: int, *, preload: tuple[str, ...] = (), profile: bool = Fals
     import numba as numba_module
     numba_module.set_num_threads(min(cores, numba_module.config.NUMBA_NUM_THREADS))
     _check_cached_kernel_signatures()
+    from .kernel_manifest import start_audit
+    start_audit()
     return _RUN
 
 
@@ -317,6 +319,8 @@ def apply_worker_settings(settings: tuple[RunSettings | None, str | None]) -> No
     from .memory import attach_governor
     attach_governor(memory_handle)
     _check_cached_kernel_signatures()
+    from .kernel_manifest import start_audit
+    start_audit()
 
 
 def _check_cached_kernel_signatures() -> None:

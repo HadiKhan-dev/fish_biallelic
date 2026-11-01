@@ -773,16 +773,24 @@ def _cluster_cached(distance, maximum_hamming, cache, content_keys, max_groups=6
 def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
     """Per site, the sum over samples of min(1, w_s) x (the sample's responsibility-weighted
     mean log odds over its records), with the number of contributing samples. ``members`` are
-    ordered by sample."""
+    ordered by sample.
+
+    Release 3.5 (speed only): each site keeps its contributing samples' terms contiguously, and only those enter the
+    site's exact sum. A sample without weight at a site adds an exact +0, which leaves the correctly rounded sum
+    unchanged (up to the sign of a zero total, which the logistic maps to 1/2 either way). One partials buffer
+    serves every site, and no members x sites matrix is allocated."""
     n_sites = log_odds.shape[1]
     total = np.zeros(n_sites, dtype=np.float64)
-    sample_terms = np.zeros((members.shape[0], n_sites), dtype=np.float64)
-    term_index = 0
     contributing = np.zeros(n_sites, dtype=np.int32)
-    weighted = np.zeros(n_sites, dtype=np.float64)
-    weight_at_site = np.zeros(n_sites, dtype=np.float64)
     if members.shape[0] == 0:
         return total, contributing
+    n_terms = 1
+    for position in range(1, members.shape[0]):
+        if sample_indices[members[position]] != sample_indices[members[position - 1]]:
+            n_terms += 1
+    site_terms = np.empty((n_sites, n_terms), dtype=np.float64)
+    weighted = np.zeros(n_sites, dtype=np.float64)
+    weight_at_site = np.zeros(n_sites, dtype=np.float64)
     current = sample_indices[members[0]]
     for position in range(members.shape[0]):
         record = members[position]
@@ -792,25 +800,42 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
                 weight = weight_at_site[site]
                 if weight > 0.0:
                     sample_weight = 1.0 if weight > 1.0 else weight
-                    sample_terms[term_index, site] = sample_weight * (weighted[site] / weight)
+                    site_terms[site, contributing[site]] = sample_weight * (weighted[site] / weight)
                     contributing[site] += 1
                     weighted[site] = 0.0
                     weight_at_site[site] = 0.0
-            term_index += 1
             current = sample
         record_weight = weights[record]
         for site in range(n_sites):
             if compatible[record, site]:
                 weighted[site] += record_weight * log_odds[record, site]
                 weight_at_site[site] += record_weight
+    partials = np.empty(n_terms, dtype=np.float64)
     for site in range(n_sites):
         weight = weight_at_site[site]
         if weight > 0.0:
             sample_weight = 1.0 if weight > 1.0 else weight
-            sample_terms[term_index, site] = sample_weight * (weighted[site] / weight)
+            site_terms[site, contributing[site]] = sample_weight * (weighted[site] / weight)
             contributing[site] += 1
-        total[site] = _accurate_sum(sample_terms[:term_index + 1, site])
+        total[site] = _accurate_sum(site_terms[site, :contributing[site]], partials)
     return total, contributing
+
+
+@njit(cache=True)
+def _sample_support(ordered, sample_indices, weights):
+    """(distinct samples, each sample's capped support min(1, running sum of its records' weights) in member
+    order). ``ordered`` is sorted by sample, so each sample is one run (release 3.5: the per-record Python loop of
+    soft_candidates, same arithmetic in the same order)."""
+    support = np.empty(ordered.shape[0], dtype=np.float64)
+    count = 0
+    for position in range(ordered.shape[0]):
+        record = ordered[position]
+        if position == 0 or sample_indices[record] != sample_indices[ordered[position - 1]]:
+            support[count] = min(1.0, 0.0 + weights[record])
+            count += 1
+        else:
+            support[count - 1] = min(1.0, support[count - 1] + weights[record])
+    return count, support
 
 
 def _consensus(members, sample_indices, weights, compatible, log_odds, call_probability):
@@ -1047,20 +1072,22 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None, li
     # hardened row, source order).
     prepared = []
     consensus_by_members: dict[tuple, tuple] = {}
+    # Members ordered by (sample, subtracted row, record index): the rank of every record in that total order,
+    # computed once (release 3.5; the same order as sorting each source by that key).
+    record_rank = np.empty(n_records, dtype=np.int64)
+    record_rank[np.lexsort((np.arange(n_records), subtracted, sample_indices))] = np.arange(n_records)
     for source_index, members in enumerate(sources):
-        ordered = tuple(sorted(members, key=lambda index: (
-            sample_indices[index], subtracted[index], index)))
+        member_array = np.asarray(members, dtype=np.int64)
+        ordered_array = member_array[np.argsort(record_rank[member_array], kind="stable")]
+        ordered = tuple(ordered_array.tolist())
         cached = consensus_by_members.get(ordered)
         if cached is None:
-            by_sample: dict[int, float] = {}
-            for index in ordered:
-                sample = int(sample_indices[index])
-                by_sample[sample] = min(1.0, by_sample.get(sample, 0.0) + float(weights[index]))
+            n_samples, support = _sample_support(ordered_array, sample_indices, weights)
             candidate, known_fraction = _consensus(
-                ordered, sample_indices, weights, compatible, log_odds,
+                ordered_array, sample_indices, weights, compatible, log_odds,
                 float(config.candidate_call_probability))
             cached = consensus_by_members[ordered] = (
-                _hardened_key(candidate, fallback), len(by_sample), math.fsum(by_sample.values()),
+                _hardened_key(candidate, fallback), n_samples, math.fsum(support[:n_samples].tolist()),
                 candidate, known_fraction)
             note_band(counter, "discovery.residual.half_band", candidate, 0.5, HALF_BAND)
             note_band(counter, "discovery.residual.mass_band", [cached[2]],

@@ -45,8 +45,8 @@ column per founder row of every component) and the phased sample VCF.
 
 Larger runs use a configuration file; the built-in presets `tromau` and `aulstu` list the contigs of the two
 cichlid crosses, so their configurations add only the data path. Rerunning
-the same command resumes compatible checkpoints. Upgrading from 3.3 to 3.4 requires a new output and checkpoint
-root; see the [release notes](CHANGELOG.md#340-31-october-2026). See [usage](docs/usage.md) for inputs, allocations
+the same command resumes compatible checkpoints. Upgrading from 3.4 to 3.5 requires a new output and checkpoint
+root; see the [release notes](CHANGELOG.md#350-1-november-2026). See [usage](docs/usage.md) for inputs, allocations
 and outputs, and [configuration](docs/configuration.md) for every setting.
 
 ## One pipeline

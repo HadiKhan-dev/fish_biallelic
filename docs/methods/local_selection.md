@@ -538,7 +538,11 @@ Cost in the founder count K, samples N and discovery sites L of one block (S = K
 - **One forward or backward pass** is O(N L K^2): the redraw transition is separable, so each site
   costs O(S^2) per sample. A backward pass computes only the statistics its caller needs: expected
   copies, then complete-emission flip gains and occupancy, then the exact one-bit gains, which are
-  computed only at stationary points and for the reported probabilities.
+  needed at stationary points and for the reported probabilities. Release 3.5 computes them with every
+  frequency step except the first step of a panel
+  with more than `local_selection.fit.EXACT_FIRST_UPDATE_MAX_K = 16` founders, where the next state is
+  rarely stationary; otherwise a stationary state repeated the pass at the higher level. Every level
+  computes its lower statistics identically, so this is a cost choice only.
 - **A GEM update** is a few passes, O(N L K^2); a fit takes at most 20 + 4K + 2L updates.
 - **A search round** has an O(N L K^3) likelihood screen: drop forwards, add forwards,
   drop-statistic passes, merge lower bounds and at most 2K exact merge forwards (one representative

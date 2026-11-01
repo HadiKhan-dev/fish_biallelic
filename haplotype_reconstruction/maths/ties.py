@@ -218,6 +218,38 @@ def _exact_key(value):
     return value
 
 
+@numba.njit(cache=True, nogil=True)
+def _class_membership(x, exact_order, sign, quantum, guard, with_guard):
+    """The original consecutive-gap scan, with the same float64 arithmetic and guards."""
+    n = len(x)
+    classes = np.empty(n, dtype=np.int64)
+    spans = np.empty(n, dtype=np.float64)
+    boundary = np.empty(max(0, n - 1), dtype=np.float64)
+    current = -1
+    boundary_count = 0
+    previous = start_value = 0.0
+    for position in range(n):
+        i = exact_order[position]
+        value = sign * x[i]
+        if position and with_guard and value != previous:
+            gap = value - previous
+            if np.isfinite(gap) and abs(gap - quantum) <= guard:
+                boundary[boundary_count] = gap
+                boundary_count += 1
+        if position == 0 or (value != previous and not (value - previous <= quantum)):
+            if position:
+                span = 0.0 if previous == start_value else previous - start_value
+                spans[current] = span if np.isfinite(span) else 0.0
+            current += 1
+            start_value = value
+        classes[i] = current
+        previous = value
+    if n:
+        span = 0.0 if previous == start_value else previous - start_value
+        spans[current] = span if np.isfinite(span) else 0.0
+    return classes, spans[:current + 1], boundary[:boundary_count]
+
+
 def tie_classes(values: Sequence[float], quantum: float, *, content: Sequence | None = None,
                 secondary: Sequence | None = None, descending: bool = False,
                 motion: float | None = None) -> TieClasses:
@@ -242,28 +274,9 @@ def tie_classes(values: Sequence[float], quantum: float, *, content: Sequence | 
     keys = [(_exact_key(content[i]) if content is not None else i) for i in range(n)]
     sign = -1.0 if descending else 1.0
     exact_order = sorted(range(n), key=lambda i: (sign * x[i], keys[i]))
-    classes = np.empty(n, dtype=np.int64)
-    spans = []
-    boundary = []
-    guard = None if motion is None else BOUNDARY_GUARD * float(motion)
-    current = -1
-    start_value = previous = None
-    for i in exact_order:
-        value = sign * x[i]
-        if previous is not None and guard is not None and value != previous:
-            gap = value - previous
-            if np.isfinite(gap) and abs(gap - quantum) <= guard:
-                boundary.append(float(gap))
-        if previous is None or (value != previous and not (value - previous <= quantum)):
-            if previous is not None:
-                spans.append(0.0 if previous == start_value else previous - start_value)
-            current += 1
-            start_value = value
-        classes[i] = current
-        previous = value
-    if previous is not None:
-        spans.append(0.0 if previous == start_value else previous - start_value)
-    spans_array = np.asarray([0.0 if not np.isfinite(span) else span for span in spans], dtype=np.float64)
+    classes, spans_array, boundary = _class_membership(
+        x, np.asarray(exact_order, dtype=np.int64), sign, float(quantum),
+        0.0 if motion is None else BOUNDARY_GUARD * float(motion), motion is not None)
     wide = spans_array > WIDE_CLASS_QUANTA * quantum
     second = [(_exact_key(secondary[i]) if secondary is not None else ()) for i in range(n)]
 
@@ -277,7 +290,7 @@ def tie_classes(values: Sequence[float], quantum: float, *, content: Sequence | 
 
     order = np.asarray(sorted(range(n), key=decision_key), dtype=np.int64)
     return TieClasses(order=order, classes=classes, spans=spans_array, quantum=float(quantum),
-                      wide_classes=int(np.count_nonzero(wide)), boundary_gaps=tuple(boundary))
+                      wide_classes=int(np.count_nonzero(wide)), boundary_gaps=tuple(boundary.tolist()))
 
 
 class TieCounter:

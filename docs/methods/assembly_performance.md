@@ -314,3 +314,35 @@ claimed for them. The old 2^21 policy stays rejected.
 The 2.7 implementation and measurements must be assessed per kernel and per supported path.
 This window overlay does not change two-row certification or establish a uniformly cubic
 assembly stage. The exact two-row overlay is delivered and validated separately.
+
+## Join count step, beam and tie orders (3.5)
+
+Release 3.5 removes repeated or unread work from the join's count step, beam and tie-class orders. Every change is
+exact: the same decisions, records and diagnostics (counters included), only less computation.
+
+- **Bootstrap bands on demand.** A count decision's point part (the effective-carrier tests on the total gain and
+  its sequence part, the verdict and min(m_d, m_q)) decides which shadow, birth or death a step takes; only the
+  decision a record reports reads its bootstrap band. The join's count step now computes the point part for every
+  candidate and draws the band (2,000 resamples, `count_rule.decide` or the shadow family's shared draws, from the
+  same seed key) only for the decision it records (`assembly/join/count_step.py`, `PendingDecision`). The 3.4 step
+  drew a band for every scored birth: about a third of a count-heavy batch's time.
+- **Births at one panel are scored once.** At a stall the search decides births at the same panel up to twice with
+  the same pool (after a pool extension and again after tier 2) and the same scores. The count step keeps the
+  numerics of the births it scored at the current panel (novelty tests, sparse exact scores, point decisions) and
+  reuses them while the panel, its per-sample scores and its forwards are unchanged; every tie decision, event,
+  family record and work counter is still produced in the same order. It is off while the valley census records
+  per-call margins. The memo's persistent storage is capped at 256 MiB: everything it keeps is charged before it
+  is kept, with upper per-object charges (arrays by the buffer that owns their data): the context (its key and the
+  panel's score array; a context above the cap is not kept), every entry's key (path and bound bytes), scores and
+  decision, its shadow details where the step records them, and every novelty entry. A decision keeps its inputs
+  (scores, shadow, seed panel, shadow family) only until it is resolved, then only its recorded values, so a
+  shadow family's bootstrap draws (2,000 x S indices) are released with it; a deleted path's score column is an
+  owned copy, not a view of the removal matrix. Beyond the cap the step recomputes. Transient work (bootstrap
+  draws while a decision resolves, copies returned to the caller) and the search's other arrays are outside this
+  budget.
+- **Private cells** (`count_rule.private_mask`) are counted by one comparison of all path pairs (O(K^2 B))
+  instead of a sort per block; same boolean mask.
+- **Beam.** The scaffolds' step scores are computed for all paths at once (each element the same float64 sum in
+  past-block order), the archive is returned from its keys, and tie-class orders sort paths by one mixed-radix
+  code per path (`tie_rules.path_codes`: the codes' numeric order is the paths' lexicographic order; the column
+  keys are used when the code would not fit below 2^62), so the same stable sorts give the same permutations.

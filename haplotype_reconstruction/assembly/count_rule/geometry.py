@@ -102,13 +102,12 @@ def covered_rows(rows) -> list[tuple[int, ...]]:
 
 
 def private_mask(rows) -> np.ndarray:
-    """bool[K, B]: private[i, b] iff path i is the only path using its row at block b."""
+    """bool[K, B]: private[i, b] iff path i is the only path using its row at block b (the paths using
+    each cell counted by one comparison of all path pairs: O(K^2 B))."""
     rows = np.asarray(rows, dtype=np.int64)
-    private = np.zeros(rows.shape, dtype=bool)
-    for b in range(rows.shape[1]):
-        _, inverse, counts = np.unique(rows[:, b], return_inverse=True, return_counts=True)
-        private[:, b] = counts[inverse] == 1
-    return private
+    if rows.ndim != 2 or rows.shape[0] == 0:
+        return np.zeros(rows.shape, dtype=bool)
+    return (rows[:, None, :] == rows[None, :, :]).sum(axis=1) == 1
 
 
 def shadow_path(path, smaller_cover, geometry: RowGeometry):

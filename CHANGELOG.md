@@ -1,5 +1,157 @@
 # Changelog
 
+## 3.5.0 (1 November 2026)
+
+This release makes the pipeline faster without changing its results. Every change is exact: on replays of saved
+stage inputs the released scientific outputs are identical, and so are the records and work counters that steer
+later decisions. Floating-point drift from mathematically equivalent arithmetic is reported where it occurs; the
+largest is 3.6e-12 in the pedigree's path sums. No likelihood, prior, threshold, convergence rule or decision rule
+changes, and no configuration key, command or output file changes.
+
+The measurements below are local: stage or kernel replays on saved 3.4 inputs, timed in pairs on exclusive 76-core
+nodes unless stated otherwise. They do not add up to an end-to-end figure; see [Timings](#timings).
+
+**Compiled kernels** ([performance](docs/performance.md#compiled-kernels)).
+
+- The pedigree's family kernels take their thread count as an argument instead of fixing it at compilation, so they
+  persist in the kernel store. Cold warm-up is 5.2 s shorter, and a fresh family worker pool starts in 0.2-0.3 s
+  instead of about 5 s (TroMau, std, K30). Family and family-phase replays are bitwise identical (30 family
+  comparisons, 14 chromosomes).
+- The release kernel list drops 32 obsolete signatures that every cold warm-up tried and skipped, 8.2 s of a 3.4.0
+  cold warm-up, and adds one observed signature.
+- Release check: with `HAPLOTYPES_KERNEL_AUDIT` set to a new directory, the driver and every scientific worker
+  record the Numba compilations they perform, including kernels that cannot persist to disk.
+  `python -m haplotype_reconstruction.execution.kernel_manifest --check` fails when an observed signature is missing
+  from the shipped list. Normal runs install no listener.
+
+**Evidence.** The read model's binomial terms are tabulated for depths below 129 (one 129 x 129 table, about
+130 KiB); deeper reads use the formula. TroMau chr3 evidence took 43.1 s instead of 70.5 s on 8 cores (-38.9%), with
+every evidence array and QC record identical. Process peak memory rose 0.2%.
+
+**Discovery.** Nine exact rewrites of discovery's bookkeeping, in three steps: omitted data-birth starts are counted
+in bulk; pooled log-odds are formed without the members x sites matrix; a canonical solution's tied-state segments
+are sorted in one sort; soft candidates rank their members once and accumulate capped support in one pass;
+family fits order panel rows by one compiled sort; packed state keys are built from and decoded to the ordered
+panel directly; panel and tie helpers share cached state endpoints; and the numeric tie-class scan of
+`maths/ties.py`, shared by about twenty modules, runs as compiled code with the same IEEE comparisons.
+
+- All 1,923 replayed blocks (std chr1, f3x8 chr1, K30 m1 and m3, TroMau chr3, N = 320 chr3) are identical at every
+  step, with zero float drift.
+- Discovery block CPU fell 17.0% on TroMau chr7 and 15.2% on N = 320 chr1; replay wall time fell 14.0% and 13.1%
+  (paired, alternating arms).
+
+**Local selection** ([local selection](docs/methods/local_selection.md)). The fixed-K fit's frequency step computes
+the exact one-bit gains at every update, except the first update of a panel with more than 16 founders, instead of
+a cheaper pass followed by a second, exact pass whenever the state turned stationary. Every level computes its
+lower statistics identically, so this is a cost choice only. Round CPU fell 5.5-6.8% on TroMau chr3 and about 1%
+on std; K30 was neutral. 7,226 block comparisons were identical.
+
+**Founder refinement** ([founder refinement](docs/methods/founder_refinement.md)).
+
+- Lazy lexicographic rescoring: within a lexicographic pass every proposal is scored with the plain kernel, and a
+  coarse proposal is rescored with the lexicographic kernel only when the ranking reaches it. The work counter that
+  chooses the next sweep's mode keeps its 3.4 count.
+- The acceptance pass's forward lookahead extends to the candidates' first blocks, the only forward messages the
+  candidate kernels read, instead of their ends, with a floor of 4 blocks instead of 16. The streaming window's
+  reach keeps its 3.4 value.
+- Fused site steps: the forward and backward site recursions compute a site's transition, its emission and the
+  founder maxima that the next transition reads in one pass over the states, with the same `max()` operations in
+  the same order (`assembly/founder_refinement/objective.py`). The lexicographic site steps are fused the same way,
+  with 3.4's lexicographic comparisons.
+- TroMau chr15 level-3 refinement replays (76 threads): lazy rescoring with the lookahead -8.6% wall and -10.4% CPU
+  (four runs per arm); the floor -1.1% wall further; the plain fusion -7.1% wall and -7.3% CPU (16 threads); the
+  lexicographic fusion -1.2% CPU, with no wall change. Std chr1 level 4: fusion -8.0% wall and -7.9% CPU.
+- Every refinement record and work counter was equal on 21 saved units (byte-level review audit). A strict
+  comparison of the integrated changes (every leaf by bytes, timing fields only excluded) found 0 differences in
+  383,690 leaves on 5 units.
+
+**Joins** ([assembly performance](docs/methods/assembly_performance.md#join-count-step-beam-and-tie-orders-35)). A
+count decision's bootstrap band is drawn only for the decision a record reports; births at an unchanged panel are
+scored once (the memo's persistent storage is capped at 256 MiB: everything it keeps is charged before it is
+kept, and beyond the cap the step recomputes); private cells are counted by one
+comparison of all path pairs;
+the beam's step scores are computed for all paths at once; and tie-class orders sort one mixed-radix code per path.
+
+- Join CPU fell 11% over 17 paired units (10,909 to 9,715 CPU-s): TroMau level-1 joins -17%, the slowest TroMau
+  batch 185 to 114 s, N = 320 straggler batches -13% to -22%, levels 2 and 3 0-4%. Peak memory was unchanged.
+- 610 replayed batches and 3,864 timed batches were byte-identical to the recorded 3.4 joins, events, tie
+  decisions and work counters included.
+
+**Scheduling** ([CPUs](docs/performance.md#cpus)). A contig whose planning size is at least twice the median
+contig's (`execution.contig_lanes.STRAGGLER_RATIO`) keeps its proportional CPU share while its share of the
+unfinished planned work exceeds its equal share; the other lanes split the rest equally. On the standard
+simulation's contig set, whose chr3 is 4.6 times the median, the lanes phase fell 1.2% (a replay at N = 40). TroMau
+has no such contig (1.9 times the median), so its shares are unchanged by construction. Lane records were bitwise
+identical on all 22 contigs.
+
+**Pedigree.**
+
+- Pair bounds take the exponential of each cap once per entry and bin instead of once per pair. Complete bound
+  computations were 8.6% faster at N = 1,003 and 7.9% faster at N = 2,503 (chr19), with all 43.5 million and 413.6
+  million bounds identical. Two entry x bin tables are charged to the existing 512 MiB soft workspace target.
+- The reverse-path terms of a configuration row are summed by a stable scaled accumulation, with one exponential per
+  term and one final logarithm, instead of a log-add at every addition. On the N near 1,000 crop the decision phase
+  fell 9.1% and fit CPU 10.4%. Continuous fields drift by at most 3.6e-12 (std 2e-15, K30 4.5e-13, f3x8 0), far
+  below the decision tie floors; no released field changes.
+- The final reciprocal solve runs one fused parallel pass per iteration; the calibration objective is evaluated per
+  child over the worker pool and folded in child order; and resampling schedules the leave-one-chromosome-out fits
+  first, then the bootstrap vectors that omit the most chromosomes, with the same seeded draws. With the path sum,
+  the N near 1,000 crop's decision phase took 593.0 s instead of 800.4 s (-25.9%), with 69.3 instead of 63.2 of 76
+  cores busy. Calibration took 11.7 s instead of 41.9 s at N near 1,000 and 25.7 s instead of 183.5 s at N near
+  2,500, bitwise identical.
+
+**Memory.** The new storage is limited: the evidence table (130 KiB), the join's birth memo (persistent storage
+capped at 256 MiB, every kept object charged before it is kept; transient work is outside the cap), the pair-bound
+tables (within the existing soft workspace target) and discovery's shared state endpoints. Where the
+replays above measured peaks, they moved by less than 0.5%, and the pedigree decision's fell from 32.7 to 31.6 GiB;
+the pair-bound tables were not measured in isolation. The end-to-end peaks are under [Timings](#timings).
+
+**Investigated, not included.**
+
+- **Local selection, deferred flip checks in the frequency-only tail:** about 11,000 replayed selections showed no
+  released change, but review found real decision changes. Skipping the flip tests can miss an improving flip: in a
+  35-sample fixture the fit ended 12.50 nats worse with different founders, and the outer search did not always
+  repair it. Skipped iterations also used up the iteration budget, changing panels at backstop exits. Replay maxima
+  are not an error bound. Snapping refits (another local-selection candidate) also changed decisions.
+- **Founder refinement, late start of candidate recursions:** exact on 3.4, but 99.1-99.999% of candidate
+  sample-blocks still recurse, so it gained nothing measurable; with the shortened lookahead above it would read
+  messages beyond the valid window. A lexicographic candidate preselection was slower on real components (+5% at
+  K 6, +7% at K 9).
+- **Discovery with evidence two contigs ahead in the same process:** no gain (the helpers contend); the separate
+  evidence process above replaces it.
+- **Pair bounds in a bin-major blocked kernel:** slower. **A pedigree exclusion prototype:** identical, but 4.5%
+  more CPU.
+- **Joins:** batched shadow bounds were identical with no gain, and variants of the linker scan kernel were not
+  faster; the kernel is instruction-bound.
+- **Warm-up overlapped with the first stages:** the first prototype lengthened warm-up; not pursued in 3.5.
+- **Evidence recorded ahead of discovery in a second process:** it shortened TroMau's discovery phase by 11.6%
+  with identical results, but was withdrawn after review found a hang when its child process dies inside the
+  claims lock. It goes to the architectural rebuild with the pipelining below.
+- **Relatedness beside the contig lanes, and discovery pipelined into the lanes:** both would change the documented
+  relatedness barrier. By the owner's decision the barrier stays in 3.5.
+
+**Compatibility and resume.** Use a **new output and checkpoint root** for a 3.5 run. The code identity of every
+stage changes, so a 3.4 run cannot be resumed in place: identity mismatches stop the append-only store rather than
+replace old results. Configuration files, commands and output files are unchanged.
+
+### Final validation
+
+One end-to-end matrix of 55 runs validated the integrated candidate: the 13 truth simulations, TroMau, three
+additional reference runs and 38 perturbations of the zero-noise loop (noise, permutation, core-count, CPU-target
+and convention-reversal cells). Every run finished with exit status 0. Each was compared with its 3.4.0
+counterpart, file by file: released products, tie reports and, for simulations, the evaluation against the truth.
+All 55 are scientifically identical (two VCF-permutation cells do not apply to native simulations). No released
+file and no truth metric differs. Floating-point drift appears only in three pedigree diagnostic tables, from the
+pedigree's scaled path sums, and is at most 1.5e-11. The join memo's storage cap (charged by owning buffer) was
+added after the matrix and checked by strict identity on 218 replayed join batches. The shipped kernel list was
+regenerated from the runs' compile audits and passes its coverage check.
+
+### Timings
+
+End-to-end timings of TroMau and of the standard N = 320 simulation on exclusive 76-core nodes, against the
+3.4.0 baselines, are measured on the release and reported separately; the stage figures above are the release's
+measured gains.
+
 ## 3.4.0 (31 October 2026)
 
 This release infers parentage without sample metadata, changes the pedigree's count and family-consistency rules,
