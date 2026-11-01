@@ -17,6 +17,7 @@ Two samplers, chosen by ``ReadModel.read_length_bp``:
   disfavoured allele reports the other one with probability |2p - 1|); the error rate acts on
   homozygous cells only.
 """
+
 from __future__ import annotations
 
 import math
@@ -24,11 +25,11 @@ import math
 import numpy as np
 from scipy.special import ndtri
 
+from ..core.errors import SettingsError
 from .design import ReadModel
+from .parameters import FRAGMENT_QUANTILES, FRAGMENT_SD_LIMIT, MINIMUM_FRAGMENT_BP
 
 # Fragment-length quantiles used to compute the expected bases covered per fragment.
-_FRAGMENT_QUANTILES = 100_000
-_MINIMUM_FRAGMENT_BP = 50
 
 
 def sample_reads(hap0, hap1, positions, depth: float, model: ReadModel, rng: np.random.Generator) -> np.ndarray:
@@ -41,7 +42,7 @@ def sample_reads(hap0, hap1, positions, depth: float, model: ReadModel, rng: np.
 def _sample_factors(samples, model, rng):
     factor = np.ones(samples)
     if model.depth_cv:
-        sigma = np.sqrt(np.log1p(model.depth_cv ** 2))
+        sigma = np.sqrt(np.log1p(model.depth_cv**2))
         factor = rng.lognormal(-sigma * sigma / 2, sigma, size=samples)
         factor /= factor.mean()
     return factor
@@ -56,11 +57,12 @@ def _site_reads(hap0, hap1, depth, model, rng):
     if width:
         starts = rng.integers(0, sites - width + 1, size=samples)
         for sample, start in enumerate(starts):
-            counts[sample, start:start + width] = 0
+            counts[sample, start : start + width] = 0
     dosage = hap0 + hap1
     alt = np.zeros_like(counts)
     for genotype, probability in enumerate(
-            (model.error_rate, model.heterozygote_alt_probability, 1 - model.error_rate)):
+        (model.error_rate, model.heterozygote_alt_probability, 1 - model.error_rate)
+    ):
         mask = dosage == genotype
         if np.any(mask):
             alt[mask] = rng.binomial(counts[mask], probability)
@@ -71,13 +73,13 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
     samples, sites = hap0.shape
     positions = np.asarray(positions, dtype=np.int64)
     if positions.shape != (sites,) or np.any(np.diff(positions) < 0):
-        raise ValueError("fragment sampling needs sorted positions aligned with the haplotypes")
+        raise SettingsError("fragment sampling needs sorted positions aligned with the haplotypes")
     r = int(model.read_length_bp)
     mean, sd = float(model.fragment_mean_bp), float(model.fragment_sd_bp)
-    f_min, f_max = _MINIMUM_FRAGMENT_BP, int(math.ceil(mean + 6 * sd)) + 1
+    f_min, f_max = MINIMUM_FRAGMENT_BP, int(math.ceil(mean + FRAGMENT_SD_LIMIT * sd)) + 1
     # Expected bases covered per fragment under the sampled length law (normal, rounded, clipped)
     # evaluated at fixed quantiles.
-    quantiles = (np.arange(_FRAGMENT_QUANTILES) + 0.5) / _FRAGMENT_QUANTILES
+    quantiles = (np.arange(FRAGMENT_QUANTILES) + 0.5) / FRAGMENT_QUANTILES
     lengths = np.clip(np.rint(mean + sd * ndtri(quantiles)), f_min, f_max)
     covered_per_fragment = float(np.mean(np.minimum(lengths, 2 * r)))
     factor = _sample_factors(samples, model, rng)
@@ -127,6 +129,6 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
     if width:
         starts = rng.integers(0, sites - width + 1, size=samples)
         for sample, first in enumerate(starts):
-            counts[sample, first:first + width] = 0
-            alt[sample, first:first + width] = 0
+            counts[sample, first : first + width] = 0
+            alt[sample, first : first + width] = 0
     return np.stack((counts - alt, alt), axis=-1).astype(np.int64, copy=False)

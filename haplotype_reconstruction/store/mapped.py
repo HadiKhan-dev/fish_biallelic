@@ -4,18 +4,19 @@ The ndarray owns its mmap; the temporary file lives on the checkpoint root's fil
 while open. No checkpoint or scratch pathname survives a crash. Eviction flushes dirty pages first, so values
 remain available to ordinary readers.
 """
+
 from __future__ import annotations
 
 import mmap
 import os
 import tempfile
 import weakref
+from typing import BinaryIO
 
 import numpy as np
 
-
 WINDOW_BYTES = 16 << 20
-_FILES = weakref.WeakKeyDictionary()
+_FILES: weakref.WeakKeyDictionary[mmap.mmap, BinaryIO] = weakref.WeakKeyDictionary()
 
 
 def mapped_array(shape, dtype, fill=0, *, root):
@@ -39,7 +40,7 @@ def mapped_array(shape, dtype, fill=0, *, root):
         flat = array.reshape(-1)
         step = max(1, WINDOW_BYTES // dtype.itemsize)
         for start in range(0, len(flat), step):
-            part = flat[start:start + step]
+            part = flat[start : start + step]
             part.fill(fill)
             discard_pages(part)
     return array
@@ -63,3 +64,6 @@ def discard_pages(value):
     owner.madvise(mmap.MADV_DONTNEED, start, stop - start)
     # Drop the clean file cache too: removing PTEs alone reduces RSS but can leave a chromosome charged to the job.
     os.posix_fadvise(_FILES[owner].fileno(), start, stop - start, os.POSIX_FADV_DONTNEED)
+
+
+__all__ = ["mapped_array", "discard_pages", "WINDOW_BYTES"]

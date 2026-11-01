@@ -16,21 +16,23 @@ exponential with the per-bp rate, rounded up to whole bp; with a map, a Poisson 
 crossovers uniform in genetic distance. Ancestry segments (start, end, founder haplotype) follow
 every crossover; mutations flip alleles at a per-bp rate (exponential gaps, rounded down).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-import random
+from typing import Any
 
 import numpy as np
 
-from ..execution.budget import as_budget
-from ..execution.pools import BudgetedPool
+from ..contracts.roles import record_field
+from ..core.errors import InputError
+from ..core.random import child_seeds, stream, structure_stream
 from .design import PedigreeRow, SimulationDesign
-
 
 # ---------------------------------------------------------------------------------------------
 # Founders
 # ---------------------------------------------------------------------------------------------
+
 
 def materialise_founders(allele_probabilities, rng: np.random.Generator) -> list[np.ndarray]:
     """Concrete founder haplotypes (int8 0/1) from template probabilities float[H, L, 2].
@@ -42,9 +44,9 @@ def materialise_founders(allele_probabilities, rng: np.random.Generator) -> list
     for haplotype in allele_probabilities:
         values = np.asarray(haplotype)
         if values.ndim != 2 or values.shape[1] != 2:
-            raise ValueError("founder template haplotypes must have shape (sites, 2)")
+            raise InputError("founder template haplotypes must have shape (sites, 2)")
         if np.any(~np.isfinite(values)) or np.any(values < 0.0) or np.any(np.sum(values, axis=1) <= 0.0):
-            raise ValueError("founder template probabilities must be finite, nonnegative, with positive mass")
+            raise InputError("founder template probabilities must be finite, nonnegative, with positive mass")
         alleles = np.argmax(values, axis=1).astype(np.int8)
         tied = values[:, 0] == values[:, 1]
         if np.any(tied):
@@ -56,13 +58,14 @@ def materialise_founders(allele_probabilities, rng: np.random.Generator) -> list
 def pair_founders(haplotypes) -> list[list[np.ndarray]]:
     """Diploid founders from consecutive haplotypes (0, 1), (2, 3), ..."""
     if len(haplotypes) % 2:
-        raise ValueError("founder templates must hold an even number of haplotypes")
+        raise InputError("founder templates must hold an even number of haplotypes")
     return [[haplotypes[2 * i], haplotypes[2 * i + 1]] for i in range(len(haplotypes) // 2)]
 
 
 # ---------------------------------------------------------------------------------------------
 # Meiosis
 # ---------------------------------------------------------------------------------------------
+
 
 def _segments_in_range(painting, range_start, range_end):
     """Ancestry segments (start, end, founder) of ``painting`` clipped to [range_start, range_end)."""
@@ -83,12 +86,11 @@ def _map_crossovers(site_locs, chromosome_map, rng):
         return np.empty(0, dtype=np.float64)
     count = int(rng.poisson(distance))
     genetic_start = float(chromosome_map.cumulative_morgans(start))
-    coordinates = genetic_start + rng.uniform(0., distance, size=count)
+    coordinates = genetic_start + rng.uniform(0.0, distance, size=count)
     return np.sort(chromosome_map.inverse_morgans(coordinates))
 
 
-def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_rate, rng,
-           chromosome_map=None):
+def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_rate, rng, chromosome_map=None):
     """One gamete of a parent: (alleles int8[L], ancestry segments, crossover positions float64[]).
 
     ``chromosome_map`` (a ChromosomeGeneticMap with a map) replaces the homogeneous
@@ -117,8 +119,7 @@ def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_r
             if cur_loc_index >= len(site_locs):
                 break
     else:
-        events = (_map_crossovers(site_locs, chromosome_map, rng) if using_map
-                  else np.empty(0, dtype=np.float64))
+        events = _map_crossovers(site_locs, chromosome_map, rng) if using_map else np.empty(0, dtype=np.float64)
         # A terminal boundary beyond the last marker includes the final allele while keeping the
         # [start, end) ancestry convention.
         terminal_loc = np.nextafter(float(end_phys), np.inf)
@@ -133,7 +134,7 @@ def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_r
                 using_hap = 1 - using_hap
                 cur_loc = new_loc
                 cur_loc_index = new_loc_index
-    result = np.concatenate(alleles)[:len(site_locs)]
+    result = np.concatenate(alleles)[: len(site_locs)]
     # Mutations flip alleles (ancestry unchanged): exponential gaps rounded down.
     mutation_scale = 1.0 / mutation_rate
     mutated = []
@@ -151,19 +152,40 @@ def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_r
 
 def _simulate_children(task, shared=None, budget=None):
     """Pool task: the children ``first..stop-1`` of one contig and cohort (one seed per child)."""
-    (contig_index, first, parent_pairs, seeds, parents, ancestries, site_locs, recombination_rate,
-     mutation_rate, chromosome_map) = task
+    (
+        contig_index,
+        first,
+        parent_pairs,
+        seeds,
+        parents,
+        ancestries,
+        site_locs,
+        recombination_rate,
+        mutation_rate,
+        chromosome_map,
+    ) = task
     children = []
-    for (mother, father), seed in zip(parent_pairs, seeds):
-        rng = np.random.default_rng(int(seed))
-        maternal = gamete(parents[mother], ancestries[mother], site_locs,
-                          recombination_rate=recombination_rate, mutation_rate=mutation_rate,
-                          rng=rng, chromosome_map=chromosome_map)
-        paternal = gamete(parents[father], ancestries[father], site_locs,
-                          recombination_rate=recombination_rate, mutation_rate=mutation_rate,
-                          rng=rng, chromosome_map=chromosome_map)
-        children.append(([maternal[0], paternal[0]], [maternal[1], paternal[1]],
-                         [maternal[2], paternal[2]]))
+    for (mother, father), seed in zip(parent_pairs, seeds, strict=False):
+        rng = stream("simulation.child", seed=int(seed))
+        maternal = gamete(
+            parents[mother],
+            ancestries[mother],
+            site_locs,
+            recombination_rate=recombination_rate,
+            mutation_rate=mutation_rate,
+            rng=rng,
+            chromosome_map=chromosome_map,
+        )
+        paternal = gamete(
+            parents[father],
+            ancestries[father],
+            site_locs,
+            recombination_rate=recombination_rate,
+            mutation_rate=mutation_rate,
+            rng=rng,
+            chromosome_map=chromosome_map,
+        )
+        children.append(([maternal[0], paternal[0]], [maternal[1], paternal[1]], [maternal[2], paternal[2]]))
     return contig_index, first, children
 
 
@@ -171,29 +193,39 @@ def _simulate_children(task, shared=None, budget=None):
 # Pedigree
 # ---------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class PedigreeTable:
     """Individuals in generation order: sample names, cohort (1 = children of the founders) and
     the two parents (founders are ``Founder_<i>``); parent1 gave the first haplotype."""
 
-    samples: tuple[str, ...]
-    cohorts: tuple[int, ...]
-    parent1: tuple[str, ...]
-    parent2: tuple[str, ...]
+    samples: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    cohorts: tuple[int, ...] = record_field("obs", axes=(), units="1", dtype="tuple[int, ...]")
+    parent1: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    parent2: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
 
-    def take(self, rows) -> "PedigreeTable":
+    def take(self, rows) -> PedigreeTable:
         rows = [int(row) for row in rows]
-        return PedigreeTable(*(tuple(column[row] for row in rows) for column in
-                               (self.samples, self.cohorts, self.parent1, self.parent2)))
+        return PedigreeTable(
+            *(tuple(column[row] for row in rows) for column in (self.samples, self.cohorts, self.parent1, self.parent2))
+        )
 
     def record(self) -> dict:
-        return dict(samples=list(self.samples), cohorts=list(self.cohorts),
-                    parent1=list(self.parent1), parent2=list(self.parent2))
+        return dict(
+            samples=list(self.samples),
+            cohorts=list(self.cohorts),
+            parent1=list(self.parent1),
+            parent2=list(self.parent2),
+        )
 
     @classmethod
-    def from_record(cls, record) -> "PedigreeTable":
-        return cls(tuple(record["samples"]), tuple(int(c) for c in record["cohorts"]),
-                   tuple(record["parent1"]), tuple(record["parent2"]))
+    def from_record(cls, record) -> PedigreeTable:
+        return cls(
+            tuple(record["samples"]),
+            tuple(int(c) for c in record["cohorts"]),
+            tuple(record["parent1"]),
+            tuple(record["parent2"]),
+        )
 
 
 @dataclass
@@ -205,30 +237,27 @@ class SimulatedContig:
     crossover positions float64[]).
     """
 
-    haplotypes: list
-    ancestry: list
-    gametes: list
+    haplotypes: list = record_field("obs", axes=(), units="1", dtype="list")
+    ancestry: list = record_field("obs", axes=(), units="1", dtype="list")
+    gametes: list = record_field("obs", axes=(), units="1", dtype="list")
 
 
 class _TaskRunner:
-    """A BudgetedPool for more than one process; inline execution (no process) for one."""
+    """Relocation runner: execute the unchanged independent child batches in order."""
 
-    def __init__(self, budget, processes):
-        self.pool = (BudgetedPool(budget, processes=processes, label="simulated meiosis")
-                     if processes > 1 else None)
+    def __init__(self, budget, processes, runner=None):
+        self.runner = runner
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
-        if self.pool is not None:
-            return self.pool.__exit__(*exc)
         return False
 
     def imap_unordered(self, function, tasks):
-        if self.pool is None:
-            return (function(task, None, None) for task in tasks)
-        return self.pool.imap_unordered(function, tasks)
+        if self.runner is not None:
+            return self.runner(function, tasks)
+        return (function(task, None, None) for task in tasks)
 
 
 def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
@@ -237,41 +266,48 @@ def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
     return max(1, (n_children + per_contig - 1) // per_contig)
 
 
-def simulate_pedigree(founders_by_contig, sites_by_contig, cohort_sizes, *, seed: int,
-                      recombination_rate: float, mutation_rate: float, chromosome_maps,
-                      design: SimulationDesign, budget):
+def simulate_pedigree(
+    founders_by_contig,
+    sites_by_contig,
+    cohort_sizes,
+    *,
+    seed: int,
+    recombination_rate: float,
+    mutation_rate: float,
+    chromosome_maps,
+    design: SimulationDesign,
+    budget=1,
+    runner=None,
+):
     """Simulate the cohorts on every contig with one shared pedigree structure.
 
     founders_by_contig[c]: list of founders [hap0, hap1] (int8[L_c]); sites_by_contig[c]: int64[L_c];
     chromosome_maps[c]: the contig's generating ChromosomeGeneticMap (None: the homogeneous rate).
     Returns (PedigreeTable of every generated individual, [SimulatedContig per contig]).
     """
-    budget = as_budget(budget)
     n_contigs = len(founders_by_contig)
-    master = np.random.default_rng(seed)
-    structure = random.Random(int(master.integers(0, 2 ** 31)))
+    master = stream("simulation.master", seed=seed)
+    structure = structure_stream(master)
 
     # Founder ancestry: haplotype h of the founders covers the whole contig.
     parents_by_contig = [list(founders) for founders in founders_by_contig]
     ancestries_by_contig = []
-    for founders, sites in zip(founders_by_contig, sites_by_contig):
+    for founders, sites in zip(founders_by_contig, sites_by_contig, strict=False):
         start, end = sites[0], sites[-1]
-        ancestries_by_contig.append([[[(start, end, 2 * i)], [(start, end, 2 * i + 1)]]
-                                     for i in range(len(founders))])
+        ancestries_by_contig.append([[[(start, end, 2 * i)], [(start, end, 2 * i + 1)]] for i in range(len(founders))])
     parent_ids = [f"Founder_{i}" for i in range(len(founders_by_contig[0]))]
     contigs = [SimulatedContig([], [], []) for _ in range(n_contigs)]
     samples, cohorts, parent1, parent2 = [], [], [], []
     # Backcrosses pair a generated individual with one of its actual parents.
-    parents_of = {}
-    hap_registry = [dict(zip(parent_ids, parents)) for parents in parents_by_contig]
-    ancestry_registry = [dict(zip(parent_ids, ancestries)) for ancestries in ancestries_by_contig]
+    parents_of: dict[str, tuple[str, str]] = {}
+    hap_registry = [dict(zip(parent_ids, parents, strict=False)) for parents in parents_by_contig]
+    ancestry_registry = [dict(zip(parent_ids, ancestries, strict=False)) for ancestries in ancestries_by_contig]
 
-    processes = budget.threads()
-    with _TaskRunner(budget, processes) as pool:
+    processes = int(budget)
+    with _TaskRunner(budget, processes, runner) as pool:
         for cohort_index, n_children in enumerate(cohort_sizes):
             cohort_name = f"F{cohort_index + 1}"
-            backcrossing = (design.backcross_fraction > 0
-                            and cohort_index + 1 >= design.backcross_start_cohort)
+            backcrossing = design.backcross_fraction > 0 and cohort_index + 1 >= design.backcross_start_cohort
             pool_ids = list(parent_ids)
             if backcrossing:
                 for individual in parent_ids:
@@ -279,12 +315,19 @@ def simulate_pedigree(founders_by_contig, sites_by_contig, cohort_sizes, *, seed
                         if parent not in pool_ids:
                             pool_ids.append(parent)
             pool_index = {name: index for index, name in enumerate(pool_ids)}
-            pool_haplotypes = ([[registry[name] for name in pool_ids] for registry in hap_registry]
-                               if backcrossing else parents_by_contig)
-            pool_ancestries = ([[registry[name] for name in pool_ids] for registry in ancestry_registry]
-                               if backcrossing else ancestries_by_contig)
+            pool_haplotypes = (
+                [[registry[name] for name in pool_ids] for registry in hap_registry]
+                if backcrossing
+                else parents_by_contig
+            )
+            pool_ancestries = (
+                [[registry[name] for name in pool_ids] for registry in ancestry_registry]
+                if backcrossing
+                else ancestries_by_contig
+            )
             # A. Structure (shared by every contig).
             parent_pairs, child_ids = [], []
+            pair: tuple[int, ...]
             for i in range(n_children):
                 if backcrossing and structure.random() < design.backcross_fraction:
                     first_id = structure.choice(parent_ids)
@@ -302,15 +345,27 @@ def simulate_pedigree(founders_by_contig, sites_by_contig, cohort_sizes, *, seed
                 parent1.append(first_id)
                 parent2.append(second_id)
             # B. Genetics: one seed per contig and child, fixed before any scheduling.
-            seeds = master.integers(0, 2 ** 63, size=(n_contigs, n_children), dtype=np.int64)
+            seeds = child_seeds(master, n_contigs, n_children)
             per_task = _children_per_task(n_children, n_contigs, processes)
-            tasks = [(c, first, parent_pairs[first:first + per_task], seeds[c, first:first + per_task],
-                      pool_haplotypes[c], pool_ancestries[c], sites_by_contig[c], recombination_rate,
-                      mutation_rate, chromosome_maps[c])
-                     for c in range(n_contigs) for first in range(0, n_children, per_task)]
-            offspring = [[None] * n_children for _ in range(n_contigs)]
+            tasks = [
+                (
+                    c,
+                    first,
+                    parent_pairs[first : first + per_task],
+                    seeds[c, first : first + per_task],
+                    pool_haplotypes[c],
+                    pool_ancestries[c],
+                    sites_by_contig[c],
+                    recombination_rate,
+                    mutation_rate,
+                    chromosome_maps[c],
+                )
+                for c in range(n_contigs)
+                for first in range(0, n_children, per_task)
+            ]
+            offspring: list[list[Any]] = [[None] * n_children for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
-                offspring[contig_index][first:first + len(children)] = children
+                offspring[contig_index][first : first + len(children)] = children
             row0 = len(samples) - n_children
             for c in range(n_contigs):
                 for i, (haplotypes, ancestry, events) in enumerate(offspring[c]):
@@ -321,16 +376,26 @@ def simulate_pedigree(founders_by_contig, sites_by_contig, cohort_sizes, *, seed
                         contigs[c].gametes.append((row0 + i, slot, parent, events[slot]))
             if design.backcross_fraction:
                 for c in range(n_contigs):
-                    hap_registry[c].update(zip(child_ids, (child[0] for child in offspring[c])))
-                    ancestry_registry[c].update(zip(child_ids, (child[1] for child in offspring[c])))
+                    hap_registry[c].update(zip(child_ids, (child[0] for child in offspring[c]), strict=False))
+                    ancestry_registry[c].update(zip(child_ids, (child[1] for child in offspring[c]), strict=False))
             parents_by_contig = [[child[0] for child in offspring[c]] for c in range(n_contigs)]
             ancestries_by_contig = [[child[1] for child in offspring[c]] for c in range(n_contigs)]
             parent_ids = child_ids
     return PedigreeTable(tuple(samples), tuple(cohorts), tuple(parent1), tuple(parent2)), contigs
 
 
-def simulate_explicit_pedigree(founders_by_contig, sites_by_contig, rows: tuple[PedigreeRow, ...], *, seed: int,
-                               recombination_rate: float, mutation_rate: float, chromosome_maps, budget):
+def simulate_explicit_pedigree(
+    founders_by_contig,
+    sites_by_contig,
+    rows: tuple[PedigreeRow, ...],
+    *,
+    seed: int,
+    recombination_rate: float,
+    mutation_rate: float,
+    chromosome_maps,
+    budget=1,
+    runner=None,
+):
     """Simulate an explicit pedigree table (design.read_pedigree_table rows) on every contig (release 2.17).
 
     Founder rows take the template founders in table order (their numbers must agree). Children are simulated by
@@ -341,14 +406,14 @@ def simulate_explicit_pedigree(founders_by_contig, sites_by_contig, rows: tuple[
     per contig in the same order; a founder's haplotypes are its template founder, its ancestry its own two
     founder haplotypes, and it has no gametes).
     """
-    budget = as_budget(budget)
     n_contigs = len(founders_by_contig)
     founder_rows = [index for index, row in enumerate(rows) if not row.parent1]
     if len(founder_rows) != len(founders_by_contig[0]):
-        raise ValueError(f"the pedigree table has {len(founder_rows)} founders and the templates "
-                         f"{len(founders_by_contig[0])}")
-    master = np.random.default_rng(seed)
-    depth = {}
+        raise InputError(
+            f"the pedigree table has {len(founder_rows)} founders and the templates {len(founders_by_contig[0])}"
+        )
+    master = stream("simulation.master", seed=seed)
+    depth: dict[str, int] = {}
     for row in rows:
         depth[row.sample] = 0 if not row.parent1 else 1 + max(depth[row.parent1], depth[row.parent2])
     index_of = {row.sample: index for index, row in enumerate(rows)}
@@ -359,25 +424,38 @@ def simulate_explicit_pedigree(founders_by_contig, sites_by_contig, rows: tuple[
             start, end = sites_by_contig[c][0], sites_by_contig[c][-1]
             contigs[c].haplotypes[index] = list(founders_by_contig[c][founder])
             contigs[c].ancestry[index] = [[(start, end, 2 * founder)], [(start, end, 2 * founder + 1)]]
-    processes = budget.threads()
-    with _TaskRunner(budget, processes) as pool:
+    processes = int(budget)
+    with _TaskRunner(budget, processes, runner) as pool:
         for level in range(1, max(depth.values()) + 1):
             members = [index for index, row in enumerate(rows) if depth[row.sample] == level]
-            ancestors = sorted({index_of[parent] for index in members
-                                for parent in (rows[index].parent1, rows[index].parent2)})
+            ancestors = sorted(
+                {index_of[parent] for index in members for parent in (rows[index].parent1, rows[index].parent2)}
+            )
             slot_of = {index: slot for slot, index in enumerate(ancestors)}
-            parent_pairs = [(slot_of[index_of[rows[index].parent1]], slot_of[index_of[rows[index].parent2]])
-                            for index in members]
-            seeds = master.integers(0, 2 ** 63, size=(n_contigs, len(members)), dtype=np.int64)
+            parent_pairs = [
+                (slot_of[index_of[rows[index].parent1]], slot_of[index_of[rows[index].parent2]]) for index in members
+            ]
+            seeds = child_seeds(master, n_contigs, len(members))
             per_task = _children_per_task(len(members), n_contigs, processes)
-            tasks = [(c, first, parent_pairs[first:first + per_task], seeds[c, first:first + per_task],
-                      [contigs[c].haplotypes[index] for index in ancestors],
-                      [contigs[c].ancestry[index] for index in ancestors], sites_by_contig[c], recombination_rate,
-                      mutation_rate, chromosome_maps[c])
-                     for c in range(n_contigs) for first in range(0, len(members), per_task)]
-            offspring = [[None] * len(members) for _ in range(n_contigs)]
+            tasks = [
+                (
+                    c,
+                    first,
+                    parent_pairs[first : first + per_task],
+                    seeds[c, first : first + per_task],
+                    [contigs[c].haplotypes[index] for index in ancestors],
+                    [contigs[c].ancestry[index] for index in ancestors],
+                    sites_by_contig[c],
+                    recombination_rate,
+                    mutation_rate,
+                    chromosome_maps[c],
+                )
+                for c in range(n_contigs)
+                for first in range(0, len(members), per_task)
+            ]
+            offspring: list[list[Any]] = [[None] * len(members) for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
-                offspring[contig_index][first:first + len(children)] = children
+                offspring[contig_index][first : first + len(children)] = children
             for c in range(n_contigs):
                 for position, (haplotypes, ancestry, events) in enumerate(offspring[c]):
                     index = members[position]
@@ -387,6 +465,10 @@ def simulate_explicit_pedigree(founders_by_contig, sites_by_contig, rows: tuple[
                         contigs[c].gametes.append((index, slot, parent, events[slot]))
     for contig in contigs:
         contig.gametes.sort(key=lambda gamete: (gamete[0], gamete[1]))
-    table = PedigreeTable(tuple(row.sample for row in rows), tuple(depth[row.sample] for row in rows),
-                          tuple(row.parent1 for row in rows), tuple(row.parent2 for row in rows))
+    table = PedigreeTable(
+        tuple(row.sample for row in rows),
+        tuple(depth[row.sample] for row in rows),
+        tuple(row.parent1 for row in rows),
+        tuple(row.parent2 for row in rows),
+    )
     return table, contigs

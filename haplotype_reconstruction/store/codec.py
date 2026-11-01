@@ -16,24 +16,22 @@ writes; the CPU budget is the caller's ``nthreads`` (bounded by affinity).
 Standalone payload files (`write_payload` / `read_payload`) hold transient state (work states, batch transport):
 a small header, then one payload; they are replaced atomically and durably.
 """
+
 from __future__ import annotations
 
 import bisect
-from collections import deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
 import pickle
 import struct
 import sys
 import tempfile
 import threading
-from threading import RLock
 import zlib
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from threading import RLock
 
-import blosc2
 import numpy as np
-
-from ..execution.resources import affinity_cpus
 
 CLEVEL = 5
 
@@ -42,7 +40,6 @@ CLEVEL = 5
 # unchanged. Not for floating-point evidence arrays (genotype likelihoods: 25% more bytes).
 FAST_CLEVEL = 1
 
-CODEC = blosc2.Codec.ZSTD
 
 PAYLOAD_SUFFIX = ".p5.b2"
 
@@ -67,10 +64,10 @@ def cpu_threads(nthreads) -> int:
     """A positive thread count no larger than this process's CPU affinity; a live CPU budget (a contig lane's
     lease) is re-read now, so compression takes the CPUs the lane holds at that moment."""
     if hasattr(nthreads, "codec_threads"):
-        nthreads = nthreads.codec_threads()     # a lane's lease: one thread while its pools hold its CPUs
+        nthreads = nthreads.codec_threads()  # a lane's lease: one thread while its pools hold its CPUs
     elif hasattr(nthreads, "threads"):
         nthreads = nthreads.threads()
-    return min(max(1, int(nthreads)), affinity_cpus())
+    return min(max(1, int(nthreads)), _affinity_cpus())
 
 
 def thread_setting(nthreads):
@@ -93,23 +90,32 @@ def _buffer_layout(sizes):
 def _aligned_buffer(nbytes):
     storage = np.empty(nbytes + _BUFFER_ALIGNMENT - 1, dtype=np.uint8)
     offset = (-storage.ctypes.data) % _BUFFER_ALIGNMENT
-    return storage[offset:offset + nbytes]
+    return storage[offset : offset + nbytes]
 
 
 def _compress(raw, nthreads, clevel):
     # A packed group may end with int8 calls and have an odd byte length. Blosc2 4.5.1 emits unreadable all-zero
     # special chunks when that length is not divisible by its default eight-byte element size. Keep the
     # established shuffle for aligned chunks; otherwise compress as bytes.
+    # Compression libraries initialize process settings; load them only at the I/O boundary.
+    import blosc2
+
     typesize = 8 if memoryview(raw).nbytes % 8 == 0 else 1
     return blosc2.compress2(
         raw,
         cparams=blosc2.CParams(
-            nthreads=max(1, int(nthreads)), clevel=clevel, codec=CODEC, typesize=typesize,
+            nthreads=max(1, int(nthreads)),
+            clevel=clevel,
+            codec=blosc2.Codec.ZSTD,
+            typesize=typesize,
         ),
     )
 
 
 def _decompress_into(blob, destination, nthreads, context):
+    # Compression libraries initialize process settings; load them only at the I/O boundary.
+    import blosc2
+
     try:
         raw_size, compressed_size, _block_size = blosc2.get_cbuffer_sizes(blob)
     except Exception as error:
@@ -158,6 +164,9 @@ class _ChunkPipeline:
     """
 
     def __init__(self, nthreads, *, ordered):
+        # Compression libraries initialize process settings; load them only at the I/O boundary.
+        import blosc2
+
         self.cpus = max(1, nthreads - 1)
         self.free_cpus = self.cpus
         self.ordered = ordered
@@ -238,6 +247,9 @@ class _ChunkPipeline:
             self._progress()
 
     def close(self):
+        # Compression libraries initialize process settings; load them only at the I/O boundary.
+        import blosc2
+
         try:
             if self.pool is not None:
                 self.pool.shutdown(wait=True, cancel_futures=True)
@@ -300,6 +312,9 @@ class _BufferWriter:
             self._write_group(pending)
 
     def _chunk(self, raw, release=None):
+        # Compression libraries initialize process settings; load them only at the I/O boundary.
+        import blosc2
+
         prefix, self.prefix = self.prefix, bytearray()
 
         def consume(result):
@@ -308,6 +323,7 @@ class _BufferWriter:
             self.handle.write(_CHUNK_DESC.pack(raw_size, len(compressed), checksum))
             self.handle.write(compressed)
             from .mapped import discard_pages
+
             discard_pages(raw)
             raw.release()
             if release is not None:
@@ -317,8 +333,7 @@ class _BufferWriter:
             if self.pipeline is None:
                 self.pipeline = _ChunkPipeline(self.nthreads, ordered=True)
             # Blosc output is bounded by raw bytes plus its small frame overhead.
-            self.pipeline.add(_compress_checked, (raw, self.clevel), 2 * raw.nbytes + blosc2.MAX_OVERHEAD,
-                              consume)
+            self.pipeline.add(_compress_checked, (raw, self.clevel), 2 * raw.nbytes + blosc2.MAX_OVERHEAD, consume)
         else:
             consume(_compress_checked(raw, self.clevel, self.nthreads))
 
@@ -343,8 +358,8 @@ class _BufferWriter:
             return
         packed = bytearray(total)
         destination = memoryview(packed)
-        for (raw, _readonly, _), offset in zip(buffers, offsets):
-            destination[offset:offset + raw.nbytes] = raw
+        for (raw, _readonly, _), offset in zip(buffers, offsets, strict=False):
+            destination[offset : offset + raw.nbytes] = raw
         # The packed copy now owns these bytes; source views are no longer used by asynchronous compression.
         # Direct buffers retain their owners until done.
         self._release(key)
@@ -411,7 +426,7 @@ def encode(handle, obj, nthreads, clevel):
 def _create(path):
     """Open a new file, creating its directory only when it is missing.
 
-    Retried: a concurrent WorkState.clear can remove an empty parent between its creation and the open.
+    Retried: concurrent scratch cleanup can remove an empty parent between its creation and the open.
     """
     for attempt in range(3):
         try:
@@ -479,9 +494,12 @@ class _ChunkReader:
         self.pipeline = _ChunkPipeline(nthreads, ordered=False)
 
     def add(self, payload_offset, compressed_size, checksum, destination, context):
-        self.pipeline.add(_read_chunk_at,
-                          (self.fd, payload_offset, compressed_size, checksum, destination, context),
-                          compressed_size, lambda _result: None)
+        self.pipeline.add(
+            _read_chunk_at,
+            (self.fd, payload_offset, compressed_size, checksum, destination, context),
+            compressed_size,
+            lambda _result: None,
+        )
 
     def flush(self):
         self.pipeline.finish()
@@ -502,7 +520,8 @@ def _chunk_layout(handle, raw_total, n_chunks, limit, context):
     raw_seen = 0
     for _index in range(n_chunks):
         raw_size, compressed_size, checksum = _CHUNK_DESC.unpack(
-            _read_exact(handle, _CHUNK_DESC.size, f"{context} chunk header"))
+            _read_exact(handle, _CHUNK_DESC.size, f"{context} chunk header")
+        )
         if raw_size == 0 or raw_size > _CHUNK_BYTES:
             raise ValueError(f"corrupt checkpoint: invalid {context} chunk size")
         if raw_seen + raw_size > raw_total:
@@ -538,7 +557,7 @@ def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context, reader=N
     raw_offset = 0
     for index, chunk in enumerate(chunks):
         raw_size, compressed_size, checksum, payload_offset = chunk
-        target = destination[raw_offset:raw_offset + raw_size]
+        target = destination[raw_offset : raw_offset + raw_size]
         if reader is not None:
             reader.add(payload_offset, compressed_size, checksum, target, f"{context} chunk {index}")
         else:
@@ -561,8 +580,8 @@ def _read_chunks_to_file(handle, raw_total, n_chunks, limit, nthreads, context, 
 
 def _spool_metadata(handle, end, nthreads, metadata):
     """Decode the payload's pickle metadata (at the handle) into ``metadata``."""
-    metadata_size, = _U64.unpack(_read_exact(handle, _U64.size, "metadata size"))
-    n_chunks, = _U32.unpack(_read_exact(handle, _U32.size, "metadata chunk count"))
+    (metadata_size,) = _U64.unpack(_read_exact(handle, _U64.size, "metadata size"))
+    (n_chunks,) = _U32.unpack(_read_exact(handle, _U32.size, "metadata chunk count"))
     if metadata_size > sys.maxsize:
         raise ValueError("corrupt checkpoint: metadata is too large")
     _read_chunks_to_file(handle, metadata_size, n_chunks, end, nthreads, "metadata", metadata)
@@ -609,8 +628,8 @@ def _read_buffer_groups(handle, metadata_offset, expected_buffers, nthreads, buf
     for descriptors, offsets, total, n_chunks in _buffer_group_headers(handle, metadata_offset, expected_buffers):
         backing = _read_chunks(handle, total, n_chunks, metadata_offset, nthreads, "buffer group", reader)
         group_view = memoryview(backing)
-        for (size, readonly), offset in zip(descriptors, offsets):
-            view = group_view[offset:offset + size]
+        for (size, readonly), offset in zip(descriptors, offsets, strict=False):
+            view = group_view[offset : offset + size]
             buffers.append(view.toreadonly() if readonly else view)
 
 
@@ -623,8 +642,7 @@ def decode(handle, start, end, metadata_offset, expected_buffers, nthreads):
     """
     nthreads = cpu_threads(nthreads)
     handle.seek(start)
-    reader = (_ChunkReader(handle, nthreads)
-              if nthreads > 1 and end - start >= _DIRECT_BUFFER_BYTES else None)
+    reader = _ChunkReader(handle, nthreads) if nthreads > 1 and end - start >= _DIRECT_BUFFER_BYTES else None
     buffers = []
     try:
         _read_buffer_groups(handle, metadata_offset, expected_buffers, nthreads, buffers, reader)
@@ -651,8 +669,33 @@ def _plain_arrays(value):
     raise TypeError(f"selective reads select plain data, not {type(value).__name__}")
 
 
-def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nthreads, context, *, out=None):
-    """Selected top-level entries of a dict payload, decoding only their arrays.
+def _select_path(payload, path, context):
+    """Descend plain dictionary metadata without touching any array buffer."""
+    for key in path:
+        if type(payload) is not dict:
+            raise TypeError(f"{context}: selection path requires plain dictionaries")
+        payload = payload[key]
+    return payload
+
+
+def decode_items(
+    handle,
+    start,
+    end,
+    metadata_offset,
+    expected_buffers,
+    keys,
+    nthreads,
+    context,
+    *,
+    out=None,
+    path=(),
+    metadata_only=False,
+):
+    """Selected entries of a dict payload, decoding only their arrays.
+
+    ``path`` descends plain-dict keys before selection; an empty path preserves the
+    3.5 top-level behavior. A missing path key raises KeyError; non-dicts raise TypeError.
 
     Entries must be plain data. The metadata is first unpickled against untouched placeholder buffers (an
     unwritten allocation holds no memory) to find which buffers the selected arrays use; only the buffer groups
@@ -660,7 +703,9 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
     are omitted. ``out`` maps selected array keys to writable contiguous ndarrays of the same shape and dtype.
     A full array in its own buffer group is decoded straight into the destination when its storage order matches;
     packed groups and other layouts use the ordinary checked decode followed by a copy. Returned entries are the
-    caller's arrays. No on-disk format changes are needed.
+    caller's arrays. No on-disk format changes are needed. ``metadata_only`` is the
+    status-reader capability: selected arrays or output buffers raise TypeError
+    before any array buffer group is decompressed; ordinary reads are unchanged.
     """
     out = {} if out is None else out
     nthreads = cpu_threads(nthreads)
@@ -673,16 +718,20 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
         _spool_metadata(handle, end, nthreads, metadata)
 
         def selected(buffers):
-            payload = _unpickle(metadata, buffers)
+            payload = _select_path(_unpickle(metadata, buffers), path, context)
             if not isinstance(payload, dict):
                 raise TypeError(f"{context}: selective reads need a dict payload")
             return {key: payload[key] for key in keys if key in payload}
 
-        buffers = [np.empty(size, dtype=np.uint8)
-                   for descriptors, *_ in groups for size, _readonly in descriptors]
+        buffers = [np.empty(size, dtype=np.uint8) for descriptors, *_ in groups for size, _readonly in descriptors]
         items = selected(buffers)
-        spans = sorted((buffer.ctypes.data, buffer.nbytes, index)
-                       for index, buffer in enumerate(buffers) if buffer.nbytes)
+        if metadata_only:
+            if out or _plain_arrays(items):
+                raise TypeError(f"{context}: status metadata cannot contain arrays or output buffers")
+            return items
+        spans = sorted(
+            (buffer.ctypes.data, buffer.nbytes, index) for index, buffer in enumerate(buffers) if buffer.nbytes
+        )
         starts = [begin for begin, _, _ in spans]
 
         def buffer_index(array):
@@ -696,14 +745,22 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
         destinations = {}
         for key, target in out.items():
             source = items[key]
-            if (not isinstance(source, np.ndarray) or not isinstance(target, np.ndarray)
-                    or target.shape != source.shape or target.dtype != source.dtype
-                    or not target.flags.writeable
-                    or not (target.flags.c_contiguous or target.flags.f_contiguous)):
+            if (
+                not isinstance(source, np.ndarray)
+                or not isinstance(target, np.ndarray)
+                or target.shape != source.shape
+                or target.dtype != source.dtype
+                or not target.flags.writeable
+                or not (target.flags.c_contiguous or target.flags.f_contiguous)
+            ):
                 raise ValueError(f"{context}: out[{key!r}] must be a writable contiguous array of matching shape/dtype")
             index = buffer_index(source)
-            if (index is not None and source.ctypes.data == buffers[index].ctypes.data
-                    and source.nbytes == buffers[index].nbytes and source.strides == target.strides):
+            if (
+                index is not None
+                and source.ctypes.data == buffers[index].ctypes.data
+                and source.nbytes == buffers[index].nbytes
+                and source.strides == target.strides
+            ):
                 destinations[index] = memoryview(target.ravel(order="K")).cast("B")
         needed = {index for array in _plain_arrays(items) if (index := buffer_index(array)) is not None}
         first = 0
@@ -714,10 +771,11 @@ def decode_items(handle, start, end, metadata_offset, expected_buffers, keys, nt
                 continue
             handle.seek(chunk_list)
             destination = destinations.get(indices.start) if len(descriptors) == 1 else None
-            backing = memoryview(_read_chunks(handle, total, n_chunks, metadata_offset, nthreads, "buffer group",
-                                             out=destination))
-            for index, (size, readonly), offset in zip(indices, descriptors, offsets):
-                view = backing[offset:offset + size]
+            backing = memoryview(
+                _read_chunks(handle, total, n_chunks, metadata_offset, nthreads, "buffer group", out=destination)
+            )
+            for index, (size, readonly), offset in zip(indices, descriptors, offsets, strict=False):
+                view = backing[offset : offset + size]
                 buffers[index] = view.toreadonly() if readonly else view
         result = selected(buffers)
         for key, target in out.items():
@@ -746,3 +804,26 @@ def read_payload(path, *, nthreads=1):
     with open(path, "rb") as handle:
         file_size, metadata_offset, expected_buffers = _read_header(handle, path)
         return decode(handle, _HEADER.size, file_size, metadata_offset, expected_buffers, nthreads)
+
+
+def _affinity_cpus() -> int:
+    """CPUs this process may run on (its affinity mask; the node's count only where no mask exists)."""
+    try:
+        count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        count = os.cpu_count() or 1
+    return max(1, int(count))
+
+
+__all__ = [
+    "cpu_threads",
+    "thread_setting",
+    "encode",
+    "write_payload",
+    "decode",
+    "decode_items",
+    "read_payload",
+    "CLEVEL",
+    "FAST_CLEVEL",
+    "PAYLOAD_SUFFIX",
+]

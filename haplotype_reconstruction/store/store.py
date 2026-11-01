@@ -1,34 +1,36 @@
-"""A run's checkpoint directory: run.ckpt, contigs/<contig>.ckpt and transient work/ states.
+"""Keep run and contig checkpoint containers under one versioned layout.
 
 At rest the directory holds ``run.ckpt`` (genome-wide records), one append-only ``contigs/<contig>.ckpt`` per
-chromosome, and ``work/`` only while transient resume-only state is live (store.container describes the
-container format and its concurrency rules). Everything here is cheap and picklable.
+chromosome and optional ``markers/`` (store.container describes the format and concurrency rules).
+Everything here is cheap and picklable.
 
 A run marks its run.ckpt with this release's layout (``layout`` record, :meth:`CheckpointStore.bind_layout`) before
-it writes anything else: 92b3daf wrote the same container format with other contents under the same keys, so a
-directory whose run.ckpt or contig files hold records but no marker is refused instead of being appended to.
+it writes anything else. The container codec remains interoperable with 3.5 oracle reads, but the layout marker
+refuses resuming a 3.5 scientific run. Publication and resume by derivation live in store.protocol.
 """
+
 from __future__ import annotations
 
 import copy
 import os
+from dataclasses import dataclass
 
+from ..core.errors import InvariantError, SettingsError
 from . import codec
 from .container import CheckpointFile, CheckpointMismatch, RecordInfo
-from .identity import canonical_json, jsonable
+from .identity import jsonable
 
 CONTIG_DIRECTORY = "contigs"
-WORK_DIRECTORY = "work"
+MARKER_DIRECTORY = "markers"
 RUN_FILE = "run.ckpt"
 CONTIG_SUFFIX = ".ckpt"
-LAYOUT_KEY = "layout"          # run.ckpt record marking this release's checkpoint layout
-LAYOUT = {"release": 2}        # 92b3daf (release 1) wrote the same containers without it
+LAYOUT_KEY = "layout"  # run.ckpt record marking this release's checkpoint layout
+LAYOUT = {"release": 4}  # 4.0 never resumes 3.5 scientific products.
 
 
 def _path_token(value, name) -> str:
     result = str(value)
-    if (not result or result in {".", ".."} or os.sep in result
-            or (os.altsep is not None and os.altsep in result)):
+    if not result or result in {".", ".."} or os.sep in result or (os.altsep is not None and os.altsep in result):
         raise ValueError(f"{name} must be a nonempty path-component token")
     return result
 
@@ -38,7 +40,7 @@ class CheckpointStore:
 
     ``nthreads`` is the default encode/decode CPU budget of its containers (a count, or a live CPU budget re-read
     at each encode/decode); ``clevel`` their default ZSTD level.
-    A directory holding other subdirectories than contigs/ and work/ belongs to another layout and is refused.
+    A directory holding other subdirectories than contigs/ and markers/ belongs to another layout and is refused.
     """
 
     def __init__(self, root, *, nthreads=1, clevel=None):
@@ -47,10 +49,11 @@ class CheckpointStore:
         self.clevel = codec.CLEVEL if clevel is None else int(clevel)
         os.makedirs(self.root, exist_ok=True)
         for entry in os.scandir(self.root):
-            if entry.is_dir() and entry.name not in (CONTIG_DIRECTORY, WORK_DIRECTORY):
+            if entry.is_dir() and entry.name not in (CONTIG_DIRECTORY, MARKER_DIRECTORY):
                 raise RuntimeError(
                     f"{self.root} holds '{entry.name}/', which is not part of this release's checkpoint "
-                    "layout (run.ckpt, contigs/, work/): use a new output root")
+                    "layout (run.ckpt, contigs/, markers/): use a new output root"
+                )
 
     def __repr__(self):
         return f"CheckpointStore({self.root!r})"
@@ -58,14 +61,18 @@ class CheckpointStore:
     @property
     def run(self) -> CheckpointFile:
         """The genome-wide container, run.ckpt."""
-        return CheckpointFile(os.path.join(self.root, RUN_FILE), kind="run",
-                              nthreads=self.nthreads, clevel=self.clevel)
+        return CheckpointFile(os.path.join(self.root, RUN_FILE), kind="run", nthreads=self.nthreads, clevel=self.clevel)
 
     def contig(self, name) -> CheckpointFile:
         """The container of one chromosome (created by its first put)."""
         name = _path_token(name, "contig")
-        return CheckpointFile(os.path.join(self.root, CONTIG_DIRECTORY, name + CONTIG_SUFFIX),
-                              kind="contig", name=name, nthreads=self.nthreads, clevel=self.clevel)
+        return CheckpointFile(
+            os.path.join(self.root, CONTIG_DIRECTORY, name + CONTIG_SUFFIX),
+            kind="contig",
+            name=name,
+            nthreads=self.nthreads,
+            clevel=self.clevel,
+        )
 
     def contig_names(self) -> tuple[str, ...]:
         """Chromosomes that have a container, sorted by name."""
@@ -73,27 +80,19 @@ class CheckpointStore:
             names = os.listdir(os.path.join(self.root, CONTIG_DIRECTORY))
         except FileNotFoundError:
             return ()
-        return tuple(sorted(name[:-len(CONTIG_SUFFIX)] for name in names
-                            if name.endswith(CONTIG_SUFFIX) and not name.startswith(".")))
+        return tuple(
+            sorted(
+                name[: -len(CONTIG_SUFFIX)]
+                for name in names
+                if name.endswith(CONTIG_SUFFIX) and not name.startswith(".")
+            )
+        )
 
-    def with_threads(self, nthreads) -> "CheckpointStore":
+    def with_threads(self, nthreads) -> CheckpointStore:
         """The same store with another default encode/decode CPU budget."""
         store = copy.copy(self)
         store.nthreads = codec.thread_setting(nthreads)
         return store
-
-    def bind_identity(self, file: CheckpointFile, section: str, identity) -> None:
-        """Bind ``identity/<section>`` of a container to one exact identity.
-
-        The first binder records it; later runs must match exactly (canonical JSON), else CheckpointMismatch
-        names the section.
-        """
-        try:
-            file.put_once(f"identity/{section}", jsonable(identity))
-        except CheckpointMismatch:
-            raise CheckpointMismatch(
-                f"{file.label}: checkpoint identity '{section}' does not match the current "
-                "model/configuration; use a new output root") from None
 
     def check_layout(self) -> None:
         """Refuse (CheckpointMismatch) a directory this release did not create; reads only, writes nothing.
@@ -108,22 +107,63 @@ class CheckpointStore:
                 marker = run.get(LAYOUT_KEY)
                 if marker == LAYOUT:
                     return
-                raise CheckpointMismatch(f"{self.root}: checkpoint layout {marker} is not this release's {LAYOUT}; "
-                                         "use a new output root")
-            foreign = (run.exists() and bool(run.keys())) or any(self.contig(name).keys()
-                                                                  for name in self.contig_names())
-        except ValueError as error:   # a container header of another kind/name/format
-            raise CheckpointMismatch(f"{self.root} holds checkpoint files this release cannot use ({error}); "
-                                     "use a new output root") from None
+                raise CheckpointMismatch(
+                    f"{self.root}: checkpoint layout {marker} is not this release's {LAYOUT}; use a new output root"
+                )
+            foreign = (run.exists() and bool(run.keys())) or any(
+                self.contig(name).keys() for name in self.contig_names()
+            )
+        except ValueError as error:  # a container header of another kind/name/format
+            raise CheckpointMismatch(
+                f"{self.root} holds checkpoint files this release cannot use ({error}); use a new output root"
+            ) from None
         if foreign:
-            raise CheckpointMismatch(f"{self.root} holds checkpoints written by an earlier release (no layout "
-                                     "marker in run.ckpt); use a new output root")
+            raise CheckpointMismatch(
+                f"{self.root} holds checkpoints written by an earlier release (no layout "
+                "marker in run.ckpt); use a new output root"
+            )
 
     def bind_layout(self) -> None:
-        """check_layout, then mark run.ckpt with this release's layout (a run calls it before writing anything)."""
-        self.check_layout()
-        if not self.run.has(LAYOUT_KEY):
-            self.run.put_once(LAYOUT_KEY, LAYOUT)
+        """Check and bind the layout under the same append lock as first publication.
+
+        Two initialisers may start on an empty directory together. Holding the
+        lock across the check avoids mistaking the other initialiser's freshly
+        written layout record for an unmarked earlier-release container.
+        """
+        run = self.run
+        with run._append_lock() as (fd, index):
+            marker = index.records.get(LAYOUT_KEY)
+            if marker is not None:
+                if run._read(marker, 1) != LAYOUT:
+                    raise CheckpointMismatch(f"{self.root}: checkpoint layout differs; use a new output root")
+                return
+            if index.records or any(self.contig(name).keys() for name in self.contig_names()):
+                raise CheckpointMismatch(
+                    f"{self.root} holds checkpoints written by an earlier release (no layout marker); "
+                    "use a new output root"
+                )
+            run._append(fd, index, LAYOUT_KEY, LAYOUT, None, None)
+
+    def bind_run_manifest(self, resolved) -> None:
+        """Atomically bind the resolved scientific configuration once, after layout.
+
+        Equal concurrent initialisers are no-ops. A mismatch raises SettingsError
+        without replacing the winner's manifest; execution/output options must
+        already have been removed by the caller.
+        """
+        self.bind_layout()
+        try:
+            self.run.put_once("manifest/run", jsonable(resolved))
+        except CheckpointMismatch:
+            raise SettingsError(
+                "this output root was initialised with a different configuration; use a new output root"
+            ) from None
+
+    def scatter_view(self, contig: str) -> ScatterView:
+        """Give a scatter task its one writable container and a read-only run reader."""
+        source = self.run
+        reader = ReadOnlyCheckpointFile(source.path, kind="run", nthreads=source.nthreads, clevel=source.clevel)
+        return ScatterView(self.contig(contig), reader)
 
     def bind_manifest(self, key: str, payload: dict) -> None:
         """Publish one JSON-compatible run manifest exactly once (run.ckpt ``manifest/<key>``)."""
@@ -133,7 +173,8 @@ class CheckpointStore:
             self.run.put_once(f"manifest/{key}", jsonable(payload))
         except CheckpointMismatch:
             raise CheckpointMismatch(
-                f"manifest '{key}' does not match the current run; use a new output root") from None
+                f"manifest '{key}' does not match the current run; use a new output root"
+            ) from None
 
     def manifest(self, key: str) -> dict | None:
         """The run manifest ``manifest/<key>`` (e.g. "run": kind, contigs, sample_ids, source), or None."""
@@ -141,13 +182,20 @@ class CheckpointStore:
         name = f"manifest/{key}"
         return run.get(name) if run.has(name) else None
 
-    def stage_complete(self, stage: str) -> bool:
-        return self.run.has(f"complete/{stage}")
+    def control(self, key: str) -> dict | None:
+        """A run-scope control record bound at ``init`` (e.g. the simulation manifest), or None.
 
-    def mark_stage_complete(self, stage: str) -> None:
-        if not self.stage_complete(stage):
-            self.run.put_once(f"complete/{stage}", True)
-            print(f"  [Checkpoint] Stage '{stage}' marked complete", flush=True)
+        Control records are bindings, not scientific publications: they carry the configuration identity that
+        callers compare with their own. A scientific publication envelope is refused here; it is read with its
+        independently expected identity (read_items/resume).
+        """
+        try:
+            record = self.run.get(key)
+        except KeyError:
+            return None
+        if isinstance(record, dict) and {"derivation", "payload", "publication_schema"} <= record.keys():
+            raise CheckpointMismatch(f"run:{key}: a scientific publication is read with its expected identity")
+        return record
 
     def require(self, key: str, contigs) -> None:
         """Require ``key`` in every listed contig's container (OSError naming the ones lacking it)."""
@@ -155,62 +203,14 @@ class CheckpointStore:
         if missing:
             raise OSError(f"checkpoint record {key!r} is missing for: " + ", ".join(missing))
 
-    def work(self, contig, name) -> "WorkState":
-        """Transient resume-only state of one contig step (see WorkState)."""
-        return WorkState(self.root, contig, name, nthreads=self.nthreads)
-
-
-class WorkState:
-    """Resume-only state of one contig step: ``work/<contig>/<name>.p5.b2``.
-
-    Saved by atomic, durable replacement; cleared (with the directories it leaves empty) once its step's
-    product is recorded, so a completed run has no ``work/`` directory.
-    """
-
-    def __init__(self, root, contig, name, *, nthreads=1):
-        self.root = os.fspath(root)
-        self.contig = _path_token(contig, "contig")
-        self.name = _path_token(name, "work state name")
-        self.nthreads = codec.thread_setting(nthreads)
-
-    @property
-    def path(self) -> str:
-        return os.path.join(self.root, WORK_DIRECTORY, self.contig, self.name + codec.PAYLOAD_SUFFIX)
-
-    def exists(self) -> bool:
-        return os.path.exists(self.path)
-
-    def save(self, payload) -> int:
-        """Replace the state atomically; return its size in bytes."""
-        return codec.write_payload(self.path, payload, nthreads=codec.cpu_threads(self.nthreads),
-                                   clevel=codec.FAST_CLEVEL)
-
-    def load(self):
-        """The saved state, or None when there is none."""
-        try:
-            return codec.read_payload(self.path, nthreads=codec.cpu_threads(self.nthreads))
-        except FileNotFoundError:
-            return None
-
-    def clear(self) -> None:
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
-        directory = os.path.dirname(self.path)
-        for path in (directory, os.path.dirname(directory)):
-            try:
-                os.rmdir(path)
-            except OSError:
-                return
-
 
 class RecordScope:
-    """The records under ``prefix`` of one container, bound to one identity before anything is written.
+    """The raw records under ``prefix`` of one container.
 
     Cheap and picklable: pool workers record through pickled copies (each record is one append, safe across
-    processes). ``bind`` records ``identity/<prefix>``; ``scoped`` narrows to ``<prefix>/<sub>`` under the same
-    binding. Records are written at ``clevel`` (FAST_CLEVEL by default: transient or superseded state) with
+    processes). ``scoped`` narrows to ``<prefix>/<sub>``. Scientific products use
+    store.protocol publication and derivation identities instead of this raw prefix helper.
+    Records are written at ``clevel`` (FAST_CLEVEL by default: transient or superseded state) with
     ``nthreads`` compression threads (the file's default when None).
     """
 
@@ -221,25 +221,12 @@ class RecordScope:
         self.prefix = prefix
         self.nthreads = nthreads
         self.clevel = clevel
-        # Canonical JSON of the bound identity (None until bound).
-        self.identity = None
 
     def __repr__(self):
         return f"RecordScope({self.file.label!r}, {self.prefix!r})"
 
-    def bind(self, identity) -> None:
-        """Bind this scope to ``identity``; a different bound identity is a CheckpointMismatch."""
-        identity = jsonable(identity)
-        try:
-            self.file.put_once(f"identity/{self.prefix}", identity)
-        except CheckpointMismatch:
-            raise CheckpointMismatch(
-                f"{self.file.label}: checkpoint identity '{self.prefix}' does not match the current "
-                "model/configuration; use a new output root") from None
-        self.identity = canonical_json(identity)
-
-    def scoped(self, sub: str, *, nthreads=None) -> "RecordScope":
-        """The records under ``<prefix>/<sub>``, written under this binding."""
+    def scoped(self, sub: str, *, nthreads=None) -> RecordScope:
+        """The records under ``<prefix>/<sub>``, within the same container."""
         scope = copy.copy(self)
         scope.prefix = self.key(sub)
         if nthreads is not None:
@@ -258,11 +245,38 @@ class RecordScope:
         return self.file.get(key, nthreads=self.nthreads) if self.file.has(key) else None
 
     def save(self, name: str, payload) -> RecordInfo:
-        if self.identity is None:
-            raise RuntimeError(f"{self!r} must be bound before it records anything")
         return self.file.put(self.key(name), payload, nthreads=self.nthreads, clevel=self.clevel)
 
     def keys(self, prefix: str = "") -> tuple[str, ...]:
         """Names (relative to this scope) of the live records starting with ``prefix``."""
         start = f"{self.prefix}/"
-        return tuple(key[len(start):] for key in self.file.keys(start + prefix))
+        return tuple(key[len(start) :] for key in self.file.keys(start + prefix))
+
+
+class ReadOnlyCheckpointFile(CheckpointFile):
+    """A run-container reader that refuses every normal append entry point."""
+
+    def _append_lock(self):
+        raise InvariantError("scatter tasks cannot append run.ckpt")
+
+
+@dataclass(frozen=True)
+class ScatterView:
+    """The durable storage capabilities owned by one contig scatter task."""
+
+    contig: CheckpointFile
+    run: ReadOnlyCheckpointFile
+
+
+__all__ = [
+    "CheckpointStore",
+    "RecordScope",
+    "ScatterView",
+    "ReadOnlyCheckpointFile",
+    "LAYOUT",
+    "LAYOUT_KEY",
+    "CONTIG_DIRECTORY",
+    "MARKER_DIRECTORY",
+    "RUN_FILE",
+    "CONTIG_SUFFIX",
+]

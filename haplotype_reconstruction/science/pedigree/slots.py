@@ -1,0 +1,105 @@
+"""Released order of a child's two observed parents (release 2.2; Parent1/Parent2, family-phase slots).
+
+Scoring treats a parent pair as unordered; only the released products order it. The pipeline reads no sample
+metadata (release 3.4), so no sex is recorded and none is inferred: the slots carry no biological meaning (neither
+maternal nor paternal).
+
+* ``unordered``: two observed parents. Their order is a canonical label that does not depend on sample names or
+  input order: the parent with more observed sites (read depth > 0) first, compared over the run's contigs in
+  configured order until they differ; the sample name decides only between parents whose observed patterns have
+  identical counts on every contig. Renaming samples changes no released order; the convention reversal
+  (maths.ties) flips the label.
+* ``single``: one observed parent, in slot 0.
+* ``none``: no observed parent.
+
+Method: docs/methods/pedigree.md#released-parent-order-release-22.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from ...core.errors import InputError
+
+__all__ = ["ParentOrientation", "canonical_ranks", "orient_edges"]
+
+BASES = ("unordered", "single", "none")
+
+
+@dataclass(frozen=True)
+class ParentOrientation:
+    """Orders released parent pairs by ``ranks`` int64 [N] (canonical rank of each sample, lower first;
+    :func:`canonical_ranks`)."""
+
+    ranks: np.ndarray
+    reverse: bool = False
+
+    def order(self, first: int, second: int) -> tuple[tuple[int, int], str]:
+        """((slot 0, slot 1), basis) of a released parent pair (-1 = no parent)."""
+        named = [int(parent) for parent in (first, second) if parent >= 0]
+        if not named:
+            return (-1, -1), "none"
+        if len(named) == 1:
+            return (named[0], -1), "single"
+        a, b = named
+        before = (int(self.ranks[a]) <= int(self.ranks[b])) != self.reverse
+        return ((a, b) if before else (b, a)), "unordered"
+
+    def orient(self, parents: np.ndarray) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+        """(oriented int64 [N, 2], moved bool [N]: the pair's slots changed, basis per row) of parents [N, 2]."""
+        parents = np.asarray(parents, dtype=np.int64)
+        oriented = np.full(parents.shape, -1, dtype=np.int64)
+        bases = []
+        for row, (first, second) in enumerate(parents.tolist()):
+            pair, basis = self.order(first, second)
+            oriented[row] = pair
+            bases.append(basis)
+        moved = np.any(oriented != parents, axis=1)
+        return oriented, moved, tuple(bases)
+
+
+def canonical_ranks(observed_counts, sample_ids, pairs=None) -> np.ndarray:
+    """int64 [N]: canonical sample ranks by (-observed sites per contig, compared contig by contig, then name).
+
+    ``observed_counts`` is an iterable yielding int64 [N] observed-site counts per contig in configured order (it
+    may be a generator: consumption stops once every pair of ``pairs``, an iterable of (a, b), differs on some
+    contig; None consumes all). The name is a last resort for identical count vectors.
+    """
+    names = [str(name) for name in sample_ids]
+    n = len(names)
+    pending = None if pairs is None else {(int(a), int(b)) for a, b in pairs if a >= 0 and b >= 0 and a != b}
+    columns = []
+    for counts in observed_counts:
+        counts = np.asarray(counts, dtype=np.int64)
+        if counts.shape != (n,):
+            raise InputError(f"observed-site counts shape {counts.shape} must be ({n},)")
+        columns.append(counts)
+        if pending is not None:
+            pending = {(a, b) for a, b in pending if counts[a] == counts[b]}
+            if not pending:
+                break
+    keys = [tuple(-int(column[sample]) for column in columns) + (names[sample],) for sample in range(n)]
+    order = sorted(range(n), key=lambda sample: keys[sample])
+    ranks = np.empty(n, dtype=np.int64)
+    ranks[np.asarray(order, dtype=np.int64)] = np.arange(n, dtype=np.int64)
+    return ranks
+
+
+def orient_edges(
+    parents: np.ndarray, children: np.ndarray, slots: np.ndarray, orientation: ParentOrientation
+) -> np.ndarray:
+    """Slots of released parent edges (parent, child, internal slot) in the released orientation: a child's edges
+    are re-slotted together by :meth:`ParentOrientation.order` of its supported parents."""
+    parents, children, slots = (np.asarray(values, dtype=np.int64) for values in (parents, children, slots))
+    result = slots.copy()
+    for child in np.unique(children):
+        edges = np.flatnonzero(children == child)
+        pair = [-1, -1]
+        for edge in edges:
+            pair[int(slots[edge])] = int(parents[edge])
+        oriented, _ = orientation.order(*pair)
+        for edge in edges:
+            result[edge] = oriented.index(int(parents[edge]))
+    return result

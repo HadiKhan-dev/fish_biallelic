@@ -1,0 +1,1901 @@
+{
+  "carried": [
+    {
+      "area": "assembly-core",
+      "unit": "U01",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U02",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U03",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U04",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U05",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U06",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U07",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U08",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U09",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U10",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U11",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U12",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U13",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U14",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U15",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U16",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U17",
+      "classification": "Core (operational)"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ01",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ02",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ03",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ04",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ05",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ06",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ07",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ08",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ09",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ10",
+      "classification": "Accretion"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ11",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ12",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ13",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ14",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ15",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ16",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ17",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ18",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ19",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ20",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ21",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ22",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ23",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ24",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ25",
+      "classification": "Accretion"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ26",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ27",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ28",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ29",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ30",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ31",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ32",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ33",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ34",
+      "classification": "Core"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ35",
+      "classification": "Accretion"
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ36",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI01",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI02",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI03",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI04",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI05",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI06",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI07",
+      "classification": "Accretion"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI08",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI09",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI10",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI11",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI12",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI13",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI14",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI15",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI16",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI17",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI18",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI19",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI20",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI21",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI22",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI23",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI24",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI25",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI26",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI27",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI28",
+      "classification": "Core"
+    },
+    {
+      "area": "discovery",
+      "unit": "DI29",
+      "classification": "Accretion"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-01",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-02",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-03",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-04",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-05",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-06",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-07",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-08",
+      "classification": "Core (complete/<stage> markers: Accretion)"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-09",
+      "classification": "Core (REMOVED_SECTIONS: Accretion; RunConfig.scientific and CICHLID_AUTOSOMES: Dead)"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-10",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-11",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-12",
+      "classification": "Accretion"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-13",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-14",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-15",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-16",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-17",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-18",
+      "classification": "Core (1.0 layout guard: Accretion; WorkState/CheckpointStore.work: Dead)"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-19",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-20",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-21",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-22",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-23",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-24",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-25",
+      "classification": "Core (byte-reservation API surface: Accretion)"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-26",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-27",
+      "classification": "Core"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-28",
+      "classification": "Accretion"
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-30",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC01",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC02",
+      "classification": "Accretion"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC03",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC04",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC05",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC06",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC07",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC08",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC09",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC10",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC11",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC12",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC13",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC14",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC15",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC16",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC17",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC18",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC19",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC20",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC21",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC22",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC23",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC24",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC25",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC26",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC27",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC28",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC29",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC30",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC31",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC32",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC33",
+      "classification": "Core"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC34",
+      "classification": "Accretion"
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC35",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS01",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS02",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS03",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS04",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS05",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS06",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS07",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS08",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS09",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS10",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS11",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS12",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS13",
+      "classification": "Accretion"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS14",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS15",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS16",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS17",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS18",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS19",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS20",
+      "classification": "Accretion"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS21",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS22",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS23",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS24",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS25",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS26",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS27",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS28",
+      "classification": "Core"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS29",
+      "classification": "Accretion"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS30",
+      "classification": "Accretion"
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS31",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU01",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU02",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU03",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU04",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU05",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU06",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU07",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU08",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU09",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU11",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU12",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU13",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU14",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU15",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU16",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU17",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU18",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU19",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU20",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU21",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU22",
+      "classification": "Accretion"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU23",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU24",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU25",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU26",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU27",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU28",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU29",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU30",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU31",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU32",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU33",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU34",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU35",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU36",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU37",
+      "classification": "Core"
+    },
+    {
+      "area": "outputs",
+      "unit": "OU38",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR01",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR02",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR03",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR04",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR05",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR06",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR07",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR08",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR09",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR10",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR11",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR12",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR13",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR14",
+      "classification": "Accretion"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR15",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR16",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR17",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR18",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR19",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR01",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR02",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR03",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR04",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR05",
+      "classification": "Core"
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR06",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD01",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD02",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD03",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD04",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD05",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD06",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD07",
+      "classification": "Accretion"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD08",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD09",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD10",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD11",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD12",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD13",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD14",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD15",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD16",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD17",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD18",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD19",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD20",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD21",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD22",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD23",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD24",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD25",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD26",
+      "classification": "Accretion"
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD27",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS01",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS02",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS03",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS04",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS05",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS06",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS07",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS08",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS09",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS10",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS11",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS12",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS13",
+      "classification": "Accretion"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS14",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS15",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS16",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS17",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS18",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS19",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS20",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS21",
+      "classification": "Core"
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS22",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP01",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP02",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP03",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP04",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP05",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP06",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP07",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP08",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP09",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP10",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP11",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP12",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP13",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP14",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP15",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP16",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP17",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP18",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP19",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP20",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP21",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP22",
+      "classification": "Accretion"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP23",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP24",
+      "classification": "Accretion"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP25",
+      "classification": "Accretion"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC01",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC02",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC03",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC04",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC05",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC06",
+      "classification": "Core"
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC07",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC01",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC02",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC03",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC04",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC05",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC06",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC07",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC08",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC09",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC10",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC11",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC12",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC13",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC14",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC15",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC16",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC17",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC18",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC19",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC20",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC21",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS01",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS02",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS03",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS04",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS05",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS06",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS07",
+      "classification": "Accretion"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS08",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS09",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS10",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS11",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS12",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS13",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS14",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS15",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS16",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS17",
+      "classification": "Core"
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS18",
+      "classification": "Accretion"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL01",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL02",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL03",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL04",
+      "classification": "Accretion"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL05",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL06",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL07",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL08",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL09",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL10",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL11",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL12",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL13",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL14",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL15",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL16",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL17",
+      "classification": "Core"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL18",
+      "classification": "Accretion"
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL19",
+      "classification": "Core"
+    }
+  ],
+  "removed": [
+    {
+      "area": "engine",
+      "unit": "ENG-29",
+      "reason": "Helper batch queue replaced by workflow cuts; no carried implementation."
+    }
+  ]
+}

@@ -1,3 +1,25 @@
-include LICENSE CITATION.cff CHANGELOG.md requirements-tested.txt
-recursive-include configs *.toml
-recursive-include docs *.md *.py
+include README.md CHANGELOG.md LICENSE CITATION.cff requirements-tested.txt
+include pyproject.toml MANIFEST.in
+recursive-include haplotype_reconstruction *.py *.toml
+graft docs
+include tools/check.sh tools/check_docs.py tools/package_*.sh
+# Portable fast tier: generated synthetic controls, without external native trees,
+# corpus provenance, extraction receipts, lab stores, or stage replay payloads.
+include tests/packaging/test_import_scan.py tests/packaging/test_lazy_import.py
+include tests/contract/test_roles.py tests/contract/test_d1_pilot_metadata.py
+include tests/property/test_ties.py
+include tests/unit/engine/test_graph.py
+include tests/cli/test_cuts.py tests/cli/test_interface_cli.py
+include tests/engine/eng40_actions.py tests/engine/eng40_lazy_kernel.py tests/engine/eng40_adversarial.py
+include tests/engine/test_adversarial.py
+include tests/engine/test_cpu_shares.py tests/engine/test_leases.py
+include tests/engine/test_failfast.py tests/engine/test_residency_recycling.py
+include tests/engine/test_runtime.py tests/engine/test_run_records.py
+include tests/engine/test_shared_arrays.py tests/engine/test_storage_routes.py
+include tests/engine/test_task_session.py tests/engine/test_workflow_mode.py
+prune tests/oracle
+prune fixtures
+prune runs
+prune .numba_cache
+prune .pytest_cache
+global-exclude *.pyc *.pyo *.nbi *.nbc __pycache__ .DS_Store

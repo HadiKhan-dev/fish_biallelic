@@ -25,19 +25,51 @@ heterozygote released phased, spanning first to last such site (``released_phase
 These are the definitions of the lab scorer the releases since 3.0 were judged with. Samples are scored one at a time;
 every count is an integer, so results do not depend on the thread count.
 """
+
 from __future__ import annotations
 
 import numpy as np
-from numba import njit
+from numba import types
+
+from ..core.errors import InputError
+from ..core.kernels import kernel
 
 # Long switches: both orientation runs around the change hold at least this many scored sites.
-LONG_SWITCH_MIN_RUN = 20
+from .parameters import LONG_SWITCH_MIN_RUN
+
 # Per-sample counts returned by released_phase_counts, in this column order.
-SAMPLE_COLUMNS = ("called_genotypes", "genotype_errors", "correct_true_heterozygotes", "phased_true_heterozygotes",
-                  "phase_sets", "set_aligned_errors", "switch_errors", "long_switches", "released_phase_sets")
+SAMPLE_COLUMNS = (
+    "called_genotypes",
+    "genotype_errors",
+    "correct_true_heterozygotes",
+    "phased_true_heterozygotes",
+    "phase_sets",
+    "set_aligned_errors",
+    "switch_errors",
+    "long_switches",
+    "released_phase_sets",
+)
 
 
-@njit(cache=True)
+@kernel(
+    overloads=tuple(
+        (
+            types.Array(types.int8, 2, "C", readonly=calls_readonly),
+            types.Array(types.int8, 2, "C", readonly=truth_readonly),
+            types.int64[::1],
+            types.Array(types.boolean, 1, "C", readonly=mask_readonly),
+            types.Array(types.int64, 1, "C", readonly=positions_readonly),
+            types.int64,
+            types.int64[::1],
+            types.int64[::1],
+        )
+        for calls_readonly in (False, True)
+        for truth_readonly in (False, True)
+        for mask_readonly in (False, True)
+        for positions_readonly in (False, True)
+    ),
+    cache=True,
+)
 def _sample_phase(calls, truth, set_ids, undetermined, positions, minimum_run, spans, released_spans):
     """One sample's released-phase counts (module docstring).
 
@@ -128,8 +160,18 @@ def phase_set_ids(components, boundaries):
     return np.where(components >= 0, np.cumsum(cut), -1).astype(np.int64)
 
 
-def released_phase_counts(calls, truth, components, undetermined, positions, phase_breaks=None, *,
-                          minimum_run=LONG_SWITCH_MIN_RUN):
+def released_phase_counts(
+    calls,
+    truth,
+    components,
+    undetermined,
+    positions,
+    phase_breaks=None,
+    *,
+    minimum_run=LONG_SWITCH_MIN_RUN,
+    sample_order=None,
+    undetermined_bit=None,
+):
     """Per-sample released-phase counts of one chromosome (module docstring).
 
     ``calls`` int8 [N, L, 2] (released alleles, -1 unknown); ``truth`` int8 [N, L, 2] (maternal, paternal);
@@ -141,7 +183,7 @@ def released_phase_counts(calls, truth, components, undetermined, positions, pha
     calls, truth = np.asarray(calls), np.asarray(truth)
     samples, sites, _ = calls.shape
     if truth.shape != calls.shape:
-        raise ValueError("released and true allele axes differ")
+        raise InputError("released and true allele axes differ")
     positions = np.ascontiguousarray(positions, dtype=np.int64)
     components = np.asarray(components)
     counts = np.zeros((samples, len(SAMPLE_COLUMNS)), dtype=np.int64)
@@ -149,17 +191,28 @@ def released_phase_counts(calls, truth, components, undetermined, positions, pha
     buffer = np.empty(sites, dtype=np.int64)
     released_buffer = np.empty(sites, dtype=np.int64)
     no_undetermined = np.zeros(sites, dtype=np.bool_)
+    order = np.arange(samples) if sample_order is None else np.asarray(sample_order, dtype=np.int64)
+    if order.shape != (samples,) or not np.array_equal(np.sort(order), np.arange(samples)):
+        raise InputError("sample_order must permute the released sample axis")
     for sample in range(samples):
-        boundaries = () if phase_breaks is None else phase_breaks[sample]
-        result = _sample_phase(np.ascontiguousarray(calls[sample], dtype=np.int8),
-                               np.ascontiguousarray(truth[sample], dtype=np.int8),
-                               phase_set_ids(components, boundaries),
-                               no_undetermined if undetermined is None else
-                               np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
-                               positions, int(minimum_run), buffer, released_buffer)
+        source = int(order[sample])
+        boundaries = () if phase_breaks is None else phase_breaks[source]
+        unknown = no_undetermined if undetermined is None else np.asarray(undetermined[source])
+        if undetermined_bit is not None and undetermined is not None:
+            unknown = (unknown & undetermined_bit) != 0
+        result = _sample_phase(
+            np.ascontiguousarray(calls[source], dtype=np.int8),
+            np.ascontiguousarray(truth[sample], dtype=np.int8),
+            phase_set_ids(components, boundaries),
+            np.ascontiguousarray(unknown, dtype=np.bool_),
+            positions,
+            int(minimum_run),
+            buffer,
+            released_buffer,
+        )
         counts[sample] = result
-        spans.append(buffer[:int(result[4])].copy())
-        released_spans.append(released_buffer[:int(result[8])].copy())
+        spans.append(buffer[: int(result[4])].copy())
+        released_spans.append(released_buffer[: int(result[8])].copy())
     return counts, spans, released_spans
 
 

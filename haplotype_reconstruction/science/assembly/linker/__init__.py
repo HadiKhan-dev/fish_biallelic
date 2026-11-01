@@ -1,0 +1,16 @@
+"""The distance-aware sum-product linker: dense haploid founder transitions between the blocks of one batch.
+
+Modules (import them directly; this package imports nothing, so the join can import ``emissions`` alone):
+    em         ``fit_transitions`` with explicit settings/workspace returns ``Transitions`` (the EM)
+    scan       within-block normal/error-tract scans (lane-vectorised, log-domain fallback), ``BlockScans``
+    kernels    pair-prior propagation, posterior edge counts, log matmul, M-step regularisation
+    emissions  predictive pair classes and log emissions (shared with the join's binned emissions)
+    proxies    linking-proxy sites of a block (also used by the batch partition)
+
+
+Owns the linker __init__ boundary (AS1-AS3). Must not read files, clocks or
+environment, allocate execution resources or publish diagnostics.
+Method: docs/methods/assembly.md#linker.
+"""
+
+__all__ = []

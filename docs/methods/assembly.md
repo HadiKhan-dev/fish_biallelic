@@ -1,794 +1,626 @@
-# Assembly
-
-Assembly turns the path-selected local founder panels of one contig (one small panel per discovery
-block, each with K_b local founder rows) into chromosome-scale founder haplotypes, split only into
-phase components whose boundaries the data cannot bridge. It runs in three steps. Founder
-completion fixes the prepared panels: the local calls plus the unknown alleles the data determine
-well enough to publish. A hierarchy of levels then joins batches of adjacent components: a
-distance-aware linker fits founder transitions between the blocks of a batch, an endpoint beam
-enumerates candidate chromosome paths, and a certified panel search chooses the batch's founder
-paths, with their number decided by the pipeline's founder-count rule. In the contig's final
-assembly, [founder refinement](founder_refinement.md) re-chooses every component's founders after
-every level. The same computation has two roles: the final assembly (`Role.FINAL`), the stage
-product that [painting](painting.md) reads, and the context assemblies of local selection's
-feedback rounds (`Role.CONTEXT`, through level 1 or 2 and without refinement), whose components
-seed the next round of [local selection](local_selection.md). No pedigree, cohort label,
-simulation truth or target founder count enters.
-
-## Inputs and outputs
-
-| | Final assembly | Context assembly |
-|---|---|---|
-| Local panels | the `local_selection/l2` panels (`LocalPanel`, one per informative block) | the panels of the calling round |
-| Levels | until the stop rule ends the loop ([hierarchy](#hierarchy)) | 1 (round `l1`) or 2 (round `l2`), `LocalSelectionConfig.context_levels = (1, 2)` |
-| Founder refinement | after every level | none |
-| Records | under `assembly/` | under `local_selection/l1/assembly` and `local_selection/l2/assembly` |
-
-Every assembly also reads the contig's evidence view and genetic map. The evidence view
-(`assembly/evidence.py`, built once per contig from the evidence record's founder view) holds the
-normalised genotype likelihoods where a sample is observed at a discovery site and exactly 1/3 at
-every other cell (unobserved, not a discovery site, or a sample the contamination QC excluded from
-founder construction). Completion and the batch partition read it in float64; the linker, the joins
-and founder refinement read one float32 copy of the same values. The view also retains compact
-per-sample keys of integer total read depths on founder-visible discovery sites for completion's
-cross-fit partition. Counts are decoded transiently to construct those keys; the full count array
-is not retained by assembly. The genetic map gives the
-linker's within-block switch probabilities and the beam's maximum gap: distances come from the map
-file where one covers the contig (with the fallback rate `[genetic_map] rate_cm_per_mb` beyond its
-ends) and from the fallback rate alone otherwise.
-
-The product of the final assembly is the record `assembly/final`: the phase components
-(`FounderComponent`, with their count calls) over the prepared panels of `assembly/completion`.
-Other stages and the evaluator read it through `assembly/records.py`: `load_product`,
-`founder_panels(file, level)` (level k: the level-k product after refinement, or the hierarchy
-output where refinement did not run; no level: the final product), `level_records` and
-`join_searches` (the reports' assembly search table). `model.components.materialise` turns
-components into chromosome-scale arrays. Two report tables are written with each contig's painting
-outputs ([painting](painting.md)): `assembly_search.tsv` (every record of the final assembly's join
-searches) and `founder_counts.tsv` (how firmly each component's founder count is determined).
-
-None of the stage's constants is a TOML key (the generated [configuration reference](../configuration.md)
-lists them). The user options that affect assembly are `[genetic_map] file` and
-`[genetic_map] rate_cm_per_mb` (distances), `[quality] sample_filter` (which samples are uniform in
-the founder view), `[execution] batch_queue` (hierarchy batches run by helper workers on other
-nodes) and `[execution] cores` and `[execution] memory_limit`, which change timing only.
-
-## Prepared panels and founder components
-
-Assembly never copies founder alleles into chromosome arrays. Its atomic unit is the prepared panel
-of one block (`PreparedPanel`, `model/components.py`), R local rows over the block's sites:
-`inference` int8[R, L] holds the local-selection calls with -1 at non-discovery sites (the frozen
-pre-fill snapshot that every likelihood reads), `released` the same calls plus the released
-completion fills, and `alt_probability` and `support` the per-allele probability and directional
-supporters. Every product of assembly is a row-path matrix: `rows[f, b]` is the local row of
-prepared panel b that founder f copies. A `FounderComponent(start, stop, rows, break_before,
-break_after, count_call)` covers the prepared panels [start, stop); the components of one assembly
-partition the prepared panels in genomic order, and founder labels are row indices 0 .. K-1 of a
-component (component-local, with no key objects). `materialise` gives a `ComponentPanel` per
-component: positions, released and inference calls int8[K, L], discovery sites, ALT probabilities,
-supporters, the site offsets of the prepared spans and `source_rows` (two founders that copy the
-same prepared row at a site share one latent allele there). A `CountCall` records a component's
-last count step (founder refinement at the final level): K before and after, each decision (kind,
-K, kept or added, skipped by a bound, margin, bootstrap band, ambiguity), count cycles and the
-overall ambiguity; components with one block or one founder carry the reason
-`single_block_or_founder` instead. The local panels and every scientific input are never modified:
-completion returns prepared panels without touching the local panels, and phase breaks are carried on fresh
-components. The final assembly consumes one workspace of the evidence view it is given: it releases the view's
-neutral float64 copy after its last level's join ([memory](#implementation-and-cost)), so that view cannot start
-another assembly afterwards.
-
-## Founder completion
-
-Local selection leaves some founder alleles unreleased. Completion (`assembly/completion/`)
-decides, block by block, which of them the data determine well enough to publish, without letting
-a fill feed back into its own evidence. In the observation model of the cross-fit and the cavity
-fill, a sample copies an unordered pair (a, b) of the block's K rows (K(K+1)/2 pair states), its
-genotype dosage is x_a + x_b, a homozygous pair copies one allele, an unresolved allele is a binary
-variable shared by every sample, and evidence enters through the robust mixture 0.99 P(g) + 0.01/3
-(`AssemblyConfig.completion.crossfit.uniform_mix = 0.01`), whose log the pair-state scores floor at
-`AssemblyConfig.completion.crossfit.log_floor = -2.0`.
-
-1. **Cross-fitted carrier profiles** (`assembly/completion/crossfit.py`). The samples are split into two deterministic
-   folds (`AssemblyConfig.completion.crossfit.fold_seed = 1729`). The primary key is a seeded
-   SHA-256 of the observation pattern on the contig; ties are refined by a seeded key of the exact
-   integer total-depth vector (REF + ALT) on founder-visible discovery sites, zero elsewhere.
-   Samples with identical observation and depth content stay in one group. In content-key order,
-   each whole group goes to the fold with fewer informative members so far; an equal load selects
-   label 0. For balancing, informative means at least one founder-visible observed site,
-   independent of likelihood values. Samples with no founder-visible observation have zero balancing weight and fixed
-   label 0. With distinct informative keys this gives an alternating balanced split. Residual
-   groups are never divided by input position, even if their genotype likelihoods differ.
-   Sample names, input order, inferred genotypes and floating-point likelihood values do not
-   enter the split. It is invariant to sample permutation, renaming and convention reversal;
-   GL-only noise cannot change the integer depth keys. Array-only callers without counts hold
-   whole observation-pattern groups together and record that key source explicitly.
-   On one fold a variational EM over
-   per-sample pair states and per-site configurations of the unresolved alleles runs from one
-   start (uniform configurations, pair posteriors from the complete sites) until the evidence
-   lower bound converges (at most `AssemblyConfig.completion.crossfit.max_iterations = 100`
-   iterations). It releases conservative calls: marginal at least
-   `AssemblyConfig.completion.crossfit.minimum_call_probability = 0.99`, carrier support (the
-   larger of the number of samples carrying the row with probability above 1/2 and their summed
-   carrier probability) at least `AssemblyConfig.completion.crossfit.minimum_carriers = 2`, a row
-   not identical to another row, no multimodal site and no shell-guard withholding (next section).
-   The other fold's samples are painted on the complete sites of that released panel. The result
-   is a held-out carrier profile per sample and row (expected copies and carrier probability) that
-   never uses the sample's own evidence to learn its training panel. When the training complement
-   has no informative observations, it cannot learn missing alleles: the original pre-fill panel
-   is used unchanged for held-out painting and absent informative training is flagged. This
-   fallback changes neither the separate cavity-fill model nor the occupancy criteria. Fold
-   group sizes, informative loads, key source and absent-training diagnostics accompany the
-   completion summary. These learned calls serve only the profiles; they are not published.
-2. **Cavity fills** (`assembly/completion/cavity_fill.py`). The block is cut into bins of
-   `AssemblyConfig.completion.cavity.snps_per_bin = 50` sites. For each bin, every sample's
-   pair-state weights come from the block's complete, informative sites outside the bin
-   (leave-bin-out). At each site of the bin the unresolved alleles are enumerated jointly: an
-   assignment a has likelihood prod_n sum_s w_ns E_n(dosage(s, a)) under independent
-   Bernoulli(1/2) priors, so every allele is drawn once and shared by all samples. A fill is a
-   candidate when its posterior is at least
-   `AssemblyConfig.completion.cavity.minimum_posterior_probability = 0.99`, at least
-   `AssemblyConfig.completion.cavity.minimum_supporters = 2` carriers support it among the
-   focal-informative samples whose likelihood depends on the allele, the row differs from every
-   other row at an observable site outside the bin, and the site is neither multimodal nor withheld
-   by the shell guard.
-3. **Boundary links** (`assembly/completion/links.py`). Rows with identical calls form classes. A class of one block
-   and a class of the next are linked when, on the samples informative in both blocks, their
-   held-out copy numbers agree (mean squared discrepancy of expected copies and of min(copies, 1)
-   at most `AssemblyConfig.completion.links.maximum_mean_cost = 0.099`) as a reciprocal unique
-   optimum by a margin, pooled and in each fold, with enough informative samples and effective
-   copies on both sides.
-4. **Occupancy gate** (`assembly/completion/occupancy.py`). A row's candidate fills are released only when the row is
-   demonstrably occupied. In the abundant route, the squared carrier probabilities of the
-   informative samples sum to at least
-   `AssemblyConfig.completion.occupancy.minimum_abundant_sum_squared_probability = 8.0` and at
-   least `AssemblyConfig.completion.occupancy.minimum_abundant_high_confidence_carriers = 5`
-   samples carry the row with probability 0.8 or more; all its candidates are released. In the
-   rare-continuity route, a link of single-row classes reaches a row of an adjacent block that at
-   least two samples informative on both sides also carry (local probability at least 0.9,
-   neighbour at least 0.8, product at least 0.72), the best such neighbour is unique, and a fill is
-   released where one of those samples is focal-informative. A block releases nothing when it has
-   one row, or when local selection left unexplained copies there: some sample with depth has an
-   unknown-copy slot and the block's unknown-copy fraction exceeds
-   `AssemblyConfig.completion.maximum_discovery_unknown_mass = 0.0`.
-
-Released fills change only the published calls (`released`, with the fill posterior as ALT
-probability). Every likelihood of the linker, the joins, founder refinement and painting reads the
-pre-fill `inference` calls, so a fill never strengthens the evidence that produced it, and the count
-rule's row geometry measures distances on the same pre-fill calls
-([founder-count rule](#founder-count-rule)): a fill changes the published panel, never an assembly
-decision.
-Completion runs in every assembly of a contig, contexts included; its summary (candidate and
-released fills per block, vetoed blocks, gate reasons, site-posterior counts) is stored with the
-prepared panels and logged.
-
-## Founder-allele site posterior
-
-Completion's EM and cavity fills, and local selection's context refit, need the posterior of the m
-unresolved founder alleles b in {0, 1}^m at one site, shared by every sample
-(`assembly/founder_alleles/site_posterior.py`). Each informative sample contributes a positive
-quadratic Q_n(b) (its pair weights times its genotype evidence), and p(b) is proportional to
-exp(a . b) prod_n Q_n(b) with log prior odds a. For m at most
-`assembly.founder_alleles.site_posterior.MAX_EXACT_BITS = 10` every configuration is enumerated.
-Above that the uncertain-core approximation applies, with no cap on the founder count:
-
-- the mode comes from loopy belief propagation (one factor per sample) followed by steepest ascent
-  over single and pair flips, started from the thresholded beliefs and from their full allele
-  complement; the better optimum is kept;
-- when the two starts end in different optima within
-  `assembly.founder_alleles.site_posterior.SITE_CERTAIN_NATS = 20.0` of each other, the posterior
-  has two comparable basins that no single or pair flip connects (typical where most carriers look
-  heterozygous, as at paralogous sites), and the site releases nothing (multimodal abstention);
-- founders whose single flip and every pair flip cost more than 20 nats stay at the mode; the
-  remaining core is enumerated exactly when it has at most ten founders, otherwise over the
-  Hamming ball around its mode of the largest radius with at most
-  `assembly.founder_alleles.site_posterior.SITE_BALL_CONFIGURATIONS = 1024` configurations, but of
-  radius at least `assembly.founder_alleles.site_posterior.SITE_BALL_MINIMUM_RADIUS = 3`
-  (4,526 configurations for a 30-founder core);
-- in the ball, a release is withheld when the marginal lies within
-  `assembly.founder_alleles.site_posterior.SITE_SHELL_GUARD = 3.0` times the weight of the
-  outermost-shell configurations that flip the founder of the release threshold.
-
-Exact marginals of this model are #P-hard in general, so above ten free founders the marginals are
-exact only over the enumerated support. The work per site is O(N m^2) per propagation iteration and
-ascent step, O(N (m^2 + 2^10)) for a core enumeration and O(N m^3) for a radius-3 ball. In
-completion's EM the support of every site is fixed for the whole EM (chosen under the starting pair
-posteriors), so the evidence lower bound stays a lower bound.
-
-Completion retains this support as a centre, an ordered core and sparse flip sets. No growing
-ball is expanded to a configuration-by-founder matrix. Flip indices and support sizes use signed int8:
-indices are -1 (padding) or 0..K-1, sizes are 0..K, hence neither can overflow at K <= 30.
-Configuration counts and packed offsets retain int64. Quadratic scores use the value and local
-fields at the centre plus the couplings among the flipped bits. Pair-dosage probabilities use
-single- and joint-flip masses. Their work is O(K^2 + C r^2) per site and update, where C is the
-support size and r its radius. Allele and shell marginals cost O(C r + K^2); cavity log odds use
-positive interval sums of the unchanged support, avoiding subtraction of nearly equal masses.
-Carrier sensitivity still evaluates the mode and its single core flips, O(N U^2).
-
-The exact cube at U <= 10 remains bounded by 1,024 assignments. Larger-radius balls also remain
-inside the existing 1,024-configuration envelope; growing supports have radius three and
-C = 1 + U + choose(U,2) + choose(U,3). Thus completion has at most cubic dependence on K,
-with fixed sample count, block length and existing iteration limits. This changes evaluation
-order only: support, priors, thresholds, convergence rules and released scientific decisions
-are preserved. Continuous agreement is scientific, not bitwise.
-
-## Hierarchy
-
-Level 1 starts from one single-block component per prepared panel, with every local row as a
-founder. Each level (`assembly/hierarchy/`) then proceeds in three steps.
-
-1. **Partition.** A sample is informative for a component when its evidence is non-uniform at one
-   of the component's usable linking-proxy sites: discovery sites where some founder has a
-   pre-fill call, at most `AssemblyConfig.linker.max_sites = 2000` per component (an even stride
-   over the usable sites of a longer component). A boundary whose two sides share fewer than
-   `AssemblyConfig.min_boundary_informative_samples = 4` informative samples becomes a phase break
-   (`insufficient_joint_informative_samples`) and stays one at every later level. The components
-   are cut into batches of `AssemblyConfig.batch_size = 10` adjacent components that never cross a
-   break; a batch's samples are those informative in every one of its components, since inference
-   spans the whole batch.
-2. **Joins.** Every batch of at least two components with at least one sample is joined
-   ([linker](#linker), [endpoint beam](#endpoint-beam), [certified panel search](#certified-panel-search)).
-   A single component, or a batch without informative samples, passes through unchanged; its
-   boundaries are not marked as breaks.
-3. **Output.** A joined batch becomes one component whose rows compose the chosen paths with the
-   input components' rows.
-
-The loop stops after a level when one component remains, or when a level from the second on did
-not reduce the component count. A context assembly stops at its level count. The final assembly
-runs at least `AssemblyConfig.minimum_levels = 4` levels while they reduce the count, and beyond
-them continues only while some boundary between adjacent components is not a phase break. With
-batches of ten, four levels join up to 10^4 blocks into one component; a longer break-free segment
-is joined at level 5 and above. In the final assembly, founder refinement runs after every level
-and its output is the next level's input; the level at which the assembly stops is its last level,
-the only one at which refinement may add founders.
-
-A component boundary is either a data-unsupported break (the reason above) or carries no reason:
-a chromosome end, or a boundary the hierarchy left unjoined for another reason (a batch without
-informative samples, or a batch edge at the last level).
-
-## Linker
-
-The linker (`assembly/linker/`) fits dense haploid founder transitions between the blocks of one
-batch (its input components, read through their linking proxies) from the batch's informative
-samples.
-
-- **Chains.** For every gap g = 1 .. G the blocks split into g residue-class chains (blocks i,
-  i + g, i + 2g, ...). G is n - 1 at level 1 and the beam's maximum gap at later levels: only the
-  gaps the beam reads are fitted. In a chain a sample's state is an ordered founder pair; within a
-  block it evolves along the block's emission sites, and between consecutive blocks of the chain
-  both homologues move independently through one haploid transition matrix T_i (K_i x K_{i+g}),
-  so no K^4 diploid transition is formed. Every gap is its own model and EM.
-- **Within a block.** Emission sites are the usable proxy sites. Between adjacent emission sites
-  at most one homologue switches founder: with theta the interval's genetic distance (Morgans;
-  max(1 bp, distance) times the fallback rate without a map), capped at 0.5, the stay and
-  per-founder switch weights (1 - theta)^2 and theta (1 - theta)/(K - 1) are normalised to row
-  mass 1. Theta is the distance of one meiosis; it is not multiplied by `AssemblyConfig.gap_horizon_scale = 3`,
-  which controls only the linker and beam's inter-component gap horizon. A two-state quality indicator
-  follows a continuous-distance Markov process with stationary error fraction
-  `AssemblyConfig.linker.error_fraction = 0.01` and mean error tract
-  `AssemblyConfig.linker.error_tract_bp = 20000.0` bp: in the normal state the pair emits through
-  its predictive class, in the error state the mean of the three genotype likelihoods (independent
-  of the founders); ancestry transitions apply in both states. Each block starts the indicator at
-  stationarity and sums it out at its far end. Inference is sum-product over both ancestry and
-  quality; the backward scan is the adjoint of the forward operator.
-- **Emissions.** The predictive likelihood of a pair class is mixed with a uniform genotype,
-  (1 - r) P + r/3 with `AssemblyConfig.linker.robustness = 0.01`, without a further log floor. The
-  seven classes are: both alleles called (dosage 0, 1 or 2); one called allele and one unknown
-  (averaging dosages 0 and 1, or 1 and 2); two unknown alleles of different latent rows (weights
-  1/4, 1/2, 1/4); two copies of one unknown latent allele, the same founder or two founders
-  copying the same prepared row (weights 1/2, 0, 1/2). Unknown alleles are Bernoulli(1/2). This
-  is a per-observation predictive approximation, not exact integration of shared latent alleles
-  across samples; it changes linkage evidence and never imputes an allele.
-- **EM.** Transitions start uniform and each chain starts from a uniform pair prior. The E-step
-  runs forward and backward over every chain (the backward contraction uses the transpose of T,
-  not a reverse conditional). The M-step takes the posterior homologue edge counts, adds the
-  pseudocount `AssemblyConfig.linker.pseudo_count = 0.1`, normalises each row, floors it at log
-  probability `AssemblyConfig.linker.min_log_probability = -10.0`, renormalises and mixes in a
-  uniform row, (1 - u) p + u/K_{i+g} with `AssemblyConfig.linker.uniform_mix = 0.01`. The default
-  takes the full regularised M-step: T becomes T_target. The numerical rate remains
-  eta = max(decay^t, minimum), with `AssemblyConfig.linker.learning_rate_decay = 1.0` and
-  `AssemblyConfig.linker.minimum_learning_rate = 0.1`; a smaller decay can reproduce damped
-  iteration for numerical comparisons. The EM
-  stops when the undamped fixed-point residual `max(abs(M(T) - T))` at the returned forward
-  transitions is at most `AssemblyConfig.linker.min_change = 0.001`, with M the regularised
-  forward M-step, or after `AssemblyConfig.linker.max_iterations = 50` applied updates. The
-  cap increased from 20 to 50 in 2.7. Full steps replace the decaying rate in 2.8 without
-  changing the M-map, uniform initialization or stopping tolerance. Finite-tolerance answers
-  and downstream decisions can change, especially for iteration-limited fits. Neither
-  satisfying the residual criterion nor using a higher cap proves a unique fixed point.
-  Column-normalised reverse summaries do not enter the stopping rule: they are not parameters
-  of this fixed-point problem. A uniform starting point that already satisfies the criterion
-  takes zero updates.
-
-Each fitted gap persists a `linker_em` event in its join search summary (or the retained-input
-shadow record when the beam cannot establish a joined panel). It records the number of
-updates, whether the iteration cap was reached, whether the fit exhausted the cap without satisfying
-the stopping rule, the last applied **forward** change (the historical `last_damped_change`
-field, absent for zero updates), and the undamped
-fixed-point residual (also per edge). Each iterate's target is computed once and reused for its
-update; there are updates + 1 E/M evaluations, including the final stopping evaluation. `converged`
-means the returned residual is within tolerance; reaching the cap alone does not establish this.
-All incoming parent branches retain these records, including branches that were not selected.
-Existing checkpoints without these events have unmeasured convergence diagnostics; zero must not
-be inferred from their absence. The changed stopping rule can change beam candidates and scientific
-outputs, so it requires validation with the integrated candidate. The optional
-`assembly.linker_em_stop` census now records residual-minus-tolerance distances, matching the
-reported stopping rule rather than the previous damped-change distances.
-
-The linker hands the beam the natural logs of the fitted probabilities in float64. Its
-dense propagation and edge counts are cubic in the founder count (O(N (K_i^2 K_j + K_i K_j^2)) per
-edge and iteration); scaled arithmetic with a log-domain fallback implements the same model.
-
-## Endpoint beam
-
-The endpoint beam (`assembly/join/beam.py`) enumerates candidate chromosome paths through a batch
-(one founder per input component). A path scores the sum over blocks k >= 1 of the mean of the log
-transitions into block k from the earlier blocks within the maximum gap. Pass 1 builds paths left
-to right and keeps, at every block, at most q paths per endpoint founder
-(`AssemblyConfig.join.paths_per_endpoint = 16`). Pass 2 refines backwards from the last block:
-every kept path tries every founder at block k with the rest fixed, and the pooled candidates are
-selected with the same endpoint quota. Every path selected at any step is archived, so full paths
-through interior states survive; the archive, sorted by score, is the batch's candidate pool C0
-(bounded proposals in 2.8; see below). Candidates are ranked by
-anchored score tie classes with content ordering inside each class; scores accumulate in float64 in
-past-block order. The panel search's tie rules downstream depend on this order.
-
-Release 2.8 bounds every endpoint by its quota, splitting cut-score tie classes in
-canonical prepared-row content order. Constant-transition families always use the existing
-first-covering members (O(B K) paths), without Cartesian expansion. Search continues on that
-proposal pool; there is no beam-bound stop or unjoined-input fallback. These are declared
-proposal approximations, including for ties that fit the former materialization allowance.
-Equal linkage scores do not imply equal genotype likelihood or released alleles. See
-[assembly performance](assembly_performance.md#polynomial-beam-proposals-28).
-
-At level 1 every gap enters a step. At later levels the maximum gap is
-max(1, 1 + floor(t / s)), where s is the mean genetic span of the batch's components in
-Morgans times `AssemblyConfig.gap_horizon_scale = 3`, and
-`AssemblyConfig.recombination_tolerance = 0.5` is the dimensionless budget t. The scale has
-units of inverse Morgans and controls the proposal horizon: increasing it shortens the gaps
-considered by both linker fitting and the beam. A zero scaled span uses every gap; if no
-component spans two sites, the maximum gap is 1. This is a search rule, not a sample's meiotic
-depth or a transition likelihood. It is independent of local selection's
-`LocalSelectionConfig.model.redraw_rate_per_morgan = 3.0`. Neither setting is derived from
-generation labels or estimated from painting switches.
-
-Both parameters are internal constants, not public TOML settings. The retained defaults are
-copying intensity 3.0 and gap scale 3. A bounded chr19 study on std, F3 and TroMau finds no
-principled gain from gap scales 1 or 6: both retain std accuracy and TroMau G0 pseudo-truth
-consistency, while scale 1 trades better F3 genotype recovery for worse founder recovery.
-These are painting-stage comparisons, not final-export accuracy gates or proof of an optimal scale.
-Changing the gap scale bounds proposal search; it does not change the copying transition model.
-
-## Join objective
-
-A panel P of K paths through the batch is scored per sample by a Viterbi programme over unordered
-pairs of panel paths (`assembly/join/objective.py`):
-V_s(P) = max over state sequences of [sum_t e_s(z_t, t) - penalty x (number of state changes)],
-with a free start. The join log likelihood is LL(P) = sum_s V_s(P). The emissions are binned
-(`assembly/join/emissions.py`): each input component's sites are cut into bins of
-max(clamp(floor(mean component sites / 20), 10, 100), ceil(batch sites / 2000)) sites (at most about
-`AssemblyConfig.join.max_bins = 2000` bins per batch), and the emission of a pair at a bin is the
-sum over the bin's usable sites of max(log(0.99 P(g | pair) + 0.01/3), -2) - log(1/3), with the
-linker's seven predictive classes on the pre-fill calls; uniform evidence contributes nothing. The
-penalty is 20 nats while the batch spans at most 5,000 sites and 20 sqrt(sites / 2000) above. With
-symmetric genotype emissions and a uniform penalty the ordered states (a, c) and (c, a) score
-equally, so the K(K+1)/2 unordered pairs carry the programme exactly. Ties are broken
-deterministically: the switch source is the first maximiser in pair order, and a state stays when
-staying is at least as good as switching.
-
-## Certified panel search
-
-The panel search (`assembly/join/search.py`) chooses a batch's founder paths from the candidate
-pool: same-count moves are judged by LL alone, the founder count by the
-[founder-count rule](#founder-count-rule).
-
-**Start.** For every anchor block j, taking the beam paths in beam order and keeping each one whose
-row at block j is not yet covered gives an anchor panel; the distinct anchor panel of largest LL
-(ties: the first anchor) starts the search. It only seeds the search: the count rule decides the
-panel size.
-
-**Same-count moves** keep the number of paths: replace (path f becomes pool path c), local (f takes
-row r at block b), one-sided suffix copy (f takes g's rows from block t on), splice (f and g
-exchange their rows from block t on) and suffix cycles. A move is admissible only when the panel
-keeps K distinct paths and every changed path keeps a private cell (a row at some block that no
-other path uses) and differs from every other path at more than the near-identity rate of called
-sites (`AssemblyConfig.count_rule.near_identity = 0.01`); otherwise the move would create a path the
-count rule deletes. It is accepted only when it raises LL beyond the score's float resolution,
-2 dLL > max(1e-8, 1e-9 (1 + 2 |LL|)).
-
-**Tier 1** is the bounded sweep. Nine proposal kinds are ranked by cheap statistics (conditional
-fixed-painting gains, candidate novelty under a mate model, exact no-switch replacement gains,
-boundary votes of an exploratory painting at penalty min(penalty, 10), greedy and cycle
-permutations); of the top `AssemblyConfig.join.full_scores_per_kind = 16` proposals of each kind,
-the distinct admissible ones are scored exactly, and the best improving one is accepted.
-
-**Count step.** At every tier-1 stall the count step runs. Paths without sequence of their own (no
-private cell, or within 1% of another path) are deleted one after another, and the death candidate
-of largest V(P minus f) (ties: the lower path) is then decided by the rule. Only when no path died
-is the pool birth of largest total gain among those the rule accepts added; births are bounded per
-sample (two-region bounds) and scored exactly only where the bound leaves them open. A count change
-returns the search to tier 1.
-
-**Tier 2** runs when the count step is quiescent. The pool is extended by a beam re-run with quota
-q times the number of panel paths sharing each endpoint (births by the added paths are decided
-first), and every same-count move of an explicit neighbourhood (replacement by any pool path, any
-one-block row change, suffix copies and exchanges at every boundary) is bounded through exclusion
-forwards; moves the bound cannot exclude are scored exactly, best bound first, and the best
-improving admissible move is accepted (back to tier 1).
-
-**Duplicate-seed births.** At a panel certified for both, pool births without a private cell that
-would pass on their total gain indicate a chimera: one panel path covers cells of an unrepresented
-founder. Seeds are every panel path while K is at most
-`AssemblyConfig.count_rule.ranked_refits = 9`, otherwise the main coverers of the strongest
-indicators. Each seed is refitted from P plus a copy of the seed (certified best improvement over
-the moves that change the seed or its copy, run concurrently), then settled: paths without
-sequence of their own are deleted and the death candidate of largest V(P minus f) must survive its
-death test. A settled panel is accepted when it survives, keeps at least K paths and raises LL.
-
-**Pool saturation.** Before a panel is certified, the beam is re-run with doubled quotas (32, 64,
-128 and 256 paths per endpoint, times the endpoint's multiplicity), and the paths each rung adds
-are tested as replacements (by LL) and births (by the count rule). A move found at a rung raises the
-quota to that rung and returns the search to tier 1. A join whose 256 rung accepted a move climbs
-on to 512 and 1024 (`assembly.join.search.POOL_QUOTA_DOUBLINGS = 4`,
-`assembly.join.search.POOL_EXTENDED_DOUBLINGS = 6`). The panel is certified when no rung up to its
-ladder top adds a move.
-
-**Backstops** are reported and never decide a normal result: at most
-100 + 20 max_b K_b same-count sweeps (tier-1 sweeps and accepted tier-2 moves) since the last count
-change or saturation move (`assembly.join.search.SWEEP_BACKSTOP_BASE = 100`,
-`assembly.join.search.SWEEP_BACKSTOP_PER_ROW = 20`), and a move accepted at quota 1024 (the pool
-backstop). Each join records the flags `certified`, `backstop_reached`, `ladder_extended` and
-`pool_backstop` with its tier-2 passes, survivors, exact scores, pool sizes and every count decision
-(margins on the total and sequence parts, band, ambiguity); each level logs two census lines.
-
-Certification is relative to this neighbourhood and to the beam's pool, not a global optimum:
-paths the beam never proposes, three-way boundary cycles and multi-founder births lie outside it
-(tier 1 still proposes cycles, and duplicate seeds split chimeras). A founder that is a pure block
-mosaic of other founders within one batch is not carried by that batch; later levels and founder
-refinement can re-split it.
-
-## Equivalent seed histories (2.7)
-
-The TroMau chr7 L2 context join exposes a result-selecting convention in 2.6. Two
-accepted duplicate-seed refits reach exactly the same canonical settled panel, but
-only one encounters an unresolved two-panel tier-2 family. The global reversal hook
-changes which equivalent seed witness is selected, so promoting only that witness's
-histories changes `release_alternatives` from zero families to one. A bounded replay
-of saved 2.6 inputs reproduces this while keeping all nominal rows and the join
-likelihood identical. This is separate from the
-[local-selection convention checks](local_selection.md#observed-effects-of-the-start-cap-and-inner-winner-order).
-
-For a selected seed endpoint, the join now retains the union of unresolved source
-families from every accepted seed candidate with that exact canonical settled panel.
-Equality of likelihood alone does not qualify. Rejected seeds and different endpoints
-do not contribute. This removes the witness-order convention without adding a search,
-changing a count test, or declaring unexplored continuations equivalent. The union
-uses only the candidates and family records already evaluated by the count step.
-
-The context-refit consumer still uses the representative components and prepared
-panels, not the alternatives sidecar. The observed context case therefore has no
-released-local-call change. Final founder release does read ambiguity metadata;
-its existing distinction between evaluated terminal disagreement and unperformed
-continuations remains in force. This fix does not claim a downstream accuracy gain
-or complete coverage of every remaining assembly convention.
-
-## Live alternatives and founder release (2.3)
-
-Proposal budgets now retain complete `join_proxy` classes. A cut class that would exceed
-twice the quota is dropped whole unless it is the leading class; an oversized leading
-class is kept whole. Painting-derived candidates are merged across both traceback
-conventions before this cut. Admissibility is tested on each edit witness before target
-panels are deduplicated. Exact scoring identifies a one-path replacement by the target's
-path multiset, so an alternative edit description cannot choose a different scoring route.
-
-A symmetric data decision records its complete discovered panel family. Up to four
-complete search histories, including the primary history, are evaluated by replaying the
-original inputs with the chosen decision prefix. Each replay preserves the ordinary
-count-cycle and born-path rules. Immutable emissions are shared; mutable search state is
-new. At a given supported K, final outputs are compared using `join_ll` classes on one
-common scale. Different supported K values remain `ambiguous_k`; raw likelihood does
-not choose the count. The representative uses smaller K, then the exact minimum number
-of sample state changes among optimal paths. Canonical order names a representative only
-after those priors, while every remaining alternative stays recorded.
-
-At the next hierarchy level, all child choices are combined jointly. Two two-way children
-require all four configurations. The higher-level allowance is sixteen complete incoming/search
-leaves per component, shared with same-level refinement; it is never sixteen independent
-four-history searches. Each incoming join configuration receives one search execution;
-unperformed inner histories stay flagged. A product larger than sixteen is retained as an explicit
-unresolved domain; no convenient subset is declared decisive. Informative masks are
-computed on the usable-site intersection across every alternative before partitioning.
-Samples must also satisfy the original proxy eligibility under every input alternative;
-changing the proxy stride on the shared sites cannot introduce samples excluded by an original alternative.
-Every compared join uses that common sample cohort, usable-site mask and prepared span;
-excluded sites are also absent from its count geometry. Positions and bin boundaries stay fixed. Each configuration refits its linker.
-Parent outputs are compared by their common likelihood within K; scores of separately
-fitted linker models are not compared, and child likelihoods are not added to parent
-likelihoods. Lost informative samples and usable sites, branch counts and costs are recorded. In FINAL
-assemblies, surviving join panels pass through that level's refinement. CONTEXT assemblies
-return alternatives too; local selection currently consumes their declared representative.
-
-This is a bounded comparison of discovered alternatives, not an enumeration of all global
-optima. Selected count-choice ties continue from the original count-pass state within
-the shared sixteen-leaf refinement budget as fixed-K and incoming-panel choices. Uncontinued inner-seed
-histories, branch-budget overflow and any remaining untested continuations stay explicit. At a count-quiescent terminal tie, the stated exact prior selects a discovered
-neighbor and ordinary search continues with the existing count, cycle, born-path, quota and
-sweep state. Flat transitions do not count as improvements or reset the search budget.
-Already visited flat states cannot cycle; newly discovered neighbors may extend the live
-family within the same four-history budget. A continuation that reaches a backstop remains
-uncertified, and its source family is not consumed as a validated terminal alternative.
-
-Founder export reads the final sidecar. A founder column and track extend only over
-segments where represented terminal panels agree up to a whole-row permutation, preserving
-duplicate multiplicity. Forward and reverse maximal common-interval scans supply a common
-set of cuts and an uncertainty interval bracketed by observed SNP positions. Different
-local content is withheld as unknown for evaluated final alternatives with established
-final correspondence. For equal-K panels, unique exact row matches on invariant path
-anchors preserve every allele cell that agrees across the complete evaluated family;
-only differing or missing cells are withheld. Matching uses no approximate or truth-based
-alignment. For unequal-K terminal panels, a displayed full-span path occurring exactly
-once in every evaluated member retains its known prepared content, even if other paths
-change that row ID's local multiplicity. Duplicate full paths and clipped fragments do
-not establish this correspondence. This protection applies to each family before masks
-are combined; prepared missingness, carrier masks and other families' withholding remain
-in force. All continuity cuts and uncertainty intervals are retained. Without this exact
-correspondence, varying prepared-row multiplicity retains the conservative local-row
-mask in every representative. Withheld calls remain unknown during full-length r5 filling.
-A source history whose continuation was not performed retains its incumbent calls and is
-flagged `continuation_unverified`, with the evaluated source panels, their actual local
-disagreement intervals, stated priors, cause and scope. The flag alone supplies neither a cut
-nor withholding. For an evaluated biological family stopped by a joint/search budget,
-the smaller-K and exact minimum-switch priors first identify the complete class in which
-the representative can vary. A unique prior winner retains its calls. Within a remaining
-tie, immutable prepared-row IDs and exact agreeing source-path anchors identify observed
-local allele disagreement; only those differing cells are withheld. Unknown downstream
-continuation and unmapped local IDs remain explicitly unverified. Continuity cuts require
-an exact whole-row correspondence to a represented source panel. Computational count
-overflow never invokes this rule. Source paths are not claimed to be final alternatives.
-The manifest records
-source inference component, segment index, source decision, uncertainty interval and newly
-withheld cells separately from unobserved-carrier withholding.
-
-Released segment identities are local. Downstream pedigree, offspring phase and recombination
-inference remain conditional on the chosen assembly representative; this export operation does
-not marginalize those analyses over founder alternatives. A 2.2 record without the sidecar is
-reported as having unknown ambiguity coverage and must be reassembled to obtain this treatment.
-
-## Founder-count rule
-
-The join and founder refinement decide founder counts with one rule (`assembly/count_rule/`). A
-decision compares a larger panel X+ with a smaller X- that lacks one founder f. With per-sample
-scores (the join's V_s, refinement's F_s), the total gain is d_s = score_s(X+) - score_s(X-) and its
-sequence part is q_s = score_s(X+) - score_s(X+^sigma). The shadow X+^sigma replaces every cell
-(block, row) of X+ that a reference panel does not use by the reference's row at that block nearest
-in Hamming distance over sites called in both; the reference is X- in the
-join, and in refinement (2.8) X+ without each member of its own canonical death class, in both
-directions ([symmetric null](founder_refinement.md#symmetric-sequence-null)). A founder
-without a private cell is a pure mosaic of the others and has q = 0 exactly, so switch savings
-alone never justify a founder.
-
-**Effective-carrier test.** The per-founder cost is c = s x (mean sites per block / 200) x S x B
-for a span of B blocks and S samples, i.e. c = s S L / 200 for a span of L sites, with
-`AssemblyConfig.cost_scale = 0.5` as s. In the join the blocks are the batch's input components and
-S counts its informative samples; in founder refinement the blocks are the component's prepared
-panels and S counts the component's informative samples (samples with evidence at one of its
-objective's sites). With n_eff = (sum_s d_s+)^2 / sum_s (d_s+)^2, the
-participation ratio of the positive differences, a difference vector passes when
-m = sum_s d_s / c - n_eff / (2S) > 0 and m' > 0, where m' is the same margin with the sample of
-largest d_s left out (S unchanged). The cost is thus charged only to a founder's effective carriers
-(c / (2S) per carrier, L / 800 nats at the default scale; with n_eff = S the margin equals BIC's
-sum d / c - 1/2), and no single sample can decide a founder. X+ is kept (deletion rejected) or
-accepted (addition) only when the test passes on d and on q.
-
-**Ambiguity.** Samples are resampled with replacement
-(`AssemblyConfig.count_rule.bootstrap_resamples = 2000`, each decision with a deterministic stream
-from a SHA-256 of its key) and min(m_d, m_q) is recomputed; a call whose percentile interval
-(`AssemblyConfig.count_rule.bootstrap_level = 0.95`) contains zero in its interior is ambiguous.
-The point decision stands.
-
-**Near-zero margins (2.7 decision 3).** There is no additional heuristic dead band around
-zero. The effective-carrier point test remains `m > 0` and `m' > 0` for both total and
-sequence gain. Count-margin candidate comparisons use the existing numerical tie quantum
-(`count_margin`, 2^-26 in units of c); that ranking quantum is not a replacement threshold
-for the point test. A numerical tie must be treated as its complete candidate family or
-reported as unresolved, never settled by an arbitrary candidate order. Differences above
-the applicable quantum are evidence, however small their absolute value. Bootstrap
-uncertainty and unperformed comparisons remain separately reported. A new dead band would
-change the model and requires independently demonstrated harm against simulation truth.
-
-**Near identity (join only).** A path within 1% called-site mismatch of another panel path over the
-batch span owns no sequence (q = 0): it is never added, it is deleted first, and no same-count move
-may produce one. Founder refinement does not use this shortcut (it scores the shadow exactly).
-
-**Count cycles.** Deleting a path that an addition of the same search created closes a count cycle:
-the rule, called against different panels, has both added and deleted that row. The deletion
-stands and the join then adds no further births (refinement's symmetric null decides both directions
-alike, so its count pass runs no check deletion and closes no cycle). A cycle is
-undecided when its closing deletion is ambiguous and it began with a decided deletion (not with an
-addition, and not with the deletion of a path without sequence of its own, which is not a
-decision); undecided cycles are counted in the census and published in `founder_counts.tsv`.
-
-The row geometry (nearest rows, shadows, the near-identity and novelty tests, same-count admissibility) measures
-distances on the pre-fill inference calls, the calls every likelihood reads: a completion fill is a published call
-no likelihood sees, so it never makes two rows differ or agree.
-
-For join count decisions in 2.3, every equally nearest row at every changed cell
-belongs to the sequence-shadow domain. The complete Cartesian set is evaluated when it
-fits `CountRuleConfig.shadow_combinations` (currently 2048). Agreement of all count verdicts
-resolves the shadow; conflicting evaluated verdicts retain count uncertainty and use the
-smaller-K representative. If the complete domain exceeds that computational budget, only
-the incumbent's own shadow verdict is evaluated and retained; no order-selected prefix is
-scored. The sidecar records `count_unverified`, cause, domain size, evaluated count and scope.
-Computational incompleteness cannot itself delete a row or withhold a founder call. Failure
-of the total-gain test already rejects the larger count regardless of the sequence shadow.
-These are sequence-shadow evaluations, separate from the shared sixteen-leaf higher-level
-budget. Bounds and sparse replacement scores retain their existing scientific meaning.
-
-**Zero-sequence screening (R0-P03).** No additional priority rule is introduced for
-private-cell founders with a diagnostic sequence-test failure. The existing pure-mosaic
-case has exactly zero sequence gain by construction; a failed effective-carrier test
-can instead reflect small positive, concentrated, negative or mixed contributions.
-Saved hidden failures do not establish an identically zero sequence vector over every
-nearest-shadow alternative. Prioritising them would change count selection, so it needs
-that evidence and independent simulation validation before adoption.
-
-## Join records and reuse
-
-Every joined batch is recorded as `joins/<digest>` at the contig root as soon as it completes. The
-digest is a SHA-256 of the batch's explicit typed inputs: the join and linker settings, count rule,
-cost scale, gap settings (levels 2 and above) and genetic map identity, the code identity of the
-assembly package, the evidence record's identity, the batch's informative samples, the content
-digests of its prepared panels (site range, positions, discovery sites, released and inference
-calls) and the input components' relative ranges and rows. Joins are deterministic, so equal digests
-give equal joins. The digest does not depend on where the batch lies in the assembly, so an
-identical batch of another assembly of the same contig (a context assembly and the final one) reuses
-the record instead of recomputing it.
-
-## Records
-
-Every assembly binds its identity before writing: the stage configuration (without the refinement
-settings for a context assembly, which never refines), the role and level count, the upstream
-identities (the evidence record, the local panels: the `local_selection/l2` record for the final
-assembly and a content digest for contexts, and the genetic map) and the code identity of the
-assembly package (with `model/` and `maths/`). A different bound identity stops the run instead of
-reusing records. Records under the section prefix P (`assembly`, or the context's prefix):
-
-| Key | Content |
-|---|---|
-| `identity/P` | the assembly's identity |
-| `P/completion` | prepared panels and the completion summary |
-| `P/l<k>/plan` | level k's batches: (first input component, end, join digest or none) |
-| `joins/<digest>` | one joined batch, shared by the contig's assemblies: rows over its prepared panels, panel log likelihood, search summary |
-| `P/l<k>/join` | level k's hierarchy output: components and the level record (plan, join summaries, log likelihoods, reused joins, informative samples per boundary, stop reason) |
-| `P/l<k>/refine/...` | founder refinement's records of level k ([founder refinement](founder_refinement.md#records-and-census)) |
-| `P/l<k>/refined` | level k after founder refinement (final role): components and refinement summary |
-| `P/final` | the stage product (final role): the last level's refined components with count calls, and the level records |
-
-Each record is written as soon as its step completes, so an interrupted assembly resumes from its
-last recorded step: completion, then each level's output, joined batch and refined level. A level
-whose records are present is decoded, not recomputed.
-
-## Implementation and cost
-
-| Module | Role |
-|---|---|
-| `assembly/stage.py` | `assemble(inputs, config, role=..., levels=..., records=..., budget=...)`: roles, level loop, stop rule, records |
-| `assembly/completion/` | cross-fit, cavity fills, boundary links, occupancy gate |
-| `assembly/founder_alleles/` | the shared site posterior and its dosage polynomials |
-| `assembly/hierarchy/` | partition, batch tasks and digests, level execution |
-| `assembly/linker/` | emissions, within-block scans, cubic transition kernels, EM |
-| `assembly/join/` | beam, binned emissions, objective, certification bounds, moves, proposals, count step, search |
-| `assembly/count_rule/` | the shared count rule: criterion, bound tests, geometry |
-| `assembly/founder_refinement/` | [founder refinement](founder_refinement.md) |
-| `model/components.py` | `PreparedPanel`, `FounderComponent`, `ComponentPanel`, `CountCall`, `materialise` |
-
-**Parallel structure.** Completion runs its blocks and then its boundary links in a pool of
-single-threaded worker processes. A level's batches run in a pool of worker processes that share
-the assembly's CPUs dynamically (a single pending batch runs in the coordinating process with the
-whole budget); with `[execution] batch_queue` they may run on other nodes. Inside a join, the linker's block scans, gap fits and forward/backward recursions and the
-search's duplicate-seed refits run concurrently on shares of the live thread budget. Completion
-tasks and batches are admitted by their estimated memory, so a run slows down rather than
-overcommitting memory; this never changes a result.
-
-**Memory.** The contig's assembly evidence (`assembly/evidence.py`, `AssemblyEvidence`: the neutral float64
-likelihoods, their float32 copy and the observation mask) lives in shared memory from the start; completion,
-hierarchy and founder-refinement workers attach it instead of copying it, and a completion task copies only its
-blocks' columns. Production construction first reads the observation mask and depth counts, hashes the depth
-rows and releases the counts. It then decodes the likelihoods directly into shared neutral storage, applies the
-founder/discovery mask in place, and casts that buffer once to float32. The view has 37 bytes per sample/site;
-the transient source observation mask adds one byte, plus bounded codec scratch. Packed small-array groups
-fall back to checked decoding and copying; callers supplying decoded evidence keep the staged copy path.
-Both routes produce the same values. The final assembly frees the neutral float64 copy (24 bytes per sample/site) after its last
-level's join, its last reader, before that level's founder refinement (which reads the float32 copy only;
-release 3.4, memory only). Constructing completion depth keys transiently decodes the int32 REF/ALT counts
-(8 bytes per sample/site), uses one int64 depth row plus a mask as scratch, and retains only
-32 key bytes per sample. Reconstruction planning and memory admission include that transient
-count/scratch footprint. Every task reserves an upper estimate of its peak memory with the run's
-memory governor before it starts:
-
-- a completion block (`assembly/completion/stage.py`, `block_memory_bytes`): its evidence columns, the cavity
-  fill's (N, K, K, bin sites) emissions with their temporaries, the per-bin pair-state scores and the cross-fit's
-  pair-state arrays; a boundary link (`link_memory_bytes`); and the coordinator's resident arrays;
-- a joined batch (`assembly/hierarchy/level.py`, `batch_memory_bytes`): the float32 evidence of its informative
-  samples over its sites, the linker's emissions and gap-fit messages, the search's binned emissions
-  (S, K_b, K_b, m_b), painting and exclusion arrays, painting back pointers bounded by
-  `AssemblyConfig.join.tensor_budget_mb = 256`, and the move arrays and beam lists up to the saturation ladder's
-  normal top (quota 16 x 2^4). A batch's reservation is an envelope: the search's nested reservations draw on it
-  first, and a search whose ladder climbs past the normal top reserves the extra quota itself
-  (`assembly/join/search.py`, `ladder_extension_bytes`).
-
-When memory is tight, tasks wait for their reservations; results never depend on that pacing.
-
-**Complexity.** N is the number of samples (a join reads its batch's informative samples), L the
-number of sites, K the largest working panel of a step (including temporary panels; not a
-biological founder count), B the components per batch (at most 10), m the join bins of a batch
-(about 2,000 at most), q the endpoint quota, |C| the candidate pool (O(q B K) paths) and I the linker
-E/M evaluations (at most 51: 50 updates plus the returned-iterate check). The table gives
-leading kernels, not a blanket bound on the whole
-search. Beam frontiers and constant-family proposals are polynomially bounded in 2.8; refinement
-frontiers and the bin dependence of exact two-row certification need the qualifications below.
-
-| Step | Work | Largest power of K |
-|---|---|---|
-| Completion EM, per block and iteration | O(N L K^2 + sum_l(K^2 + C_l r_l^2)); support construction O(N U^3) per growing-ball site | K^3; cubes and larger-radius balls have at most 1,024 assignments |
-| Cavity fills, per block | O(N L K^2) bin statistics; per site O(N 2^U K^2) in the worst-case cancellation fallback for U <= 10, O(N K^3) above; compact priors and marginals O(C r + K^2) | K^3; the small exact cube is constant-bounded |
-| Completion boundary links and occupancy | O((N + L) K^2 + K^2 log K) per boundary; O(N K L) occupancy per block with at most two atomic neighbours per row | At most K^3 |
-| Linker, per gap edge and iteration | O(N K^3) propagation and edge counts; within-block scans O(N L_b K^2) | K^3 |
-| Endpoint beam | O(n q K^2 G^2) path scores plus sorting (G the largest gap) | K^2 log K |
-| Tier-1 sweep | O(N m K^2 + K^2 B log K) | K^2 |
-| Tier-2 pass | replacement bounds plus adaptive exact structural screening; see qualification below | structural screening O(N m^2 K^3), fixed m |
-| Count step | O(N m K \|C\|) bounds plus exact scores where a bound is open | K^2 for fixed q and B |
-
-Exact suffix-exchange score reuse is cubic. Two-row screening chooses between direct forwards
-and an exact segment programme, giving a whole structural-screening-pass O(N m^2 K^3) bound
-without dropping candidates or changing the old screening/flat-neighbor rules. The quadratic
-bin dependence is explicit; finite K grids can still favor the direct route and show quartic
-trends. This does not bound entire search/count iteration counts. The
-[2.7 complexity narrative](assembly_performance.md) gives the separate dependencies and scope.
-
-Founder refinement's costs are listed on its own page ([founder refinement](founder_refinement.md#implementation-and-cost)).
-Search budgets and incomplete families are reported explicitly. A search stopped at a
-computational bound is not certified by the work that was left unperformed.
-
-**Memory.** Completion's growing ball stores O(C r + K) support entries per site, plus
-O(K^2) pair statistics; it does not store O(C K) allele rows and shell flags. Cross-fit EM retains
-O(L K^2 + sum_l C_l r_l + N K^2) workspace, in addition to evidence. Cavity bin emissions retain
-the existing O(N K^2 min(L,50)) arrays. The evidence view holds 37 N L bytes (float64 and float32 likelihoods and the observed
-mask), shared by every worker. A join's packed binned emissions hold
-8 S sum_j [K_j(K_j+1)/2] m_j bytes (2.38GB at S=320, K=30 and2,000bins), its exclusion forwards 8 S m bytes per excluded path (at
-most K + 1 paths), its painting back pointers at most `AssemblyConfig.join.tensor_budget_mb = 256`
-MiB per sample chunk, and the pool-saturation step O(B q K^2) move and beam entries at its top rung.
-The linker keeps seven log emissions and seven weights per sample and proxy site. Exact pair
-segments additionally reserve 16 m Q + 17 m P bytes plus index arrays per active numerical
-thread when selected, Q=K(K+1)/2 and P the chunk's pair-query count; the direct route uses
-only its small pair index. Concurrent seed calls reserve separately.
-
-**Determinism.** Per-sample values are computed by one thread each and summed in sample order;
-concurrent refits are evaluated in seed order; caches never change values; bootstrap streams are
-seeded from the decision keys. Results therefore do not depend on thread counts, worker counts,
-completion order or memory pacing.
-
-## Interpretation and limitations
-
-See [founder identity across joins](founder_identity.md) for the distinction between local allele
-accuracy, long-range correspondence, penalized score margins and released identity breaks.
-
-- A phase component is a stretch over which the data link founder labels; labels are row indices
-  local to the component and say nothing about labels in other components. A break with the reason
-  `insufficient_joint_informative_samples` is a data limitation (too few samples informative on
-  both sides), not a biological event; a boundary without a reason is a limit of the hierarchy (a
-  batch without informative samples, or a batch edge at the last level), not evidence for a
-  break.
-- K per component is the count the count rule supports on these samples. It is not an estimate of
-  the number of biological founders: absent local alleles, unsampled ancestry, rare founders carried
-  by few samples, founders missing from the local panels and long-range mislinking all affect it.
-  An ambiguous count call (band containing zero, count cycle) marks a count the data cannot
-  separate from its neighbour.
-- The linker's emissions integrate unknown alleles per observation, so uncertain paths can be
-  preferred in ambiguous regions; the linker is not a calibrated model of path probabilities, and
-  the beam and panel selection maximise. Correlated errors that conceal a genuine crossover remain
-  an identifiability limitation.
-- Certified panels are certified relative to the explicit neighbourhood and the beam's pool; a
-  higher likelihood or more called alleles do not by themselves establish a better biological
-  reconstruction.
-- Completion fills are published calls, not observations: they never enter a likelihood. A
-  multimodal site releases nothing even where the founder alleles are identifiable by other means.
+# Assembly and founder release
+
+Assembly joins local panels into component paths, compares founder counts and releases conservative allele/identity claims. Its bounded seed, join and continuation searches are distinct from proof of a global optimum. N is evidence samples, S the selected scoring samples, L sites, B blocks, K founder rows, R prepared rows and Q unordered founder-pair states. Context and final assemblies have different stopping roles. Search-dependent costs and the ranked-refit exemption are explicit.
+
+The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
+
+<a id="u01"></a>
+## u01 Assembly evidence view (neutralised founder evidence, float64/float32 copies, depth keys, float64 release)
+
+Construct neutral founder-visible evidence in float64 and the declared scoring view in float32, preserving positions, observation masks and exact depth-content keys. Decoding into shared storage and copying a supplied evidence record must agree. Release the larger neutral view only at its declared lifetime boundary.
+
+Implementation: [science/assembly/evidence.py](../../haplotype_reconstruction/science/assembly/evidence.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u02"></a>
+## u02 Roles, identity binding, level loop, stop rule and refinement hand-off
+
+Complete panels, initialise one component per block, then run hierarchy levels. Evaluate stop reasons on the unrefined hierarchy output in precedence order: single component, no count reduction after the initial level, requested context depth, then final minimum-depth/all-breaks condition. Final-role refinement follows every level; additions are enabled only at the terminal level. Carry refined and unrefined first-level context to later refinement.
+
+Implementation: [science/assembly/run.py](../../haplotype_reconstruction/science/assembly/run.py).
+
+Parameters by name: `minimum_levels`, `batch_size`, `min_boundary_informative_samples`, `selection`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(levels). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u03"></a>
+## u03 Completion: content-keyed two-fold split
+
+Hash the fold seed with each sample’s observation-mask content and depth key, group equal keys, and visit groups in byte order. Assign each whole group to the lighter fold, resolving equal load and inactive groups to fold zero. This fixed content split is not reversed; no random draw or sample label chooses a fold.
+
+Implementation: [science/assembly/completion/crossfit.py](../../haplotype_reconstruction/science/assembly/completion/crossfit.py), [science/assembly/completion/parameters.py](../../haplotype_reconstruction/science/assembly/completion/parameters.py), [science/assembly/completion/run.py](../../haplotype_reconstruction/science/assembly/completion/run.py).
+
+Parameters by name: `fold_seed`, `completion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N L) deterministic fold work with the named sampling stride.
+
+<a id="u04"></a>
+## u04 Completion: cross-fitted variational EM, conservative release, held-out carrier profiles
+
+For each held-out fold, fit the other fold with the declared variational update order and monotonic ELBO guard. Without informative training data, retain the pre-fill panel and record absence. Release only conservative site-posterior calls and keep held-out carrier profiles separate from training evidence. The iteration cap is part of the model schedule.
+
+Implementation: [science/assembly/completion/crossfit.py](../../haplotype_reconstruction/science/assembly/completion/crossfit.py), [science/assembly/completion/dosage_statistics.py](../../haplotype_reconstruction/science/assembly/completion/dosage_statistics.py), [science/assembly/completion/observation.py](../../haplotype_reconstruction/science/assembly/completion/observation.py), [science/assembly/completion/support.py](../../haplotype_reconstruction/science/assembly/completion/support.py).
+
+Parameters by name: `max_iterations`, `minimum_iterations`, `elbo_absolute_tolerance`, `elbo_relative_tolerance`, `monotonic_tolerance`, `uniform_mix`, `log_floor`, `minimum_call_probability`, `minimum_carriers`, `UNIFORM_TOLERANCE`, `completion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N L Q + sum_l (Q + C_l r_l^2)); O(N L K^2 + ...); O(N U^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u05"></a>
+## u05 Completion: leave-bin-out cavity fills (candidate fills)
+
+Compute outside-bin statistics as prefix plus suffix, assess founder separability outside the focal bin, then consider unknown-allele fills with the site-posterior model. An exchangeable founder cannot acquire a confident fill from that bin alone. A single-bin multi-founder block consequently has no independent outside-bin separation.
+
+Implementation: [science/assembly/completion/cavity_fill.py](../../haplotype_reconstruction/science/assembly/completion/cavity_fill.py), [science/assembly/completion/support.py](../../haplotype_reconstruction/science/assembly/completion/support.py).
+
+Parameters by name: `snps_per_bin`, `minimum_supporters`, `minimum_posterior_probability`, `uniform_mix`, `tie_tolerance`, `founder_identifiability_tolerance`, `minimum_observable_founder_separation`, `log_floor`, `completion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N K² L) scoring, with transient site tiles sized by the named storage parameter.
+
+<a id="u06"></a>
+## u06 Completion: boundary class links
+
+Require informative evidence on both sides and sufficient pooled samples/classes. Form stable reciprocal best matches, withdraw insufficient margins, and apply pooled copy/cost/separation and fold checks in order. Retain only mutually identifiable class links; an exact best/runner-up ambiguity is not resolved by row number.
+
+Implementation: [science/assembly/completion/links.py](../../haplotype_reconstruction/science/assembly/completion/links.py).
+
+Parameters by name: `minimum_pooled_informative_samples`, `minimum_fold_informative_samples`, `minimum_informative_sites_per_sample`, `minimum_effective_copies`, `minimum_fold_effective_copies`, `maximum_mean_cost`, `minimum_pooled_margin`, `minimum_fold_margin`, `minimum_original_hard_anchor_sites`, `tolerance`, `completion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N K^2); O(K^2 log K); O(K^2 L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u07"></a>
+## u07 Completion: unknown-mass veto, occupancy gate and prepared-panel construction
+
+First veto unexplained-copy underfit and unverifiable singleton panels. Then test the abundant occupancy route; otherwise rank atomic-neighbour rare-continuity witnesses by sample count and probability classes. Conflicting tied witness sample sets abstain. Apply the recorded reason precedence and fill only kept sites. Occupancy uses the named probability quantum, not a copied literal.
+
+Implementation: [science/assembly/completion/observation.py](../../haplotype_reconstruction/science/assembly/completion/observation.py), [science/assembly/completion/occupancy.py](../../haplotype_reconstruction/science/assembly/completion/occupancy.py), [science/assembly/completion/parameters.py](../../haplotype_reconstruction/science/assembly/completion/parameters.py), [science/assembly/completion/run.py](../../haplotype_reconstruction/science/assembly/completion/run.py).
+
+Parameters by name: `minimum_abundant_sum_squared_probability`, `abundant_high_confidence_probability`, `minimum_abundant_high_confidence_carriers`, `minimum_rare_local_carrier_probability`, `minimum_rare_neighbor_carrier_probability`, `minimum_same_sample_continuity`, `minimum_rare_continuity_samples`, `maximum_discovery_unknown_mass`, `completion`, `occupancy`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N K L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u08"></a>
+## u08 Founder alleles: exact binary-dosage polynomials
+
+Enumerate the binary-dosage polynomial exactly on the admitted cube, accumulating genotype-state contributions in declared pair order. When subtraction threatens a small likelihood, recompute it as a direct positive sum. This is an arithmetic evaluation rule; it neither changes the allele prior nor invents evidence.
+
+Implementation: [science/assembly/alleles/parameters.py](../../haplotype_reconstruction/science/assembly/alleles/parameters.py), [science/assembly/alleles/polynomials.py](../../haplotype_reconstruction/science/assembly/alleles/polynomials.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(Q); O(K^2); O(2^U). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u09"></a>
+## u09 Founder alleles: uncertain-core site posterior above the exact-enumeration ceiling
+
+Above the exact-enumeration ceiling, run damped loopy BP, then deterministic ascent from its mode and complement. Carry the declared single/pair moves, uncertain-core cube or bounded Hamming ball, multimodality and shell guards. Nonconverged BP is flagged. This bounded approximation can withhold a release even when a mode exists.
+
+Implementation: [science/assembly/alleles/site_posterior.py](../../haplotype_reconstruction/science/assembly/alleles/site_posterior.py).
+
+Parameters by name: `MAX_EXACT_BITS`, `SITE_CERTAIN_NATS`, `SITE_BALL_CONFIGURATIONS`, `SITE_BALL_MINIMUM_RADIUS`, `SITE_SHELL_GUARD`, `SITE_BP_DAMPING`, `SITE_BP_TOLERANCE`, `SITE_BP_ITERATIONS`, `SITE_ASCENT_BACKSTOP`, `SITE_RECENTRE_BACKSTOP`, `SITE_IMPROVEMENT`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(iterations N m²) for the bounded occupancy fit; m is the occupied-pattern dimension.
+
+<a id="u10"></a>
+## u10 Founder alleles: context-refit site posterior with background state
+
+Use exact site enumeration within its ceiling and the uncertain-core route beyond it, with the context model’s background state and prior. Return count and posterior carrier mass separately. The caller applies its conservative support band; a mass exactly at the threshold is not silently rounded into a supporter.
+
+Implementation: [science/assembly/alleles/parameters.py](../../haplotype_reconstruction/science/assembly/alleles/parameters.py), [science/assembly/alleles/site_posterior.py](../../haplotype_reconstruction/science/assembly/alleles/site_posterior.py).
+
+Parameters by name: `SITE_HALF_BAND`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N (K^2 + 2^K)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u11"></a>
+## u11 Hierarchy partition: informative samples, phase breaks, symmetric batches, batch cohorts
+
+Find informative overlap with the exact evidence test, preserve existing break reasons, then introduce insufficient-joint-evidence breaks. Partition each unbroken span into symmetric size-limited batches and derive its cohort. Both sides of a break carry the reason. Batch grouping is deterministic; the completed founder rows remain immutable inputs.
+
+Implementation: [science/assembly/hierarchy/level.py](../../haplotype_reconstruction/science/assembly/hierarchy/level.py), [science/assembly/hierarchy/batches.py](../../haplotype_reconstruction/science/assembly/hierarchy/batches.py).
+
+Parameters by name: `batch_size`, `max_sites`, `linker`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N x proxy sites); O(n N); O(K L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u12"></a>
+## u12 Batch join sequencing, digests and reuse, linker->beam->search, canonical founder order, level output
+
+Create join work only for multi-component batches with a usable cohort. Bind complete evidence, prepared-panel, map, parameter and alternative-branch content in the reuse digest. Run linker, endpoint beam and certified panel search, then canonicalise the resulting founder rows. Pass-through components retain their existing scientific content.
+
+Implementation: [science/assembly/hierarchy/batch.py](../../haplotype_reconstruction/science/assembly/hierarchy/batch.py), [science/assembly/hierarchy/level.py](../../haplotype_reconstruction/science/assembly/hierarchy/level.py).
+
+Parameters by name: `paths_per_endpoint`, `full_scores_per_kind`, `max_bins`, `tensor_budget_mb`, `gap_horizon_scale`, `recombination_tolerance`, `cost_scale`, `join`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N K^3); O(n q K^2 G^2); O(N m^2 K^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u13"></a>
+## u13 Alternatives carried between levels (component choices, joint branches bounded, common sites and cohort, parent-join comparison)
+
+Match incoming alternative families to exact component spans and nominal panels before consuming them. Compute common usable sites and cohort across all admitted choices, then enumerate joint branches within the complete-family budget. Preserve unresolved correspondence/budget states and compare parent-join outcomes; never choose a convenient subset of a tied family.
+
+Implementation: [science/assembly/hierarchy/level.py](../../haplotype_reconstruction/science/assembly/hierarchy/level.py), [science/assembly/alternatives.py](../../haplotype_reconstruction/science/assembly/alternatives.py), [science/assembly/hierarchy/batch.py](../../haplotype_reconstruction/science/assembly/hierarchy/batch.py).
+
+Parameters by name: `BRANCH_LIMIT`, `WIDE_CLASS_QUANTA`, `refinement`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N x proxy sites). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u14"></a>
+## u14 Assembly tie rules (per-kind quanta and motions, tie-class orders, truncation, counters, canonical order)
+
+Use named scale-aware assembly policies for likelihoods, proxy gains, beams, refinement and count decisions. Build anchored classes with explicit motion/width guards, then apply linkage, count or content secondary rules as that decision declares. Scientific priors remain fixed under reversal; stable exact-duplicate ordering implements L3 where specified.
+
+Implementation: [core/ties.py](../../haplotype_reconstruction/core/ties.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py).
+
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(n log n); O(n B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u15"></a>
+## u15 Records, identities, resume and readers
+
+Read completion, joined levels, refined levels and final products through checked typed adapters. Derive expected identities from the complete upstream closure; never trust a completion flag alone. Founder-panel readers prefer a recorded refined level over its join-only level. Report join searches once at the level where they actually ran.
+
+Implementation: [stages/assembly/records.py](../../haplotype_reconstruction/stages/assembly/records.py), [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/run.py](../../haplotype_reconstruction/science/assembly/run.py), [science/assembly/hierarchy/batch.py](../../haplotype_reconstruction/science/assembly/hierarchy/batch.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(sum R_b L_b). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u16"></a>
+## u16 Founder release at export (continuity cuts, content withholding, continuation records)
+
+Apply carrier withholding before assembly-family release. Resolve correspondence, distinguish diagnostic count verification from unresolved continuation, and use complete alternative families to cut unsupported continuity and withhold disagreeing alleles. Overflow follows the declared smaller-count/minimum-switch prior and anchor rules. Reorder cut/withheld segments by content, block r5 fill on withheld rows, and retain source mappings.
+
+Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(B A K log K); O(K L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="u17"></a>
+## u17 Memory and scheduling estimates of completion tasks and batches (decision-inert)
+
+Calculate completion, link and batch workspace/operation estimates from dimensions and report them to the engine. Shared evidence and whole-branch maxima determine storage plans. Estimates never gate a scientific decision or proof; actual memory pressure governs execution admission without changing candidate budgets.
+
+Implementation: [science/assembly/hierarchy/costs.py](../../haplotype_reconstruction/science/assembly/hierarchy/costs.py), [science/assembly/completion/run.py](../../haplotype_reconstruction/science/assembly/completion/run.py), [science/assembly/hierarchy/level.py](../../haplotype_reconstruction/science/assembly/hierarchy/level.py).
+
+Parameters by name: `BUNDLE_TASKS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(1). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj01"></a>
+## aj01 Join binned emissions (robust centred site logs summed in per-block bins)
+
+Centre robust site emissions and accumulate each sample/pair/bin in site order. Preserve the bin layout and model uniform penalty. Parallelism is across independent samples; task chunking cannot reorder a bin’s arithmetic.
+
+Implementation: [science/assembly/join/__init__.py](../../haplotype_reconstruction/science/assembly/join/__init__.py), [science/assembly/join/emissions.py](../../haplotype_reconstruction/science/assembly/join/emissions.py), [science/assembly/join/inputs.py](../../haplotype_reconstruction/science/assembly/join/inputs.py), [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py).
+
+Parameters by name: `max_bins`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S L K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj02"></a>
+## aj02 Join objective V_s and LL (Viterbi over unordered path pairs; uniform penalty; free start)
+
+Score unordered path pairs with a free-start Viterbi recurrence and the uniform copying penalty, then combine per-sample values in the declared reduction. This exact objective drives all same-count comparisons. Bound and removal sums retain their specifically declared forms; an approximation is not substituted at acceptance.
+
+Implementation: [science/assembly/join/objective.py](../../haplotype_reconstruction/science/assembly/join/objective.py), [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(S m K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj03"></a>
+## aj03 Exact minimum-switch prior
+
+Count the exact minimum founder switches among maximum-score paths and use it as a secondary representative prior. It never changes the primary likelihood or turns a lower-likelihood panel into an equal one. Count is computed on the same complete path definition.
+
+Implementation: [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py), [science/assembly/join/objective.py](../../haplotype_reconstruction/science/assembly/join/objective.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(S m K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj04"></a>
+## aj04 Join painting traceback with tie band
+
+Trace the join painting with the declared tie band under both conventions. Generate painting-dependent proposals from both traces and merge their union. A traceback convention therefore supplies candidates symmetrically; it does not select a single released ancestry claim.
+
+Implementation: [science/assembly/join/objective.py](../../haplotype_reconstruction/science/assembly/join/objective.py), [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py).
+
+Parameters by name: `EXPLORATORY_PENALTY`, `tensor_budget_mb`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S m K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj05"></a>
+## aj05 Linker observation model (proxies, emission sites, pair codes, robust float32 logs)
+
+Build linkage proxies, selected emission sites and founder-pair codes, then robust float32 log emissions. Keep the model inputs separate from the join objective and from released hard calls. Proxy reduction is a proposal device, not replacement scientific evidence.
+
+Implementation: [science/assembly/linker/emissions.py](../../haplotype_reconstruction/science/assembly/linker/emissions.py), [science/assembly/linker/proxies.py](../../haplotype_reconstruction/science/assembly/linker/proxies.py), [science/assembly/linker/em.py](../../haplotype_reconstruction/science/assembly/linker/em.py).
+
+Parameters by name: `max_sites`, `robustness`, `linker`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S E C + E K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj06"></a>
+## aj06 Linker within-block scan (one-switch ordered-pair chain x error-tract CTMC)
+
+Scan the ordered-pair copying model with its one-switch and error-tract process. Use the scaled route when its numerical guards hold, otherwise rescore the same model in log space. A constant finite prior may use the declared offset shortcut. Numerical fallback does not truncate candidate states.
+
+Implementation: [science/assembly/linker/scan.py](../../haplotype_reconstruction/science/assembly/linker/scan.py).
+
+Parameters by name: `error_fraction`, `error_tract_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S E K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj07"></a>
+## aj07 Linker EM per gap (chains, propagation, edge counts, regularised M-step, stop rule)
+
+For each gap, alternate the specified forward/backward expectations with regularised transition updates until the stop rule or update cap. Preserve propagation and edge-count route guards and zero-probability transitions. Concurrent gap fits merge in fixed order; the fitted linker is a proposal model, not a pedigree likelihood.
+
+Implementation: [science/assembly/linker/em.py](../../haplotype_reconstruction/science/assembly/linker/em.py), [science/assembly/linker/kernels.py](../../haplotype_reconstruction/science/assembly/linker/kernels.py).
+
+Parameters by name: `max_iterations`, `min_change`, `pseudo_count`, `min_log_probability`, `uniform_mix`, `learning_rate_decay`, `minimum_learning_rate`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S sum_b E_b K_b^2); O(S (K_l^2 K_r + K_l K_r^2)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj08"></a>
+## aj08 Maximum transition gap (proposal horizon)
+
+Compute the maximum allowed transition gap from the declared geometric rule and use it to bound linker/beam proposals. The horizon is a search restriction; it does not censor a term of the exact join likelihood.
+
+Implementation: [science/assembly/join/beam.py](../../haplotype_reconstruction/science/assembly/join/beam.py).
+
+Parameters by name: `gap_horizon_scale`, `recombination_tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj09"></a>
+## aj09 Endpoint beam (forward pass, backward refinement, endpoint quotas, archive order)
+
+Extend paths forward in path-major/row-minor order, deduplicate by best score, and retain whole endpoint score classes within the quota. Apply backward refinement and the declared archive order. Reversal affects allowed content ties; endpoint quotas mean the beam is not exhaustive path enumeration.
+
+Implementation: [science/assembly/join/beam.py](../../haplotype_reconstruction/science/assembly/join/beam.py).
+
+Parameters by name: `paths_per_endpoint`, `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(q K^2); O(n q K^2 G); O(q K^2 log). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj10"></a>
+## aj10 Constant-transition Cartesian family (first-covering proposals)
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+When transitions are constant, construct the first-covering Cartesian paths with the order specified for initial pools, anchors and beam reruns. Deduplicate without replacing original-pool positions. The shortcut preserves its proposal order, which subsequent bounded search can observe.
+
+Implementation: [science/assembly/join/beam.py](../../haplotype_reconstruction/science/assembly/join/beam.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(B G K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj11"></a>
+## aj11 Path linkage score (linker data criterion inside LL tie classes)
+
+Within an ordinary likelihood tie class, compare linker scores in their own classes before content. Use panel linkage for panel choices, added-path linkage for births and negative removed-path linkage for deaths. Compute links only when needed; linkage never overrides a decisive likelihood difference.
+
+Implementation: [science/assembly/join/beam.py](../../haplotype_reconstruction/science/assembly/join/beam.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(n G). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj12"></a>
+## aj12 Search start (anchor panels)
+
+Score all anchor starts, rank by the start likelihood policy at the trial scale, then linkage and panel content. A fully symmetric class invokes the count/minimum-switch representative prior and records its replayable choice. The first enumerated anchor has no unconditional preference.
+
+Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(n S m K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj13"></a>
+## aj13 Panel-search main loop (phase order, certification flags)
+
+Run tier one, then death/birth count work at a stall. Extend the pool and repeat count work only if its content changes (L7), then run tier two and duplicate-seed count work. Escalate the saturation ladder, then terminal plateau continuation. Preserve the sweep/count/quota state and exact stop/certification branches; event counters advance only for work that runs.
+
+Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `paths_per_endpoint`, `POOL_QUOTA_DOUBLINGS`, `POOL_EXTENDED_DOUBLINGS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Data-dependent sweeps, count changes and rungs; local backstops do not bound the whole search.
+
+<a id="aj14"></a>
+## aj14 Same-count admissibility and improvement threshold
+
+Test same-count admissibility on the slot-level edit witness before deduplicating target panels. Seed refits use their explicit exemption. Require a gain strictly above the named improvement tolerance; equality is not improvement. A canonical target alone cannot prove that its generating edit was admissible.
+
+Implementation: [science/assembly/join/diagnostics.py](../../haplotype_reconstruction/science/assembly/join/diagnostics.py), [science/assembly/join/moves.py](../../haplotype_reconstruction/science/assembly/join/moves.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `near_identity`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(K^2 B); O(K B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj15"></a>
+## aj15 Tier-1 proposal generators (fixed-painting fields, novelty, static gains, votes, permutations)
+
+Generate replacement, novelty, local, one-sided, splice, cycle and switch-based edits from both paintings and fixed-field evidence. Merge duplicate edit scores by the declared maximum rule. Preserve permutation-construction order and pass caps; these bounded generators do not enumerate every possible panel edit.
+
+Implementation: [science/assembly/join/proposals.py](../../haplotype_reconstruction/science/assembly/join/proposals.py).
+
+Parameters by name: `EXPLORATORY_PENALTY`, `full_scores_per_kind`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S m K^2); O(S m K K_b); O(S m K |C|). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj16"></a>
+## aj16 Tier-1 sweep (per-kind truncation, witness choice, exact scoring, winner)
+
+Visit proposal kinds in the fixed order, rank proxy gains and admit complete cut classes within each kind’s allowance. Materialise edits, skip no-ops, reject inadmissible witnesses, deduplicate targets and score exact candidates. Select the winner with the likelihood/linkage/content policy and preserve alternative-family evidence.
+
+Implementation: [science/assembly/join/proposals.py](../../haplotype_reconstruction/science/assembly/join/proposals.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `full_scores_per_kind`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S m K^2 + K^2 B log K). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj17"></a>
+## aj17 Exclusion forwards and two-region bounds (incl. pair-segment programme)
+
+Compute exclusion forwards and two-region upper bounds, including pair-segment bounds. Apply the named exclusion margin when deciding which moves or samples need exact work. A bound must certify its skip; unresolved margins continue to exact scoring rather than become implicit zero gains.
+
+Implementation: [science/assembly/join/certify.py](../../haplotype_reconstruction/science/assembly/join/certify.py), [science/assembly/join/moves.py](../../haplotype_reconstruction/science/assembly/join/moves.py), [science/assembly/join/pair_segments.py](../../haplotype_reconstruction/science/assembly/join/pair_segments.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(S m K² + K² B log K) proposal work plus admitted exact scores. The direct finite-grid route can be quartic in K; this unresolved cost is not covered by exemption 0b or 0c.
+
+<a id="aj18"></a>
+## aj18 Sparse exact replacement scores
+
+Use bulk bounds to discard clearly inactive samples, then tighter move bounds and exact sparse trial scores for unresolved samples. Other samples retain their exact lower/base value under the declared relative band. Reuse a removal bound only for its matching removed slot, including duplicate-path cases.
+
+Implementation: [science/assembly/join/certify.py](../../haplotype_reconstruction/science/assembly/join/certify.py).
+
+Parameters by name: `tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S' m K^2); O(S m K). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj19"></a>
+## aj19 Suffix-exchange (splice) table and the selected splice's forward rescore
+
+Build the suffix-exchange score table lazily for the tier-two pass and use its total for admission and flat-neighbour observation. Rescore the selected splice by the ordinary sorted-panel forward to establish its continuing baseline. Preserve the declared acceptance point; do not add a second threshold test after selection.
+
+Implementation: [science/assembly/join/splice.py](../../haplotype_reconstruction/science/assembly/join/splice.py), [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(S m K^2 + S B K^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj20"></a>
+## aj20 Tier-2 certification pass (bounded neighbourhood, best-first exact scoring, choice, flat neighbours)
+
+Enumerate pool and structural moves in canonical kind/slot/block order, compute bounds, then score promising moves best-first. Preserve seed-refit slot restrictions and the bounded neighbourhood. Rank exact candidates, record flat neighbours and accept the declared winner; certification applies to this neighbourhood, not all conceivable edits.
+
+Implementation: [science/assembly/join/moves.py](../../haplotype_reconstruction/science/assembly/join/moves.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N m K (|C| + K^2)); O(N m^2 K^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj21"></a>
+## aj21 Count step: deaths (pure-path cleanup, best death candidate, death test)
+
+Compute all removal scores, prefer paths lacking their own sequence when present, and select the least-cost death using likelihood, negative linkage and content ties. Pure cleanup uses its explicit point rule; otherwise evaluate the sequence-shadow family. Record count ambiguity and update cycle state on deletion.
+
+Implementation: [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py), [science/assembly/join/diagnostics.py](../../haplotype_reconstruction/science/assembly/join/diagnostics.py).
+
+Parameters by name: `near_identity`, `cost_scale`, `shadow_combinations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(shadow_combinations S m K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj22"></a>
+## aj22 Count step: births (novelty, bound screen, best-first exact, winner, trap indicators, birth memo)
+
+Enumerate distinct novel pool paths, bound per-sample birth gains and require both total and leave-one-out support. Retain pure-mosaic trap indicators separately. Score passing novel paths best-first, select a winner under the count/likelihood rules and lazily resolve its reported bootstrap band.
+
+Implementation: [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py).
+
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(shadow_combinations S m K²) when the complete shadow family is evaluated.
+
+<a id="aj23"></a>
+## aj23 Duplicate-seed births (seed choice, concurrent refits, settle, acceptance)
+
+Choose duplicate seeds from all small panels or the declared ranked indicator/coverer cap. Refit seed copies with restricted slot moves, settle pure-path cleanup/death tests, then compare surviving improvements. Preserve survivor alternatives and revisit checks; acceptance can be a count birth or same-count seed swap. The rank cap is an explicit cost exemption.
+
+Implementation: [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `ranked_refits`, `BIRTH_SETS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: At most the admitted ranked-refit candidates times their fixed-count refit work; candidate scratch grows with S times sites times K.
+
+<a id="aj24"></a>
+## aj24 Count cycles, born-path freeze and count-state revisits
+
+Propagate born-path tags through same-count edits, record deletion cycles and freeze births when the declared cycle rule applies. Detect revisited count states and retain the associated ambiguity status. Tags, cleanup history and count-state visits are decision-bearing state, not disposable diagnostics.
+
+Implementation: [science/assembly/count_rule/criterion.py](../../haplotype_reconstruction/science/assembly/count_rule/criterion.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: Linear in the represented panel/family memberships, plus canonical set ordering.
+
+<a id="aj25"></a>
+## aj25 Backstops (sweep/count/pool) and final death-test census
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Apply sweep, count and pool backstops at their declared points; a count backstop freezes births/seed swaps while deaths continue. Run the final death-test census only on the specified terminal branches. A backstop stop is uncertified and must not be labelled exhaustive convergence.
+
+Implementation: [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py), [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py), [science/assembly/join/diagnostics.py](../../haplotype_reconstruction/science/assembly/join/diagnostics.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `SWEEP_BACKSTOP_BASE`, `SWEEP_BACKSTOP_PER_ROW`, `COUNT_BACKSTOP_BASE`, `COUNT_BACKSTOP_PER_ROW`, `POOL_EXTENDED_DOUBLINGS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: One symmetric shadow-family evaluation per final path; its combination budget limits evaluated alternatives.
+
+<a id="aj26"></a>
+## aj26 Pool extension and the saturation ladder
+
+Extend endpoint quotas using current multiplicities, retaining original-pool order before new beam paths. Test only newly added paths on each saturation rung and preserve quota/ladder progression. Compare pool content for repeated work (L7), so cache identity and eviction cannot create extra count decisions.
+
+Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `paths_per_endpoint`, `POOL_QUOTA_DOUBLINGS`, `POOL_EXTENDED_DOUBLINGS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(n q K²); O(paths_per_endpoint · 2^POOL_EXTENDED_DOUBLINGS · B K). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj27"></a>
+## aj27 Search tie handling and the representative prior (release families)
+
+Form likelihood classes, then linkage classes within ordinary ties, then content order. For fully symmetric panels, prefer smaller count and exact minimum switches, carrying the full replayable release family. Wide classes keep their declared value priority. Reversal changes only the remaining arbitrary convention.
+
+Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj28"></a>
+## aj28 Terminal plateau continuation
+
+Collect observed terminal plateau panels with the nominal panel and select the symmetric winner family. Continue only through not-yet-certified eligible members, preserving counters and quota; stop when the episode is covered. A nominal panel outside the selected family does not acquire a fabricated continuation choice.
+
+Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: One full score per continued panel and minimum-switch scoring per retained family member.
+
+<a id="aj29"></a>
+## aj29 Bounded original-input replays and terminal resolution
+
+Replay bounded original-input branches in FIFO prefix order, verifying the expected decision kind/source/panel set at each forced choice. Queue complete novel alternatives; stop on mismatch or whole-family budget overflow. Exclude the declared seed choices from forcing and record incomplete resolution rather than selecting a convenient subset.
+
+Implementation: [science/assembly/join/__init__.py](../../haplotype_reconstruction/science/assembly/join/__init__.py), [science/assembly/join/alternatives.py](../../haplotype_reconstruction/science/assembly/join/alternatives.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
+
+Parameters by name: `MAX_BRANCHES`, `join`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: A bounded number of complete join searches under the continuation-leaf budget; each retains its own search cost.
+
+<a id="aj30"></a>
+## aj30 Effective-carrier criterion and founder cost (shared count rule)
+
+Compare larger and smaller panels using effective-carrier support, leave-one-out support and the shared founder-cost criterion. Apply strict inequalities and the declared first-maximum sample rule. The total improvement and sequence-specific improvement are separate requirements; one large carrier cannot replace independent support.
+
+Implementation: [science/assembly/count_rule/__init__.py](../../haplotype_reconstruction/science/assembly/count_rule/__init__.py), [science/assembly/count_rule/criterion.py](../../haplotype_reconstruction/science/assembly/count_rule/criterion.py), [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py).
+
+Parameters by name: `cost_scale`, `TOP_SAMPLES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(S); O(S log S). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj31"></a>
+## aj31 Bootstrap ambiguity band (seed key, draws, shadow family, lazy resolution)
+
+Derive the bootstrap stream from its named content key and retain the exact generator/draw schedule. Share draws across a shadow family and reuse identical shadow vectors. Resolve bands lazily for reported count decisions only; cache timing cannot change which scientific test is reported.
+
+Implementation: [science/assembly/count_rule/criterion.py](../../haplotype_reconstruction/science/assembly/count_rule/criterion.py).
+
+Parameters by name: `bootstrap_resamples`, `bootstrap_level`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(R S). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj32"></a>
+## aj32 Row geometry (private cells, nearest rows, near identity, novelty)
+
+Compute integer row distances, private cells, nearest-row choices, near-identity classes and novelty with declared content ties. Cache only exact geometry keyed by its complete dependencies. Geometry constrains proposals and shadows; it does not itself release an allele.
+
+Implementation: [science/assembly/count_rule/geometry.py](../../haplotype_reconstruction/science/assembly/count_rule/geometry.py), [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py).
+
+Parameters by name: `near_identity`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(L_b); O(B); O(K^2 B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj33"></a>
+## aj33 Join sequence-shadow family decision
+
+Construct the complete sequence-shadow choice product when it fits the budget and the total test passes; otherwise evaluate only the declared incumbent shadow and mark completeness honestly. Reduce decisions in the specified reject/margin order. Join-side unverified counts remain diagnostics and do not trigger an unrequested proof route.
+
+Implementation: [science/assembly/count_rule/geometry.py](../../haplotype_reconstruction/science/assembly/count_rule/geometry.py), [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py).
+
+Parameters by name: `shadow_combinations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(shadow_combinations S m K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="aj34"></a>
+## aj34 Count-rule bound tests used by founder refinement
+
+Apply the shared strict total and sequence count bounds to refinement candidates before expensive refits. A bound can certify acceptance/rejection only under its stated operands; unresolved intervals continue to the exact criterion. Use the same effective-carrier definitions as the join count rule.
+
+Implementation: [science/assembly/count_rule/criterion.py](../../haplotype_reconstruction/science/assembly/count_rule/criterion.py).
+
+Parameters by name: `tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(shadow_combinations S m K²) for the bounded family scoring route.
+
+<a id="aj35"></a>
+## aj35 Shadow-envelope proof certificate (verification metadata)
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Attempt the shadow-envelope proof by deterministic dimensions: local combination/work limits and dosage-table limit (L5). Build the envelope and certify domination only when every required total-test field matches the incumbent. Live memory/admission never decides whether the proof is scientifically attempted; verification diagnostics report any changed proof outcome.
+
+Implementation: [science/assembly/count_rule/__init__.py](../../haplotype_reconstruction/science/assembly/count_rule/__init__.py), [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py), [science/assembly/count_rule/shadow_bounds.py](../../haplotype_reconstruction/science/assembly/count_rule/shadow_bounds.py).
+
+Parameters by name: `shadow_combinations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Local shadow products sum over units of the product of option counts; the dimension rule bounds proof-table admission, not the full search.
+
+<a id="aj36"></a>
+## aj36 Join record key and schema (joins/<digest>)
+
+Bind the complete join input and parameter closure into a content digest, publish one checked result and reuse it only on exact derivation agreement. Keep level-plan spans and diagnostic census labels separate from scientific identity. Physical record location and cache object identity do not choose the search path.
+
+Implementation: [stages/assembly/records.py](../../haplotype_reconstruction/stages/assembly/records.py), [science/assembly/hierarchy/batch.py](../../haplotype_reconstruction/science/assembly/hierarchy/batch.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(sites x K). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<!-- named mechanism anchors -->
+
+## Named mechanisms
+
+<a id="alleles"></a>
+
+**Alleles:** see [U08](#u08).
+
+<a id="completion"></a>
+
+**Completion:** see [U03](#u03).
+
+<a id="evidence"></a>
+
+**Evidence:** see [U01](#u01).
+
+<a id="founder-allele-posteriors"></a>
+
+**Founder allele posteriors:** see [U08](#u08).
+
+<a id="hierarchy"></a>
+
+**Hierarchy:** see [U11](#u11).
+
+<a id="linker"></a>
+
+**Linker:** see [AJ05](#aj05).
+
+<a id="release"></a>
+
+**Release:** see [U16](#u16).

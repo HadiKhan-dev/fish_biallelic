@@ -1,0 +1,367 @@
+"""OUTPUT/recombination/: readable recombination maps, calls, exposure and junction loci.
+
+Per contig (from its recombination record):
+  <contig>.map.csv              per map bin [left_bp, right_bp): called and expected crossovers, observable
+                                exposure, rates (cM/Mb), effective meioses, cumulative observed cM
+  <contig>.crossovers.csv       called crossover intervals per meiosis (parent, child, parent slot): between
+                                centres of consecutive released-chain bins; reported_left/right_bp include
+                                both bins, with origin probabilities, component and reversed-segment flag
+  <contig>.coverage.csv         informative spans per meiosis; <contig>.called_coverage.csv: spans between
+                                supported markers
+  <contig>.meioses.csv          per meiosis: marker counts, calls, expected crossovers, exposure
+  <contig>.junctions.csv        junction loci (overlapping reported calls) and their flags
+  <contig>.png                  conditional rate and effective meioses along the chromosome
+Genome-wide: junctions.csv (every contig's loci) and summary.csv (one row per contig). Maps are conditional on
+the final phase and the fixed inferred pedigree.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, fields
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...contracts.recombination import Recombination, RecombinationMap
+    from ...results.reader import Results
+
+import numpy as np
+
+from .tables import record_mapping, temporary_path, write_rows
+
+SPAN_COLUMNS = ("parent", "child", "parent_slot", "left_bp", "right_bp", "component_id")
+"""Columns in published order.
+
+    parent: sequenced parent identifier (text).
+    child: child identifier (text).
+    parent_slot: parental transmission slot, 0 or 1 (1).
+    left_bp: left coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    right_bp: right coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    component_id: zero-based component index (1).
+"""
+CROSSOVER_COLUMNS = (
+    "parent",
+    "child",
+    "parent_slot",
+    "left_bp",
+    "right_bp",
+    "left_origin_probability",
+    "right_origin_probability",
+    "joint_endpoint_probability_lower_bound",
+    "component_id",
+    "reported_left_bp",
+    "reported_right_bp",
+    "in_reversed_segment",
+)
+"""Columns in published order.
+
+    parent: sequenced parent identifier (text).
+    child: child identifier (text).
+    parent_slot: parental transmission slot, 0 or 1 (1).
+    left_bp: left coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    right_bp: right coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    left_origin_probability: left origin probability (1).
+    right_origin_probability: right origin probability (1).
+    joint_endpoint_probability_lower_bound: max(0, left_origin_probability + right_origin_probability - 1) (1).
+    component_id: zero-based component index (1).
+    reported_left_bp: reported crossover interval left edge including the preceding chain bin (bp).
+    reported_right_bp: reported crossover interval right edge including the following chain bin (bp).
+    in_reversed_segment: in reversed segment (1).
+"""
+PLOT_BYTES = 128 << 20  # one figure (and matplotlib on first use)
+
+
+def _locus_columns() -> tuple[str, ...]:
+    """Published JunctionLocus columns in the frozen 3.5 dataclass order."""
+    return JUNCTION_COLUMNS
+
+
+def map_table(curve: RecombinationMap) -> dict:
+    """Columns of <contig>.map.csv from a RecombinationMap."""
+    bins = np.asarray(curve.edges_bp)
+    table = {"left_bp": bins[:-1], "right_bp": bins[1:]}
+    table.update(
+        {
+            field.name: getattr(curve, field.name)
+            for field in fields(curve)
+            if field.name not in ("edges_bp", "cumulative_observed_cM")
+        }
+    )
+    table["cumulative_observed_cM_at_right"] = np.asarray(curve.cumulative_observed_cM)[1:]
+    return table
+
+
+def meiosis_tables(product: Recombination) -> tuple[list, list, list, list]:
+    """(crossovers, coverage, called_coverage, meioses) rows of one chromosome's RecombinationProduct."""
+    names = product.sample_ids
+    crossovers: list[dict] = []
+    coverage: list[dict] = []
+    called_coverage: list[dict] = []
+    meioses: list[dict] = []
+    for edge, (parent, child, slot) in enumerate(
+        zip(product.edge_parent.tolist(), product.edge_child.tolist(), product.edge_slot.tolist(), strict=False)
+    ):
+        labels = {"parent": names[parent], "child": names[child], "parent_slot": int(slot)}
+        calls = product.edge_crossovers(edge)
+        first = product.crossover_offsets[edge]
+        for index, (left, right, left_support, right_support, component) in enumerate(calls.tolist()):
+            reported_left, reported_right = product.reported_intervals[first + index].tolist()
+            crossovers.append(
+                {
+                    **labels,
+                    "left_bp": int(left),
+                    "right_bp": int(right),
+                    "left_origin_probability": left_support,
+                    "right_origin_probability": right_support,
+                    "joint_endpoint_probability_lower_bound": max(0.0, left_support + right_support - 1),
+                    "component_id": int(component),
+                    "reported_left_bp": int(reported_left),
+                    "reported_right_bp": int(reported_right),
+                    "in_reversed_segment": bool(product.in_reversed_segment[first + index]),
+                }
+            )
+        for rows, spans in (
+            (coverage, product.edge_informative_spans(edge)),
+            (called_coverage, product.edge_callable_spans(edge)),
+        ):
+            for left, right, component in spans.tolist():
+                rows.append({**labels, "left_bp": int(left), "right_bp": int(right), "component_id": int(component)})
+        counts = product.marker_counts[edge]
+        meioses.append(
+            {
+                **labels,
+                "released_chain_bins": int(counts[0]),
+                "followed_chain_bins": int(counts[1]),
+                "unresolved_chain_bins": int(counts[2]),
+                "called_crossovers": len(calls),
+                "expected_crossovers": float(product.expected_crossovers[edge].sum()),
+                "exposure_meiosis_bp": float(product.exposure[edge].sum()),
+            }
+        )
+    return crossovers, coverage, called_coverage, meioses
+
+
+def write_plot(path: Path, contig: str, curve: RecombinationMap) -> Path:
+    """<contig>.png: expected and called rates, and effective meioses (no global plotting state)."""
+    from matplotlib.figure import Figure
+
+    bins = np.asarray(curve.edges_bp)
+    figure = Figure(figsize=(9, 6))
+    axes = figure.subplots(2, 1, sharex=True)
+    centres = (bins[:-1] + bins[1:]) / 2e6
+    axes[0].plot(centres, curve.rate_cM_per_Mb, color="#24557b", label="Expected (called endpoints)")
+    axes[0].plot(centres, curve.called_rate_cM_per_Mb, color="#777777", linestyle="--", label="High-confidence calls")
+    axes[0].legend()
+    axes[0].set_ylabel("Conditional rate (cM/Mb)")
+    axes[1].stairs(curve.effective_meioses, bins / 1e6, color="#3d7e55")
+    axes[1].set_ylabel("Effective meioses")
+    axes[1].set_xlabel("Position (Mb)")
+    axes[0].set_title(f"{contig}: missing-aware recombination and exposure")
+    figure.tight_layout()
+    temporary = temporary_path(path)
+    figure.savefig(temporary, format="png", dpi=150)
+    temporary.replace(path)
+    return path
+
+
+def write_chromosome(directory: Path, product: Recombination) -> list[Path]:
+    """Every per-contig file of one RecombinationProduct."""
+    import pandas as pd
+
+    from .tables import write_frame
+
+    contig = product.contig
+    crossovers, coverage, called_coverage, meioses = meiosis_tables(product)
+    written = [
+        write_frame(directory / f"{contig}.map.csv", pd.DataFrame(map_table(product.map))),
+        write_rows(directory / f"{contig}.meioses.csv", meioses),
+        write_rows(directory / f"{contig}.crossovers.csv", crossovers, columns=CROSSOVER_COLUMNS),
+        write_rows(directory / f"{contig}.junctions.csv", product.junctions, columns=_locus_columns()),
+        write_rows(directory / f"{contig}.coverage.csv", coverage, columns=SPAN_COLUMNS),
+        write_rows(directory / f"{contig}.called_coverage.csv", called_coverage, columns=SPAN_COLUMNS),
+        write_plot(directory / f"{contig}.png", contig, product.map),
+    ]
+    return written
+
+
+def contig_bytes(decoded_bytes: int) -> int:
+    """Plan row/frame temporaries and one figure from the reader's decoded size."""
+    return 3 * decoded_bytes + PLOT_BYTES
+
+
+def write_recombination(
+    output: str | Path, results: Results, contigs: Sequence[str], *, elapsed_seconds: Mapping[str, float] | None = None
+) -> list[Path]:
+    """Read each typed recombination result once and publish tables in contig order."""
+    directory = Path(output) / "recombination"
+    directory.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    loci: list[dict] = []
+    summaries: list[dict] = []
+    for contig in contigs:
+        product = results.recombination(contig)
+        assert product is not None  # the report runs after every contig's recombination task published it
+        written.extend(write_chromosome(directory, product))
+        loci.extend(asdict(locus) for locus in product.junctions)
+        summaries.append({**record_mapping(product.summary), "elapsed_seconds": (elapsed_seconds or {}).get(contig)})
+    written.append(write_rows(directory / "junctions.csv", loci, columns=_locus_columns()))
+    written.append(write_rows(directory / "summary.csv", summaries))
+    return written
+
+
+JUNCTION_COLUMNS = (
+    "contig",
+    "locus",
+    "left_bp",
+    "right_bp",
+    "calls_left_bp",
+    "calls_right_bp",
+    "calls",
+    "parents_with_calls",
+    "odd_meioses",
+    "decidable_meioses",
+    "switch_fraction",
+    "flip_adjusted_switch_fraction",
+    "hotspot_ceiling",
+    "mixed_parents",
+    "all_or_none_parents",
+    "parents",
+    "children",
+    "mixing_log_lr",
+    "paired_locus",
+    "paired_odd_meioses",
+    "pairing_log_lr",
+    "pairing_tests",
+    "junction_log_lr",
+    "flagged",
+    "interpretation",
+    "nearest_supplied_breakpoint",
+    "breakpoint_distance_bp",
+)
+"""Columns in published order.
+
+    contig: contig identifier (text).
+    locus: locus (1).
+    left_bp: left coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    right_bp: right coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    calls_left_bp: calls left bp (bp).
+    calls_right_bp: calls right bp (bp).
+    calls: calls (1).
+    parents_with_calls: parents with calls (1).
+    odd_meioses: odd meioses (1).
+    decidable_meioses: decidable meioses (1).
+    switch_fraction: switch fraction (1).
+    flip_adjusted_switch_fraction: flip adjusted switch fraction (1).
+    hotspot_ceiling: hotspot ceiling (1).
+    mixed_parents: mixed parents (1).
+    all_or_none_parents: all or none parents (1).
+    parents: parents (1).
+    children: children (1).
+    mixing_log_lr: mixing log lr (nats).
+    paired_locus: paired locus (1).
+    paired_odd_meioses: paired odd meioses (1).
+    pairing_log_lr: pairing log lr (nats).
+    pairing_tests: pairing tests (1).
+    junction_log_lr: junction log lr (nats).
+    flagged: flagged (1).
+    interpretation: interpretation (1).
+    nearest_supplied_breakpoint: nearest supplied breakpoint (1).
+    breakpoint_distance_bp: breakpoint distance bp (bp).
+"""
+
+
+# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
+# Row-dict tables retain B's headerless empty constructor; these constants do not
+# impose columns on those tables. Scientific values remain upstream contract fields.
+MAP_COLUMNS = (
+    "left_bp",
+    "right_bp",
+    "crossover_count",
+    "exposure_meiosis_bp",
+    "expected_crossovers",
+    "called_exposure_meiosis_bp",
+    "called_rate_cM_per_Mb",
+    "covered_bp",
+    "effective_meioses",
+    "rate_cM_per_Mb",
+    "cM_on_covered_bp",
+    "cumulative_observed_cM_at_right",
+)
+"""Columns in published order.
+
+    left_bp: left coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    right_bp: right coordinate of this map bin, span or crossover interval; see the table definition (bp).
+    crossover_count: crossover count (count).
+    exposure_meiosis_bp: informative transmission exposure (meiosis bp).
+    expected_crossovers: expected crossovers (1).
+    called_exposure_meiosis_bp: callable transmission exposure (meiosis bp).
+    called_rate_cM_per_Mb: called rate c m per mb (1).
+    covered_bp: covered bp (bp).
+    effective_meioses: observable transmission exposure divided by covered bases (count).
+    rate_cM_per_Mb: rate c m per mb (1).
+    cM_on_covered_bp: c m on covered bp (bp).
+    cumulative_observed_cM_at_right: cumulative observed genetic distance at the right bin edge (cM).
+"""
+
+MEIOSIS_COLUMNS = (
+    "parent",
+    "child",
+    "parent_slot",
+    "released_chain_bins",
+    "followed_chain_bins",
+    "unresolved_chain_bins",
+    "called_crossovers",
+    "expected_crossovers",
+    "exposure_meiosis_bp",
+)
+"""Columns in published order.
+
+    parent: sequenced parent identifier (text).
+    child: child identifier (text).
+    parent_slot: parental transmission slot, 0 or 1 (1).
+    released_chain_bins: released chain bins (1).
+    followed_chain_bins: followed chain bins (1).
+    unresolved_chain_bins: unresolved chain bins (1).
+    called_crossovers: called crossovers (1).
+    expected_crossovers: expected crossovers (1).
+    exposure_meiosis_bp: informative transmission exposure (meiosis bp).
+"""
+
+SUMMARY_COLUMNS = (
+    "contig",
+    "meioses",
+    "observable_meioses",
+    "crossovers",
+    "expected_crossovers",
+    "unresolved_bins",
+    "exposure_meiosis_bp",
+    "covered_bp",
+    "cumulative_observed_cM",
+    "uncovered_bins",
+    "order_breakpoints",
+    "order_breakpoint_masked_sites",
+    "junction_loci",
+    "junction_loci_flagged",
+    "family_phase_converged",
+    "elapsed_seconds",
+)
+"""Columns in published order.
+
+    contig: contig identifier (text).
+    meioses: meioses (1).
+    observable_meioses: observable meioses (1).
+    crossovers: crossovers (bp,bp,probability,probability,index).
+    expected_crossovers: expected crossovers (1).
+    unresolved_bins: unresolved bins (1).
+    exposure_meiosis_bp: informative transmission exposure (meiosis bp).
+    covered_bp: covered bp (bp).
+    cumulative_observed_cM: cumulative observed c m (cM).
+    uncovered_bins: uncovered bins (1).
+    order_breakpoints: order breakpoints (1).
+    order_breakpoint_masked_sites: order breakpoint masked sites (1).
+    junction_loci: junction loci (1).
+    junction_loci_flagged: junction loci flagged (1).
+    family_phase_converged: family phase converged (1).
+    elapsed_seconds: recorded runtime, empty when the run record does not supply it (s).
+"""

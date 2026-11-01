@@ -29,15 +29,21 @@ assertions are counted separately, never as errors avoided; covered pairs are al
 assertions (a consumer that drops flagged continuity). Splitting rows or dropping assertions can raise the share of
 correct assertions without raising coverage, so the counts are read together, not as one score.
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-IDENTITY_WINDOW_MARKERS = 100
-LABEL_MIN_CALLS = 16
-LABEL_MARGIN = 2
-COVERAGE_MIN_DISTANCE = 3
-COVERAGE_MAX_GAP = 3
+from .parameters import (
+    COVERAGE_MAX_GAP,
+    COVERAGE_MIN_DISTANCE,
+    IDENTITY_WINDOW_MARKERS,
+    LABEL_ERROR_FRACTION,
+    LABEL_MARGIN,
+    LABEL_MIN_CALLS,
+    LABEL_MIN_ERRORS,
+)
+
 STRATA = ("absent", "single", "multi")
 
 
@@ -62,9 +68,11 @@ def stratum_counts(panels, matches, truth, counts) -> dict:
     positions = np.asarray(truth["positions"])
     haplotypes = truth["haplotypes"]
     classes = np.minimum(counts, 2)
-    result = {name: dict(truth_alleles=int(np.count_nonzero(classes == i)), correct=0, wrong=0)
-              for i, name in enumerate(STRATA)}
-    matched = {}
+    result = {
+        name: dict(truth_alleles=int(np.count_nonzero(classes == i)), correct=0, wrong=0)
+        for i, name in enumerate(STRATA)
+    }
+    matched: dict[int, list[tuple[int, int]]] = {}
     for match in matches:
         matched.setdefault(match["component"], []).append((match["predicted_row"], match["truth_founder"]))
     for component, (sites, calls) in enumerate(panels):
@@ -89,10 +97,14 @@ def _window_labels(calls, index, window, haplotypes, windows) -> np.ndarray:
         called = calls[row] >= 0
         where = window[called]
         n = np.bincount(where, minlength=windows)
-        mismatches = np.stack([np.bincount(where, weights=calls[row, called] != haplotypes[f, index[called]],
-                                           minlength=windows) for f in range(len(haplotypes))])
+        mismatches = np.stack(
+            [
+                np.bincount(where, weights=calls[row, called] != haplotypes[f, index[called]], minlength=windows)
+                for f in range(len(haplotypes))
+            ]
+        )
         ordered = np.sort(mismatches, axis=0)
-        close = ordered[0] <= np.maximum(1, np.floor(0.05 * n))
+        close = ordered[0] <= np.maximum(LABEL_MIN_ERRORS, np.floor(LABEL_ERROR_FRACTION * n))
         if len(haplotypes) > 1:
             close &= ordered[1] - ordered[0] >= LABEL_MARGIN
         labels[row] = np.where(close & (n >= LABEL_MIN_CALLS), np.argmin(mismatches, axis=0), -1)
@@ -124,8 +136,9 @@ def identity_counts(panels, truth, counts, flags=None) -> dict:
         distance[:, w] = pairwise.min(axis=1)
     window_class = np.minimum(np.floor(median), 2).astype(np.int64)
     eligible = (median >= 1) & (distance >= COVERAGE_MIN_DISTANCE)
-    keys = [f"{kind}_{verdict}_{name}" for kind in ("direct", "gap") for verdict in ("correct", "wrong")
-            for name in STRATA]
+    keys = [
+        f"{kind}_{verdict}_{name}" for kind in ("direct", "gap") for verdict in ("correct", "wrong") for name in STRATA
+    ]
     result = {key: 0 for key in keys}
     result.update(flagged_correct=0, flagged_wrong=0, labelled_cells=0)
 
@@ -136,7 +149,7 @@ def identity_counts(panels, truth, counts, flags=None) -> dict:
         i = np.searchsorted(marks, left, side="right")
         return i < len(marks) and marks[i] <= right
 
-    holders = {}
+    holders: dict[tuple[int, int], list[tuple[int, int]]] = {}
     rows_labels = {}
     for component, (sites, calls) in enumerate(panels):
         index = np.searchsorted(positions, np.asarray(sites))
@@ -145,14 +158,16 @@ def identity_counts(panels, truth, counts, flags=None) -> dict:
         result["labelled_cells"] += int(np.count_nonzero(labels >= 0))
         for row in range(len(labels)):
             labelled = np.flatnonzero(labels[row] >= 0)
-            for w in labelled:
-                holders.setdefault((int(labels[row, w]), int(w)), []).append((component, row))
-            for w1, w2 in zip(labelled[:-1], labelled[1:]):
+            for labelled_window in labelled:
+                holders.setdefault((int(labels[row, labelled_window]), int(labelled_window)), []).append(
+                    (component, row)
+                )
+            for w1, w2 in zip(labelled[:-1], labelled[1:], strict=False):
                 f1, f2 = int(labels[row, w1]), int(labels[row, w2])
                 good = f1 == f2
                 if flagged(component, row, int(centre[w1]), int(centre[w2])):
                     result["flagged_correct" if good else "flagged_wrong"] += 1
-                stratum = (min(window_class[f1, w1], window_class[f1, w2]) if good else window_class[f1, w2])
+                stratum = min(window_class[f1, w1], window_class[f1, w2]) if good else window_class[f1, w2]
                 kind = "direct" if w2 == w1 + 1 else "gap"
                 result[f"{kind}_{'correct' if good else 'wrong'}_{STRATA[stratum]}"] += 1
     for name in ("single", "multi"):
@@ -160,14 +175,14 @@ def identity_counts(panels, truth, counts, flags=None) -> dict:
         result[f"coverage_covered_unflagged_{name}"] = 0
     for founder in range(founders):
         eligible_windows = np.flatnonzero(eligible[founder])
-        for w1, w2 in zip(eligible_windows[:-1], eligible_windows[1:]):
+        for w1, w2 in zip(eligible_windows[:-1], eligible_windows[1:], strict=False):
             if w2 - w1 > COVERAGE_MAX_GAP:
                 continue
             name = "multi" if min(window_class[founder, w1], window_class[founder, w2]) >= 2 else "single"
             result[f"coverage_pairs_{name}"] += 1
             covered = unflagged = False
             for component, row in set(holders.get((founder, int(w1)), ())) & set(holders.get((founder, int(w2)), ())):
-                between = rows_labels[component][row, w1 + 1:w2]
+                between = rows_labels[component][row, w1 + 1 : w2]
                 if np.all((between < 0) | (between == founder)):
                     covered = True
                     if not flagged(component, row, int(centre[w1]), int(centre[w2])):

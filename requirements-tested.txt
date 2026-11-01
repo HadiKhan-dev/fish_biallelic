@@ -1,13 +1,14 @@
-# Tested on Linux x86_64 with Python 3.14.8 (18 October 2026; release 2.0 acceptance environment).
-# Direct runtime dependency constraints, NOT a full transitive lockfile.
-# Keep pyproject.toml as the supported dependency specification.
-# Optional reproducible install: python -m pip install -c requirements-tested.txt .
+# Linux x86_64, CPython 3.14.8; scientific reference captured 2026-11-01.
+# Regenerated from installed distribution metadata; nothing installed into the reference environment.
+# Runtime dependency constraints, not a complete transitive lockfile.
+# Reproduce with: python -m pip install -c requirements-tested.txt DISTRIBUTION
 numpy==2.5.4
 numba==0.68.0
+llvmlite==0.50.0
 scipy==1.18.1
 pandas==3.0.6
-openpyxl==3.1.5
 cyvcf2==0.34.0
 blosc2==4.14.1
 matplotlib==3.11.2
+threadpoolctl==3.7.0
 hdbscan==0.8.44

@@ -19,35 +19,54 @@ A founder panel is (positions int64 [L_c], calls int8 [K_c, L_c]) with calls -1 
 its founder labels are the row indices 0..K_c-1. Counts are integers reduced in a fixed order (per row, then
 per component), so results do not depend on the thread count.
 """
+
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
-from numba import njit, prange
+from numba import prange, types
 from numba.typed import List
 from scipy.optimize import linear_sum_assignment
 
-# Bound temporary counting storage while exposing long panels to site-level
-# parallelism. Small panels share a single batch launch across components.
-_SITE_TILE = 65536
+from ..core.errors import InputError
+from ..core.kernels import kernel
 
 # Segment-wise row labels: a label switch costs as much as this many allele
 # mismatches, so a row that copies another founder for a segment is charged
 # the switch rather than every differing site of that segment.
-SEGMENT_SWITCH_COST = 20.0
+from .parameters import SEGMENT_SWITCH_COST
+
+# Bound temporary counting storage while exposing long panels to site-level
+# parallelism. Small panels share a single batch launch across components.
+from .parameters import SITE_TILE as _SITE_TILE
 
 # Columns summed over a stage's components into its per-chromosome row.
-_SUMMED = ("called_alleles", "missing_alleles", "called_allele_errors",
-           "one_to_one_called_allele_errors", "matched_called_alleles",
-           "unmatched_founder_rows", "unmatched_truth_founders", "unmatched_called_alleles",
-           "truth_to_panel_errors_missing", "represented_matched_called_alleles",
-           "represented_matched_called_errors", "absent_matched_called_alleles",
-           "absent_matched_called_errors", "represented_truth_to_panel_errors_missing",
-           "absent_truth_to_panel_errors_missing")
+_SUMMED = (
+    "called_alleles",
+    "missing_alleles",
+    "called_allele_errors",
+    "one_to_one_called_allele_errors",
+    "matched_called_alleles",
+    "unmatched_founder_rows",
+    "unmatched_truth_founders",
+    "unmatched_called_alleles",
+    "truth_to_panel_errors_missing",
+    "represented_matched_called_alleles",
+    "represented_matched_called_errors",
+    "absent_matched_called_alleles",
+    "absent_matched_called_errors",
+    "represented_truth_to_panel_errors_missing",
+    "absent_truth_to_panel_errors_missing",
+)
 
 
-@njit(parallel=True, cache=True)
+@kernel(
+    overloads=((types.int64[::1], types.int64[::1], types.int64[::1], types.int64, types.int64),),
+    parallel=True,
+    cache=True,
+)
 def _ancestry_mask(events, counts, offsets, founder_count, sites):
     result = np.empty((founder_count, sites), dtype=np.bool_)
     tiles = (sites + _SITE_TILE - 1) // _SITE_TILE
@@ -74,13 +93,17 @@ def represented_ancestry(painting, positions, founder_count: int) -> np.ndarray:
     positions = np.asarray(positions)
     starts = np.asarray(painting.start, dtype=np.int64)
     ends = np.asarray(painting.end, dtype=np.int64)
-    endpoints = [[] for _ in range(founder_count)]
-    changes = [[] for _ in range(founder_count)]
-    bounds = np.searchsorted(positions, np.stack([starts, ends], axis=1)) if len(starts) else \
-        np.empty((0, 2), dtype=np.int64)
+    endpoints: list[list[int]] = [[] for _ in range(founder_count)]
+    changes: list[list[int]] = [[] for _ in range(founder_count)]
+    bounds = (
+        np.searchsorted(positions, np.stack([starts, ends], axis=1))
+        if len(starts)
+        else np.empty((0, 2), dtype=np.int64)
+    )
     last_position = positions[-1]
-    for end, first_hap, second_hap, (left, right) in zip(ends.tolist(), np.asarray(painting.hap1).tolist(),
-                                                         np.asarray(painting.hap2).tolist(), bounds):
+    for end, first_hap, second_hap, (left, right) in zip(
+        ends.tolist(), np.asarray(painting.hap1).tolist(), np.asarray(painting.hap2).tolist(), bounds, strict=False
+    ):
         # The terminal endpoint includes the last marker; internal boundaries
         # remain half-open, exactly as in the truth producer.
         if end == last_position:
@@ -103,7 +126,21 @@ def represented_ancestry(painting, positions, founder_count: int) -> np.ndarray:
     return _ancestry_mask(events, counts, offsets, founder_count, len(positions))
 
 
-@njit(parallel=True, cache=True)
+@kernel(
+    overloads=tuple(
+        (
+            types.ListType(types.Array(types.int8, 2, "C", readonly=panel_readonly)),
+            types.ListType(types.int64[::1]),
+            types.Array(types.int8, 2, "C", readonly=truth_readonly),
+            types.boolean[:, ::1],
+            types.int64[:, ::1],
+        )
+        for panel_readonly in (False, True)
+        for truth_readonly in (False, True)
+    ),
+    parallel=True,
+    cache=True,
+)
 def _count_tiles(panels, indices, truth, represented, tasks):
     # Columns: called errors, represented called, represented errors,
     # represented missing. Absent counts follow by exact integer subtraction.
@@ -136,7 +173,7 @@ def _count_tiles(panels, indices, truth, represented, tasks):
     return parts, missing
 
 
-@njit(parallel=True, cache=True)
+@kernel(overloads=((types.int64[:, :, ::1], types.int64[::1], types.int64[::1]),), parallel=True, cache=True)
 def _reduce_tiles(parts, missing_parts, row_offsets):
     counts = np.zeros((len(row_offsets) - 1, parts.shape[1], 4), dtype=np.int64)
     missing = np.zeros(len(row_offsets) - 1, dtype=np.int64)
@@ -149,7 +186,7 @@ def _reduce_tiles(parts, missing_parts, row_offsets):
     return counts, missing
 
 
-@njit(parallel=True, cache=True)
+@kernel(overloads=((types.ListType(types.int64[::1]), types.boolean[:, ::1]),), parallel=True, cache=True)
 def _represented_counts(indices, represented):
     counts = np.zeros((len(indices), len(represented)), dtype=np.int64)
     for task in prange(len(indices) * len(represented)):
@@ -161,7 +198,21 @@ def _represented_counts(indices, represented):
     return counts
 
 
-@njit(parallel=True, cache=True)
+@kernel(
+    overloads=tuple(
+        (
+            types.ListType(types.Array(types.int8, 2, "C", readonly=panel_readonly)),
+            types.ListType(types.int64[::1]),
+            types.Array(types.int8, 2, "C", readonly=truth_readonly),
+            types.int64[:, ::1],
+            types.float64,
+        )
+        for panel_readonly in (False, True)
+        for truth_readonly in (False, True)
+    ),
+    parallel=True,
+    cache=True,
+)
 def _segment_rows(panels, indices, truth, tasks, switch_cost):
     """Per row, the Viterbi truth-founder path minimising mismatches + cost x switches.
 
@@ -193,7 +244,7 @@ def _segment_rows(panels, indices, truth, tasks, switch_cost):
                     following[founder] = cost[founder]
                     back[site, founder] = founder
                 if call >= 0 and call != truth[founder, index[site]]:
-                    following[founder] += 1.
+                    following[founder] += 1.0
             cost[:] = following
         founder = 0
         for other in range(1, founders):
@@ -215,13 +266,18 @@ def _segment_panels(panels, indices, truth, switch_cost=SEGMENT_SWITCH_COST):
     if not panels:
         return np.zeros((0, 2), dtype=np.int64)
     packed_panels, packed_indices, tasks, owners = List(), List(), [], []
-    for component, (calls, index) in enumerate(zip(panels, indices)):
+    for component, (calls, index) in enumerate(zip(panels, indices, strict=False)):
         packed_panels.append(np.ascontiguousarray(calls, dtype=np.int8))
         packed_indices.append(np.ascontiguousarray(index, dtype=np.int64))
         tasks.extend((component, row) for row in range(len(calls)))
         owners.extend([component] * len(calls))
-    rows = _segment_rows(packed_panels, packed_indices, np.ascontiguousarray(truth, dtype=np.int8),
-                         np.asarray(tasks, dtype=np.int64).reshape(-1, 2), float(switch_cost))
+    rows = _segment_rows(
+        packed_panels,
+        packed_indices,
+        np.ascontiguousarray(truth, dtype=np.int8),
+        np.asarray(tasks, dtype=np.int64).reshape(-1, 2),
+        float(switch_cost),
+    )
     totals = np.zeros((len(panels), 2), dtype=np.int64)
     np.add.at(totals, np.asarray(owners, dtype=np.int64), rows)
     return totals
@@ -232,22 +288,26 @@ def _count_panels(panels, indices, truth, represented):
         return [], [], []
     packed_panels, packed_indices = List(), List()
     tasks, row_offsets, component_offsets = [], [0], [0]
-    for component, (calls, index) in enumerate(zip(panels, indices)):
+    for component, (calls, index) in enumerate(zip(panels, indices, strict=False)):
         packed_panels.append(np.ascontiguousarray(calls, dtype=np.int8))
         packed_indices.append(np.ascontiguousarray(index, dtype=np.int64))
         for row in range(len(calls)):
-            tasks.extend((component, row, left, min(calls.shape[1], left + _SITE_TILE))
-                         for left in range(0, calls.shape[1], _SITE_TILE))
+            tasks.extend(
+                (component, row, left, min(calls.shape[1], left + _SITE_TILE))
+                for left in range(0, calls.shape[1], _SITE_TILE)
+            )
             row_offsets.append(len(tasks))
         component_offsets.append(component_offsets[-1] + len(calls))
     parts, missing_parts = _count_tiles(
-        packed_panels, packed_indices, truth, represented,
-        np.asarray(tasks, dtype=np.int64).reshape(-1, 4))
+        packed_panels, packed_indices, truth, represented, np.asarray(tasks, dtype=np.int64).reshape(-1, 4)
+    )
     counts, missing = _reduce_tiles(parts, missing_parts, np.asarray(row_offsets, dtype=np.int64))
     rep_counts = _represented_counts(packed_indices, represented)
-    return ([counts[left:right] for left, right in zip(component_offsets[:-1], component_offsets[1:])],
-            [missing[left:right] for left, right in zip(component_offsets[:-1], component_offsets[1:])],
-            rep_counts)
+    return (
+        [counts[left:right] for left, right in zip(component_offsets[:-1], component_offsets[1:], strict=False)],
+        [missing[left:right] for left, right in zip(component_offsets[:-1], component_offsets[1:], strict=False)],
+        rep_counts,
+    )
 
 
 def _content_order(calls) -> np.ndarray:
@@ -267,41 +327,56 @@ def _compare_counts(counts, missing, represented_counts, sites, order=None):
     by_row = np.argsort(predicted, kind="stable")
     predicted, actual = predicted[by_row], actual[by_row]
     nearest = np.argmin(errors, axis=1) if k else np.empty(0, dtype=int)
-    result = dict(founder_rows=k, truth_founders=f, markers=sites,
-                  called_alleles=int(called.sum()), missing_alleles=int(missing.sum()),
-                  called_allele_errors=int(errors[np.arange(k), nearest].sum()),
-                  one_to_one_called_allele_errors=int(errors[predicted, actual].sum()),
-                  matched_called_alleles=int(called[predicted].sum()),
-                  unmatched_founder_rows=k-len(predicted),
-                  unmatched_truth_founders=f-len(actual),
-                  unmatched_called_alleles=int(called.sum()-called[predicted].sum()),
-                  truth_alleles=f*sites,
-                  truth_to_panel_errors_missing=int(
-                      errors[predicted, actual].sum() + missing[predicted].sum()
-                      + (f-len(actual))*sites))
+    result = dict(
+        founder_rows=k,
+        truth_founders=f,
+        markers=sites,
+        called_alleles=int(called.sum()),
+        missing_alleles=int(missing.sum()),
+        called_allele_errors=int(errors[np.arange(k), nearest].sum()),
+        one_to_one_called_allele_errors=int(errors[predicted, actual].sum()),
+        matched_called_alleles=int(called[predicted].sum()),
+        unmatched_founder_rows=k - len(predicted),
+        unmatched_truth_founders=f - len(actual),
+        unmatched_called_alleles=int(called.sum() - called[predicted].sum()),
+        truth_alleles=f * sites,
+        truth_to_panel_errors_missing=int(
+            errors[predicted, actual].sum() + missing[predicted].sum() + (f - len(actual)) * sites
+        ),
+    )
     result["represented_truth_alleles"] = int(represented_counts.sum())
-    result["absent_truth_alleles"] = f*sites - result["represented_truth_alleles"]
+    result["absent_truth_alleles"] = f * sites - result["represented_truth_alleles"]
     rep_called = int(counts[predicted, actual, 1].sum())
     rep_errors = int(counts[predicted, actual, 2].sum())
-    rep_missing = int(counts[predicted, actual, 3].sum()
-                      + represented_counts.sum() - represented_counts[actual].sum())
+    rep_missing = int(counts[predicted, actual, 3].sum() + represented_counts.sum() - represented_counts[actual].sum())
     for label, called_count, error_count, missing_count in (
-            ("represented", rep_called, rep_errors, rep_missing),
-            ("absent", result["matched_called_alleles"] - rep_called,
-             result["one_to_one_called_allele_errors"] - rep_errors,
-             int(missing[predicted].sum() + (f-len(actual))*sites) - rep_missing)):
+        ("represented", rep_called, rep_errors, rep_missing),
+        (
+            "absent",
+            result["matched_called_alleles"] - rep_called,
+            result["one_to_one_called_allele_errors"] - rep_errors,
+            int(missing[predicted].sum() + (f - len(actual)) * sites) - rep_missing,
+        ),
+    ):
         result[f"{label}_matched_called_alleles"] = called_count
         result[f"{label}_matched_called_errors"] = error_count
         result[f"{label}_truth_to_panel_errors_missing"] = error_count + missing_count
-    matches = [dict(predicted_row=int(row), truth_founder=int(founder),
-                    called_alleles=int(called[row]),
-                    errors=int(errors[row, founder]), missing=int(missing[row]))
-               for row, founder in zip(predicted, actual)]
+    matches = [
+        dict(
+            predicted_row=int(row),
+            truth_founder=int(founder),
+            called_alleles=int(called[row]),
+            errors=int(errors[row, founder]),
+            missing=int(missing[row]),
+        )
+        for row, founder in zip(predicted, actual, strict=False)
+    ]
     return result, matches
 
 
-def evaluate_founders(panels: Sequence[tuple[np.ndarray, np.ndarray]], positions, truth, represented, *,
-                      contig: str, stage: str):
+def evaluate_founders(
+    panels: Sequence[tuple[np.ndarray, np.ndarray]], positions, truth, represented, *, contig: str, stage: str
+):
     """Compare one stage's founder panels of a chromosome with the true founder haplotypes.
 
     ``panels``: (positions int64 [L_c], calls int8 [K_c, L_c]) per component/block in the stage's order;
@@ -312,69 +387,94 @@ def evaluate_founders(panels: Sequence[tuple[np.ndarray, np.ndarray]], positions
     """
     positions, truth = np.asarray(positions), np.asarray(truth)
     covered = np.zeros(len(positions), dtype=bool)
-    rows, matches = [], []
+    rows: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     calls_list, indices, spans = [], [], []
     if len(truth) == 0:
-        raise ValueError("founder truth must not be empty")
+        raise InputError("founder truth must not be empty")
     if truth.min() < 0 or truth.max() > 1:
-        raise ValueError("require -1/0/1 calls and complete 0/1 founder truth")
+        raise InputError("require -1/0/1 calls and complete 0/1 founder truth")
     if represented.shape != truth.shape:
-        raise ValueError("ancestry representation mask has the wrong axes")
+        raise InputError("ancestry representation mask has the wrong axes")
     for sites, calls in panels:
         sites = np.asarray(sites, dtype=np.int64)
         calls = np.asarray(calls, dtype=np.int8)
-        if calls.ndim != 2 or calls.shape[1] != len(sites) or (
-                calls.size and (calls.min() < -1 or calls.max() > 1)):
-            raise ValueError(f"{contig}/{stage}: founder call and position axes are inconsistent")
+        if calls.ndim != 2 or calls.shape[1] != len(sites) or (calls.size and (calls.min() < -1 or calls.max() > 1)):
+            raise InputError(f"{contig}/{stage}: founder call and position axes are inconsistent")
         index = np.searchsorted(positions, sites)
         if np.any(index >= len(positions)) or not np.array_equal(positions[index], sites):
-            raise ValueError(f"{contig}: founder truth and reconstruction positions differ")
+            raise InputError(f"{contig}: founder truth and reconstruction positions differ")
         if np.any(covered[index]):
-            raise ValueError("evaluated founder components must not overlap")
+            raise InputError("evaluated founder components must not overlap")
         covered[index] = True
         calls_list.append(calls)
         indices.append(index)
         spans.append((int(sites[0]), int(sites[-1]), len(sites)))
     counts, missing, rep_counts = _count_panels(calls_list, indices, truth, represented)
     segments = _segment_panels(calls_list, indices, truth)
-    for component, (first, last, sites) in enumerate(spans):
+    for component, (first, last, component_sites) in enumerate(spans):
         metrics, component_matches = _compare_counts(
-            counts[component], missing[component], rep_counts[component], sites,
-            order=_content_order(calls_list[component]))
+            counts[component],
+            missing[component],
+            rep_counts[component],
+            component_sites,
+            order=_content_order(calls_list[component]),
+        )
         # Split nearest-founder errors into wrong alleles under segment-wise
         # labels and the remainder charged for chimeric row segments.
         segment_errors, segment_switches = map(int, segments[component])
         # Release 3.2: the segment-wise cost, with one label switch per row charged at every component start after the
         # chromosome's first (module docstring).
         switches = segment_switches + (len(calls_list[component]) if component else 0)
-        rows.append(dict(contig=contig, stage=stage, component=component,
-                         first_position=first, last_position=last, **metrics,
-                         segment_allele_errors=segment_errors,
-                         segment_label_switches=segment_switches,
-                         chimeric_segment_charges=metrics["called_allele_errors"] - segment_errors,
-                         split_charged_segment_cost=segment_errors + int(SEGMENT_SWITCH_COST * switches)))
-        matches.extend(dict(contig=contig, stage=stage, component=component,
-                            founder_key=str(match["predicted_row"]), **match)
-                       for match in component_matches)
-    summary = dict(contig=contig, stage=stage, components=len(rows),
-                   markers=len(positions), reconstructed_markers=int(covered.sum()),
-                   uncovered_markers=int((~covered).sum()),
-                   min_founder_rows=min((r["founder_rows"] for r in rows), default=0),
-                   max_founder_rows=max((r["founder_rows"] for r in rows), default=0),
-                   truth_founders=len(truth), truth_alleles=int(truth.size),
-                   represented_truth_alleles=int(represented.sum()),
-                   absent_truth_alleles=int((~represented).sum()),
-                   **{key: sum(row[key] for row in rows) for key in _SUMMED})
-    summary["truth_to_panel_errors_missing"] += len(truth)*int((~covered).sum())
+        rows.append(
+            dict(
+                contig=contig,
+                stage=stage,
+                component=component,
+                first_position=first,
+                last_position=last,
+                **metrics,
+                segment_allele_errors=segment_errors,
+                segment_label_switches=segment_switches,
+                chimeric_segment_charges=metrics["called_allele_errors"] - segment_errors,
+                split_charged_segment_cost=segment_errors + int(SEGMENT_SWITCH_COST * switches),
+            )
+        )
+        matches.extend(
+            dict(contig=contig, stage=stage, component=component, founder_key=str(match["predicted_row"]), **match)
+            for match in component_matches
+        )
+    summary = dict(
+        contig=contig,
+        stage=stage,
+        components=len(rows),
+        markers=len(positions),
+        reconstructed_markers=int(covered.sum()),
+        uncovered_markers=int((~covered).sum()),
+        min_founder_rows=min((r["founder_rows"] for r in rows), default=0),
+        max_founder_rows=max((r["founder_rows"] for r in rows), default=0),
+        truth_founders=len(truth),
+        truth_alleles=int(truth.size),
+        represented_truth_alleles=int(represented.sum()),
+        absent_truth_alleles=int((~represented).sum()),
+        **{key: sum(row[key] for row in rows) for key in _SUMMED},
+    )
+    summary["truth_to_panel_errors_missing"] += len(truth) * int((~covered).sum())
     summary["represented_truth_to_panel_errors_missing"] += int(represented[:, ~covered].sum())
     summary["absent_truth_to_panel_errors_missing"] += int((~represented[:, ~covered]).sum())
     summary["called_errors_per_million"] = (
-        1e6*summary["called_allele_errors"]/summary["called_alleles"]
-        if summary["called_alleles"] else None)
+        1e6 * summary["called_allele_errors"] / summary["called_alleles"] if summary["called_alleles"] else None
+    )
     summary["one_to_one_errors_per_million"] = (
-        1e6*summary["one_to_one_called_allele_errors"]/summary["matched_called_alleles"]
-        if summary["matched_called_alleles"] else None)
-    for key in ("segment_allele_errors", "segment_label_switches", "chimeric_segment_charges",
-                "split_charged_segment_cost"):
+        1e6 * summary["one_to_one_called_allele_errors"] / summary["matched_called_alleles"]
+        if summary["matched_called_alleles"]
+        else None
+    )
+    for key in (
+        "segment_allele_errors",
+        "segment_label_switches",
+        "chimeric_segment_charges",
+        "split_charged_segment_cost",
+    ):
         summary[key] = sum(row[key] for row in rows)
     return summary, rows, matches

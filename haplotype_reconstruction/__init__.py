@@ -1,11 +1,16 @@
-"""Founder-haplotype reconstruction from low-coverage sequencing of experimental crosses.
+"""Reconstruct founder haplotypes, pedigrees, phase and recombination with a lazy public API.
 
-One pipeline: evidence -> discovery -> local selection -> assembly -> painting -> pedigree -> founder refit ->
-family phase -> recombination (see docs/). Importing the package configures the numerical libraries before any
-numerical module loads (execution.bootstrap.configure_imports); nothing else happens at import.
+Importing the package loads no numerical libraries and changes no runtime policy.
+The public functions are resolved from interface.api only when first requested.
 """
-from .execution.bootstrap import configure_imports as _configure_imports
 
-__version__ = "3.5.0"
+__version__ = "4.0.0.dev0"
+__all__ = ["run", "load_settings", "open_results", "errors", "__version__"]
 
-_configure_imports()
+
+def __getattr__(name: str):
+    if name in {"run", "load_settings", "open_results", "errors"}:
+        from .interface import api
+
+        return getattr(api, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
