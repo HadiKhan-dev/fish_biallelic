@@ -1,0 +1,256 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="667" viewBox="0 0 940 667" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/></marker></defs>
+<rect width="940" height="667" fill="#ffffff"/>
+<rect x="8" y="24.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="35.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">evidence.calibration_objective</text>
+<text x="292.0" y="50.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">evidence.likelihoods</text>
+<rect x="8" y="54.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="65.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">evidence.quality_genotypes</text>
+<text x="292.0" y="80.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">relatedness.screen</text>
+<rect x="8" y="84.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="95.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">relatedness.terms</text>
+<text x="292.0" y="110.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">relatedness.pairs</text>
+<rect x="8" y="114.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="125.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">discovery.assignment</text>
+<text x="292.0" y="140.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">discovery.fit_family</text>
+<rect x="8" y="144.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="155.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">discovery.cavity</text>
+<text x="292.0" y="170.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">discovery.release</text>
+<rect x="8" y="174.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="185.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">selection.exact_pass</text>
+<text x="292.0" y="200.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">selection.fit_fixed</text>
+<rect x="8" y="204.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="215.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">selection.context_matching</text>
+<text x="292.0" y="230.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.cavity_fill</text>
+<rect x="8" y="234.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="245.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.crossfit</text>
+<text x="292.0" y="260.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.site_posterior</text>
+<rect x="8" y="264.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="275.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.linker_scan</text>
+<text x="292.0" y="290.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.join_score</text>
+<rect x="8" y="294.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="305.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.count_rule</text>
+<text x="292.0" y="320.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">assembly.release</text>
+<rect x="8" y="324.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="335.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">refinement.score</text>
+<text x="292.0" y="350.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">refinement.count_bound</text>
+<rect x="8" y="354.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="365.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">painting.transposition_gains</text>
+<text x="292.0" y="380.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">painting.chain</text>
+<rect x="8" y="384.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="395.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">painting.decode_masks</text>
+<text x="292.0" y="410.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">refit.alleles</text>
+<rect x="8" y="414.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="425.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">pedigree.sources</text>
+<text x="292.0" y="440.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">pedigree.pair_bound</text>
+<rect x="8" y="444.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="455.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">pedigree.exposure</text>
+<text x="292.0" y="470.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">pedigree.family_messages</text>
+<rect x="8" y="474.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="485.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">pedigree.resample_counts</text>
+<text x="292.0" y="500.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">phase.viterbi</text>
+<rect x="8" y="504.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="515.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">phase.posterior</text>
+<text x="292.0" y="530.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">recombination.follow</text>
+<rect x="8" y="534.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="545.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">outputs.samples</text>
+<text x="292.0" y="560.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">outputs.painting_report</text>
+<rect x="8" y="564.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="575.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">simulation.reads</text>
+<text x="292.0" y="590.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">evaluation.founders</text>
+<rect x="8" y="594.0" width="924" height="15" fill="#f4f6f8"/>
+<text x="292.0" y="605.0" font-size="9.2" font-weight="normal" font-style="normal" text-anchor="end" fill="#1a1a1a">contracts.partners</text>
+<rect x="300" y="24" width="285" height="585" fill="none" stroke="#5f6368" stroke-width="0.8"/>
+<line x1="328.5" y1="609" x2="328.5" y2="613" stroke="#5f6368"/>
+<text x="328.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">0</text>
+<line x1="385.5" y1="609" x2="385.5" y2="613" stroke="#5f6368"/>
+<text x="385.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">1</text>
+<line x1="442.5" y1="609" x2="442.5" y2="613" stroke="#5f6368"/>
+<text x="442.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">2</text>
+<line x1="499.5" y1="609" x2="499.5" y2="613" stroke="#5f6368"/>
+<text x="499.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">3</text>
+<line x1="556.5" y1="609" x2="556.5" y2="613" stroke="#5f6368"/>
+<text x="556.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">4</text>
+<line x1="385.5" y1="24" x2="385.5" y2="609" stroke="#c7ccd1" stroke-width="0.9"/>
+<line x1="442.5" y1="24" x2="442.5" y2="609" stroke="#c7ccd1" stroke-width="0.9"/>
+<line x1="499.5" y1="24" x2="499.5" y2="609" stroke="#c7ccd1" stroke-width="0.9"/>
+<line x1="516.6" y1="24" x2="516.6" y2="609" stroke="#c0571b" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="519.6" y="20.0" font-size="8.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#c0571b">3.3 gate</text>
+<text x="442.5" y="641.0" font-size="10" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1a1a1a">Fitted K exponent (K = 5–30, N = 200)</text>
+<line x1="328.5" y1="31.5" x2="328.5" y2="31.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="328.5" cy="31.5" r="3.2" fill="#2f5d9e"/>
+<line x1="328.5" y1="46.5" x2="328.5" y2="46.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="328.5" cy="46.5" r="3.2" fill="#2f5d9e"/>
+<line x1="328.5" y1="61.5" x2="328.5" y2="61.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="328.5" cy="61.5" r="3.2" fill="#2f5d9e"/>
+<line x1="326.8" y1="76.5" x2="327.9" y2="76.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="327.4" cy="76.5" r="3.2" fill="#2f5d9e"/>
+<line x1="327.4" y1="91.5" x2="328.5" y2="91.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="327.9" cy="91.5" r="3.2" fill="#2f5d9e"/>
+<line x1="329.6" y1="106.5" x2="330.8" y2="106.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="330.2" cy="106.5" r="3.2" fill="#c0571b"/>
+<line x1="413.4" y1="121.5" x2="422.6" y2="121.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="418.0" cy="121.5" r="3.2" fill="#2f5d9e"/>
+<line x1="396.9" y1="136.5" x2="406.0" y2="136.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="401.5" cy="136.5" r="3.2" fill="#c0571b"/>
+<line x1="458.5" y1="151.5" x2="492.7" y2="151.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="475.6" cy="151.5" r="3.2" fill="#c0571b"/>
+<line x1="335.3" y1="166.5" x2="336.5" y2="166.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="335.9" cy="166.5" r="3.2" fill="#2f5d9e"/>
+<line x1="417.4" y1="181.5" x2="424.3" y2="181.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="420.8" cy="181.5" r="3.2" fill="#2f5d9e"/>
+<line x1="416.3" y1="196.5" x2="427.7" y2="196.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="422.0" cy="196.5" r="3.2" fill="#c0571b"/>
+<line x1="554.2" y1="211.5" x2="559.9" y2="211.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="557.1" cy="211.5" r="3.2" fill="#c0571b"/>
+<line x1="413.4" y1="226.5" x2="428.2" y2="226.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="420.8" cy="226.5" r="3.2" fill="#2f5d9e"/>
+<line x1="400.3" y1="241.5" x2="409.4" y2="241.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="404.9" cy="241.5" r="3.2" fill="#2f5d9e"/>
+<line x1="496.6" y1="256.5" x2="509.2" y2="256.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="502.9" cy="256.5" r="3.2" fill="#2f5d9e"/>
+<line x1="435.1" y1="271.5" x2="438.5" y2="271.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="436.8" cy="271.5" r="3.2" fill="#2f5d9e"/>
+<line x1="424.8" y1="286.5" x2="431.7" y2="286.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="428.2" cy="286.5" r="3.2" fill="#2f5d9e"/>
+<line x1="384.9" y1="301.5" x2="386.1" y2="301.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="385.5" cy="301.5" r="3.2" fill="#c0571b"/>
+<line x1="333.6" y1="316.5" x2="334.8" y2="316.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="334.2" cy="316.5" r="3.2" fill="#2f5d9e"/>
+<line x1="422.6" y1="331.5" x2="429.4" y2="331.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="426.0" cy="331.5" r="3.2" fill="#2f5d9e"/>
+<line x1="427.1" y1="346.5" x2="440.8" y2="346.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="434.0" cy="346.5" r="3.2" fill="#c0571b"/>
+<line x1="461.9" y1="361.5" x2="467.6" y2="361.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="464.7" cy="361.5" r="3.2" fill="#2f5d9e"/>
+<line x1="438.5" y1="376.5" x2="439.6" y2="376.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="439.1" cy="376.5" r="3.2" fill="#2f5d9e"/>
+<line x1="426.0" y1="391.5" x2="428.2" y2="391.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="427.1" cy="391.5" r="3.2" fill="#2f5d9e"/>
+<line x1="374.1" y1="406.5" x2="383.2" y2="406.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="378.7" cy="406.5" r="3.2" fill="#2f5d9e"/>
+<line x1="427.1" y1="421.5" x2="434.0" y2="421.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="430.5" cy="421.5" r="3.2" fill="#2f5d9e"/>
+<line x1="443.1" y1="436.5" x2="461.3" y2="436.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="452.2" cy="436.5" r="3.2" fill="#2f5d9e"/>
+<line x1="415.7" y1="451.5" x2="421.4" y2="451.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="418.6" cy="451.5" r="3.2" fill="#2f5d9e"/>
+<line x1="327.9" y1="466.5" x2="329.1" y2="466.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="328.5" cy="466.5" r="3.2" fill="#2f5d9e"/>
+<line x1="328.5" y1="481.5" x2="329.6" y2="481.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="329.1" cy="481.5" r="3.2" fill="#2f5d9e"/>
+<line x1="436.2" y1="496.5" x2="440.8" y2="496.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="438.5" cy="496.5" r="3.2" fill="#2f5d9e"/>
+<line x1="487.5" y1="511.5" x2="489.8" y2="511.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="488.7" cy="511.5" r="3.2" fill="#2f5d9e"/>
+<line x1="325.6" y1="526.5" x2="327.9" y2="526.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="326.8" cy="526.5" r="3.2" fill="#2f5d9e"/>
+<line x1="328.5" y1="541.5" x2="329.6" y2="541.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="329.1" cy="541.5" r="3.2" fill="#2f5d9e"/>
+<line x1="378.7" y1="556.5" x2="380.9" y2="556.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="379.8" cy="556.5" r="3.2" fill="#2f5d9e"/>
+<line x1="331.9" y1="571.5" x2="333.1" y2="571.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="332.5" cy="571.5" r="3.2" fill="#2f5d9e"/>
+<line x1="392.9" y1="586.5" x2="405.4" y2="586.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="399.2" cy="586.5" r="3.2" fill="#2f5d9e"/>
+<line x1="373.5" y1="601.5" x2="381.5" y2="601.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="377.5" cy="601.5" r="3.2" fill="#2f5d9e"/>
+<rect x="635" y="24" width="285" height="585" fill="none" stroke="#5f6368" stroke-width="0.8"/>
+<line x1="682.5" y1="609" x2="682.5" y2="613" stroke="#5f6368"/>
+<text x="682.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">0</text>
+<line x1="730.0" y1="609" x2="730.0" y2="613" stroke="#5f6368"/>
+<text x="730.0" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">0.5</text>
+<line x1="777.5" y1="609" x2="777.5" y2="613" stroke="#5f6368"/>
+<text x="777.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">1</text>
+<line x1="825.0" y1="609" x2="825.0" y2="613" stroke="#5f6368"/>
+<text x="825.0" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">1.5</text>
+<line x1="872.5" y1="609" x2="872.5" y2="613" stroke="#5f6368"/>
+<text x="872.5" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">2</text>
+<line x1="920.0" y1="609" x2="920.0" y2="613" stroke="#5f6368"/>
+<text x="920.0" y="624.0" font-size="9" font-weight="normal" font-style="normal" text-anchor="middle" fill="#5f6368">2.5</text>
+<line x1="777.5" y1="24" x2="777.5" y2="609" stroke="#c7ccd1" stroke-width="0.9"/>
+<line x1="872.5" y1="24" x2="872.5" y2="609" stroke="#c7ccd1" stroke-width="0.9"/>
+<text x="777.5" y="641.0" font-size="10" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1a1a1a">Fitted N exponent (N = 250–2,500, K = 15)</text>
+<line x1="777.5" y1="31.5" x2="777.5" y2="31.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="31.5" r="3.2" fill="#2f5d9e"/>
+<line x1="773.7" y1="46.5" x2="777.5" y2="46.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="775.6" cy="46.5" r="3.2" fill="#2f5d9e"/>
+<line x1="788.0" y1="61.5" x2="789.9" y2="61.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="788.9" cy="61.5" r="3.2" fill="#2f5d9e"/>
+<line x1="872.5" y1="76.5" x2="872.5" y2="76.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="872.5" cy="76.5" r="3.2" fill="#2f5d9e"/>
+<line x1="775.6" y1="91.5" x2="783.2" y2="91.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="779.4" cy="91.5" r="3.2" fill="#2f5d9e"/>
+<line x1="871.5" y1="106.5" x2="871.5" y2="106.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="871.5" cy="106.5" r="3.2" fill="#c0571b"/>
+<line x1="769.9" y1="121.5" x2="775.6" y2="121.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="772.8" cy="121.5" r="3.2" fill="#2f5d9e"/>
+<line x1="764.2" y1="136.5" x2="773.7" y2="136.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="769.0" cy="136.5" r="3.2" fill="#c0571b"/>
+<line x1="685.4" y1="151.5" x2="708.1" y2="151.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="696.8" cy="151.5" r="3.2" fill="#c0571b"/>
+<line x1="777.5" y1="166.5" x2="783.2" y2="166.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="780.4" cy="166.5" r="3.2" fill="#2f5d9e"/>
+<line x1="775.6" y1="181.5" x2="777.5" y2="181.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="776.5" cy="181.5" r="3.2" fill="#2f5d9e"/>
+<line x1="772.8" y1="196.5" x2="774.6" y2="196.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="773.7" cy="196.5" r="3.2" fill="#c0571b"/>
+<line x1="682.5" y1="211.5" x2="684.4" y2="211.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="683.5" cy="211.5" r="3.2" fill="#c0571b"/>
+<line x1="771.8" y1="226.5" x2="775.6" y2="226.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="773.7" cy="226.5" r="3.2" fill="#2f5d9e"/>
+<line x1="756.6" y1="241.5" x2="762.3" y2="241.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="759.5" cy="241.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="256.5" x2="777.5" y2="256.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="256.5" r="3.2" fill="#2f5d9e"/>
+<line x1="773.7" y1="271.5" x2="777.5" y2="271.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="775.6" cy="271.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="286.5" x2="781.3" y2="286.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="779.4" cy="286.5" r="3.2" fill="#2f5d9e"/>
+<line x1="796.5" y1="301.5" x2="811.7" y2="301.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="804.1" cy="301.5" r="3.2" fill="#c0571b"/>
+<line x1="677.8" y1="316.5" x2="685.4" y2="316.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="681.5" cy="316.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="331.5" x2="777.5" y2="331.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="331.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="346.5" x2="777.5" y2="346.5" stroke="#c0571b" stroke-width="1.4"/>
+<circle cx="777.5" cy="346.5" r="3.2" fill="#c0571b"/>
+<line x1="777.5" y1="361.5" x2="777.5" y2="361.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="361.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="376.5" x2="777.5" y2="376.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="376.5" r="3.2" fill="#2f5d9e"/>
+<line x1="779.4" y1="391.5" x2="779.4" y2="391.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="779.4" cy="391.5" r="3.2" fill="#2f5d9e"/>
+<line x1="747.1" y1="406.5" x2="752.8" y2="406.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="750.0" cy="406.5" r="3.2" fill="#2f5d9e"/>
+<line x1="781.3" y1="421.5" x2="787.0" y2="421.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="784.1" cy="421.5" r="3.2" fill="#2f5d9e"/>
+<line x1="872.5" y1="436.5" x2="872.5" y2="436.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="872.5" cy="436.5" r="3.2" fill="#2f5d9e"/>
+<line x1="872.5" y1="451.5" x2="872.5" y2="451.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="872.5" cy="451.5" r="3.2" fill="#2f5d9e"/>
+<line x1="871.5" y1="466.5" x2="875.4" y2="466.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="873.4" cy="466.5" r="3.2" fill="#2f5d9e"/>
+<line x1="815.5" y1="481.5" x2="874.4" y2="481.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="845.0" cy="481.5" r="3.2" fill="#2f5d9e"/>
+<line x1="778.5" y1="496.5" x2="778.5" y2="496.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="778.5" cy="496.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="511.5" x2="777.5" y2="511.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="511.5" r="3.2" fill="#2f5d9e"/>
+<line x1="777.5" y1="526.5" x2="777.5" y2="526.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="526.5" r="3.2" fill="#2f5d9e"/>
+<line x1="765.1" y1="541.5" x2="770.9" y2="541.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="768.0" cy="541.5" r="3.2" fill="#2f5d9e"/>
+<line x1="774.6" y1="556.5" x2="774.6" y2="556.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="774.6" cy="556.5" r="3.2" fill="#2f5d9e"/>
+<line x1="775.6" y1="571.5" x2="777.5" y2="571.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="776.5" cy="571.5" r="3.2" fill="#2f5d9e"/>
+<line x1="681.5" y1="586.5" x2="683.5" y2="586.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="682.5" cy="586.5" r="3.2" fill="#2f5d9e"/>
+<line x1="682.5" y1="601.5" x2="684.4" y2="601.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="683.5" cy="601.5" r="3.2" fill="#2f5d9e"/>
+<circle cx="306" cy="653.5" r="3.2" fill="#2f5d9e"/>
+<text x="314.0" y="657.0" font-size="9.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#1a1a1a">kernel gated at most cubic in K</text>
+<circle cx="536" cy="653.5" r="3.2" fill="#c0571b"/>
+<text x="544.0" y="657.0" font-size="9.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#1a1a1a">kernel under a decided cost exemption (0, 0b, 0c, 0d)</text>
+</svg>
