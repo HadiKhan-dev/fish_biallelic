@@ -1,0 +1,557 @@
+"""Keep compiled kernels disposable, keyed by their full code closure and target.
+
+The caller supplies roots and applies numerical settings before importing Numba.
+This module never discovers scientific stages or imports them. The caller preloads
+its roots before warm_up; every executing process activates declared caches only
+at that explicit boundary. Persistent cache failures cost compilation time, never
+scientific results. ENG-19/27 are relocated from 3.5 execution/bootstrap.py and
+kernel_cache.py; the learned manifest and signature guard retain their semantics.
+"""
+
+from __future__ import annotations
+
+import atexit
+import hashlib
+import io
+import logging
+import os
+import pickle
+import re
+import shutil
+import socket
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from importlib import metadata
+from pathlib import Path
+from typing import Any, cast
+
+from ..core.errors import InvariantError
+from ..store.identity import PACKAGE_ROOT, CodeIdentity, code_dependency_identity
+
+# P0 engine.parameters.csv ENG-19/27; operational storage, never science identity.
+KEEP_KEYS = 6
+KERNEL_SCRATCH = Path("/dev/shm")
+KERNEL_SCRATCH_FREE_BYTES = 4 << 30
+_SNAPSHOT = "cache.tar"
+_MANIFEST = "manifest.pkl"
+_PACKAGE = "haplotype_reconstruction"
+_INDEX_SUFFIX = f".py{sys.version_info[0]}{sys.version_info[1]}{getattr(sys, 'abiflags', '')}.nbi"
+_LOG = logging.getLogger(__name__)
+
+
+def _host_cpu_model() -> str:
+    """CPU vendor, model and instruction-set flags (Linux), else the platform name."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as handle:
+            first = handle.read(1 << 16).split("\n\n", 1)[0]
+    except OSError:
+        import platform
+
+        return f"{platform.machine()} {platform.processor()}"
+    fields = {
+        name.strip(): value.strip()
+        for name, value in (line.split(":", 1) for line in first.splitlines() if ":" in line)
+    }
+    return " | ".join(fields.get(name, "") for name in ("vendor_id", "model name", "flags"))
+
+
+def _remove_orphaned_caches(parent: Path, host: str) -> None:
+    """Remove private run caches in ``parent`` whose creating process on this host has ended (a run killed before
+    its exit handler ran), so memory-backed caches cannot accumulate."""
+    if os.name != "posix":  # process-existence checks below are POSIX semantics
+        return
+    pattern = re.compile(r"-" + re.escape(re.sub(r"[^A-Za-z0-9_.-]", "_", host)) + r"-pid(\d+)$")
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        match = pattern.search(entry.name)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        try:
+            os.kill(pid, 0)  # the creator still runs (or exists under another user)
+            continue
+        except ProcessLookupError:
+            pass
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def _kernel_scratch(parent: str, host: str) -> tuple[Path, bool]:
+    """(directory for the automatic run-local kernel cache, whether it is private node-local memory); ``parent``
+    names this user's directory of private run caches."""
+    job = os.environ.get("SLURM_TMPDIR") if os.environ.get("SLURM_JOB_ID") else None
+    if job:
+        return Path(job), False
+    try:
+        if os.access(KERNEL_SCRATCH, os.W_OK):
+            # Ended runs' caches are removed before the free-space test: they may be what fills the space.
+            _remove_orphaned_caches(KERNEL_SCRATCH / parent, host)
+            if shutil.disk_usage(KERNEL_SCRATCH).free >= KERNEL_SCRATCH_FREE_BYTES:
+                return KERNEL_SCRATCH, True
+    except OSError:
+        pass
+    return Path(tempfile.gettempdir()), False
+
+
+def _batch_cache_scope() -> str | None:
+    """A scheduler job (and array task) identifier for the automatic cache directory, if any."""
+    schedulers: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        ("slurm", "SLURM_JOB_ID", ("SLURM_ARRAY_TASK_ID",)),
+        ("pbs", "PBS_JOBID", ("PBS_ARRAY_INDEX", "PBS_ARRAYID")),
+        ("lsf", "LSB_JOBID", ("LSB_JOBINDEX",)),
+    )
+    if os.environ.get("SGE_ROOT"):
+        schedulers += (("sge", "JOB_ID", ("SGE_TASK_ID",)),)
+    for name, variable, task_variables in schedulers:
+        job = os.environ.get(variable)
+        if job:
+            task = next((os.environ[key] for key in task_variables if os.environ.get(key)), None)
+            return f"{name}-{job}" + (f"-task-{task}" if task else "")
+    return None
+
+
+def cache_key(roots: Iterable[str], *, package_root: Path = PACKAGE_ROOT) -> str:
+    """Hash source closure, its location and every code-generation input; no writes.
+
+    Call once in the parent after applying numerical policy. Workers inherit its
+    key and directory, rather than choosing scratch or recalculating the key.
+    Missing roots raise ValueError. Thread counts/layer/cache path are operational
+    and do not affect this key; every other NUMBA_* setting does.
+    """
+    code = code_dependency_identity(roots, package_root=package_root)
+    digest = hashlib.sha256()
+
+    def add(*values):
+        for value in values:
+            digest.update(str(value).encode("utf-8", "surrogateescape") + b"\0")
+
+    add(str(Path(package_root).resolve()), sys.version, sys.implementation.cache_tag, getattr(sys, "abiflags", ""))
+    for name in ("numpy", "numba", "llvmlite"):
+        add(name, metadata.version(name))
+    for name in sorted(os.environ):
+        if name.startswith("NUMBA_") and name not in {"NUMBA_CACHE_DIR", "NUMBA_NUM_THREADS", "NUMBA_THREADING_LAYER"}:
+            add(name, os.environ[name])
+    add(_host_cpu_model(), code.digest)
+    return digest.hexdigest()[:24]
+
+
+def cache_directory(key: str, base: str | Path | None = None) -> Path:
+    """Create a private mode-0700 namespace at the explicit runtime boundary.
+
+    Explicit base, Slurm scratch, memory scratch and temporary storage are tried
+    in that order. Other scheduler variables only identify the scope. Workers
+    reuse the returned path supplied by their parent. Filesystem errors propagate
+    so the boundary can fall back to lazy, uncached compilation.
+    """
+    host = socket.gethostname()
+    private = False
+    run = f"run-{uuid.uuid4().hex}"
+    if base is None:
+        parent = f"haplotype-reconstruction-numba-{os.getuid()}"
+        scratch, private = _kernel_scratch(parent, host)
+        scope = run if private else (_batch_cache_scope() or run)
+        scope = re.sub(r"[^A-Za-z0-9_.-]", "_", scope + f"-{host}" + (f"-pid{os.getpid()}" if private else ""))
+        root = scratch / parent / scope
+    else:
+        root = Path(base) / re.sub(r"[^A-Za-z0-9_.-]", "_", _batch_cache_scope() or run)
+    directory = root / key
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    if private:
+        atexit.register(shutil.rmtree, str(root), True)
+    return directory
+
+
+def check_closure(roots: Iterable[str], key_closure: CodeIdentity | Iterable[str]) -> None:
+    """Refuse cacheable declarations that the selected key does not cover.
+
+    No science module is imported here. The caller already imported its roots.
+    Non-cacheable declarations are exempt, including test audit controls.
+    """
+    from ..core.kernels import declarations
+
+    modules = set(key_closure.modules if isinstance(key_closure, CodeIdentity) else key_closure)
+    if not set(code_dependency_identity(roots).modules) <= modules:
+        raise InvariantError("kernel roots exceed the cache key's dependency closure")
+    missing = sorted({entry.module for entry in declarations() if entry.cache and entry.module not in modules})
+    if missing:
+        raise InvariantError("cacheable kernels outside the keyed closure: " + ", ".join(missing))
+
+
+def store_directory() -> Path | None:
+    """The persistent store, or None without a home or XDG cache directory."""
+    base: str | Path | None = os.environ.get("XDG_CACHE_HOME")
+    if not base:
+        try:
+            base = Path.home() / ".cache"
+        except RuntimeError:
+            return None
+    return Path(base) / "haplotype-reconstruction" / "numba"
+
+
+def _listing(directory) -> dict:
+    """{relative path: (bytes, mtime ns)} of the Numba cache files in ``directory``."""
+    files = {}
+    for parent, _, names in os.walk(directory):
+        for name in names:
+            if name.endswith((".nbi", ".nbc")):
+                path = os.path.join(parent, name)
+                try:
+                    status = os.stat(path)
+                except FileNotFoundError:
+                    continue
+                files[os.path.relpath(path, directory)] = (status.st_size, status.st_mtime_ns)
+    return files
+
+
+def _write_atomically(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "wb") as handle:
+            handle.write(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _seed(cache_directory: Path, snapshot: Path) -> int:
+    """Install the snapshot's functions that the run-local cache lacks; return the files written.
+
+    A function's index (``.nbi``) and data files (``.nbc``, named after the index) are installed together and
+    only when no local index exists, data files first, each by an atomic rename: a reader never meets a partial
+    entry, and a local index is never mixed with another one's data files.
+    """
+    payload = snapshot.read_bytes()
+    try:
+        os.utime(snapshot)  # most recently used, for pruning
+    except OSError:
+        pass
+    functions: dict[tuple[str, str], list[tarfile.TarInfo]] = {}
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+        for member in archive.getmembers():
+            parts = Path(member.name).parts
+            if not member.isfile() or len(parts) != 2 or ".." in parts:
+                continue
+            name = parts[1]
+            if name.endswith(".nbi"):
+                base = name[:-4]
+            elif name.endswith(".nbc"):
+                base = name[:-4].rpartition(".")[0]
+            else:
+                continue
+            functions.setdefault((parts[0], base), []).append(member)
+        written = 0
+        for (directory, base), members in functions.items():
+            target = cache_directory / directory
+            if (target / f"{base}.nbi").exists():
+                continue
+            target.mkdir(parents=True, exist_ok=True)
+            for member in sorted(members, key=lambda item: item.name.endswith(".nbi")):
+                handle = archive.extractfile(member)
+                assert handle is not None
+                _write_atomically(target / Path(member.name).name, handle.read())
+                written += 1
+    return written
+
+
+def _module_packages() -> dict:
+    """Numba cache subdirectory -> dotted package, for this package's directories.
+
+    Numba files a kernel under ``<directory name>_<sha1 of its absolute directory>``
+    (numba.core.caching._CacheLocator.get_suitable_cache_subpath).
+    """
+    root = str(PACKAGE_ROOT)
+    packages = {}
+    for directory, subdirectories, _ in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if name != "__pycache__"]
+        relative = os.path.relpath(directory, root)
+        dotted = _PACKAGE if relative == "." else f"{_PACKAGE}.{relative.replace(os.sep, '.')}"
+        name = os.path.basename(directory) + "_" + hashlib.sha1(directory.encode()).hexdigest()
+        packages[name] = dotted
+    return packages
+
+
+def _cached_overloads(cache_directory: Path, target=None) -> dict:
+    """{(module, function): signatures} of this package's kernels in a cache directory.
+
+    Index files are named ``<module>.<qualified name>-<line>.pyXY.nbi`` and hold the Numba version, then
+    (source stamp, {(signature, target, code hashes): data file}). ``target`` keeps only overloads compiled for
+    that code-generation target (Numba's magic tuple). Functions without an importable name are skipped.
+    """
+    import numba
+
+    packages = _module_packages()
+    overloads: dict[tuple[str, str], set] = {}
+    for subdirectory in os.listdir(cache_directory):
+        package = packages.get(subdirectory)
+        if package is None:
+            continue
+        for name in os.listdir(cache_directory / subdirectory):
+            if not name.endswith(_INDEX_SUFFIX):
+                continue
+            stem, _, line = name[: -len(_INDEX_SUFFIX)].rpartition("-")
+            module, _, function = stem.partition(".")
+            if not function or not line.isdigit() or "locals" in function.split("."):
+                continue
+            module = package if module == "__init__" else f"{package}.{module}"
+            try:
+                with open(cache_directory / subdirectory / name, "rb") as handle:
+                    if pickle.load(handle) != numba.__version__:
+                        continue
+                    _, index = pickle.loads(handle.read())
+            except Exception:
+                continue  # Numba would not use an index it cannot read either
+            signatures = {key[0] for key in index if target is None or key[1] == target}
+            if signatures:
+                overloads.setdefault((module, function), set()).update(signatures)
+    return overloads
+
+
+def _read_manifest(store: Path):
+    try:
+        with open(store / _MANIFEST, "rb") as handle:
+            manifest = pickle.load(handle)
+        return dict(manifest["overloads"]), dict(manifest["seconds"])
+    except FileNotFoundError:
+        return {}, {}
+    except Exception as error:
+        _LOG.warning("kernel learned manifest unreadable (%s); ignored", type(error).__name__)
+        return {}, {}
+
+
+def install_signature_guard() -> None:
+    """Use a cached Numba kernel only when it was compiled for the requested argument types.
+
+    Numba trusts its cache index. Processes that save different overloads of one function at the same time (the
+    kernel warm-up's parallel tasks also compile their callees; pool workers compile on first use) can leave an
+    index entry naming another overload's data file, and loading it returns that other kernel, so the calling
+    kernel fails to type. A cold-cache K30 simulation failed this way on 21 Oct 2026. Such an entry is now a cache
+    miss: the kernel is compiled again.
+    """
+    from numba.core import caching, sigutils
+
+    load = caching.Cache._load_overload
+    if getattr(load, "checks_signature", False):
+        return
+
+    def load_checked(self, sig, target_context):
+        data = load(self, sig, target_context)
+        signature = getattr(data, "signature", None)
+        if signature is not None and tuple(signature.args) != tuple(sigutils.normalize_signature(sig)[0]):
+            return None
+        return data
+
+    cast(Any, load_checked).checks_signature = True
+    cast(Any, caching.Cache)._load_overload = load_checked
+
+
+@dataclass
+class CacheState:
+    """One run's disposable cache publication and warm-up accounting."""
+
+    key: str
+    cache_directory: Path
+    store: Path | None
+    baseline: dict = field(default_factory=dict)
+    published: bool = False
+    stale: bool = False
+    seconds: dict = field(default_factory=dict)
+    requested: int = 0
+    compiled: int = 0
+    skipped: int = 0
+    verified: int = 0
+    seeded: int = 0
+
+
+def _compile_function(task, shared, budget):
+    """Compile one imported dispatcher's union; declared failures are invariants."""
+    from ..core.kernels import declarations, enable_caches
+
+    name, dispatcher, encoded, encoded_declared = task
+    if dispatcher is None:
+        dispatcher = next(
+            (entry.dispatcher for entry in declarations() if (entry.module, entry.function) == name), None
+        )
+    signatures, declared = pickle.loads(encoded), pickle.loads(encoded_declared)
+    install_signature_guard()
+    enable_caches()
+    started = time.perf_counter()
+    compiled = 0
+    if dispatcher is None:
+        if declared:
+            raise InvariantError(f"declared kernel is missing: {name}")
+        return name, 0, time.perf_counter() - started
+    for signature in signatures:
+        try:
+            dispatcher.compile(signature)
+            compiled += 1
+        except Exception as error:
+            if signature in declared:
+                raise InvariantError(f"declared kernel {name} overload {signature} failed: {error}") from error
+    return name, compiled, time.perf_counter() - started
+
+
+def _compile_requests(requests: Mapping, required: Mapping, seconds: Mapping, team) -> tuple[int, dict]:
+    from numba.core.serialize import dumps
+
+    from .workers import BudgetedPool
+
+    # Passing a CPUDispatcher through pickle rebuilds an uncached dispatcher.
+    # Resolve the preloaded, declared object in the worker so cache activation applies.
+    tasks = [
+        (name, None, dumps(tuple(sorted(signatures, key=str))), dumps(set(required.get(name, ()))))
+        for name, signatures in requests.items()
+    ]
+    tasks.sort(key=lambda item: (-seconds.get(item[0], 0.0), -len(requests[item[0]]), item[0]))
+    cores = int(team.threads()) if hasattr(team, "threads") else int(team)
+    count, timings = 0, {}
+    if tasks:
+        with BudgetedPool(team, processes=max(1, min(cores, len(tasks))), label="kernel-warm-up") as pool:
+            for name, compiled, elapsed in pool.imap_unordered(_compile_function, tasks):
+                count += compiled
+                timings[name] = elapsed
+    return count, timings
+
+
+def warm_up(
+    roots: Iterable[str],
+    requests: Mapping,
+    team,
+    *,
+    cache: Path | None = None,
+    store: Path | None = None,
+    key: str | None = None,
+    key_closure: CodeIdentity | None = None,
+) -> CacheState:
+    """Seed and warm declarations plus learned signatures before scientific pools.
+
+    The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba.
+    One task per function uses the engine pool; a fresh pool, one task per
+    function, verifies the complete union after a cold compile. Learned failures are counted/skipped;
+    declared overload failures raise InvariantError. Store I/O failures only log.
+    Call publish(state) in a finally block, including after scientific failure.
+    """
+    from numba.core.registry import cpu_target
+
+    from ..core.kernels import declarations, enable_caches
+
+    roots = tuple(roots)
+    closure = code_dependency_identity(roots) if key_closure is None else key_closure
+    check_closure(roots, closure)
+    install_signature_guard()
+    failures = enable_caches()
+    if failures:
+        _LOG.warning("some kernel caches unavailable; dispatch remains lazy: %s", failures)
+    directory = Path(os.environ["NUMBA_CACHE_DIR"]) if cache is None else Path(cache)
+    storage = store_directory() if store is None else Path(store)
+    state = CacheState(directory.name if key is None else key, directory, storage)
+    snapshot = None if storage is None else storage / state.key / _SNAPSHOT
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if snapshot is not None and snapshot.is_file():
+            state.seeded = _seed(directory, snapshot)
+            state.published = True
+        state.baseline = _listing(directory)
+    except (OSError, tarfile.TarError) as error:
+        _LOG.warning("kernel snapshot unavailable; using lazy compilation: %s", error)
+        return state
+    # Snapshot this invocation's declarations before unpickling learned signatures: unpickling imports the
+    # modules that define their types, which this invocation's workers never import. Learned overloads are
+    # kept per cache key, so one command's learning never reaches another command's warm-up.
+    declared = {(d.module, d.function): set(d.overloads) for d in declarations()}
+    learned, state.seconds = ({}, {}) if storage is None else _read_manifest(storage / state.key)
+    # Never omit an imported declaration just because a caller supplied a partial request set.
+    required = {name: set(sigs) for name, sigs in declared.items()}
+    union = {name: set(sigs) for name, sigs in learned.items()}
+    for source in (requests, required):
+        for name, signatures in source.items():
+            union.setdefault(name, set()).update(signatures)
+    target = cpu_target.target_context.codegen().magic_tuple()
+    present = _cached_overloads(directory, target)
+    missing = {name: set(sigs) - present.get(name, set()) for name, sigs in union.items()}
+    missing = {name: sigs for name, sigs in missing.items() if sigs}
+    state.requested = sum(map(len, missing.values()))
+    state.compiled, timings = _compile_requests(missing, required, state.seconds, team)
+    state.seconds.update(timings)
+    state.verified = sum(map(len, union.values()))
+    if state.requested:
+        # Verified by a fresh pool (processes that compiled nothing), one task per function as in the compile step,
+        # so each function's cache index still has one writer if a load must recompile. A single process loaded
+        # every kernel in turn: one busy CPU for a minute or more at the start of every cold run.
+        state.verified, _ = _compile_requests(union, required, state.seconds, team)
+    state.stale = state.compiled < state.requested or state.verified < sum(map(len, union.values()))
+    state.skipped = sum(map(len, union.values())) - state.verified
+    return state
+
+
+def publish(state: CacheState | None) -> None:
+    """Publish cache and learned overloads atomically; cache-store failures only log."""
+    if state is None or state.store is None:
+        return
+    try:
+        _publish(state)
+    except Exception as error:
+        _LOG.warning("could not publish kernel cache to %s (%s: %s)", state.store, type(error).__name__, error)
+
+
+def _publish(state: CacheState) -> None:
+    from numba.core.serialize import dumps
+
+    cache_directory, store, key = state.cache_directory, state.store, state.key
+    assert store is not None
+    files = _listing(cache_directory)
+    changed = bool(files) and not (state.published and files == state.baseline)
+    if not (changed or state.stale):
+        return
+    overloads = _cached_overloads(cache_directory)
+    store.mkdir(parents=True, exist_ok=True)
+    if changed:
+        directory = store / key
+        directory.mkdir(parents=True, exist_ok=True)
+        snapshot = directory / _SNAPSHOT
+        temporary = directory / f".{_SNAPSHOT}.{os.getpid()}.tmp"
+        try:
+            with tarfile.open(temporary, "w") as archive:
+                for name in sorted(files):
+                    archive.add(cache_directory / name, arcname=name)
+            os.replace(temporary, snapshot)
+        finally:
+            temporary.unlink(missing_ok=True)
+    (store / key).mkdir(parents=True, exist_ok=True)
+    _write_atomically(
+        store / key / _MANIFEST,
+        dumps(
+            dict(
+                overloads={name: tuple(sigs) for name, sigs in overloads.items()},
+                seconds={name: value for name, value in state.seconds.items() if name in overloads},
+            )
+        ),
+    )
+    recent = []
+    for path in store.glob(f"*/{_SNAPSHOT}"):
+        try:
+            recent.append((path.stat().st_mtime, path.parent))
+        except FileNotFoundError:
+            pass
+    for _, stale in sorted(recent, reverse=True)[KEEP_KEYS:]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+@contextmanager
+def persistent_kernel_cache(roots: Iterable[str], requests: Mapping, team, **options: Any):
+    """Publish learned compilation state even when the scientific operation raises."""
+    state = warm_up(roots, requests, team, **options)
+    try:
+        yield state
+    finally:
+        publish(state)

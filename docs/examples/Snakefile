@@ -1,0 +1,59 @@
+# Run from the directory containing cross.toml. Paths are relative to that directory.
+from pathlib import Path
+import tomllib
+
+CONFIG = "cross.toml"
+with open(CONFIG, "rb") as handle:
+    SETTINGS = tomllib.load(handle)
+CONTIGS = SETTINGS["input"]["contigs"]
+RUN = Path(SETTINGS.get("run", {}).get("output", "run"))
+CHECKPOINTS = str(SETTINGS.get("run", {}).get("checkpoints") or RUN / "checkpoints")
+M = str(Path(CHECKPOINTS) / "markers")
+
+rule all:
+    input:
+        expand(f"{M}/phase.{{c}}.done", c=CONTIGS),
+        f"{M}/report.done"
+
+rule init:
+    output: f"{M}/init.done"
+    threads: 1
+    shell: "haplotypes init {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule evidence:
+    input: f"{M}/init.done"
+    output: f"{M}/evidence.{{c}}.done"
+    threads: 8
+    shell: "haplotypes evidence {CONFIG:q} --contig {wildcards.c:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule relatedness:
+    input: expand(f"{M}/evidence.{{c}}.done", c=CONTIGS)
+    output: f"{M}/relatedness.done"
+    threads: 8
+    shell: "haplotypes relatedness {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule reconstruct:
+    input: f"{M}/evidence.{{c}}.done"
+    output: f"{M}/reconstruct.{{c}}.done"
+    threads: 8
+    shell: "haplotypes reconstruct {CONFIG:q} --contig {wildcards.c:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule pedigree:
+    input:
+        f"{M}/relatedness.done",
+        expand(f"{M}/reconstruct.{{c}}.done", c=CONTIGS)
+    output: f"{M}/pedigree.done"
+    threads: 8
+    shell: "haplotypes pedigree {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule phase:
+    input: f"{M}/pedigree.done"
+    output: f"{M}/phase.{{c}}.done"
+    threads: 8
+    shell: "haplotypes phase {CONFIG:q} --contig {wildcards.c:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule report:
+    input: expand(f"{M}/phase.{{c}}.done", c=CONTIGS)
+    output: f"{M}/report.done"
+    threads: 1
+    shell: "haplotypes report {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"

@@ -19,17 +19,22 @@ writer refreshes its index, truncates a torn tail, encodes and appends its recor
 lock: they index complete records only, by scanning record headers and trailers (never payloads), and refresh
 incrementally from the last indexed end. Indexes are cached per process.
 """
+
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import fcntl
 import os
+import shutil
 import struct
+import tempfile
 import threading
 import time
+import warnings
 import zlib
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 from . import codec
 from .identity import canonical_json
@@ -66,12 +71,33 @@ class CheckpointMismatch(RuntimeError):
     """A bound record (put_once / bind_identity) differs from the value this run would bind."""
 
 
+_SPOOL_BYTES = 64 << 20  # an encoded record stays in memory up to this size before it spills to a temporary file
+_COPY_BYTES = 16 << 20
+
+
+@dataclass
+class Encoded:
+    """A record payload encoded before the append lock (Container.encode); offsets relative to its start."""
+
+    spool: Any
+    metadata_offset: int
+    n_buffers: int
+    decoded: int
+
+    def __enter__(self) -> Encoded:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.spool.close()
+
+
 @dataclass(frozen=True)
 class RecordInfo:
     """Index entry of one committed record; reading it needs no payload access.
 
     ``identity`` (32 hex digits) is unique to this committed record (a rewrite, even with the same content, gets
-    a new one): downstream stages bind it to identify their sources. ``decoded_bytes`` counts decoded array
+    a new one). It is a physical storage token only; store.protocol carries the deterministic derivation used
+    downstream. ``decoded_bytes`` counts decoded array
     buffers plus pickle metadata, not the peak memory of a consumer.
     """
 
@@ -109,6 +135,7 @@ class _Index:
 
 _INDEXES: dict[str, _Index] = {}
 _INDEXES_GUARD = threading.Lock()
+_INDEX_PID = None
 
 
 def _forget_indexes():
@@ -118,10 +145,13 @@ def _forget_indexes():
     _INDEXES_GUARD = threading.Lock()
 
 
-os.register_at_fork(after_in_child=_forget_indexes)
-
-
 def _index(path):
+    # Reset before taking inherited locks; import itself installs no process hooks.
+    global _INDEX_PID
+    pid = os.getpid()
+    if _INDEX_PID != pid:
+        _forget_indexes()
+        _INDEX_PID = pid
     with _INDEXES_GUARD:
         index = _INDEXES.get(path)
         if index is None:
@@ -145,19 +175,21 @@ class _Window:
         relative = offset - self.start
         if relative < 0 or relative + count > len(self.data):
             ahead = offset - (self.start + len(self.data))
-            self.span = (min(2 * self.span, _SCAN_WINDOW_MAX) if 0 <= ahead < self.span else _SCAN_WINDOW)
+            self.span = min(2 * self.span, _SCAN_WINDOW_MAX) if 0 <= ahead < self.span else _SCAN_WINDOW
             self.start = offset
             self.data = os.pread(self.fd, max(count, self.span), offset)
             relative = 0
             if len(self.data) < count:
                 return None
-        return self.data[relative:relative + count]
+        return self.data[relative : relative + count]
 
 
 def _file_header(kind, name, file_identity):
     name_bytes = name.encode()
-    header = _FILE_HEADER.pack(
-        _FILE_MAGIC, CONTAINER_VERSION, CONTAINER_KINDS.index(kind), file_identity, len(name_bytes)) + name_bytes
+    header = (
+        _FILE_HEADER.pack(_FILE_MAGIC, CONTAINER_VERSION, CONTAINER_KINDS.index(kind), file_identity, len(name_bytes))
+        + name_bytes
+    )
     return header + _U32.pack(zlib.crc32(header))
 
 
@@ -171,17 +203,21 @@ def _parse_file_header(window, path):
     if version != CONTAINER_VERSION:
         raise ValueError(
             f"{path}: checkpoint container format {version} is not supported by this release "
-            f"(format {CONTAINER_VERSION}); use a new output root")
+            f"(format {CONTAINER_VERSION}); use a new output root"
+        )
     rest = window.read(_FILE_HEADER.size, name_length + _U32.size)
-    if (rest is None or kind >= len(CONTAINER_KINDS)
-            or zlib.crc32(fixed + rest[:name_length]) != _U32.unpack(rest[name_length:])[0]):
+    if (
+        rest is None
+        or kind >= len(CONTAINER_KINDS)
+        or zlib.crc32(fixed + rest[:name_length]) != _U32.unpack(rest[name_length:])[0]
+    ):
         raise ValueError(f"{path}: corrupt checkpoint container header")
     header = dict(kind=CONTAINER_KINDS[kind], name=rest[:name_length].decode(), identity=file_identity.hex())
     return header, _FILE_HEADER.size + name_length + _U32.size
 
 
 def _utc(timestamp):
-    return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_record(window, offset, expected_seq, path):
@@ -189,8 +225,7 @@ def _parse_record(window, offset, expected_seq, path):
     fixed = window.read(offset, _RECORD.size)
     if fixed is None:
         return None
-    (magic, seq, written, stored, decoded, metadata_offset, n_buffers, identity,
-     key_length) = _RECORD.unpack(fixed)
+    (magic, seq, written, stored, decoded, metadata_offset, n_buffers, identity, key_length) = _RECORD.unpack(fixed)
     if magic != _RECORD_MAGIC:
         return None
     rest = window.read(offset + _RECORD.size, key_length + _U32.size)
@@ -205,17 +240,27 @@ def _parse_record(window, offset, expected_seq, path):
     if trailer is None:
         return None
     end = trailer_offset + _TRAILER.size + _U32.size
-    if (_TRAILER.unpack(trailer[:_TRAILER.size]) != (_TRAILER_MAGIC, seq, end - offset, header_crc)
-            or zlib.crc32(trailer[:_TRAILER.size]) != _U32.unpack(trailer[_TRAILER.size:])[0]):
+    if (
+        _TRAILER.unpack(trailer[: _TRAILER.size]) != (_TRAILER_MAGIC, seq, end - offset, header_crc)
+        or zlib.crc32(trailer[: _TRAILER.size]) != _U32.unpack(trailer[_TRAILER.size :])[0]
+    ):
         return None
     if seq != expected_seq:
         raise ValueError(
-            f"{path}: corrupt checkpoint container (record {seq} at byte {offset}, "
-            f"expected record {expected_seq})")
+            f"{path}: corrupt checkpoint container (record {seq} at byte {offset}, expected record {expected_seq})"
+        )
     return RecordInfo(
-        key=rest[:key_length].decode(), seq=seq, offset=offset, stored_bytes=stored, decoded_bytes=decoded,
-        written_utc=_utc(written), identity=identity.hex(), payload_offset=payload_offset,
-        metadata_offset=metadata_offset, n_buffers=n_buffers), end
+        key=rest[:key_length].decode(),
+        seq=seq,
+        offset=offset,
+        stored_bytes=stored,
+        decoded_bytes=decoded,
+        written_utc=_utc(written),
+        identity=identity.hex(),
+        payload_offset=payload_offset,
+        metadata_offset=metadata_offset,
+        n_buffers=n_buffers,
+    ), end
 
 
 def _scan(index, fd, size, path):
@@ -236,9 +281,9 @@ def _torn(fd, offset, size):
     """Whether the bytes from ``offset`` to EOF are an interrupted append.
 
     An append writes a zero header, the payload and trailer, makes them durable and only then the header, so an
-    interruption leaves a zero header (possibly cut short) or a valid header whose trailer is missing or still
-    zero (pages lost in a node crash). Anything else at the end of the complete records is damage, which must
-    not be truncated away.
+    interruption leaves a zero header, a partially committed header backed by its
+    durable trailer, or a valid header whose trailer is missing/zero after a node
+    crash. A damaged committed header retains its complete CRC and is refused.
     """
     window = _Window(fd, size)
     fixed = window.read(offset, min(_RECORD.size, size - offset))
@@ -246,10 +291,33 @@ def _torn(fd, offset, size):
         return True
     if len(fixed) < _RECORD.size:
         return False
-    *_, stored, _decoded, _metadata, _buffers, _identity, key_length = _RECORD.unpack(fixed)
+    magic, seq, _, stored, _decoded, _metadata, _buffers, _identity, key_length = _RECORD.unpack(fixed)
+    # The final small write can itself be interrupted. The durable trailer gives
+    # an independent length/sequence/CRC witness; a complete stored CRC must never
+    # turn ordinary header corruption into a truncatable tail.
+    trailer_size = _TRAILER.size + _U32.size
+    tail = window.read(size - trailer_size, trailer_size) if size - offset >= trailer_size else None
+    if magic == _RECORD_MAGIC and stored > 0 and tail is not None:
+        end_magic, end_seq, length, expected_crc = _TRAILER.unpack(tail[: -_U32.size])
+        header_size = size - offset - trailer_size - stored
+        if (
+            end_magic == _TRAILER_MAGIC
+            and end_seq == seq
+            and length == size - offset
+            and zlib.crc32(tail[: -_U32.size]) == _U32.unpack(tail[-_U32.size :])[0]
+            and _RECORD.size + _U32.size < header_size <= _RECORD.size + _MAX_KEY_BYTES + _U32.size
+        ):
+            header = window.read(offset, header_size)
+            expected = _U32.pack(expected_crc)
+            actual = header[-_U32.size :]
+            if actual != expected and any(actual == expected[:n] + bytes(_U32.size - n) for n in range(_U32.size)):
+                return True
     rest = window.read(offset + _RECORD.size, key_length + _U32.size)
-    if (fixed[:8] != _RECORD_MAGIC or rest is None
-            or zlib.crc32(fixed + rest[:key_length]) != _U32.unpack(rest[key_length:])[0]):
+    if (
+        fixed[:8] != _RECORD_MAGIC
+        or rest is None
+        or zlib.crc32(fixed + rest[:key_length]) != _U32.unpack(rest[key_length:])[0]
+    ):
         return False
     trailer_offset = offset + _RECORD.size + key_length + _U32.size + stored
     trailer = window.read(trailer_offset, _TRAILER.size + _U32.size)
@@ -301,8 +369,8 @@ class CheckpointFile:
         header = index.header
         if header is not None and (header["kind"], header["name"]) != (self.kind, self.name):
             raise ValueError(
-                f"{self.path}: holds checkpoint {header['kind']} {header['name']!r}, "
-                f"not {self.kind} {self.name!r}")
+                f"{self.path}: holds checkpoint {header['kind']} {header['name']!r}, not {self.kind} {self.name!r}"
+            )
 
     def _refresh(self, index, fd=None):
         """Bring the index up to the file's current complete records (index lock held)."""
@@ -338,56 +406,100 @@ class CheckpointFile:
         return tuple(records[key] for key in sorted(records) if key.startswith(prefix))
 
     def has(self, key) -> bool:
-        return key in self._records()
+        return self.info(key) is not None
 
     def info(self, key) -> RecordInfo | None:
-        return self._records().get(key)
+        # One lookup in the refreshed index, not a copy of it (a contig holds ~10^4 records, looked up per read).
+        index = _index(self.path)
+        with index.lock:
+            self._refresh(index)
+            return index.records.get(key)
 
-    def get(self, key, *, nthreads=None, items=None, out=None):
+    def get(self, key, *, nthreads=None, items=None, out=None, path=()):
         """Decode the latest record of ``key`` (KeyError if absent).
 
-        ``items`` selects top-level entries of a dict payload (missing ones are omitted), decoding only the
+        ``path`` descends dictionary keys; ``items`` selects entries there (missing ones are omitted), decoding only the
         arrays they use. ``out`` supplies caller-owned arrays for selected items (codec.decode_items).
         """
-        if out is not None and items is None:
-            raise ValueError("out requires selected items")
+        if (out is not None or path) and items is None:
+            raise ValueError("out and path require selected items")
         info = self.info(key)
         if info is None:
             raise KeyError(f"{self.label}: no checkpoint record {key!r}")
-        return self._read(info, self.nthreads if nthreads is None else nthreads, items, out)
+        return self._read(info, self.nthreads if nthreads is None else nthreads, items, out, path=path)
 
     @contextmanager
-    def open_arrays(self, key, items, *, nthreads=None):
+    def open_arrays(self, key, items, *, nthreads=None, path=()):
         """Read selected C-contiguous numeric arrays by bounded windows while this context is open."""
-        from .slices import ArrayReader
-
         info = self.info(key)
         if info is None:
             raise KeyError(f"{self.label}: no checkpoint record {key!r}")
+        with self._open_arrays(info, items, nthreads=nthreads, path=path) as reader:
+            yield reader
+
+    @contextmanager
+    def _open_arrays(self, info, items, *, nthreads=None, path=()):
+        """Open windows against the caller's immutable record snapshot."""
+        from .slices import ArrayReader
+
         threads = codec.cpu_threads(self.nthreads if nthreads is None else nthreads)
         with open(self.path, "rb") as handle:
-            reader = ArrayReader(handle, info.payload_offset, info.payload_end,
-                                 info.payload_offset + info.metadata_offset, info.n_buffers,
-                                 tuple(items), threads, f"{self.label}:{info.key}")
+            reader = ArrayReader(
+                handle,
+                info.payload_offset,
+                info.payload_end,
+                info.payload_offset + info.metadata_offset,
+                info.n_buffers,
+                tuple(items),
+                threads,
+                f"{self.label}:{info.key}",
+                path=path,
+            )
             try:
                 yield reader
             finally:
                 reader.close()
 
-    def _read(self, info, nthreads, items=None, out=None):
+    def _read(self, info, nthreads, items=None, out=None, *, path=(), metadata_only=False):
         nthreads = codec.cpu_threads(nthreads)
         with open(self.path, "rb") as handle:
             metadata_offset = info.payload_offset + info.metadata_offset
             if items is None:
-                return codec.decode(handle, info.payload_offset, info.payload_end, metadata_offset,
-                                    info.n_buffers, nthreads)
-            return codec.decode_items(handle, info.payload_offset, info.payload_end, metadata_offset,
-                                      info.n_buffers, tuple(items), nthreads, f"{self.label}:{info.key}", out=out)
+                return codec.decode(
+                    handle, info.payload_offset, info.payload_end, metadata_offset, info.n_buffers, nthreads
+                )
+            return codec.decode_items(
+                handle,
+                info.payload_offset,
+                info.payload_end,
+                metadata_offset,
+                info.n_buffers,
+                tuple(items),
+                nthreads,
+                f"{self.label}:{info.key}",
+                out=out,
+                path=path,
+                metadata_only=metadata_only,
+            )
+
+    def encode(self, payload, *, nthreads=None, clevel=None) -> Encoded:
+        """``payload`` encoded for an append (Encoded, a context manager). Writers encode before they take the
+        append lock: compression is the costly part of an append, and under the lock every writer of a container
+        (a contig's selection blocks, say) waited for the others' compression."""
+        nthreads = codec.cpu_threads(self.nthreads if nthreads is None else nthreads)
+        clevel = self.clevel if clevel is None else int(clevel)
+        spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_BYTES, mode="w+b")
+        try:
+            metadata_offset, n_buffers, decoded = codec.encode(spool, payload, nthreads, clevel)
+        except BaseException:
+            spool.close()
+            raise
+        return Encoded(spool, metadata_offset, n_buffers, decoded)
 
     def put(self, key, payload, *, nthreads=None, clevel=None) -> RecordInfo:
         """Append a record superseding any earlier ``key``; return its RecordInfo (durable on return)."""
-        with self._append_lock() as (fd, index):
-            return self._append(fd, index, key, payload, nthreads, clevel)
+        with self.encode(payload, nthreads=nthreads, clevel=clevel) as encoded, self._append_lock() as (fd, index):
+            return self._append(fd, index, key, encoded, None, None)
 
     def put_once(self, key, payload, *, nthreads=None):
         """Bind ``key`` to a JSON-compatible payload, exactly once; return the bound payload.
@@ -396,15 +508,16 @@ class CheckpointFile:
         ``payload`` as canonical JSON, else CheckpointMismatch.
         """
         expected = canonical_json(payload)
-        with self._append_lock() as (fd, index):
+        with self.encode(payload, nthreads=nthreads) as encoded, self._append_lock() as (fd, index):
             existing = index.records.get(key)
             if existing is None:
-                self._append(fd, index, key, payload, nthreads, None)
+                self._append(fd, index, key, encoded, None, None)
                 return payload
             bound = self._read(existing, 1)
         if canonical_json(bound) != expected:
             raise CheckpointMismatch(
-                f"{self.label}: checkpoint record {key!r} does not match this run; use a new output root")
+                f"{self.label}: checkpoint record {key!r} does not match this run; use a new output root"
+            )
         return bound
 
     def _create(self):
@@ -412,8 +525,8 @@ class CheckpointFile:
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
         temporary = os.path.join(
-            directory, f".{os.path.basename(self.path)}.{os.getpid()}."
-            f"{threading.get_ident()}.{os.urandom(4).hex()}.tmp")
+            directory, f".{os.path.basename(self.path)}.{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}.tmp"
+        )
         fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
         try:
             try:
@@ -447,10 +560,15 @@ class CheckpointFile:
                         if not _torn(fd, index.end, size):
                             raise ValueError(
                                 f"{self.path}: corrupt checkpoint container at byte {index.end} "
-                                "(not an interrupted append); refusing to truncate")
+                                "(not an interrupted append); refusing to truncate"
+                            )
                         os.ftruncate(fd, index.end)
-                        print(f"[Checkpoint] WARNING: {self.path}: discarded an incomplete record "
-                              f"({size - index.end} bytes) left by an interrupted writer", flush=True)
+                        warnings.warn(
+                            f"{self.path}: discarded an incomplete record "
+                            f"({size - index.end} bytes) left by an interrupted writer",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
                 yield fd, index
             finally:
                 os.close(fd)  # also releases the flock
@@ -470,13 +588,30 @@ class CheckpointFile:
             # interrupted append, _torn).
             handle.seek(offset)
             handle.write(bytes(payload_offset - offset))
-            metadata_offset, n_buffers, decoded = codec.encode(handle, payload, nthreads, clevel)
+            if isinstance(payload, Encoded):
+                payload.spool.seek(0)
+                shutil.copyfileobj(payload.spool, handle, _COPY_BYTES)
+                metadata_offset = payload_offset + payload.metadata_offset
+                n_buffers, decoded = payload.n_buffers, payload.decoded
+            else:
+                metadata_offset, n_buffers, decoded = codec.encode(handle, payload, nthreads, clevel)
             stored = handle.tell() - payload_offset
             written = time.time()
             identity = os.urandom(16)
-            header = _RECORD.pack(
-                _RECORD_MAGIC, seq, written, stored, decoded, metadata_offset - payload_offset, n_buffers,
-                identity, len(key_bytes)) + key_bytes
+            header = (
+                _RECORD.pack(
+                    _RECORD_MAGIC,
+                    seq,
+                    written,
+                    stored,
+                    decoded,
+                    metadata_offset - payload_offset,
+                    n_buffers,
+                    identity,
+                    len(key_bytes),
+                )
+                + key_bytes
+            )
             header_crc = zlib.crc32(header)
             end = payload_offset + stored + _TRAILER.size + _U32.size
             trailer = _TRAILER.pack(_TRAILER_MAGIC, seq, end - offset, header_crc)
@@ -489,9 +624,17 @@ class CheckpointFile:
             handle.flush()
         os.fsync(fd)
         info = RecordInfo(
-            key=key_bytes.decode(), seq=seq, offset=offset, stored_bytes=stored, decoded_bytes=decoded,
-            written_utc=_utc(written), identity=identity.hex(), payload_offset=payload_offset,
-            metadata_offset=metadata_offset - payload_offset, n_buffers=n_buffers)
+            key=key_bytes.decode(),
+            seq=seq,
+            offset=offset,
+            stored_bytes=stored,
+            decoded_bytes=decoded,
+            written_utc=_utc(written),
+            identity=identity.hex(),
+            payload_offset=payload_offset,
+            metadata_offset=metadata_offset - payload_offset,
+            n_buffers=n_buffers,
+        )
         # Absolute, not incremental: a reader thread of this process may have indexed the new record already
         # (its scan holds only index.lock).
         with index.lock:
@@ -499,3 +642,6 @@ class CheckpointFile:
             index.next_seq = seq + 1
             index.end = end
         return info
+
+
+__all__ = ["CheckpointMismatch", "RecordInfo", "CheckpointFile", "CONTAINER_KINDS"]

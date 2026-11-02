@@ -7,12 +7,15 @@ Inference never reads the truth. Records (prefix ``simulation``, an input step, 
 * contig ``simulation/reads``: positions int64[L], counts int32[N, L, 2] of the analysed samples;
 * contig ``simulation/truth``: :class:`ContigTruth`.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
 
+from ..contracts.roles import freeze_record_arrays, record_field, require_schema, schema_field
+from ..core.errors import InputError
 from .pedigree import PedigreeTable
 
 MANIFEST = "simulation/manifest"
@@ -33,29 +36,48 @@ class SimulationManifest:
     identity it was made for.
     """
 
-    state: str
-    requested_seed: int | None
-    seed: int
-    contigs: tuple[str, ...]
-    identity: dict
-    sample_ids: tuple[str, ...] = ()
-    observed: PedigreeTable | None = None
-    generated: PedigreeTable | None = None
+    state: str = record_field("state", axes=(), units="1", dtype="str")
+    requested_seed: int | None = record_field("obs", axes=(), units="1", dtype="int | None")
+    seed: int = record_field("obs", axes=(), units="1", dtype="int")
+    contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    identity: dict = record_field("diagnostic", axes=(), units="1", dtype="mapping")
+    sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]", default=())
+    observed: PedigreeTable | None = record_field("obs", axes=(), units="1", dtype="PedigreeTable | None", default=None)
+    generated: PedigreeTable | None = record_field(
+        "obs", axes=(), units="1", dtype="PedigreeTable | None", default=None
+    )
 
     def record(self) -> dict:
-        return dict(schema=SCHEMA, state=self.state, requested_seed=self.requested_seed, seed=self.seed,
-                    contigs=list(self.contigs), identity=self.identity, sample_ids=list(self.sample_ids),
-                    observed=None if self.observed is None else self.observed.record(),
-                    generated=None if self.generated is None else self.generated.record())
+        return dict(
+            schema=SCHEMA,
+            state=self.state,
+            requested_seed=self.requested_seed,
+            seed=self.seed,
+            contigs=list(self.contigs),
+            identity=self.identity,
+            sample_ids=list(self.sample_ids),
+            observed=None if self.observed is None else self.observed.record(),
+            generated=None if self.generated is None else self.generated.record(),
+        )
 
     @classmethod
-    def from_record(cls, record) -> "SimulationManifest":
-        return cls(state=record["state"], requested_seed=record["requested_seed"], seed=record["seed"],
-                   contigs=tuple(record["contigs"]), identity=record["identity"],
-                   sample_ids=tuple(record["sample_ids"]),
-                   observed=None if record["observed"] is None else PedigreeTable.from_record(record["observed"]),
-                   generated=None if record["generated"] is None
-                   else PedigreeTable.from_record(record["generated"]))
+    def from_record(cls, record) -> SimulationManifest:
+        require_schema(record, SCHEMA)
+        return cls(
+            state=record["state"],
+            requested_seed=record["requested_seed"],
+            seed=record["seed"],
+            contigs=tuple(record["contigs"]),
+            identity=record["identity"],
+            sample_ids=tuple(record["sample_ids"]),
+            observed=None if record["observed"] is None else PedigreeTable.from_record(record["observed"]),
+            generated=None if record["generated"] is None else PedigreeTable.from_record(record["generated"]),
+        )
+
+    schema: int = schema_field(SCHEMA)
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
 
 
 @dataclass(frozen=True)
@@ -68,11 +90,14 @@ class TruthPainting:
     ContigTruth.founder_haplotypes.
     """
 
-    offsets: np.ndarray
-    start: np.ndarray
-    end: np.ndarray
-    hap1: np.ndarray
-    hap2: np.ndarray
+    offsets: np.ndarray = record_field("obs", axes=("N+1",), units="index", dtype="int64")
+    start: np.ndarray = record_field("obs", axes=("chunks",), units="bp", dtype="int64")
+    end: np.ndarray = record_field("obs", axes=("chunks",), units="bp", dtype="int64")
+    hap1: np.ndarray = record_field("obs", axes=("chunks",), units="index", dtype="int64")
+    hap2: np.ndarray = record_field("obs", axes=("chunks",), units="index", dtype="int64")
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
 
 
 @dataclass(frozen=True)
@@ -84,13 +109,16 @@ class TruthCrossovers:
     founders. Gamete g's crossover positions (bp, float) are positions[offsets[g]:offsets[g + 1]].
     """
 
-    child_index: np.ndarray
-    child: tuple[str, ...]
-    parent: tuple[str, ...]
-    parent_slot: np.ndarray
-    cohort_index: np.ndarray
-    offsets: np.ndarray
-    positions: np.ndarray
+    child_index: np.ndarray = record_field("obs", axes=("gametes",), units="index", dtype="int64")
+    child: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    parent: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    parent_slot: np.ndarray = record_field("obs", axes=("gametes",), units="index", dtype="int8")
+    cohort_index: np.ndarray = record_field("obs", axes=("gametes",), units="index", dtype="int64")
+    offsets: np.ndarray = record_field("obs", axes=("gametes+1",), units="index", dtype="int64")
+    positions: np.ndarray = record_field("obs", axes=("crossovers",), units="bp", dtype="float64")
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
 
 
 @dataclass(frozen=True)
@@ -101,12 +129,17 @@ class ContigTruth:
     samples' (maternal, paternal) alleles; painting, crossovers: as their types.
     """
 
-    sample_ids: tuple[str, ...]
-    positions: np.ndarray
-    founder_haplotypes: np.ndarray
-    alleles: np.ndarray
-    painting: TruthPainting
-    crossovers: TruthCrossovers
+    sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
+    positions: np.ndarray = record_field("obs", axes=("L",), units="bp", dtype="int64")
+    founder_haplotypes: np.ndarray = record_field("obs", axes=("F", "L"), units="1", dtype="int8")
+    alleles: np.ndarray = record_field("obs", axes=("N", "L", "2"), units="1", dtype="int8")
+    painting: TruthPainting = record_field("obs", axes=(), units="1", dtype="TruthPainting")
+    crossovers: TruthCrossovers = record_field("obs", axes=(), units="1", dtype="TruthCrossovers")
+
+    schema: int = schema_field(SCHEMA)
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
 
 
 def truth_painting(ancestry) -> TruthPainting:
@@ -128,8 +161,7 @@ def truth_painting(ancestry) -> TruthPainting:
                 continue
             middle = (start + end) / 2
             owners = []
-            for starts_h, ends_h, segments in ((first_starts, first_ends, first),
-                                               (second_starts, second_ends, second)):
+            for starts_h, ends_h, segments in ((first_starts, first_ends, first), (second_starts, second_ends, second)):
                 owner = -1
                 index = np.searchsorted(starts_h, middle, side="right") - 1
                 if 0 <= index < len(starts_h) and starts_h[index] <= start and ends_h[index] >= end:
@@ -140,9 +172,13 @@ def truth_painting(ancestry) -> TruthPainting:
             hap1s.append(owners[0])
             hap2s.append(owners[1])
         offsets.append(len(starts))
-    return TruthPainting(offsets=np.asarray(offsets, np.int64), start=np.asarray(starts, np.int64),
-                         end=np.asarray(ends, np.int64), hap1=np.asarray(hap1s, np.int64),
-                         hap2=np.asarray(hap2s, np.int64))
+    return TruthPainting(
+        offsets=np.asarray(offsets, np.int64),
+        start=np.asarray(starts, np.int64),
+        end=np.asarray(ends, np.int64),
+        hap1=np.asarray(hap1s, np.int64),
+        hap2=np.asarray(hap2s, np.int64),
+    )
 
 
 def truth_crossovers(gametes, child_rows, child_names, cohort_of_row) -> TruthCrossovers:
@@ -150,51 +186,58 @@ def truth_crossovers(gametes, child_rows, child_names, cohort_of_row) -> TruthCr
 
     child_rows: {generated row: analysed index}; rows not analysed are left out.
     """
-    rows = [(child_rows[row], child_names[row], parent, slot, cohort_of_row[row] - 1, positions)
-            for row, slot, parent, positions in gametes if row in child_rows]
+    rows = [
+        (child_rows[row], child_names[row], parent, slot, cohort_of_row[row] - 1, positions)
+        for row, slot, parent, positions in gametes
+        if row in child_rows
+    ]
     lengths = [len(row[5]) for row in rows]
     return TruthCrossovers(
         child_index=np.asarray([row[0] for row in rows], np.int64),
-        child=tuple(row[1] for row in rows), parent=tuple(row[2] for row in rows),
+        child=tuple(row[1] for row in rows),
+        parent=tuple(row[2] for row in rows),
         parent_slot=np.asarray([row[3] for row in rows], np.int8),
         cohort_index=np.asarray([row[4] for row in rows], np.int64),
         offsets=np.concatenate(([0], np.cumsum(lengths))).astype(np.int64),
-        positions=(np.concatenate([row[5] for row in rows]).astype(np.float64) if rows
-                   else np.empty(0, np.float64)))
+        positions=(np.concatenate([row[5] for row in rows]).astype(np.float64) if rows else np.empty(0, np.float64)),
+    )
 
 
-def save_truth(file, truth: ContigTruth, *, nthreads=None):
-    file.put(TRUTH, dict(schema=SCHEMA, sample_ids=truth.sample_ids, positions=truth.positions,
-                         founder_haplotypes=truth.founder_haplotypes, alleles=truth.alleles,
-                         painting=truth.painting.__dict__, crossovers=truth.crossovers.__dict__),
-             nthreads=nthreads)
+def truth_record(truth: ContigTruth) -> dict:
+    """Encode the schema-1 truth payload without I/O or changing array ownership."""
+    return dict(
+        schema=SCHEMA,
+        sample_ids=truth.sample_ids,
+        positions=truth.positions,
+        founder_haplotypes=truth.founder_haplotypes,
+        alleles=truth.alleles,
+        painting=truth.painting.__dict__,
+        crossovers=truth.crossovers.__dict__,
+    )
 
 
-def load(file, *, nthreads=None) -> ContigTruth:
-    """A contig's truth (evaluation only)."""
-    payload = file.get(TRUTH, nthreads=nthreads)
-    return ContigTruth(sample_ids=tuple(payload["sample_ids"]), positions=payload["positions"],
-                       founder_haplotypes=payload["founder_haplotypes"], alleles=payload["alleles"],
-                       painting=TruthPainting(**payload["painting"]),
-                       crossovers=TruthCrossovers(**payload["crossovers"]))
-
-
-def save_reads(file, sample_ids, positions, counts, *, nthreads=None):
-    file.put(READS, dict(schema=SCHEMA, sample_ids=tuple(sample_ids), positions=np.asarray(positions, np.int64),
-                         counts=np.ascontiguousarray(counts, dtype=np.int32)), nthreads=nthreads)
-
-
-def load_reads(file, *, nthreads=None) -> dict:
-    return file.get(READS, nthreads=nthreads)
-
-
-def load_manifest(store) -> SimulationManifest | None:
-    return SimulationManifest.from_record(store.run.get(MANIFEST)) if store.run.has(MANIFEST) else None
+def truth_from_record(payload: dict) -> ContigTruth:
+    """Decode schema-1 truth after the boundary reader has checked publication identity."""
+    require_schema(payload, SCHEMA)
+    return ContigTruth(
+        sample_ids=tuple(payload["sample_ids"]),
+        positions=payload["positions"],
+        founder_haplotypes=payload["founder_haplotypes"],
+        alleles=payload["alleles"],
+        painting=TruthPainting(**payload["painting"]),
+        crossovers=TruthCrossovers(**payload["crossovers"]),
+    )
 
 
 def truth_pedigree_table(manifest: SimulationManifest) -> tuple[list[str], list[list[str]]]:
     """Rows of OUTPUT/simulation/truth_pedigree.csv: the analysed samples and their true parents."""
     table = manifest.observed
+    if table is None:
+        raise InputError("simulation manifest has no observed pedigree")
     header = ["sample", "cohort", "parent1", "parent2"]
-    return header, [[sample, f"F{cohort}", first, second] for sample, cohort, first, second in
-                    zip(table.samples, table.cohorts, table.parent1, table.parent2)]
+    return header, [
+        [sample, f"F{cohort}", first, second]
+        for sample, cohort, first, second in zip(
+            table.samples, table.cohorts, table.parent1, table.parent2, strict=False
+        )
+    ]

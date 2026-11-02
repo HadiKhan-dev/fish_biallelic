@@ -4,14 +4,14 @@ Only metadata is decoded at open. A gather reads contiguous sample rows at selec
 axes). Blosc2's partial decompression writes the requested bytes; it never materialises a whole raw buffer group.
 The compressed-chunk cache is bounded, shared by the selected arrays, and discarded when the reader closes.
 """
+
 from __future__ import annotations
 
 import bisect
-from collections import OrderedDict
 import tempfile
 import zlib
+from collections import OrderedDict
 
-import blosc2
 import numpy as np
 
 from . import codec
@@ -35,6 +35,8 @@ class WindowArray:
 
     def gather(self, samples, columns):
         """Contiguous sample slice x increasing column indices x all trailing axes, in C order."""
+        if self.reader.closed:
+            raise ValueError("window reader is closed")
         start, stop, step = samples.indices(self.shape[0])
         if step != 1:
             raise ValueError("window reads require a contiguous sample slice")
@@ -65,13 +67,15 @@ class ArrayReader:
     callers parallelise numerical work after gathering, without nested I/O teams.
     """
 
-    def __init__(self, handle, start, end, metadata_offset, expected_buffers, keys, nthreads, context):
+    def __init__(self, handle, start, end, metadata_offset, expected_buffers, keys, nthreads, context, *, path=()):
         self.handle, self.context = handle, context
+        self.closed = False
         self.groups, self.cache, self.cache_bytes = [], OrderedDict(), 0
         handle.seek(start)
         buffers, locations = [], []
         for descriptors, offsets, total, n_chunks in codec._buffer_group_headers(
-                handle, metadata_offset, expected_buffers):
+            handle, metadata_offset, expected_buffers
+        ):
             chunks = codec._chunk_layout(handle, total, n_chunks, metadata_offset, "buffer group")
             raw_starts, position = [], 0
             for chunk in chunks:
@@ -79,20 +83,25 @@ class ArrayReader:
                 position += chunk[0]
             group = len(self.groups)
             self.groups.append((chunks, raw_starts))
-            for (size, _readonly), offset in zip(descriptors, offsets):
+            for (size, _readonly), offset in zip(descriptors, offsets, strict=False):
                 buffers.append(np.empty(size, dtype=np.uint8))
                 locations.append((group, offset))
         with tempfile.SpooledTemporaryFile(max_size=codec._METADATA_SPOOL_BYTES, mode="w+b") as metadata:
             codec._spool_metadata(handle, end, nthreads, metadata)
-            payload = codec._unpickle(metadata, buffers)
-        spans = sorted((buffer.ctypes.data, buffer.nbytes, index)
-                       for index, buffer in enumerate(buffers) if buffer.nbytes)
+            payload = codec._select_path(codec._unpickle(metadata, buffers), path, context)
+        spans = sorted(
+            (buffer.ctypes.data, buffer.nbytes, index) for index, buffer in enumerate(buffers) if buffer.nbytes
+        )
         starts = [address for address, _, _ in spans]
         self.arrays = {}
         for key in keys:
             array = payload[key]
-            if (not isinstance(array, np.ndarray) or array.dtype.hasobject or array.ndim < 2
-                    or not array.flags.c_contiguous):
+            if (
+                not isinstance(array, np.ndarray)
+                or array.dtype.hasobject
+                or array.ndim < 2
+                or not array.flags.c_contiguous
+            ):
                 raise TypeError(f"{context}: window item {key!r} must be a C-contiguous numeric array with >=2 axes")
             group, offset = None, 0
             if array.nbytes:
@@ -108,10 +117,14 @@ class ArrayReader:
         return self.arrays[key]
 
     def close(self):
+        self.closed = True
         self.cache.clear()
         self.cache_bytes = 0
 
     def _chunk(self, group, index):
+        # Compression libraries initialize process settings; load them only at the I/O boundary.
+        import blosc2
+
         key = (group, index)
         if key in self.cache:
             self.cache.move_to_end(key)
@@ -130,9 +143,11 @@ class ArrayReader:
             raise ValueError(f"{self.context}: corrupt checkpoint: window chunk size mismatch")
         # codec._compress writes eight-byte items, except odd-sized groups which use bytes.
         typesize = 8 if raw_size % 8 == 0 else 1
-        chunk = blosc2.SChunk(chunksize=raw_size,
-                             cparams=blosc2.CParams(typesize=typesize, nthreads=1, codec=codec.CODEC),
-                             dparams=blosc2.DParams(nthreads=1))
+        chunk = blosc2.SChunk(
+            chunksize=raw_size,
+            cparams=blosc2.CParams(typesize=typesize, nthreads=1, codec=blosc2.Codec.ZSTD),
+            dparams=blosc2.DParams(nthreads=1),
+        )
         chunk.append_chunk(blob)
         self.cache[key] = (chunk, compressed_size)
         self.cache_bytes += compressed_size
@@ -147,14 +162,17 @@ class ArrayReader:
             left, right = start - starts[index], end - starts[index]
             chunk = self._chunk(group, index)
             size = chunk.typesize
-            target = destination[offset:offset + end - start]
+            target = destination[offset : offset + end - start]
             if left % size == 0 and right % size == 0:
                 chunk.get_slice(left // size, right // size, out=target)
             else:
                 # Byte masks can start/end inside the codec's eight-byte items.
                 raw = chunk.get_slice(left // size, (right + size - 1) // size)
-                target[:] = memoryview(raw)[left % size:left % size + len(target)]
+                target[:] = memoryview(raw)[left % size : left % size + len(target)]
                 del raw
             del chunk
             offset += end - start
             start = end
+
+
+__all__ = ["WindowArray", "ArrayReader", "CACHE_BYTES"]

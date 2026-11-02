@@ -1,0 +1,6436 @@
+{
+  "units": [
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS01",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps01",
+      "specs": [
+        "WP_PE1 §4.1"
+      ],
+      "sources": [
+        "stages/pedigree/prepare.py",
+        "science/pedigree/prepare.py",
+        "science/pedigree/scoring.py"
+      ],
+      "parameters": [
+        "INFORMATIVE_GL_SPREAD"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS02",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps02",
+      "specs": [
+        "WP_PE1 §4.2"
+      ],
+      "sources": [
+        "science/pedigree/prepare.py"
+      ],
+      "parameters": [
+        "markers_per_bin"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS03",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps03",
+      "specs": [
+        "WP_PE1 §4.3"
+      ],
+      "sources": [
+        "science/pedigree/prepare.py"
+      ],
+      "parameters": [
+        "markers_per_information_block",
+        "effective_markers_per_information_block"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS04",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps04",
+      "specs": [
+        "WP_PE1 §4.4"
+      ],
+      "sources": [
+        "science/pedigree/prepare.py",
+        "science/pedigree/scoring.py"
+      ],
+      "parameters": [
+        "SELECTOR_SWITCH_FLOOR",
+        "rate_is_measured",
+        "unit_morgans"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS05",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps05",
+      "specs": [
+        "WP_PE1 §4.5"
+      ],
+      "sources": [
+        "stages/pedigree/prepare.py",
+        "science/pedigree/sources.py",
+        "science/pedigree/prepare.py"
+      ],
+      "parameters": [
+        "robustness_epsilon",
+        "emission_log_floor"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS06",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps06",
+      "specs": [
+        "WP_PE1 §4.6"
+      ],
+      "sources": [
+        "science/pedigree/projection.py"
+      ],
+      "parameters": [
+        "robustness_epsilon"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS07",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps07",
+      "specs": [
+        "WP_PE1 §4.7"
+      ],
+      "sources": [
+        "science/pedigree/projection.py"
+      ],
+      "parameters": [
+        "bridge_max_iterations",
+        "HALL_ULPS",
+        "HUB_MASS_TIE",
+        "release",
+        "tolerance"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS08",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps08",
+      "specs": [
+        "WP_PE1 §4.8"
+      ],
+      "sources": [
+        "science/pedigree/projection.py",
+        "science/pedigree/forward.py"
+      ],
+      "parameters": [
+        "source_gap_support_sites"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS09",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps09",
+      "specs": [
+        "WP_PE1 §4.9"
+      ],
+      "sources": [
+        "science/pedigree/forward.py"
+      ],
+      "parameters": [
+        "null_prior_samples"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS10",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps10",
+      "specs": [
+        "WP_PE1 §4.10"
+      ],
+      "sources": [
+        "science/pedigree/forward.py",
+        "science/pedigree/selective_m1.py"
+      ],
+      "parameters": [
+        "mismatch_probability",
+        "COMMON_EMISSION_CACHE_BYTES"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS11",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps11",
+      "specs": [
+        "WP_PE2 §4.1"
+      ],
+      "sources": [
+        "stages/pedigree/screen.py",
+        "science/pedigree/selective_bounds.py",
+        "science/pedigree/certificates.py"
+      ],
+      "parameters": [
+        "log_floor"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS12",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps12",
+      "specs": [
+        "WP_PE2 §4.2"
+      ],
+      "sources": [
+        "science/pedigree/selective_screen.py",
+        "science/pedigree/selective_m1.py"
+      ],
+      "parameters": [
+        "LOG_FLOOR",
+        "markers_per_information_block",
+        "information_tempering_power"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS13",
+      "classification": "Accretion",
+      "page": "methods/pedigree.md",
+      "anchor": "ps13",
+      "specs": [
+        "WP_PE2 §4.3"
+      ],
+      "sources": [
+        "science/pedigree/panel.py"
+      ],
+      "parameters": [
+        "rank_weight",
+        "chromosome_contamination",
+        "maximum_contig_weight_ratio",
+        "information_tempering_power"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS14",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps14",
+      "specs": [
+        "WP_PE2 §4.4"
+      ],
+      "sources": [
+        "science/pedigree/pair_bound.py"
+      ],
+      "parameters": [
+        "pair_bound_high_mass"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS15",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps15",
+      "specs": [
+        "WP_PE2 §4.5"
+      ],
+      "sources": [
+        "stages/pedigree/screen.py",
+        "science/pedigree/panel.py"
+      ],
+      "parameters": [
+        "pair_relevance_margin"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS16",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps16",
+      "specs": [
+        "WP_PE3 §4.1"
+      ],
+      "sources": [
+        "stages/pedigree/scores.py",
+        "science/pedigree/scoring.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS17",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps17",
+      "specs": [
+        "WP_PE3 §4.2"
+      ],
+      "sources": [
+        "science/pedigree/exposure.py"
+      ],
+      "parameters": [
+        "unit_morgans",
+        "report_edge_coverage",
+        "report_pair_explainability"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS18",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps18",
+      "specs": [
+        "WP_PE3 §4.3"
+      ],
+      "sources": [
+        "science/pedigree/junctions.py"
+      ],
+      "parameters": [
+        "junction_unreachable_state",
+        "junction_unreachable_count"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS19",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps19",
+      "specs": [
+        "WP_PE3 §4.4"
+      ],
+      "sources": [
+        "stages/pedigree/scores.py",
+        "science/pedigree/junctions.py",
+        "science/pedigree/scoring.py"
+      ],
+      "parameters": [
+        "trace"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS20",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps20",
+      "specs": [
+        "WP_PE2 §4.6"
+      ],
+      "sources": [
+        "stages/pedigree/exclusion.py",
+        "science/pedigree/exclusion.py"
+      ],
+      "parameters": [
+        "alpha",
+        "genotype_replacement_probability",
+        "bet_sizes",
+        "window_widths_bp"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS21",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps21",
+      "specs": [
+        "WP_PE2 §4.7"
+      ],
+      "sources": [
+        "science/pedigree/exclusion_bound.py",
+        "science/pedigree/run.py"
+      ],
+      "parameters": [
+        "guard"
+      ]
+    },
+    {
+      "area": "pedigree-scoring",
+      "unit": "PS22",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "ps22",
+      "specs": [
+        "WP_PE1 §7; WP_PE2 §7; WP_PE3 §7"
+      ],
+      "sources": [
+        "stages/pedigree/exclusion.py",
+        "stages/pedigree/prepare.py",
+        "science/pedigree/run.py",
+        "stages/pedigree/records.py",
+        "contracts/pedigree.py"
+      ],
+      "parameters": [
+        "preparation",
+        "scoring",
+        "exclusion"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD01",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd01",
+      "specs": [
+        "WP_PE4 §4.1"
+      ],
+      "sources": [
+        "contracts/pedigree.py",
+        "science/pedigree/api.py",
+        "science/pedigree/eligibility.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD02",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd02",
+      "specs": [
+        "WP_PE4 §4.2"
+      ],
+      "sources": [
+        "science/pedigree/stacking.py",
+        "stages/pedigree/records.py",
+        "contracts/pedigree.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD03",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd03",
+      "specs": [
+        "WP_PE4 §4.3"
+      ],
+      "sources": [
+        "science/pedigree/calibration.py",
+        "stages/pedigree/execution.py"
+      ],
+      "parameters": [
+        "evidence_calibration",
+        "state_priors"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD04",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd04",
+      "specs": [
+        "WP_PE4 §4.4"
+      ],
+      "sources": [
+        "science/pedigree/selection.py"
+      ],
+      "parameters": [
+        "m0_contamination_probability"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD05",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd05",
+      "specs": [
+        "WP_PE4 §4.5"
+      ],
+      "sources": [
+        "science/pedigree/selection.py"
+      ],
+      "parameters": [
+        "minimum_edge_exposed_bins",
+        "minimum_pair_exposed_bins",
+        "minimum_exposed_fraction",
+        "minimum_exposed_units",
+        "unit_morgans",
+        "rate_is_measured",
+        "preparation"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD06",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd06",
+      "specs": [
+        "WP_PE3 §4.5"
+      ],
+      "sources": [
+        "science/pedigree/orientation.py"
+      ],
+      "parameters": [
+        "chromosome_error_probability",
+        "pair_failure_probability"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD07",
+      "classification": "Accretion",
+      "page": "methods/pedigree.md",
+      "anchor": "pd07",
+      "specs": [
+        "WP_PE3 §4.6"
+      ],
+      "sources": [
+        "science/pedigree/orientation.py"
+      ],
+      "parameters": [
+        "order_minimum_weight",
+        "order_variance_offset"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD08",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd08",
+      "specs": [
+        "WP_PE3 §4.7"
+      ],
+      "sources": [
+        "science/pedigree/family.py"
+      ],
+      "parameters": [
+        "message_passes"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD09",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd09",
+      "specs": [
+        "WP_PE3 §4.8"
+      ],
+      "sources": [
+        "science/pedigree/family.py"
+      ],
+      "parameters": [
+        "ancestry_path_budget"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD10",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd10",
+      "specs": [
+        "WP_PE3 §4.9"
+      ],
+      "sources": [
+        "science/pedigree/family.py"
+      ],
+      "parameters": [
+        "final_max_iterations",
+        "final_tolerance",
+        "final_progress_window",
+        "final_pause_budgets",
+        "retry_iterations",
+        "retry_damping"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD11",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd11",
+      "specs": [
+        "WP_PE4 §4.6"
+      ],
+      "sources": [
+        "science/pedigree/ties.py"
+      ],
+      "parameters": [
+        "contrast_ulp_factor",
+        "noise_floor"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD12",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd12",
+      "specs": [
+        "WP_PE4 §4.7"
+      ],
+      "sources": [
+        "science/pedigree/selection.py"
+      ],
+      "parameters": [
+        "state_priors"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD13",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd13",
+      "specs": [
+        "WP_PE4 §4.8"
+      ],
+      "sources": [
+        "science/pedigree/graph.py"
+      ],
+      "parameters": [
+        "graph_local_search_passes"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD14",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd14",
+      "specs": [
+        "WP_PE4 §4.9"
+      ],
+      "sources": [
+        "science/pedigree/decision.py"
+      ],
+      "parameters": [
+        "prior_sensitivity"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD15",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd15",
+      "specs": [
+        "WP_PE4 §4.10"
+      ],
+      "sources": [
+        "science/pedigree/decision.py"
+      ],
+      "parameters": [
+        "minimum_informative_units",
+        "unit_morgans"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD16",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd16",
+      "specs": [
+        "WP_PE5 §4.1"
+      ],
+      "sources": [
+        "stages/pedigree/execution.py",
+        "science/pedigree/resampling.py"
+      ],
+      "parameters": [
+        "bootstrap_replicates",
+        "bootstrap_seed"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD17",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd17",
+      "specs": [
+        "WP_PE5 §4.2"
+      ],
+      "sources": [
+        "science/pedigree/run.py",
+        "science/pedigree/resampling.py"
+      ],
+      "parameters": [
+        "minimum_exposed_units",
+        "unit_morgans"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD18",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd18",
+      "specs": [
+        "WP_PE5 §4.3"
+      ],
+      "sources": [
+        "science/pedigree/release.py"
+      ],
+      "parameters": [
+        "tier_b",
+        "tier_a",
+        "minimum_informative_units",
+        "orientation_reversal_probability"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD19",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd19",
+      "specs": [
+        "WP_PE5 §4.4"
+      ],
+      "sources": [
+        "science/pedigree/release.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD20",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd20",
+      "specs": [
+        "WP_PE5 §4.5"
+      ],
+      "sources": [
+        "science/pedigree/release.py"
+      ],
+      "parameters": [
+        "minimum_informative_units"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD21",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd21",
+      "specs": [
+        "WP_PE5 §4.6"
+      ],
+      "sources": [
+        "science/pedigree/release.py"
+      ],
+      "parameters": [
+        "support_set_coverage"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD22",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd22",
+      "specs": [
+        "WP_PE5 §4.7"
+      ],
+      "sources": [
+        "science/pedigree/count.py",
+        "science/pedigree/run.py",
+        "science/pedigree/exclusion.py"
+      ],
+      "parameters": [
+        "alpha",
+        "minimum_informative_units"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD23",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd23",
+      "specs": [
+        "WP_PE5 §4.8"
+      ],
+      "sources": [
+        "science/pedigree/guard.py"
+      ],
+      "parameters": [
+        "minimum_family",
+        "member_support",
+        "alpha"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD24",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd24",
+      "specs": [
+        "WP_PE5 §4.9"
+      ],
+      "sources": [
+        "science/pedigree/api.py",
+        "science/pedigree/slots.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD25",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd25",
+      "specs": [
+        "WP_OU2 §4.5; WP_PE5 §4.8"
+      ],
+      "sources": [
+        "outputs/reports/pedigree.py",
+        "science/pedigree/views.py"
+      ],
+      "parameters": [
+        "report_edge_coverage",
+        "report_pair_explainability",
+        "support_set_coverage"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD26",
+      "classification": "Accretion",
+      "page": "methods/pedigree.md",
+      "anchor": "pd26",
+      "specs": [
+        "WP_PE3 §4.10"
+      ],
+      "sources": [
+        "stages/pedigree/relatives.py",
+        "science/pedigree/relatives.py"
+      ],
+      "parameters": [
+        "mismatch_probability",
+        "scoring"
+      ]
+    },
+    {
+      "area": "pedigree-decision",
+      "unit": "PD27",
+      "classification": "Core",
+      "page": "methods/pedigree.md",
+      "anchor": "pd27",
+      "specs": [
+        "WP_PE5 §4.10"
+      ],
+      "sources": [
+        "contracts/pedigree.py",
+        "science/pedigree/run.py",
+        "stages/pedigree/decision.py",
+        "stages/pedigree/records.py",
+        "stages/graph.py",
+        "interface/run.py"
+      ],
+      "parameters": [
+        "evidence_calibration",
+        "reverse_conventions",
+        "preparation",
+        "scoring",
+        "panel",
+        "exposure",
+        "direction",
+        "selection",
+        "resampling",
+        "release",
+        "exclusion",
+        "guard"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U01",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u01",
+      "specs": [
+        "WP_AS6 §4.1, §5"
+      ],
+      "sources": [
+        "science/assembly/evidence.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U02",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u02",
+      "specs": [
+        "WP_AS6 §4.2"
+      ],
+      "sources": [
+        "science/assembly/run.py"
+      ],
+      "parameters": [
+        "minimum_levels",
+        "batch_size",
+        "min_boundary_informative_samples",
+        "selection"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U03",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u03",
+      "specs": [
+        "WP_AS1 §4.2, §9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/completion/crossfit.py",
+        "science/assembly/completion/parameters.py",
+        "science/assembly/completion/run.py"
+      ],
+      "parameters": [
+        "fold_seed",
+        "completion"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U04",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u04",
+      "specs": [
+        "WP_AS1 §4.3, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/completion/crossfit.py",
+        "science/assembly/completion/dosage_statistics.py",
+        "science/assembly/completion/observation.py",
+        "science/assembly/completion/support.py"
+      ],
+      "parameters": [
+        "max_iterations",
+        "minimum_iterations",
+        "elbo_absolute_tolerance",
+        "elbo_relative_tolerance",
+        "monotonic_tolerance",
+        "uniform_mix",
+        "log_floor",
+        "minimum_call_probability",
+        "minimum_carriers",
+        "UNIFORM_TOLERANCE",
+        "completion"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U05",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u05",
+      "specs": [
+        "WP_AS1 §4.4, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/completion/cavity_fill.py",
+        "science/assembly/completion/support.py"
+      ],
+      "parameters": [
+        "snps_per_bin",
+        "minimum_supporters",
+        "minimum_posterior_probability",
+        "uniform_mix",
+        "tie_tolerance",
+        "founder_identifiability_tolerance",
+        "minimum_observable_founder_separation",
+        "log_floor",
+        "completion"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U06",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u06",
+      "specs": [
+        "WP_AS1 §4.5, §9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/completion/links.py"
+      ],
+      "parameters": [
+        "minimum_pooled_informative_samples",
+        "minimum_fold_informative_samples",
+        "minimum_informative_sites_per_sample",
+        "minimum_effective_copies",
+        "minimum_fold_effective_copies",
+        "maximum_mean_cost",
+        "minimum_pooled_margin",
+        "minimum_fold_margin",
+        "minimum_original_hard_anchor_sites",
+        "tolerance",
+        "completion"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U07",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u07",
+      "specs": [
+        "WP_AS1 §4.6, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/completion/observation.py",
+        "science/assembly/completion/occupancy.py",
+        "science/assembly/completion/parameters.py",
+        "science/assembly/completion/run.py"
+      ],
+      "parameters": [
+        "minimum_abundant_sum_squared_probability",
+        "abundant_high_confidence_probability",
+        "minimum_abundant_high_confidence_carriers",
+        "minimum_rare_local_carrier_probability",
+        "minimum_rare_neighbor_carrier_probability",
+        "minimum_same_sample_continuity",
+        "minimum_rare_continuity_samples",
+        "maximum_discovery_unknown_mass",
+        "completion",
+        "occupancy"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U08",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u08",
+      "specs": [
+        "WP_AS2 §4.1, §9.1, §9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/alleles/parameters.py",
+        "science/assembly/alleles/polynomials.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U09",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u09",
+      "specs": [
+        "WP_AS2 §4.2, §9.1, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/alleles/site_posterior.py"
+      ],
+      "parameters": [
+        "MAX_EXACT_BITS",
+        "SITE_CERTAIN_NATS",
+        "SITE_BALL_CONFIGURATIONS",
+        "SITE_BALL_MINIMUM_RADIUS",
+        "SITE_SHELL_GUARD",
+        "SITE_BP_DAMPING",
+        "SITE_BP_TOLERANCE",
+        "SITE_BP_ITERATIONS",
+        "SITE_ASCENT_BACKSTOP",
+        "SITE_RECENTRE_BACKSTOP",
+        "SITE_IMPROVEMENT"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U10",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u10",
+      "specs": [
+        "WP_AS2 §4.3, §9.1, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/alleles/parameters.py",
+        "science/assembly/alleles/site_posterior.py"
+      ],
+      "parameters": [
+        "SITE_HALF_BAND"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U11",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u11",
+      "specs": [
+        "WP_AS6 §4.3"
+      ],
+      "sources": [
+        "science/assembly/hierarchy/level.py",
+        "science/assembly/hierarchy/batches.py"
+      ],
+      "parameters": [
+        "batch_size",
+        "max_sites",
+        "linker"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U12",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u12",
+      "specs": [
+        "WP_AS6 §4.4-§4.5"
+      ],
+      "sources": [
+        "science/assembly/hierarchy/batch.py",
+        "science/assembly/hierarchy/level.py"
+      ],
+      "parameters": [
+        "paths_per_endpoint",
+        "full_scores_per_kind",
+        "max_bins",
+        "tensor_budget_mb",
+        "gap_horizon_scale",
+        "recombination_tolerance",
+        "cost_scale",
+        "join"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U13",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u13",
+      "specs": [
+        "WP_AS6 §4.4-§4.5"
+      ],
+      "sources": [
+        "science/assembly/hierarchy/level.py",
+        "science/assembly/alternatives.py",
+        "science/assembly/hierarchy/batch.py"
+      ],
+      "parameters": [
+        "BRANCH_LIMIT",
+        "WIDE_CLASS_QUANTA",
+        "refinement"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U14",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u14",
+      "specs": [
+        "WP_AS4 §7, WP_AS5 §7, WP_AS6 §1, WP_AS7 §6"
+      ],
+      "sources": [
+        "core/ties.py",
+        "science/assembly/orders.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U15",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u15",
+      "specs": [
+        "WP_AS6 §4.6, §7"
+      ],
+      "sources": [
+        "stages/assembly/records.py",
+        "contracts/assembly.py",
+        "science/assembly/run.py",
+        "science/assembly/hierarchy/batch.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U16",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "u16",
+      "specs": [
+        "WP_AS6 §4.7, §9.2"
+      ],
+      "sources": [
+        "science/assembly/release.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-core",
+      "unit": "U17",
+      "classification": "Core (operational)",
+      "page": "methods/assembly.md",
+      "anchor": "u17",
+      "specs": [
+        "WP_AS6 §8; WP_AS1 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/hierarchy/costs.py",
+        "science/assembly/completion/run.py",
+        "science/assembly/hierarchy/level.py"
+      ],
+      "parameters": [
+        "BUNDLE_TASKS"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ01",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj01",
+      "specs": [
+        "WP_AS4 §4.1"
+      ],
+      "sources": [
+        "science/assembly/join/__init__.py",
+        "science/assembly/join/emissions.py",
+        "science/assembly/join/inputs.py",
+        "science/assembly/pairs.py"
+      ],
+      "parameters": [
+        "max_bins"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ02",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj02",
+      "specs": [
+        "WP_AS4 §4.1"
+      ],
+      "sources": [
+        "science/assembly/join/objective.py",
+        "science/assembly/pairs.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ03",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj03",
+      "specs": [
+        "WP_AS4 §4.2"
+      ],
+      "sources": [
+        "science/assembly/pairs.py",
+        "science/assembly/join/objective.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ04",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj04",
+      "specs": [
+        "WP_AS4 §4.2"
+      ],
+      "sources": [
+        "science/assembly/join/objective.py",
+        "science/assembly/pairs.py"
+      ],
+      "parameters": [
+        "EXPLORATORY_PENALTY",
+        "tensor_budget_mb"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ05",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj05",
+      "specs": [
+        "WP_AS3 §4.1, §9.1, §9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/linker/emissions.py",
+        "science/assembly/linker/proxies.py",
+        "science/assembly/linker/em.py"
+      ],
+      "parameters": [
+        "max_sites",
+        "robustness",
+        "linker"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ06",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj06",
+      "specs": [
+        "WP_AS3 §4.2, §4.4, §9.1, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/linker/scan.py"
+      ],
+      "parameters": [
+        "error_fraction",
+        "error_tract_bp"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ07",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj07",
+      "specs": [
+        "WP_AS3 §4.3, §9.1, §9.3-9.4 (spec40b)"
+      ],
+      "sources": [
+        "science/assembly/linker/em.py",
+        "science/assembly/linker/kernels.py"
+      ],
+      "parameters": [
+        "max_iterations",
+        "min_change",
+        "pseudo_count",
+        "min_log_probability",
+        "uniform_mix",
+        "learning_rate_decay",
+        "minimum_learning_rate"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ08",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj08",
+      "specs": [
+        "WP_AS4 §4.3"
+      ],
+      "sources": [
+        "science/assembly/join/beam.py"
+      ],
+      "parameters": [
+        "gap_horizon_scale",
+        "recombination_tolerance"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ09",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj09",
+      "specs": [
+        "WP_AS4 §4.3"
+      ],
+      "sources": [
+        "science/assembly/join/beam.py"
+      ],
+      "parameters": [
+        "paths_per_endpoint",
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ10",
+      "classification": "Accretion",
+      "page": "methods/assembly.md",
+      "anchor": "aj10",
+      "specs": [
+        "WP_AS4 §4.3"
+      ],
+      "sources": [
+        "science/assembly/join/beam.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ11",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj11",
+      "specs": [
+        "WP_AS4 §4.3"
+      ],
+      "sources": [
+        "science/assembly/join/beam.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ12",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj12",
+      "specs": [
+        "WP_AS4 §4.4"
+      ],
+      "sources": [
+        "science/assembly/join/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ13",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj13",
+      "specs": [
+        "WP_AS4 §4.9"
+      ],
+      "sources": [
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "paths_per_endpoint",
+        "POOL_QUOTA_DOUBLINGS",
+        "POOL_EXTENDED_DOUBLINGS"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ14",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj14",
+      "specs": [
+        "WP_AS4 §4.6"
+      ],
+      "sources": [
+        "science/assembly/join/diagnostics.py",
+        "science/assembly/join/moves.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "near_identity"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ15",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj15",
+      "specs": [
+        "WP_AS4 §4.5"
+      ],
+      "sources": [
+        "science/assembly/join/proposals.py"
+      ],
+      "parameters": [
+        "EXPLORATORY_PENALTY",
+        "full_scores_per_kind"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ16",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj16",
+      "specs": [
+        "WP_AS4 §4.5"
+      ],
+      "sources": [
+        "science/assembly/join/proposals.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "full_scores_per_kind"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ17",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj17",
+      "specs": [
+        "WP_AS4 §4.7"
+      ],
+      "sources": [
+        "science/assembly/join/certify.py",
+        "science/assembly/join/moves.py",
+        "science/assembly/join/pair_segments.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ18",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj18",
+      "specs": [
+        "WP_AS4 §4.7"
+      ],
+      "sources": [
+        "science/assembly/join/certify.py"
+      ],
+      "parameters": [
+        "tolerance"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ19",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj19",
+      "specs": [
+        "WP_AS4 §4.7"
+      ],
+      "sources": [
+        "science/assembly/join/splice.py",
+        "science/assembly/pairs.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ20",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj20",
+      "specs": [
+        "WP_AS4 §4.8"
+      ],
+      "sources": [
+        "science/assembly/join/moves.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ21",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj21",
+      "specs": [
+        "WP_AS5 §4.5"
+      ],
+      "sources": [
+        "science/assembly/join/count_step.py",
+        "science/assembly/join/diagnostics.py"
+      ],
+      "parameters": [
+        "near_identity",
+        "cost_scale",
+        "shadow_combinations"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ22",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj22",
+      "specs": [
+        "WP_AS5 §4.6"
+      ],
+      "sources": [
+        "science/assembly/join/count_step.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ23",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj23",
+      "specs": [
+        "WP_AS5 §4.7"
+      ],
+      "sources": [
+        "science/assembly/count_rule/parameters.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "ranked_refits",
+        "BIRTH_SETS"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ24",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj24",
+      "specs": [
+        "WP_AS5 §4.8"
+      ],
+      "sources": [
+        "science/assembly/count_rule/criterion.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ25",
+      "classification": "Accretion",
+      "page": "methods/assembly.md",
+      "anchor": "aj25",
+      "specs": [
+        "WP_AS4 §4.9; WP_AS5 §4.9"
+      ],
+      "sources": [
+        "science/assembly/count_rule/parameters.py",
+        "science/assembly/join/count_step.py",
+        "science/assembly/join/diagnostics.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "SWEEP_BACKSTOP_BASE",
+        "SWEEP_BACKSTOP_PER_ROW",
+        "COUNT_BACKSTOP_BASE",
+        "COUNT_BACKSTOP_PER_ROW",
+        "POOL_EXTENDED_DOUBLINGS"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ26",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj26",
+      "specs": [
+        "WP_AS4 §4.9"
+      ],
+      "sources": [
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "paths_per_endpoint",
+        "POOL_QUOTA_DOUBLINGS",
+        "POOL_EXTENDED_DOUBLINGS"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ27",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj27",
+      "specs": [
+        "WP_AS4 §4.10"
+      ],
+      "sources": [
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ28",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj28",
+      "specs": [
+        "WP_AS4 §4.11"
+      ],
+      "sources": [
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ29",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj29",
+      "specs": [
+        "WP_AS4 §4.11"
+      ],
+      "sources": [
+        "science/assembly/join/__init__.py",
+        "science/assembly/join/alternatives.py",
+        "science/assembly/join/search.py"
+      ],
+      "parameters": [
+        "MAX_BRANCHES",
+        "join"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ30",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj30",
+      "specs": [
+        "WP_AS5 §4.1"
+      ],
+      "sources": [
+        "science/assembly/count_rule/__init__.py",
+        "science/assembly/count_rule/criterion.py",
+        "science/assembly/count_rule/parameters.py"
+      ],
+      "parameters": [
+        "cost_scale",
+        "TOP_SAMPLES"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ31",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj31",
+      "specs": [
+        "WP_AS5 §4.2"
+      ],
+      "sources": [
+        "science/assembly/count_rule/criterion.py"
+      ],
+      "parameters": [
+        "bootstrap_resamples",
+        "bootstrap_level"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ32",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj32",
+      "specs": [
+        "WP_AS5 §4.3"
+      ],
+      "sources": [
+        "science/assembly/count_rule/geometry.py",
+        "science/assembly/join/count_step.py"
+      ],
+      "parameters": [
+        "near_identity"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ33",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj33",
+      "specs": [
+        "WP_AS5 §4.4"
+      ],
+      "sources": [
+        "science/assembly/count_rule/geometry.py",
+        "science/assembly/join/count_step.py"
+      ],
+      "parameters": [
+        "shadow_combinations"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ34",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj34",
+      "specs": [
+        "WP_AS5 §4.10"
+      ],
+      "sources": [
+        "science/assembly/count_rule/criterion.py"
+      ],
+      "parameters": [
+        "tolerance"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ35",
+      "classification": "Accretion",
+      "page": "methods/assembly.md",
+      "anchor": "aj35",
+      "specs": [
+        "WP_AS5 §4.11"
+      ],
+      "sources": [
+        "science/assembly/count_rule/__init__.py",
+        "science/assembly/count_rule/parameters.py",
+        "science/assembly/count_rule/shadow_bounds.py"
+      ],
+      "parameters": [
+        "shadow_combinations"
+      ]
+    },
+    {
+      "area": "assembly-joins",
+      "unit": "AJ36",
+      "classification": "Core",
+      "page": "methods/assembly.md",
+      "anchor": "aj36",
+      "specs": [
+        "WP_AS6 §4.6"
+      ],
+      "sources": [
+        "stages/assembly/records.py",
+        "science/assembly/hierarchy/batch.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI01",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di01",
+      "specs": [
+        "WP_DI3 §4.5; WP_DI2 §4.1 (natural K ceiling)"
+      ],
+      "sources": [
+        "science/discovery/__init__.py",
+        "stages/discovery/tasks.py",
+        "science/discovery/run.py",
+        "science/discovery/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI02",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di02",
+      "specs": [
+        "WP_DI1 §4.1; whole_class_cut semantics WP_DI2 §4 (file panel.py, DI3)"
+      ],
+      "sources": [
+        "science/discovery/search.py",
+        "core/ties.py",
+        "science/discovery/panel.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI03",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di03",
+      "specs": [
+        "WP_DI1 §4.2"
+      ],
+      "sources": [
+        "science/discovery/api.py",
+        "science/discovery/fixed_k/workspace.py"
+      ],
+      "parameters": [
+        "unknown_copy_penalty",
+        "snps_per_bin",
+        "release"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI04",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di04",
+      "specs": [
+        "WP_DI1 §4.3"
+      ],
+      "sources": [
+        "science/discovery/fixed_k/assign.py",
+        "science/discovery/fixed_k/fit.py"
+      ],
+      "parameters": [
+        "switch_penalty",
+        "snps_per_bin"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI05",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di05",
+      "specs": [
+        "WP_DI1 §4.4"
+      ],
+      "sources": [
+        "science/discovery/fixed_k/update.py",
+        "science/discovery/fixed_k/fit.py"
+      ],
+      "parameters": [
+        "H_SUM_ERROR_FACTOR",
+        "H_SUM_ERROR_CUTOFF"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI06",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di06",
+      "specs": [
+        "WP_DI1 §4.5"
+      ],
+      "sources": [
+        "science/discovery/fixed_k/fit.py"
+      ],
+      "parameters": [
+        "max_iterations"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI07",
+      "classification": "Accretion",
+      "page": "methods/discovery.md",
+      "anchor": "di07",
+      "specs": [
+        "WP_DI1 §4.7"
+      ],
+      "sources": [
+        "science/discovery/fixed_k/workspace.py",
+        "science/discovery/fixed_k/fit.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI08",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di08",
+      "specs": [
+        "WP_DI1 §4.6"
+      ],
+      "sources": [
+        "science/discovery/fixed_k/fit.py"
+      ],
+      "parameters": [
+        "max_iterations"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI09",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di09",
+      "specs": [
+        "WP_DI3 §4.1"
+      ],
+      "sources": [
+        "science/discovery/panel.py"
+      ],
+      "parameters": [
+        "SET_COUNT_ROUNDING_FLOOR"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI10",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di10",
+      "specs": [
+        "WP_DI2 §4.3"
+      ],
+      "sources": [
+        "science/discovery/api.py",
+        "science/discovery/cavity.py",
+        "science/discovery/cavity_kernels.py"
+      ],
+      "parameters": [
+        "state_concentration",
+        "unknown_prior_mass",
+        "double_unknown_fraction",
+        "mean_field_max_iterations",
+        "mean_field_tolerance",
+        "likelihood_floor",
+        "PREDICTION_TILE_BYTES"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI11",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di11",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/residual_births.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI12",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di12",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/landmarks.py"
+      ],
+      "parameters": [
+        "landmark_budget",
+        "seed_landmark_budget"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI13",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di13",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/moves.py"
+      ],
+      "parameters": [
+        "data_seed_count",
+        "seed_min_cluster_size",
+        "data_start_beam_width",
+        "seed_landmark_budget"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI14",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di14",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/moves.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI15",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di15",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/moves.py"
+      ],
+      "parameters": [
+        "exact_cut_max_k",
+        "max_cut_ties",
+        "max_proposals_per_expansion",
+        "MAX_CUT_CACHE_ENTRIES"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI16",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di16",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/moves.py"
+      ],
+      "parameters": [
+        "data_birth_attempts_factor",
+        "data_birth_children_factor",
+        "data_birth_tie_budget_factor",
+        "unknown_copy_penalty"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI17",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di17",
+      "specs": [
+        "WP_DI2 §4.7 (DI17) and §10"
+      ],
+      "sources": [
+        "science/discovery/residual_births.py"
+      ],
+      "parameters": [
+        "min_soft_responsibility",
+        "residual_call_probability"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI18",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di18",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/residual_births.py",
+        "science/discovery/_cliques.py"
+      ],
+      "parameters": [
+        "max_cluster_hamming",
+        "min_residual_joint_known_fraction",
+        "max_alternative_groups",
+        "landmark_budget"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI19",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di19",
+      "specs": [
+        "WP_DI2 §4.7 (DI19 steps 1-7)"
+      ],
+      "sources": [
+        "science/discovery/residual_births.py",
+        "science/discovery/moves.py"
+      ],
+      "parameters": [
+        "candidate_call_probability",
+        "min_candidate_known_fraction",
+        "min_dedup_joint_known_fraction",
+        "min_dedup_bidirectional_coverage",
+        "dedup_hamming_fraction",
+        "min_unique_sample_support",
+        "min_effective_sample_support",
+        "max_proposals_per_expansion"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI20",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di20",
+      "specs": [
+        "WP_DI2 §4.7"
+      ],
+      "sources": [
+        "science/discovery/moves.py"
+      ],
+      "parameters": [
+        "max_replacement_children"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI21",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di21",
+      "specs": [
+        "WP_DI2 §4.2"
+      ],
+      "sources": [
+        "science/discovery/search.py"
+      ],
+      "parameters": [
+        "beam_width"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI22",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di22",
+      "specs": [
+        "WP_DI2 §4.4"
+      ],
+      "sources": [
+        "science/discovery/search.py"
+      ],
+      "parameters": [
+        "exact_score_backstop_base",
+        "exact_score_backstop_per_founder"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI23",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di23",
+      "specs": [
+        "WP_DI2 §4.5"
+      ],
+      "sources": [
+        "contracts/discovery.py",
+        "science/discovery/search.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI24",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di24",
+      "specs": [
+        "WP_DI2 §4.6"
+      ],
+      "sources": [
+        "science/discovery/search.py"
+      ],
+      "parameters": [
+        "expansion_backstop_base",
+        "expansion_backstop_per_founder",
+        "beam_width"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI25",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di25",
+      "specs": [
+        "WP_DI2 §4.8; WP_DI3 §4.4"
+      ],
+      "sources": [
+        "science/discovery/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI26",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di26",
+      "specs": [
+        "WP_DI3 §4.2"
+      ],
+      "sources": [
+        "science/discovery/api.py",
+        "science/discovery/release.py"
+      ],
+      "parameters": [
+        "min_call_probability",
+        "min_supporters"
+      ]
+    },
+    {
+      "area": "discovery",
+      "unit": "DI27",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di27",
+      "specs": [
+        "WP_DI3 §4.3"
+      ],
+      "sources": [
+        "science/discovery/release.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI28",
+      "classification": "Core",
+      "page": "methods/discovery.md",
+      "anchor": "di28",
+      "specs": [
+        "WP_DI3 §4.5"
+      ],
+      "sources": [
+        "stages/discovery/tasks.py",
+        "science/discovery/run.py",
+        "stages/discovery/records.py",
+        "contracts/discovery.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "discovery",
+      "unit": "DI29",
+      "classification": "Accretion",
+      "page": "methods/discovery.md",
+      "anchor": "di29",
+      "specs": [
+        "WP_DI2 §6 and §10; WP_DI3 §6 (diagnostics.py)"
+      ],
+      "sources": [
+        "science/discovery/__init__.py",
+        "science/discovery/diagnostics.py",
+        "core/ties.py",
+        "science/discovery/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-01",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-01",
+      "specs": [
+        "WP_G1 §4.1"
+      ],
+      "sources": [
+        "stages/graph.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-02",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-02",
+      "specs": [
+        "WP_I1 §4.3; WP_G1 §4.3; WP_EV3 §4.1"
+      ],
+      "sources": [
+        "interface/run.py",
+        "stages/graph.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-03",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-03",
+      "specs": [
+        "WP_G1 §4.1; WP_E1 §4.3"
+      ],
+      "sources": [
+        "stages/graph.py",
+        "interface/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-04",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-04",
+      "specs": [
+        "WP_G1 §4.4; WP_I1 §4.3"
+      ],
+      "sources": [
+        "stages/graph.py",
+        "interface/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-05",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-05",
+      "specs": [
+        "WP_G1 §4.1"
+      ],
+      "sources": [
+        "stages/graph.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-06",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-06",
+      "specs": [
+        "WP_ST1 §4.4, §4.5; WP_C1 §6"
+      ],
+      "sources": [
+        "core/digest.py",
+        "store/identity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-07",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-07",
+      "specs": [
+        "WP_ST1 §3 items 1, 3, 5, 8; §4.5"
+      ],
+      "sources": [
+        "store/store.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-08",
+      "classification": "Core (complete/<stage> markers: Accretion)",
+      "page": "methods/execution.md",
+      "anchor": "eng-08",
+      "specs": [
+        "WP_ST1 §3 item 5",
+        "WP_ST1 §3 item 5; WP_G1 §4.4"
+      ],
+      "sources": [
+        "store/store.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-09",
+      "classification": "Core (REMOVED_SECTIONS: Accretion; RunConfig.scientific and CICHLID_AUTOSOMES: Dead)",
+      "page": "methods/execution.md",
+      "anchor": "eng-09",
+      "specs": [
+        "WP_I1 §4.1",
+        "WP_I1 §4.2"
+      ],
+      "sources": [
+        "interface/settings/migrate.py",
+        "interface/settings/load.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-10",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-10",
+      "specs": [
+        "WP_G1 §4.2; WP_I1 §4.1"
+      ],
+      "sources": [
+        "stages/configure.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-11",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-11",
+      "specs": [
+        "WP_G1 §4.2; STYLE_40 §9"
+      ],
+      "sources": [
+        "stages/configure.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-12",
+      "classification": "Accretion",
+      "page": "methods/execution.md",
+      "anchor": "eng-12",
+      "specs": [
+        "WP_C1 §3 item 4; WP_E1 §4.6; WP_C2 §4.5"
+      ],
+      "sources": [
+        "core/ties.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-13",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-13",
+      "specs": [
+        "WP_I1 §4.3"
+      ],
+      "sources": [
+        "interface/cli.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-14",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-14",
+      "specs": [
+        "WP_ST1 §4.1"
+      ],
+      "sources": [
+        "store/protocol.py",
+        "store/container.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-15",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-15",
+      "specs": [
+        "WP_ST1 §4.2"
+      ],
+      "sources": [
+        "store/codec.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-16",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-16",
+      "specs": [
+        "WP_ST1 §4.3"
+      ],
+      "sources": [
+        "store/container.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-17",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-17",
+      "specs": [
+        "WP_ST1 §4.3"
+      ],
+      "sources": [
+        "store/mapped.py"
+      ],
+      "parameters": [
+        "WINDOW_BYTES"
+      ]
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-18",
+      "classification": "Core (1.0 layout guard: Accretion; WorkState/CheckpointStore.work: Dead)",
+      "page": "methods/execution.md",
+      "anchor": "eng-18",
+      "specs": [
+        "WP_ST1 §3 items 2-3",
+        "WP_ST1 §3 item 2"
+      ],
+      "sources": [
+        "store/store.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-19",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-19",
+      "specs": [
+        "WP_E1 §4.6; WP_C2 §4.2-4.4"
+      ],
+      "sources": [
+        "engine/kernels.py",
+        "engine/runtime.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-20",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-20",
+      "specs": [
+        "WP_E1 §4.2"
+      ],
+      "sources": [
+        "engine/graph.py",
+        "engine/scheduler.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-21",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-21",
+      "specs": [
+        "WP_E1 §4.5"
+      ],
+      "sources": [
+        "engine/workers.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-22",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-22",
+      "specs": [
+        "WP_E1 §4.3"
+      ],
+      "sources": [
+        "engine/workers.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-23",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-23",
+      "specs": [
+        "WP_E1 §4.3"
+      ],
+      "sources": [
+        "engine/scheduler.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-24",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-24",
+      "specs": [
+        "WP_E1 §4.5"
+      ],
+      "sources": [
+        "engine/workers.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-25",
+      "classification": "Core (byte-reservation API surface: Accretion)",
+      "page": "methods/execution.md",
+      "anchor": "eng-25",
+      "specs": [
+        "WP_E1 §4.4",
+        "WP_E1 §4.4"
+      ],
+      "sources": [
+        "engine/scheduler.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-26",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-26",
+      "specs": [
+        "WP_E1 §4.4"
+      ],
+      "sources": [
+        "engine/scheduler.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-27",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-27",
+      "specs": [
+        "WP_C2 §4.2-4.3"
+      ],
+      "sources": [
+        "engine/kernels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-28",
+      "classification": "Accretion",
+      "page": "methods/execution.md",
+      "anchor": "eng-28",
+      "specs": [
+        "WP_C2 §4.1, §4.5"
+      ],
+      "sources": [
+        "core/kernels.py",
+        "engine/kernels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "engine",
+      "unit": "ENG-30",
+      "classification": "Core",
+      "page": "methods/execution.md",
+      "anchor": "eng-30",
+      "specs": [
+        "WP_E1 §4.7; WP_I1 §4.6"
+      ],
+      "sources": [
+        "engine/records.py",
+        "interface/status.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC01",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec01",
+      "specs": [
+        "WP_EV3 §4.1"
+      ],
+      "sources": [
+        "contracts/source.py",
+        "science/evidence/parameters.py",
+        "science/evidence/quality/parameters.py",
+        "science/evidence/read_model/parameters.py",
+        "stages/inputs/vcf.py",
+        "stages/inputs/sources.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC02",
+      "classification": "Accretion",
+      "page": "methods/evidence.md",
+      "anchor": "ec02",
+      "specs": [
+        "WP_EV3 §4.4; WP_ST1 §3 item 8"
+      ],
+      "sources": [
+        "contracts/source.py",
+        "stages/inputs/sources.py",
+        "contracts/samples.py",
+        "stages/evidence/records.py",
+        "contracts/evidence.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC03",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec03",
+      "specs": [
+        "WP_D1 §4.5; WP_C1 §4.3; WP_EV3 §4.2"
+      ],
+      "sources": [
+        "contracts/samples.py",
+        "stages/inputs/sources.py",
+        "core/ties.py",
+        "stages/graph.py",
+        "interface/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC04",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec04",
+      "specs": [
+        "WP_EV2 §4.1"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": [
+        "classification_error",
+        "classification_heterozygote_alt",
+        "site_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC05",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec05",
+      "specs": [
+        "WP_EV2 §4.2"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": [
+        "core_posterior_level",
+        "histogram_smoothing_bins",
+        "site_quality",
+        "clip"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC06",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec06",
+      "specs": [
+        "WP_EV2 §4.3"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC07",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec07",
+      "specs": [
+        "WP_EV2 §4.3"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC08",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec08",
+      "specs": [
+        "WP_EV2 §4.3"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": [
+        "clean_posterior_level",
+        "minimum_artefact_separation",
+        "site_quality",
+        "clip"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC09",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec09",
+      "specs": [
+        "WP_EV2 §4.3; §10"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": [
+        "minimum_artefact_separation",
+        "clean_posterior_level",
+        "site_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC10",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec10",
+      "specs": [
+        "WP_EV2 §4.3"
+      ],
+      "sources": [
+        "science/evidence/quality/site_quality.py"
+      ],
+      "parameters": [
+        "drop_uninformative_sites",
+        "minimum_expected_carriers"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC11",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec11",
+      "specs": [
+        "WP_EV2 §4.4"
+      ],
+      "sources": [
+        "science/evidence/run.py",
+        "stages/evidence/tasks.py"
+      ],
+      "parameters": [
+        "enabled",
+        "minimum_calibration_sites",
+        "site_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC12",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec12",
+      "specs": [
+        "WP_EV2 §4.5"
+      ],
+      "sources": [
+        "science/evidence/quality/sample_quality.py"
+      ],
+      "parameters": [
+        "carrier_tail_level",
+        "fragment_bp",
+        "artefact_regions",
+        "initial",
+        "sample_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC13",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec13",
+      "specs": [
+        "WP_EV2 §4.5"
+      ],
+      "sources": [
+        "science/evidence/quality/sample_quality.py"
+      ],
+      "parameters": [
+        "minimum_foreign_fraction",
+        "heterozygote_floor_ratio",
+        "heterozygote_depth_classes",
+        "sample_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC14",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec14",
+      "specs": [
+        "WP_EV2 §4.5"
+      ],
+      "sources": [
+        "science/evidence/quality/sample_quality.py"
+      ],
+      "parameters": [
+        "minimum_samples",
+        "carrier_tail_level",
+        "enabled",
+        "sample_quality"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC15",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec15",
+      "specs": [
+        "WP_EV2 §4.5"
+      ],
+      "sources": [
+        "science/evidence/quality/sample_quality.py"
+      ],
+      "parameters": [
+        "segment_gap_bp",
+        "segment_minimum_events",
+        "fragment_bp"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC16",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec16",
+      "specs": [
+        "WP_EV1 §4.1"
+      ],
+      "sources": [
+        "science/evidence/read_model/emission.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC17",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec17",
+      "specs": [
+        "WP_EV1 §4.2"
+      ],
+      "sources": [
+        "science/evidence/read_model/calibrate.py"
+      ],
+      "parameters": [
+        "maximum_fit_depth",
+        "fold_window_bp"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC18",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec18",
+      "specs": [
+        "WP_EV1 §4.3"
+      ],
+      "sources": [
+        "science/evidence/read_model/fit.py"
+      ],
+      "parameters": [
+        "em_starts",
+        "em_maximum_iterations",
+        "em_tolerance_per_observation"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC19",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec19",
+      "specs": [
+        "WP_EV1 §4.4"
+      ],
+      "sources": [
+        "science/evidence/read_model/fit.py"
+      ],
+      "parameters": [
+        "polish"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC20",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec20",
+      "specs": [
+        "WP_EV1 §4.5"
+      ],
+      "sources": [
+        "science/evidence/read_model/fit.py"
+      ],
+      "parameters": [
+        "initial_heterozygote_concentration"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC21",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec21",
+      "specs": [
+        "WP_EV1 §4.6"
+      ],
+      "sources": [
+        "science/evidence/run.py",
+        "science/evidence/read_model/calibrate.py"
+      ],
+      "parameters": [
+        "selection_z",
+        "selection_minimum_blocks"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC22",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec22",
+      "specs": [
+        "WP_EV1 §4.7"
+      ],
+      "sources": [
+        "science/evidence/read_model/fit.py",
+        "stages/evidence/tasks.py",
+        "science/evidence/run.py"
+      ],
+      "parameters": [
+        "fixed_error"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC23",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec23",
+      "specs": [
+        "WP_EV3 §4.3 steps 5-7"
+      ],
+      "sources": [
+        "science/evidence/likelihoods.py",
+        "science/evidence/run.py",
+        "science/evidence/read_model/emission.py",
+        "stages/evidence/tasks.py"
+      ],
+      "parameters": [
+        "lookup_depth"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC24",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec24",
+      "specs": [
+        "WP_EV3 §4.3 steps 8, 10"
+      ],
+      "sources": [
+        "science/evidence/blocks.py",
+        "science/evidence/run.py",
+        "stages/evidence/tasks.py",
+        "science/evidence/parameters.py"
+      ],
+      "parameters": [
+        "minimum_total_depth",
+        "block_sites",
+        "discovery_sites"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC25",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec25",
+      "specs": [
+        "WP_D1 §4.2"
+      ],
+      "sources": [
+        "stages/evidence/records.py",
+        "contracts/evidence.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC26",
+      "classification": "Core",
+      "page": "methods/evidence.md",
+      "anchor": "ec26",
+      "specs": [
+        "WP_EV3 §4.4"
+      ],
+      "sources": [
+        "stages/evidence/records.py",
+        "contracts/evidence.py",
+        "stages/evidence/tasks.py",
+        "science/evidence/run.py",
+        "outputs/reports/evidence.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC27",
+      "classification": "Core",
+      "page": "methods/genetic_map.md",
+      "anchor": "ec27",
+      "specs": [
+        "WP_D1 §4.3; WP_C1 §3 item 5"
+      ],
+      "sources": [
+        "contracts/genetic_map.py",
+        "stages/inputs/genetic_map.py",
+        "stages/configure.py"
+      ],
+      "parameters": [
+        "rate_is_measured"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC28",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec28",
+      "specs": [
+        "WP_D1 §4.4"
+      ],
+      "sources": [
+        "contracts/panels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC29",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec29",
+      "specs": [
+        "WP_D1 §4.4"
+      ],
+      "sources": [
+        "contracts/panels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC30",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec30",
+      "specs": [
+        "WP_C1 §4.1"
+      ],
+      "sources": [
+        "core/ties.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC31",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec31",
+      "specs": [
+        "WP_C1 §4.2; §3 item 2"
+      ],
+      "sources": [
+        "core/ties.py"
+      ],
+      "parameters": [
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC32",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec32",
+      "specs": [
+        "WP_C1 §4.3"
+      ],
+      "sources": [
+        "core/ties.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC33",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec33",
+      "specs": [
+        "WP_C1 §3 item 4; §4.3"
+      ],
+      "sources": [
+        "core/ties.py",
+        "store/identity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC34",
+      "classification": "Accretion",
+      "page": "methods/core.md",
+      "anchor": "ec34",
+      "specs": [
+        "WP_C1 §3 item 4"
+      ],
+      "sources": [
+        "core/ties.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "evidence-core",
+      "unit": "EC35",
+      "classification": "Core",
+      "page": "methods/core.md",
+      "anchor": "ec35",
+      "specs": [
+        "WP_C1 §3 item 5; §4.5"
+      ],
+      "sources": [
+        "science/shared/emissions.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS01",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls01",
+      "specs": [
+        "WP_SE1 §4.1 and §4.2 (normaliser rule)"
+      ],
+      "sources": [
+        "science/selection/__init__.py",
+        "science/selection/path_model.py"
+      ],
+      "parameters": [
+        "unknown_mass",
+        "redraw_rate_per_morgan",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS02",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls02",
+      "specs": [
+        "WP_SE1 §4.2"
+      ],
+      "sources": [
+        "science/selection/path_model.py"
+      ],
+      "parameters": [
+        "LANE_WIDTH",
+        "LANE_ALIGN"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS03",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls03",
+      "specs": [
+        "WP_SE1 §4.3"
+      ],
+      "sources": [
+        "science/selection/objective.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS04",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls04",
+      "specs": [
+        "WP_SE1 §4.4"
+      ],
+      "sources": [
+        "science/selection/objective.py"
+      ],
+      "parameters": [
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS05",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls05",
+      "specs": [
+        "WP_SE1 §4.5"
+      ],
+      "sources": [
+        "science/selection/fit.py"
+      ],
+      "parameters": [
+        "tolerance",
+        "FLIP_TIE",
+        "EXACT_FIRST_UPDATE_MAX_K",
+        "search",
+        "update_backstop_base"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS06",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls06",
+      "specs": [
+        "WP_SE1 §4.6"
+      ],
+      "sources": [
+        "science/selection/fit.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "tolerance",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS07",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls07",
+      "specs": [
+        "WP_SE1 §4.7"
+      ],
+      "sources": [
+        "science/selection/fit.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "tolerance",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS08",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls08",
+      "specs": [
+        "WP_SE2 §4.1"
+      ],
+      "sources": [
+        "science/selection/diagnostics.py",
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "CONSENSUS_TIE",
+        "PROPOSAL_FREQUENCY_TIE",
+        "CONSENSUS_CENSUS_WINDOW",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS09",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls09",
+      "specs": [
+        "WP_SE2 §4.2"
+      ],
+      "sources": [
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "DECISION_MOTION",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS10",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls10",
+      "specs": [
+        "WP_SE2 §4.3"
+      ],
+      "sources": [
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "refits_per_kind",
+        "refits_per_kind_cap",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS11",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls11",
+      "specs": [
+        "WP_SE2 §4.4"
+      ],
+      "sources": [
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "round_backstop_base",
+        "round_backstop_per_founder",
+        "decision_tolerance",
+        "KIND_ORDER",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS12",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls12",
+      "specs": [
+        "WP_SE2 §4.5"
+      ],
+      "sources": [
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS13",
+      "classification": "Accretion",
+      "page": "methods/selection.md",
+      "anchor": "ls13",
+      "specs": [
+        "WP_SE2 §4.6"
+      ],
+      "sources": [
+        "science/selection/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS14",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls14",
+      "specs": [
+        "WP_SE2 §4.7"
+      ],
+      "sources": [
+        "science/selection/rounds.py",
+        "science/selection/search.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS15",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls15",
+      "specs": [
+        "WP_SE2 §4.8"
+      ],
+      "sources": [
+        "science/selection/rounds.py"
+      ],
+      "parameters": [
+        "decision_tolerance",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS16",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls16",
+      "specs": [
+        "WP_SE2 §4.9"
+      ],
+      "sources": [
+        "science/selection/rounds.py",
+        "science/selection/bank.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS17",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls17",
+      "specs": [
+        "WP_SE2 §4.9 (1)"
+      ],
+      "sources": [
+        "science/selection/bank.py"
+      ],
+      "parameters": [
+        "completion_variant_cap",
+        "bank",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS18",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls18",
+      "specs": [
+        "WP_SE2 §4.9 (3)"
+      ],
+      "sources": [
+        "science/selection/bank.py"
+      ],
+      "parameters": [
+        "max_iterations",
+        "unknown_copy_penalty",
+        "cavity",
+        "release",
+        "improvement",
+        "WIDE_CLASS_QUANTA",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS19",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls19",
+      "specs": [
+        "WP_SE2 §4.9 (4)"
+      ],
+      "sources": [
+        "science/selection/bank.py"
+      ],
+      "parameters": [
+        "complexity_scale",
+        "improvement",
+        "bank",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS20",
+      "classification": "Accretion",
+      "page": "methods/selection.md",
+      "anchor": "ls20",
+      "specs": [
+        "WP_SE2 §4.9 (5)"
+      ],
+      "sources": [
+        "science/selection/bank.py"
+      ],
+      "parameters": [
+        "start_backstop_base",
+        "start_backstop_per_founder",
+        "score_backstop_base",
+        "score_backstop_per_founder",
+        "round_backstop_base",
+        "bank",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS21",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls21",
+      "specs": [
+        "WP_SE2 §4.10 (rule); WP_SE1 §4.9 (kernel)"
+      ],
+      "sources": [
+        "science/selection/release.py"
+      ],
+      "parameters": [
+        "min_call_probability",
+        "min_supporters",
+        "favourable_margin",
+        "RELEASE_SAMPLE_BATCH",
+        "FAVOURABLE_CENSUS_WINDOW",
+        "release"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS22",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls22",
+      "specs": [
+        "WP_SE2 §4.10"
+      ],
+      "sources": [
+        "science/selection/release.py"
+      ],
+      "parameters": [
+        "posterior_threshold",
+        "min_support",
+        "context_refit"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS23",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls23",
+      "specs": [
+        "WP_SE1 §4.9"
+      ],
+      "sources": [
+        "science/selection/path_model.py",
+        "science/selection/rounds.py",
+        "science/selection/run.py",
+        "stages/selection/tasks.py",
+        "contracts/panels.py"
+      ],
+      "parameters": [
+        "unknown_count_band",
+        "unknown_mass",
+        "release",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS24",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls24",
+      "specs": [
+        "WP_SE2 §4.11"
+      ],
+      "sources": [
+        "science/selection/rounds.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS25",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls25",
+      "specs": [
+        "WP_SE2 §4.12"
+      ],
+      "sources": [
+        "science/selection/run.py",
+        "stages/selection/tasks.py"
+      ],
+      "parameters": [
+        "context_levels",
+        "search"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS26",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls26",
+      "specs": [
+        "WP_SE2 §4.13"
+      ],
+      "sources": [
+        "science/selection/context_refit.py"
+      ],
+      "parameters": [
+        "redraw_rate_per_morgan",
+        "unknown_mass",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS27",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls27",
+      "specs": [
+        "WP_SE2 §4.13"
+      ],
+      "sources": [
+        "science/selection/context_refit.py"
+      ],
+      "parameters": [
+        "emission_mix",
+        "unknown_mass",
+        "redraw_rate_per_morgan",
+        "context_refit",
+        "model"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS28",
+      "classification": "Core",
+      "page": "methods/selection.md",
+      "anchor": "ls28",
+      "specs": [
+        "WP_SE2 §4.13"
+      ],
+      "sources": [
+        "science/selection/context_refit.py"
+      ],
+      "parameters": [
+        "posterior_threshold",
+        "min_support",
+        "MAX_EXACT_BITS",
+        "SITE_CERTAIN_NATS",
+        "SITE_BALL_CONFIGURATIONS",
+        "SITE_BALL_MINIMUM_RADIUS",
+        "SITE_SHELL_GUARD",
+        "SITE_IMPROVEMENT",
+        "SITE_HALF_BAND",
+        "context_refit",
+        "release",
+        "tolerance"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS29",
+      "classification": "Accretion",
+      "page": "methods/selection.md",
+      "anchor": "ls29",
+      "specs": [
+        "WP_SE2 §4.13"
+      ],
+      "sources": [
+        "science/selection/context_refit.py"
+      ],
+      "parameters": [
+        "BACKGROUND_COUNT_BAND",
+        "HALF_CENSUS_WINDOW",
+        "context_refit"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS30",
+      "classification": "Accretion",
+      "page": "methods/selection.md",
+      "anchor": "ls30",
+      "specs": [
+        "WP_SE2 §4.14"
+      ],
+      "sources": [
+        "stages/selection/records.py",
+        "science/selection/rounds.py"
+      ],
+      "parameters": [
+        "TASK_WORKSPACE_BASE_BYTES",
+        "SEARCH_GROWTH",
+        "context_refit"
+      ]
+    },
+    {
+      "area": "local-selection",
+      "unit": "LS31",
+      "classification": "Accretion",
+      "page": "methods/selection.md",
+      "anchor": "ls31",
+      "specs": [
+        "WP_SE2 §6 (diagnostics.py) and §9.2"
+      ],
+      "sources": [
+        "science/selection/__init__.py",
+        "science/selection/context_refit.py",
+        "science/selection/diagnostics.py",
+        "stages/selection/tasks.py",
+        "science/selection/rounds.py"
+      ],
+      "parameters": [
+        "DECISION_MOTION",
+        "search",
+        "release",
+        "context_refit"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU01",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou01",
+      "specs": [
+        "WP_OU1 §4.1, §4.3"
+      ],
+      "sources": [
+        "contracts/release.py",
+        "outputs/export/records.py",
+        "stages/inputs/sites.py",
+        "stages/inputs/vcf_alleles.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU02",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou02",
+      "specs": [
+        "WP_OU1 §4.1"
+      ],
+      "sources": [
+        "stages/inputs/sites.py",
+        "stages/inputs/vcf_alleles.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU03",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou03",
+      "specs": [
+        "WP_OU1 §4.2"
+      ],
+      "sources": [
+        "science/assembly/release.py",
+        "stages/assembly/release.py",
+        "outputs/export/run.py",
+        "interface/cli.py",
+        "science/painting/release.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU04",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou04",
+      "specs": [
+        "WP_OU1 §4.4"
+      ],
+      "sources": [
+        "outputs/export/run.py",
+        "outputs/export/founders.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU05",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou05",
+      "specs": [
+        "WP_OU1 §4.5"
+      ],
+      "sources": [
+        "outputs/export/run.py",
+        "outputs/export/samples.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU06",
+      "classification": "Accretion",
+      "page": "methods/export.md",
+      "anchor": "ou06",
+      "specs": [
+        "WP_OU1 §4.2 step 3, §4.6"
+      ],
+      "sources": [
+        "science/assembly/release.py",
+        "stages/assembly/release.py",
+        "outputs/export/founders.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU07",
+      "classification": "Accretion",
+      "page": "methods/export.md",
+      "anchor": "ou07",
+      "specs": [
+        "WP_OU1 §4.6"
+      ],
+      "sources": [
+        "outputs/export/founders.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU08",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou08",
+      "specs": [
+        "WP_OU1 §4.7"
+      ],
+      "sources": [
+        "outputs/export/records.py",
+        "outputs/export/run.py",
+        "outputs/export/task.py",
+        "interface/cli.py"
+      ],
+      "parameters": [
+        "TASK_ALLOWANCE_BYTES",
+        "enabled"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU09",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou09",
+      "specs": [
+        "WP_OU1 §4.9; WP_OU2 §4.1"
+      ],
+      "sources": [
+        "contracts/samples.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU11",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou11",
+      "specs": [
+        "WP_OU2 §4.1"
+      ],
+      "sources": [
+        "outputs/reports/tasks.py",
+        "outputs/reports/tables.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU12",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou12",
+      "specs": [
+        "WP_OU2 §4.2"
+      ],
+      "sources": [
+        "outputs/reports/painting.py",
+        "science/painting/release.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU13",
+      "classification": "Accretion",
+      "page": "methods/export.md",
+      "anchor": "ou13",
+      "specs": [
+        "WP_OU2 §4.3"
+      ],
+      "sources": [
+        "outputs/reports/painting.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU14",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou14",
+      "specs": [
+        "WP_OU2 §4.4"
+      ],
+      "sources": [
+        "outputs/reports/relatedness.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU15",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou15",
+      "specs": [
+        "WP_OU2 §4.5"
+      ],
+      "sources": [
+        "outputs/reports/pedigree.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU16",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou16",
+      "specs": [
+        "WP_OU2 §4.6"
+      ],
+      "sources": [
+        "outputs/reports/evidence.py",
+        "outputs/reports/quality.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU17",
+      "classification": "Accretion",
+      "page": "methods/export.md",
+      "anchor": "ou17",
+      "specs": [
+        "WP_OU2 §4.7"
+      ],
+      "sources": [
+        "outputs/reports/tables.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU18",
+      "classification": "Core",
+      "page": "methods/export.md",
+      "anchor": "ou18",
+      "specs": [
+        "WP_OU2 §4.8"
+      ],
+      "sources": [
+        "outputs/reports/recombination.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU19",
+      "classification": "Accretion",
+      "page": "methods/export.md",
+      "anchor": "ou19",
+      "specs": [
+        "WP_OU2 §4.9"
+      ],
+      "sources": [
+        "outputs/reports/ties.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU20",
+      "classification": "Accretion",
+      "page": "methods/simulation.md",
+      "anchor": "ou20",
+      "specs": [
+        "WP_SI1 §4.9"
+      ],
+      "sources": [
+        "interface/templates/builder.py"
+      ],
+      "parameters": [
+        "WINDOW_BP",
+        "WINDOW_SHIFT_BP",
+        "TEMPLATE_HAPLOTYPES",
+        "WINDOW_EVIDENCE_FACTOR",
+        "WINDOW_ALLOWANCE_BYTES",
+        "CONTIG_CELL_BYTES",
+        "UNDECLARED_LENGTH_BP"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU21",
+      "classification": "Accretion",
+      "page": "methods/simulation.md",
+      "anchor": "ou21",
+      "specs": [
+        "WP_SI1 §4.9"
+      ],
+      "sources": [
+        "interface/templates/linker.py"
+      ],
+      "parameters": [
+        "NODE_PENALTY",
+        "EDGE_PENALTY",
+        "GAP_SCORE",
+        "EDGE_DIVISOR"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU22",
+      "classification": "Accretion",
+      "page": "methods/simulation.md",
+      "anchor": "ou22",
+      "specs": [
+        "WP_SI1 §4.9"
+      ],
+      "sources": [
+        "simulation/example.py",
+        "interface/example.py"
+      ],
+      "parameters": [
+        "EXAMPLE_HAPLOTYPES",
+        "EXAMPLE_COHORTS",
+        "EXAMPLE_DEPTH"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU23",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou23",
+      "specs": [
+        "WP_SI1 §4.2"
+      ],
+      "sources": [
+        "simulation/source.py",
+        "simulation/pedigree.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU24",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou24",
+      "specs": [
+        "WP_SI1 §4.3"
+      ],
+      "sources": [
+        "simulation/pedigree.py",
+        "simulation/design.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU25",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou25",
+      "specs": [
+        "WP_SI1 §4.4"
+      ],
+      "sources": [
+        "simulation/pedigree.py",
+        "simulation/design.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU26",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou26",
+      "specs": [
+        "WP_SI1 §4.5"
+      ],
+      "sources": [
+        "simulation/pedigree.py"
+      ],
+      "parameters": [
+        "MUTATION_RATE_PER_BP"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU27",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou27",
+      "specs": [
+        "WP_SI1 §4.6"
+      ],
+      "sources": [
+        "simulation/reads.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU28",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou28",
+      "specs": [
+        "WP_SI1 §4.6"
+      ],
+      "sources": [
+        "simulation/reads.py"
+      ],
+      "parameters": [
+        "FRAGMENT_QUANTILES",
+        "MINIMUM_FRAGMENT_BP",
+        "FRAGMENT_SD_LIMIT"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU29",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou29",
+      "specs": [
+        "WP_SI1 §4.7"
+      ],
+      "sources": [
+        "simulation/source.py",
+        "simulation/truth.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU30",
+      "classification": "Core",
+      "page": "methods/simulation.md",
+      "anchor": "ou30",
+      "specs": [
+        "WP_SI1 §4.8"
+      ],
+      "sources": [
+        "simulation/source.py",
+        "stages/inputs/simulation.py"
+      ],
+      "parameters": [
+        "READS_BYTES_PER_CELL",
+        "READS_WORKER_BYTES"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU31",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou31",
+      "specs": [
+        "WP_EVA1 §4.1"
+      ],
+      "sources": [
+        "evaluation/tasks.py",
+        "evaluation/evaluate.py"
+      ],
+      "parameters": [
+        "PHASE_METRIC",
+        "TASK_ALLOWANCE_BYTES"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU32",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou32",
+      "specs": [
+        "WP_EVA1 §4.2"
+      ],
+      "sources": [
+        "evaluation/founders.py"
+      ],
+      "parameters": [
+        "SITE_TILE"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU33",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou33",
+      "specs": [
+        "WP_EVA1 §4.3"
+      ],
+      "sources": [
+        "evaluation/founders.py"
+      ],
+      "parameters": [
+        "SEGMENT_SWITCH_COST"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU34",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou34",
+      "specs": [
+        "WP_EVA1 §4.4"
+      ],
+      "sources": [
+        "evaluation/founders.py",
+        "evaluation/identity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU35",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou35",
+      "specs": [
+        "WP_EVA1 §4.5"
+      ],
+      "sources": [
+        "evaluation/identity.py"
+      ],
+      "parameters": [
+        "IDENTITY_WINDOW_MARKERS",
+        "LABEL_MIN_CALLS",
+        "LABEL_MARGIN",
+        "COVERAGE_MIN_DISTANCE",
+        "COVERAGE_MAX_GAP"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU36",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou36",
+      "specs": [
+        "WP_EVA1 §4.6"
+      ],
+      "sources": [
+        "evaluation/metrics.py"
+      ],
+      "parameters": [
+        "LONG_SWITCH_MIN_RUN",
+        "PHASE_METRIC"
+      ]
+    },
+    {
+      "area": "outputs",
+      "unit": "OU37",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou37",
+      "specs": [
+        "WP_EVA1 §4.7"
+      ],
+      "sources": [
+        "evaluation/evaluate.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "outputs",
+      "unit": "OU38",
+      "classification": "Core",
+      "page": "methods/evaluation.md",
+      "anchor": "ou38",
+      "specs": [
+        "WP_EVA1 §4.8"
+      ],
+      "sources": [
+        "evaluation/evaluate.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR01",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr01",
+      "specs": [
+        "WP_PA2 §4.1"
+      ],
+      "sources": [
+        "science/painting/states.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR02",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr02",
+      "specs": [
+        "WP_PA2 §4.1"
+      ],
+      "sources": [
+        "science/painting/states.py"
+      ],
+      "parameters": [
+        "snps_per_bin"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR03",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr03",
+      "specs": [
+        "WP_PA2 §4.1"
+      ],
+      "sources": [
+        "science/painting/states.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR04",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr04",
+      "specs": [
+        "WP_PA2 §4.2"
+      ],
+      "sources": [
+        "science/painting/emissions.py",
+        "science/painting/hmm.py",
+        "stages/painting/tasks.py"
+      ],
+      "parameters": [
+        "robustness_epsilon",
+        "emission_log_floor",
+        "emission_site_correlation",
+        "INFORMATIVE_SPREAD",
+        "WINDOW_BYTES"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR05",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr05",
+      "specs": [
+        "WP_PA2 §4.3"
+      ],
+      "sources": [
+        "science/painting/transitions.py"
+      ],
+      "parameters": [
+        "MINIMUM_SWITCH_PROBABILITY"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR06",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr06",
+      "specs": [
+        "WP_PA2 §4.3"
+      ],
+      "sources": [
+        "science/painting/fidelity.py"
+      ],
+      "parameters": [
+        "ENTRY_BOUNDS",
+        "EXIT_BOUNDS"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR07",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr07",
+      "specs": [
+        "WP_PA2 §4.4"
+      ],
+      "sources": [
+        "science/painting/fidelity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR08",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr08",
+      "specs": [
+        "WP_PA2 §4.4"
+      ],
+      "sources": [
+        "science/painting/fidelity.py",
+        "stages/painting/tasks.py",
+        "science/painting/run.py"
+      ],
+      "parameters": [
+        "initial_switch_rate",
+        "initial_error_entry",
+        "initial_error_exit",
+        "estimation_iterations",
+        "estimate_grid",
+        "RATE_BOUNDS",
+        "ENTRY_BOUNDS",
+        "EXIT_BOUNDS",
+        "MINIMUM_WORKING_MEMORY_BYTES"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR09",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr09",
+      "specs": [
+        "WP_PA2 §4.5"
+      ],
+      "sources": [
+        "science/painting/fidelity.py"
+      ],
+      "parameters": [
+        "VITERBI_TIE"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR10",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr10",
+      "specs": [
+        "WP_PA2 §4.5"
+      ],
+      "sources": [
+        "science/painting/hmm.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR11",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr11",
+      "specs": [
+        "WP_PA2 §4.5"
+      ],
+      "sources": [
+        "science/painting/fidelity.py"
+      ],
+      "parameters": [
+        "MAXIMUM_MASK_STATES"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR12",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr12",
+      "specs": [
+        "WP_PA2 §4.5"
+      ],
+      "sources": [
+        "science/painting/fidelity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR13",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr13",
+      "specs": [
+        "WP_PA2 §4.6"
+      ],
+      "sources": [
+        "science/painting/release.py",
+        "stages/painting/tasks.py",
+        "science/painting/run.py"
+      ],
+      "parameters": [
+        "minimum_release_posterior"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR14",
+      "classification": "Accretion",
+      "page": "methods/painting.md",
+      "anchor": "pr14",
+      "specs": [
+        "WP_PA2 §7"
+      ],
+      "sources": [
+        "stages/painting/tasks.py",
+        "science/painting/run.py"
+      ],
+      "parameters": [
+        "EMISSION_CACHE_MAX_BYTES",
+        "MINIMUM_WORKING_MEMORY_BYTES"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR15",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr15",
+      "specs": [
+        "WP_PA1 §4.1"
+      ],
+      "sources": [
+        "science/painting/label_continuity.py"
+      ],
+      "parameters": [
+        "LABEL_CONTINUITY_BASE_BYTES"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR16",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr16",
+      "specs": [
+        "WP_PA1 §4.2"
+      ],
+      "sources": [
+        "science/painting/label_continuity.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR17",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr17",
+      "specs": [
+        "WP_PA1 §4.3"
+      ],
+      "sources": [
+        "science/painting/label_continuity.py",
+        "core/ties.py"
+      ],
+      "parameters": [
+        "label_continuity_minimum_switch_gain",
+        "label_continuity_maximum_loser_ratio",
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR18",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr18",
+      "specs": [
+        "WP_PA1 §4.4"
+      ],
+      "sources": [
+        "science/painting/label_continuity.py",
+        "contracts/panels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "PR19",
+      "classification": "Core",
+      "page": "methods/painting.md",
+      "anchor": "pr19",
+      "specs": [
+        "WP_PA2 §4.7, §6, §7"
+      ],
+      "sources": [
+        "contracts/painting.py",
+        "science/painting/diagnostics.py",
+        "stages/painting/tasks.py",
+        "science/painting/run.py",
+        "stages/painting/records.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR01",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr01",
+      "specs": [
+        "WP_RF1 §4.1"
+      ],
+      "sources": [
+        "science/refit/refit.py",
+        "science/painting/release.py"
+      ],
+      "parameters": [
+        "robustness_epsilon",
+        "REFIT_TIE_QUANTUM"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR02",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr02",
+      "specs": [
+        "WP_RF1 §4.2, §4.3"
+      ],
+      "sources": [
+        "science/refit/refit.py"
+      ],
+      "parameters": [
+        "minimum_gain_nats",
+        "coordinate_sweeps"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR03",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr03",
+      "specs": [
+        "WP_RF1 §4.4"
+      ],
+      "sources": [
+        "science/refit/refit.py"
+      ],
+      "parameters": [
+        "REFIT_TIE_QUANTUM",
+        "REFIT_TIE_QUANTUM_PER_CARRIER",
+        "WIDE_QUANTA"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR04",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr04",
+      "specs": [
+        "WP_RF1 §4.5"
+      ],
+      "sources": [
+        "science/refit/refit.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR05",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr05",
+      "specs": [
+        "WP_RF1 §4.6"
+      ],
+      "sources": [
+        "science/refit/refit.py"
+      ],
+      "parameters": [
+        "minimum_gain_nats",
+        "fill_min_supporters",
+        "REFIT_TIE_QUANTUM"
+      ]
+    },
+    {
+      "area": "painting-refit",
+      "unit": "FR06",
+      "classification": "Core",
+      "page": "methods/refit.md",
+      "anchor": "fr06",
+      "specs": [
+        "WP_RF1 §4.7, §6, §7"
+      ],
+      "sources": [
+        "stages/refit/tasks.py",
+        "science/refit/run.py",
+        "stages/refit/records.py",
+        "contracts/refit.py"
+      ],
+      "parameters": [
+        "SITE_TILE"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP01",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp01",
+      "specs": [
+        "WP_PH1 §4.1"
+      ],
+      "sources": [
+        "contracts/phase.py",
+        "science/painting/emissions.py",
+        "science/phase/component.py",
+        "stages/phase/tasks.py",
+        "science/phase/painting_inputs.py",
+        "stages/phase/records.py"
+      ],
+      "parameters": [
+        "SITE_WINDOW",
+        "robustness_epsilon",
+        "emission_log_floor",
+        "emission_site_correlation",
+        "EMPTY_COMPONENT_BIN_SITES"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP02",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp02",
+      "specs": [
+        "WP_PH1 §4.2"
+      ],
+      "sources": [
+        "science/phase/inputs.py",
+        "science/shared/recombination.py",
+        "stages/phase/tasks.py",
+        "science/phase/model.py"
+      ],
+      "parameters": [
+        "not_copy_rate_per_bp",
+        "not_copy_mean_bp",
+        "alpha"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP03",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp03",
+      "specs": [
+        "WP_PH1 §4.3"
+      ],
+      "sources": [
+        "science/phase/kernels.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP04",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp04",
+      "specs": [
+        "WP_PH1 §4.4"
+      ],
+      "sources": [
+        "science/phase/kernels.py"
+      ],
+      "parameters": [
+        "tie_quantum"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP05",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp05",
+      "specs": [
+        "WP_PH1 §4.5"
+      ],
+      "sources": [
+        "science/phase/model.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP06",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp06",
+      "specs": [
+        "WP_PH1 §4.6"
+      ],
+      "sources": [
+        "science/phase/model.py"
+      ],
+      "parameters": [
+        "tie_quantum"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP07",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp07",
+      "specs": [
+        "WP_PH1 §4.7"
+      ],
+      "sources": [
+        "science/phase/model.py"
+      ],
+      "parameters": [
+        "gain_quantum",
+        "max_sweeps"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP08",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp08",
+      "specs": [
+        "WP_PH1 §4.8"
+      ],
+      "sources": [
+        "science/phase/model.py"
+      ],
+      "parameters": [
+        "set_posterior",
+        "gain_quantum",
+        "max_sweeps"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP09",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp09",
+      "specs": [
+        "WP_PH1 §4.9"
+      ],
+      "sources": [
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP10",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp10",
+      "specs": [
+        "WP_PH2 §4.1"
+      ],
+      "sources": [
+        "science/phase/junctions.py",
+        "science/phase/model.py"
+      ],
+      "parameters": [
+        "junction_min_samples",
+        "junction_pin_nats",
+        "junction_pin_bins"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP11",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp11",
+      "specs": [
+        "WP_PH2 §4.2"
+      ],
+      "sources": [
+        "science/phase/painting_inputs.py",
+        "stages/phase/records.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP12",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp12",
+      "specs": [
+        "WP_PH2 §4.3"
+      ],
+      "sources": [
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP13",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp13",
+      "specs": [
+        "WP_PH2 §4.4"
+      ],
+      "sources": [
+        "science/phase/inputs.py",
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP14",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp14",
+      "specs": [
+        "WP_PH2 §4.5"
+      ],
+      "sources": [
+        "science/phase/allele_evidence.py"
+      ],
+      "parameters": [
+        "FLIP_NEGLIGIBLE",
+        "FLIP_CEILING",
+        "PRIOR_BOUNDS",
+        "EVIDENCE_CHUNK",
+        "clip"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP15",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp15",
+      "specs": [
+        "WP_PH2 §4.6"
+      ],
+      "sources": [
+        "science/phase/kernels.py",
+        "science/phase/release_kernels.py"
+      ],
+      "parameters": [
+        "LABEL_SWITCH_MINIMUM"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP16",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp16",
+      "specs": [
+        "WP_PH2 §4.7"
+      ],
+      "sources": [
+        "science/phase/kernels.py",
+        "science/phase/release_kernels.py"
+      ],
+      "parameters": [
+        "site_deviation"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP17",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp17",
+      "specs": [
+        "WP_PH2 §4.8"
+      ],
+      "sources": [
+        "science/phase/release.py"
+      ],
+      "parameters": [
+        "genotype_posterior",
+        "phase_posterior"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP18",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp18",
+      "specs": [
+        "WP_PH2 §4.9"
+      ],
+      "sources": [
+        "science/phase/release.py"
+      ],
+      "parameters": [
+        "phase_posterior",
+        "genotype_posterior",
+        "set_posterior"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP19",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp19",
+      "specs": [
+        "WP_PH2 §4.10"
+      ],
+      "sources": [
+        "science/phase/release.py"
+      ],
+      "parameters": [
+        "set_posterior",
+        "genotype_posterior"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP20",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp20",
+      "specs": [
+        "WP_PH2 §4.11"
+      ],
+      "sources": [
+        "science/phase/agreement.py",
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP21",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp21",
+      "specs": [
+        "WP_PH2 §4.12"
+      ],
+      "sources": [
+        "science/phase/agreement.py",
+        "science/phase/component.py",
+        "stages/phase/tasks.py"
+      ],
+      "parameters": [
+        "phase_posterior"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP22",
+      "classification": "Accretion",
+      "page": "methods/phase.md",
+      "anchor": "fp22",
+      "specs": [
+        "WP_PH2 §4.13"
+      ],
+      "sources": [
+        "science/phase/window.py",
+        "store/mapped.py"
+      ],
+      "parameters": [
+        "SITE_WINDOW",
+        "EVIDENCE_CHUNK",
+        "WINDOW_BYTES"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP23",
+      "classification": "Core",
+      "page": "methods/phase.md",
+      "anchor": "fp23",
+      "specs": [
+        "WP_PH2 §4.14"
+      ],
+      "sources": [
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP24",
+      "classification": "Accretion",
+      "page": "methods/phase.md",
+      "anchor": "fp24",
+      "specs": [
+        "WP_PH2 §4.14"
+      ],
+      "sources": [
+        "contracts/phase.py",
+        "stages/phase/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "FP25",
+      "classification": "Accretion",
+      "page": "methods/phase.md",
+      "anchor": "fp25",
+      "specs": [
+        "WP_PH1 §4.10"
+      ],
+      "sources": [
+        "science/phase/model.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC01",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc01",
+      "specs": [
+        "WP_RC1 §4.1"
+      ],
+      "sources": [
+        "stages/inputs/breakpoints.py",
+        "contracts/recombination.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC02",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc02",
+      "specs": [
+        "WP_RC1 §4.2"
+      ],
+      "sources": [
+        "science/recombination/junctions.py",
+        "stages/recombination/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC03",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc03",
+      "specs": [
+        "WP_RC1 §4.3"
+      ],
+      "sources": [
+        "stages/recombination/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC04",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc04",
+      "specs": [
+        "WP_RC1 §4.4"
+      ],
+      "sources": [
+        "science/recombination/map.py"
+      ],
+      "parameters": [
+        "bin_bp"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC05",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc05",
+      "specs": [
+        "WP_RC1 §4.5"
+      ],
+      "sources": [
+        "science/recombination/map.py"
+      ],
+      "parameters": [
+        "ROBUST_CONTAMINATION",
+        "bin_bp"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC06",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc06",
+      "specs": [
+        "WP_RC1 §4.6"
+      ],
+      "sources": [
+        "science/recombination/junctions.py"
+      ],
+      "parameters": [
+        "minimum_parents",
+        "hotspot_switch_probability",
+        "flag_log_likelihood_ratio"
+      ]
+    },
+    {
+      "area": "phase-recombination",
+      "unit": "RC07",
+      "classification": "Core",
+      "page": "methods/recombination.md",
+      "anchor": "rc07",
+      "specs": [
+        "WP_RC1 §4.7"
+      ],
+      "sources": [
+        "stages/recombination/records.py",
+        "stages/recombination/tasks.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC01",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc01",
+      "specs": [
+        "WP_AS8 §4.1"
+      ],
+      "sources": [
+        "science/assembly/refinement/capabilities.py",
+        "science/assembly/refinement/costs.py",
+        "science/assembly/refinement/workspace.py"
+      ],
+      "parameters": [
+        "reset_rate",
+        "map_probability_floor",
+        "genotype_error",
+        "cost_scale"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC02",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc02",
+      "specs": [
+        "WP_AS8 §4.1"
+      ],
+      "sources": [
+        "contracts/assembly.py",
+        "science/assembly/refinement/objective.py",
+        "science/assembly/refinement/window.py"
+      ],
+      "parameters": [
+        "genotype_error",
+        "reset_rate",
+        "map_probability_floor",
+        "panel"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC03",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc03",
+      "specs": [
+        "WP_AS8 §4.1"
+      ],
+      "sources": [
+        "science/assembly/refinement/emissions.py",
+        "science/assembly/refinement/run.py"
+      ],
+      "parameters": [
+        "proposal_max_bins",
+        "proposal_min_sites_per_bin"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC04",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rc04",
+      "specs": [
+        "WP_AS8 §5"
+      ],
+      "sources": [
+        "contracts/assembly.py",
+        "science/assembly/refinement/capabilities.py",
+        "science/assembly/refinement/messages.py",
+        "science/assembly/refinement/window.py",
+        "science/assembly/refinement/workspace.py"
+      ],
+      "parameters": [
+        "WINDOW_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC05",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc05",
+      "specs": [
+        "WP_AS8 §4.2"
+      ],
+      "sources": [
+        "science/assembly/refinement/messages.py"
+      ],
+      "parameters": [
+        "ROBUST_CONTAMINATION"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC06",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc06",
+      "specs": [
+        "WP_AS8 §4.2"
+      ],
+      "sources": [
+        "science/assembly/refinement/checkpoints.py",
+        "science/assembly/refinement/messages.py",
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "order_breakpoints"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC07",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rc07",
+      "specs": [
+        "WP_AS8 §4.2, §5"
+      ],
+      "sources": [
+        "science/assembly/refinement/capabilities.py",
+        "science/assembly/refinement/checkpoints.py",
+        "science/assembly/refinement/workspace.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC08",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc08",
+      "specs": [
+        "WP_AS8 §4.3"
+      ],
+      "sources": [
+        "contracts/assembly.py",
+        "science/assembly/refinement/guard.py",
+        "science/assembly/refinement/window.py",
+        "science/assembly/refinement/acceptance.py"
+      ],
+      "parameters": [
+        "GUARD_TOLERANCE"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC09",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc09",
+      "specs": [
+        "WP_AS8 §4.4"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": [
+        "COUNT_LIMIT_MULTIPLE",
+        "ranked_refits"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC10",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc10",
+      "specs": [
+        "WP_AS8 §4.5"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": [
+        "bootstrap_resamples",
+        "bootstrap_level"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC11",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc11",
+      "specs": [
+        "WP_AS8 §4.5"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": [
+        "ranked_refits",
+        "COUNT_FANOUT_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC12",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc12",
+      "specs": [
+        "WP_AS8 §4.6"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": [
+        "shadow_combinations",
+        "bootstrap_resamples",
+        "bootstrap_level",
+        "FAMILY_BYTES",
+        "PAIR_TABLE_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC13",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc13",
+      "specs": [
+        "WP_AS8 §4.7"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC14",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rc14",
+      "specs": [
+        "WP_AS8 §4.6"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC15",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc15",
+      "specs": [
+        "WP_AS8 §4.8"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC16",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc16",
+      "specs": [
+        "WP_AS8 §4.8"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC17",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc17",
+      "specs": [
+        "WP_AS8 §4.9"
+      ],
+      "sources": [
+        "science/assembly/refinement/count.py"
+      ],
+      "parameters": [
+        "alternative_branches"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC18",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc18",
+      "specs": [
+        "WP_AS8 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/run.py"
+      ],
+      "parameters": [
+        "window_work_coefficient"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC19",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc19",
+      "specs": [
+        "WP_AS8 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/run.py"
+      ],
+      "parameters": [
+        "polish"
+      ]
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC20",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rc20",
+      "specs": [
+        "WP_AS8 §8"
+      ],
+      "sources": [
+        "science/assembly/refinement/costs.py",
+        "science/assembly/refinement/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-count",
+      "unit": "RC21",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rc21",
+      "specs": [
+        "WP_AS8 §7"
+      ],
+      "sources": [
+        "stages/assembly/records.py",
+        "stages/assembly/refinement.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS01",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs01",
+      "specs": [
+        "WP_AS7 §4.1"
+      ],
+      "sources": [
+        "contracts/assembly.py",
+        "science/assembly/refinement/__init__.py",
+        "science/assembly/refinement/objective.py",
+        "science/assembly/refinement/parameters.py",
+        "science/assembly/refinement/reductions.py",
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "reset_rate",
+        "map_probability_floor",
+        "genotype_error",
+        "PAIR_TABLE_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS02",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs02",
+      "specs": [
+        "WP_AS7 §4.1"
+      ],
+      "sources": [
+        "science/assembly/refinement/proposals.py",
+        "science/assembly/refinement/objective.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS03",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs03",
+      "specs": [
+        "WP_AS7 §4.2"
+      ],
+      "sources": [
+        "science/assembly/refinement/gains.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS04",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs04",
+      "specs": [
+        "WP_AS7 §4.3"
+      ],
+      "sources": [
+        "science/assembly/refinement/proposals.py"
+      ],
+      "parameters": [
+        "proposal_max_bins",
+        "proposal_min_sites_per_bin"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS05",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs05",
+      "specs": [
+        "WP_AS7 §4.3"
+      ],
+      "sources": [
+        "science/assembly/refinement/parameters.py",
+        "science/assembly/refinement/proposals.py"
+      ],
+      "parameters": [
+        "CANONICAL_TOL",
+        "DOMINANCE_TOLERANCE",
+        "BOX_ARITHMETIC_MARGIN"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS06",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rs06",
+      "specs": [
+        "WP_AS7 §4.3"
+      ],
+      "sources": [
+        "science/assembly/refinement/costs.py",
+        "science/assembly/refinement/parameters.py",
+        "science/assembly/refinement/proposals.py"
+      ],
+      "parameters": [
+        "frontier_bytes"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS07",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rs07",
+      "specs": [
+        "WP_AS7 §4.3"
+      ],
+      "sources": [
+        "science/assembly/refinement/parameters.py",
+        "science/assembly/refinement/proposals.py",
+        "science/assembly/refinement/work_limit.py"
+      ],
+      "parameters": [
+        "window_work_coefficient"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS08",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs08",
+      "specs": [
+        "WP_AS7 §4.4"
+      ],
+      "sources": [
+        "science/assembly/refinement/acceptance.py",
+        "science/assembly/refinement/gains.py"
+      ],
+      "parameters": [
+        "EXCHANGE_ROUNDS",
+        "CONTENT_FULL_ROUNDS"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS09",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs09",
+      "specs": [
+        "WP_AS7 §4.5"
+      ],
+      "sources": [
+        "science/assembly/orders.py",
+        "science/assembly/refinement/gains.py",
+        "science/assembly/refinement/acceptance.py"
+      ],
+      "parameters": [
+        "WIDE_QUANTA",
+        "WIDE_CLASS_QUANTA"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS10",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs10",
+      "specs": [
+        "WP_AS7 §4.6"
+      ],
+      "sources": [
+        "science/assembly/refinement/acceptance.py",
+        "science/assembly/refinement/guard.py"
+      ],
+      "parameters": [
+        "GUARD_TOLERANCE"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS11",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs11",
+      "specs": [
+        "WP_AS7 §4.7"
+      ],
+      "sources": [
+        "science/assembly/refinement/parameters.py",
+        "science/assembly/refinement/reductions.py",
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "sweep_limit",
+        "WINDOW_MEMO_BYTES",
+        "tolerance"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS12",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs12",
+      "specs": [
+        "WP_AS7 §4.8"
+      ],
+      "sources": [
+        "contracts/assembly.py",
+        "science/assembly/orders.py",
+        "science/assembly/refinement/__init__.py",
+        "science/assembly/refinement/search.py",
+        "science/assembly/refinement/selection.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS13",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs13",
+      "specs": [
+        "WP_AS7 §4.9"
+      ],
+      "sources": [
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "frontier_bytes"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS14",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs14",
+      "specs": [
+        "WP_AS7 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "polish"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS15",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs15",
+      "specs": [
+        "WP_AS7 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/beam.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS16",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs16",
+      "specs": [
+        "WP_AS7 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "LONG_WINDOW",
+        "LONG_STRIDE",
+        "LONG_CORRECTION",
+        "LONG_DONORS",
+        "LONG_BEAM_WIDTH",
+        "BRIDGE_BATCH_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS17",
+      "classification": "Core",
+      "page": "methods/refinement.md",
+      "anchor": "rs17",
+      "specs": [
+        "WP_AS7 §4.10"
+      ],
+      "sources": [
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "BRIDGE_BATCH_BYTES"
+      ]
+    },
+    {
+      "area": "refinement-search",
+      "unit": "RS18",
+      "classification": "Accretion",
+      "page": "methods/refinement.md",
+      "anchor": "rs18",
+      "specs": [
+        "WP_AS7 §4.11"
+      ],
+      "sources": [
+        "science/assembly/refinement/search.py"
+      ],
+      "parameters": [
+        "WEAK_JUNCTION_MARGIN"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL01",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl01",
+      "specs": [
+        "WP_RL1 §4.1"
+      ],
+      "sources": [
+        "science/relatedness/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL02",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl02",
+      "specs": [
+        "WP_RL1 §4.2"
+      ],
+      "sources": [
+        "science/relatedness/frequency.py"
+      ],
+      "parameters": [
+        "iterations",
+        "clip"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL03",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl03",
+      "specs": [
+        "WP_RL1 §4.2"
+      ],
+      "sources": [
+        "science/relatedness/run.py"
+      ],
+      "parameters": [
+        "minor_allele_frequency",
+        "minimum_observed",
+        "family_site_step",
+        "ibd_site_step"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL04",
+      "classification": "Accretion",
+      "page": "methods/relatedness.md",
+      "anchor": "rl04",
+      "specs": [
+        "WP_RL1 §3, §4.9, §5"
+      ],
+      "sources": [
+        "science/relatedness/ibd.py"
+      ],
+      "parameters": [
+        "ibd_switch_rate",
+        "ibd_site_step",
+        "initial"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL05",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl05",
+      "specs": [
+        "WP_RL1 §4.2"
+      ],
+      "sources": [
+        "science/relatedness/run.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL06",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl06",
+      "specs": [
+        "WP_RL1 §4.3"
+      ],
+      "sources": [
+        "science/relatedness/family_kernels.py"
+      ],
+      "parameters": [
+        "initial"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL07",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl07",
+      "specs": [
+        "WP_RL1 §4.4"
+      ],
+      "sources": [
+        "science/relatedness/keys.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL08",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl08",
+      "specs": [
+        "WP_RL1 §4.5"
+      ],
+      "sources": [
+        "science/relatedness/partition.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL09",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl09",
+      "specs": [
+        "WP_RL1 §4.6"
+      ],
+      "sources": [
+        "science/relatedness/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL10",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl10",
+      "specs": [
+        "WP_RL1 §4.6"
+      ],
+      "sources": [
+        "science/relatedness/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL11",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl11",
+      "specs": [
+        "WP_RL1 §4.6"
+      ],
+      "sources": [
+        "science/relatedness/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL12",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl12",
+      "specs": [
+        "WP_RL1 §4.6"
+      ],
+      "sources": [
+        "science/relatedness/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL13",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl13",
+      "specs": [
+        "WP_RL1 §4.6"
+      ],
+      "sources": [
+        "science/relatedness/search.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL14",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl14",
+      "specs": [
+        "WP_RL1 §4.6; §5"
+      ],
+      "sources": [
+        "science/relatedness/run.py"
+      ],
+      "parameters": [
+        "max_sweeps"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL15",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl15",
+      "specs": [
+        "WP_RL1 §4.7"
+      ],
+      "sources": [
+        "science/relatedness/family_kernels.py",
+        "science/relatedness/partition.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL16",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl16",
+      "specs": [
+        "WP_RL1 §4.8; WP_D1 §4.3"
+      ],
+      "sources": [
+        "science/relatedness/run.py"
+      ],
+      "parameters": [
+        "support_unit_morgans",
+        "rate_is_measured"
+      ]
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL17",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl17",
+      "specs": [
+        "WP_RL1 §4.8"
+      ],
+      "sources": [
+        "science/relatedness/support.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL18",
+      "classification": "Accretion",
+      "page": "methods/relatedness.md",
+      "anchor": "rl18",
+      "specs": [
+        "WP_RL1 §4.8"
+      ],
+      "sources": [
+        "science/relatedness/support.py"
+      ],
+      "parameters": []
+    },
+    {
+      "area": "relatedness",
+      "unit": "RL19",
+      "classification": "Core",
+      "page": "methods/relatedness.md",
+      "anchor": "rl19",
+      "specs": [
+        "WP_RL1 §5, §7; WP_G1 §4.1"
+      ],
+      "sources": [
+        "science/relatedness/run.py",
+        "stages/graph.py",
+        "interface/run.py"
+      ],
+      "parameters": [
+        "member_support"
+      ]
+    }
+  ]
+}

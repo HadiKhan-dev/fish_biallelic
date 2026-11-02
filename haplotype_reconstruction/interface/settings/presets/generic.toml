@@ -1,0 +1,4 @@
+# Generic indexed VCF/BCF. The user supplies the contigs explicitly.
+[input]
+kind = "vcf"
+contigs = []

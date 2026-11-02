@@ -1,0 +1,1182 @@
+"""Render PE5's typed pedigree views as the 17 baseline CSVs and two summaries.
+
+Owns OU15/PD25 names, tuple text, column order and missing-value text inference.
+All selected rows, probabilities, guard transformations and support sets are PE5
+values. Method: docs/methods/pedigree.md; baseline pedigree/tables.py:58-458.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from dataclasses import fields
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from ...contracts import pedigree as records
+from .tables import record_mapping, write_frame, write_json
+
+__all__ = ["render", "write_pedigree", "COLUMNS"]
+
+# Fixed table schemas, copied from the frozen baseline; never read expected data during computation.
+COLUMNS = {
+    "tier_b_relationships": [
+        "Sample",
+        "Parent1",
+        "Parent2",
+        "ParentState",
+        "ObservedParentCount",
+        "InferenceStatus",
+        "ReleaseEvidence",
+    ],
+    "tier_b_partial_relationships": [
+        "Sample",
+        "Parent1",
+        "Parent2",
+        "ParentState",
+        "ObservedParentCount",
+        "InferenceStatus",
+        "Parent1Supported",
+        "Parent2Supported",
+        "ExactConfigurationResolved",
+        "ObservedParentCountMinimum",
+        "ObservedParentCountMaximum",
+        "ReleaseEvidence",
+    ],
+    "tier_a_relationships": ["Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus"],
+    "tier_a_partial_relationships": [
+        "Sample",
+        "Parent1",
+        "Parent2",
+        "ParentState",
+        "ObservedParentCount",
+        "InferenceStatus",
+        "Parent1Supported",
+        "Parent2Supported",
+        "ExactConfigurationResolved",
+        "ObservedParentCountMinimum",
+        "ObservedParentCountMaximum",
+    ],
+    "complete_relationships": ["Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus"],
+    "tier_b_candidate_sets": [
+        "Sample",
+        "ParentState",
+        "ObservedParentCount",
+        "Parent1",
+        "Parent2",
+        "Parent1Candidates",
+        "Parent2Candidates",
+        "ConfigurationCandidates",
+        "ExactConfigurationResolved",
+        "InferenceStatus",
+        "Parent1Supported",
+        "Parent2Supported",
+        "ObservedParentCountMinimum",
+        "ObservedParentCountMaximum",
+        "TierBFinalStateCall",
+        "TierBReleaseEvidence",
+    ],
+    "parent_state_calls": [
+        "Sample",
+        "SelectedParentState",
+        "LocalWinnerParentState",
+        "ObservedParentCount",
+        "LocalObservedParentCount",
+        "InferenceStatus",
+        "DAGDisplaced",
+        "GraphConflict",
+        "GraphTieConflict",
+        "GraphDirectionResolvedAlternative",
+        "SelectedParentRoleProbability",
+        "TierAStateCall",
+        "TierBStateCall",
+        "TierBFinalStateCall",
+        "TierBReleaseEvidence",
+    ],
+    "diagnostics": [
+        "Sample",
+        "M0PriorSensitivityStateAgreement",
+        "M0PriorSensitivityGraphAgreement",
+        "M0PriorSensitivityTierVeto",
+        "StructureChildEvaluable",
+        "StructureSelectedRowExposureTestable",
+        "StructureSelectedRowCXCompatible",
+        "StructureParent1Coverage",
+        "StructureParent2Coverage",
+        "StructurePairExplainability",
+        "StructureParent1DirectionProbability",
+        "StructureParent2DirectionProbability",
+        "BestM1Parent",
+        "BestM1ConditionalIdentityMargin",
+        "BestM2Parent1",
+        "BestM2Parent2",
+        "BestM2ConditionalIdentityMargin",
+        "LocalParent1",
+        "LocalParent2",
+        "EligibleChild",
+        "EligibleParentCount",
+        "EligibleParentPairCount",
+        "CompleteParent1",
+        "CompleteParent2",
+        "SelectedParentState",
+        "LocalWinnerParentState",
+        "ObservedParentCount",
+        "LocalObservedParentCount",
+        "Identifiable",
+        "DAGDisplaced",
+        "GraphConflict",
+        "GraphTieConflict",
+        "GraphDirectionResolvedAlternative",
+        "LocalParentRoleProbability",
+        "SelectedParentRoleProbability",
+        "RawAncestryJunctionCount",
+        "CallableAncestryHaplotypeBinCount",
+        "AdjustedAncestryJunctionBurden",
+        "AncestryPaintingCallabilityFraction",
+        "InformativeContigCount",
+        "InformativeMapUnits",
+        "LocalStateBootstrapFraction",
+        "LocalConfigurationBootstrapFraction",
+        "GraphConfigurationBootstrapFraction",
+        "SelectedGraphConfigurationBootstrapFraction",
+        "SelectedGraphParent1BootstrapFraction",
+        "SelectedGraphParent2BootstrapFraction",
+        "Parent1BootstrapFraction",
+        "Parent2BootstrapFraction",
+        "LocalStateLOCOFraction",
+        "LocalConfigurationLOCOFraction",
+        "GraphConfigurationLOCOFraction",
+        "SelectedGraphConfigurationLOCOFraction",
+        "SelectedGraphParent1LOCOFraction",
+        "SelectedGraphParent2LOCOFraction",
+        "Parent1LOCOFraction",
+        "Parent2LOCOFraction",
+        "StateWinnerMargin",
+        "ConditionalIdentityMargin",
+        "UnconstrainedWinnerMargin",
+        "SelectedAggregateUtility",
+        "SelectedMinusUnconstrainedBest",
+        "StateLogEvidence0",
+        "StateLogEvidence1",
+        "StateLogEvidence2",
+        "StateSupport0",
+        "StateSupport1",
+        "StateSupport2",
+        "ScoredCandidateCount2",
+        "M2CandidateScreenIncomplete",
+        "PriorSensitivityLocalStateAgreementFraction",
+        "PriorSensitivityLocalIdentityAgreementFraction",
+        "PriorSensitivityGraphAgreementFraction",
+        "PriorSensitivitySelectedStateMinimumSupport",
+        "InferenceStatus",
+        "TierAStateCall",
+        "TierBStateCall",
+        "TierAExactConfiguration",
+        "TierBExactConfiguration",
+        "TierAExactPair",
+        "TierBExactPair",
+        "TierAParent1",
+        "TierAParent2",
+        "TierBParent1",
+        "TierBParent2",
+        "ConfigurationSupportSet",
+        "Parent1CandidateSet",
+        "Parent2CandidateSet",
+        "EvidenceConfigurationSet",
+        "TierBFinalStateCall",
+        "TierBReleaseEvidence",
+    ],
+    "call_explanations": [
+        "Sample",
+        "ParentState",
+        "ObservedParentCount",
+        "Parent1",
+        "Parent2",
+        "Parent1Candidates",
+        "Parent2Candidates",
+        "ConfigurationCandidates",
+        "ExactConfigurationResolved",
+        "InferenceStatus",
+        "Parent1Supported",
+        "Parent2Supported",
+        "ObservedParentCountMinimum",
+        "ObservedParentCountMaximum",
+        "LocalWinnerParentState",
+        "SelectedParentState",
+        "LocalParent1",
+        "LocalParent2",
+        "GraphConflict",
+        "StateWinnerMargin",
+        "ConditionalIdentityMargin",
+        "LocalStateBootstrapFraction",
+        "LocalStateLOCOFraction",
+        "EligibleM2Pairs",
+        "ScoredM2Pairs",
+        "IncompleteM2Search",
+        "GraphChangedLocalConfiguration",
+        "Interpretation",
+        "TierBFinalStateCall",
+        "TierBReleaseEvidence",
+    ],
+    "alternative_explanations": [
+        "Sample",
+        "ParentState",
+        "Parent1",
+        "Parent2",
+        "LocalWinner",
+        "GraphWinner",
+        "WithinStateRank",
+        "GeneticLogEvidence",
+        "StructuralStateLogEvidence",
+        "StructuralIdentityEligible",
+        "DirectionLogContribution",
+        "ReciprocalFamilyLogContribution",
+        "AncestryPathLogContribution",
+        "AdjustedStateLogEvidence",
+        "AdjustedIdentityLogEvidence",
+        "ParentStateLogPrior",
+        "LogEligibleIdentityMultiplicity",
+        "MarginalStateLogEvidence",
+        "GraphDecisionUtility",
+    ],
+    "search_diagnostics": [
+        "Sample",
+        "EligibleParents",
+        "ScoredM2Pairs",
+        "M2PanelParents",
+        "ScreenBoundaryRank",
+        "ScreenBoundaryGap",
+        "OmittedParentCount",
+        "StrongestOmittedParent",
+        "Parent1ScreenRank",
+        "Parent2ScreenRank",
+        "SelectedParentAtScreenBoundary",
+    ],
+    "exclusion_evidence": ["Sample", "CandidateParent", "LogE", "ObservedSites"],
+    "exclusion_diagnostics": [
+        "Sample",
+        "EligibleCandidates",
+        "CompatibleCandidates",
+        "SupportedReverseCandidates",
+        "RemainingCandidates",
+        "WeakestExclusionLogE",
+        "ThresholdLogE",
+        "CompleteCandidateEvidence",
+        "Released",
+        "ReleaseConditionalOnSupportedDirections",
+    ],
+    "evidence_summary": ["Contig", "InformativeMarkers", "MeanMinimumAncestryJunctions", "MeanCallableHaplotypeBins"],
+    "chromosome_summary": ["Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason"],
+    "relative_contrasts": [
+        "Sample",
+        "CandidateParent",
+        "Views",
+        "ProxyModel",
+        "M1MinusSecondDegreeProxyNats",
+        "M1MinusFullSibProxyNats",
+        "UsableChromosomes",
+        "NegativeChromosomesSecondDegree",
+        "NegativeChromosomesFullSib",
+        "MinChromosomeContrastSecondDegree",
+    ],
+    "sibling_guard": [
+        "Parent",
+        "Child",
+        "SupportedMembers",
+        "DroppedLinked",
+        "DroppedHalfSib",
+        "DroppedMembers",
+        "TestedMembers",
+        "ExcludedMembers",
+        "Call",
+        "EvidenceCall",
+        "WithdrawalIteration",
+        "WithholdingBasis",
+    ],
+}
+
+
+# Empty frames preserve the constructor used by B pedigree/tables.py:407-458,
+# panel.py:218 and stage.py:428. Fixed-column frames retain their full header.
+EMPTY_COLUMNS = {
+    "tier_b_relationships": ("ReleaseEvidence",),
+    "tier_b_partial_relationships": (),
+    "tier_a_relationships": (),
+    "tier_a_partial_relationships": (),
+    "complete_relationships": (),
+    "tier_b_candidate_sets": ("TierBFinalStateCall", "TierBReleaseEvidence"),
+    "diagnostics": ("TierBFinalStateCall", "TierBReleaseEvidence"),
+    "call_explanations": ("TierBFinalStateCall", "TierBReleaseEvidence"),
+    "alternative_explanations": (),
+    "search_diagnostics": (),
+    "chromosome_summary": (),
+}
+
+
+def snake(name):
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)).lower()
+
+
+REFERENCE_FIELDS = {
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "CandidateParent",
+    "BestM1Parent",
+    "BestM2Parent1",
+    "BestM2Parent2",
+    "LocalParent1",
+    "LocalParent2",
+    "CompleteParent1",
+    "CompleteParent2",
+    "StrongestOmittedParent",
+    "Parent",
+    "Child",
+}
+STATE_FIELDS = {"ParentState", "SelectedParentState", "LocalWinnerParentState"}
+SET_FIELDS = {
+    "Parent1Candidates",
+    "Parent2Candidates",
+    "CompatibleCandidates",
+    "SupportedReverseCandidates",
+    "RemainingCandidates",
+}
+
+
+def _value(column, value, names, table):
+    # B uses None for absent search ranks before pandas infers the column dtype.
+    if column in {"Parent1ScreenRank", "Parent2ScreenRank"}:
+        return None if value is None or np.isnan(value) else int(value)
+    if column == "ScreenBoundaryRank":
+        return int(value)
+    if column in REFERENCE_FIELDS:
+        return None if value is None or value < 0 else names[int(value)]
+    if column in STATE_FIELDS:
+        if value < 0:
+            return "unresolved" if column == "ParentState" else None
+        return f"M{value}" if table == "alternative_explanations" else records.STATE_NAMES[int(value)]
+    if column in SET_FIELDS:
+        return tuple(names[i] for i in value)
+    if column == "ConfigurationCandidates":
+        return tuple(tuple(names[i] for i in configuration) for configuration in value)
+    if column in {"Parent1CandidateSet", "Parent2CandidateSet"}:
+        return "{" + ",".join(str(names[i]) for i in value) + "}"
+    if column == "EvidenceConfigurationSet":
+        return ";".join("+".join(str(names[i]) for i in configuration) for configuration in value)
+    if column == "ConfigurationSupportSet":
+        return ";".join(
+            f"{records.STATE_NAMES[v.state]}:"
+            + ("+".join(str(names[i]) for i in v.parents) if v.parents else "external+external")
+            + f":{v.probability:.3f}"
+            for v in value
+        )
+    if column == "DroppedMembers":
+        return ";".join(f"{names[i]}:{reason}" for i, reason in value)
+    return value
+
+
+def _count_row(value, names):
+    row = dict(
+        Sample=names[value.child],
+        EligibleCandidates=value.eligible_candidates,
+        CompatibleCandidates=tuple(names[i] for i in value.compatible),
+        SupportedReverseCandidates=tuple(names[i] for i in value.reverse),
+        RemainingCandidates=tuple(names[i] for i in value.remaining),
+        WeakestExclusionLogE=value.weakest_log_e,
+        ThresholdLogE=value.threshold_log_e,
+        CompleteCandidateEvidence=value.complete_evidence,
+        Released=value.released,
+        ReleaseConditionalOnSupportedDirections=value.uses_supported_directions,
+    )
+    if value.weakest_exact is not None:
+        row.update(
+            WeakestExclusionLogELower=value.weakest_lower,
+            WeakestExclusionLogEUpper=value.weakest_upper,
+            WeakestExclusionLogEExact=value.weakest_exact,
+        )
+    return row
+
+
+def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd.DataFrame | None]:
+    """Render numeric rows and text only; never choose or recompute a scientific value."""
+    result = {}
+    for table, fixed_columns in COLUMNS.items():
+        values = getattr(product, table)
+        columns = list(fixed_columns)
+        if table in EMPTY_COLUMNS and not values:
+            result[table] = pd.DataFrame(columns=list(EMPTY_COLUMNS[table]))
+            continue
+        if table == "relative_contrasts":
+            if values is None:
+                result[table] = None
+                continue
+            result[table] = pd.DataFrame(
+                [
+                    dict(
+                        Sample=names[int(c)],
+                        CandidateParent=names[int(p)],
+                        Views=";".join(values.views[i]),
+                        ProxyModel="relative-proxy-v1",
+                        M1MinusSecondDegreeProxyNats=values.second_degree[i],
+                        M1MinusFullSibProxyNats=values.full_sib[i],
+                        UsableChromosomes=int(values.usable_chromosomes[i]),
+                        NegativeChromosomesSecondDegree=int(values.negative_second[i]),
+                        NegativeChromosomesFullSib=int(values.negative_full[i]),
+                        MinChromosomeContrastSecondDegree=values.minimum_second[i],
+                    )
+                    for i, (c, p) in enumerate(values.pairs)
+                ],
+                columns=columns,
+            )
+            continue
+        if table == "sibling_guard":
+            if values is None:
+                result[table] = None
+                continue
+            guard = values
+            values = guard.rows
+        if table == "exclusion_evidence" and not values:
+            result[table] = pd.DataFrame(
+                dict(
+                    Sample=[],
+                    CandidateParent=[],
+                    LogE=np.empty(0, dtype=np.float64),
+                    ObservedSites=np.empty(0, dtype=np.int64),
+                )
+            )
+            if product.exclusion_intervals:
+                result[table]["LogELower"] = np.empty(0, dtype=np.float64)
+                result[table]["LogEUpper"] = np.empty(0, dtype=np.float64)
+                result[table]["LogEExact"] = np.empty(0, dtype=np.bool_)
+            continue
+        if table == "exclusion_evidence" and product.exclusion_intervals:
+            columns += ["LogELower", "LogEUpper", "LogEExact"]
+        if table == "exclusion_diagnostics":
+            if product.exclusion_intervals:
+                columns += ["WeakestExclusionLogELower", "WeakestExclusionLogEUpper", "WeakestExclusionLogEExact"]
+            result[table] = pd.DataFrame([_count_row(v, names) for v in values], columns=columns)
+            continue
+        oriented = table in (
+            "tier_b_relationships",
+            "tier_b_partial_relationships",
+            "tier_a_relationships",
+            "tier_a_partial_relationships",
+            "complete_relationships",
+            "tier_b_candidate_sets",
+        )
+        if oriented and values and values[0].parent_slot_basis is not None:
+            columns.insert(columns.index("Parent2") + 1, "ParentSlotBasis")
+        result[table] = pd.DataFrame(
+            [{c: _value(c, getattr(v, snake(c)), names, table) for c in columns} for v in values], columns=columns
+        )
+        if oriented:
+            for slot, column in enumerate(("Parent1", "Parent2")):
+                if any(v.parents_before_guard is not None and v.parents_before_guard[slot] >= 0 for v in values):
+                    result[table][column] = pd.Series(result[table][column].tolist(), dtype="str")
+        if oriented and "ParentSlotBasis" in columns:
+            # The baseline slot renderer writes explicitly object-typed names/bases after a swap.
+            result[table]["ParentSlotBasis"] = pd.Series([v.parent_slot_basis for v in values], dtype=object)
+        if table == "sibling_guard":
+            if not values:
+                # B guard.fixed_point assigns empty lists after constructing the frame.
+                for column in ("WithdrawalIteration", "WithholdingBasis"):
+                    result[table][column] = np.empty(0, dtype=np.float64)
+            result[table].attrs.update(
+                cleaning_iterations=guard.cleaning_iterations,
+                cleaning_converged=guard.cleaning_converged,
+                cleaning_iteration_bound=guard.cleaning_iteration_bound,
+            )
+    return result
+
+
+# B pedigree/exclusion.py summary insertion order; chromosome details precede
+# released count. D1 field layout is a storage contract, not the JSON key order.
+EXCLUSION_SUMMARY_FIELDS = (
+    "model",
+    "alpha",
+    "genotype_replacement_probability",
+    "conditional_on_supported_edge_directions",
+    "candidate_dyads",
+    "guard_dyads",
+    "contigs",
+    "status",
+    "chromosomes",
+    "released",
+)
+
+
+def write_pedigree(output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None) -> list[Path]:
+    """Write every table of ``product.views``, the calibration and the run summary; returns the paths written.
+    ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
+    per-sample tables list their rows in it (the records keep the canonical order, release 2.1)."""
+    from .tables import frame_in_input_order
+
+    frames = render(product.views, product.sample_ids)
+    exclusion = record_mapping(product.exclusion)
+    directory = Path(output) / "pedigree"
+    written = [
+        write_frame(directory / f"{field.name}.csv", frame_in_input_order(frames[field.name], input_ids))
+        for field in fields(product.views)
+        if field.name in frames and frames[field.name] is not None
+    ]
+    written.append(write_json(directory / "evidence_calibration.json", record_mapping(product.calibration)))
+    written.append(
+        write_json(
+            directory / "summary.json",
+            dict(
+                informative_contigs=list(product.informative_contigs),
+                omitted=dict(product.omitted),
+                reach=record_mapping(product.reach),
+                family_solve=record_mapping(product.family_solve),
+                exclusion={name: exclusion[name] for name in EXCLUSION_SUMMARY_FIELDS if name in exclusion},
+                eligibility=record_mapping(product.eligibility),
+                sibling_guard=record_mapping(product.guard_summary),
+            ),
+        )
+    )
+    return written
+
+
+# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
+# Row-dict tables retain B's headerless empty constructor; these constants do not
+# impose columns on those tables. Scientific values remain upstream contract fields.
+TIER_B_RELATIONSHIPS_COLUMNS = (
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "ParentState",
+    "ObservedParentCount",
+    "InferenceStatus",
+    "ReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    InferenceStatus: inference status (1).
+    ReleaseEvidence: release evidence (1).
+"""
+
+TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "ParentState",
+    "ObservedParentCount",
+    "InferenceStatus",
+    "Parent1Supported",
+    "Parent2Supported",
+    "ExactConfigurationResolved",
+    "ObservedParentCountMinimum",
+    "ObservedParentCountMaximum",
+    "ReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    InferenceStatus: inference status (1).
+    Parent1Supported: parent1 supported (1).
+    Parent2Supported: parent2 supported (1).
+    ExactConfigurationResolved: exact configuration resolved (1).
+    ObservedParentCountMinimum: observed parent count minimum (1).
+    ObservedParentCountMaximum: observed parent count maximum (1).
+    ReleaseEvidence: release evidence (1).
+"""
+
+TIER_A_RELATIONSHIPS_COLUMNS = ("Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus")
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    InferenceStatus: inference status (1).
+"""
+
+TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "ParentState",
+    "ObservedParentCount",
+    "InferenceStatus",
+    "Parent1Supported",
+    "Parent2Supported",
+    "ExactConfigurationResolved",
+    "ObservedParentCountMinimum",
+    "ObservedParentCountMaximum",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    InferenceStatus: inference status (1).
+    Parent1Supported: parent1 supported (1).
+    Parent2Supported: parent2 supported (1).
+    ExactConfigurationResolved: exact configuration resolved (1).
+    ObservedParentCountMinimum: observed parent count minimum (1).
+    ObservedParentCountMaximum: observed parent count maximum (1).
+"""
+
+COMPLETE_RELATIONSHIPS_COLUMNS = (
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "ParentState",
+    "ObservedParentCount",
+    "InferenceStatus",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    InferenceStatus: inference status (1).
+"""
+
+TIER_B_CANDIDATE_SETS_COLUMNS = (
+    "Sample",
+    "ParentState",
+    "ObservedParentCount",
+    "Parent1",
+    "Parent2",
+    "Parent1Candidates",
+    "Parent2Candidates",
+    "ConfigurationCandidates",
+    "ExactConfigurationResolved",
+    "InferenceStatus",
+    "Parent1Supported",
+    "Parent2Supported",
+    "ObservedParentCountMinimum",
+    "ObservedParentCountMaximum",
+    "TierBFinalStateCall",
+    "TierBReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    Parent1Candidates: first-parent candidate tuple, rendered using Python tuple text (text).
+    Parent2Candidates: second-parent candidate tuple, rendered using Python tuple text (text).
+    ConfigurationCandidates: nested parent-configuration tuples, rendered using Python tuple text (text).
+    ExactConfigurationResolved: exact configuration resolved (1).
+    InferenceStatus: inference status (1).
+    Parent1Supported: parent1 supported (1).
+    Parent2Supported: parent2 supported (1).
+    ObservedParentCountMinimum: observed parent count minimum (1).
+    ObservedParentCountMaximum: observed parent count maximum (1).
+    TierBFinalStateCall: tier b final state call (1).
+    TierBReleaseEvidence: tier b release evidence (1).
+"""
+
+PARENT_STATE_CALLS_COLUMNS = (
+    "Sample",
+    "SelectedParentState",
+    "LocalWinnerParentState",
+    "ObservedParentCount",
+    "LocalObservedParentCount",
+    "InferenceStatus",
+    "DAGDisplaced",
+    "GraphConflict",
+    "GraphTieConflict",
+    "GraphDirectionResolvedAlternative",
+    "SelectedParentRoleProbability",
+    "TierAStateCall",
+    "TierBStateCall",
+    "TierBFinalStateCall",
+    "TierBReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    SelectedParentState: selected M0/M1/M2 state label (text).
+    LocalWinnerParentState: local winning M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    LocalObservedParentCount: local observed parent count (1).
+    InferenceStatus: inference status (1).
+    DAGDisplaced: dag displaced (1).
+    GraphConflict: graph conflict (1).
+    GraphTieConflict: graph tie conflict (1).
+    GraphDirectionResolvedAlternative: graph direction resolved alternative (1).
+    SelectedParentRoleProbability: selected parent role probability (1).
+    TierAStateCall: tier a state call (1).
+    TierBStateCall: tier b state call (1).
+    TierBFinalStateCall: tier b final state call (1).
+    TierBReleaseEvidence: tier b release evidence (1).
+"""
+
+DIAGNOSTICS_COLUMNS = (
+    "Sample",
+    "M0PriorSensitivityStateAgreement",
+    "M0PriorSensitivityGraphAgreement",
+    "M0PriorSensitivityTierVeto",
+    "StructureChildEvaluable",
+    "StructureSelectedRowExposureTestable",
+    "StructureSelectedRowCXCompatible",
+    "StructureParent1Coverage",
+    "StructureParent2Coverage",
+    "StructurePairExplainability",
+    "StructureParent1DirectionProbability",
+    "StructureParent2DirectionProbability",
+    "BestM1Parent",
+    "BestM1ConditionalIdentityMargin",
+    "BestM2Parent1",
+    "BestM2Parent2",
+    "BestM2ConditionalIdentityMargin",
+    "LocalParent1",
+    "LocalParent2",
+    "EligibleChild",
+    "EligibleParentCount",
+    "EligibleParentPairCount",
+    "CompleteParent1",
+    "CompleteParent2",
+    "SelectedParentState",
+    "LocalWinnerParentState",
+    "ObservedParentCount",
+    "LocalObservedParentCount",
+    "Identifiable",
+    "DAGDisplaced",
+    "GraphConflict",
+    "GraphTieConflict",
+    "GraphDirectionResolvedAlternative",
+    "LocalParentRoleProbability",
+    "SelectedParentRoleProbability",
+    "RawAncestryJunctionCount",
+    "CallableAncestryHaplotypeBinCount",
+    "AdjustedAncestryJunctionBurden",
+    "AncestryPaintingCallabilityFraction",
+    "InformativeContigCount",
+    "InformativeMapUnits",
+    "LocalStateBootstrapFraction",
+    "LocalConfigurationBootstrapFraction",
+    "GraphConfigurationBootstrapFraction",
+    "SelectedGraphConfigurationBootstrapFraction",
+    "SelectedGraphParent1BootstrapFraction",
+    "SelectedGraphParent2BootstrapFraction",
+    "Parent1BootstrapFraction",
+    "Parent2BootstrapFraction",
+    "LocalStateLOCOFraction",
+    "LocalConfigurationLOCOFraction",
+    "GraphConfigurationLOCOFraction",
+    "SelectedGraphConfigurationLOCOFraction",
+    "SelectedGraphParent1LOCOFraction",
+    "SelectedGraphParent2LOCOFraction",
+    "Parent1LOCOFraction",
+    "Parent2LOCOFraction",
+    "StateWinnerMargin",
+    "ConditionalIdentityMargin",
+    "UnconstrainedWinnerMargin",
+    "SelectedAggregateUtility",
+    "SelectedMinusUnconstrainedBest",
+    "StateLogEvidence0",
+    "StateLogEvidence1",
+    "StateLogEvidence2",
+    "StateSupport0",
+    "StateSupport1",
+    "StateSupport2",
+    "ScoredCandidateCount2",
+    "M2CandidateScreenIncomplete",
+    "PriorSensitivityLocalStateAgreementFraction",
+    "PriorSensitivityLocalIdentityAgreementFraction",
+    "PriorSensitivityGraphAgreementFraction",
+    "PriorSensitivitySelectedStateMinimumSupport",
+    "InferenceStatus",
+    "TierAStateCall",
+    "TierBStateCall",
+    "TierAExactConfiguration",
+    "TierBExactConfiguration",
+    "TierAExactPair",
+    "TierBExactPair",
+    "TierAParent1",
+    "TierAParent2",
+    "TierBParent1",
+    "TierBParent2",
+    "ConfigurationSupportSet",
+    "Parent1CandidateSet",
+    "Parent2CandidateSet",
+    "EvidenceConfigurationSet",
+    "TierBFinalStateCall",
+    "TierBReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    M0PriorSensitivityStateAgreement: m0 prior sensitivity state agreement (1).
+    M0PriorSensitivityGraphAgreement: m0 prior sensitivity graph agreement (1).
+    M0PriorSensitivityTierVeto: m0 prior sensitivity tier veto (1).
+    StructureChildEvaluable: structure child evaluable (1).
+    StructureSelectedRowExposureTestable: structure selected row exposure testable (1).
+    StructureSelectedRowCXCompatible: structure selected row cx compatible (1).
+    StructureParent1Coverage: structure parent1 coverage (1).
+    StructureParent2Coverage: structure parent2 coverage (1).
+    StructurePairExplainability: structure pair explainability (1).
+    StructureParent1DirectionProbability: structure parent1 direction probability (1).
+    StructureParent2DirectionProbability: structure parent2 direction probability (1).
+    BestM1Parent: best m1 parent (1).
+    BestM1ConditionalIdentityMargin: best m1 conditional identity margin (nats).
+    BestM2Parent1: best m2 parent1 (1).
+    BestM2Parent2: best m2 parent2 (1).
+    BestM2ConditionalIdentityMargin: best m2 conditional identity margin (nats).
+    LocalParent1: local parent1 (1).
+    LocalParent2: local parent2 (1).
+    EligibleChild: eligible child (1).
+    EligibleParentCount: eligible parent count (1).
+    EligibleParentPairCount: eligible parent pair count (1).
+    CompleteParent1: complete parent1 (1).
+    CompleteParent2: complete parent2 (1).
+    SelectedParentState: selected M0/M1/M2 state label (text).
+    LocalWinnerParentState: local winning M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    LocalObservedParentCount: local observed parent count (1).
+    Identifiable: identifiable (1).
+    DAGDisplaced: dag displaced (1).
+    GraphConflict: graph conflict (1).
+    GraphTieConflict: graph tie conflict (1).
+    GraphDirectionResolvedAlternative: graph direction resolved alternative (1).
+    LocalParentRoleProbability: local parent role probability (1).
+    SelectedParentRoleProbability: selected parent role probability (1).
+    RawAncestryJunctionCount: raw ancestry junction count (1).
+    CallableAncestryHaplotypeBinCount: callable ancestry haplotype bin count (1).
+    AdjustedAncestryJunctionBurden: adjusted ancestry junction burden (1).
+    AncestryPaintingCallabilityFraction: ancestry painting callability fraction (1).
+    InformativeContigCount: informative contig count (1).
+    InformativeMapUnits: informative map units (1).
+    LocalStateBootstrapFraction: local state bootstrap fraction (1).
+    LocalConfigurationBootstrapFraction: local configuration bootstrap fraction (1).
+    GraphConfigurationBootstrapFraction: graph configuration bootstrap fraction (1).
+    SelectedGraphConfigurationBootstrapFraction: selected graph configuration bootstrap fraction (1).
+    SelectedGraphParent1BootstrapFraction: selected graph parent1 bootstrap fraction (1).
+    SelectedGraphParent2BootstrapFraction: selected graph parent2 bootstrap fraction (1).
+    Parent1BootstrapFraction: parent1 bootstrap fraction (1).
+    Parent2BootstrapFraction: parent2 bootstrap fraction (1).
+    LocalStateLOCOFraction: local state loco fraction (1).
+    LocalConfigurationLOCOFraction: local configuration loco fraction (1).
+    GraphConfigurationLOCOFraction: graph configuration loco fraction (1).
+    SelectedGraphConfigurationLOCOFraction: selected graph configuration loco fraction (1).
+    SelectedGraphParent1LOCOFraction: selected graph parent1 loco fraction (1).
+    SelectedGraphParent2LOCOFraction: selected graph parent2 loco fraction (1).
+    Parent1LOCOFraction: parent1 loco fraction (1).
+    Parent2LOCOFraction: parent2 loco fraction (1).
+    StateWinnerMargin: state winner margin (nats).
+    ConditionalIdentityMargin: conditional identity margin (nats).
+    UnconstrainedWinnerMargin: unconstrained winner margin (nats).
+    SelectedAggregateUtility: selected aggregate utility (nats).
+    SelectedMinusUnconstrainedBest: selected minus unconstrained best (1).
+    StateLogEvidence0: state log evidence0 (nats).
+    StateLogEvidence1: state log evidence1 (nats).
+    StateLogEvidence2: state log evidence2 (nats).
+    StateSupport0: state support0 (1).
+    StateSupport1: state support1 (1).
+    StateSupport2: state support2 (1).
+    ScoredCandidateCount2: scored candidate count2 (1).
+    M2CandidateScreenIncomplete: m2 candidate screen incomplete (1).
+    PriorSensitivityLocalStateAgreementFraction: prior sensitivity local state agreement fraction (1).
+    PriorSensitivityLocalIdentityAgreementFraction: prior sensitivity local identity agreement fraction (1).
+    PriorSensitivityGraphAgreementFraction: prior sensitivity graph agreement fraction (1).
+    PriorSensitivitySelectedStateMinimumSupport: prior sensitivity selected state minimum support (1).
+    InferenceStatus: inference status (1).
+    TierAStateCall: tier a state call (1).
+    TierBStateCall: tier b state call (1).
+    TierAExactConfiguration: tier a exact configuration (1).
+    TierBExactConfiguration: tier b exact configuration (1).
+    TierAExactPair: tier a exact pair (1).
+    TierBExactPair: tier b exact pair (1).
+    TierAParent1: tier a parent1 (1).
+    TierAParent2: tier a parent2 (1).
+    TierBParent1: tier b parent1 (1).
+    TierBParent2: tier b parent2 (1).
+    ConfigurationSupportSet: configuration support set (1).
+    Parent1CandidateSet: parent1 candidate set (1).
+    Parent2CandidateSet: parent2 candidate set (1).
+    EvidenceConfigurationSet: evidence configuration set (1).
+    TierBFinalStateCall: tier b final state call (1).
+    TierBReleaseEvidence: tier b release evidence (1).
+"""
+
+CALL_EXPLANATIONS_COLUMNS = (
+    "Sample",
+    "ParentState",
+    "ObservedParentCount",
+    "Parent1",
+    "Parent2",
+    "Parent1Candidates",
+    "Parent2Candidates",
+    "ConfigurationCandidates",
+    "ExactConfigurationResolved",
+    "InferenceStatus",
+    "Parent1Supported",
+    "Parent2Supported",
+    "ObservedParentCountMinimum",
+    "ObservedParentCountMaximum",
+    "LocalWinnerParentState",
+    "SelectedParentState",
+    "LocalParent1",
+    "LocalParent2",
+    "GraphConflict",
+    "StateWinnerMargin",
+    "ConditionalIdentityMargin",
+    "LocalStateBootstrapFraction",
+    "LocalStateLOCOFraction",
+    "EligibleM2Pairs",
+    "ScoredM2Pairs",
+    "IncompleteM2Search",
+    "GraphChangedLocalConfiguration",
+    "Interpretation",
+    "TierBFinalStateCall",
+    "TierBReleaseEvidence",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    ParentState: released M0/M1/M2 state label (text).
+    ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    Parent1Candidates: first-parent candidate tuple, rendered using Python tuple text (text).
+    Parent2Candidates: second-parent candidate tuple, rendered using Python tuple text (text).
+    ConfigurationCandidates: nested parent-configuration tuples, rendered using Python tuple text (text).
+    ExactConfigurationResolved: exact configuration resolved (1).
+    InferenceStatus: inference status (1).
+    Parent1Supported: parent1 supported (1).
+    Parent2Supported: parent2 supported (1).
+    ObservedParentCountMinimum: observed parent count minimum (1).
+    ObservedParentCountMaximum: observed parent count maximum (1).
+    LocalWinnerParentState: local winning M0/M1/M2 state label (text).
+    SelectedParentState: selected M0/M1/M2 state label (text).
+    LocalParent1: local parent1 (1).
+    LocalParent2: local parent2 (1).
+    GraphConflict: graph conflict (1).
+    StateWinnerMargin: state winner margin (nats).
+    ConditionalIdentityMargin: conditional identity margin (nats).
+    LocalStateBootstrapFraction: local state bootstrap fraction (1).
+    LocalStateLOCOFraction: local state loco fraction (1).
+    EligibleM2Pairs: eligible m2 pairs (1).
+    ScoredM2Pairs: scored m2 pairs (1).
+    IncompleteM2Search: incomplete m2 search (1).
+    GraphChangedLocalConfiguration: graph changed local configuration (1).
+    Interpretation: interpretation (1).
+    TierBFinalStateCall: tier b final state call (1).
+    TierBReleaseEvidence: tier b release evidence (1).
+"""
+
+ALTERNATIVE_EXPLANATIONS_COLUMNS = (
+    "Sample",
+    "ParentState",
+    "Parent1",
+    "Parent2",
+    "LocalWinner",
+    "GraphWinner",
+    "WithinStateRank",
+    "GeneticLogEvidence",
+    "StructuralStateLogEvidence",
+    "StructuralIdentityEligible",
+    "DirectionLogContribution",
+    "ReciprocalFamilyLogContribution",
+    "AncestryPathLogContribution",
+    "AdjustedStateLogEvidence",
+    "AdjustedIdentityLogEvidence",
+    "ParentStateLogPrior",
+    "LogEligibleIdentityMultiplicity",
+    "MarginalStateLogEvidence",
+    "GraphDecisionUtility",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    ParentState: released M0/M1/M2 state label (text).
+    Parent1: first parent identifier; empty for an unobserved parent (text).
+    Parent2: second parent identifier; empty for an unobserved parent (text).
+    LocalWinner: local winner (1).
+    GraphWinner: graph winner (1).
+    WithinStateRank: within state rank (1).
+    GeneticLogEvidence: genetic log evidence (nats).
+    StructuralStateLogEvidence: structural state log evidence (nats).
+    StructuralIdentityEligible: structural identity eligible (1).
+    DirectionLogContribution: direction log contribution (nats).
+    ReciprocalFamilyLogContribution: reciprocal family log contribution (nats).
+    AncestryPathLogContribution: ancestry path log contribution (nats).
+    AdjustedStateLogEvidence: adjusted state log evidence (nats).
+    AdjustedIdentityLogEvidence: adjusted identity log evidence (nats).
+    ParentStateLogPrior: parent state log prior (nats).
+    LogEligibleIdentityMultiplicity: log eligible identity multiplicity (nats).
+    MarginalStateLogEvidence: marginal state log evidence (nats).
+    GraphDecisionUtility: graph decision utility (nats).
+"""
+
+SEARCH_DIAGNOSTICS_COLUMNS = (
+    "Sample",
+    "EligibleParents",
+    "ScoredM2Pairs",
+    "M2PanelParents",
+    "ScreenBoundaryRank",
+    "ScreenBoundaryGap",
+    "OmittedParentCount",
+    "StrongestOmittedParent",
+    "Parent1ScreenRank",
+    "Parent2ScreenRank",
+    "SelectedParentAtScreenBoundary",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    EligibleParents: eligible parents (1).
+    ScoredM2Pairs: scored m2 pairs (1).
+    M2PanelParents: m2 panel parents (1).
+    ScreenBoundaryRank: screen boundary rank (1).
+    ScreenBoundaryGap: screen boundary gap (nats).
+    OmittedParentCount: omitted parent count (1).
+    StrongestOmittedParent: strongest omitted parent (1).
+    Parent1ScreenRank: parent1 screen rank (1).
+    Parent2ScreenRank: parent2 screen rank (1).
+    SelectedParentAtScreenBoundary: selected parent at screen boundary (1).
+"""
+
+EXCLUSION_EVIDENCE_COLUMNS = ("Sample", "CandidateParent", "LogE", "ObservedSites")
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    CandidateParent: candidate parent (1).
+    LogE: exclusion log-evidence (nats).
+    ObservedSites: observed sites (1).
+"""
+
+EXCLUSION_DIAGNOSTICS_COLUMNS = (
+    "Sample",
+    "EligibleCandidates",
+    "CompatibleCandidates",
+    "SupportedReverseCandidates",
+    "RemainingCandidates",
+    "WeakestExclusionLogE",
+    "ThresholdLogE",
+    "CompleteCandidateEvidence",
+    "Released",
+    "ReleaseConditionalOnSupportedDirections",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    EligibleCandidates: eligible candidates (count).
+    CompatibleCandidates: compatible candidates (1).
+    SupportedReverseCandidates: supported reverse candidates (1).
+    RemainingCandidates: remaining candidates (1).
+    WeakestExclusionLogE: weakest exclusion log-evidence used for the released count (nats).
+    ThresholdLogE: required exclusion log-evidence threshold (nats).
+    CompleteCandidateEvidence: complete candidate evidence (1).
+    Released: released (1).
+    ReleaseConditionalOnSupportedDirections: release conditional on supported directions (1).
+"""
+
+EVIDENCE_SUMMARY_COLUMNS = ("Contig", "InformativeMarkers", "MeanMinimumAncestryJunctions", "MeanCallableHaplotypeBins")
+"""Columns in published order.
+
+    Contig: contig identifier (text).
+    InformativeMarkers: informative markers (1).
+    MeanMinimumAncestryJunctions: mean minimum ancestry junctions (painting bins).
+    MeanCallableHaplotypeBins: mean callable haplotype bins (1).
+"""
+
+CHROMOSOME_SUMMARY_COLUMNS = ("Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason")
+"""Columns in published order.
+
+    Contig: contig identifier (text).
+    ComponentCount: component count (1).
+    ScoredComponentCount: scored component count (1).
+    InformativeMarkers: informative markers (1).
+    OmittedReason: omitted reason (1).
+"""
+
+RELATIVE_CONTRASTS_COLUMNS = (
+    "Sample",
+    "CandidateParent",
+    "Views",
+    "ProxyModel",
+    "M1MinusSecondDegreeProxyNats",
+    "M1MinusFullSibProxyNats",
+    "UsableChromosomes",
+    "NegativeChromosomesSecondDegree",
+    "NegativeChromosomesFullSib",
+    "MinChromosomeContrastSecondDegree",
+)
+"""Columns in published order.
+
+    Sample: sample identifier (text).
+    CandidateParent: candidate parent (1).
+    Views: views (1).
+    ProxyModel: proxy model (1).
+    M1MinusSecondDegreeProxyNats: m1 minus second degree proxy nats (nats).
+    M1MinusFullSibProxyNats: m1 minus full sib proxy nats (nats).
+    UsableChromosomes: usable chromosomes (1).
+    NegativeChromosomesSecondDegree: negative chromosomes second degree (1).
+    NegativeChromosomesFullSib: negative chromosomes full sib (1).
+    MinChromosomeContrastSecondDegree: min chromosome contrast second degree (1).
+"""
+
+SIBLING_GUARD_COLUMNS = (
+    "Parent",
+    "Child",
+    "SupportedMembers",
+    "DroppedLinked",
+    "DroppedHalfSib",
+    "DroppedMembers",
+    "TestedMembers",
+    "ExcludedMembers",
+    "Call",
+    "EvidenceCall",
+    "WithdrawalIteration",
+    "WithholdingBasis",
+)
+"""Columns in published order.
+
+    Parent: sequenced parent identifier (text).
+    Child: child identifier (text).
+    SupportedMembers: supported members (1).
+    DroppedLinked: dropped linked (1).
+    DroppedHalfSib: dropped half sib (1).
+    DroppedMembers: dropped members (1).
+    TestedMembers: tested members (1).
+    ExcludedMembers: excluded members (1).
+    Call: call (1).
+    EvidenceCall: evidence call (1).
+    WithdrawalIteration: withdrawal iteration (1).
+    WithholdingBasis: withholding basis (1).
+"""
+
+EXCLUSION_INTERVAL_COLUMNS = ("LogELower", "LogEUpper", "LogEExact")
+"""Columns in published order.
+
+    LogELower: lower exclusion log-evidence bound (nats).
+    LogEUpper: upper exclusion log-evidence bound (nats).
+    LogEExact: whether exclusion log-evidence is exact (1).
+"""
+
+COUNT_INTERVAL_COLUMNS = ("WeakestExclusionLogELower", "WeakestExclusionLogEUpper", "WeakestExclusionLogEExact")
+"""Columns in published order.
+
+    WeakestExclusionLogELower: weakest exclusion log e lower (nats).
+    WeakestExclusionLogEUpper: weakest exclusion log e upper (nats).
+    WeakestExclusionLogEExact: weakest exclusion log e exact (1).
+"""
+
+PARENT_SLOT_COLUMNS = ("ParentSlotBasis",)
+"""Columns in published order.
+
+    ParentSlotBasis: recorded unordered-parent orientation basis; no sex inference (text).
+"""

@@ -1,288 +1,226 @@
 # Relatedness
 
-Release 3.2. The relatedness stage estimates how the samples are related from their genotype likelihoods alone: the
-identity by descent (IBD) of every pair along the genome, and a partition of the samples into full-sib families with
-latent or sequenced parents. It reads only the evidence records: no founder panel, painting, pedigree, phase or cohort
-label. No later stage feeds back into it. Its only consumer is the pedigree release's
-[sibling-as-parent guard](pedigree.md#sibling-as-parent-guard), which reads the full-sib families (since release 3.4,
-not the pairwise IBD statistics).
+Relatedness fits a composite full-sib/half-sib family model from genotype likelihoods. Its latent or sequenced parent slots carry no sex, generation or sample-name prior. N is samples, M selected family sites, L pair-chain sites and U nonempty support units. The two bounded searches are alternatives, not an exhaustive pedigree search. Pairwise IBD is an optional output and is off by default.
 
-The products are inferences from genotype likelihoods, not pedigree truth. A sample's family is a hypothesis with a
-measured support across map units (chromosomes without a genetic map), and the stage keeps unsupported placements as
-unresolved rather than forcing a call.
+The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
-## Inputs and outputs
+<a id="rl01"></a>
+## rl01 Genome-wide evidence pass and the concatenated site axis
 
-- Input: each contig's evidence record (genotype likelihoods, observed-read mask, positions) and the run's genetic
-  maps (the IBD chain's switching distance).
-- Run record `relatedness` (`relatedness.records.RelatednessProduct`), bound to every contig's evidence identity,
-  each contig's map and the stage settings.
-- Published tables in `OUTPUT/relatedness/`:
-  - `families.csv`: one row per sample. Its family, the share of support units on which that family is its best
-    placement (`FamilySupport`), and the family's two parents with their support. A parent is a sequenced
-    sample or empty for a latent parent.
-  - `pairs.csv`: one row per sample pair. The posterior IBD0, IBD1 and IBD2 shares of the pair's jointly observed
-    sites, the number of those sites, and the IBD0 and IBD2 stretch evidence.
-  - `half_sib_links.csv`: pairs of latent-parent families better explained as sharing one latent parent.
-  - `summary.json`: the family fit (objective, sweeps, convergence, the search kept and its margin, sites per
-    chromosome).
+Read evidence from every configured contig, validate the canonical sample axis, compute its summaries and concatenate family-site evidence in configuration order. Overlap decoding only as an execution choice. Contig order is scientifically bound because it fixes ranks and reduction order.
 
-## Allele frequencies and sites
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-Each contig's alternative allele frequency p is fitted by EM under Hardy-Weinberg over all samples' genotype
-likelihoods (six iterations; unobserved cells carry the prior), clipped to [1e-4, 1 - 1e-4]. Since release 3.4 the
-EM runs per site in one parallel pass, a mathematically equivalent form of the earlier array expression: it agrees
-bitwise on every validation replay checked, and other inputs can differ in the last bit (the sums over samples may
-associate differently), which leaves the site selection and every decision unchanged in the checks. With two or more
-CPUs the next contig's evidence is read and decoded on one CPU while the current one is computed on the others.
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-- The IBD chain uses every `RelatednessConfig.ibd_site_step = 10`th site of the contig, at any frequency.
-- The family model uses every `RelatednessConfig.family_site_step = 20`th site among those with a minor allele
-  frequency of at least `RelatednessConfig.minor_allele_frequency = 0.05` and reads in at least
-  `RelatednessConfig.minimum_observed = 0.5` of the samples.
+Cost and scope: O(N L) decoded evidence per active contig and O(N M) retained selected-site tables; concatenation can temporarily retain both source and combined arrays.
 
-## Pairwise identity by descent
+<a id="rl02"></a>
+## rl02 Hardy-Weinberg EM allele frequency per site
 
-For each pair (a, b), a three-state chain (IBD0, IBD1, IBD2) runs over the contig's IBD sites. It leaves its state at
-`RelatednessConfig.ibd_switch_rate = 4.0` per Morgan, to either other state equally; the genetic distance comes from
-the run's map. A site observed in both samples emits, with Hardy-Weinberg genotype probabilities h at frequency p
-(q = 1 - p) and the samples' genotype likelihoods A and B:
+Iterate the Hardy–Weinberg allele-frequency EM for its fixed schedule, using the declared floors/clips and sample-order sums. Count every sample in the denominator, including neutral missing observations. Preserve the left-to-right arithmetic of genotype contributions and frequency updates.
 
-    IBD0: (sum_g h_g A_g) (sum_g h_g B_g)
-    IBD2: sum_g h_g A_g B_g
-    IBD1: q^3 A0 B0 + p^3 A2 B2 + p q A1 B1 + p q^2 (A0 B1 + A1 B0) + p^2 q (A2 B1 + A1 B2)
+Implementation: [science/relatedness/frequency.py](../../haplotype_reconstruction/science/relatedness/frequency.py).
 
-Other sites emit 1. Genotype likelihoods need no normalisation, because every state of a pair uses the same reads.
+Parameters by name: `iterations`, `clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Outputs, summed over the contigs:
-- the posterior state shares over jointly observed sites (forward-backward);
-- `lr_ibd0` = log L(IBD0, IBD1, IBD2) - log L(IBD1, IBD2): the evidence for stretches with no IBD. A parent and its
-  child have none and full sibs share about a quarter of the genome IBD0. In crosses from few founders, with
-  low-depth genotype likelihoods, the model still finds some IBD0 evidence between parent and child: on the simulated
-  designs their median is 20-35% of the full sibs' median, and the posterior IBD0 share of true parent-child pairs
-  has a median of 0.38. The absolute scale is therefore not interpretable in such crosses: the Hardy-Weinberg null at
-  the sample frequency treats founder haplotypes shared by chance as unrelated. Consumers should at most compare
-  `lr_ibd0` values within one run (the 3.2-3.3 sibling guard used a within-family ratio; release 3.4 replaced it by a
-  Mendelian family-consistency test);
-- `lr_ibd2` = log L(IBD0, IBD1, IBD2) - log L(IBD0, IBD1): the evidence for stretches IBD on both homologues.
+Cost and scope: O(6 · N · L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-The restricted chains move only among their allowed states.
+<a id="rl03"></a>
+## rl03 Site selection and thinning (family sites, IBD sites)
 
-## Full-sib families
+Apply the inclusive minor-frequency and observed-share gates, then the declared thinning separately for family and pair-chain sites. The observed-share gate is evaluated from integer counts. Do not reuse the pair output selection to change the family evidence axis.
 
-### Model
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-A family is a set of samples (full sibs) with two parent slots. Each slot is either latent (Hardy-Weinberg at the
-sample allele frequency) or a sequenced sample p. Its composite log-likelihood over the family sites is
+Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`, `ibd_site_step`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-    L_F = sum_i log sum_{g_u, g_v} P_u(i, g_u) P_v(i, g_v) prod_{c in F} sum_g T(g | g_u, g_v) GL_c(i, g),
+Cost and scope: O(N L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-- T is Mendelian transmission.
-- GL_c is the member's genotype likelihood, scaled to a maximum of 1 per site. Unobserved sites contribute 1.
-- P is the Hardy-Weinberg prior for a latent slot, or the sequenced parent's genotype posterior from its own reads.
+<a id="rl04"></a>
+## rl04 Pairwise three-state IBD chain and its genome-wide summaries
 
-The objective is the sum over families.
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-**Each sample's reads are counted once.** They enter the likelihood as a member of the sample's own family. A family
-with a sequenced parent conditions on that parent's reads, through the posterior: the factor
-P(children | parent's reads). The sum is therefore an approximate chain-rule factorisation of the joint likelihood,
-which is valid only along an acyclic parent graph. Every assignment is checked, and none may make a sample its own
-ancestor. The approximation drops what a sequenced parent's own family says about its genotype, and treats two families
-that share a sequenced parent as independent given that parent's reads.
+For each selected sample pair, run the three-state IBD chain along each contig with the stated allele-frequency emissions and map transition law. Aggregate posterior state shares over jointly observed sites and compute the recorded IBD0/IBD2 stretch evidence. This optional output costs quadratically in sample count and does not feed family fitting.
 
-**Half-sib links.** Two latent families may instead share one latent parent, their other parents being independent:
+Implementation: [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
 
-    L_HS(i) = sum_{g_u} pi(g_u) [sum_{g_v} pi(g_v) prod_F ...] [sum_{g_w} pi(g_w) prod_G ...].
+Parameters by name: `ibd_switch_rate`, `ibd_site_step`, `initial`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-A full-sib merge is made only when it beats both separation and this link. A link that beats separation by more than
-log N is recorded, and the families stay apart.
+Cost and scope: O(P · L/ibd_site_step · c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-### Search
+<a id="rl05"></a>
+## rl05 Family-model site terms (child terms, latent prior, sequenced-parent posterior)
 
-The search is deterministic, and it does not depend on sample names or on the input order (release 3.4). The
-samples' order on the run's axis follows their names, so any choice made in that order would make the families depend
-on what the samples are called.
+Construct child-genotype terms, the latent Hardy–Weinberg parent prior and sequenced-parent genotype posterior on family sites. Floor logs before using them in the composite model; normalise posterior states in the declared order. A sequenced sample’s posterior is not a true parent label.
 
-1. **Agglomeration.** Starting from one-member latent families, repeatedly merge the pair with the largest positive
-   full-sib gain that also beats its half-sib link.
-2. **Sweeps**, at most `RelatednessConfig.max_sweeps = 30`, until a sweep changes nothing. They run twice from the
-   agglomeration, once with each kind of move (step 3):
-   1. *Parent assignment.* At most one assignment per family with a free slot, best offers first, applied when the
-      gain exceeds log N (the choice among N samples) and the parent graph stays acyclic. An offer is either a
-      sequenced non-member, or a member moved first to its best other placement. Offers are ranked on the partition
-      at the start of the sweep, and each is scored again just before it is applied.
-   2. *Moves.* A sample moves to its best valid placement, another family or a new one-member family, when that
-      gains more than 1e-6. A target is valid when none of its sequenced parents is the sample or descends from it.
-   3. *Merge.* The single best merge of two families with compatible parents: at most two sequenced parents, none of
-      them a member.
-3. **Two searches; the better one is kept (release 3.4).**
-   - *Best improvement.* Repeatedly, the single move with the largest gain over all samples is applied. This stops
-     when no move gains more than 1e-6, or after N moves (the next sweep continues).
-   - *Content order.* Each sample is visited once per sweep, by decreasing content key (below), and moves at once
-     when its best placement gains more than 1e-6.
-   - The fit with the higher objective is kept. Within 1e-6, the best-improvement fit is kept. `summary.json` records
-     the search kept (`search`: `best_improvement` or `content_order`) and its objective minus the other's
-     (`search_margin`).
-   - The objective has many local optima, 10^2 to 10^4 log units apart on the simulated designs, and neither search
-     reaches the better one on every design. Keeping the better of the two never fits worse than either alone.
-   - Until 3.3, a single first-improvement search visited the samples in axis order (name order), so renaming the
-     samples could change the partition (on a real three-chromosome TroMau subset: 35 against 36 families).
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-**Ties.** Numerical gains and evidence keys are separate. Among eligible choices within 1e-6 of the
-largest gain, choose the largest evidence key. Compute each sample's key once from its full retained child-term
-vector: the log probabilities of its own normalised genotype likelihoods under all nine parental genotype pairs,
-with unobserved cells contributing zero. These terms do not use the cohort allele frequency. Compare the full
-vectors lexicographically by numeric value in site/parent-genotype order, stopping at the first difference;
-no rounding or gain tolerance enters this exact
-evidence comparison. Dense ranks preserve the order for later choices. Unlike digest ordering, numerical
-lexicographic ordering does not scramble unrelated samples because an upstream fit changes a last bit.
-A family key contains the complete sorted member-rank multiset and its sorted parent ranks (latent = -1); a merge
-key is the sorted pair of family keys. Use these keys for agglomeration, move targets (including a new singleton),
-member out-placement, parent offers, family merges and the content-order sweep. Member sums on restoration also
-follow evidence order. Sample names and input indices never distinguish evidence.
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Exactly identical retained evidence vectors share a key and are interchangeable: output identities within that
-class are defined only up to permutation. No evidence-only method can identify which of two identical samples
-occupies a nonsymmetric role. For distinct evidence vectors, even equal marginal log-likelihoods have distinct
-keys. An isolated parent-offspring direction can remain unidentified by the likelihood; its evidence-key choice
-is arbitrary and reproducible, not biological evidence for that direction.
+Cost and scope: O(27 N M_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-**Incremental gains.** The best-improvement moves keep every sample's gain on joining every live family, and on
-leaving its own.
-A move changes only its two families, so only their gains are scored again: every sample joining either of them, and
-their members leaving. The selected move is scored once more on the current partition before it is applied, so every
-applied move raises the objective by more than 1e-6, and the search cannot cycle.
+<a id="rl06"></a>
+## rl06 Composite full-sib family likelihood, half-sib link likelihood and the objective
 
-**Implementation (release 3.4).** The search above is computed without changing any value it compares or any
-decision it makes; only which gains are evaluated, and when, changed.
-- *Kept values.* Every family carries a version that each change of its members, sums or slots advances. A sample's
-  join and leave gains, a family's parent offers and a pair's merge gains are kept for the versions they were computed
-  for, across moves, parent assignment, merges and both searches, and are evaluated again only once those change.
-- *Screens.* Most gains are far from any decision: an unrelated pair is never a merge candidate, and most
-  placements and parents are far below a sample's or a family's best. The full-sib and half-sib merge gains of the
-  agglomeration, every join gain and every parent-slot offer are first estimated in the linear domain: each family's
-  and sample's per-site terms, rescaled to their largest term and stored in float32, so that a site's sum of
-  exponentials is a short dot product (a site whose sum is too small for float32 is evaluated in the log domain).
-  A candidate is set aside only when its estimate is beyond the decision by more than an error bound with two
-  parts: the float32 terms (about 1.2e-7 log units per site, nonnegative sums without cancellation, covered by
-  1e-6 per site) and the float64 reductions of the estimate and of the exact gain (at most about (M + 16) 2^-53
-  times the summed magnitudes of the log-likelihoods involved, for each, covered by twice that), plus 0.1 log units.
-  This is a first-order rounding bound; measured screen errors are far below it (at most 2.7e-5 log units over
-  56,502 sites on the validation designs). The candidates set aside are an agglomeration pair whose full-sib gain is
-  negative, a half-sib comparison already decided, and a placement or parent that can neither be the best nor tie
-  with it. Everything else is evaluated exactly, with the same expression as the previous implementation, so the
-  merges, moves, placements, parents and ties are those of the exact gains: every validation replay agrees with the
-  previous implementation bitwise.
-- The largest agglomeration gain comes from per-row maxima instead of a scan of the gain matrix, and support and the
-  half-sib links are evaluated in single parallel kernels.
-- `relatedness.families.fit(..., reference=True)` runs the previous implementation (`families_reference`),
-  for validation.
+For each family/site, add the parent terms to its member-sum state, log-sum over parent genotypes, then sum sites in order. Use one family-likelihood function for predicted and realised member updates (L13). Half-sib scores integrate the shared latent parent under their own composite rule; the objective is not a joint pedigree likelihood.
 
-### Support
+Implementation: [science/relatedness/family_kernels.py](../../haplotype_reconstruction/science/relatedness/family_kernels.py).
 
-Support is measured on each support unit alone, against the fitted partition. A chromosome with a supplied
-genetic map is cut into max(1, floor(L / `RelatednessConfig.support_unit_morgans = 1.0` Morgan)) consecutive units of
-equal measured map length. L is the measured map length of its family-site span: the part between the map's first
-and last knots, or all of it when `[genetic_map] rate_is_measured = true` (`RelatednessConfig.rate_is_measured =
-False` by default). Sites beyond the knots join the end units. A chromosome with neither a map nor a stated rate is
-one unit. This is the pedigree's [map-length rule](pedigree.md#map-length-requirement-release-32).
+Parameters by name: `initial`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-- A member's family is its best placement on that unit when
-  log P(member's reads | the rest of its family) beats every other family and being alone.
-- A sequenced parent beats a latent one on that unit when the family's likelihood with it is higher than with a
-  latent parent in its slot.
-- A margin within 1e-6 is a tie, not a win (release 3.4). A latent one-member family is exactly its member alone, and
-  a sequenced parent without reads on a unit is exactly a latent one. Until 3.3, float noise decided these
-  comparisons, and that noise follows the sample order. A latent one-member family now always has support 0.
+Cost and scope: O(9 M); O(18 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-`member_support` and `parent_support` are the shares of units on which these hold. They are member-removal contrasts on
-the partition fitted to all the data, which the member and the unit helped choose. They are not held-out validation, and
-not calibrated probabilities. A consumer decides the support it requires. The guard uses members whose family is their
-best placement on at least 75% of the support units (`PedigreeConfig.guard.member_support = 0.75`).
+<a id="rl07"></a>
+## rl07 Evidence ranks, content order, family and pair keys, tie rules
 
-**Held-out chromosomes.** The families were refitted without each chromosome in turn, then tested on that
-chromosome alone. The share of members whose refitted family is their best placement there:
+Rank complete child-evidence vectors lexicographically by value, assigning dense equal ranks. Define family and pair keys from ordered member/parent ranks, then use those keys within the declared gain ties. The earliest differing site can determine rank; sample and contig axes must therefore remain bound.
 
-| run | members with support ≥ 0.75 | other members | full-sib pairs kept together |
-| --- | --- | --- | --- |
-| TroMau-like | 0.92 | 0.42 | 98% |
-| eight-chromosome F3 | 0.84 | 0.42 | 97% |
-| half-sib/backcross control | 0.85 | 0.44 | 85% |
-| eight-chromosome backcross | 0.73 | 0.39 | 60% |
-| real TroMau (22 chromosomes) | 0.95 | 0.07 | 94% |
+Implementation: [science/relatedness/keys.py](../../haplotype_reconstruction/science/relatedness/keys.py).
 
-Support predicts what held-out chromosomes confirm, but it is not their probability.
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-**Half-sib links** are pairwise hypotheses, not a consistent graph of shared latent parents. The half-sib comparison
-guards the agglomeration and the merges, but not single-sample moves, so the search does not optimise jointly over
-shared latent parents. Every sample receives a family; consumers abstain through the support they require.
+Cost and scope: O(N log N); O(9 M); O(|F| log |F|). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-## Interpretation and limitations
+<a id="rl08"></a>
+## rl08 Partition state: slot allocation, member order, family sums, snapshot and restore
 
-- **Hardy-Weinberg at the sample frequency.** No inbreeding or background-relatedness term is fitted. In a cross
-  from few founders most pairs are related, so the model separates large full-sib families well but resolves small
-  families in parent-rich designs poorly.
-- **Measured on saved simulations** (full-sib pair precision and recall over all members; then over members with
-  support at least 0.75):
+Maintain family members in declared evidence-rank order and copy shared singleton sums before mutation. Apply join/leave/merge changes with the same arithmetic that predicts their likelihood. Snapshot and restore complete family state; recomputing member sums follows their declared order, never arbitrary set iteration.
 
-  | design | all members: precision | all members: recall | supported members: precision |
-  | --- | --- | --- | --- |
-  | TroMau-like | 0.975 | 0.953 | 1.000 |
-  | F3, eight chromosomes | 1.000 | 0.961 | 1.000 |
-  | backcross, eight chromosomes | 0.13 | 0.09 | 0.57 |
-  | standard | 0.00 | 0.00 | no supported pair |
-  | standard, held-out seed | 0.11 | 0.05 | no supported pair |
+Implementation: [science/relatedness/partition.py](../../haplotype_reconstruction/science/relatedness/partition.py).
 
-  In the small-family designs few members reach the support threshold, so consumers abstain there.
-- **Composite likelihood.** The objective sums over linked sites, so it overstates confidence. Per-unit support,
-  not the objective's margin, is the stability measure.
-- **Sequenced-parent slots** are often wrong in small families; for example, 46 of 65 are right on the backcross
-  design. The guard does not use them.
-- **No cohort labels.** The stage uses no cohort, sex or generation label, and no assumed parentage. Real-data
-  families are hypotheses, never truth.
-- **Placement (release 3.3).** The stage depends only on the evidence. It runs once every contig's evidence is
-  recorded and before any assembly, in every execution mode: after discovery in the default mode, after an
-  evidence-only pass over every contig in serial mode, and before any shard (which needs the product recorded by a
-  run with `[run] stop_after = "relatedness"`). Nothing downstream feeds back into it.
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-## Cost
+Cost and scope: O(N · depth). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
-- **Time.** The IBD chain costs O(N^2 L / step) for N samples and L sites, evaluated exactly for every pair; it is
-  the largest part at large N. The agglomeration screens all O(N^2) sample pairs (O(N^2 M) float32 multiply-adds for
-  M family sites, about a tenth of an exact evaluation's cost) and evaluates exactly only the pairs whose full-sib
-  gain may be positive. Each applied move re-estimates its two families' join gains for every sample (O(N M) screen
-  terms) and evaluates exactly only the placements near the best; parent offers and merges are kept per family
-  version. The sweeps run twice (two searches). Nothing depends on the founder count K.
-- **Parallelism.** Pairs, families, samples, candidate parents and a family's sites run as Numba parallel loops over
-  the stage's CPU budget; a family's log-likelihood sums its sites' terms in site order. While the next contig's
-  evidence is read (one helper thread, decoding on one CPU), the kernels run on the budget less one CPU.
-- **Memory (release 3.4, exact storage reduction).** Every unordered pair is still evaluated; no candidate set,
-  likelihood, threshold, or search rule changes. Agglomeration stores its upper triangle in `N(N-1)/2` float64
-  cells (0.40 GB at N = 10,000), replacing the `(2N+2)^2` gain table and separate `N^2` screen. Screen estimates
-  are overwritten by exact gains in batches of 262,144 pairs before any merge is selected. At most N family slots
-  are needed: every live family contains a sample. Singleton sums borrow their child terms; changed families own
-  their sum rows, released rows are freed, and the saved search start shares rows until a mutation copies them.
-  Restoring a sum slices the site axis into at most 32 MiB of input terms, retaining member reduction order.
-  The saved start keeps gain-cache rows only for live families.
-- The child terms, genotype posteriors, and RELFAST screens remain O(N M); gain caches and released IBD summaries
-  remain O(N^2). The screens add about 64 N M bytes during agglomeration and 56 N M during the searches. IBD pair
-  indices are filled directly in their final buffer. Its four accumulated posterior columns are normalised in
-  place in bounded batches, and the released means and site counts are contiguous views of that buffer. The
-  evidence prefetch still holds up to two decoded contigs. This reduces resident memory; it does not make the
-  all-pairs computation subquadratic or bound whole-contig evidence by a site window.
-- **Measured** (one 76-core node; simulated runs of the N-scaling series; before -> after the speed-up).
+<a id="rl09"></a>
+## rl09 Agglomeration of latent full-sib families
 
-  | run | evidence pass (IBD and terms) | family fit | peak resident memory |
-  | --- | --- | --- | --- |
-  | N = 1,003, 8 chromosomes, 58,425 family sites | 952 s -> 252 s | 1,416 s -> 82 s | 27 GB -> 20 GB (evidence pass) |
-  | N = 2,503, the same chromosomes cut to 10% | 319 s -> 126 s | 2,391 s -> 65 s | |
-  | N = 1,003, cut to 10% | 97 s -> 24 s | 214 s -> 12 s | |
+Screen singleton-family pairs, evaluate unresolved gains exactly, and offer positive full-sib gains only when they strictly exceed the half-sib alternative. Choose the largest pair key within the gain band, merge, and update affected scores. The positive-gain and full-sib/half-sib comparisons have their stated strict boundaries.
 
-  At N = 2,500 over the same 8 full-length chromosomes, scaling each part by the cut series, the stage takes about
-  29 min (22 min evidence pass, 7 min family fit), against about 4.9 h before the speed-up.
+Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
 
-The pedigree guard's cleaning uses the final retained edges, with irreversible withdrawals until the retained set is
-stable. This removes stale cleaning premises, but family support is placement stability, not a guarantee that most
-witnesses are offspring of the tested parent. An unsequenced shared co-parent, uneven mating sizes, or incomplete or
-wrong released-parent markers can cause true-edge withdrawals. Absence of a released parent edge is not evidence
-that the biological parent is absent. See the [guard's assumptions and diagnostics](pedigree.md#sibling-as-parent-guard).
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(9 N² M); O(N M); O(9 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl10"></a>
+## rl10 Parent assignment (one per open family per sweep)
+
+For each family’s first free parent slot, offer its best non-member and eligible member candidates. Rank offers by gain and content, then enforce the log-sample-count penalty, per-sweep use rules and acyclicity at application. Only one non-member is offered per family; failure does not trigger a second-best search.
+
+Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(3 N M); O(9 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl11"></a>
+## rl11 Best-improvement single-sample moves
+
+For each sample, choose its best admissible target family or new singleton under gain/key ties. Rank eligible positive moves and apply at most one per iteration, within the sample-count iteration limit. Exclude ancestry-cycle targets and rescore the selected move against current state.
+
+Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N F); O(N M); O(N² F). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl12"></a>
+## rl12 Content-order first-improvement moves
+
+Visit samples in fixed content order. Compare the new-singleton target first and valid live families thereafter, using the declared key tie rule. Apply a sufficient gain immediately and refresh changed-family leave gains. This first-improvement schedule is intentionally distinct from the best-improvement search.
+
+Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N M); O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl13"></a>
+## rl13 One merge per sweep
+
+Enumerate compatible live-family pairs, compare full-sib and applicable half-sib gains, and rank sufficient merge offers. Apply the first acyclic merge; undo a rejected cyclic trial without changing the remaining offer order. At most one merge is accepted per sweep.
+
+Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(F²); O(9 M); O(F² M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl14"></a>
+## rl14 Sweep loop, the two searches and the kept fit
+
+Agglomerate, save the starting partition, then run parent assignment, best-improvement moves and one-merge sweeps. Restore the start and repeat with content-order moves. Stop each search at no change or its sweep cap. Keep the second only when it clears the total-objective tolerance; retain explicit convergence and search-margin diagnostics.
+
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
+
+Parameters by name: `max_sweeps`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Two bounded searches, each up to the named sweep cap, with member/parent/slot scans per sweep.
+
+<a id="rl15"></a>
+## rl15 Gain screens and kept-gain caches (decision-neutral acceleration)
+
+Use conservative float32 screens with declared error bounds, promoting every near-best or undecided comparison to the exact family score. Cache only gains whose dependency state is unchanged. The screen changes work, never the candidate universe or the acceptance cut-off.
+
+Implementation: [science/relatedness/family_kernels.py](../../haplotype_reconstruction/science/relatedness/family_kernels.py), [science/relatedness/partition.py](../../haplotype_reconstruction/science/relatedness/partition.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N M) screen workspace and O(N²) proposal-cache storage; exact fallback preserves decisions.
+
+<a id="rl16"></a>
+## rl16 Support units on the measured map
+
+Divide measured map length into support units and map cuts to the first site at or above each cut. Drop empty units from the denominator. Without positive measured length, use one nonempty unit; fallback genetic distance is not invented measured support.
+
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
+
+Parameters by name: `support_unit_morgans`, `rate_is_measured`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(M_c log M_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl17"></a>
+## rl17 Member support and parent support
+
+For each nonempty support unit, compare a member’s stay likelihood with other families/new singleton and compare each named parent slot with its latent replacement. Count strict supported gains and divide by nonempty units. Latent-parent support is missing. These support comparisons have their own target exclusions, distinct from search-cycle rules.
+
+Implementation: [science/relatedness/support.py](../../haplotype_reconstruction/science/relatedness/support.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(9 F N M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl18"></a>
+## rl18 Final half-sib links
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Enumerate pairs of entirely latent families in recorded order and report half-sib links strictly above the log-sample-count threshold. Do not require the same pair to win a full-sib comparison. Links are a diagnostic after the retained family fit, including fits stopped by a sweep budget.
+
+Implementation: [science/relatedness/support.py](../../haplotype_reconstruction/science/relatedness/support.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(18 M); O(F_lat² M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="rl19"></a>
+## rl19 Product, identity, barrier placement, reuse, shard consumption and published tables
+
+Publish family fitting separately from the optional pair chain. Canonicalise family IDs as dense ranks by smallest member (L6); keep membership and parent/support axes aligned. Schedule the family gather after all evidence, while independent reconstruction may overlap it. Persist pair selection outside scientific identities and render only selected, checked pair products.
+
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
+
+Parameters by name: `member_support`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Family products scale with N; optional pair products have N(N−1)/2 rows and O(N² L) chain work.
+
+<!-- named mechanism anchors -->
+
+## Named mechanisms
+
+<a id="pairwise-ibd"></a>
+
+**Pairwise ibd:** see [RL04](#rl04).

@@ -1,0 +1,676 @@
+"""Evidence-only tables of one block's fixed-K model and the block's fit caches.
+
+Everything here depends on the block's evidence and the model settings only, never on a panel,
+so one workspace serves every fit of a block search (thousands of starts). Missing cells (no
+depth) contribute nothing: zero log emissions, zero unknown-copy cost, and a sample without any
+observed site is forced to the unknown-unknown state.
+
+Per-site costs of a sample s at site l (lambda = unknown_copy_penalty, floor 1e-12):
+* genotype g: -log max(GL[s, l, g], 1e-12) (``log_probs`` holds the logarithm);
+* both copies unknown: the best genotype plus 2 lambda (``cost_ww``), the per-cell cap of the
+  H step's costs;
+* one known copy with allele h and one unknown copy: the best genotype in {h, h + 1} plus lambda.
+
+The A step's binned emissions are contracted per (bin, within-bin allele pattern) of a row or of
+a row pair (bitwise AND): ``PatternTables`` fills a pattern's three contraction rows the first
+time a panel uses it, as one fixed ascending set-bit sum, so every value is the same float64 the
+complete 2^snps_per_bin table would hold.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import OrderedDict
+
+import numba
+import numpy as np
+from numba import prange
+
+from ....core.kernels import kernel
+from ....core.ties import BlockQuanta, block_scale, fixed_policy
+from ..parameters import EMISSION_FLOOR, FixedKModelConfig
+
+# Cache bounds by entry count (one block's search stays far below them).
+FIT_CACHE_ENTRIES = 4096
+TRANSITION_CACHE_ENTRIES = 16384
+# Initial pattern slots per bin of the lazily filled tables (doubled on demand; a block uses
+# 40-130 of the 1,024 patterns of a ten-site bin).
+_PATTERN_INITIAL_SLOTS = 64
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=False),
+            numba.float64,
+        ),
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=True),
+            numba.float64,
+        ),
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=True),
+            numba.types.Array(numba.boolean, 2, "C", readonly=False),
+            numba.float64,
+        ),
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=True),
+            numba.types.Array(numba.boolean, 2, "C", readonly=True),
+            numba.float64,
+        ),
+    ),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
+def _observed_log_emissions(likelihoods, observed, penalty):
+    """log max(GL, 1e-12) at observed cells (0 elsewhere) and the unknown-unknown cost per cell
+    (0 at unobserved cells)."""
+    n, length, _ = likelihoods.shape
+    log_probs = np.empty((n, length, 3), dtype=np.float64)
+    cost_ww = np.empty((n, length), dtype=np.float64)
+    floor = EMISSION_FLOOR
+    for s in prange(n):
+        for l in range(length):
+            if not observed[s, l]:
+                log_probs[s, l, 0] = 0.0
+                log_probs[s, l, 1] = 0.0
+                log_probs[s, l, 2] = 0.0
+                cost_ww[s, l] = 0.0
+                continue
+            maximum = -math.inf
+            for genotype in range(3):
+                value = likelihoods[s, l, genotype]
+                if value < floor:
+                    value = floor
+                log_value = math.log(value)
+                log_probs[s, l, genotype] = log_value
+                if log_value > maximum:
+                    maximum = log_value
+            cost_ww[s, l] = -maximum + 2.0 * penalty
+    return log_probs, cost_ww
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.float64, 2, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=False),
+            numba.float64,
+        ),
+        (
+            numba.types.Array(numba.float64, 2, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=True),
+            numba.float64,
+        ),
+    ),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
+def _capped_update_costs(cost_ww, log_probs, observed, penalty):
+    """The H step's capped costs: per genotype (N, L, 3) and per known-allele of a row paired
+    with an unknown copy (N, L, 2), each capped at the cell's unknown-unknown cost; the
+    unknown-unknown total per sample (summed left to right)."""
+    n, length = cost_ww.shape
+    ww_total = np.empty(n, dtype=np.float64)
+    genotype_cost = np.empty((n, length, 3), dtype=np.float64)
+    unknown_cost = np.empty((n, length, 2), dtype=np.float64)
+    for s in prange(n):
+        total = 0.0
+        for l in range(length):
+            cap = cost_ww[s, l]
+            total += cap
+            lp0 = log_probs[s, l, 0]
+            lp1 = log_probs[s, l, 1]
+            lp2 = log_probs[s, l, 2]
+            for genotype in range(3):
+                value = -log_probs[s, l, genotype]
+                if value > cap:
+                    value = cap
+                genotype_cost[s, l, genotype] = value
+            best0 = lp0 if lp0 > lp1 else lp1
+            best1 = lp1 if lp1 > lp2 else lp2
+            penalty_here = penalty if observed[s, l] else 0.0
+            value0 = -best0 + penalty_here
+            value1 = -best1 + penalty_here
+            if value0 > cap:
+                value0 = cap
+            if value1 > cap:
+                value1 = cap
+            unknown_cost[s, l, 0] = value0
+            unknown_cost[s, l, 1] = value1
+        ww_total[s] = total
+    return ww_total, genotype_cost, unknown_cost
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.float64, 2, "C", readonly=False),
+            numba.int64,
+            numba.int64,
+        ),
+    ),
+    cache=True,
+    parallel=True,
+)
+def _ww_bin_emissions(cost_ww, snps_per_bin, n_bins):
+    """Binned log emission of the unknown-unknown state: -sum of cost_ww over each bin, left to
+    right."""
+    n, length = cost_ww.shape
+    out = np.empty((n, n_bins), dtype=np.float64)
+    for s in prange(n):
+        for b in range(n_bins):
+            start = b * snps_per_bin
+            end = min(start + snps_per_bin, length)
+            acc = 0.0
+            for l in range(start, end):
+                acc -= cost_ww[s, l]
+            out[s, b] = acc
+    return out
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=False),
+            numba.float64,
+            numba.int64,
+            numba.int64,
+        ),
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.boolean, 2, "C", readonly=True),
+            numba.float64,
+            numba.int64,
+            numba.int64,
+        ),
+    ),
+    cache=True,
+    parallel=True,
+)
+def _binned_contraction_inputs(log_probs, observed, penalty, snps_per_bin, n_bins):
+    """Panel-independent inputs of the A step's binned emissions.
+
+    With a_g = log_probs[s, l, g], a row-pair state (i, j) emits at a site
+    a0 + (a1 - a0)(H_i + H_j) + (a0 - 2 a1 + a2) H_i H_j, and a row-unknown state (k, U) emits
+    m01 + (m12 - m01) H_k - lambda (m01 = max(a0, a1), m12 = max(a1, a2); lambda only at
+    observed cells). Per (sample, bin): C0b = sum a0, kW_Cb = sum m01 - lambda x observed sites;
+    per (bin, site in bin, sample): diff1 = a1 - a0, w = a0 - 2 a1 + a2, kWdiff = m12 - m01
+    (zero beyond the last site).
+    """
+    n, length, _ = log_probs.shape
+    c0b = np.zeros((n, n_bins), dtype=np.float64)
+    kw_cb = np.zeros((n, n_bins), dtype=np.float64)
+    diff1 = np.zeros((n_bins, snps_per_bin, n), dtype=np.float64)
+    w = np.zeros((n_bins, snps_per_bin, n), dtype=np.float64)
+    kw_diff = np.zeros((n_bins, snps_per_bin, n), dtype=np.float64)
+    for b in prange(n_bins):
+        for s in range(n):
+            c0 = 0.0
+            cm01 = 0.0
+            observed_count = 0
+            for t in range(snps_per_bin):
+                l = b * snps_per_bin + t
+                if l < length:
+                    a0 = log_probs[s, l, 0]
+                    a1 = log_probs[s, l, 1]
+                    a2 = log_probs[s, l, 2]
+                    m01 = a0 if a0 > a1 else a1
+                    m12 = a1 if a1 > a2 else a2
+                    diff1[b, t, s] = a1 - a0
+                    w[b, t, s] = a0 - 2.0 * a1 + a2
+                    kw_diff[b, t, s] = m12 - m01
+                    c0 += a0
+                    cm01 += m01
+                    if observed[s, l]:
+                        observed_count += 1
+            c0b[s, b] = c0
+            kw_cb[s, b] = cm01 - observed_count * penalty
+    return c0b, diff1, w, kw_cb, kw_diff
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.int64, 2, "C", readonly=False),
+            numba.types.Array(numba.int64, 2, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _assign_pattern_slots(patterns, slot_of, n_used):
+    """Give every new (bin, pattern) the next free slot of its bin; returns the new entries in
+    first-use order and the largest number of slots any bin now uses."""
+    n_rows, n_bins = patterns.shape
+    new_bins = np.empty(n_rows * n_bins, dtype=np.int64)
+    new_patterns = np.empty(n_rows * n_bins, dtype=np.int64)
+    new_slots = np.empty(n_rows * n_bins, dtype=np.int64)
+    count = 0
+    for row in range(n_rows):
+        for b in range(n_bins):
+            pattern = patterns[row, b]
+            if slot_of[b, pattern] < 0:
+                slot = n_used[b]
+                slot_of[b, pattern] = slot
+                n_used[b] = slot + 1
+                new_bins[count] = b
+                new_patterns[count] = pattern
+                new_slots[count] = slot
+                count += 1
+    needed = 0
+    for b in range(n_bins):
+        if n_used[b] > needed:
+            needed = n_used[b]
+    return new_bins[:count], new_patterns[:count], new_slots[:count], needed
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.int64, 2, "C", readonly=False),
+            numba.types.Array(numba.int64, 2, "C", readonly=False),
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _lookup_pattern_slots(patterns, slot_of):
+    n_rows, n_bins = patterns.shape
+    slots = np.empty((n_rows, n_bins), dtype=np.int64)
+    for row in range(n_rows):
+        for b in range(n_bins):
+            slots[row, b] = slot_of[b, patterns[row, b]]
+    return slots
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+        ),
+        (
+            numba.types.Array(numba.float64, 3, "C", readonly=True),
+            numba.types.Array(numba.float64, 3, "C", readonly=True),
+            numba.types.Array(numba.float64, 3, "C", readonly=True),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+            numba.types.Array(numba.float64, 3, "C", readonly=False),
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _fill_pattern_rows(diff1, w, kw_diff, new_bins, new_patterns, new_slots, diff1_table, w_table, kw_diff_table):
+    """Contract new patterns: 0.0 plus the per-site terms of the pattern's set bits, added in
+    ascending bit order (the complete table's recurrence, so the values are identical)."""
+    n_samples = diff1.shape[2]
+    snps_per_bin = diff1.shape[1]
+    for index in range(new_bins.shape[0]):
+        b = new_bins[index]
+        pattern = new_patterns[index]
+        slot = new_slots[index]
+        diff1_row = diff1_table[b, slot]
+        w_row = w_table[b, slot]
+        kw_diff_row = kw_diff_table[b, slot]
+        for s in range(n_samples):
+            diff1_row[s] = 0.0
+            w_row[s] = 0.0
+            kw_diff_row[s] = 0.0
+        for bit in range(snps_per_bin):
+            if (pattern >> bit) & 1:
+                diff1_bit = diff1[b, bit]
+                w_bit = w[b, bit]
+                kw_diff_bit = kw_diff[b, bit]
+                for s in range(n_samples):
+                    diff1_row[s] = diff1_row[s] + diff1_bit[s]
+                    w_row[s] = w_row[s] + w_bit[s]
+                    kw_diff_row[s] = kw_diff_row[s] + kw_diff_bit[s]
+
+
+@kernel(
+    overloads=(
+        (numba.types.Array(numba.int64, 2, "C", readonly=False),),
+        (numba.types.Array(numba.int64, 2, "C", readonly=True),),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _pack_state(matrix):
+    """The existing little-endian packed key, directly from the ordered panel."""
+    k, length = matrix.shape
+    packed = np.zeros((k * length + 7) // 8, dtype=np.uint8)
+    for row in range(k):
+        for site in range(length):
+            index = row * length + site
+            if np.uint8(matrix[row, site]) != 0:
+                packed[index // 8] |= np.uint8(1 << (index % 8))
+    return packed
+
+
+@kernel(
+    overloads=(
+        (
+            numba.types.Array(numba.uint8, 1, "C", readonly=True),
+            numba.int64,
+            numba.int64,
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _unpack_state(packed, k, length):
+    """Decode directly to int64, without an intermediate unpacked uint8 panel."""
+    matrix = np.empty((k, length), dtype=np.int64)
+    for row in range(k):
+        for site in range(length):
+            index = row * length + site
+            matrix[row, site] = (packed[index // 8] >> (index % 8)) & 1
+    return matrix
+
+
+class PatternTables:
+    """Lazily filled contractions of the within-bin allele patterns a block's panels use.
+
+    ``slot_of[b, pattern]`` maps a pattern of bin b to its row (slot) in the three tables
+    ``diff1_table``, ``w_table``, ``kw_diff_table`` (shape (n_bins, capacity, N)); call
+    :meth:`slots` before reading the tables (adding patterns can replace them).
+    """
+
+    def __init__(self, diff1: np.ndarray, w: np.ndarray, kw_diff: np.ndarray):
+        self.n_bins, self.snps_per_bin, self.n_samples = diff1.shape
+        self.diff1, self.w, self.kw_diff = diff1, w, kw_diff
+        n_patterns = 1 << self.snps_per_bin
+        self.slot_of = np.full((self.n_bins, n_patterns), -1, dtype=np.int64)
+        self._n_used = np.zeros(self.n_bins, dtype=np.int64)
+        capacity = min(_PATTERN_INITIAL_SLOTS, n_patterns)
+        self._tables = [np.empty((self.n_bins, capacity, self.n_samples)) for _ in range(3)]
+
+    @property
+    def diff1_table(self):
+        return self._tables[0]
+
+    @property
+    def w_table(self):
+        return self._tables[1]
+
+    @property
+    def kw_diff_table(self):
+        return self._tables[2]
+
+    def slots(self, patterns: np.ndarray) -> np.ndarray:
+        """Slots of within-bin patterns (last axis = bin), contracting first-seen patterns."""
+        values = np.ascontiguousarray(patterns, dtype=np.int64)
+        flat = values.reshape(-1, self.n_bins)
+        new_bins, new_patterns, new_slots, needed = _assign_pattern_slots(flat, self.slot_of, self._n_used)
+        if len(new_bins):
+            capacity = self._tables[0].shape[1]
+            if needed > capacity:
+                while capacity < needed:
+                    capacity *= 2
+                for index, table in enumerate(self._tables):
+                    grown = np.empty((self.n_bins, capacity, self.n_samples))
+                    grown[:, : table.shape[1]] = table
+                    self._tables[index] = grown
+            _fill_pattern_rows(self.diff1, self.w, self.kw_diff, new_bins, new_patterns, new_slots, *self._tables)
+        return _lookup_pattern_slots(flat, self.slot_of).reshape(values.shape)
+
+
+def search_bytes(samples: int, sites: int, founders: int, snps_per_bin: int = 10) -> int:
+    """Planned peak bytes of one block's workspace for panels of up to ``founders`` rows: the
+    evidence tables, pattern tables at their full 1,024 slots per bin, the entry-bounded caches
+    (assignment records of three per-sample vectors; bit-packed panels and keys) and the
+    fixed-point set (about 7,000 panels in a K = 25 block of AulStu chr3)."""
+    n, length, k = int(samples), int(sites), int(founders)
+    _, n_bins = bin_layout(length, int(snps_per_bin))
+    tables = 8 * n * length * 14
+    patterns = 3 * 8 * n_bins * 1024 * n
+    packed = -(-k * length // 8) + 120
+    caches = (
+        TRANSITION_CACHE_ENTRIES * (32 * n + 400 + packed + 150)
+        + FIT_CACHE_ENTRIES * (2 * packed + 300)
+        + 16384 * packed
+    )
+    # Sparse tie membership: plan two retained states per sample per cached record;
+    # singletons store none. Transient frontier masks are split at 32 MiB (one very
+    # large panel can exceed this without imposing a scientific K cap).
+    membership = TRANSITION_CACHE_ENTRIES * (8 * (n + 1) + 2 * 4 * n)
+    transient = max(64 << 20, n * (k * (k + 1) // 2 + k + 1))
+    return tables + patterns + caches + membership + transient
+
+
+def bin_layout(n_sites: int, snps_per_bin: int) -> tuple[int, int]:
+    """(snps per bin, bins): ``snps_per_bin`` sites per bin when the block has more sites than
+    that, else one bin per site."""
+    if 1 < snps_per_bin < n_sites:
+        return snps_per_bin, int(math.ceil(n_sites / snps_per_bin))
+    return 1, n_sites
+
+
+class FixedKWorkspace:
+    """One block's fixed-K model tables and fit caches (see the module docstring).
+
+    Fit caches are exact memos of deterministic functions of an *ordered* panel: the A(H)
+    assignment record, two schedule-specific H(A) transitions and complete fits per
+    (schedule, start, iteration limit). Untied transitions share both schedule slots.
+    ``fixed_point_keys`` holds schedule-specific certificates; a public family certificate
+    requires both schedules.
+    Caches are bounded by entry count (least recently used entries leave first).
+    """
+
+    def __init__(
+        self,
+        likelihoods: np.ndarray,
+        observed: np.ndarray,
+        model: FixedKModelConfig,
+        quanta: BlockQuanta | None = None,
+        *,
+        reverse: bool = False,
+        threads: int = 1,
+    ):
+        """``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
+        uses ``quanta.sample``, the H step ``quanta.h_step``, cycle and duplicate resolution ``quanta.nll``.
+        Every fixed-K path uses uniform evidence over its winning category's tied states."""
+        self.reverse = bool(reverse)
+        self.threads = int(threads)
+        self.penalty = float(model.unknown_copy_penalty)
+        self.quanta = (
+            quanta
+            if quanta is not None
+            else BlockQuanta.for_scale(block_scale(likelihoods, observed, model.unknown_copy_penalty))
+        )
+        self.a_policy = fixed_policy("discovery.fixed_k.a_band", self.quanta.sample, reverse=self.reverse)
+        self.h_policy = fixed_policy("discovery.fixed_k.h_flip", self.quanta.h_step, reverse=self.reverse)
+        self.cycle_policy = fixed_policy("discovery.fixed_k.cycle", self.quanta.nll, reverse=self.reverse)
+        self.switch_penalty = float(model.switch_penalty)
+        self.likelihoods = np.asarray(likelihoods, dtype=np.float64, order="C").view()
+        self.observed = np.asarray(observed, dtype=np.bool_, order="C").view()
+        self.uninformative = np.ascontiguousarray(~self.observed.any(axis=1))
+        n, length, _ = likelihoods.shape
+        self.log_probs, self.cost_ww = _observed_log_emissions(
+            np.ascontiguousarray(likelihoods, dtype=np.float64), self.observed, self.penalty
+        )
+        self.ww_total_cost, genotype_cost, unknown_cost = _capped_update_costs(
+            self.cost_ww, self.log_probs, self.observed, self.penalty
+        )
+        # Each fractional H term is a weighted average of these costs. Twice their
+        # largest magnitude bounds the rounded term, including its arithmetic rounding.
+        self.h_term_bound = 2.0 * max(
+            float(np.max(np.abs(genotype_cost), initial=0.0)), float(np.max(np.abs(unknown_cost), initial=0.0))
+        )
+        # The same capped costs in two layouts: (L, N, c) for the site-parallel H sweep and
+        # site-contiguous (N, c, L) for the one-thread founder-outer sweep.
+        self.genotype_cost_by_site = np.ascontiguousarray(genotype_cost.transpose(1, 0, 2))
+        self.unknown_cost_by_site = np.ascontiguousarray(unknown_cost.transpose(1, 0, 2))
+        self.genotype_cost_by_sample = np.ascontiguousarray(genotype_cost.transpose(0, 2, 1))
+        self.unknown_cost_by_sample = np.ascontiguousarray(unknown_cost.transpose(0, 2, 1))
+        self.snps_per_bin, self.n_bins = bin_layout(length, int(model.snps_per_bin))
+        self.ww_bin_emissions = _ww_bin_emissions(self.cost_ww, self.snps_per_bin, self.n_bins)
+        (self.c0b, diff1, w, self.kw_cb, kw_diff) = _binned_contraction_inputs(
+            self.log_probs, self.observed, self.penalty, self.snps_per_bin, self.n_bins
+        )
+        self.patterns = PatternTables(diff1, w, kw_diff)
+        # Evidence views and prepared tables are immutable for the workspace lifetime.
+        # The caller owns canonical evidence; freezing these views never changes its flags.
+        # Pattern slot/table storage and trajectory memos remain task-local scratch.
+        for value in (
+            self.likelihoods,
+            self.observed,
+            self.uninformative,
+            self.log_probs,
+            self.cost_ww,
+            self.ww_total_cost,
+            self.genotype_cost_by_site,
+            self.unknown_cost_by_site,
+            self.genotype_cost_by_sample,
+            self.unknown_cost_by_sample,
+            self.ww_bin_emissions,
+            self.c0b,
+            self.kw_cb,
+            diff1,
+            w,
+            kw_diff,
+        ):
+            value.flags.writeable = False
+        self.fits: OrderedDict = OrderedDict()
+        self.assignments: OrderedDict = OrderedDict()
+        self.transitions: OrderedDict = OrderedDict()
+        self.fixed_point_keys: set = set()
+        self.endpoint_family_counts: dict[str, int] = {}
+        self.fit_schedule_counts = dict(
+            family_starts=0,
+            branched_starts=0,
+            a_evaluations=0,
+            a_reuses_for_h=0,
+            h_sweeps=0,
+            tied_h_sweeps=0,
+            commuting_tied_h_sweeps=0,
+            stationary_tied_h_sweeps=0,
+            dense_a_h_reuses=0,
+        )
+
+    @property
+    def samples(self) -> int:
+        return int(self.observed.shape[0])
+
+    @property
+    def sites(self) -> int:
+        return int(self.observed.shape[1])
+
+    # -- ordered-panel state keys (founder order matters: the Gauss-Seidel schedule is ordered)
+    @staticmethod
+    def state_key(haplotypes) -> tuple:
+        matrix = np.asarray(haplotypes)
+        packed = _pack_state(matrix)
+        return (int(matrix.shape[0]), int(matrix.shape[1]), packed.tobytes())
+
+    @staticmethod
+    def state_from_key(key) -> np.ndarray:
+        k, length, packed = key
+        return _unpack_state(np.frombuffer(packed, dtype=np.uint8), k, length)
+
+    # -- caches
+    def cached_assignment(self, key):
+        record = self.assignments.get(key)
+        if record is not None:
+            self.assignments.move_to_end(key)
+        return record
+
+    def remember_assignment(self, key, record):
+        self.assignments[key] = record
+        self.assignments.move_to_end(key)
+        while len(self.assignments) > TRANSITION_CACHE_ENTRIES:
+            self.assignments.popitem(last=False)
+
+    def cached_transition(self, key, schedule_reverse=False):
+        """One schedule's H transition; untied transitions share both slots."""
+        schedules = self.transitions.get(key)
+        if schedules is None:
+            return None
+        self.transitions.move_to_end(key)
+        return schedules[int(bool(schedule_reverse))]
+
+    def remember_transition(
+        self, key, assignment, next_key, changes, schedule_reverse=False, usage_tie=False, commuting=False
+    ):
+        transition = (assignment, next_key, int(changes), bool(usage_tie))
+        self.remember_assignment(key, assignment)
+        schedules = self.transitions.setdefault(key, [None, None])
+        schedules[int(bool(schedule_reverse))] = transition
+        # A tied transition is shared only with an exact dependency certificate:
+        # no heterozygote membership edge joins founders within any tied usage group.
+        # The usage-tie flag stays true, so both complete schedule families still run.
+        # A zero-change sweep is also an exact certificate. Each founder/site is
+        # updated once, so every update kept its allele while reading the original
+        # panel. In the opposite order the same induction leaves every allele fixed.
+        if not usage_tie or commuting or changes == 0:
+            schedules[:] = (transition, transition)
+        self.transitions.move_to_end(key)
+        while len(self.transitions) > TRANSITION_CACHE_ENTRIES:
+            self.transitions.popitem(last=False)
+        return transition
+
+    @staticmethod
+    def fit_key(haplotypes, max_iterations, schedule_reverse=False) -> tuple:
+        limit = int(max_iterations)
+        if limit <= 0:
+            return (limit,) + FixedKWorkspace.state_key(haplotypes)
+        return (limit, bool(schedule_reverse)) + FixedKWorkspace.state_key(haplotypes)
+
+    def cached_fit(self, key):
+        """A remembered fit tuple, with its panel stored bit-packed."""
+        stored = self.fits.get(key)
+        if stored is None:
+            return None
+        self.fits.move_to_end(key)
+        packed, rest, _usage_tie = stored
+        haplotypes = self.state_from_key(packed)
+        haplotypes.setflags(write=False)
+        return (haplotypes, *rest)
+
+    def fit_encountered_usage_tie(self, key):
+        return bool(self.fits[key][2])
+
+    def remember_fit(self, key, result, *, fixed_point, schedule_reverse=False, usage_tie=False):
+        packed = self.state_key(result[0])
+        self.fits[key] = (packed, tuple(result[1:]), bool(usage_tie))
+        self.fits.move_to_end(key)
+        while len(self.fits) > FIT_CACHE_ENTRIES:
+            self.fits.popitem(last=False)
+        if fixed_point:
+            self.fixed_point_keys.add((bool(schedule_reverse), packed))
+            transition = self.cached_transition(packed, schedule_reverse)
+            if transition is not None and not transition[3]:
+                self.fixed_point_keys.add((not bool(schedule_reverse), packed))
+
+    @staticmethod
+    def fixed_point_key(haplotypes) -> tuple:
+        return FixedKWorkspace.state_key(haplotypes)
+
+    def certifies_fixed_point(self, haplotypes, schedule_reverse=None) -> bool:
+        key = self.fixed_point_key(haplotypes)
+        if schedule_reverse is not None:
+            return (bool(schedule_reverse), key) in self.fixed_point_keys
+        return (False, key) in self.fixed_point_keys and (True, key) in self.fixed_point_keys
+
+
+__all__ = ["FixedKWorkspace", "PatternTables", "search_bytes", "bin_layout"]

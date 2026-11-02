@@ -1,1179 +1,650 @@
-# Pedigree inference
-
-Pedigree inference estimates, for every sequenced sample, how many of its parents are among the other sequenced samples
-(its parent-count state: M0, M1 or M2 observed parents) and, where the evidence allows, which samples they are. It
-works genome-wide and without generation labels, from two kinds of evidence: per chromosome, the fit of each
-candidate configuration to the child's raw genotype likelihoods under a transmission model built from every sample's
-painting; and, across samples, finite direction and family evidence from painted junction counts and from the
-competing configurations of related samples. Chromosome bootstrap and leave-one-chromosome-out refits measure the
-stability of the full-data decisions, and two evidence tiers release calls; Tier B is the primary product. A
-full-marker Mendelian exclusion can then settle zero- or one-parent counts that Tier B leaves open, without adding
-parent edges. The stage (`pedigree`, entry point `pedigree.run`) runs once per run, genome-wide, after every contig
-is painted; [family phase](family_phase.md) and [recombination](recombination.md) condition on its released Tier-B
-parent edges, and nothing downstream feeds back into it.
-
-## Inputs and outputs
-
-| | record or setting | content |
-| --- | --- | --- |
-| reads | `painting` (each contig) | the contig's `ChromosomePainting` ([painting](painting.md)): per component the selected sites and trajectory-class alleles, BACKGROUND's allele frequency, the bins (edges, centres), the normalised transition table, the MAP state classes and track statuses, the emission settings, and the packed emissions when the painting kept them; the painting must have been computed from the contig's current evidence record |
-| reads | `painting/summary` (each contig) | component shapes (bins, states), for memory planning |
-| reads | `evidence` (each contig) | positions, normalised genotype likelihoods `float64[N, L, 3]` and the positive-depth mask `bool[N, L]` of all samples ([evidence](evidence.md)) |
-| reads | the contig's genetic map | `[genetic_map] file` or the fallback `[genetic_map] rate_cm_per_mb` ([genetic maps](../genetic_maps.md)): switch probabilities of the transmission selectors |
-| builds | `ParentEligibility` | the candidate universe: every sequenced sample ([parent candidates](#parent-candidates)) |
-| writes | `pedigree/prepared`, `pedigree/screen`, `pedigree/scores`, `pedigree/exclusion` | per-contig records ([records, identities and resume](#records-identities-and-resume)) |
-| writes | `pedigree`, `complete/pedigree` | the `PedigreeProduct` in the run record, and the stage's completion marker |
-| publishes | `OUTPUT/pedigree/` | 15 tables and `evidence_calibration.json` ([published tables](#published-tables)) |
-
-The stage reads no sample metadata and no published file; it needs at least three samples and a painting of every
-configured contig. Its user settings are `[pedigree] evidence_calibration` (`"predictive"` by default, or
-`"off"`) and the genetic map's `rate_is_measured`; see the [configuration reference](../configuration.md) and
-[usage](../usage.md). Every other value below is an internal constant of `PedigreeConfig` (`pedigree/config.py`) or
-of a named module, listed in the configuration reference.
-
-Notation: N samples in run order; C informative chromosomes; per painting component, S states (its trajectory classes
-plus BACKGROUND, so S ≤ K + 1 for K founder rows), B painting bins and M selected markers; T rows of the M2 candidate
-panel; A configuration rows.
-
-## Parent candidates
-
-`ParentEligibility` (`pedigree/eligibility.py`) is the candidate universe of the inference, and it is always every
-sequenced sample (release 3.4): the pipeline reads no sample metadata, so no generation, cohort or sex label and no
-breeding record narrows it, and sample names are identifiers only. Over the run's sample axis it holds:
-
-- `children`, bool [N]: the inference targets, every sample.
-- `parents`, bool [N, N] (child, parent): the admissible M1 edges, every pair of distinct samples. Any two candidates
-  of a child form an admissible M2 configuration; no N × N × N table is formed.
-
-The stage builds it itself (`ParentEligibility.unrestricted`); its identity enters the stage's identities, and the
-product's summary records the universe's sizes with `individual_parentage_ground_truth` and `sample_metadata` false.
-
-A sample is a candidate parent because it is present in the input, not because of a label. Every edge's direction is
-inferred: the painted-junction orientation and the reciprocal-family and short-ancestry terms of the decision ([finite
-continuous direction](#finite-continuous-direction), [reciprocal family messages](#reciprocal-family-messages)) weigh p
-→ c against c → p for every pair, and no edge is exempt. Relatives that are not parents are kept from release by the
-evidence, not by labels: the orientation cut-off of a released edge ([release tiers](#release-tiers)), the resampling
-and map-length rules of the tiers, and the [sibling-as-parent guard](#sibling-as-parent-guard), which withholds an edge
-whose parent is Mendelian-excluded from most of the child's full sibs in the relatedness product. Samples that a cross's
-records label as an earlier generation (for example the four samples labelled G0 in the TroMau cross) are candidates of
-every other sample like everyone else; no sequenced individual or pair is assumed to be anyone's parent, and the calls
-remain inferences.
-
-Founder discovery and painting also use every sample of the input, so a sample that must not take part in the
-inference (for example an unrelated outgroup) has to be left out of the input VCF.
-
-## Preparation: markers, source factors and information blocks
-
-Chromosome workers prepare every painting component of a contig (`pedigree/prepare.py`, `pedigree/sources.py`):
-
-- **Selected markers.** Of each painting bin's selected sites, at most
-  `PedigreeConfig.preparation.markers_per_bin = 10` evenly spaced ones (in a bin of n > 10 sites, those at offsets
-  ⌊j n / 10⌋, j = 0, …, 9) enter the transmission model, with every sample's genotype likelihoods and observed flags
-  there. The likelihoods are used exactly as the evidence stage stored them.
-- **Exact source factors.** Within the reduced source model below, each sample's source chain is an HMM over ordered
-  diplotypes (S² states) with the painting's own tempered emissions (the packed emissions of the painting record, or the
-  same emission model recomputed and divided by its design effect (each sample's bin, as painting does) for components
-  beyond the painting's cache) and its normalised label-level transition table at the painting's estimated
-  ancestry-change rate, whose weights depend only on whether zero, one or both founders change. This is pedigree's own
-  reduced source model, not the marginal of painting's class x fidelity chain: the panel-error state is left out and a
-  called founder allele is transmitted unchanged (release 2.14). The backward pass is stored as the bin-0
-  ordered-diplotype law (symmetrised over the arbitrary homologue order) and max-normalised right weights r_b, so that
-  the posterior chain kernel
-
-      K_b(u, v) = A_b(u, v) r_b(v) / Σ_w A_b(u, w) r_b(w)
-
-  and the per-bin posterior marginals follow in O(S²) per bin through row, column and total sums; the S² × S²
-  transition matrix is never formed. A sample without any observed site of the component whose GL row is
-  informative (spread above `pedigree.projection.INFORMATIVE_GL_SPREAD = 1e-12`) keeps a uniform law there and is
-  evidence-free as a candidate parent of that component.
-- **Painted state classes.** The painting's MAP class of each sample, bin and track; BACKGROUND, unanchored tracks
-  and abstentions are unknown. They feed the junction counts.
-- **Selector switch probabilities.** Between adjacent bin centres at genetic distance d (Morgans, from the contig's
-  map, or the fallback rate), the transmitted homologue changes when an odd number of crossovers falls between them:
-  θ = (1 − exp(−2d)) / 2, one meiosis's Haldane recombination fraction (`model.genetic_map.haldane_fraction`),
-  clipped to [`pedigree.prepare.SELECTOR_SWITCH_FLOOR = 1e-15`, 0.5]. Before 2.15 θ was 1 − exp(−d), the probability
-  of at least one crossover, which counts even numbers of crossovers as switches.
-- **Information exponents.** The chromosome's selected markers are grouped bin by bin, across components in order,
-  into consecutive groups that close once they hold `PedigreeConfig.preparation.markers_per_information_block = 100`
-  markers (the last group may hold fewer). For
-  a child with n markers of non-uniform GLs in a bin's group, the bin's tempered-view exponent is η = min(e, n) / n
-  with e = `PedigreeConfig.preparation.effective_markers_per_information_block = 3.0` (η = 0 when n = 0): a group of
-  linked markers weighs at most about as much as three independent ones.
-
-A component without any non-uniform GL at its selected markers is skipped; a contig without a remaining component is
-omitted (`no_observed_nonuniform_component_evidence`). The **informative chromosomes** of the run are the contigs
-with at least one prepared component; only they are scored and resampled.
-
-## Ragged quadratic scoring of M0, M1 and M2
-
-The genetic evidence of a configuration is a forward likelihood of the child's genotype likelihoods
-(`pedigree/projection.py`, `pedigree/forward.py`). Ragged: every painting component keeps its own state alphabet,
-bins and selected markers, with no common grid, and a chromosome's log likelihood of a configuration is the sum over
-its prepared components in component order. Quadratic: whatever the configuration, the child's hidden state at a
-bin is an ordered pair of transmitted founder states, S² values.
-
-### Parent-count states
-
-M0, M1 and M2 are zero, one and two parents among the other sequenced samples. M0 means zero observed parents, the
-parents being unsampled; it does not mean a founder or the first generation, and an M0 sample can
-have observed offspring. A missing biological parent is never replaced by an unsupported candidate: an M1 call leaves
-the second parent unobserved. Each eligible child has one M0 configuration, one M1 configuration per eligible parent
-and one M2 configuration per admissible pair of its [candidate panel](#candidate-panel).
-
-### Transmitted-state projection
-
-A parent transmits, at each bin, one of its two painted homologues; which one is a selector that switches at
-crossovers with probability θ per bin edge. The exact law of the transmitted founder state couples the parent's
-ordered-diplotype chain with the selector, an S⁴ object for two parents. The projection keeps, per candidate and bin:
-
-- π_b(s), the transmitted-state marginal (the homologue-symmetrised source marginals propagated with the selector);
-- at each selected marker, the probability that state s transmits the ALT allele: a class with a called allele transmits
-  it, a class the panel left uncalled there transmits BACKGROUND's ALT frequency (the null's and the painting's value),
-  and BACKGROUND, which has no panel haplotype, is conditioned on the candidate's own reads (the untransmitted homologue
-  summed out under the source posterior, the candidate's GL rows mixed with the painting's robustness weight, a uniform
-  genotype mixture). The candidate's reads still shape its source posterior, marginals and bridges; only the
-  within-class allele update of named classes is omitted. Until release 2.16 uncalled named classes were conditioned on
-  the reads too. The panel leaves an allele uncalled where the data are noisy, and in the traced simulation examples the
-  candidate's GL rows were noisy there as well (genotype argmax wrong at 41-49% of such sites, 5-8% at fully called
-  ones; heterozygous-looking at about 40% of truly homozygous such sites); there the conditioned allele scored the
-  transmitted one worse than the background frequency (summed log predictive probability −96 against −65 on one
-  chromosome). Those sites (0.3-1.8% of selected markers in the simulations, 0.01-0.03% in TroMau) accumulated losses of
-  7-68 nats in M1 against M0 on the traced chromosomes of true parents, directly and through the filter, where the
-  called ancestry and alleles of parent and child were mostly correct. The omission is a conservative treatment of
-  panel-withheld alleles, not the generative likelihood: a genuinely private allele that the panel withheld (for example
-  because few samples carry it) loses its read evidence too;
-- between adjacent bins, a maximum-entropy bridge: the S × S transition that matches the exact adjacent marginals
-  π_b and π_b+1 and the exact same-state (persistence) flow. It is a diagonal plus a rank-one off-diagonal part with
-  pivot arms, found by bisection on the maximum-entropy root (at most
-  `PedigreeConfig.scoring.bridge_max_iterations = 128` steps, until the bracket stops shrinking), and it is accepted
-  only when its rows are stochastic and it reproduces the adjacent marginal and the persistence flow within
-  max(8 × `PedigreeConfig.scoring.bridge_tolerance = 2e-13`, 256 ε_mach); otherwise the stage stops with an error.
-
-Where a candidate has no informative markers, its chain between two bins is the painter's interpolation only (the
-painting's label-level copying process; before 2.14 an imposed switch-suppression prior). Each bridge is therefore
-mixed with the uniform selector kernel,
-
-    T' = (1 − k) T + k U,   k = θ (1 − min(1, n / G)),
-
-with n the smaller number of the candidate's observed informative selected markers in the two adjacent bins and
-G = `PedigreeConfig.scoring.source_gap_support_sites = 1`: the mixture acts only next to data-free parent bins and
-leaves every data-supported bridge unchanged.
-
-### Child forward model and composite score
-
-An unobserved parent's slot follows the null source, built from the founder states that the other samples
-transmit. For child c and bin b, the leave-one-out sample frequency is
-
-    f_cb(s) = (Σ_{j ≠ c} a_j π_jb(s) + w / S) / (Σ_{j ≠ c} a_j + w),
-
-over the samples j with an informative painting site in the component (a_j = 1; π_jb is j's transmitted-state
-marginal), with a uniform pseudo-count of w = `PedigreeConfig.scoring.null_prior_samples = 1.0` samples, a
-regulariser that keeps a state no other sample carries possible. The slot starts from f_c0 and, per bin edge, keeps
-its state with the weight k = d − o and otherwise redraws a state from f_c,b+1, where d and o are the diagonal and
-off-diagonal entries of (1 − θ) times the painting transition's single-homologue marginal plus θ times the uniform
-kernel. Its marginal therefore follows m_c0 = f_c0 and m_c,b+1 = k m_cb + (1 − k) f_c,b+1: f is the initial and
-redraw law, not the slot's marginal at every bin. With uniform frequencies this is exactly the symmetric kernel, the
-null of releases before 2.15. A saturated kernel (theoretically d = o) whose difference rounds below zero is set to
-d = o = 1/S; a materially negative k is an error. This is an empirical, persistent copying null in the spirit of the
-sample-allele-frequency null of parentage likelihoods, at founder-state resolution: a founder state that many samples
-carry is cheap for M0, as it is for any candidate. The frequencies pool every informative sample, descendants and
-large sibships included, so they describe the sampled population rather than the parents' breeding population, and
-leaving the child out removes its own row from the average, not its influence on the shared paintings. The null does
-not model a sampled relative of the child's unsampled parent: a close relative can still explain one homologue
-better than the population draw (see the limitations). M0 has two null slots; M1 takes the
-first transmitted state from the candidate's projection (π at bin 0, then its bridges) and keeps a null second slot;
-M2 takes both from the two parents. At an observed selected marker with transmitted ALT probabilities a1 and a2, the
-child's emission is
-
-    L(a1, a2) = 3 (g0 p0 + g1 p1 + g2 p2),   p0 = (1 − f1)(1 − f2),   p2 = f1 f2,   p1 = 1 − p0 − p2,
-    fi = μ + (1 − 2μ) ai,
-
-with the child's normalised GL row g and μ = `PedigreeConfig.scoring.mismatch_probability = 0.01`. A bin's emission
-is the product over the child's observed markers there; unobserved markers contribute 1 (the factor 3 makes a flat
-GL row neutral).
-
-Each configuration H is scored by two forward passes over the same markers, sources and transitions: Z_η(H), whose
-bin emissions are raised to the child's information exponent η before the sum over transmission paths, and Z_1(H)
-at full strength. The chromosome score is
-
-    s(H) = ½ log Z_η(H) + ½ log Z_1(H).
-
-Tempering before path marginalisation can suppress the contradictions that separate a missing parent from a related
-observed candidate; the full-strength view keeps them, while the tempered view limits the weight of dense linked
-markers. The equal weight is fixed (never fitted per sample or against truth), and s is a composite score over two
-evidence weightings of the same data: neither two independent data sets nor a calibrated likelihood. Each view keeps
-its own scaling and falls back to log-space products where a product would underflow. A wholly unobserved child is
-neutral, and an evidence-free candidate adds nothing: its M1 score equals the child's M0 score, and an M2 row
-containing it reduces to the other parent's M1 score (or to M0).
-
-## Candidate panel
-
-M0 and a certified genome-wide M1 profile are computed first. Unproved eligible dyads receive exact scoring; retained identities keep raw scores and excluded identities share the fixed floor profile described below. M2 is scored only for the pairs of retained parents whose joint M2 bound can reach the child's best configuration (`pedigree/pair_bound.py`, `pedigree/panel.py`, below).
-For child c with n_c eligible parents, the robust screen utility of parent p is
-
-    u(c, p) = Σ_k w_k [ρ r_k(p) + (1 − ρ) ((1 − γ) σ_k(p) + γ / n_c)].
-
-On chromosome k, σ_k is the softmax of the child's M1 screen scores, centred at their maximum, divided by the
-temperature τ_k = max(1, ⌈m_k / 100⌉)^q and clipped at −60 nats, with m_k the chromosome's selected markers, 100 the
-information-block size and q = `PedigreeConfig.panel.information_tempering_power = 0.5`; r_k is tied-rank evidence
-((n_c − average rank) / n_c with ranks counted from 0 for the best score, normalised to sum 1, scores within the
-contrast tolerance sharing their rank);
-ρ = `PedigreeConfig.panel.rank_weight = 0.35` and γ = `PedigreeConfig.panel.chromosome_contamination = 0.02`. The
-chromosome weights are √m_k / median, clipped to [1/R, R] with R = `PedigreeConfig.panel.maximum_contig_weight_ratio = 4.0`
-and normalised to sum 1, so no chromosome dominates the screen.
-
-The panel holds the admissible pairs among each child's genome-retained parents whose joint M2 likelihood could come
-near the child's best configuration (release 3.4). For each chromosome k and retained pair (p, q), `pedigree/pair_bound.py`
-computes U_k(p, q) ≥ M2_k(c | p, q), a valid upper bound on the pooled M2 score (both views), and the pair enters when,
-in the full-data fit or in one of the leave-one-chromosome-out (LOCO) fits w,
-
-    Σ_k w_k U_k(p, q) ≥ max(Σ_k w_k M0_k(c), max_r Σ_k w_k M1_k(c | r)) − Γ,
-
-r ranging over the retained parents and Γ = `PedigreeConfig.panel.pair_relevance_margin = 150.0` raw nats (33 nats at the
-0.22 evidence scale fitted on bc8). A fit's sum leaves out the chromosomes it does not use, and a pair whose bound sum
-is not a number is kept. A pair left out therefore has a raw M2 likelihood more than Γ below the best known
-configuration in every such fit: it can be neither the best configuration nor within Γ of it there. This is a
-guarantee about raw scores in the screened fits only: Γ is a working window, not a calibrated error bound; bootstrap
-fits are not screened; the decision's later exposure, family and graph terms are outside the comparison; and the
-decisions themselves can change (a dropped row loses its κ floor, and a far-below-best row can be a graph fallback).
-No allowance for pair synergy is needed: the bound is a relaxation of M2 itself, never of the parents' separate M1
-fits. Membership is a function of the scores only; no parent count or pair count is capped, and the retained set
-stays the outer bound.
-
-The bound relaxes the M2 forward pass by state aggregation. Per parent and bin, every state with transmitted-state mass
-π ≥ `PedigreeConfig.panel.pair_bound_high_mass = 0.01` keeps its own group, BACKGROUND keeps its own group, and the
-parent's other named states form one low group. The aggregated forward uses the exact initial mass of each group, the
-largest exact row mass of the parent's bridge-with-excursion operator from a state of a group into each next group,
-and the largest joint emission bound over the two groups; by induction over bins it is at least the exact forward
-mass of the states each group pair covers, for any grouping (the grouping sets only tightness and cost). The two
-parents keep their own chains (selector persistence and crossovers between their homologues included), and the
-emission couples them bin by bin, so a pair is examined jointly: two parents that each fit the child poorly under M1
-but together explain it (complementary mosaics: the unobserved co-parent's null chain cannot follow the other
-parent's ancestry changes) keep their joint score. The emission bounds hold for every candidate pair: named founder
-states transmit their panel allele (BACKGROUND's frequency where uncalled) in every candidate, so their joint emissions
-are exact child-level values; BACKGROUND, the only candidate-specific state, takes the range at each site of every
-BACKGROUND ALT probability a slot can transmit: the candidates' read-conditioned values and, in a component with an
-evidence-free candidate, the null chain's unconditional frequency (such a pair is scored as the other parent's M1, or
-M0, with the null chain in the missing slot). The site likelihood is bilinear in the two transmitted ALT
-probabilities and peaks at a corner of that box; a candidate in BACKGROUND is further capped by its own BACKGROUND
-alleles against the best partner state in the range. An evidence-free candidate is one group with the largest
-null-kernel row sum as its transition. The tempered view raises the same bounds to the bin's information exponent.
-Aggregated transitions need not be stochastic, so the bound can grow along a chromosome: each bin's normaliser enters
-through its own logarithm (no running product overflows or underflows), and a bin whose aggregated mass underflows is
-redone in the log domain, shifted by the largest group term that holds mass.
-
-Why (release 3.4, label-free eligibility). With every sample a candidate, the 60 T retention margin admits hundreds of
-relatives at N ≥ 1,000 (n1000c crop: median 264 retained parents per child; N = 2,503: 497), and all their pairs made
-the panel cubic (43.5M and 414M rows per chromosome). Most pairs are far below the best configuration (a true parent
-paired with a relative that follows the same homologue), so they carry only the κ floor of the M0 mixture. On the
-n1000c crop the bound is at least the exact M2 on all 43.5M rows of every chromosome (median slack 0.001 nats), and the
-panel keeps 1.0M rows (2.3%), every row within Γ of its child's exact best among them. An additive screen on the
-parents' separate M1 gains was rejected: it can drop the uniquely best pair of two complementary parents. The LOCO fits
-are included because a pair that is far from the best on the full data can be competitive once one chromosome is left
-out, which decides LOCO support on few chromosomes; the bootstrap fits are not anticipated (on few chromosomes some
-bootstrap weighting favours many more pairs: K30 1,741 → 6,530 rows), so bootstrap support is conditional on this
-panel.
-
-The panel is built once before calibration and remains fixed in every resampled fit. The full eligible-pair prior
-denominator is retained. Excluding a pair is an explicit model approximation: pairs outside the panel (outside the
-retained set, or retained but bounded away from the best) contribute nothing, so the M2 evidence remains a lower
-bound, and the κ floor of the excluded pairs is not counted (state evidence and the fitted evidence scale can move with
-it). Robust utility is reported for diagnostics; it does not select an
-arbitrary prefix.
-
-## Exposure and junction counts
-
-The score phase also extracts, per informative chromosome, the two structural summaries the decision uses.
-
-**Exposure** (`pedigree/exposure.py`) comes from the exact source marginals, read as each sample's posterior mass
-over unordered founder pairs per bin. A founder class is anchored when the component calls it somewhere; BACKGROUND
-and unanchored trajectories are never identity evidence, and evidence-free samples contribute nothing. An edge
-(child, parent) is matched in a bin with the posterior probability that the child's pair shares an anchored founder
-with the parent's pair, and exposed with the probability that the bin can test the edge: a match, or both pairs fully
-anchored and disjoint. A panel pair (child, parent 1, parent 2) is explained when one parent can supply each of the
-child's founders, and exposed when explained or when all three pairs are fully anchored and no such assignment
-exists. Summed over bins and components these give the expected matched and exposed bins of every eligible edge and
-panel pair; the exposure gate of each fit reads the exposed bins, and matched-to-exposed ratios are diagnostics.
-
-**Junction counts** (`pedigree/junctions.py`) are the minimum number of founder switches of each sample's painting
-per chromosome, invariant to phase. Within each bin, trajectory classes with identical alleles at the selected markers
-are pooled into one local class, so splitting one identical-by-state haplotype into duplicate classes cannot
-manufacture switches. The hidden state is an unordered pair of deduplicated whole-component trajectories (possibly
-the same one twice), with cost 0 to stay, 1 to change one trajectory and 2 to change both; per-trajectory and global
-minima keep each update quadratic in the number of trajectories. Unknown painted classes are uninformative, and the
-callable haplotype-bin labels are counted alongside, so that an incomplete painting cannot pass as a shallow one.
-
-## Cross-chromosome evidence calibration
-
-With `[pedigree] evidence_calibration` set to `"predictive"` (`PedigreeConfig.evidence_calibration = "predictive"`),
-one positive scale λ multiplies every chromosome's M0, M1 and M2 log likelihoods before the decision
-(`pedigree/calibration.py`); `"off"` keeps λ = 1. The scale is chosen by predicting held-out chromosomes. The
-informative chromosomes, by index modulo 4, form four folds; each of folds 0 to 2 is predicted by the other two, and
-fold 3 is an untouched test. For each eligible child with at least two configurations finite on every chromosome,
-the objective sums over the three fitting folds f
-
-    log Σ_r exp(λ ℓ_−f(r) + log π_r + m_f(r) + ℓ_f(r)) − log Σ_r exp(λ ℓ_−f(r) + log π_r + m_f(r)),
-
-the log predictive mixture of fold f's likelihoods ℓ_f under configuration weights from the two other fitting folds
-ℓ_−f, tempered by λ. Here π_r is the fixed state prior divided by the configuration's eligible identity count, and
-m_f(r) = −∞ excludes reciprocal-dominant rows: a row naming p as a parent of c is left out of the objective when, on
-the fitting chromosomes, M1(p with parent c) − M0(p) ≥ M1(c with parent p) − M0(c). Genetics cannot order such
-parent–offspring reversals; the direction and family evidence settle them, and decisions still see every row. A grid
-of `pedigree.calibration.GRID_POINTS = 33` points over log λ in [log 0.001, log 100] brackets the local maxima (the
-objective need not be unimodal), and each is refined by bounded scalar optimisation.
-
-The fitted λ is applied only when the optimiser succeeds, the gain over λ = 1 exceeds
-`pedigree.calibration.MINIMUM_GAIN = 1e-08` nats, the optimum lies more than
-`pedigree.calibration.BOUNDARY_MARGIN = 0.01` (in log λ) inside the bounds, and λ < 1: the weight only tempers, never
-sharpens. Otherwise λ = 1, with the reason as status (`no_predictive_gain`, `above_unit_scale`, `boundary_optimum`,
-`optimizer_failed`, `insufficient_alternatives`). With fewer than two informative chromosomes in any fold, that is
-with fewer than 8 informative chromosomes, λ = 1 and the status is `insufficient_contigs`. The test fold, predicted
-from all three fitting folds, is recorded as `untouched_test_gain` (at the applied scale) and
-`fitted_untouched_test_gain` (at the fitted scale) and never selects anything; the whole report is
-`evidence_calibration.json`.
-
-λ is a conditional predictive weight of a composite model, not a calibration of posterior probabilities: the
-paintings and the candidate panel use all chromosomes, relatives are dependent, and the priors, candidate universe,
-direction model and release rules stay fixed. Resampled fits condition on λ (its estimation uncertainty is not
-resampled), and the full-marker exclusion uses the raw genotype likelihoods without it.
-
-## One weighted fit
-
-The decision (`pedigree/decision.py`) runs one fit on the full data and one per resampled chromosome set. A fit gives
-each informative chromosome k a multiplicity w_k (all 1 for the full data, the draw counts in a bootstrap replicate,
-one zero in a leave-one-chromosome-out refit) and recomputes everything that follows the genetic scores
-(`pedigree/selection.py`, `pedigree/orientation.py`, `pedigree/family.py`, `pedigree/graph.py`); the scores, λ and
-the panel stay fixed.
-
-### Configuration likelihoods and the exposure gate
-
-The genome-wide log likelihood of a configuration H is the weighted chromosome sum ℓ(H) = Σ_k w_k λ s_k(H). Each M1
-and M2 likelihood is mixed once with the child's M0 likelihood,
-
-    ℓ'(H) = log((1 − κ) exp ℓ(H) + κ exp ℓ(M0)),
-
-with κ = `PedigreeConfig.selection.m0_contamination_probability = 0.02`: one mixture per genome-wide configuration,
-not per chromosome, so a configuration that fails somewhere cannot fall more than log(1/κ) ≈ 3.9 nats below "no
-observed parent".
-
-A non-M0 configuration is testable in the fit only when each of its edges, and for M2 its panel pair, has weighted
-exposed bins of at least `PedigreeConfig.exposure.minimum_edge_exposed_bins = 1.0` (pairs:
-`PedigreeConfig.exposure.minimum_pair_exposed_bins = 1.0`), at least
-`PedigreeConfig.exposure.minimum_exposed_fraction = 0.1` of the weighted painting bins of the fit's chromosomes, and
-exposure on chromosomes of positive multiplicity that together hold at least
-`PedigreeConfig.exposure.minimum_exposed_units = 3.0` map units (a chromosome counts, by its
-[map units](#map-length-requirement-release-32), when it alone holds the minimum exposed bins; repeated bootstrap
-draws count once).
-An untestable configuration keeps the child's M0 likelihood as its state score, so it dilutes its state's evidence
-towards M0, and its identity cannot be named (identity score −∞). This hard gate sets the
-[map-length requirement](#map-length-requirement-release-32). Matched-to-exposed ratios against the thresholds
-`PedigreeConfig.exposure.report_edge_coverage = 0.95` and `PedigreeConfig.exposure.report_pair_explainability = 0.95`
-appear in the diagnostics only and never gate a decision.
-
-### Finite continuous direction
-
-Junction counts orient a linked pair. A homologue transmitted by parent p copies one of p's two homologues and
-switches between them only at meiotic crossovers, so the junctions on one of p's homologues are inherited together
-(release 2.16; before, each junction was transmitted independently with probability 1/2, which made a parent with
-many junctions on one homologue look implausible). Per component, each sample's painting is traced as its
-minimum-switch unordered pair of deduplicated trajectories (`pedigree.junctions.schedules`, the path behind its
-junction count J; trajectories in canonical allele-content order, so painted track order does not matter), which
-places p's junctions on its two homologues. The transmitted homologue starts uniform in each component and switches
-with the meiotic selector probability θ at each bin edge; a junction on the transmitted homologue at an edge (under
-each of the two homologue alignments that minimise p's switches there, averaged when both do) is inherited and seen
-with the child's chromosome-wide callable fraction f_c (missing at random). The inherited count accumulates over the
-chromosome's components. The compatibility model assumes that everything else in the child's count J_c (the
-crossovers of the two meioses that formed the child, junctions from the other parent and false junctions) is a
-non-negative remainder with no assumed distribution (identical-by-state founders, missing labels and compensating
-changes can mask inherited junctions; see the limitations):
-
-    L_k(p → c) ∝ P(inherited and seen junctions of p ≤ J_c),     L_k(c → p) likewise with the roles swapped,
-
-computed by a count recurrence over the bins (`pedigree.junctions.linked_log_cdf`: O(B (J_c + 1)) per dyad, counts
-above J_c dropped and the retained mass renormalised per edge) for both directions of every eligible edge. Two
-impossible directions carry no evidence. Without crossovers, ten junctions on one parental homologue give
-P(none inherited) = 1/2, not 2^-10. At θ = 1/2 the selector choices at successive edges are independent, but
-simultaneous junctions on p's two homologues still share their edge's selector (exactly one of them is inherited),
-so the former independent-junction binomial is not a special case.
-
-Under the reverse orientation the proposed parent would have lost junctions that its own "parent" transmits: equal
-counts give no evidence, and a junction-poor parent of a junction-rich child gives strong evidence. With probability
-ε_c = `PedigreeConfig.direction.chromosome_error_probability = 0.05` one chromosome's comparison is painting failure,
-
-    π_k = (1 − ε_c) L_k(p → c) / (L_k(p → c) + L_k(c → p)) + ε_c / 2,
-
-so each chromosome contributes at most log(2/ε_c − 1) ≈ 3.7 nats, and the log odds add over chromosomes as
-independent meioses, LLR = Σ_k w_k logit π_k. Painting failure need not be independent between chromosomes (a
-sample-level junction excess or deficit repeats on every chromosome), so with probability
-ε = `PedigreeConfig.direction.pair_failure_probability = 0.02` the pair's whole comparison carries no orientation
-evidence, and each proposed parent of a configuration adds the neutral-centred correction
-
-    log(2 ((1 − ε) σ(LLR) + ε / 2)),
-
-which is zero for equal support and lies within [log ε, log(2 − ε)] ≈ [−3.9, +0.7] nats. The expected number of the
-child's own crossovers is deliberately not imposed (it depends on the recombination rate, on whether the transmitting
-parent's homologues differ at a crossover, and on painting sensitivity), so related samples of equal junction burden,
-such as full sibs or a backcross offspring of a deep parent, receive little orientation evidence. A separate paired
-junction-density contrast, an order probability in [0, 1] (0.5 = no information), only orders the graph search and
-is reported as the role probability; it never enters a score.
-
-### Reciprocal family messages
-
-For every sample the competing M0, M1 and M2 configurations are retained. Their weights in the family messages are
-the identity scores after the exposure gate and the orientation correction, each divided by its state's eligible
-identity count (equal M0/M1/M2 weight; the configured state priors act only in the state choice). A configuration
-naming p as a parent of c receives the message
-
-    log P(p does not name c as its parent),
-
-taken over p's configurations with the reverse message, from c to p, excluded: a cavity distribution, so a sample
-never receives its own evidence back as support. The message compares p's configurations that do not make c its
-parent with all of p's configurations, marginalising over p's possible co-parents rather than freezing a selected
-pedigree. `PedigreeConfig.direction.message_passes = 4` synchronous passes, each excluding the incoming reverse
-message before forming the next, prepare the short-ancestry path factor. Included and excluded masses are carried as
-log odds until the reverse message is excluded, so very small probabilities are not rounded away before the cavity
-step.
-
-### Joint short-ancestry correction
-
-Direct reciprocity does not catch a proposed parent who is actually a grandchild, which matters after related
-individuals mate: a double grandchild can resemble a direct parent. For a configuration of child c with parental set
-P, the correction averages, over the joint configurations of the members of P (each conditioned on not choosing c
-directly, which reciprocity already handles), the compatibility Π_g P(g does not choose c as its parent) over the
-distinct intermediate ancestors g in those configurations, with configuration weights from the identity scores plus
-the preparatory reciprocal term and the outgoing cavity messages of the four passes.
-Members of P are excluded as intermediates (a reverse path through the co-parent is already forbidden by
-reciprocity) and shared intermediates count once; together these keep legitimate backcrosses. Only the top
-`PedigreeConfig.direction.ancestry_path_budget = 16` configurations of each parent (by weight) are enumerated; all
-omitted mass, including ties at the panel boundary, counts as compatible, so the truncation can only weaken the
-penalty and never depends on sample order. The term min(0, log averaged compatibility) is added to both the state and
-the identity score of the configuration. The term is finite evidence, not a veto
-from a called pedigree, and it is never fed back into the messages it was computed from.
-
-### Converged final reciprocal solve
-
-With the path factor frozen, the preparatory reciprocal term is replaced by a converged solve of the same cavity
-equations on the path-adjusted scores: synchronous undamped iterations until the largest change of a log message is
-at most `PedigreeConfig.direction.final_tolerance = 1e-08`, for at most
-`PedigreeConfig.direction.final_max_iterations = 8192` iterations (slow monotone modes need thousands, and damping
-would halve their rate); on failure, a restart of the same equations with damping
-`PedigreeConfig.direction.retry_damping = 0.5` for at most `PedigreeConfig.direction.retry_iterations = 4096`
-iterations. The residual is measured before damping, so smaller damped steps cannot signal convergence falsely.
-Some resampled fits oscillate undamped without converging (N = 320 simulation: two of 118 distinct bootstrap weightings,
-residual still 17 nats after 8192 iterations, while the damped restart converges in under 300). So every
-`PedigreeConfig.direction.final_progress_window = 512` iterations, from the second window on (iteration 1024), the
-undamped solve checks its progress: if its residual did not fall over the last window, or would need more than
-`PedigreeConfig.direction.final_pause_budgets = 4` times the 8192 iterations at that window's geometric rate, it pauses
-and the damped restart runs at once (release 2.16). The forecast is a heuristic: slow modes that speed up later can
-still pause (f3 on 8 chromosomes: three resampled fits whose undamped solves finish in 1,796-2,959 iterations). If the
-restart fails, the undamped solve resumes from where it paused for the rest of its budget, so it follows exactly the
-iterates it would have followed without the pause and no fit meets the residual criterion less often. A fit that pauses,
-converges damped and would also have converged undamped meets the same residual criterion with messages that can differ:
-at most 2.8e-7 in the measured fits, with no pedigree table changed; the loopy solver has no uniqueness guarantee.
-Failure of both attempts is an error in the full-data fit and an abstention, for every sample, of a resampled fit
-(which stays in the denominator and so only lowers support). The incoming final messages are added to the state and
-identity scores once, and the path factor is not recomputed from them. The product records the full-data solve
-(iterations, residual, retry use) and the counts of non-converged bootstrap and LOCO fits as `family_solve`.
-Excluding immediate feedback does not exclude every loop: the messages are a bounded, loopy approximation, not exact
-pedigree marginalisation.
-
-### Marginal state, then identity
-
-The state evidence of state m for child c is the log mean likelihood of its configurations,
-
-    E_m(c) = log Σ_{H in m} exp v(H) − log n_m(c),
-
-with v(H) the configuration's state score (likelihood after the M0 mixture and the exposure gate, plus the
-orientation, path and final reciprocal terms) and n_m(c) the full eligible identity count (1 for M0, the eligible parents for M1, the admissible pairs for M2), so
-an incomplete M2 panel lowers the M2 evidence and never inflates it. The marginal state score adds the log of the
-fixed state prior, 1/3 for each state in the decision fit, and the state support is the softmax of the marginal
-scores. The state is chosen first, as the unique winner of the marginal state scores, then the identity within it,
-as the unique winner of the decision scores (marginal state score + identity score − the state's best identity
-score). Two values closer than the winner tolerance, the larger of `pedigree.ties.CONTRAST_ULP_FACTOR = 512.0`
-machine epsilons times the largest magnitude compared (taken as at least 1) and the absolute floor
-`pedigree.ties.NOISE_FLOOR = 3.0517578125e-05` (2^-15) nats (release 2.1, placed by a census of decision gaps under 1e-9
-genotype-likelihood noise), are tied: a tie leaves the state (`no_unique_marginal_parent_state`) or the identity
-(`parent_state_resolved_identity_unresolved`) unresolved, so
-floating evaluation order does not decide a call within the measured noise scale (a finite band cannot guarantee
-invariance at its own boundary; the 2.15 replays found no released change under 1e-6 genotype-likelihood jitter).
-
-M0 calls must survive prior sensitivity: the selection is repeated on the same adjusted scores under each
-alternative fixed prior, (0.5, 0.3, 0.2), (1/3, 1/3, 1/3) and (0.2, 0.3, 0.5) for (M0, M1, M2), and an M0 state is
-released only when every prior also selects M0 (the exact M0 configuration additionally needs an M0 graph choice
-under every prior).
-
-### Acyclic graph selection
-
-The local winners are kept when their parent edges form a directed acyclic graph. Otherwise cycles are examined
-first: in each cyclic strongly connected component of the local edges, the implicated child with the weakest support
-(confidence = the smaller of its state and identity margins) is the link the search is expected to break, and when
-two or more implicated children are tied at that weakest link all of them are marked as graph tie conflicts and left
-unresolved, because choosing one by sample order would manufacture confidence from a graph constraint. Peeling
-repeats until no cycle remains. The tie tolerance of this step is the winner tolerance above (at least 2^-15 nats)
-of the largest magnitude of the scores the implicated children's margins were computed from (their marginal state
-scores and the identity and decision scores of their local state; at least the margins themselves and 1), the same
-yardstick as a single margin's tie test: a margin is a difference of composite scores of 1e4-1e5 nats and carries
-their rounding (measured: up to about 136 ULP of its scores, so a difference of two margins up to about 272).
-
-A greedy pass then visits the children that have a local configuration, tie conflicts excluded, by descending
-orientation support of that configuration (the product of its edges' order probabilities), then confidence, then
-sample index. A child keeps its local
-configuration when it fits the graph; otherwise it takes the unique winner, by decision score, of the highest
-feasible state at or below its local state (M2, then M1, then M0), never a higher parent count, so the graph
-constraint cannot create parent evidence. Up to `PedigreeConfig.selection.graph_local_search_passes = 3` coordinate
-passes then re-select each child given the others, stopping early when nothing changes. Displaced children are
-reported (`DAGDisplaced`, `GraphConflict`).
-
-## Chromosome resampling
-
-Support comes from refits with resampled chromosome multiplicities (`pedigree/resampling.py`):
-`PedigreeConfig.resampling.bootstrap_replicates = 1000` bootstrap replicates, each drawing C informative chromosomes
-with replacement from a generator seeded with `PedigreeConfig.resampling.bootstrap_seed = 20260725`, and C
-leave-one-chromosome-out (LOCO) refits, counted separately. Every refit recomputes the orientation, the exposure gate,
-the reciprocal and path terms, the final solve, state, identity and graph; the genetic scores, λ, the panel, the
-eligibility, the priors and the thresholds stay fixed. Counts are integer sums over fits, per configuration (as local
-winner and as graph choice), per state and per (child, parent) edge, and a fraction divides by all fits, including
-non-converged ones that abstained. A fit is a deterministic function of its multiplicities, so each distinct bootstrap
-multiplicity vector is fitted once and its selections, failures and fits are counted as many times as the replicates
-drew it (release 2.15; with few chromosomes most draws repeat: the default seed's 1,000 draws hold 10 distinct vectors
-at C = 3, 118 at C = 5 and 840 at C = 8). The fractions measure internal stability across chromosomes, not calibrated
-probabilities of correct parentage, and they condition on the paintings, the panel and λ, which use all chromosomes.
-
-## Release tiers
-
-`pedigree/release.py` turns the full-data fit and its support into two evidence tiers. Thresholds label evidence
-tiers; they are not biological acceptance probabilities.
-
-| tier | state and configuration bootstrap | parent bootstrap | LOCO |
-| --- | --- | --- | --- |
-| Tier B (primary) | `PedigreeConfig.release.tier_b.configuration_bootstrap = 0.7` | `PedigreeConfig.release.tier_b.parent_bootstrap = 0.7` | `PedigreeConfig.release.tier_b.loco_fraction = 0.8` |
-| Tier A (strict) | `PedigreeConfig.release.tier_a.configuration_bootstrap = 0.95` | `PedigreeConfig.release.tier_a.parent_bootstrap = 0.95` | `PedigreeConfig.release.tier_a.loco_fraction = 0.95` |
-
-### Tier rules
-
-A tier releases a child's parent state when the full-data fit resolved the state, the chromosomes informative for
-the child (its own per-chromosome state evidence has a unique winner there) hold at least
-`PedigreeConfig.release.minimum_informative_units = 3.0` map units (release 3.2; three chromosomes shorter than 1
-Morgan or with neither a map nor a stated rate), the state's bootstrap and LOCO fractions reach the
-tier's state bootstrap and LOCO cut-offs, an M0 state survives every alternative prior, and an M1 or M2 state has an
-identifiable observed parent: at least one parent of the local configuration reaches the tier's parent bootstrap and
-LOCO cut-offs (release 3.4; orientation is not required for this). A one- or two-parent count claims that a sequenced
-eligible sample is the child's parent. When no candidate is stable, a stable count usually means that some close
-relative of an unsampled parent (a full sib, half sib or grandparent of the child) beats the null in every resample
-while which relative wins changes ([interpretation and limitations](#interpretation-and-limitations)), so such a
-count is not released. It releases the exact
-configuration when, in addition, the local configuration is also the graph's choice without a tie conflict, the
-configuration's bootstrap and LOCO fractions as local winner and as graph choice reach the cut-offs, an M0
-configuration is the graph choice under every prior, every named parent is stable (parent bootstrap and LOCO
-fractions at their cut-offs), and every inferred parent edge is decisively oriented (below). A released state
-without its configuration states why, as `<tier>_parent_state_supported_<reason>` with the reason
-`graph_tie_conflict`, `graph_conflict`, `orientation_unresolved` or `identity_unresolved` (a stable named parent
-whose configuration is not released); an unreleased state is `unresolved_below_<tier>_state_support`,
-`unresolved_<tier>_m0_prior_sensitivity` or `unresolved_<tier>_no_stable_parent` (an M1 or M2 state that meets the
-state cut-offs without a stable named parent). The identity requirement withdraws no edge: a marginal edge needs the
-same parent cut-offs, so a child without a stable local parent has none, and its partial-view count bounds are 0 to
-2.
-
-### Orientation of released edges
-
-Chromosome resampling measures stability, not direction: two strongly linked samples whose junction counts cannot
-orient them can be resampled into either of two nearly equal reciprocal configurations and pass the support cut-offs
-in the wrong direction. A released inferred edge p → c therefore also needs a decisive full-data orientation. With
-every other converged reciprocal message held fixed, the pair's anti-reciprocity factor is evaluated exactly: for
-the cavity inclusion log odds a (of c's configurations naming p) and b (of p's configurations naming c), the joint
-states p → c, c → p and neither weigh e^a : e^b : 1, and the edge is released only when
-
-    a − b ≥ log((1 − q) / q) ≈ 3.9 nats,
-
-with q = `PedigreeConfig.release.orientation_reversal_probability = 0.02`. Otherwise the state stays released with
-status `<tier>_parent_state_supported_orientation_unresolved` and the edge is withheld from the partial and
-candidate-set views, so family phase never conditions on it. No edge is exempt: every edge's direction is inferred.
-
-### Marginal edges, candidate sets and the complete view
-
-Where a tier does not release the exact configuration, it can still release single parent edges of the full-data
-graph (the partial view). For a child without graph conflict and with enough informative chromosomes, a parent that
-is the same in the local and the graph configuration is released when its local and graph parent bootstrap fractions
-reach the parent cut-off, both its LOCO fractions the LOCO cut-off, and its orientation is decisive (status
-`<tier>_marginal_parent_support`, or `<tier>_marginal_parent_orientation_unresolved` when only the orientation
-fails). The partial view states the observed-parent count as bounds: the released count when the state is
-released, otherwise from the number of released edges up to 2. An edge does not say whether the child's other parent
-was sampled.
-
-Tier-B candidate sets describe what remains open. Within the called state they hold the fewest configurations, by
-descending softmax of the decision scores (ties by row), that carry `PedigreeConfig.release.support_set_coverage = 0.95`
-of the mass. For M1 they list the candidate parents. For M2 one pair gives its two sides; pairs that all share one
-parent make that parent one side and the other parents the other side; pairs without a common parent give no sides,
-only the configuration list. A singleton side becomes a named parent when it is stable at the Tier-B parent cut-offs
-and decisively oriented; retained marginal edges replace sides, and no complete configuration is invented.
-
-The complete view is the full-data acyclic selection itself: a best guess for every target, displaced and tied
-children included, and never a release.
-
-## Map-length requirement (release 3.2)
-
-How much material a run has is measured in map units, not chromosomes. An informative chromosome holds
-max(1, L / U) units:
-- U = `PedigreeConfig.exposure.unit_morgans = 1.0` Morgan.
-- L is the measured map length of its scored components: over adjacent bins of each component, the measured map
-  length between the bins' centres, each interval at most U. Gaps between components add nothing.
-- A length counts only where it is measured, as `PedigreeConfig.exposure.rate_is_measured = False` sets by default:
-  - a supplied genetic map (`[genetic_map] file`) measures the part of each interval that lies between its first and
-    last knots;
-  - a stated rate counts everywhere: `[genetic_map] rate_is_measured = true` declares `rate_cm_per_mb` to be the
-    organism's genome-wide average ([genetic maps](../genetic_maps.md#map-length-as-pedigree-material-release-32));
-  - otherwise the fallback rate, which also extends a map's tails, is a placeholder that measures no recombination,
-    and a chromosome with neither a map nor a stated rate counts one unit.
-- An edge (or panel pair) earns max(1, E / U) units on a chromosome, where E is the measured map length it is
-  exposed over. Each interval between adjacent bins counts as far as the edge is exposed at both its ends: the
-  smaller of its two posterior-expected exposures. Painting bins hold about equal numbers of markers, not equal map
-  lengths, so an edge exposed only on a short, marker-dense island counts that island's length: one unit. The
-  smaller exposure is the largest joint probability the two marginals allow: an optimistic endpoint approximation,
-  not a calibrated joint exposure. An interval exposed at both ends counts in full, even a sparse stretch with no
-  bins inside, up to the one-unit cap.
-
-Why U = 1 Morgan. Map units are a working measure of material, not a count of independent replicates:
-- One meiosis's transmission at two loci d Morgans apart is correlated by exp(−2d), which is 0.14 at 1 Morgan.
-  Averages over adjacent 1-Morgan blocks still correlate about 0.33, so a long chromosome holds several partly
-  independent stretches, not that many replicates.
-- An unlinked chromosome is an independent replicate however short, so it counts at least once.
-- Resampling still draws whole chromosomes, and the stage still needs at least three informative chromosomes. One
-  or two long chromosomes are not supported.
-
-**Effect on support.** The [exposure gate](#configuration-likelihoods-and-the-exposure-gate) needs an edge's units on
-its exposed chromosomes to reach 3, so the support of any call is capped (shown for fully exposed edges):
-- bootstrap: at most the fraction of draws whose distinct chromosomes hold 3 units;
-- leave-one-out: at most the fraction of LOCO fits whose remaining chromosomes do.
-
-A child's tier call also needs its informative chromosomes (those where its own per-chromosome state evidence has a
-unique winner) to hold `PedigreeConfig.release.minimum_informative_units = 3.0` units. On each such chromosome the
-child claims at most the units its best-exposed candidate edge earns there.
-
-**Chromosomes shorter than one unit, including every run with neither a map nor a stated rate.** The rule is the earlier chromosome count:
-- the bootstrap caps are 0.22, 0.66, 0.90 and 0.98 for C = 3, 4, 5 and 6 informative chromosomes;
-- the LOCO cap is 0 unless C − 1 ≥ 3;
-- so Tier B needs 5 informative chromosomes and Tier A 6 (`pedigree.tier_b_minimum_contigs` counts such chromosomes).
-
-**Longer chromosomes** need fewer. Three chromosomes of at least 1.5 Morgans each, any two of which hold 3 units, give
-bootstrap support up to 0.89 and LOCO 1.0: Tier B is reachable, Tier A is not.
-
-**Where the run reports it.**
-- Before any computation, the driver stops a genome-wide run with fewer than 3 contigs.
-- With fewer than 5 contigs it warns that Tier B needs long chromosomes on a supplied map or a stated rate.
-- After preparation, the stage stops when fewer than 3 chromosomes are informative.
-- The product's `TierReach` states the informative chromosomes, their map units, the largest bootstrap and LOCO
-  support this run allows, and whether Tier A and Tier B are reachable. The same statement is printed to the log and
-  published in `OUTPUT/pedigree/summary.json` (`reach`).
-- Omitted contigs lower the informative count, so the final statement is authoritative.
-
-**Measured** by replaying the decision on saved scores of 12 designs:
-- **Without maps, nothing changes.** The chromosome-count rule and the map-unit rule release identical edges on
-  every design, real TroMau included.
-- **Why only supplied maps count.** The simulations infer at the fallback 5 cM/Mb but generate at 2 cM/Mb. Crediting
-  that fallback length would have opened Tier B to their 3-chromosome designs:
-  - the backcross releases 114 edges, all true (of 120);
-  - the sib-rich, metadata-free F3 releases 3 false sibling-as-parent edges that the
-    [guard](#sibling-as-parent-guard) cannot test, because its families need more chromosomes.
-- **Long chromosomes on a supplied map.** Two 3-chromosome designs were generated and inferred at 5 cM/Mb with the map
-  supplied: 5.5 Morgans, 5.5 map units.
-  - Tier B is assessable in both: bootstrap support up to 0.89, LOCO 1.0.
-  - Backcross: 118 edges released, all true, 114 of them in exact calls, against 0 under the chromosome-count rule.
-    Phase: 378 sets, 1 switch, N50 32 Mb.
-  - Sib-rich F3: the 2 false sibling-as-parent edges it releases are both withheld by the guard, whose families are
-    supported on long chromosomes (63 of 112 samples).
-
-## Full-marker Mendelian exclusion of M0 and M1 counts
-
-After the tiers, every eligible candidate of each target child whose Tier-B count is unresolved (no state, or fewer
-released parents than the called count) is checked against the full-marker raw genotype likelihoods of the evidence
-record, on every configured contig (`pedigree/exclusion.py`). At each site observed in both samples of a dyad, with
-normalised GL rows x and y,
-
-    A = (x0 y2 + x2 y0) / 2        the two incompatible (opposite-homozygote) genotype pairs
-    C = the largest likelihood among the seven Mendelian-compatible genotype pairs
-    U = max(x) max(y)
-    D = (1 − δ) C + δ U,
-
-with δ = `PedigreeConfig.exclusion.genotype_replacement_probability = 0.01`. D bounds every compatible read model
-with at most a δ share of arbitrary genotype replacement, so A / D has null expectation at most one under calibrated
-read likelihoods. The evidence E averages products of convex bets 1 − b + b A / D over the bets
-`PedigreeConfig.exclusion.bet_sizes = (0.0009765625, 0.00390625, 0.015625, 0.0625, 0.25, 1.0)` and over the whole
-chromosome plus half-overlapping windows of widths
-`PedigreeConfig.exclusion.window_widths_bp = (1000000, 5000000, 20000000)` bp; sites missing in either sample
-contribute 1, and the genome-wide E is the mean over chromosomes, never a maximum over selected windows. A dyad is
-excluded when
-
-    log E ≥ log(2N / α),
-
-with α = `PedigreeConfig.exclusion.alpha = 0.01`. The bound is conditional on calibrated likelihoods and on read
-errors independent across markers, not on independent inheritance of SNPs; the allowance 2N covers the at most 2N true
-observed parent edges, including when the targets were selected using the same data. Mapping errors, ascertainment
-and correlated errors violate these assumptions.
-
-The default scorer can stop likelihood work once completed-window products certify this same
-final genome-average threshold. An unfinished product cannot certify exclusion: later factors
-can reduce it. The certificate accounts for the number of configured chromosomes and samples;
-unproved dyads complete the original calculation exactly. Observed-site counts still cover the
-whole chromosome. The exact reference remains available in `pedigree/exclusion.py`.
-
-Certified results carry lower and upper log-evidence endpoints. In `exclusion_evidence.csv`,
-`LogE` is the exact value when known and NaN otherwise; `LogELower`, `LogEUpper` and
-`LogEExact` expose the interval. `exclusion_diagnostics.csv` adds the corresponding
-`WeakestExclusionLogELower`, `WeakestExclusionLogEUpper` and `WeakestExclusionLogEExact`
-fields. These columns appear when interval evidence is supplied; zero-target tables keep
-their original schema. Bounds never masquerade as exact point evidence. The release decision
-and its assumptions are unchanged.
-
-Mendelian compatibility is symmetric and cannot tell parent from child. A compatible candidate of which the child is
-already the supported Tier-B parent is ruled out by acyclicity, so the release is conditional on the supported
-directions: the final ones, after the [sibling-as-parent guard](#sibling-as-parent-guard) (release 3.4; an edge the
-guard withholds supports no direction, and its child is not released here). A child's count is released when every
-eligible candidate was checked, the child is a target with at least 3 informative chromosomes and no graph conflict, and
-the surviving candidates, at most one, equal both its supported Tier-B edges and its complete-view parents, with the
-complete-view state equal to their number. The result is M0 or M1, with status `tier_b_fixed_genome_directed_exclusion`
-and release evidence `mendelian_exclusion_and_supported_direction`. No edge is added: an M1 release names an already
-supported edge and rules out a second observed parent. The bootstrap and LOCO fractions and `TierBStateCall` keep their
-resampling values, `TierBFinalStateCall` records the final call, and the exclusion evidence never enters the scores or
-the resampled fits. The release depends on the supported directions being correct and is not an unconditional accuracy
-guarantee; M0 still means no observed eligible parent, not founder generation.
-
-<a id="sibling-as-parent-guard-release-32"></a>
-
-## Sibling-as-parent guard
-
-Every sequenced sample is a candidate parent, so Tier B can release a relative of a child as its parent: a full sib,
-a half sib or a grandparent of a child whose own parents were not sequenced. Such relatives are released when they
-happen to be Mendelian-compatible with the child, and a test of the pair alone cannot catch them: the exclusion
-evidence of the pair is what a parent has, and the relative-proxy contrasts of a parent-like relative stay positive
-([relative-proxy contrasts](#relative-proxy-contrasts-of-released-edges)). Release 3.4 tests instead what makes a
-parent: **a parent of c is a parent of every full sib of c**, so it is Mendelian-compatible with each of them, while a
-relative is compatible with most of c's other sibs only by chance (`pedigree/guard.py`).
-
-**The members tested.** For each released Tier-B edge p -> c (the edges before the guard):
-- F is c's full-sib family in the [relatedness](relatedness.md) product: the members whose family is their best
-  placement on at least `PedigreeConfig.guard.member_support = 0.75` of the support units, without p. If c itself
-  falls below that support, F is c alone.
-- F loses any member released as a parent or child of c or of another member (no full sib is anyone's parent or
-  child; added in 3.2 after a long-map backcross put a mother and her child in one family).
-- F loses any member with a released parent that is neither p nor a released parent of c. This is a half-sib
-  heuristic for merged mating groups, not proof of half-sibship. Absence of a released edge is not absence of a
-  biological parent: incomplete or wrong released-parent markers can remove genuine full sibs.
-- The tested members are F without c. The edge is tested when F, counting c, still has at least
-  `PedigreeConfig.guard.minimum_family = 3` members.
-
-**The decision.**
-- Each tested member s is checked against p with the [full-marker Mendelian
-  exclusion](#full-marker-mendelian-exclusion-of-m0-and-m1-counts) evidence and threshold of the count release: s is
-  excluded from p when log E(p, s) >= log(2N/α). The member dyads are scored in the same pass as the release's target
-  dyads, and the guard decides before the count release (see below).
-- The edge is withheld when a strict majority of its tested members are excluded from p; otherwise it is kept
-  (tested), or untested when too few members remain.
-- Cleaning and voting repeat after simultaneous withdrawals, using only the edges that remain. With E original
-  edges, every changing pass removes at least one edge, so at most E changing passes plus one stable pass are needed.
-  Withdrawals are irreversible; this avoids cycles when removing a premise changes a vote in either direction.
-  The code enforces this E+1 bound and fails rather than publishing a non-converged result. All reported member
-  counts and evidence calls use the final edge set. A prior withdrawal whose final vote lacks a majority stays withheld
-  as an explicit abstention (`prior_veto_abstention`), rather than being described as a final majority veto.
-- Assuming calibrated exclusion e-values **and at most half of each tested set not being actual offspring of a true
-  p**, a strict-majority veto requires a false exclusion of a genuine parent-child dyad. A union bound over at most
-  2N such dyads gives α at this threshold; independence of sibling votes is unnecessary. Family support is placement
-  stability, not a guarantee of that composition assumption. A wrong-member majority can veto a true edge with no
-  false dyad exclusion. Iterating withdrawals can propagate this error; convergence is not a correctness guarantee.
-- A withheld edge leaves `ParentEdges`, so family phase and recombination do not condition on it.
-- The child's observed-parent minimum becomes its remaining released edges, and its maximum returns to 2: its count
-  becomes unresolved, including a count released without named parents. No other parent is substituted, and the
-  child is not called M0.
-- The [count release](#full-marker-mendelian-exclusion-of-m0-and-m1-counts) uses the final supported directions: a
-  withheld edge p -> c neither rules c out as a reverse candidate parent of p nor counts as a supported parent of c,
-  and c is not released by exclusion. So no released count rests on a withheld edge (the stage checks this and
-  stops otherwise). Before this ordering, a parent whose only compatible candidate was its own child could keep a
-  zero-parent count certified through the edge the guard then withheld.
-- A Tier-B or Tier-A call that names the withheld parent becomes unresolved (`tier_b_sibling_guard_withheld`).
-- `sibling_guard.csv` lists every released edge: the supported members, the members dropped (linked or half sib,
-  named with their reason), and the members tested and excluded under the final retained edges. `EvidenceCall`
-  records that final vote; `Call` records the release decision. `WithdrawalIteration` is the first veto pass (zero
-  for retained edges), and `WithholdingBasis` distinguishes `final_majority`, `prior_veto_abstention`, and `none`.
-  The product's `sibling_guard` summary (model `family-exclusion-v2`) records tested/withheld counts, prior-veto
-  abstentions, cleaning iterations, the E+1 bound, and convergence. All supported member dyads are scored up front,
-  since a currently dropped member may return when its cleaning edge is withheld.
-
-**It replaces the 3.2 ratio test.** Releases 3.2 and 3.3 withheld an edge when the ratio of p's IBD0 evidence with F
-to the family's own sib-sib level lay in [0.75, 1.33]. That ratio reads the relatedness evidence for stretches without
-IBD, whose scale is not interpretable in crosses from few founders (true parent-child pairs have a median posterior
-IBD0 share of 0.38 on the simulations). It missed grandparents (r 0.58 and 0.70 on independent seeds) and a full sib at
-r 0.748. Under the label-free eligibility of 3.4, on real TroMau, it withheld the eight edges of one sample into a
-relatedness family that merged two half sibships: that sample is compatible with every member of the family.
-
-**Where it acts.** The guard tests an edge whenever the child's supported family is large enough, whether or not the
-family's parents were sampled. It abstains otherwise: in small families, in designs with too few chromosomes for
-supported families, and for children below the member support. Where it abstains, a relative released as a parent
-stays released.
-
-**Measured** (replays of the pedigree stage on the saved scores; release 3.4 lab):
-- Simulations (the 13 release 3.2 validation designs and 4 independent seeds of the F3, long-map F3, sib-rich and
-  TroMau-like designs, label-free): every released relative whose child has a supported family is withheld: the
-  sib-rich full sib (the 3.2 guard's miss at r = 0.748) and the 8-chromosome and long-map F3 grandparents. Before the
-  guard, 12 of 12 testable false edges are excluded by a strict majority (median share 1.0, lowest 0.70).
-- True edges: none withheld. The tested true edges (TroMau-like, half-sib/backcross and random half-sib controls)
-  have no excluded member at all.
-- The one released relative left is a full sib whose own member support is 0.625 (sib-rich seed): untested.
-- With exclusion recomputed on any subset of 1 to 8 chromosomes, no true edge was withheld; with 3 of 8 chromosomes
-  85-90% of the false edges were still caught.
-- Real TroMau under label-free eligibility (consistency only, no truth): 30 of 70 pre-guard edges tested, none
-  withheld. The earlier count of 22 referred only to edges already surviving the old ratio guard; the additional
-  eight are now retained. This establishes consistency, not recovery of eight true parents.
-
-**Bounded missing-parent control.** A single-chromosome simulated cross with a shared unsequenced co-parent and
-4:9 mating sizes was fitted from read likelihoods, then scored with complete, incomplete and erroneous supplied
-parent markers (4,000 sites, depths 5 and 20). Both guard versions retained all supplied true edges with the fitted
-families, but missed all 25 compatible false challenges across the four depth/template arms. The short diagnostic
-cross fitted a mixed-mating family. In a separate, deliberately merged-family control at depth 20, both versions
-withheld all four supplied true edges of the smaller mating when the other mating's parent markers were omitted.
-This is a conditional failure, not an estimate of how often that family is inferred. Supplying true families instead
-also exposed a false edge missed because an incomplete parent list removed genuine witnesses. Thus the guard is a
-narrow family-consistency heuristic, not a general relatives-versus-parents solution. Fixed-point cleaning fixes its
-dependence on withdrawn premises; it does not validate family composition or the released-parent markers.
-
-## Products and published tables
-
-`PedigreeProduct` (run record `pedigree`) holds the sample axis; the configured and informative contigs, with the
-reason for each omitted contig; three relationship views as `PedigreeCalls` (per sample a state 0, 1, 2 or −1 for
-unresolved, two parent slots and a status): `calls` (Tier B after the exclusion release; simulation evaluation reads
-these), `tier_a` and `complete`; the released edges `edges`; `reach` (`TierReach`); the calibration report,
-`family_solve`, the exclusion summary and the candidate universe's summary; the candidate panel (its rows and the screen
-utilities); and the report tables.
-
-### Released parent order (release 2.2)
-
-Scoring treats a parent pair as unordered. Only the released products order it (`pedigree/slots.py`), applied once
-to `calls`, `tier_a`, `complete`, `edges` and the relationship and candidate-set tables:
-
-No sex is recorded (the pipeline reads no sample metadata) and none is inferred, so the slots carry no biological
-meaning: neither slot is maternal or paternal.
-
-- **unordered**: two observed parents. Their order is a canonical label that does not depend on input order: the parent with more observed sites (read depth >
-  0) first, compared over the configured contigs in order until the counts differ; only parents with identical
-  counts on every contig fall back to the name, so renaming can swap such a pair's slots (a label, never a different
-  parent set). Under `HAPLOTYPES_TIE_REVERSE=1` this label flips.
-- **single**: one observed parent, in slot 0.
-
-Tables carry `ParentSlotBasis` (`unordered`, `single`, `none`) next to Parent2; per-slot columns
-(Parent1Supported, Parent1Candidates, …) move with their parent. The diagnostic tables (`diagnostics.csv`,
-`call_explanations.csv`, `alternative_explanations.csv`) keep the internal configuration order (sample-axis order).
-Simulation evaluation compares parents as sets. 2.1 ordered every pair by sample name, so renaming samples changed
-Parent1/Parent2 and the GT order of two-parent children.
-
-### ParentEdges
-
-`ParentEdges` is the only pedigree input of [family phase](family_phase.md) and [recombination](recombination.md);
-`pedigree.records.load_edges` decodes it without the report tables. It lists the supported Tier-B edges after the exclusion release
-as parent, child and slot arrays (slot 0 for the child's Parent1 column, 1 for Parent2, in the released parent
-order above), ordered by child and slot,
-with each sample's observed-parent count bounds (minimum = released edges, maximum = 2 unless the count is resolved).
-Unreleased candidates, orientation-withheld edges and Tier-A or complete-view information never appear, and an edge
-does not establish whether the child's other parent was sampled. Its identity, a digest of the sample axis and the
-edge list, is what downstream conditioning binds.
-
-### Published tables
-
-`OUTPUT/pedigree/` holds one CSV per report table, `evidence_calibration.json` and `summary.json`. Parent order within a
-configuration follows the released parent order (`ParentSlotBasis`); state
-names are `zero_observed_parents`, `one_observed_parent`, `two_observed_parents` and `unresolved`.
-
-| file | one row per | how to read it |
-| --- | --- | --- |
-| `tier_b_relationships.csv` | sample | the primary calls: Parent1 and Parent2 only where the exact configuration is released (or by the exclusion release), ParentState, ObservedParentCount, InferenceStatus, and ReleaseEvidence (`chromosome_resampling` or `mendelian_exclusion_and_supported_direction`) |
-| `tier_b_partial_relationships.csv` | sample | the edge view that forms `ParentEdges`: the released parent of each slot with Parent1Supported and Parent2Supported, ExactConfigurationResolved, ObservedParentCountMinimum and ObservedParentCountMaximum, ReleaseEvidence |
-| `tier_a_relationships.csv`, `tier_a_partial_relationships.csv` | sample | the same views at the Tier-A cut-offs (no exclusion release) |
-| `complete_relationships.csv` | sample | the full-data acyclic selection, a best guess and never a release (statuses such as `selected_<state>`, `graph_displaced_hypothesis_not_tier_eligible`, `graph_tie_conflict_parent_identity_unresolved`) |
-| `tier_b_candidate_sets.csv` | sample | what Tier B leaves open: Parent1Candidates, Parent2Candidates, ConfigurationCandidates, named parents, count bounds and the status (`tier_b_exact_configuration`, `tier_b_partial_parent_with_candidate_set`, `tier_b_candidate_set_identity_unresolved`, `tier_b_parent_state_only`, `unresolved_tier_b_no_stable_parent`, …) |
-| `parent_state_calls.csv` | sample | local and selected states and counts, graph displacement and conflicts, role probability, TierAStateCall and TierBStateCall (resampling), TierBFinalStateCall and TierBReleaseEvidence (after the exclusion release) |
-| `diagnostics.csv` | sample | everything behind a call: local, best-M1, best-M2 and complete-view parents; state and identity margins; StateLogEvidence0–2 and StateSupport0–2; bootstrap and LOCO fractions of the local state, configurations and parents; exposure and coverage diagnostics; junction burden and callability; informative chromosomes; prior-sensitivity agreement; tier flags; M2 screen completeness; support sets |
-| `call_explanations.csv` | sample | one readable row per sample: the candidate-set columns with the local and selected states, local parents, graph conflict, margins, the local state's bootstrap and LOCO fractions, the M2 search completeness and a plain-language interpretation |
-| `alternative_explanations.csv` | configuration | the local and graph configurations and the three leading identities within each state, with separate GeneticLogEvidence (scaled, after the M0 mixture), StructuralStateLogEvidence, StructuralIdentityEligible (the gate), DirectionLogContribution, ReciprocalFamilyLogContribution, AncestryPathLogContribution, adjusted state and identity evidence, ParentStateLogPrior, LogEligibleIdentityMultiplicity, MarginalStateLogEvidence and GraphDecisionUtility; priors, multiplicities, marginal evidence and graph utility are not additive terms of one posterior |
-| `search_diagnostics.csv` | sample | the M2 screen: eligible parents, scored pairs and panel parents, ScreenBoundaryRank, ScreenBoundaryGap (weakest panel utility minus the strongest omitted one), omitted parents, the called parents' screen ranks and SelectedParentAtScreenBoundary; M1 always scores every eligible parent |
-| `exclusion_evidence.csv` | target dyad | Sample, CandidateParent, LogE (exact genome-wide log E, otherwise NaN), ObservedSites; interval evidence adds LogELower, LogEUpper, LogEExact |
-| `exclusion_diagnostics.csv` | target child | compatible, supported-reverse and remaining candidates, the weakest exclusion log E against ThresholdLogE, CompleteCandidateEvidence, Released, ReleaseConditionalOnSupportedDirections; interval evidence adds WeakestExclusionLogELower/Upper/Exact |
-| `evidence_summary.csv` | informative chromosome | selected markers, mean minimum junctions and mean callable haplotype bins |
-| `chromosome_summary.csv` | configured contig | ComponentCount, ScoredComponentCount, InformativeMarkers, OmittedReason |
-| `relative_contrasts.csv` | released child-candidate edge | release 2.17, diagnostics only: Views (tier_b, tier_b_partial, complete), ProxyModel, M1MinusSecondDegreeProxyNats and M1MinusFullSibProxyNats (summed over UsableChromosomes, where the candidate has evidence), NegativeChromosomesSecondDegree, NegativeChromosomesFullSib, MinChromosomeContrastSecondDegree ([relative contrasts](#relative-proxy-contrasts-of-released-edges)) |
-| `evidence_calibration.json` | (one object) | the calibration report: mode, applied and fitted scale, status, folds, search grid, selection gain, untouched test gains |
-| `summary.json` | (one object) | the informative contigs, the omitted ones with their reasons, the chromosome-count statement (`reach`: whether Tier A and Tier B were reachable with these chromosomes, and why), the final family solve, the exclusion summary and the candidate universe's summary |
-
-All values are composite log evidence or resampling fractions of the fitted model; none is a calibrated probability,
-a proof of biological direction or a validation against truth.
-
-### Relative-proxy contrasts of released edges
-
-Release 2.17 reports, for every child-candidate edge of the Tier-B, Tier-B partial and complete views, uncalibrated
-composite genetic-score contrasts between the candidate-parent model and two relationship proxies
-(`pedigree/relatives.py`). Per scored chromosome: the production M1 score of the edge (the screen's kernel; the
-other slot null) minus the score of a second-degree proxy (one homologue of the child IBD with the candidate's
-transmission chain in tracts, switching with the meiotic selector probability, the population null outside, the
-other homologue null) and of a full-sib proxy (each homologue IBD with the candidate's chain in its own tracts,
-flipping with probability 2θ(1 − θ) per bin edge). Each is the composite of the tempered and the full view; a
-chromosome counts (UsableChromosomes) when the candidate has evidence in one of its components, whether or not that
-evidence discriminates a parent from a relative, so a chromosome can count and contribute about zero. Positive
-favours the candidate-parent model over the stated proxy under these paintings. The contrasts change no call, tier
-or release, are not posterior parentage probabilities, and the proxies are not exhaustive alternatives (no
-inbreeding loops or other relatives). A parent's margin over the second-degree proxy per chromosome is small
-(Interpretation and limitations; reset components and the map span change it), so a small positive total does not
-separate a parent from a relative: small positive contrasts were also measured for non-parents (2.4 to 3.3 nats on
-the K30 simulation). A negative contrast says only that the specified relative proxy has the larger composite
-genetic score under these paintings; it does not identify a true relationship. Measured (2.17 lab): on a TroMau-like simulated cross
-(96 sequenced F2, most parents unsequenced, the sequenced F1 their sibs; 8 chromosomes) every released edge is a
-true parent and beats the second-degree proxy by at least 12.6 nats and the full-sib proxy by at least 23.5; on the
-real TroMau cross 2 of 38 released edges have a negative second-degree contrast.
-
-## Implementation and cost
-
-### Parallel structure
-
-Chromosome workers prepare the contigs in parallel, the largest evidence first. The screen and score phases run in
-persistent chromosome workers that keep each component's source pair masses, projection and child-side terms resident
-across the genome-wide panel barrier: the screen returns only each chromosome's summed M1 matrix and marker count, the
-coordinating process builds the panel, and the same workers then score M2, exposure and junctions. The decision runs
-in the coordinating process; the resampled fits run in a process pool of single-threaded workers that share the
-read-only decision inputs and take chunks of bootstrap replicates and the LOCO refits as tasks. The exclusion uses
-chromosome workers again. Inside a worker the kernels run in parallel over samples, edges or panel rows. Parallel
-work is admitted by byte estimates computed from the records (the component shapes of `painting/summary` and the
-decoded sizes of the evidence, painting and prepared records), never from published files
-([performance](../performance.md)).
-
-### Cost in K, N and chromosomes
-
-Per component, with S ≤ K + 1: source factors and marginals cost O(N B S²) (contracted transitions, never S⁴); the
-projection O(N M S²) for the transmitted alleles, O(N B S²) for the flows and O(N B (S² + 128 S)) for the bridges;
-the forward pass O((M + B) S²) per child and configuration; exposure O((E + T) B S² / 2) for E eligible unordered
-edges and T panel rows; junction counts O(N B J²) for J ≤ K distinct trajectories. Nothing in the stage is
-exponential in K, no kernel is worse than quadratic in S, and there is no exact-enumeration branch.
-
-Per chromosome the dominant term is the M1 screen, O(N n (M + B) S²) for n = N − 1 candidate parents per child,
-quadratic in samples (the certified selective screen scores exactly only the dyads its bounds cannot settle); M2
-is scored for the T panel rows, O(T (M + B) S²). T is the number of admitted pairs among each child's
-genome-retained parents (release 3.4; before it, every retained pair: f3 43,052 rows, K30 12,546, and 43.5M and 414M at
-N = 1,003 and 2,503 on the S-scale crops). Admitting them costs the pair bound of every retained pair, O(R² B G²) per
-child and chromosome for R retained parents and G ≤ S + 1 groups per slot (typically 3-4), plus O(N R B S² m) for
-the emission and partner bounds over m markers per bin; no per-site work per pair. The bound's pair count is quadratic
-in R per child (cubic in N when R grows with N), at a small constant: 4-11 minutes per n1000c crop chromosome on 38
-cores, against hours for M2 of every retained pair. The decision has
-A = N + E + T configuration rows (N M0 rows, one M1 row per eligible edge E = O(N²), the T M2 rows) and keeps the
-genome-wide M1 profile and the matched and exposed bins per eligible edge (float64 C × E each, [memory](#memory)); the
-per-fit orientation and family matrices are N × N. One fit costs O(C A + N²): the weighted likelihoods, the exposure
-(per eligible edge, E ≤ A) and the junction log odds (per oriented dyad, at most 2E; the linked count recurrences, O(D B
-m) per chromosome for D oriented dyads, B bins and a typical junction count m, plus O(N B K²) for the minimum-switch
-traces, are computed once in the score phase and reweighted) are O(C A), and the orientation matrices O(N²); then O((4 +
-I)(A + N²)) for the messages with I ≤ 8192 + 4096 final iterations, and O(R A + R N² + R² T) for the path factor with R
-= 16; resampling repeats the fit for each distinct bootstrap multiplicity vector (at most 1000) and the C LOCO
-weightings. The exclusion costs O(D L) for D target dyads and L markers (D at most the targets times N, quadratic in
-samples in the worst case), with exact reuse of repeated GL triples up to `pedigree.exclusion.MAX_PATTERNS = 1024`
-distinct triples per sample (beyond it a direct per-site scorer gives the same values).
-
-### Memory
-
-The decision's genome-wide arrays follow the eligible edges, not N × N (release 2.16). The M1 profile and the matched
-and exposed bins are float64 [C, E] arrays on the eligible edges (child-major, parents ascending): the decision decodes
-the chromosome records one at a time and keeps copies of their eligible-edge entries and small fields (decoded records
-can share one buffer, so views would keep their dense arrays alive), so no [C, N, N] array is formed, and the score
-workers write their records instead of returning them. The linked junction compatibilities and the orientation evidence
-are stored per oriented dyad ([C, D] and [C, U] for D ordered and U unordered eligible dyads), the bootstrap and LOCO
-parent counts per named edge, the screen utilities are computed child by child from the compact M1 profile (no [C, N, N]
-expansion), and records are encoded without copying their arrays. The three [C, E] arrays take 24 C E bytes, with
-E = N (N − 1) since every sample is a candidate parent of every other: 52.8 GB at C = 22 and N = 10,000, 3.3 GB at
-N = 2,500. These are the final payloads, not the decision's peak: building the
-stack briefly holds the gathered columns and their destination, and the arrays listed below remain.
-
-Still dense in N: each chromosome record (M1, matched and exposed bins [N, N], and the per-component screens), held one
-chromosome at a time by a scoring worker and by the decision while it gathers the edges; the panel's screen utilities
-and the candidate-universe masks ([N, N] each); and each fit's orientation and family matrices ([N, N]). The
-configuration rows' likelihoods ([C, A]) repeat the M1 profile in their M1 rows, and A grows with the M2 panel
-(T rows; O(N³) in the worst case). With E = N (N − 1) the decision cannot be sub-quadratic in N at all; N = 10,000 has
-not been run.
-
-A preparation worker holds the contig's decoded evidence and painting and, per component, the emissions, source factors
-and workspace. A scoring worker holds the prepared record, whose largest array is the source right weights (float64 N ×
-(B − 1) × S²), and per component the unordered source pair masses (N × B × S(S + 1)/2, half the ordered marginals, which
-the projection consumes in place), the projection (O(N (M + B) S)) and the child terms (including the null frequencies,
-float64 N × B × S, 8 N B S bytes, with a few transient arrays of that size while they are built). The shared emission
-products of called founders are cached in child batches of at most `pedigree.forward.COMMON_EMISSION_CACHE_BYTES =
-268435456` bytes (256 MiB); a batch that does not fit is scored on the uncached path with identical values. The source
-workspace per chromosome worker is therefore O(N B S²); the worker also holds the chromosome's dense N × N M1 scores and
-exposure and its M2 panel rows, and while tracing junctions 8 B K(K + 1)/2 bytes of traceback scratch per thread and
-the 16 N B bytes of minimum-switch schedules. A pair-bound worker (release 3.4) holds the prepared record and the
-residents as above, its chromosome's bound of every retained pair (float32, 4 P bytes for P retained pairs: 1.7 GB
-at P = 414M) and a batch workspace with a target of 512 MiB, which one child's emission/partner tables can exceed
-(`pedigree.pair_bound.WORKSPACE_BYTES = 536870912` bytes). Child emission tables use the batch's listed children,
-so children without a pair take no space; the stage then holds the C bound arrays (4 C P bytes) while it admits the
-panel. The decision holds O(C A + N²) values (O(C E) per eligible edge, O(C D)
-per dyad with D ≤ 2E, and the N × N matrices above), and an exclusion worker one contig's evidence and the dyad
-results.
-
-### Measured on the reference runs
-
-On the whole-genome reference runs (22 contigs, a dedicated 112-CPU node;
-[performance](../performance.md#reference-timings)) the stage took 553 s of the 2:03:41 seed-10000 simulation and
-76 s of the 41:10 TroMau run. The simulation has 320 samples, each a candidate parent of every other (319 candidate
-parents and 50,721 candidate parent pairs per child). The TroMau timing predates release 3.4: its cohort eligibility
-then left 96 children with 16 candidate parents and 64 candidate pairs each, so the screen, linear in the candidate
-parents per child, and the decision, with one M1 row per eligible edge, were far smaller than with every sample a
-candidate (116 samples, 115 candidate parents each). The run record times the stage as a whole, not its phases. Memory per task
-is the largest peak one task added to its worker (resident memory, shared pages it touched included):
-
-| phase | simulation seed 10000 | TroMau |
-| --- | --- | --- |
-| preparation, per contig | 17.9 GiB | 1.4 GiB |
-| screen, per contig | 10.9 GiB | 1.2 GiB |
-| score, per contig | 0.6 GiB | 0.3 GiB |
-| resampling, first task of a worker / later tasks | 0.17 / 0.03 GiB | 0.07 / < 0.01 GiB |
-| exclusion, per contig | not run (no candidate dyads) | 0.66 GiB (48 candidate dyads) |
-
-No pedigree task waited for memory, and the preparation, screen and exclusion peaks were at most 0.80 of their
-estimates. The node held at most 84 GiB during the stage on the simulation and 28 GiB on TroMau (30-s samples),
-against run peaks of 259 GiB (family phase) and 96 GiB (contig lanes). The evidence calibration took 4.1 and 0.5 s,
-and the final family solve converged in 4 and 2 iterations with no non-converged bootstrap or LOCO replicate.
-
-### Records, identities and resume
-
-Per contig, each record bound to its identity:
-
-- `pedigree/prepared`: the prepared components (selected-marker alleles and GLs, bin sizes, transition, source
-  factors, state classes, switch probabilities, information exponents); bound to the contig's painting and evidence
-  record identities, `PedigreeConfig.preparation` and the contig's genetic map.
-- `pedigree/screen`: per component M0 [N] and M1 [N, N]; bound to the prepared record, `PedigreeConfig.scoring` and
-  the candidate universe's identity.
-- `pedigree/scores`: the chromosome's M0, M1 and panel M2 scores, exposure, junction counts and the linked junction
-  log compatibilities of the oriented eligible dyads; bound to the screen record and the panel's rows.
-- `pedigree/exclusion`: the contig's exclusion evidence for the target dyads, written only when there are targets;
-  bound to the evidence record, target dyads and `PedigreeConfig.exclusion`; the default certificate also binds its model identity, chromosome count and sample count, so a bound cannot be reused with a different genome divisor or threshold.
-
-The run record `pedigree` (the product) is bound to every contig's prepared and scores identities, the candidate
-universe, the panel and the whole `PedigreeConfig`; `complete/pedigree` marks the stage done. Every identity also contains the
-stage's schema version and code identity (the `pedigree` and `painting` packages with `model/` and `maths/`). Each
-record has one current version: a record whose identity matches is reused, and a mismatch stops the run. An
-interrupted run therefore resumes per contig (the score phase rebuilds its resident state from the prepared record
-when needed), but a changed pedigree setting (including `[pedigree] evidence_calibration`), a changed sample set, a
-changed painting or evidence record, or changed pedigree or painting code needs a separate output root.
-
-### Determinism
-
-Components are summed in component order and chromosomes stacked in contig order; the panel breaks ties by sample
-index; the bootstrap is seeded and support counts are integer sums independent of worker count and completion order;
-each kernel task is independent of the thread count. Results do not depend on `[execution] cores`, the number of
-chromosome workers or memory pacing.
-
-Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2) reverses the remaining arbitrary orders: the run's sample
-axis (centrally), the graph's visit order among equal role and confidence (the index, last key), the search diagnostics'
-rank ties, the calibration's choice between equally near scales after the stated prior (smallest |log scale|), and the
-projection bridges' lowest state among rounding-tied Hall states, bracketing large branches and pivots, and the junction
-trace's choice among tied minimum-switch predecessors (release 2.16). Not reversed (stated priors and abstentions):
-abstention on a tie (winners, margins), fewer parents at graph ties, and the symmetric top-16 boundary.
-
-## Interpretation and limitations
-
-- Calls are inferences of a composite model. M0 means no observed parent, not founder generation; an M1 call
-  leaves the other parent unobserved; the order of two parents is arbitrary.
-- Tier B is the primary product and the only one used downstream; Tier A is a stricter view and the complete view a
-  best guess. Bootstrap and LOCO fractions measure internal stability across chromosomes, not calibrated
-  probabilities of correct parentage; message weights, state supports and λ are not calibrated either. Resampling
-  conditions on the paintings, the panel and λ, all of which use every chromosome.
-- The model is a bounded composite and loopy approximation, not exact pedigree marginalisation: the genetic score
-  pools two weightings of the same data, the orientation uses chromosome-level summaries (a missing-at-random
-  callability correction, not common-interval recounts), and the cavity messages exclude immediate feedback but not
-  every loop.
-- Direction evidence depends on the paintings. Related samples of equal junction burden receive little orientation
-  evidence and stay unreleased rather than guessed. The linked junction comparison
-  conditions on one minimum-switch placement of each painting's junctions (alternative minimum paths are not
-  integrated) and treats the child's minimum count as observed junctions plus a non-negative remainder (inherited
-  changes can be masked by identical-by-state founders or missing labels); it is a bounded compatibility correction
-  (at most log(2/ε_c − 1) nats per chromosome), not a calibrated probability of the orientation.
-- A sampled close relative of a child's unsampled parent (a sibling, half-sibling, grandparent or aunt/uncle of the
-  child) can explain one of the child's homologues better than the null source and win the complete view's genetic
-  comparison against M0: the model has no explicit related-but-not-parent alternative. In inbred designs with few
-  founder haplotypes and few chromosomes (the f3 simulation: about 7 founder haplotypes per chromosome, 3 chromosomes)
-  such relatives remain poorly separated from parents by this model, and the full-marker exclusion leaves them
-  compatible; the chromosome-count requirement keeps them out of Tier B there. With enough chromosomes Tier B can
-  release them: the same design on 8 chromosomes released 3 full sibs as parents (and 6 wrong one-parent counts among
-  106 released counts; 5 of 105 before release 2.16, the extra one a bootstrap fraction moving from 0.694 to 0.71 across
-  the 0.70 threshold), with 106 of 112 complete-view configurations right. Measured in release 2.16 with explicit
-  relative models (the child's homologue copies a candidate inside IBD tracts, the population null outside;
-  second-degree and full-sib forms), after the transmitted-allele correction of the same release (before it, true
-  parents lost tens of nats on single chromosomes to read-conditioned panel-withheld alleles, which defeated every
-  relationship gate tried): every true parent of the std, missing-parent, backcross and K30 simulations outscores the
-  second-degree form genome-wide, but by at most log 2 − Σ log(1 − θ) ≈ log 2 + Σθ per independently started component
-  (about 2 nats per chromosome; the full-sib form, with two independent IBD tracts, has a larger bound of about log 2 +
-  4Σθ). Relatives that look parent-like at founder resolution therefore stay parent-like: of the 3 false full-sib edges
-  on 8 chromosomes one has a negative contrast (−47.6 nats) and two favour the parent even over the full-sib form, and
-  in K30 sibling and half-sibling F1s score like true parents (+2.4 to +3.3 nats against the second-degree form), as do
-  reversed parent-child pairs. A joint relationship model, or a release abstention on a negative contrast (which would
-  withhold the one separable false edge there without losing a true parent), is future work; release 2.17 reports
-  the contrasts of every released edge (`relative_contrasts.csv`) without changing any call.
-- Such relatives also leave counts behind: a child of unsampled parents whose sibs, half sibs or grandparents take
-  turns as the local winner keeps a stable one-parent count while no candidate is stable. Release 3.4 releases an M1
-  or M2 count only with a stable named parent ([tier rules](#tier-rules)). Replayed on the saved scores of the
-  release 3.2 validation simulations, this withdrew 34 of the 37 one- or two-parent counts that Tier B released
-  without an edge for children with no sequenced parent (all 32 on the three-chromosome long-map F3 design, 2 of 3
-  on its 8-chromosome form), and 1 of the 12 correct counts released without an edge (K30). It changed no edge.
-  Relatives stable at founder resolution keep their counts: in K30 two two-parent counts name pairs of half sibs,
-  one of each pair stable (parent bootstrap 0.77 and 0.85, LOCO 1.0), and one 8-chromosome F3 count names a full
-  sib at parent bootstrap 0.70 and LOCO 1.0.
-- Every sequenced sample is a candidate, so labels can neither remove a true parent from the universe nor keep a
-  relative out of it: a sequenced relative of a child (a sib, a grandparent, an offspring) competes with its true
-  parents and is kept from release only by the evidence (orientation, resampling, the map-length rule and the
-  sibling-as-parent guard).
-- The relatives that reach release are Mendelian-compatible with the child: on the simulations, 10 of the 13
-  relatives released before the guard share no opposite-homozygote site with the child in the true genotypes (2.4
-  million sites; the other 3 share 2, 3 and 68), against 2.3% of all sequenced full-sib pairs and 1.5% of
-  grandparent pairs. No statistic of the pair alone separates them from parents at founder resolution
-  (pair exclusion, relatedness IBD, the relative-proxy contrasts); the [sibling-as-parent
-  guard](#sibling-as-parent-guard) separates them through the child's other full sibs. Where the child has no
-  supported family (small families, few chromosomes, a child below the member support, most children on real
-  TroMau), a released relative stays released.
-- The guard trusts the relatedness family after its filters. Members that are half sibs of the child through a
-  sequenced, released other parent are dropped; half sibs through an unsampled shared parent cannot be recognised. If
-  the relatedness search merges two half sibships whose shared parent is unsampled, a true parent of a child in the
-  smaller sibship can face a majority of excluded members and be withheld. The 17 original simulation products did
-  not expose this wrong-member majority. Family support does not guarantee that most witnesses are offspring of
-  the tested parent. Incomplete or erroneous released-parent markers can also remove legitimate witnesses. These
-  are risks of losing true edges as well as missing false ones; fixed-point cleaning does not cure them. On real
-  TroMau the observed merge has a sequenced shared parent, where the heuristic applies. Real crosses have no individual-level trio truth, so
-  real-data calls cannot be scored for accuracy; supervised validation uses simulations with a known pedigree, and real
-  data are judged by internal consistency, chromosome-level stability, competing-candidate margins and explicit
-  unresolved outcomes ([validation](../validation.md)).
-- Known failure modes: fewer than 3 map units of informative chromosomes in most resamples (no Tier B call under
-  the defaults: 5 chromosomes shorter than 1 Morgan, or without a genetic map; the full-marker exclusion can still
-  release zero- or one-parent counts), a true parent pair outside the
-  retained-parent screen (the M2 evidence is a lower bound; see `search_diagnostics.csv`), unsampled parents, closely
-  related alternatives, long feedback loops and highly structured missingness.
-- The exclusion release assumes calibrated, independent read errors and correct supported directions. Samples
-  flagged by the contamination QC still enter it as targets and candidates; the required concordance with the
-  complete view limits, but does not exclude, the effect of their miscalibrated likelihoods.
-- One current record per product: changing any pedigree setting on an existing run needs a separate output root.
-
-## Genome-wide consistent M1 floor in 2.3
-
-Let S(c,p) be the sum of raw chromosome M1 scores for eligible parent p of child c,
-and B(c) its maximum over eligible parents. The retained set includes every parent
-with S(c,p) >= B(c) - 60 T(sum of informative markers), including equality.
-T(m) = max(ceil(m / markers_per_information_block), 1)^information_tempering_power
-uses the existing information temperature. This genome set is fixed before
-calibration and resampling. Retained identities keep their raw chromosome scores.
-
-For chromosome j, let b(c,j) be its maximum raw eligible score and T_j its temperature.
-Every excluded identity uses the same chromosome profile
-f(c,j) = b(c,j) - T_j / sum(T) * (sum_j b(c,j) - cutoff(c)).
-Its sum is the genome cutoff. This profile feeds ranks, calibration, state/family
-inference, informative tests, path/cavity evidence and resampling consistently.
-Identity multiplicities, contamination and full prior denominators remain.
-The transform is applied once; applying it again would change the model.
-
-The default certified screen derives this same profile with exact fallback for
-unproved candidates. Compact-screen and fixed-score records have separate keys
-from legacy raw records. M2 kernels are unchanged; where exactly one parent is
-available in a component, the fallback uses freshly computed raw component M1,
-not the fixed genome profile. The retained-parent pairs whose joint M2 bound reaches the best configuration enter the M2 panel (release 3.4, [candidate panel](#candidate-panel)).
-
-Four-dataset checks preserve the adopted exact model's released fields, all 4,060
-resample records and 60 CSV files; bounded default-stage and missing-parent fixtures
-also verify fresh M2/exposure scores and resume. Dense downstream migration arrays
-remain. These tests establish scientific identity, not sub-quadratic memory or a
-whole-pipeline scaling result.
+# Pedigree scoring and release
+
+Pedigree inference compares no-, one- and two-observed-parent states using painted ancestry, raw read evidence and genome-wide consistency. Every other sample is a candidate parent; names supply no biological prior. N is samples, C contigs, B bins, M selected markers, S source states, T admitted parent pairs and A configuration rows. Tempering, composite scores, projected source bridges, the bounded M2 panel and loopy family corrections are explicit approximations. Resampling supports and released edges remain distinct from complete best guesses.
+
+The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
+
+<a id="ps01"></a>
+## ps01 Scoring-side candidate universe, dyad sets and evidence-free candidates
+
+Treat every sample as a target and every other sample as a candidate parent. Availability is component-specific: it requires an observed painting site whose likelihood spread exceeds the named threshold. An unavailable parent reduces M1 to M0, or M2 to the other parent’s raw M1; its exposure is zero. Availability, information-exponent counts and excursion support have different informative tests and must remain separate.
+
+Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+
+Parameters by name: `INFORMATIVE_GL_SPREAD`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps02"></a>
+## ps02 Marker selection and component admission
+
+Select markers within half-open painting bins, keeping all in a small bin or evenly spaced truncated-index positions otherwise. Require every painted position to exist in evidence. Admit a component when selected likelihood triples are nonuniform, without substituting the observation mask for that test. Preserve painting component order and gaps in component indices. Anchoring is determined before subsampling; background and unanchored track statuses become unknown classes.
+
+Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
+
+Parameters by name: `markers_per_bin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(L); O(N M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps03"></a>
+## ps03 Information exponents of the tempered view
+
+Group bins across the contig in prepared-component order, starting a new information group only after the preceding running count reaches the marker budget. Count every empty bin as one for grouping. Per child, count nonidentical likelihood triples in the selected markers and form the capped information exponent; no informative markers gives zero. Split the exponents back into component arrays. This tempering approximates correlated information.
+
+Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
+
+Parameters by name: `markers_per_information_block`, `effective_markers_per_information_block`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N ΣM). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps04"></a>
+## ps04 Selector switch probabilities and measured map lengths
+
+Use the run map’s interval distance, including fallback tails, for Haldane selector-switch probabilities and apply the selector floor. L1 supplies the shared expm1 form. Separately compute measured interval lengths from the measured-coordinate view: clip to supplied knots unless the fallback rate is explicitly measured, and use zero measured support without either. Model transition distance is not measured exposure.
+
+Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+
+Parameters by name: `SELECTOR_SWITCH_FLOOR`, `rate_is_measured`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps05"></a>
+## ps05 Exact source chain: factors and posterior marginals
+
+Use painting’s tempered emissions and recorded label transitions for the ordered-diplotype source chain. Contract the transition through its Hamming structure, normalising backward right weights at each boundary. Symmetrise the initial law only; evidence-free samples use a uniform initial law and unit right weights. Available samples losing supported mass raise an invariant error. Save pair masses before projection consumes the marginal workspace.
+
+Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/sources.py](../../haplotype_reconstruction/science/pedigree/sources.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
+
+Parameters by name: `robustness_epsilon`, `emission_log_floor`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N B S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps06"></a>
+## ps06 Transmitted-state projection: selected-homologue propagation and transmitted ALT
+
+Start from the symmetrised source marginal and propagate selected-homologue orientation with direct/swapped flows. Normalise the propagated law and flows together; lost mass raises. Named states transmit their state ALT value unchanged, including fallback values at uncalled sites. Read-condition only a fractional BACKGROUND frequency, retaining the unconditioned value if its denominator is nonpositive. Computing transmitted ALT costs O(N M S), not a pair-state loop.
+
+Implementation: [science/pedigree/projection.py](../../haplotype_reconstruction/science/pedigree/projection.py).
+
+Parameters by name: `robustness_epsilon`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N M S) for transmitted ALT, plus O(N B S²) posterior propagation; no extra state axis in the ALT calculation.
+
+<a id="ps07"></a>
+## ps07 Maximum-entropy bridges
+
+Validate and clip rounding-sized negative residual flows; a zero residual uses the diagonal branch and skips later checks. Normalise both flow vectors by the row total, validate Hall loads, and choose the Hall state by load, marginal mass and explicit index convention. Use the star branch at the Hall boundary, otherwise bracket the all-small or one-large root. Bisect to the named cap or adjacent endpoints, preferring the lower endpoint on equal residual. Choose the pivot, construct arms, then check nonnegativity and reproduced marginals. The bridge tolerance is a post-check tolerance, not a root tolerance; failure has no fallback.
+
+Implementation: [science/pedigree/projection.py](../../haplotype_reconstruction/science/pedigree/projection.py).
+
+Parameters by name: `bridge_max_iterations`, `HALL_ULPS`, `HUB_MASS_TIE`, `release`, `tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N B (S² + iterations S)); iterations is capped by the named bridge bisection limit.
+
+<a id="ps08"></a>
+## ps08 Source-gap excursion mixture
+
+Compute excursion strength from the smaller adjacent-bin informative-marker count and the support target; a nonpositive support setting disables it. Apply the excursion after each bridge only when its strength is positive. Mix the bridged values with a uniform share calculated from the pre-bridge input mass along that axis. The mixture represents uncertain source identity through evidence gaps.
+
+Implementation: [science/pedigree/projection.py](../../haplotype_reconstruction/science/pedigree/projection.py), [science/pedigree/forward.py](../../haplotype_reconstruction/science/pedigree/forward.py).
+
+Parameters by name: `source_gap_support_sites`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N M); O(S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps09"></a>
+## ps09 Null source of an unobserved parent slot
+
+Build a child-specific null frequency by subtracting its available contribution from the total candidate mass, clipping rounding residues and adding the positive symmetric prior. Derive diagonal/off-diagonal transition coefficients from the source transition and selector probability. A genuinely negative persistence raises; a rounding-sized negative persistence saturates to the uniform kernel. Execute the declared coefficient form in axis order. The null slot is unobserved parentage, not a named individual.
+
+Implementation: [science/pedigree/forward.py](../../haplotype_reconstruction/science/pedigree/forward.py).
+
+Parameters by name: `null_prior_samples`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N B S). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps10"></a>
+## ps10 Child emission and composite forward score of M0, M1 and M2
+
+Initialise M0, M1 and M2 from null or observed-parent source laws. At each boundary update the first slot then the second, bridge before excursion. Multiply observed-marker emissions in site order; recompute a whole unstable bin in log space. L12 uses correctly rounded division followed by the power on every probability/cache route, skipping the power at unit exponent. A zero exponent still runs normalisation and can have a rounding-sized increment. Pool full and tempered log scores at the fixed composite weight; this is not an independent-marker likelihood.
+
+Implementation: [science/pedigree/forward.py](../../haplotype_reconstruction/science/pedigree/forward.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py).
+
+Parameters by name: `mismatch_probability`, `COMMON_EMISSION_CACHE_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O((M_obs + B)·S²); O(S); O(N (M + B) S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps11"></a>
+## ps11 Block-certificate upper bound on chromosome M1
+
+Bound M1 with called alleles exact and uncertain alleles relaxed to endpoint likelihoods. Group available candidates by painted words in two block partitions, choosing a content-hash reference member, and apply outward numerical padding. Take the minimum partition bound and sum components outward; unavailable candidates get exact M0. Bounds choose which exact cells are queried, but never replace a retained exact score. Validity must hold for unqueried cells too.
+
+Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/selective_bounds.py](../../haplotype_reconstruction/science/pedigree/selective_bounds.py), [science/pedigree/certificates.py](../../haplotype_reconstruction/science/pedigree/certificates.py).
+
+Parameters by name: `log_floor`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(batch B S² m); O(batch·G·B·S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps12"></a>
+## ps12 Certified M1 search, genome retention and the floor profile (CompactM1)
+
+Query the complete maximal-bound tie class first, then exhaust the best frontier and floor frontier in that order. Compute retention with the dimension-fixed contiguous chromosome reduction before completing every local maximum. Apply the resulting floor profile exactly once to nonretained eligible identities. Every query verifies finite exact scores below their bounds; every unknown local cell must lie strictly below the completed local maximum. Batch width and cache lifecycle cannot change retention or the floor.
+
+Implementation: [science/pedigree/selective_screen.py](../../haplotype_reconstruction/science/pedigree/selective_screen.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py).
+
+Parameters by name: `LOG_FLOOR`, `markers_per_information_block`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C·batch·N); O(C ΣR). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps13"></a>
+## ps13 Robust screen utilities and search diagnostics
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Compute robust diagnostic utility from tied-rank evidence and a centred softmax of floored chromosome scores with contamination and chromosome weights. The softmax is not clipped at the score floor. Rank utilities only to describe the already bounded panel, after count release and before the guard. A panel is not a utility prefix, and these utilities decide no call.
+
+Implementation: [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
+
+Parameters by name: `rank_weight`, `chromosome_contamination`, `maximum_contig_weight_ratio`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C Σ_c n_c); O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps14"></a>
+## ps14 M2 pair bound by state aggregation
+
+Aggregate high-mass and BACKGROUND states separately, placing other named states in a single low group. Build upper transition factors and child emission envelopes, with partner caps only on that parent’s BACKGROUND axis. Contract the second parent axis before the first, preserving this bound’s own arithmetic order. Retry unstable absorption in log space, sum components and round stored float32 bounds upward. Check group counts before narrowing their dtype. Bound values determine panel membership and must be reproduced, not merely remain valid.
+
+Implementation: [science/pedigree/pair_bound.py](../../haplotype_reconstruction/science/pedigree/pair_bound.py).
+
+Parameters by name: `pair_bound_high_mass`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(R² B G²); O(G³); O(K³). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps15"></a>
+## ps15 Bounded M2 panel admission
+
+For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent or fixed pair-count cap; it is a score-defined model approximation.
+
+Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
+
+Parameters by name: `pair_relevance_margin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C² P); O(C P). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps16"></a>
+## ps16 Panel M2 scoring, fallback rows and the floored chromosome record
+
+For each component, obtain pair masses before projection, score M0, score unique fallback dyads for pairs with exactly one available parent, then score M2 where both are available. Use raw fallback M1 or M0 for unavailable slots. Sum in component order. Publish raw zero/two scores and the already floored one-parent profile; the one-parent field is not raw and must not be floored again.
+
+Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(T (M + B) S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps17"></a>
+## ps17 Posterior-expected exposure (bins and measured map length)
+
+Compute anchored shared/explained and fully anchored nonmatching pair probabilities, clipping rounding residues. Each unordered edge is evaluated with its lower sample index in the child role and then mirrored. Integrate the minimum adjacent-bin exposure over capped measured intervals. Evidence-free members contribute zero; diagonal matched/exposed values are retained, while diagonal measured length is zero. Exposure is posterior expectation, not an observed meiosis count.
+
+Implementation: [science/pedigree/exposure.py](../../haplotype_reconstruction/science/pedigree/exposure.py).
+
+Parameters by name: `unit_morgans`, `report_edge_coverage`, `report_pair_explainability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O((E/2 + T)·B·S(S+1)/2); O((E + T) B S²/2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps18"></a>
+## ps18 Minimum painted junction counts and callable bins
+
+Pool locally identical selected-marker allele trajectories by first occurrence and run the exact minimum-switch dynamic programme over unordered trajectory pairs. Unknown labels permit every compatible trajectory. Return the minimum final change count and count nonnegative labels on both tracks as callable bins. The parsimonious count does not identify a unique event placement.
+
+Implementation: [science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py).
+
+Parameters by name: `junction_unreachable_state`, `junction_unreachable_count`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N B J²); O(J²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps19"></a>
+## ps19 Junction schedules and the linked junction log CDF
+
+Canonicalise trajectory content, trace the first minimum path in pair order or the last under reversal, and construct a junction schedule. Propagate the linked inheritance/count recurrence per ordered dyad, resetting the transmitted homologue law at each component. Drop counts above the child total and accumulate retained log mass. Zero retained mass yields negative infinity. Alternative equally parsimonious placements are not integrated; L8 declares the placement convention and L2 declares the C-order dyad layout.
+
+Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+
+Parameters by name: `trace`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N B J²); O(D Σ_k B_k (J_c + 1)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps20"></a>
+## ps20 Full-marker exclusion e-value
+
+At jointly observed sites compare opposing homozygote evidence with the compatible-genotype replacement bound. Average products over the fixed bets and deduplicated whole-contig/half-overlapping windows, then average over configured contigs, including those without informative evidence. Pattern encoding and direct evaluation must agree. Release uses the genome lower endpoint; an interval straddling the threshold raises instead of guessing.
+
+Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [science/pedigree/exclusion.py](../../haplotype_reconstruction/science/pedigree/exclusion.py).
+
+Parameters by name: `alpha`, `genotype_replacement_probability`, `bet_sizes`, `window_widths_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(D L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="ps21"></a>
+## ps21 Completed-window exclusion certificate
+
+Visit sites in order, saving starting-window prefixes before evaluating completed windows in stable stop order. Subtract the declared numerical guards and certify only when the completed-window lower bound proves the genome threshold. Otherwise finish and reduce bets outside windows in the reference order. Store exact values as point intervals and certified values with an unbounded upper endpoint. Publish exclusion whenever target or guard dyads exist, even without release targets.
+
+Implementation: [science/pedigree/exclusion_bound.py](../../haplotype_reconstruction/science/pedigree/exclusion_bound.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
+
+Parameters by name: `guard`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: At most the full bet/window dyad scan; certification can stop a dyad after a completed window proves the threshold.
+
+<a id="ps22"></a>
+## ps22 Scoring orchestration, records, identities and resume
+
+Publish prepared, selective-screen, pair-bound, floored-score and exclusion records under their distinct checked identities. Reuse the selective screen as a whole, other products at their declared contig granularity, and rebuild the deterministic candidate panel from records. Keep state counters distinct from timing diagnostics. Worker count, completion order, resident caching and memory pacing cannot alter scientific values or admission.
+
+Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+Parameters by name: `preparation`, `scoring`, `exclusion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Task/record orchestration plus the costs of prepared components, bounds, scores and exclusion; no extra search.
+
+<a id="pd01"></a>
+## pd01 Candidate universe (every sequenced sample)
+
+Construct the unrestricted candidate universe: every sample is a child target and every other sample an eligible parent. Use the full eligible multiplicities for state priors, independent of the bounded pair panel. Require unique sample IDs and sufficient sample count. Cohort, sex, generation and metadata labels supply neither eligibility nor parentage truth.
+
+Implementation: [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py), [science/pedigree/api.py](../../haplotype_reconstruction/science/pedigree/api.py), [science/pedigree/eligibility.py](../../haplotype_reconstruction/science/pedigree/eligibility.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd02"></a>
+## pd02 Decision input assembly: eligible-edge stacking and configuration rows
+
+Decode contig score records one at a time, copying eligible edges in child-major/ascending-parent order. Require identical junction-dyad order across contigs. For each child enumerate M0, ascending M1 identities and canonical panel M2 pairs in that order. Keep full and scored state multiplicities separate. L2 declares C-contiguous indexing arrays; apply the calibrated evidence scale once, after calibration.
+
+Implementation: [science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(C (N² + T)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd03"></a>
+## pd03 Cross-chromosome predictive evidence scale lambda
+
+Assign informative contigs to ordered folds, holding out the test fold. Skip insufficient folds or alternatives; centre training, validation, combined and test terms under their specified masks before merging byte-identical M1 terms. Evaluate the grid, refine every eligible interior maximum and require all attempted optimisations to succeed. Choose the winning objective class by closeness to unit scale, then convention. Apply only a successful interior sub-unit scale with positive predictive gain; otherwise use unit scale. Untouched test gains are reported but never select the scale.
+
+Implementation: [science/pedigree/calibration.py](../../haplotype_reconstruction/science/pedigree/calibration.py), [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py).
+
+Parameters by name: `evidence_calibration`, `state_priors`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(3 × terms); O(C E). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd04"></a>
+## pd04 Weighted genome likelihood with one M0 contamination mixture
+
+Aggregate chromosome likelihoods in configured-contig order with the declared float64 weighted left fold, skipping zero weights. L2 fixes this arithmetic independently of BLAS layout or workers. Apply the M0 contamination mixture once to M1/M2 aggregates; leave M0 unchanged. This robust composite transform does not make chromosomes independent observations.
+
+Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
+
+Parameters by name: `m0_contamination_probability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd05"></a>
+## pd05 Exposure gate and map units
+
+Require every named edge and M2 pair to meet inclusive exposed-bin, exposure-fraction and map-unit thresholds, with no tie band. Count each represented contig once for map-unit support even when bootstrap weight repeats it. Nonfinite measured length contributes the declared unit fallback. An untestable row retains M0 as its state score and has no finite identity score. Validate edge membership and required exposure fields.
+
+Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
+
+Parameters by name: `minimum_edge_exposed_bins`, `minimum_pair_exposed_bins`, `minimum_exposed_fraction`, `minimum_exposed_units`, `unit_morgans`, `rate_is_measured`, `preparation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C (E + T)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd06"></a>
+## pd06 Linked-junction orientation evidence and the direction correction
+
+Compare linked-junction log CDFs per chromosome only with positive bins and callability. Skip jointly impossible or exactly equal directions; transform the signed difference through the chromosome-error mixture. Sum in contig order and add the robust direction term to finite configuration scores. This intermediate direction evidence is distinct from the final release orientation log odds.
+
+Implementation: [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
+
+Parameters by name: `chromosome_error_probability`, `pair_failure_probability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C U). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd07"></a>
+## pd07 Junction-density order probability (graph visit order, role probability)
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Compute a weighted junction-density contrast over contigs with common callability, including missingness variance. Insufficient total weight leaves a neutral order probability; otherwise use the weighted sum, not its mean, in the normal approximation. This retained heuristic supplies the graph visit order’s primary key and can therefore affect which cyclic child is displaced.
+
+Implementation: [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
+
+Parameters by name: `order_minimum_weight`, `order_variance_offset`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd08"></a>
+## pd08 Preparatory reciprocal cavity messages (fixed passes)
+
+Starting from zero, execute the fixed number of synchronous reciprocal cavity passes after adding direction evidence. Add incoming slot terms before equal-state log multiplicity, retaining the specified first-maximum and exclusion scans. Children with no finite row send a neutral avoidance message. These preparatory messages build the ancestry factor only and are discarded afterwards; there is no convergence test here.
+
+Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
+
+Parameters by name: `message_passes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(4 (A + N²)); O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd09"></a>
+## pd09 Short-ancestry path factor (bounded panels)
+
+Build a bounded panel of finite configurations per sample by strict replacement of the first minimum slot. If a boundary tie overfills the panel, move the entire boundary class to the tail. Compute short-ancestry avoidance, excluding rows that name the child and counting each permitted ancestor once in slot order. Add the resulting nonpositive term once and freeze it before the reciprocal solve. The tail and bounded panel approximate longer ancestry dependence.
+
+Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
+
+Parameters by name: `ancestry_path_budget`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(A R); O(N² R); O(T R²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd10"></a>
+## pd10 Converged final reciprocal solve and release orientation log odds
+
+Run the undamped reciprocal solve from zero, returning newly computed messages when residual meets tolerance. At the declared progress checks, pause an unpromising trajectory; if needed restart damped from zero, then resume the paused undamped state within its remaining budget. Preserve the NaN residual refold and accumulation order. Full-fit nonconvergence is fatal; resampled nonconvergence abstains while retaining its draws. Apply final incoming messages once and form release orientation from cavity differences.
+
+Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
+
+Parameters by name: `final_max_iterations`, `final_tolerance`, `final_progress_window`, `final_pause_budgets`, `retry_iterations`, `retry_damping`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(I (A + N²)); O(N + widest child rows). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd11"></a>
+## pd11 Tie-aware winners, tie tolerance and the full-fit tie census
+
+Scan rows for the first strict finite maximum and runner-up. Abstain when their margin is within the magnitude-aware winner tolerance, including exact ties; never use row index to resolve a scientific winner. Rank-probability groups instead anchor at their first value. L8 passes the recorder explicitly and records the full-fit/state/informative census only; diagnostics never enter resampled selection.
+
+Implementation: [science/pedigree/ties.py](../../haplotype_reconstruction/science/pedigree/ties.py).
+
+Parameters by name: `contrast_ulp_factor`, `noise_floor`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd12"></a>
+## pd12 Marginal state, then identity
+
+Marginalise configuration scores by state using full eligible multiplicities and configured state priors. First require a unique finite parent-count state, then a unique finite identity within that state. Preserve separate unresolved-state and unresolved-identity reasons. Record the compared score scale for graph conflict handling, then pass local choices to acyclic selection.
+
+Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
+
+Parameters by name: `state_priors`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd13"></a>
+## pd13 Acyclic graph selection
+
+Keep local rows immediately if they form a DAG. Otherwise peel cyclic components, removing all tied weakest children as conflicts and uniquely weakest children for reconsideration. Run greedy selection on the original local rows excluding only tie conflicts, in role/confidence/convention order. Prefer the local row when feasible; otherwise seek unique feasible winners from its state downward. Iterate the same coordinate order to the pass limit and report exhaustion. This bounded acyclic repair is not global graph optimisation.
+
+Implementation: [science/pedigree/graph.py](../../haplotype_reconstruction/science/pedigree/graph.py).
+
+Parameters by name: `graph_local_search_passes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N + edges); O(N·(N + edges) + A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd14"></a>
+## pd14 M0 prior sensitivity
+
+Reselect the full adjusted scores under each declared M0 sensitivity prior, reusing the nominal prior result when equal. Do not recompute family-message terms. Require agreement for an M0 state and its exact graph configuration at release; a sensitivity veto has explicit status precedence. Resampled fits do not repeat this prior analysis.
+
+Implementation: [science/pedigree/decision.py](../../haplotype_reconstruction/science/pedigree/decision.py).
+
+Parameters by name: `prior_sensitivity`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd15"></a>
+## pd15 Informative chromosomes and informative map units
+
+For each chromosome, use the same abstaining winner rule on its own score scale to identify evidence supporting the selected state/configuration. Sum the declared informative map units, using the nonfinite-length fallback. Apply the later release threshold without a tie band. Without measured support the units are contig counts, not inferred physical map length.
+
+Implementation: [science/pedigree/decision.py](../../haplotype_reconstruction/science/pedigree/decision.py).
+
+Parameters by name: `minimum_informative_units`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C A); O(C E). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd16"></a>
+## pd16 Chromosome bootstrap and LOCO resampling
+
+Draw all chromosome bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule leave-one-contig-out fits first and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector’s multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions.
+
+Implementation: [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
+
+Parameters by name: `bootstrap_replicates`, `bootstrap_seed`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(C A + C N² (PD07) + (4 + I)(A + N²) + R A + R N² + R² T + graph). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd17"></a>
+## pd17 Tier reach and chromosome-count precheck
+
+Compute the maximum achievable bootstrap and leave-one-contig-out support from distinct represented contigs and their map units. Derive each tier’s minimum contig count from both support requirements rather than hard-coding it. Refuse too little informative evidence and report unreachable tiers. Reach is an evidence-availability statement, not a released pedigree call.
+
+Implementation: [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
+
+Parameters by name: `minimum_exposed_units`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(R C); O(C²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd18"></a>
+## pd18 Tier A/B state and exact-configuration release
+
+Test state support and informative units first, including M0 prior agreement. Require at least one identified named parent for a non-M0 state. Test parent stability and orientation separately; exact configurations additionally require local/graph agreement, configuration support and prior agreement. All fraction thresholds are inclusive. Preserve status precedence for prior veto, no stable parent, insufficient state support, graph conflict, orientation and identity ambiguity.
+
+Implementation: [science/pedigree/release.py](../../haplotype_reconstruction/science/pedigree/release.py).
+
+Parameters by name: `tier_b`, `tier_a`, `minimum_informative_units`, `orientation_reversal_probability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd19"></a>
+## pd19 Complete (full-data acyclic) view
+
+Publish the complete acyclic best-guess view from graph rows, retaining explicit tie-conflict, displacement and unresolved-state reasons. A displaced row is not tier eligible merely because it is acyclic. The complete view is not a release and remains unchanged by the sibling guard.
+
+Implementation: [science/pedigree/release.py](../../haplotype_reconstruction/science/pedigree/release.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd20"></a>
+## pd20 Marginal (partial) edges
+
+Start with exact released configurations. For other children without graph conflict and with sufficient informative units, retain a slot only when local and graph parents agree and both sets of parent supports pass. Require resolved orientation to release the edge, otherwise record orientation withholding. The state itself need not have passed the tier. Increase the minimum parent count from retained edges without lowering its unresolved maximum.
+
+Implementation: [science/pedigree/release.py](../../haplotype_reconstruction/science/pedigree/release.py).
+
+Parameters by name: `minimum_informative_units`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd21"></a>
+## pd21 Tier-B candidate sets
+
+For a resolved Tier-B state, cover the finite configuration probability mass in named tie-class order, completing the cut class. Wide classes retain value ordering; ordinary classes use the declared content convention. Convert configurations to sides only when their structure permits it and name singleton sides through parent support and orientation. Apply marginal-edge and count-release overrides to typed views. Candidate sets retain ambiguity and are not extra released edges.
+
+Implementation: [science/pedigree/release.py](../../haplotype_reconstruction/science/pedigree/release.py).
+
+Parameters by name: `support_set_coverage`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(rows log rows); O(A log A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd22"></a>
+## pd22 Full-marker count release (boundary unit; file outside area list)
+
+Score every candidate of unresolved/count-only Tier-B targets and reject threshold-straddling exclusion intervals. Remove compatible reverse directions already supported by nonwithheld outgoing edges. Release a count only with complete evidence, sufficient units, no graph conflict, at most one survivor, agreement among survivors/supported/complete parents and no guard-withheld dependency. Keep resampling fractions unchanged and label the distinct exclusion-based release evidence.
+
+Implementation: [science/pedigree/count.py](../../haplotype_reconstruction/science/pedigree/count.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [science/pedigree/exclusion.py](../../haplotype_reconstruction/science/pedigree/exclusion.py).
+
+Parameters by name: `alpha`, `minimum_informative_units`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(targets × N); O(D L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd23"></a>
+## pd23 Sibling-as-parent guard (fixed point and application)
+
+For each pre-guard Tier-B edge, identify supported family members, remove linked and half-sib members, then apply the strict-majority exclusion vote when enough tested members remain. Recompute every original edge against the retained set until no more withdrawals; withdrawals are irreversible. Run count release with that withheld set, re-slot, then verify the same edge and withheld sets. Filter withdrawn edges without renumbering remaining slots. Guarded views clear calls while retaining candidate lists; complete and diagnostic views stay pre-guard.
+
+Implementation: [science/pedigree/guard.py](../../haplotype_reconstruction/science/pedigree/guard.py).
+
+Parameters by name: `minimum_family`, `member_support`, `alpha`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(E_rel · f²); O(dyads × L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd24"></a>
+## pd24 Released parent order and ParentEdges
+
+Rank released parent pairs by descending observed-site counts in configured-contig order, reading only until all pairs are distinguished, then by sample name. Apply the explicit slot convention; a single parent starts in the first slot, while later guard filtering preserves a surviving second slot. Order edges child-major then slot. Bind both the exact conditioning digest and the product derivation identity. Slots carry no sex or biological parent-order meaning.
+
+Implementation: [science/pedigree/api.py](../../haplotype_reconstruction/science/pedigree/api.py), [science/pedigree/slots.py](../../haplotype_reconstruction/science/pedigree/slots.py).
+
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+Cost and scope: O(N log N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd25"></a>
+## pd25 Report tables and published views
+
+Construct typed report views after the declared release, slot and guard steps. Distinguish the final Tier-B count-consistent state call from pre-release state support. Keep diagnostic alternatives in internal row order, exact exclusion values separate from interval endpoints, and unresolved scalar values missing. Format tuples, names and ParentSlotBasis only in outputs. Reports cannot feed a new decision.
+
+Implementation: [outputs/reports/pedigree.py](../../haplotype_reconstruction/outputs/reports/pedigree.py), [science/pedigree/views.py](../../haplotype_reconstruction/science/pedigree/views.py).
+
+Parameters by name: `report_edge_coverage`, `report_pair_explainability`, `support_set_coverage`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(A + N·columns); O(A log A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd26"></a>
+## pd26 Relative-proxy contrasts
+
+**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+
+Evaluate relative-proxy contrasts for the specified comparison configurations and publish them as diagnostics. Preserve pre-guard view labels, including edges subsequently withheld. No release tier, parent edge or count decision reads this table; a favourable proxy contrast is not a pedigree assertion.
+
+Implementation: [stages/pedigree/relatives.py](../../haplotype_reconstruction/stages/pedigree/relatives.py), [science/pedigree/relatives.py](../../haplotype_reconstruction/science/pedigree/relatives.py).
+
+Parameters by name: `mismatch_probability`, `scoring`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(B · S² · m); O(K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="pd27"></a>
+## pd27 Stage orchestration, records, identities and consistency checks
+
+Validate samples and informative-contig reach, then prepare, screen, bound and score before full decision/resampling. Build target and guard dyads, score exclusion, solve the guard, perform count release, orient slots and construct the typed product. Recheck edge/withheld consistency and reject a count resting on a withheld direction. Publish only under the checked identity; execution and formatting stay outside the pure decision steps.
+
+Implementation: [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/decision.py](../../haplotype_reconstruction/stages/pedigree/decision.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
+
+Parameters by name: `evidence_calibration`, `reverse_conventions`, `preparation`, `scoring`, `panel`, `exposure`, `direction`, `selection`, `resampling`, `release`, `exclusion`, `guard`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: Sum of preparation, scoring, decision, resampling, exclusion and report-view work; independent contig/fit tasks are placed by key.
+
+<!-- named mechanism anchors -->
+
+## Named mechanisms
+
+<a id="acyclic-graph-selection"></a>
+
+**Acyclic graph selection:** see [PD13](#pd13).
+
+<a id="candidate-panel"></a>
+
+**Candidate panel:** see [PS15](#ps15).
+
+<a id="child-forward-model-and-composite-score"></a>
+
+**Child forward model and composite score:** see [PS10](#ps10).
+
+<a id="chromosome-resampling"></a>
+
+**Chromosome resampling:** see [PD16](#pd16).
+
+<a id="configuration-likelihoods-and-the-exposure-gate"></a>
+
+**Configuration likelihoods and the exposure gate:** see [PD04](#pd04).
+
+<a id="converged-final-reciprocal-solve"></a>
+
+**Converged final reciprocal solve:** see [PD10](#pd10).
+
+<a id="cross-chromosome-evidence-calibration"></a>
+
+**Cross chromosome evidence calibration:** see [PD03](#pd03).
+
+<a id="exposure-and-junction-counts"></a>
+
+**Exposure and junction counts:** see [PS17](#ps17).
+
+<a id="finite-continuous-direction"></a>
+
+**Finite continuous direction:** see [PD06](#pd06).
+
+<a id="full-marker-mendelian-exclusion-of-m0-and-m1-counts"></a>
+
+**Full marker mendelian exclusion of m0 and m1 counts:** see [PD22](#pd22).
+
+<a id="inputs-and-outputs"></a>
+
+**Inputs and outputs:** see [PD02](#pd02).
+
+<a id="marginal-state-then-identity"></a>
+
+**Marginal state then identity:** see [PD12](#pd12).
+
+<a id="one-weighted-fit"></a>
+
+**One weighted fit:** see [PD04](#pd04).
+
+<a id="parallel-structure"></a>
+
+**Parallel structure:** see [PD27](#pd27).
+
+<a id="parent-candidates"></a>
+
+**Parent candidates:** see [PS01](#ps01).
+
+<a id="preparation-markers-source-factors-and-information-blocks"></a>
+
+**Preparation markers source factors and information blocks:** see [PS02](#ps02).
+
+<a id="products-and-published-tables"></a>
+
+**Products and published tables:** see [PD25](#pd25).
+
+<a id="published-tables"></a>
+
+**Published tables:** see [PD25](#pd25).
+
+<a id="ragged-quadratic-scoring-of-m0-m1-and-m2"></a>
+
+**Ragged quadratic scoring of m0 m1 and m2:** see [PS16](#ps16).
+
+<a id="relative-proxy-contrasts-of-released-edges"></a>
+
+**Relative proxy contrasts of released edges:** see [PD26](#pd26).
+
+<a id="release-tiers"></a>
+
+**Release tiers:** see [PD18](#pd18).
+
+<a id="released-parent-order-release-22"></a>
+
+**Released parent order:** see [PD24](#pd24).
+
+<a id="sibling-as-parent-guard"></a>
+
+**Sibling as parent guard:** see [PD23](#pd23).
+
+<a id="transmitted-state-projection"></a>
+
+**Transmitted state projection:** see [PS06](#ps06).
