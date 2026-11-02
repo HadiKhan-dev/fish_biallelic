@@ -1,0 +1,25 @@
+---
+title: "Reconstructing founder haplotypes, pedigrees and recombination from low-coverage sequencing of experimental crosses"
+author:
+  - "Hadi Khan [ORCID 0000-0001-6222-2088]"
+  - "[TO FILL: co-authors and affiliations]{.todo}"
+date: "Draft for release 4.0.1 of the software, 2 November 2026"
+abstract: |
+  Low-coverage whole-genome sequencing makes it affordable to sequence every member of an
+  experimental cross, but leaves each individual's genotypes uncertain, and in many crosses
+  the founder haplotypes, the number of founders and the pedigree are themselves unknown. We
+  describe a method that starts from nothing more than per-sample allele depths and a genetic
+  map. It reconstructs the founder haplotypes of the cross locally in marker blocks, without
+  imputing missing data, and assembles them along each chromosome with an explicit rule for the
+  number of founders. It then paints every sample as a diploid mosaic of those founders, infers
+  the pedigree with every sequenced sample a candidate parent of every other, refines phase
+  conditional on the inferred pedigree and estimates recombination maps from the resulting
+  meiosis chains. No sample metadata, sex, cohort or known parent enters inference; parents
+  that were not sequenced and relationships that the data cannot resolve are reported as such
+  rather than forced. Every stage is designed to stay polynomial in the number of founder
+  haplotypes up to K = 30, and the implementation gives identical results whatever the number
+  of processor cores. [TO FILL: one or two sentences of headline results from the simulation
+  matrix and the TroMau cross, once the 4.0 validation matrix is scored.]{.todo} The software is
+  open source (MIT licence).
+link-citations: true
+---

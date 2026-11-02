@@ -4,7 +4,7 @@ Importing the package loads no numerical libraries and changes no runtime policy
 The public functions are resolved from interface.api only when first requested.
 """
 
-__version__ = "4.0.0"
+__version__ = "4.0.1"
 __all__ = ["run", "load_settings", "open_results", "errors", "__version__"]
 
 

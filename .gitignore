@@ -2,8 +2,10 @@
 /work/
 /.work/
 
-# Local publication draft, kept separately from pipeline source control.
+# Local publication draft, kept separately from pipeline source control. The 4.0 manuscript
+# is tracked in paper/; its intermediate build outputs are not.
 /manuscript/
+/paper/build/
 
 # External research checkout (also matches a symlink, not just a directory).
 /claude_lab
