@@ -3072,8 +3072,13 @@ def run_graph(
                 # lane cannot admit never holds a worker that the lane's own work needs.
                 reserved: set[int] = set()
                 if group is not None:
-                    # Workers a pinned chain or a pending gather will need take other tasks last (free_worker).
-                    reserved = {*group.affinities.values(), *(worker for _, _, worker in expansions.values())}
+                    # Workers a chain with tasks still to run or a pending gather will need take other tasks last
+                    # (free_worker); a chain with nothing left frees its worker like any other.
+                    active = {owners[k] for k in pending} | {owners[k] for k in running}
+                    reserved = {
+                        *(worker for chain, worker in group.affinities.items() if chain in active),
+                        *(worker for _, _, worker in expansions.values()),
+                    }
                     pinned = [k for k in ready if k in gathers or indexed[k].affinity in group.affinities]
                     if pinned:
                         chosen = set(pinned)

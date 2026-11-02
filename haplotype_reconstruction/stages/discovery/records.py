@@ -248,7 +248,7 @@ class Reader:
             if saved is not None:
                 require_schema(saved.payload, 1)
                 counters.append(from_payload(TieCounts, saved.payload["tie_events"]))
-        return (TieSource("discovery", tuple(counters), tuple(p.search for p in products if p is not None)),)
+        return (TieSource("discovery/blocks", tuple(counters), tuple(p.search for p in products if p is not None)),)
 
 
 # Discovery derivations whose every block this process has checked: (container path, its inode, plan identity).

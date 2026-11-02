@@ -332,14 +332,15 @@ class Reader:
                 saved = read_items(item.file, item.key("block", index), item.derivation("block", index), ("summary",))
                 assert saved is not None
                 summaries.append(from_payload(SelectionSummary, saved.payload["summary"]))
-            counters = [summary.tie_events for summary in summaries]
+            # The 3.5 record groups the ties report reads: a round's blocks, then its proposals (refit rounds).
+            blocks = tuple(summary.tie_events for summary in summaries)
+            sources.append(TieSource(f"local_selection/{item.round_name}/blocks", blocks))
             if item.round_name != "initial":
                 saved = read_items(item.file, item.key("proposals"), item.derivation("proposals"), ("summary",))
                 assert saved is not None
                 summary = from_payload(RefitSummary, saved.payload["summary"])
                 if summary.tie_events is not None:
-                    counters.append(summary.tie_events)
-            sources.append(TieSource(f"local_selection/{item.round_name}", tuple(counters)))
+                    sources.append(TieSource(f"local_selection/{item.round_name}/proposals", (summary.tie_events,)))
         from ..assembly.records import context_tie_sources
 
         for context in self.context_scopes:

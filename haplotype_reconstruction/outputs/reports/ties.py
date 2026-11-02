@@ -89,7 +89,7 @@ class _Ambiguity:
                 continue
             search = block
             self.blocks += 1
-            self.backstops.update(dict(search.backstops))
+            self.backstops.update(_backstops(search))
             if search.selected_mean_field_failures is not None:
                 self.mean_field_measured_blocks += 1
                 self.selected_mean_field_failures += int(search.selected_mean_field_failures)
@@ -291,6 +291,24 @@ BACKSTOP_COLUMNS = (
     "exact_score_ranked_truncation",
     "exact_score_tie_class_at_budget",
 )
+
+
+def _backstops(search) -> dict[str, int]:
+    """One block's backstop indicators (BACKSTOP_COLUMNS) from its search's omission causes and stop reason, as B
+    discovery/search.py:107-122 derived them; ordinary truncation is told apart from omitted ties."""
+    causes = {item.cause for item in search.omissions}
+    expansion_ranked = "expansion_ranked_truncation" in causes
+    expansion_tied = "expansion_tie_class_at_budget" in causes
+    score_ranked = "exact_score_ranked_truncation" in causes
+    score_tied = "exact_score_tie_class_at_budget" in causes
+    return dict(
+        expansion_backstop=int(search.stop_reason == "expansion_backstop" or expansion_ranked or expansion_tied),
+        exact_score_backstop=int(score_ranked or score_tied),
+        expansion_ranked_truncation=int(expansion_ranked),
+        expansion_tie_class_at_budget=int(expansion_tied),
+        exact_score_ranked_truncation=int(score_ranked),
+        exact_score_tie_class_at_budget=int(score_tied),
+    )
 
 
 class TieSource(Protocol):
