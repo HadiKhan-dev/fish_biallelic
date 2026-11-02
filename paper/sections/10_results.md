@@ -2,8 +2,62 @@
 
 ## Accuracy on simulated crosses with recorded truth
 
-<!-- SIMULATION-RESULTS: filled from the evaluation metrics once the drafting of the evaluation
-section is merged; see the TO FILL tables below. -->
+We measured accuracy on simulated crosses generated from founder templates with recorded truth
+(Methods), scoring each run with the evaluation described above. [TO FILL: the simulation matrix:
+template source, contigs, founder haplotypes $H$, cohort sizes and designs (including backcrossing
+and explicit pedigrees), fraction of individuals sequenced, depth, depth variation, allelic
+imbalance, dropout, paired-end fragments, and seeds and replicates per cell.]{.todo}
+
+Because every stage's founder product is scored on its own components, the accuracy of the
+founder haplotypes can be followed through the pipeline, from the local panels of discovery to the
+refitted chromosome-scale founders (Table 1). One-to-one errors, rather than nearest-founder
+errors, are the primary measure, because duplicated rows can match the truth closely without
+recovering every founder; the truth-to-panel count additionally charges founders that no row
+recovers.
+
+| Stage | One-to-one errors per $10^6$ called alleles | Truth-to-panel errors and missing calls | Segment label switches | Wrong identity-continuity assertions |
+|---|---|---|---|---|
+| Discovery | · | · | · | · |
+| Local selection (initial, L1, L2) | · | · | · | · |
+| Assembly levels 1–4 | · | · | · | · |
+| Refinement | · | · | · | · |
+| Painting | · | · | · | · |
+| Founder refit | · | · | · | · |
+
+Table: Accuracy of founder haplotypes through the pipeline on simulated crosses. [TO FILL from
+`haplotypes evaluate` (founders.csv and founder_components.csv), pooled over contigs and
+replicates, per scenario.]{.todo}
+
+Phase was scored within released phase sets on correctly called true heterozygotes, separately for
+samples with zero, one and two released parent edges, because phase in samples without released
+parents rests on the children's chains or on convention (Table 2). Pedigree calls were compared
+with the true parents among the sequenced samples (Table 3); a parent that was not sequenced is not
+an observable edge, and an unresolved call is never counted as exact.
+
+| Samples (released parent edges) | Genotype errors per called genotype | Phased share of true heterozygotes | Switch errors per scored site | Long switches | Released phase-set N50 |
+|---|---|---|---|---|---|
+| All | · | · | · | · | · |
+| Two parents | · | · | · | · | · |
+| One parent | · | · | · | · | · |
+| No parent | · | · | · | · | · |
+
+Table: Accuracy of released genotypes and phase on simulated crosses. [TO FILL from the phase
+tables of `haplotypes evaluate`.]{.todo}
+
+| Scenario | Exact parent configurations | Correct edges / true edges | Extra edges | Missing edges |
+|---|---|---|---|---|
+| [TO FILL]{.todo} | · | · | · | · |
+
+Table: Accuracy of Tier-B pedigree calls on simulated crosses, against the true parents among the
+sequenced samples. [TO FILL from the pedigree table of `haplotypes evaluate`.]{.todo}
+
+[TO FILL: recombination: the fraction of called and of reported crossover intervals that contain a
+true crossover, with their median widths, and true crossovers within the inferred informative
+exposure against the expected count, on inferred edges that are true gametes.]{.todo}
+
+The evaluation has no measure of per-sample local-ancestry (painting) accuracy or of relatedness
+families against truth; painting is scored only through its relabelled founder panel, and families
+only through the pedigree they inform.
 
 ## Analysis of the TroMau cichlid cross
 
@@ -17,7 +71,10 @@ with offspring sampled as first and second laboratory generations. These labels 
 animals were sampled; they were not used in the analysis, and no sequenced founding-generation
 individual is assumed to be a parent of any other sample. The genetic map was a uniform
 placeholder rate of 5 cM/Mb [TO FILL: confirm, or name the map used]{.todo}, so recombination
-distances and map lengths below are in units of that placeholder unless stated otherwise.
+distances and map lengths below are in units of that placeholder unless stated otherwise. Because
+that rate is not declared to be a measured genome-wide average, it provides no measured map length:
+each chromosome counts as a single unit of map support in relatedness and in the pedigree's
+release rules.
 
 Because the real cross has no individual-level truth for its pedigree, we report internal
 consistency, stability and explicit ambiguity rather than accuracy: candidate margins,

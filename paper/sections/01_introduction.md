@@ -43,10 +43,11 @@ these inputs it
    local founder panels using feedback from the chromosome-scale assembly;
 4. assembles local panels into chromosome-scale founder haplotypes, deciding the number of founders
    with an explicit count rule and completing missing founder alleles jointly;
-5. paints every sample as a diploid mosaic of the founders;
+5. paints every sample as a diploid mosaic of the founders, and refits individual founder alleles
+   with those paintings held fixed;
 6. infers the pedigree, with every sequenced sample a candidate parent of every other, and releases
    parent calls in evidence tiers that keep missing, ambiguous and unresolved parents explicit;
-7. refits founder alleles and refines sample phase conditional on the inferred pedigree; and
+7. refines sample phase conditional on the inferred pedigree; and
 8. estimates recombination maps from the meiosis chains of the final phase.
 
 Three principles run through the design. First, the inputs are the data alone: the direction of a

@@ -31,8 +31,8 @@ On the computational side, every stage is designed to be polynomial in the numbe
 haplotypes, and the measured kernels of every stage gated as at most cubic in K stayed below that
 bound up to K = 30. Two kinds of cost remain outside that bound. Four decided exemptions keep
 bounded searches whose cost is documented and measured: rare context-coded screening in local
-selection, a fixed cap of nine ranked refits in assembly joins, bounded discovery and selection
-searches, and the optional pairwise IBD output. Four mechanisms have worst-case costs above cubic
+selection, a fixed cap of nine ranked refits in assembly and refinement, bounded discovery and
+selection searches, and the optional pairwise IBD output. Four mechanisms have worst-case costs above cubic
 that are carried exactly as documented exceptions: structural screening in assembly joins, window
 fixing in refinement, label-continuity checks in painting and tie resolution in founder refit.
 None of them binds on the inputs analysed here, but they define where further algorithmic work is

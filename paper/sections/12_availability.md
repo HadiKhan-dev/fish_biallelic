@@ -11,7 +11,7 @@ later; exact tested dependency versions are pinned in `requirements-tested.txt`.
 [TO FILL: accession numbers and location of the TroMau sequencing data and BCF, of the simulation
 founder templates, and of the outputs of the validation matrix.]{.todo}
 
-# Acknowledgements
+# Acknowledgements {.unnumbered}
 
 [TO FILL: funding, computing resources and people to acknowledge.]{.todo}
 

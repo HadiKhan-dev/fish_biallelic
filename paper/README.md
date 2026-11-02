@@ -6,14 +6,23 @@ outside source control (`/manuscript/`, ignored).
 
 - [manuscript.pdf](manuscript.pdf) and [supplement.pdf](supplement.pdf): the built documents.
 - `metadata.yaml`, `sections/*.md`: the main text, in pandoc Markdown, in reading order.
-- `supplement/metadata.yaml`, `supplement/*.md`: the Supplementary Information.
+- `supplement/metadata.yaml`, `supplement/S*.md`: the Supplementary Information. Sections S1–S6
+  give each stage's finer rules and defaults; `S7_tables.md` is generated (below).
 - `references.bib`: the bibliography. Each entry was written by hand; check DOIs and pages against
   the journal before submission.
 - `figures/`: SVG figures, written by `tools/make_figures.py` (standard library only). Figure 1 is
   the stage graph of `haplotype_reconstruction/stages/graph.py`; Figure 2 is parsed from the
   "Kernel ladders" table of `docs/developer/costs.md`, so rebuilding it after that table changes
   updates the figure.
-- `style.css`: page and caption style for the HTML and PDF builds.
+- `tools/make_tables.py`: writes Supplementary Tables S1 (kernel ladders, from
+  `docs/developer/costs.md`) and S2 (numerical ledger, from `docs/developer/ties.md`) into
+  `supplement/S7_tables.md`; do not edit that file by hand.
+- `style.css`: page and caption style for the HTML and PDF builds; `tools/svg_to_png.lua` points the
+  Word build at PNG renders of the figures.
+
+The stage-by-stage Methods and Supplementary Methods were drafted from `docs/methods/` and checked
+against the code of each stage; where a method page and the code disagreed, the text follows the
+code.
 
 ## Build
 

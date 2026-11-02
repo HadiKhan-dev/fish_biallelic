@@ -3,10 +3,12 @@
 ## 4.0.1 (2 November 2026)
 
 Adds the manuscript describing release 4.0, rebuilt from scratch from the 4.0 methods
-documentation and code, in [paper/](paper/README.md): Markdown sources, bibliography, figure
-generator and a build script that writes the PDF, HTML, DOCX and LaTeX versions. Figure 2 is drawn
-directly from the kernel-ladder table of the [cost page](docs/developer/costs.md). Results that
-need the outputs of the 4.0 validation matrix are marked as placeholders in the text.
+documentation and code, in [paper/](paper/README.md): the main text and Supplementary Information
+as Markdown sources, the bibliography, figure and table generators, and a build script that writes
+the PDF, HTML, DOCX and LaTeX versions. Figure 2 and Supplementary Tables S1 and S2 are drawn
+directly from the [cost page](docs/developer/costs.md) and the
+[numerical ledger](docs/developer/ties.md). Results that need the outputs of the 4.0 validation
+matrix are marked as placeholders in the text.
 
 The scientific code, settings, defaults and outputs are those of 4.0.0. The package's root
 initializer carries the version number and is part of every stage's code identity, so 4.0.1 has
