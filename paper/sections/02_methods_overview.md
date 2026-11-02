@@ -36,8 +36,8 @@ probability of recombination in a meiosis over a genetic distance of $x$ morgans
 Haldane recombination fraction
 $$r_H(x) = \tfrac{1}{2}\left(1 - e^{-2x}\right) = -\tfrac{1}{2}\,\mathrm{expm1}(-2x),$$
 evaluated in this form for numerical accuracy at short distances [@haldane1919]. The copying models
-of local selection, assembly and refinement instead convert map distance into switch probabilities
-of their own, described with each stage. Further symbols are defined where they are used.
+of local selection, assembly, refinement and painting instead convert map distance into switch
+probabilities of their own, described with each stage. Further symbols are defined where they are used.
 
 **No sample metadata.** Sample names identify rows of the input and carry no other meaning. No
 generation, cohort, sex, breeding record or known-parent label enters any stage. Every sequenced
