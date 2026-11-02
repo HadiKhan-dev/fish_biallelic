@@ -108,41 +108,21 @@ def release_tables(model: LabelModel, n: int) -> ReleaseTables:
 
 def label_pair_posterior(post, labs0, labs1, S):
     """float64 [B, S, S] ordered label-pair posteriors from block-state posteriors post [B, n0, n1]."""
-    B = post.shape[0]
-    out = np.zeros((B, S, S))
-    for b in range(B):
-        l0, l1 = labs0[b], labs1[b]
-        np.add.at(out[b], (l0[:, None].repeat(len(l1), 1), l1[None, :].repeat(len(l0), 0)), post[b])
-    return out
+    return kernels.label_pairs(post, labs0, labs1, int(S))
 
 
 def _bin_orientation(ordered, site_bin, tau_g, B, *, trace=False, audit=None):
     """float64 [B]: per bin, the median over its sites (``site_bin``) with P(heterozygous) >= tau_g under the ordered
     allele posteriors ``ordered`` (kernels.site_posteriors) of the orientation certainty max(P01, P10) / (P01 + P10);
-    NaN in a bin without such a site (no evidence that the orientation is lost)."""
-    out = np.full(B, np.nan)
+    NaN in a bin without such a site (no evidence that the orientation is lost). The audit and the trace see the site
+    selection beside the values (kernels.orientation)."""
+    out = kernels.orientation(ordered, site_bin, float(tau_g), int(B))
+    if audit is None and not trace:
+        return out
     het = ordered[1] + ordered[2]
     selected = het >= tau_g
     if audit is not None:
         audit.difference("orientation_het", het, tau_g, selected)
-    sites = np.flatnonzero(selected)
-    if not len(sites):
-        return (
-            dict(
-                values=out,
-                P01=ordered[1].copy(),
-                P10=ordered[2].copy(),
-                cutoff=np.full(len(het), tau_g),
-                selected=selected,
-            )
-            if trace
-            else out
-        )
-    certainty = np.maximum(ordered[1], ordered[2])[sites] / het[sites]
-    bins = site_bin[sites]
-    starts = np.flatnonzero(np.r_[True, bins[1:] != bins[:-1]])
-    for a, e in zip(starts, np.r_[starts[1:], len(bins)], strict=False):
-        out[bins[a]] = np.median(certainty[a:e])
     return (
         dict(
             values=out, P01=ordered[1].copy(), P10=ordered[2].copy(), cutoff=np.full(len(het), tau_g), selected=selected

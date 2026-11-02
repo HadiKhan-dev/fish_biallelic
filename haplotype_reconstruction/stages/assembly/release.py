@@ -20,7 +20,7 @@ from haplotype_reconstruction.contracts.payload import from_payload, to_payload
 from haplotype_reconstruction.contracts.refit import FounderRefit
 from haplotype_reconstruction.core.errors import InvariantError
 from haplotype_reconstruction.engine.graph import RecordKey, ResourceRequest, Task, TaskKey
-from haplotype_reconstruction.engine.runtime import thread_team
+from haplotype_reconstruction.engine.runtime import task_team
 from haplotype_reconstruction.science.assembly.release import budget_overflow, release_founders, withhold_unobserved
 from haplotype_reconstruction.store.container import CheckpointFile
 from haplotype_reconstruction.store.protocol import NumericalPolicy, claim, publish, resume
@@ -69,7 +69,7 @@ def compute_release(
     sites = np.asarray(inputs.evidence.positions)
     observed = np.asarray(inputs.evidence.observed, dtype=bool)
     original, seen = [], []
-    with thread_team(cores):
+    with task_team(cores):
         for component, panel in zip(painting, panels, strict=False):
             positions = np.asarray(panel.positions, dtype=np.int64)
             calls = np.asarray(panel.released, dtype=np.int8)

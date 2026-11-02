@@ -19,7 +19,7 @@ from ...contracts.pedigree import ExclusionEvidence, ExclusionRequest
 from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError, InvariantError
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.pedigree import exclusion_bound
 from ...science.pedigree.parameters import ExclusionConfig
 from ...store.container import CheckpointFile
@@ -91,7 +91,7 @@ def run(
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
             return previous
-    with thread_team(threads):
+    with task_team(threads):
         product, _ = exclusion_bound.score_contig(
             contig,
             evidence.likelihoods,

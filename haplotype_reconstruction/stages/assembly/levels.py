@@ -17,8 +17,8 @@ import numpy as np
 from haplotype_reconstruction.contracts.assembly import JoinRecord, JoinSettings, JoinTask, ReleaseFamily
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
 from haplotype_reconstruction.engine.graph import ResourceRequest, ResultRef, Task, TaskKey
-from haplotype_reconstruction.engine.runtime import thread_team
-from haplotype_reconstruction.engine.scheduler import CpuBudget
+from haplotype_reconstruction.engine.runtime import task_team
+from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.batch import run_batch
@@ -52,8 +52,10 @@ def execute_join(
             save_join(records.file, identity, result)
             return result
     began = perf_counter()
-    with attached_scoring(scoring) as data, thread_team(cores):
-        result = run_batch(task, data, CpuBudget.fixed(cores))
+    with attached_scoring(scoring) as data, task_team(cores):
+        # The task's live allowance: the join search re-reads it at its boundaries, so a long batch grows into CPUs
+        # its finished peers left (a fixed budget kept a tail batch on the cores it started with).
+        result = run_batch(task, data, current_budget())
     return replace(result, seconds=perf_counter() - began)
 
 
@@ -88,7 +90,7 @@ def expand_level(
     scoring_ref: SharedArrayRef | None = None,
 ) -> T | Expansion:
     """Create one engine task per missing join, preserving input-order gathering."""
-    with thread_team(cores):
+    with task_team(cores):
         planned = plan_level(
             components,
             prepared,
@@ -153,7 +155,7 @@ def run_level_stage(
     Used for bounded composition cuts and context callbacks with an existing
     engine task; it creates no pool or new CPU authority.
     """
-    with thread_team(cores):
+    with task_team(cores):
         planned = plan_level(
             components,
             prepared,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.relatedness.ibd import accumulate_pairwise_ibd, finish_pairwise_ibd, new_pairwise_ibd
 from ...science.relatedness.ibd_parameters import PairwiseIbdParameters
 from ...science.relatedness.parameters import AlleleFrequencyParameters
@@ -38,7 +38,7 @@ def run(
     with claim(file, records.KEY, derivation) as compute:
         if not compute:
             return derivation
-        with thread_team(team):
+        with task_team(team):
             state = new_pairwise_ibd(len(sample_ids))
 
             def consume(item: EvidenceInput, evidence: EvidenceArrays) -> None:

@@ -115,6 +115,27 @@ def thread_team(cores: int):
         numba.set_num_threads(previous)
 
 
+@contextmanager
+def task_team(default: int):
+    """A parallel section's Numba team: under an engine CPU budget (a graph task's, or a thread map worker's one CPU),
+    that budget's live share when the section starts (a boundary: a section started after peers finished uses their
+    CPUs); elsewhere ``default``. On exit the team never returns above the budget's share then (it may have shrunk).
+    Sections sized by the share their task started with ran on one CPU while the node emptied."""
+    import numba
+
+    from ..core.kernels import enable_caches
+    from .scheduler import _THREAD_BUDGET
+
+    enable_caches()
+    budget = getattr(_THREAD_BUDGET, "value", None)
+    previous = numba.get_num_threads()
+    numba.set_num_threads(max(1, int(budget.threads() if budget is not None else default)))
+    try:
+        yield
+    finally:
+        numba.set_num_threads(previous if budget is None else max(1, min(previous, int(budget.threads()))))
+
+
 def _inactive_file_bytes(directory: Path, version1: bool) -> int:
     """Reclaimable inactive file cache charged to a cgroup (hierarchical total in v1)."""
     key = "total_inactive_file" if version1 else "inactive_file"

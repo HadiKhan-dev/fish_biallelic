@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numba
 
@@ -25,18 +25,31 @@ _R = TypeVar("_R")
 
 
 class RefinementTeam:
-    """Fixed task CPU share; parallel templates use one kernel thread each.
+    """The enclosing task's CPU share; parallel templates use one kernel thread each.
 
     A team changes only its calling thread's Numba mask inside scope, restoring it
     on success or failure. map preserves input order and joins workers on failure.
     """
 
-    def __init__(self, cores: int) -> None:
+    budget: Any = None  # the task's live allowance (None: the declared count; concurrent child teams have none)
+
+    def __init__(self, cores: int, budget: Any | None = None) -> None:
         enable_caches()
-        self.cores = int(cores)
+        self.declared = int(cores)
+        self.budget = budget
+
+    @property
+    def cores(self) -> int:
+        """This team's CPUs now. Given the enclosing task's live allowance (``budget``, the engine's current_budget()),
+        its share re-read at this boundary: it grows as peer tasks finish, as 3.5 re-read its lease at every boundary,
+        instead of keeping the share the task started with (a component started beside many peers otherwise ran its
+        whole refinement on one or two threads while their CPUs idled). Without one, the declared count."""
+        if self.budget is None:
+            return self.declared
+        return max(1, int(self.budget.threads()))
 
     def threads(self) -> int:
-        """Return the declared CPU count; no live system resources are inspected."""
+        """This team's CPUs now (see cores)."""
         return self.cores
 
     @contextmanager
@@ -47,7 +60,8 @@ class RefinementTeam:
         try:
             yield
         finally:
-            numba.set_num_threads(previous)
+            # Never back above the task's claim now: it may have shrunk inside the scope.
+            numba.set_num_threads(previous if self.budget is None else min(previous, self.cores))
 
     def map(self, function: Callable[[_T], _R], items: list[_T]) -> list[_R]:
         """Run independent templates in supplied order and return results in that order."""
@@ -56,7 +70,8 @@ class RefinementTeam:
             with self.scope(1):
                 return function(item)
 
-        if self.cores == 1:
+        cores = self.cores  # this boundary's share, read once for the whole map
+        if cores == 1:
             # Dispatch is cost-ordered, so a failing item can precede lower logical
             # ordinals. Drain the bound batch; each solver prunes only later work.
             results = []
@@ -75,7 +90,7 @@ class RefinementTeam:
         # failure may precede an earlier logical ordinal that must still run.
         results = []
         failure = None
-        with ThreadPoolExecutor(max_workers=self.cores) as pool:
+        with ThreadPoolExecutor(max_workers=cores) as pool:
             futures = [pool.submit(run, item) for item in items]
             for future in futures:
                 try:
@@ -198,5 +213,5 @@ class _ChildTeam(RefinementTeam):
         self._index = index
 
     @property
-    def cores(self) -> int:  # type: ignore[override]  # a live share, read-only by design
+    def cores(self) -> int:  # a live share, read-only by design
         return self._shares.allocation(self._index)

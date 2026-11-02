@@ -11,14 +11,14 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...engine.graph import RecordKey, ResourceRequest, Task, TaskKey
+from ...engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from .painting import write_painting
 from .pedigree import write_pedigree
 from .quality import write_quality
 from .recombination import write_recombination
 from .relatedness import write_relatedness
 from .tables import write_family_phase, write_founder_refit, write_truth_pedigree
-from .ties import write_ties
+from .ties import contig_ties, write_ties
 
 if TYPE_CHECKING:
     from ...results.reader import Results
@@ -132,11 +132,21 @@ def run_tasks(
         ("recombination", write_recombination),
         ("complete", write_ties),
     )
-    tasks = []
+    tasks: list[Task] = []
     for name, writer in writers:
         if name not in dependencies:
             continue
         kwargs: dict[str, object] = {"reverse_conventions": reverse_conventions} if name == "complete" else {}
+        if name == "complete":
+            # Each contig's tie sources are read by a task of its own (they are independent; read in turn they made
+            # one serial step of the whole run); the report merges them in contig order.
+            readers = tuple(
+                make_task("ties", contig_ties, (results, contig), contig=contig, depends_on=dependencies[name])
+                for contig in results.contigs
+            )
+            tasks += readers
+            kwargs["collected"] = tuple(ResultRef(task.key) for task in readers)
+            dependencies = {**dependencies, name: (*dependencies[name], *(task.key for task in readers))}
         if name == "recombination":
             kwargs = {"elapsed_seconds": recombination_seconds}
         tasks.append(

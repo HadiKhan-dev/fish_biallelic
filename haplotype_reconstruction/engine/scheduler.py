@@ -1208,10 +1208,13 @@ class PoolCounters:
         counter.get_obj().value = int(number)
 
     def start_batch(self, tasks: int, processes: int) -> None:
-        """Open a new batch (generation): reset the start-up gate for ``tasks`` tasks."""
+        """Open a new batch (generation): reset the start-up gate for ``tasks`` tasks. The gate waits for as many
+        task starts as the pool can admit at once (its tasks, its processes and its CPUs): a batch larger than the
+        pool's CPUs otherwise kept every task on one thread until all of them had started, and a long task that
+        started meanwhile never grew (K = 30's selection blocks ran their whole minute on one CPU)."""
         if _read(self.active):
             raise RuntimeError("pool workers of the preceding batch are still active")
-        target = min(int(tasks), int(processes))
+        target = min(int(tasks), int(processes), max(1, _read(self.total)))
         self._store(self.started, 0)
         self._store(self.participants, 0)
         self._store(self.task_count, tasks)
@@ -1391,10 +1394,10 @@ class _PoolSeat:
 
         Fair share: floor(total / contenders), plus one of the remainder CPUs while this task holds a remainder
         claim; contenders are the running tasks and the workers waiting for their first CPU. ``max_threads``
-        (what the task can use) caps it. A task grows only up to its share (as peers finish, the share grows);
-        a task above it (it grew while it had fewer peers) returns the excess here (``give_back``; False for
-        queries from threads that do not own the task's team). Before the batch's start-up gate opens every task
-        runs one thread.
+        (what the task can use) caps it. While no peer is short and no worker waits, a task also takes the free
+        CPUs (work-conserving); once a peer is short, a task above its fair share returns the excess here
+        (``give_back``; False for queries from threads that do not own the task's team). Before the batch's
+        start-up gate opens every task runs one thread.
         """
         if max_threads is not None:
             max_threads = int(max_threads)
@@ -1431,6 +1434,12 @@ class _PoolSeat:
                 target = max(target, self.claimed)
             others = _read(c.claimed) - self.claimed
             available = min(_read(c.total) - others, self._total() - (others - c.helper_claimed.value))
+            if give_back and _read(c.startup_ready) and not c.waiting.value and _read(c.short) - self.short <= 0:
+                # Work-conserving, as 3.5's lanes borrowed idle CPUs: while no peer is short of its fair share and no
+                # worker waits for a first CPU, this task also takes the pool's free CPUs (up to what it can use), at
+                # every boundary of a step, not only at its edges. A peer that comes up short gets them back at this
+                # task's next boundary. Thread counts never decide a result.
+                target = max(target, available if max_threads is None else min(available, max_threads))
             allocated = max(1, min(target, available)) if give_back else max(self.claimed, min(target, available))
             change = allocated - self.claimed
             c.claimed.get_obj().value += change
@@ -1606,6 +1615,38 @@ def pool_seat() -> _PoolSeat | None:
     return _POOL_SEAT
 
 
+def _water_fill(shares: list[int], demands: list[int]) -> list[int]:
+    """Lane shares by demand: each lane gets its base share (equal, or the straggler floor) but never more than its
+    demand (the summed widths of its ready and running tasks; 0: unknown, no limit); what a lane cannot use goes to
+    the lanes that can, in proportion to their base shares, until every CPU is placed or every demand is met."""
+    shares = list(shares)
+    fixed = [False] * len(shares)
+    while True:
+        capped = [k for k in range(len(shares)) if not fixed[k] and 0 < demands[k] < shares[k]]
+        if not capped:
+            return shares
+        leftover = sum(shares[k] - demands[k] for k in capped)
+        for k in capped:
+            shares[k], fixed[k] = demands[k], True
+        open_ = [k for k in range(len(shares)) if not fixed[k]]
+        if not open_:
+            return shares
+        for k, extra in zip(open_, _spread(leftover, [shares[k] for k in open_]), strict=True):
+            shares[k] += extra
+
+
+def _spread(extra: int, weights) -> list[int]:
+    """Split ``extra`` CPUs (zero or more) in proportion to ``weights`` (largest remainders, ties to the lower
+    index)."""
+    weights = [max(0.0, float(w)) for w in weights]
+    total = sum(weights) or float(len(weights))
+    exact = [extra * (w if sum(weights) else 1.0) / total for w in weights]
+    result = [int(x) for x in exact]
+    for i in sorted(range(len(exact)), key=lambda i: (int(exact[i]) - exact[i], i))[: extra - sum(result)]:
+        result[i] += 1
+    return result
+
+
 def apportion(budget: int, work) -> list[int]:
     """Split ``budget`` CPUs over workers in proportion to their work.
 
@@ -1669,6 +1710,13 @@ class LeaseState:
     def __init__(self, context, workers: int, budget: int, task_weights=None, straggler_ratio: float = 0.0):
         self.claims = context.Array("i", workers, lock=False)
         self.lent = context.Array("i", workers, lock=False)
+        # Per worker, the most CPUs it can use while it has nothing ready to start (its running tasks' maxima;
+        # 0: no limit): it wants no more than that, so peers borrow the rest of its share (LaneAuthority.limit).
+        self.wants = context.Array("i", workers, lock=False)
+        # Per worker, the CPUs its running tasks hold now (as of its last rebalance). A claim (the target) may fall
+        # below it when peers are short: the worker's tasks return the excess at their boundaries, and until then
+        # those CPUs are not free for anyone else.
+        self.held = context.Array("i", workers, lock=False)
         self.lock = context.Lock()
         self.budget = int(budget)
         self.proportional = task_weights is not None
@@ -1694,6 +1742,11 @@ class LeaseState:
             with self.lock:
                 self.remaining.value = max(0.0, self.remaining.value - self.task_weights[task_index])
                 self.weights[worker] = 0.0
+
+    def free(self) -> int:
+        """CPUs no worker claims or holds, under the lock: a claim recalled below what a worker's tasks hold still
+        holds those CPUs until the tasks return them at their boundaries."""
+        return self.budget - sum(max(claim, held) for claim, held in zip(self.claims, self.held, strict=True))
 
     def shares(self, active) -> list[int]:
         """The shares of the ``active`` workers (equal, or with the straggler floor), under the lock."""
@@ -1739,7 +1792,7 @@ class _LeaseSeat:
         lends wants one CPU."""
         state, index = (self.state, self.index)
         active = [i for i, value in enumerate(state.claims) if value > 0 or state.lent[i] == -1 or i == index]
-        shares = state.shares(active)
+        shares = _water_fill(state.shares(active), [int(state.wants[i]) for i in active])
         others_short = sum(
             (
                 max(0, (1 if state.lent[i] == 1 else share) - state.claims[i])
@@ -1747,7 +1800,7 @@ class _LeaseSeat:
                 if i != index
             )
         )
-        return (shares[active.index(index)], others_short, state.budget - sum(state.claims))
+        return (shares[active.index(index)], others_short, state.free())
 
     def grow(self, *, floor: int | None = None) -> tuple[int, int]:
         """Rebalance this worker's claim at a boundary; return (before, after). ``floor``: the CPUs this worker
@@ -1766,9 +1819,12 @@ class _LeaseSeat:
         with state.lock:
             before = int(state.claims[index])
             state.lent[index] = 0
+            state.held[index] = in_use
             share, others_short, free = self._balance()
             target = max(1, min(before + free, before + free if others_short == 0 else share))
-            state.claims[index] = max(target, min(in_use, max(before, target)), 1, before if self.users > 1 else 1)
+            if others_short == 0:
+                target = max(target, min(in_use, max(before, target)))
+            state.claims[index] = max(target, 1, before if self.users > 1 else 1)
             return max(1, target - coordinator)
 
     def lend(self) -> None:
@@ -1789,6 +1845,7 @@ class _LeaseSeat:
     def release(self) -> None:
         with self.state.lock:
             self.state.claims[self.index] = 0
+            self.state.held[self.index] = 0
             self.state.lent[self.index] = 0
             if self.state.proportional:
                 self.state.weights[self.index] = 0.0
@@ -1814,12 +1871,19 @@ class _LeaseSeat:
             self.users -= 1
 
     def _grow_locked(self, floor=None):
+        """Rebalance this worker's claim. ``floor``: the CPUs its tasks hold now (recorded); None never shrinks. While a
+        peer is short the claim may fall below ``floor`` to the worker's share: its tasks give the excess back at their
+        boundaries (and those CPUs stay counted as taken until then); otherwise it keeps at least what it holds."""
         state, index = (self.state, self.index)
         before = int(state.claims[index])
+        if floor is not None:
+            state.held[index] = max(0, int(floor))
         state.lent[index] = 0
         share, others_short, free = self._balance()
-        target = before + free if others_short == 0 else share
-        target = max(target, before if floor is None else max(1, floor))
+        if others_short == 0:
+            target = max(before + free, before if floor is None else max(1, floor))
+        else:
+            target = max(share, before) if floor is None else share
         state.claims[index] = max(1, min(target, before + free))
         return (before, int(state.claims[index]))
 
@@ -1991,6 +2055,22 @@ def budget_context(budget):
         yield
     finally:
         _THREAD_BUDGET.value = previous
+
+
+class _TaskThreads:
+    """The calling task's live CPU share for codecs (a lane lease's codec_threads while its pools hold its CPUs),
+    read at each encode or decode: give it to a store (``nthreads``) so a reader inside a graph task decompresses with
+    the CPUs that task holds (one thread made every stage's input reload a serial step). Pickles by reference."""
+
+    def threads(self) -> int:
+        budget = current_budget()
+        return max(1, int(budget.codec_threads() if hasattr(budget, "codec_threads") else budget.threads()))
+
+    def __reduce__(self) -> str:
+        return "TASK_THREADS"
+
+
+TASK_THREADS = _TaskThreads()
 
 
 def current_budget():
@@ -2588,6 +2668,12 @@ def _resolve_graph(value: Any, results: Mapping[TaskKey, Any]) -> Any:
 
 
 def _resolved_task(task: Task, results: Mapping[TaskKey, Any]) -> Task:
+    from .workers import _PackedCall
+
+    if len(task.args) == 1 and type(task.args[0]) is _PackedCall:
+        # Packed by the worker that expanded it: its references were recorded there; their values go beside it.
+        packed = task.args[0]
+        return replace(task, args=(packed, tuple(results[key] for key in packed.refs))) if packed.refs else task
     return replace(task, args=_resolve_graph(task.args, results), kwargs=_resolve_graph(task.kwargs, results))
 
 
@@ -2834,6 +2920,16 @@ def run_graph(
                     token.release()
                     raise ResourceError("expanded task CPU minimum exceeds allocation")
             new = (*expansion.subtasks, gather)
+            from .workers import _PackedCall
+
+            for child in new:
+                if len(child.args) == 1 and type(child.args[0]) is _PackedCall:
+                    undeclared = set(child.args[0].refs) - set(child.depends_on)
+                    if undeclared:
+                        token.release()
+                        raise SettingsError(
+                            f"{child.key}: result references are not declared dependencies {sorted(undeclared)}"
+                        )
             # The new tasks' own checks (CPU ranges, references, writers, cycles among them), with finished stand-ins
             # for the existing tasks they depend on; then cycles through the unfinished graph. A suspended parent
             # is completed by its gather, not a resolved leaf: earlier expansions keep that dependency, so cycles
@@ -2875,6 +2971,9 @@ def run_graph(
                 pending.add(child.key)
                 parents[child.key] = task.key
                 depths[child.key] = depths[task.key] + 1
+            # Its gather completes it; its arguments (a round's evidence, a session) are never needed again.
+            if task.args or task.kwargs:
+                indexed[task.key] = replace(task, args=(), kwargs={})
             return
         results[reply.key] = _readonly(reply.value)
         finished = reply.key
@@ -2944,6 +3043,16 @@ def run_graph(
                     needed = {owners[k] for k in (*ready, *running)}
                     done = results.keys() if _session is None else results.keys() | _session.completed
                     group.authority.reconcile(needed, done)
+                    # A lane's demand: the declared widths of its ready tasks, plus what its running tasks hold or
+                    # wait for now (a running task uses only its claim until its next boundary; there it may borrow
+                    # free CPUs). A task waiting to start counts, so its lane is short and peers give CPUs back.
+                    demand: dict[str | None, int] = {}
+                    for k in ready:
+                        owner = owners[k]
+                        demand[owner] = min(cores, demand.get(owner, 0) + indexed[k].resources.max_cores)
+                    for owner in {owners[k] for k in running}:
+                        demand[owner] = min(cores, demand.get(owner, 0) + group.authority.engaged(owner))
+                    group.authority.limit(demand)
                     group.authority.refresh()  # every lane's total, once per pass
                 active_affinities = {indexed[k].affinity for k in running if indexed[k].affinity is not None}
                 dispatched = False
@@ -2961,7 +3070,10 @@ def run_graph(
                 # first idle workers, where the earliest plans and expansions ran, went to the next block every pass
                 # and a contig's gather waited for thousands of other tasks. Nothing is reserved, so a pinned task its
                 # lane cannot admit never holds a worker that the lane's own work needs.
+                reserved: set[int] = set()
                 if group is not None:
+                    # Workers a pinned chain or a pending gather will need take other tasks last (free_worker).
+                    reserved = {*group.affinities.values(), *(worker for _, _, worker in expansions.values())}
                     pinned = [k for k in ready if k in gathers or indexed[k].affinity in group.affinities]
                     if pinned:
                         chosen = set(pinned)
@@ -2985,7 +3097,16 @@ def run_graph(
                             if not handle.ready or handle.busy is not None:
                                 continue
                         else:
-                            available_worker = group.free_worker(affinity)
+                            expanding = parents.get(key)
+                            own = {
+                                index
+                                for index in (
+                                    group.affinities.get(owners[key]),
+                                    expansions[expanding][2] if expanding in expansions else None,
+                                )
+                                if index is not None
+                            }
+                            available_worker = group.free_worker(affinity, reserved, own)
                             if available_worker is None:
                                 continue
                             worker = available_worker
@@ -3112,7 +3233,13 @@ class TaskBudget(CpuBudget):
                 c.claimed.get_obj().value += floor - seat.claimed
                 seat.claimed = floor
             team = floor
-        return min(ceiling, max(floor, team))
+        team = min(ceiling, max(floor, team))
+        if getattr(_THREAD_BUDGET, "value", None) is self:
+            # On the task's own thread the claim is also its kernel team: a team left at a larger earlier claim
+            # oversubscribes, one left smaller cannot grow (other threads keep their own one-thread teams).
+            numba = _numba()
+            numba.set_num_threads(max(1, min(team, numba.config.NUMBA_NUM_THREADS)))
+        return team
 
     def current(self) -> int:
         return min(self.maximum, self.budget.current())
@@ -3186,7 +3313,7 @@ class LaneAuthority:
             return None
         try:
             claim = int(self.state.claims[index])
-            free = self.state.budget - sum(self.state.claims)
+            free = self.state.free()
             if claim < minimum:
                 if free < minimum - claim:
                     return None
@@ -3209,11 +3336,37 @@ class LaneAuthority:
                     if self.state.claims[index] <= 0 or self.state.lent[index] == 1:
                         continue
                     _, total = self.seats[index]._grow_locked(_read(group.claimed))
+                    raised = total > _read(group.total)
                     group.total.get_obj().value = total
+                    if raised:
+                        group.admission.notify_all()  # tasks waiting in begin_task start on the new CPUs
                 finally:
                     self.state.lock.release()
             finally:
                 group.admission.release()
+
+    def engaged(self, owner: str | None) -> int:
+        """The CPUs ``owner``'s running tasks hold now, plus one per task still waiting to start (at least one while
+        it runs any)."""
+        index = self.owners.get(owner)
+        if index is None:
+            return 1
+        group = self.groups[index]
+        return max(1, _read(group.claimed) + group.waiting.value)
+
+    def limit(self, wants: Mapping[str | None, int]) -> None:
+        """Per owner, the most CPUs its lane can use now (0: no limit). A lane that has nothing ready to start is
+        limited to its running tasks' maxima, so the rest of its share is free for lanes with ready work (a contig's
+        context assembly between rounds beside contigs with thousands of ready blocks); the limit lifts once it has
+        ready work again, and borrowers return the CPUs at their next boundary (frequent now that long tasks re-read
+        their share within a step)."""
+        if not self.state.lock.acquire(False):
+            return
+        try:
+            for owner, index in self.owners.items():
+                self.state.wants[index] = max(0, int(wants.get(owner, 0)))
+        finally:
+            self.state.lock.release()
 
     def lend_idle(self, owner: str | None) -> None:
         if owner not in self.owners:
@@ -3228,6 +3381,7 @@ class LaneAuthority:
             try:
                 if not _read(group.claimed) and self.state.claims[index] > 0:
                     self.state.claims[index] = 1
+                    self.state.held[index] = 0
                     self.state.lent[index] = 1
                     group.total.get_obj().value = 1
             finally:
@@ -3249,7 +3403,7 @@ class LaneAuthority:
                     self.finished.add(chain.affinity)
             for owner, index in tuple(self.owners.items()):
                 if owner not in needed and not _read(self.groups[index].claimed):
-                    self.state.claims[index] = self.state.lent[index] = 0
+                    self.state.claims[index] = self.state.held[index] = self.state.lent[index] = 0
                     if self.state.proportional:
                         self.state.weights[index] = 0.0
                     del self.owners[owner]

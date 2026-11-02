@@ -18,7 +18,7 @@ from ...contracts.pedigree import (
 from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.pedigree.parameters import PedigreeConfig
 from ...science.pedigree.scoring import score_chromosome_selective
 from ...store.container import CheckpointFile
@@ -86,7 +86,7 @@ def run(
         if previous is not None:
             return previous
     one = compact.chromosome_reference(chromosome, eligibility)
-    with thread_team(threads):
+    with task_team(threads):
         product = score_chromosome_selective(prepared, one, panel.trios, eligibility, parameters, reverse=reverse)
     if file is not None:
         assert identity is not None

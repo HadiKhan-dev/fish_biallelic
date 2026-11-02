@@ -28,6 +28,28 @@ class TaskKey:
     scope: str = "run"
     round: str = ""
 
+    # The coordinator hashes and compares keys millions of times per run (every dictionary of tasks, results,
+    # owners and dependencies is keyed by them): the hash is computed once per object and equal-by-identity keys
+    # skip the field comparison. Same semantics as the generated methods; the cached hash is never pickled (string
+    # hashes differ between processes).
+    def __hash__(self) -> int:
+        try:
+            return self.__dict__["_hash"]
+        except KeyError:
+            value = hash((self.stage, self.unit, self.scope, self.round))
+            object.__setattr__(self, "_hash", value)
+            return value
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return (self.stage, self.unit, self.scope, self.round) == (other.stage, other.unit, other.scope, other.round)
+
+    def __getstate__(self) -> dict:
+        return {"stage": self.stage, "unit": self.unit, "scope": self.scope, "round": self.round}
+
 
 @dataclass(frozen=True, order=True)
 class RecordKey:

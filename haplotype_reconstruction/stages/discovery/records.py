@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -250,6 +251,13 @@ class Reader:
         return (TieSource("discovery", tuple(counters), tuple(p.search for p in products if p is not None)),)
 
 
+# Discovery derivations whose every block this process has checked: (container path, its inode, plan identity).
+# Published records never change (containers are append-only; identities fix their content), so later readers of the
+# same derivation skip the per-block checks: every downstream product's reader rebuilds discovery's identity, and
+# re-checking ~10^3 blocks per read made a stage's input reads take tens of seconds.
+_CHECKED: set[tuple[str, int, str]] = set()
+
+
 def result_reader(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
@@ -291,6 +299,9 @@ def result_reader(
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
         ties=TieSettings(reverse=bool(manifest["ties"]["reverse"]), keep=tuple(manifest["ties"].get("keep", ()))),
     )
+    checked = (file.path, os.stat(file.path).st_ino, expected[PLAN])
+    if checked in _CHECKED:
+        return Reader(file, expected, product, count)
     if not is_complete(file, expected):
         return None
     plan = read_items(file, PLAN, expected[PLAN], ("schema", "blocks"))
@@ -303,6 +314,7 @@ def result_reader(
         require_schema(block.payload, BlockAdapter.schema)
         if block.payload["block"] != index or block.payload["kind"] not in ("discovered", "uninformative"):
             raise InvariantError("discovery block completion has invalid metadata")
+    _CHECKED.add(checked)
     return Reader(file, expected, product, count)
 
 

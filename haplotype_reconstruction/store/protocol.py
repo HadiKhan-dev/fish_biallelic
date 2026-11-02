@@ -298,14 +298,14 @@ def publish(file: CheckpointFile, key: str, identity: str, payload: Any) -> Reco
     torn-tail recovery behavior. Identical identities promise identical computation,
     so this protocol does not redundantly hash all scientific outputs.
     """
-    with file._append_lock() as (fd, index):
+    envelope = dict(publication_schema=_PUBLICATION_SCHEMA, derivation=identity, payload=payload)
+    with file.encode(envelope) as encoded, file._append_lock() as (fd, index):
         existing = index.records.get(key)
         if existing is not None:
             envelope = file._read(existing, 1, items=("publication_schema", "derivation"))
             _check(envelope, identity, f"{file.label}:{key}")
             return existing
-        envelope = dict(publication_schema=_PUBLICATION_SCHEMA, derivation=identity, payload=payload)
-        return file._append(fd, index, key, envelope, None, None)
+        return file._append(fd, index, key, encoded, None, None)
 
 
 def resume(file: CheckpointFile, key: str, identity: str) -> PublishedRecord | None:
@@ -368,7 +368,10 @@ def publish_output(
     are no-ops; changed identities require explicit supersede=True. The append
     lock keeps comparison and publication atomic; failures preserve prior data.
     """
-    with file._append_lock() as (fd, index):
+    envelope = dict(
+        publication_schema=_PUBLICATION_SCHEMA, derivation=identity, payload=payload, publication_kind="output"
+    )
+    with file.encode(envelope) as encoded, file._append_lock() as (fd, index):
         existing = index.records.get(key)
         if existing is not None:
             envelope = file._read(existing, 1, items=("publication_schema", "derivation", "publication_kind"))
@@ -378,10 +381,7 @@ def publish_output(
             if not supersede or envelope.get("derivation") == identity:
                 _check(envelope, identity, f"{file.label}:{key}")
                 return existing
-        envelope = dict(
-            publication_schema=_PUBLICATION_SCHEMA, derivation=identity, payload=payload, publication_kind="output"
-        )
-        return file._append(fd, index, key, envelope, None, None)
+        return file._append(fd, index, key, encoded, None, None)
 
 
 def read_output(file: CheckpointFile, key: str, *, identity: Callable[[Any], str]) -> PublishedRecord | None:

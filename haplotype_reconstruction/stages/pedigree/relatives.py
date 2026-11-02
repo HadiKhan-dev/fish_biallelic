@@ -8,7 +8,7 @@ import numpy as np
 
 from ...contracts.pedigree import PreparedChromosome, RelativeContrasts
 from ...contracts.roles import record_field
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.pedigree import relatives as science
 from ...science.pedigree.parameters import PedigreeConfig
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
@@ -35,7 +35,7 @@ def run(
     second = np.zeros(len(pairs))
     full = np.zeros(len(pairs))
     usable: np.ndarray = np.zeros(len(pairs), bool)
-    with thread_team(threads):
+    with task_team(threads):
         for component in prepared.components:
             a, b, use = science.component_contrasts(component, parameters, pairs, reverse=reverse)
             second += a

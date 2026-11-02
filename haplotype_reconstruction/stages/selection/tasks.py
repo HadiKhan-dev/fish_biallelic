@@ -23,7 +23,7 @@ from ...contracts.selection import ContextProposal, RefitSummary
 from ...core.errors import InvariantError
 from ...core.ties import TieCount, TieCounts
 from ...engine.graph import run_graph
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.assembly.evidence import AssemblyEvidence
 from ...science.assembly.parameters import AssemblyParameters
 from ...science.assembly.run import AssemblyResult
@@ -57,6 +57,7 @@ __all__ = [
 
 
 BlockSettings = tuple[SelectionParameters, DiscoveryParameters, float]
+CHUNK_BLOCKS = 8  # average blocks' cost per engine task in a selection round (execution only: results are per block)
 RefitFinished = tuple[int, list[ContextProposal], int, int, int, int, dict[str, int]]
 
 
@@ -81,7 +82,7 @@ def _run_block(
     """Execute one block with its allocated team; publish memo before block when recording."""
 
     def compute() -> BlockSelection:
-        with thread_team(threads):
+        with task_team(threads):
             value = select_task(
                 block,
                 evidence.likelihoods,
@@ -105,13 +106,44 @@ def _run_block(
         return result
 
 
+def _run_blocks(
+    blocks: tuple[BlockTask, ...],
+    settings: BlockSettings,
+    evidence: FounderEvidence,
+    scope: SelectionRecords | None,
+    *,
+    reverse: bool,
+    census_sink: CensusSink | None = None,
+    threads: int = 1,
+) -> tuple[BlockSelection, ...]:
+    """Several blocks of one round in one engine task, in turn; each claims and publishes its own records exactly as
+    a task of its own did, and re-reads the task's CPU share first (it grows into CPUs its peers free)."""
+    from ...engine.scheduler import current_budget
+
+    results = []
+    for block in blocks:
+        results.append(
+            _run_block(
+                block,
+                settings,
+                evidence,
+                scope,
+                reverse=reverse,
+                census_sink=census_sink,
+                threads=max(1, int(current_budget().threads())),
+            )
+        )
+    return tuple(results)
+
+
 def _gather_round(
     scope: SelectionRecords | None,
     indices: tuple[int, ...],
     saved: Sequence[BlockSelection],
-    completed: Sequence[BlockSelection],
+    completed: Sequence[BlockSelection | tuple[BlockSelection, ...]],
 ) -> tuple[BlockSelection, ...]:
-    values = {item.index: item for item in (*saved, *completed)}
+    finished = [item for result in completed for item in (result if isinstance(result, tuple) else (result,))]
+    values = {item.index: item for item in (*saved, *finished)}
     if set(values) != set(indices):
         raise InvariantError(f"selection gather got {sorted(values)}, expected {indices}")
     if scope is not None:
@@ -137,44 +169,68 @@ def round_expansion(
     Complete blocks are resumed with their exact persisted memos. Tasks declare
     working sets and outputs; the scheduler owns concurrency and CPU allocation.
     """
-    saved, tasks = [], []
+    saved, pending = [], []
     for block in blocks:
         prior = None if scope is None else scope.load_block(block.index)
         if prior is not None:
             saved.append(prior)
             continue
-        outputs: tuple[RecordKey, ...] = () if scope is None else (RecordKey(contig, scope.key("block", block.index)),)
-        if scope is not None and block.keep_memo:
-            outputs += (RecordKey(contig, scope.key("memo", block.index)),)
+        pending.append(block)
+
+    def cost(block: BlockTask) -> int:
+        size = max(
+            [
+                len(block.latent),
+                *(len(p) for p in block.proposals),
+                *(len(p) for p in block.alternatives),
+                0 if block.incumbent is None else len(block.incumbent.fit.panel),
+            ]
+        )
+        return len(block.columns) * (size + 1) ** 2
+
+    # Heaviest first, as before; then consecutive blocks are grouped into engine tasks of about CHUNK_BLOCKS average
+    # blocks' cost (a block at least that heavy stays alone), so the coordinator's fixed turnaround per task (reply,
+    # bookkeeping, dispatch, send) is paid per chunk rather than per sub-second block. A round never has fewer tasks
+    # than twice the CPUs it may use (or its block count): heavy blocks (K = 30, about a CPU-minute each) stay about
+    # one per task, so the round still fills the node.
+    pending.sort(key=lambda block: (-cost(block), block.index))
+    costs = [cost(block) for block in pending]
+    count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), 2 * max(1, int(max_threads))))
+    target = sum(costs) / count if costs else 0.0
+    chunks: list[list[BlockTask]] = []
+    total = 0.0
+    for block, weight in zip(pending, costs, strict=True):
+        if chunks and chunks[-1] and total + weight <= target:
+            chunks[-1].append(block)
+            total += weight
+        else:
+            chunks.append([block])
+            total = weight
+    tasks = []
+    observed_rows = evidence.observed.shape[0]
+    for chunk in chunks:
+        outputs: tuple[RecordKey, ...] = ()
+        if scope is not None:
+            for block in chunk:
+                outputs += (RecordKey(contig, scope.key("block", block.index)),)
+                if block.keep_memo:
+                    outputs += (RecordKey(contig, scope.key("memo", block.index)),)
         tasks.append(
             Task(
-                TaskKey("selection", f"block:{block.index:06d}", contig, round_name),
-                _run_block,
-                args=(block, settings, evidence, scope),
+                TaskKey("selection", f"blocks:{chunk[0].index:06d}", contig, round_name),
+                _run_blocks,
+                args=(tuple(chunk), settings, evidence, scope),
                 kwargs=dict(reverse=reverse, census_sink=census_sink),
-                resources=ResourceRequest(1, max_threads, block_task_bytes(block, evidence.observed.shape[0])),
+                # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
+                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task is a
+                # heavy one (K = 30): its path-model kernels spread its samples' lanes over the task's threads.
+                resources=ResourceRequest(
+                    1, 1 if len(chunk) > 1 else max_threads, max(block_task_bytes(b, observed_rows) for b in chunk)
+                ),
                 outputs=outputs,
                 thread_argument="threads",
             )
         )
-    tasks.sort(
-        key=lambda task: (
-            -len(task.args[0].columns)
-            * (
-                max(
-                    [
-                        len(task.args[0].latent),
-                        *(len(p) for p in task.args[0].proposals),
-                        *(len(p) for p in task.args[0].alternatives),
-                        0 if task.args[0].incumbent is None else len(task.args[0].incumbent.fit.panel),
-                    ]
-                )
-                + 1
-            )
-            ** 2,
-            task.args[0].index,
-        )
-    )
     keys = tuple(task.key for task in tasks)
     indices = tuple(block.index for block in blocks)
     gather = Task(
@@ -237,7 +293,7 @@ def _run_refit(
     """Gather one component's private evidence and finish it on its allocated team."""
     gl = np.ascontiguousarray(likelihoods[:, task.columns], dtype=np.float64)
     seen = np.ascontiguousarray(observed[:, task.columns])
-    with thread_team(threads):
+    with task_team(threads):
         output = refit_component(
             task.h,
             gl,

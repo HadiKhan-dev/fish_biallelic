@@ -19,7 +19,7 @@ from haplotype_reconstruction.contracts.assembly import CompletionProduct
 from haplotype_reconstruction.contracts.evidence import ContigEvidence
 from haplotype_reconstruction.contracts.payload import to_payload
 from haplotype_reconstruction.core.ties import TieSettings
-from haplotype_reconstruction.engine.runtime import thread_team
+from haplotype_reconstruction.engine.runtime import task_team
 from haplotype_reconstruction.engine.workers import (
     SharedArrayRef,
     attach_shared_array,
@@ -36,7 +36,7 @@ from .records import COMPLETION, RecordCapability, decode_completion, encode_com
 
 def build_evidence(evidence: ContigEvidence, identity: str, *, cores: int = 1) -> AssemblyEvidence:
     """Construct one exact contig view after evidence has been identity-checked."""
-    with thread_team(cores):
+    with task_team(cores):
         return AssemblyEvidence.from_contig(evidence, identity)
 
 
@@ -54,7 +54,7 @@ def complete_stage(
     stored = None if records is None else records.load(COMPLETION)
     if stored is not None:
         return decode_completion(stored)
-    with thread_team(cores):
+    with task_team(cores):
         prepared, summary = complete(
             inputs.panels, inputs.evidence, parameters, CompletionWorkspace(ties=ties, map_tasks=map_tasks)
         )

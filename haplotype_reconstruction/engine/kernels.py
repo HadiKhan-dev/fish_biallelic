@@ -436,8 +436,8 @@ def warm_up(
     """Seed and warm declarations plus learned signatures before scientific pools.
 
     The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba.
-    One task per function uses the engine pool; a fresh single worker verifies
-    the complete union after a cold compile. Learned failures are counted/skipped;
+    One task per function uses the engine pool; a fresh pool, one task per
+    function, verifies the complete union after a cold compile. Learned failures are counted/skipped;
     declared overload failures raise InvariantError. Store I/O failures only log.
     Call publish(state) in a finally block, including after scientific failure.
     """
@@ -485,7 +485,10 @@ def warm_up(
     state.seconds.update(timings)
     state.verified = sum(map(len, union.values()))
     if state.requested:
-        state.verified, _ = _compile_requests(union, required, state.seconds, 1)
+        # Verified by a fresh pool (processes that compiled nothing), one task per function as in the compile step,
+        # so each function's cache index still has one writer if a load must recompile. A single process loaded
+        # every kernel in turn: one busy CPU for a minute or more at the start of every cold run.
+        state.verified, _ = _compile_requests(union, required, state.seconds, team)
     state.stale = state.compiled < state.requested or state.verified < sum(map(len, union.values()))
     state.skipped = sum(map(len, union.values())) - state.verified
     return state

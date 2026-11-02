@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import fcntl
 import os
+import shutil
 import struct
+import tempfile
 import threading
 import time
 import warnings
@@ -32,6 +34,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from . import codec
 from .identity import canonical_json
@@ -66,6 +69,26 @@ _MAX_KEY_BYTES = 0xFFFF
 
 class CheckpointMismatch(RuntimeError):
     """A bound record (put_once / bind_identity) differs from the value this run would bind."""
+
+
+_SPOOL_BYTES = 64 << 20  # an encoded record stays in memory up to this size before it spills to a temporary file
+_COPY_BYTES = 16 << 20
+
+
+@dataclass
+class Encoded:
+    """A record payload encoded before the append lock (Container.encode); offsets relative to its start."""
+
+    spool: Any
+    metadata_offset: int
+    n_buffers: int
+    decoded: int
+
+    def __enter__(self) -> Encoded:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.spool.close()
 
 
 @dataclass(frozen=True)
@@ -383,10 +406,14 @@ class CheckpointFile:
         return tuple(records[key] for key in sorted(records) if key.startswith(prefix))
 
     def has(self, key) -> bool:
-        return key in self._records()
+        return self.info(key) is not None
 
     def info(self, key) -> RecordInfo | None:
-        return self._records().get(key)
+        # One lookup in the refreshed index, not a copy of it (a contig holds ~10^4 records, looked up per read).
+        index = _index(self.path)
+        with index.lock:
+            self._refresh(index)
+            return index.records.get(key)
 
     def get(self, key, *, nthreads=None, items=None, out=None, path=()):
         """Decode the latest record of ``key`` (KeyError if absent).
@@ -455,10 +482,24 @@ class CheckpointFile:
                 metadata_only=metadata_only,
             )
 
+    def encode(self, payload, *, nthreads=None, clevel=None) -> Encoded:
+        """``payload`` encoded for an append (Encoded, a context manager). Writers encode before they take the
+        append lock: compression is the costly part of an append, and under the lock every writer of a container
+        (a contig's selection blocks, say) waited for the others' compression."""
+        nthreads = codec.cpu_threads(self.nthreads if nthreads is None else nthreads)
+        clevel = self.clevel if clevel is None else int(clevel)
+        spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_BYTES, mode="w+b")
+        try:
+            metadata_offset, n_buffers, decoded = codec.encode(spool, payload, nthreads, clevel)
+        except BaseException:
+            spool.close()
+            raise
+        return Encoded(spool, metadata_offset, n_buffers, decoded)
+
     def put(self, key, payload, *, nthreads=None, clevel=None) -> RecordInfo:
         """Append a record superseding any earlier ``key``; return its RecordInfo (durable on return)."""
-        with self._append_lock() as (fd, index):
-            return self._append(fd, index, key, payload, nthreads, clevel)
+        with self.encode(payload, nthreads=nthreads, clevel=clevel) as encoded, self._append_lock() as (fd, index):
+            return self._append(fd, index, key, encoded, None, None)
 
     def put_once(self, key, payload, *, nthreads=None):
         """Bind ``key`` to a JSON-compatible payload, exactly once; return the bound payload.
@@ -467,10 +508,10 @@ class CheckpointFile:
         ``payload`` as canonical JSON, else CheckpointMismatch.
         """
         expected = canonical_json(payload)
-        with self._append_lock() as (fd, index):
+        with self.encode(payload, nthreads=nthreads) as encoded, self._append_lock() as (fd, index):
             existing = index.records.get(key)
             if existing is None:
-                self._append(fd, index, key, payload, nthreads, None)
+                self._append(fd, index, key, encoded, None, None)
                 return payload
             bound = self._read(existing, 1)
         if canonical_json(bound) != expected:
@@ -547,7 +588,13 @@ class CheckpointFile:
             # interrupted append, _torn).
             handle.seek(offset)
             handle.write(bytes(payload_offset - offset))
-            metadata_offset, n_buffers, decoded = codec.encode(handle, payload, nthreads, clevel)
+            if isinstance(payload, Encoded):
+                payload.spool.seek(0)
+                shutil.copyfileobj(payload.spool, handle, _COPY_BYTES)
+                metadata_offset = payload_offset + payload.metadata_offset
+                n_buffers, decoded = payload.n_buffers, payload.decoded
+            else:
+                metadata_offset, n_buffers, decoded = codec.encode(handle, payload, nthreads, clevel)
             stored = handle.tell() - payload_offset
             written = time.time()
             identity = os.urandom(16)

@@ -150,13 +150,13 @@ class Results:
     including outputs/selection, so an off/on/off change is visible immediately.
     """
 
-    def __init__(self, path: str | Path, *, checkpoints: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path, *, checkpoints: str | Path | None = None, nthreads: Any = 1) -> None:
         paths = RunPaths.from_directory(path)
         self.root = paths.output
         self.checkpoints = paths.checkpoints if checkpoints is None else Path(checkpoints).expanduser().resolve()
         if not self.checkpoints.is_dir():
             raise SettingsError(f"{self.root}: run has not been initialized; use haplotypes init")
-        self._store = CheckpointStore(self.checkpoints)
+        self._store = CheckpointStore(self.checkpoints, nthreads=nthreads)
         self._store.check_layout()
         manifest = self._store.manifest("run")
         if manifest is None:

@@ -7,6 +7,7 @@ The relatedness input is families, never the optional pairwise-IBD report select
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import CandidatePanel, ChromosomeSummaryView, ExclusionRequest, ParentEligibility, Pedigree
 from ...contracts.roles import require_schema
+from ...core.digest import json_digest
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieCounts
 from ...science.pedigree.parameters import PedigreeConfig
@@ -311,6 +313,14 @@ class Reader:
         return result.retained.decision.tie_events if self.product == "pedigree_ties" else result
 
 
+# Pedigree readers this process derived, by run container (path, inode), manifest digest and product. A derivation
+# checks every contig's evidence, painting, preparation and score headers (bound_inputs), and every phase,
+# recombination and export read of each contig needs it: re-deriving it per read made a report over eight contigs
+# read for minutes. Those records are immutable once the pedigree is published, so one derivation per run serves the
+# process; the product's own identity is still checked at every read.
+_DERIVED: dict[tuple[str, int, str, str], Reader] = {}
+
+
 def result_reader(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
@@ -328,6 +338,14 @@ def result_reader(
         raise InputError("invalid pedigree reader request")
     if not store.run.has(PRODUCT):
         return None
+    derived = (store.run.path, os.stat(store.run.path).st_ino, json_digest(manifest), product)
+    reader = _DERIVED.get(derived)
+    if reader is None:
+        reader = _DERIVED[derived] = _derive_reader(store, manifest, product)
+    return reader
+
+
+def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product: str) -> Reader:
     bound = bound_inputs(store, manifest)
     request_id = derivation(
         bound.parameters,

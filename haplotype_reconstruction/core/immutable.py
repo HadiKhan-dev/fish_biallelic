@@ -21,7 +21,11 @@ def declare_immutable(array: np.ndarray) -> np.ndarray:
         raise ValueError("only an array that owns its data can be declared immutable")
     array.flags.writeable = False
     key = id(array)
-    _DECLARED[key] = weakref.ref(array, lambda _, key=key: _DECLARED.pop(key, None))
+
+    def forget(_: weakref.ref, key: int = key) -> None:
+        _DECLARED.pop(key, None)
+
+    _DECLARED[key] = weakref.ref(array, forget)
     return array
 
 

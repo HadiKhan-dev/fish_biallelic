@@ -102,6 +102,22 @@ _OVERLOADS = {
             types.Array(types.float64, 2, "C", False, aligned=True),
         ),
     ),
+    "label_pairs": (
+        (
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.int64, 2, "C", False, aligned=True),
+            types.Array(types.int64, 2, "C", False, aligned=True),
+            types.int64,
+        ),
+    ),
+    "orientation": (
+        (
+            types.Array(types.float64, 2, "C", False, aligned=True),
+            types.Array(types.int64, 1, "C", False, aligned=True),
+            types.float64,
+            types.int64,
+        ),
+    ),
 }
 
 
@@ -443,4 +459,41 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
     return out
 
 
-__all__ = ["block_tables", "forward_backward", "site_posteriors"]
+@kernel(overloads=_OVERLOADS["label_pairs"], cache=True, nogil=True)
+def label_pairs(post, labels0, labels1, S):
+    """float64 [B, S, S]: the ordered label-pair posteriors from the block-state posteriors post [B, n0, n1], each
+    slot state's label per bin in labels0 [B, n0] and labels1 [B, n1]; states are added in their order."""
+    B, n0, n1 = post.shape
+    out = np.zeros((B, S, S))
+    for b in range(B):
+        for s0 in range(n0):
+            for s1 in range(n1):
+                out[b, labels0[b, s0], labels1[b, s1]] += post[b, s0, s1]
+    return out
+
+
+@kernel(overloads=_OVERLOADS["orientation"], cache=True, nogil=True)
+def orientation(ordered, site_bin, tau_g, B):
+    """float64 [B]: per bin, the median over its sites (``site_bin``, a bin's sites consecutive) with P(heterozygous)
+    >= tau_g under the ordered allele posteriors ``ordered`` [4, m] of the orientation certainty max(P01, P10) /
+    (P01 + P10); NaN in a bin without such a site."""
+    out = np.full(B, np.nan)
+    certainty = np.empty(len(site_bin))
+    used = 0
+    last = -1
+    for i in range(len(site_bin)):
+        het = ordered[1, i] + ordered[2, i]
+        if het >= tau_g:
+            b = site_bin[i]
+            if b != last and used:
+                out[last] = np.median(certainty[:used])
+                used = 0
+            last = b
+            certainty[used] = max(ordered[1, i], ordered[2, i]) / het
+            used += 1
+    if used:
+        out[last] = np.median(certainty[:used])
+    return out
+
+
+__all__ = ["block_tables", "forward_backward", "label_pairs", "orientation", "site_posteriors"]

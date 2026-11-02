@@ -448,9 +448,10 @@ def _model_actions(
                 key,
                 _run_discovery,
                 (str(prepared.paths.checkpoints), str(prepared.paths.output), key.scope, resolved, ties),
+                kwargs={"cores": prepared.cores},
                 inputs=(RecordKey(key.scope, "evidence"),),
+                # Up to the allocation: reading the contig's inputs decompresses with the task's live share.
                 resources=ResourceRequest(1, prepared.cores),
-                thread_argument="team",
             )
     for key in (key for key in cut.nodes if key.stage == "selection"):
         actions[key] = Task(
@@ -465,8 +466,8 @@ def _model_actions(
                 prepared.genetic_maps,
                 ties,
             ),
+            kwargs={"cores": prepared.cores},
             resources=ResourceRequest(1, prepared.cores),
-            thread_argument="team",
         )
     for key in (key for key in cut.nodes if key.stage in {"painting", "refit"}):
         args = (str(prepared.paths.checkpoints), str(prepared.paths.output), key.scope, resolved)
@@ -482,6 +483,7 @@ def _model_actions(
             key,
             function,
             args,
+            kwargs={"cores": prepared.cores} if key.stage == "painting" else {},
             outputs=tuple(RecordKey(key.scope, name) for name in published),
             resources=ResourceRequest(1, prepared.cores),
             thread_argument="team",
@@ -491,11 +493,13 @@ def _model_actions(
         if key.stage == "phase":
             function = _run_phase
             args += (str(_scratch_base(prepared)),)
+            # Family phase maps its independent work over the task's live thread budget (thread_map, input order
+            # kept): declared serial, a contig's phase ran on one CPU however many were idle.
+            resources = ResourceRequest(1, prepared.cores)
         else:
             function = _run_recombination
-        actions[key] = Task(
-            key, function, args, outputs=(RecordKey(key.scope, key.stage),), resources=ResourceRequest(1, 1)
-        )
+            resources = ResourceRequest(1, 1)
+        actions[key] = Task(key, function, args, outputs=(RecordKey(key.scope, key.stage),), resources=resources)
     for key in (key for key in cut.nodes if key.stage == "assembly"):
         actions[key] = Task(
             key,
@@ -509,8 +513,8 @@ def _model_actions(
                 prepared.genetic_maps,
                 ties,
             ),
+            kwargs={"cores": prepared.cores},
             resources=ResourceRequest(1, prepared.cores),
-            thread_argument="team",
         )
     if "pedigree" in needed:
         from ..stages.pedigree.prepare import pipeline_task
@@ -535,17 +539,16 @@ def _required_product(reader: Results, adapter: Any, product: str, contig: str |
 
 
 def _run_discovery(
-    root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, team: int = 1
+    root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, cores: int = 1
 ) -> Expansion:
     """Expand a contig into DI2's plan, independent block tasks and checked gather."""
     from ..engine.graph import Expansion
-    from ..results.reader import Results
     from ..science.discovery.run import block_evidence
     from ..stages.discovery.tasks import discovery_tasks
     from ..stages.evidence import records
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     evidence, identity = _required_product(reader, records, "evidence", contig)
     founder = evidence.founder_view()
     blocks = tuple(block_evidence(founder, index) for index in range(len(founder.block_spans)))
@@ -557,7 +560,7 @@ def _run_discovery(
         evidence_identity=identity,
         numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
         ties=ties,
-        max_cores=team,
+        max_cores=cores,
     )
     return Expansion(tasks[:-1], tasks[-1])
 
@@ -572,12 +575,11 @@ class SelectionInputs:
 
     def __call__(self) -> Any:
         from ..contracts.evidence import ContigEvidence
-        from ..results.reader import Results
         from ..science.assembly.evidence import AssemblyEvidence
         from ..stages.discovery import records as discovery_records
         from ..stages.evidence import records as evidence_records
 
-        reader = Results(self.output, checkpoints=self.root)
+        reader = _task_reader(self.output, self.root)
         discovered, _ = _required_product(reader, discovery_records, "discovery", self.contig)
         request = evidence_records.result_reader(
             reader._store, reader.manifest, product="evidence", contig=self.contig, counts=True
@@ -598,10 +600,9 @@ class SelectionContext:
     round_name: str
 
     def __call__(self) -> Any:
-        from ..results.reader import Results
         from ..stages.assembly import records
 
-        reader = Results(self.output, checkpoints=self.root)
+        reader = _task_reader(self.output, self.root)
         request = records.result_reader(
             reader._store,
             reader.manifest,
@@ -619,11 +620,10 @@ def _selected_result(root: str, output: str, contig: str, round_name: str, compl
     """Verify the round publication before returning its graph completion identity."""
     from ..contracts.roles import require_schema
     from ..engine.graph import RecordKey
-    from ..results.reader import Results
     from ..stages.selection import records
     from ..store.protocol import read_items
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     request = records.result_reader(
         reader._store,
         reader.manifest,
@@ -651,18 +651,17 @@ def _run_selection(
     maps: GeneticMapSet,
     ties: TieSettings,
     *,
-    team: int = 1,
+    cores: int = 1,
 ) -> Expansion:
     """Expand precisely one selection round, consuming G1's preceding context assembly."""
     from ..contracts.roles import require_schema
     from ..engine.graph import Expansion, ResultRef, Task, TaskKey
-    from ..results.reader import Results
     from ..stages.discovery import records as discovery_records
     from ..stages.evidence import records as evidence_records
     from ..stages.selection.tasks import SelectionSession, selection_round_task
     from ..store.protocol import NumericalPolicy, read_items
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     upstream = {}
     for name, adapter in (("evidence", evidence_records), ("discovery", discovery_records)):
         request = adapter.result_reader(reader._store, reader.manifest, product=name, contig=contig)
@@ -687,7 +686,7 @@ def _run_selection(
         reverse=ties.reverse,
         tie_keep=ties.keep,
         census_sink=ties.census,
-        max_threads=team,
+        max_threads=cores,
         numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
     )
     child = selection_round_task(
@@ -712,11 +711,10 @@ def _publication_result(
     """Return only independently verified assembly publication identities after its expansion."""
     from ..contracts.roles import require_schema
     from ..engine.graph import RecordKey
-    from ..results.reader import Results
     from ..stages.assembly import records
     from ..store.protocol import read_items
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     request = records.result_reader(
         reader._store, reader.manifest, product="assembly", contig=contig, round_name=round_name
     )
@@ -740,12 +738,11 @@ def _run_assembly(
     maps: GeneticMapSet,
     ties: TieSettings,
     *,
-    team: int = 1,
+    cores: int = 1,
 ) -> Expansion:
     """Expand one AS6 context/final role from checked selected panels and founder evidence."""
     from ..contracts.evidence import ContigEvidence
     from ..engine.graph import Expansion, ResultRef, Task, TaskKey
-    from ..results.reader import Results
     from ..science.assembly.evidence import AssemblyEvidence
     from ..science.assembly.run import AssemblyInputs, Role
     from ..stages.assembly.final import assembly_task, bind_session
@@ -753,7 +750,7 @@ def _run_assembly(
     from ..stages.selection import records as selection_records
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     context = None if not round_name else round_name.removeprefix("context.")
     previous = "l2" if context is None else "initial" if context == "l1" else "l1"
     request = selection_records.result_reader(
@@ -784,7 +781,7 @@ def _run_assembly(
         levels=None if context is None else int(context[1:]),
         records_prefix="assembly" if context is None else f"local_selection/{context}/assembly",
         parent=child_key,
-        max_cores=team,
+        max_cores=cores,
         ties=ties,
         numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
     )
@@ -808,14 +805,14 @@ def _run_painting(
     ties: TieSettings,
     *,
     team: int = 1,
+    cores: int = 1,
 ) -> str:
     """Bind AS6's checked final assembly to PA2's window-capable contig action."""
-    from ..results.reader import Results
     from ..stages.assembly import records as assembly_records
     from ..stages.painting.tasks import identity, run_contig
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     assembly, assembled = _required_product(reader, assembly_records, "assembly", contig)
     evidence_id = _evidence_identity(reader._store, resolved, contig, reverse=ties.reverse)
     file = reader._store.contig(contig)
@@ -843,6 +840,7 @@ def _run_painting(
         payload_identity=payload,
         ties=ties,
         threads=team,
+        max_threads=cores,
         census=ties.census is not None,
     )
     return expected
@@ -852,13 +850,12 @@ def _run_refit(
     root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, team: int = 1
 ) -> str:
     """Pass the checked immutable painting and evidence to RF1's one contig action."""
-    from ..results.reader import Results
     from ..stages.evidence import records as evidence_records
     from ..stages.painting import records as painting_records
     from ..stages.refit.tasks import identity, run_contig
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     painting, painted = _required_product(reader, painting_records, "painting", contig)
     evidence, evidence_id = _required_product(reader, evidence_records, "evidence", contig)
     expected = identity(
@@ -890,7 +887,6 @@ def _run_phase(
     """Bind the canonical typed upstream products to PH1's complete-contig publisher."""
     from ..contracts.phase import PhaseInputIdentities
     from ..core.digest import json_digest
-    from ..results.reader import Results
     from ..stages.evidence import records as evidence_records
     from ..stages.painting import records as painting_records
     from ..stages.pedigree import records as pedigree_records
@@ -899,7 +895,7 @@ def _run_phase(
     from ..stages.refit import records as refit_records
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     evidence, evidence_id = _required_product(reader, evidence_records, "evidence", contig)
     painting, painting_id = _required_product(reader, painting_records, "painting", contig)
     refit, refit_id = _required_product(reader, refit_records, "refit", contig)
@@ -936,14 +932,13 @@ def _run_recombination(
     root: str, output: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet
 ) -> str:
     """Execute RC1 against checked phase and conditioned edges, binding before resume."""
-    from ..results.reader import Results
     from ..stages.pedigree import records as pedigree_records
     from ..stages.phase import records as phase_records
     from ..stages.recombination import records
     from ..stages.recombination.tasks import publish_contig
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     phase, phase_id = _required_product(reader, phase_records, "phase", contig)
     pedigree, _ = _required_product(reader, pedigree_records, "pedigree", None)
     reverse = reader.manifest["ties"]["reverse"]
@@ -969,13 +964,20 @@ def _run_recombination(
     return expected.identity
 
 
+def _task_reader(output: str | Path, root: str | Path) -> Any:
+    """The run's reader inside a graph task: its store decompresses with the task's live CPU share."""
+    from ..engine.scheduler import TASK_THREADS
+    from ..results.reader import Results
+
+    return Results(output, checkpoints=root, nthreads=TASK_THREADS)
+
+
 def _run_sites(root: str, output: str, contig: str, source: Any, *, team: int = 1) -> str:
     """Publish OU1's option-independent site product after checked evidence."""
-    from ..results.reader import Results
     from ..stages.evidence import records
     from ..stages.inputs import sites
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     evidence, identity = _required_product(reader, records, "evidence", contig)
     report, _ = _required_product(reader, records, "summary", contig)
     view = sites.from_evidence(evidence, report, synthetic=reader.synthetic)
@@ -992,7 +994,6 @@ def _run_sites(root: str, output: str, contig: str, source: Any, *, team: int = 
 
 def _run_release(root: str, output: str, contig: str, *, team: int = 1) -> str:
     """Pass checked typed inputs to AS6's release operation without transforming them."""
-    from ..results.reader import Results
     from ..stages.assembly import records as assembly_records
     from ..stages.assembly.release import ReleaseInputs, execute_release, release_identity
     from ..stages.evidence import records as evidence_records
@@ -1000,7 +1001,7 @@ def _run_release(root: str, output: str, contig: str, *, team: int = 1) -> str:
     from ..stages.refit import records as refit_records
     from ..store.protocol import NumericalPolicy
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     assembly, assembly_id = _required_product(reader, assembly_records, "assembly", contig)
     painting, painting_id = _required_product(reader, painting_records, "painting", contig)
     refit, refit_id = _required_product(reader, refit_records, "refit", contig)
@@ -1050,10 +1051,9 @@ def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
     from ..contracts.roles import require_schema
     from ..outputs.export.records import SCHEMA, ExportConfig, ExportRecord
     from ..outputs.export.task import write
-    from ..results.reader import Results
     from ..store.protocol import publish_output, read_output
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     config = ExportConfig(full_length=full_length)
     identity = _export_identity(reader, contig, config)
     file = reader._store.contig(contig)
@@ -1083,10 +1083,9 @@ def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], ful
     from ..contracts.roles import require_schema
     from ..outputs.export.records import SCHEMA, ExportConfig
     from ..outputs.export.run import write_manifest
-    from ..results.reader import Results
     from ..store.protocol import read_output
 
-    reader = Results(output, checkpoints=root)
+    reader = _task_reader(output, root)
     entries = []
     for contig in contigs:
         record = read_output(reader._store.contig(contig), "outputs/export", identity=lambda p: p["identity"])

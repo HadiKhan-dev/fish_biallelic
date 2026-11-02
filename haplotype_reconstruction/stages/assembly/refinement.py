@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 from haplotype_reconstruction.contracts.assembly import ComponentRefinement, JoinedLevel, RefinedLevel
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
 from haplotype_reconstruction.engine.graph import Expansion, ResultRef
+from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
 from haplotype_reconstruction.science.assembly.refinement.capabilities import RefinementExecution, RefinementRecords
 
@@ -244,7 +245,7 @@ def _component_stage(
             component_evidence(scoring, panels),
             context,
             settings,
-            RefinementTeam(cores),
+            RefinementTeam(cores, current_budget()),
             fit_records,
             incoming=incoming,
             storage=storage,

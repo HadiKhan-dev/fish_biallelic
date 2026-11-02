@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ...contracts.source import ContigReads
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.evidence.parameters import EvidenceParameters
 from ...science.evidence.run import prepare_contig
 from ...store.protocol import bind_payload_identity, cached_payload_identity, payload_identity
@@ -53,7 +53,7 @@ def run_contig(
         bind_payload_identity(file, payload_identity(payload))
     else:
         reads = source.reads(contig, team)
-    with thread_team(team):
+    with task_team(team):
         prepared = prepare_contig(reads, parameters, team, reverse=source.reverse)
     records.write(file, prepared, derivation, payload_identity=consumed)
     return derivation

@@ -10,6 +10,7 @@ shared_arrays.py values from engine.parameters.csv; bytes and seconds as named.
 from __future__ import annotations
 
 import atexit
+import functools
 import io
 import logging
 import math
@@ -23,10 +24,11 @@ import threading
 import time
 import traceback
 import weakref
+from collections.abc import Container, Mapping
 from concurrent.futures import CancelledError
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from multiprocessing.connection import wait
 from multiprocessing.context import ForkServerContext, ForkServerProcess
@@ -41,7 +43,7 @@ from ..core.errors import InvariantError
 from ..core.immutable import declared_immutable
 from ..core.kernels import kernel
 from . import runtime as bootstrap
-from .graph import Task, TaskKey
+from .graph import Expansion, ResultRef, Task, TaskKey, _field_names, _readonly
 from .scheduler import (
     _CONTEXT,
     AdmissionToken,
@@ -108,14 +110,16 @@ class SharedArrayRef:
     dtype: str
 
 
-def new_segment(size: int, *, name: str | None = None) -> SharedMemory:
+def new_segment(size: int, *, name: str | None = None, track: bool = True) -> SharedMemory:
     """A new segment of ``size`` bytes (at least one) named after the run (see the module docstring), or ``name``
-    (FileExistsError if it exists)."""
+    (FileExistsError if it exists). ``track=False`` leaves it out of this process's resource tracker: a segment a
+    worker creates for its coordinator to adopt."""
     from .scheduler import mark_in_use, segment_name
 
     for _ in range(1 if name is not None else 64):
         try:
-            handle = SharedMemory(name=name or segment_name(), create=True, size=max(int(size), 1))
+            # ``track`` is Python 3.13's (typeshed does not have it yet).
+            handle = SharedMemory(name=name or segment_name(), create=True, size=max(int(size), 1), track=track)  # type: ignore[call-arg]
         except FileExistsError:
             if name is not None:
                 raise
@@ -670,7 +674,8 @@ class BudgetedPool:
         Each call is one batch with its own start-up gate. ``function`` must be importable (module level).
         A lazy task iterable is drawn from only when a dispatch slot is free;
         measured pressure controls sending the task. No byte reservation exists.
-        ``chunksize`` consecutive tasks are sent and run together.
+        ``chunksize`` consecutive tasks are sent and run together. The consumer holds one of the pool's CPUs while
+        it handles a result: keep that work to bookkeeping (no codec or Numba teams of its own).
         """
         return (result for _, result in self._batch(function, tasks, chunksize))
 
@@ -1379,7 +1384,7 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
             finally:
                 seat.end_task()
             retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
-            connection.send(("result", replace(reply, retire=retire)))
+            connection.send(("result", _pack_reply(replace(reply, retire=retire))))
             # Idle workers retain only explicitly registered affinity state.
             del reply, task, token, message
             if retire:
@@ -1408,15 +1413,20 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
 TRANSPORT_SHARE_BYTES = 8 << 20
 
 
+def _plain_dtype(dtype: np.dtype) -> bool:
+    """Whether ``dtype.str``, which a SharedArrayRef carries, names ``dtype`` exactly (no objects, fields, subarrays or
+    metadata)."""
+    if dtype.hasobject or dtype.fields is not None or dtype.subdtype is not None or dtype.metadata is not None:
+        return False
+    return np.dtype(dtype.str) == dtype
+
+
 def _fixed(array: np.ndarray) -> bool:
     """Whether ``array`` may be shared by identity: its data provably can no longer change (it and every array it
     views are read-only, down to immutable ``bytes`` or an owner declared immutable at birth) and ``dtype.str``, which
     a SharedArrayRef carries, names its dtype exactly (no fields, subarrays or metadata). Read-only flags alone prove
     nothing: a view made before a freeze stays writable, and a read-only memoryview of a bytearray changes with it."""
-    dtype = array.dtype
-    if dtype.hasobject or dtype.fields is not None or dtype.subdtype is not None or dtype.metadata is not None:
-        return False
-    if np.dtype(dtype.str) != dtype:
+    if not _plain_dtype(array.dtype):
         return False
     item: Any = array
     while isinstance(item, np.ndarray):
@@ -1430,6 +1440,60 @@ def _fixed(array: np.ndarray) -> bool:
     return type(item) is bytes
 
 
+# Arrays attached from a transport segment in this process: id -> (weak reference, reference, owner, descriptor at
+# attachment). Sending one
+# again passes the same reference on without a copy, in either direction, while its segment is known to live: in the
+# coordinator, ``owner`` is the transport that holds the segment (and must still be open); in a worker it is the task
+# number during which the array was attached (its coordinator keeps that task's segments until the reply is in).
+_ATTACHED: dict[int, tuple[weakref.ref, tuple, Any, tuple]] = {}
+_TASK_NUMBER = 0  # in a graph worker, the number of the task it is running
+# In a graph worker, the current task's attachments by reference (weak: a finished task's arrays are not kept).
+_TASK_ATTACHED: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+def _attach(reference: SharedArrayRef, transposed: bool, owner: Any) -> np.ndarray:
+    """Attach a transport segment read-only, register the array for pass-through and return it."""
+    global _SHARED_UNCLOSED
+    _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
+    handle, array = attach_shared_array(reference)
+    array.flags.writeable = False
+    _SHARED_UNCLOSED.append((handle, weakref.ref(array)))  # unmapped once no array refers to it
+    result = array.T if transposed else array
+    key = id(result)
+
+    def forget(_: weakref.ref, key: int = key) -> None:
+        _ATTACHED.pop(key, None)
+
+    _ATTACHED[key] = (
+        weakref.ref(result, forget),
+        _pid(reference, transposed),
+        owner,
+        _descriptor(result),
+    )
+    return result
+
+
+def _descriptor(array: np.ndarray) -> tuple:
+    """What a reference fixes besides the data: an attached array reshaped or retyped in place (``.shape =``,
+    ``.dtype =``) keeps its identity but no longer matches its reference."""
+    return array.shape, array.strides, array.dtype
+
+
+def _pid(reference: SharedArrayRef, transposed: bool) -> tuple:
+    return ("shared-array", reference, transposed)
+
+
+def _passed_through(array: np.ndarray, owner: Any) -> tuple | None:
+    """The reference ``array`` was attached from, if it may be passed on: attached in this coordinator's transport
+    (``owner``, still open) or, in a worker (``owner`` None), during the current task."""
+    entry = _ATTACHED.get(id(array))
+    if entry is None or entry[0]() is not array or entry[3] != _descriptor(array):
+        return None
+    if owner is None:
+        return entry[1] if entry[2] == _TASK_NUMBER else None
+    return entry[1] if entry[2] is owner and not owner.closed else None
+
+
 @dataclass(frozen=True)
 class _PackedTask:
     """A task pickled by the coordinator with its large arrays replaced by shared-memory references."""
@@ -1437,61 +1501,281 @@ class _PackedTask:
     payload: bytes
 
     def load(self) -> Task:
-        return cast(Task, _TransportUnpickler(io.BytesIO(self.payload)).load())
+        global _TASK_NUMBER
+        _TASK_NUMBER += 1
+        _TASK_ATTACHED.clear()
+        return cast(Task, _TransportUnpickler(io.BytesIO(self.payload), _TASK_NUMBER).load())
+
+
+@dataclass(frozen=True)
+class _PackedReply:
+    """A worker's reply pickled with its large arrays as shared-memory references (_ReplyPickler)."""
+
+    payload: bytes
+
+    def load(self, transport: _ArrayTransport) -> WorkerReply:
+        return cast(WorkerReply, _TransportUnpickler(io.BytesIO(self.payload), transport).load())
 
 
 class _TransportPickler(ForkingPickler):
     def __init__(self, file: Any, transport: _ArrayTransport):
         super().__init__(file, pickle.HIGHEST_PROTOCOL)
         self.transport = transport
-        self.used: list[np.ndarray] = []
+        self.names: set[str] = set()
+        # The arrays referenced, alive until pack() has recorded their flight: a reducer may build temporary arrays,
+        # whose segment would otherwise be released (the transport holds sources weakly) before then.
+        self.kept: list[np.ndarray] = []
 
-    def persistent_id(self, obj: Any) -> Any:
+    def reducer_override(self, obj: Any) -> Any:
+        # reducer_override, unlike persistent_id, is not called for atoms, strings or builtin containers: pickling
+        # an object-heavy task costs about a third less (persistent_id ran Python code for every int and float).
         if type(obj) is np.ndarray and obj.nbytes >= TRANSPORT_SHARE_BYTES:
-            reference = self.transport.reference(obj) if _fixed(obj) else None
+            reference = _passed_through(obj, self.transport)
+            if reference is None and _fixed(obj):
+                reference = self.transport.reference(obj)
             if reference is not None:
-                self.used.append(obj)
-                return reference
+                self.names.add(reference[1].name)
+                self.kept.append(obj)
+                return _shared_array, reference
             self.transport.by_value(obj)
-        return None
+        return NotImplemented
+
+
+class _ByValue(Exception):
+    """A packed child would carry a large array by value (_packed_child then leaves the child unpacked)."""
+
+
+class _ReplyPickler(ForkingPickler):
+    """A graph worker's reply: arrays attached during this task pass their references back; any other large,
+    contiguous, read-only array of a plain dtype is copied once into a new segment, which the coordinator adopts.
+    The copy is taken while the reply is pickled, exactly as pickling by value would take it, and it arrives
+    read-only as a read-only array sent by value would (results and arguments are read-only throughout, _readonly),
+    so unlike the coordinator's identity cache (_fixed) it needs no proof that the array cannot change later. Each new
+    segment's name is announced to the coordinator before the segment exists, so an abort unlinks it whatever
+    happens. Every other array travels by value; in a packed child (``child``) a large one raises _ByValue instead,
+    since each child is pickled on its own and would carry its own copy."""
+
+    def __init__(
+        self,
+        file: Any,
+        made: dict[int, tuple] | None = None,
+        kept: list[np.ndarray] | None = None,
+        *,
+        child: bool = False,
+        shared: frozenset[int] = frozenset(),
+    ):
+        super().__init__(file, pickle.HIGHEST_PROTOCOL)
+        # Shared by every pickler of one reply, so an array its children all carry is copied into one segment.
+        self.made: dict[int, tuple] = {} if made is None else made
+        self.kept: list[np.ndarray] = [] if kept is None else kept  # the arrays keyed in ``made`` stay alive
+        self.references: list[tuple] = []
+        self.child = child
+        self.shared = shared  # ids of smaller arrays that several packed calls of this reply carry (_shared_arrays)
+        self.refs: dict[TaskKey, int] = {}  # a packed call's result references, by first appearance
+
+    def reducer_override(self, obj: Any) -> Any:
+        if self.child and type(obj) is ResultRef:
+            self.refs.setdefault(obj.task, len(self.refs))
+            return NotImplemented
+        if type(obj) is np.ndarray and (obj.nbytes >= TRANSPORT_SHARE_BYTES or id(obj) in self.shared):
+            reference = _passed_through(obj, None)
+            if (
+                reference is None
+                and not obj.flags.writeable
+                and _plain_dtype(obj.dtype)
+                and (obj.flags.c_contiguous or obj.flags.f_contiguous)
+            ):
+                reference = self.made.get(id(obj))
+                if reference is None:
+                    reference = self.made[id(obj)] = _reply_segment(obj)
+                    self.kept.append(obj)
+            if reference is None:
+                if self.child:
+                    raise _ByValue
+                return NotImplemented
+            self.references.append(reference)
+            return _shared_array, reference
+        return NotImplemented
+
+
+def _reply_segment(array: np.ndarray) -> tuple:
+    """Copy ``array`` into a new segment for the coordinator to adopt; this worker keeps no mapping of it."""
+    from .scheduler import segment_name
+
+    transposed = not array.flags.c_contiguous
+    for _ in range(64):
+        name = segment_name()
+        _announce_shared("shared+", (name,))
+        try:
+            handle = new_segment(array.nbytes, name=name, track=False)
+        except FileExistsError:
+            _announce_shared("shared-", (name,))
+            continue
+        try:
+            return _pid(_fill_shared(array.T if transposed else array, handle, 1), transposed)
+        finally:
+            handle.close()
+    raise FileExistsError("no free shared-memory segment name")
+
+
+def _pack_reply(reply: WorkerReply) -> _PackedReply:
+    made: dict[int, tuple] = {}
+    kept: list[np.ndarray] = []
+    if isinstance(reply.value, Expansion):
+        expansion = reply.value
+        shared = _shared_arrays((*expansion.subtasks, expansion.gather))
+        children = tuple(_packed_child(task, made, kept, shared) for task in expansion.subtasks)
+        gather = _packed_child(expansion.gather, made, kept, shared)
+        reply = replace(reply, value=replace(expansion, subtasks=children, gather=gather))
+    buffer = io.BytesIO()
+    _ReplyPickler(buffer, made, kept).dump(reply)
+    return _PackedReply(buffer.getvalue())
+
+
+@dataclass(frozen=True)
+class _PackedCall:
+    """A child task's call (function, arguments) pickled once by the worker that expanded it, plus the transport
+    segments it refers to and the results it reads (``refs``, its gather's children). The coordinator forwards the
+    bytes unread (it neither unpickles nor re-pickles them, nor walks them for references), holds those segments
+    while the child is pending or running, and sends the referenced results beside the bytes."""
+
+    payload: bytes
+    names: tuple[str, ...]
+    refs: tuple[TaskKey, ...] = ()
+
+
+SHARED_CHILD_ARRAY_BYTES = 64 << 10  # smaller arrays several packed calls carry are copied into each
+
+
+def _shared_arrays(tasks: tuple[Task, ...]) -> frozenset[int]:
+    """Ids of the arrays of at least SHARED_CHILD_ARRAY_BYTES that two or more of ``tasks`` carry (through tuples,
+    lists, mappings, dataclasses and object arrays): each packed call is pickled on its own, so such an array would
+    otherwise be copied into every call that carries it (16 calls sharing 1 MiB made a 16 MiB reply)."""
+    seen: dict[int, int] = {}
+    for number, task in enumerate(tasks):
+        visited: set[int] = set()
+        pending: list[Any] = [task.args, task.kwargs]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, (str, bytes, int, float, complex, bool, type(None), np.generic)):
+                continue
+            if id(item) in visited:
+                continue
+            visited.add(id(item))
+            if isinstance(item, np.ndarray):
+                if item.dtype.hasobject:
+                    pending.extend(item.flat)
+                elif item.nbytes >= SHARED_CHILD_ARRAY_BYTES and seen.setdefault(id(item), number) != number:
+                    seen[id(item)] = -1
+                continue
+            names = _field_names(item)
+            if names is not None:
+                pending.extend(getattr(item, name) for name in names)
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+            elif isinstance(item, Mapping):
+                pending.extend(item.values())
+    return frozenset(key for key, number in seen.items() if number == -1)
+
+
+def _packed_child(
+    task: Task, made: dict[int, tuple], kept: list[np.ndarray], shared: frozenset[int] = frozenset()
+) -> Task:
+    """An expansion child or gather with its call pickled here once (_call_packed unpacks it in the worker that runs
+    it and resolves its result references there, with the coordinator's own resolver). A task that would carry a
+    large array by value stays as it is (the main reply carries such an array once for every child)."""
+    if task.function is _call_packed:
+        return task
+    buffer = io.BytesIO()
+    pickler = _ReplyPickler(buffer, made, kept, child=True, shared=shared)
+    try:
+        pickler.dump((task.function, task.args, dict(task.kwargs)))
+    except _ByValue:
+        return task
+    names = tuple(sorted({reference[1].name for reference in pickler.references}))
+    packed = _PackedCall(buffer.getvalue(), names, tuple(pickler.refs))  # dict order: by index
+    return replace(task, function=_call_packed, args=(packed,), kwargs={})
+
+
+def _call_packed(packed: _PackedCall, values: tuple = (), /, **extra: Any) -> Any:
+    """Run a child's call packed by its expanding worker: ``values`` are the results its references name (in
+    ``packed.refs`` order, sent by the coordinator), substituted with the coordinator's own resolver
+    (scheduler._resolve_graph: same traversal, rebuilt containers and dataclasses, literal mapping keys), and
+    ``extra`` the engine's per-run arguments (its thread team)."""
+    from .scheduler import _resolve_graph
+
+    function, args, kwargs = _TransportUnpickler(io.BytesIO(packed.payload), _TASK_NUMBER).load()
+    # Always, as the coordinator resolved every task (references or not): it rebuilds tuples, lists and mappings.
+    results = dict(zip(packed.refs, values, strict=True))
+    args, kwargs = _resolve_graph(args, results), _resolve_graph(kwargs, results)
+    args, kwargs = _readonly((args, dict(kwargs, **extra)))
+    return function(*args, **kwargs)
+
+
+def _shared_array(kind: str, reference: SharedArrayRef, transposed: bool) -> np.ndarray:
+    """A transport reference in a pickle: only _TransportUnpickler loads one (its find_class binds this name to the
+    payload's own loader); any other unpickler reaching it is outside the transport."""
+    raise pickle.UnpicklingError("a task-transport array reference can only be loaded by the task transport")
 
 
 class _TransportUnpickler(pickle.Unpickler):
-    def __init__(self, file: Any):
-        super().__init__(file)
-        self.attached: dict[tuple, np.ndarray] = {}  # one array per reference: a repeated array stays one object
+    """Attaches each shared-memory reference once per payload (a repeated array stays one object) and registers it
+    for pass-through; in the coordinator (``owner`` a transport) the attached array also holds its segment."""
 
-    def persistent_load(self, pid: Any) -> Any:
-        global _SHARED_UNCLOSED
-        kind, reference, transposed = pid
+    def __init__(self, file: Any, owner: Any):
+        super().__init__(file)
+        self.owner = owner
+        # In a worker, every payload of the current task shares one memo (its message and its packed call: an
+        # array both carried and referenced stays one object, as when the coordinator pickled the whole task).
+        self.attached: Any = _TASK_ATTACHED if type(owner) is int and owner == _TASK_NUMBER else {}
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module == __name__ and name == "_shared_array":
+            return self._shared_array
+        return super().find_class(module, name)
+
+    def _shared_array(self, kind: str, reference: SharedArrayRef, transposed: bool) -> np.ndarray:
         if kind != "shared-array":
             raise pickle.UnpicklingError(f"unknown task transport reference {kind!r}")
         key = (reference, transposed)
         if key in self.attached:
             return self.attached[key]
-        _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
-        handle, array = attach_shared_array(reference)
-        array.flags.writeable = False
-        _SHARED_UNCLOSED.append((handle, weakref.ref(array)))  # unmapped once no array refers to it
-        result = array.T if transposed else array
+        result = _attach(reference, transposed, self.owner)
+        if isinstance(self.owner, _ArrayTransport):
+            self.owner.hold(reference.name, result)
         self.attached[key] = result
         return result
+
+
+class _Segment:
+    """One transport segment in the coordinator: its handle (None when adopted from a worker), the arrays here that
+    refer to it (sources or attached views) and the tasks in flight that carry it."""
+
+    __slots__ = ("flight", "handle", "holders")
+
+    def __init__(self, handle: SharedMemory | None):
+        self.handle = handle
+        self.holders: dict[int, weakref.ref] = {}  # by the reference's id (arrays are not hashable)
+        self.flight = 0
 
 
 class _ArrayTransport:
     """The coordinator's shared copies of large immutable task arrays (TRANSPORT_SHARE_BYTES, _fixed).
 
-    An array is shared once per descriptor (data address, shape, strides, dtype: a reshaped array is copied anew),
-    and its segments live while it does; arrays of a task in flight are kept alive until its worker replies, so a
-    worker always finds the segment it was sent. A segment is registered before it is filled, so close() unlinks it
-    whatever interrupts the copy.
+    A segment is either created here (once per source array descriptor: data address, shape, strides, dtype; a
+    reshaped array is copied anew) or adopted from a worker's reply. It lives while an array here refers to it (a
+    source, or an array attached from it) or a task in flight carries it, and is unlinked when neither remains, so
+    each round's inputs leave memory with the round. A segment created here is registered before it is filled, so
+    close() unlinks it whatever interrupts the copy.
     """
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.entries: dict[tuple, tuple[weakref.ref, tuple, SharedMemory]] = {}
+        self.closed = False
+        self.sources: dict[tuple, tuple[weakref.ref, tuple]] = {}
+        self.segments: dict[str, _Segment] = {}
         self.filling: dict[str, SharedMemory | None] = {}  # by name, from before its creation until its entry
-        self.in_flight: dict[int, list[np.ndarray]] = {}
+        self.in_flight: dict[int, set[str]] = {}
         self.copied: dict[tuple, list[int]] = {}  # large arrays sent by value: (shape, dtype) -> [tasks, bytes]
 
     def pack(self, index: int, task: Task) -> _PackedTask:
@@ -1499,12 +1783,32 @@ class _ArrayTransport:
         pickler = _TransportPickler(buffer, self)
         pickler.dump(task)
         with self.lock:
-            self.in_flight[index] = pickler.used
+            for name in pickler.names:
+                self.segments[name].flight += 1
+            self.in_flight[index] = pickler.names
         return _PackedTask(buffer.getvalue())
+
+    def receive(self, reply: Any) -> Any:
+        """A worker's reply, its shared-memory references attached and held here; an expansion's packed children
+        hold the segments their calls refer to until the children finish (their arguments are then dropped)."""
+        if not isinstance(reply, _PackedReply):
+            return reply
+        reply = reply.load(self)
+        if isinstance(reply.value, Expansion):
+            for child in (*reply.value.subtasks, reply.value.gather):
+                for packed in child.args:
+                    if isinstance(packed, _PackedCall):
+                        for name in packed.names:
+                            self.hold(name, packed)
+        return reply
 
     def done(self, index: int) -> None:
         with self.lock:
-            self.in_flight.pop(index, None)
+            for name in self.in_flight.pop(index, ()):
+                segment = self.segments.get(name)
+                if segment is not None:
+                    segment.flight -= 1
+                    self._release_if_unused(name)
 
     def by_value(self, array: np.ndarray) -> None:
         """Count a large array that travels by value (writable, viewing writable data, strided or with an inexact
@@ -1514,22 +1818,34 @@ class _ArrayTransport:
             entry[0] += 1
             entry[1] += array.nbytes
 
+    def hold(self, name: str, array: Any) -> None:
+        """``array`` (here: an attached array, or a packed call that refers to the segment) refers to segment
+        ``name``: adopt it if a worker created it, and keep it while ``array`` lives."""
+        with self.lock:
+            segment = self.segments.get(name)
+            if segment is None:
+                segment = self.segments[name] = _Segment(None)
+            holder = weakref.ref(array, functools.partial(self._released, name))
+            segment.holders[id(holder)] = holder
+
     def reference(self, array: np.ndarray) -> tuple | None:
         if not (array.flags.c_contiguous or array.flags.f_contiguous):
             return None
         key = (id(array), array.__array_interface__["data"][0], array.shape, array.strides, array.dtype.str)
         with self.lock:
-            entry = self.entries.get(key)
+            entry = self.sources.get(key)
             if entry is not None and entry[0]() is array:
                 return entry[1]
             transposed = not array.flags.c_contiguous
             handle = self._new_segment(array.nbytes)
             try:
-                shared = _fill_shared(array.T if transposed else array, handle, 1)
-                pid = ("shared-array", shared, transposed)
-                self.entries[key] = (weakref.ref(array, self._finalizer(key)), pid, handle)
+                pid = _pid(_fill_shared(array.T if transposed else array, handle, 1), transposed)
+                self.segments[handle.name] = _Segment(handle)
+                self.hold(handle.name, array)
+                self.sources[key] = (weakref.ref(array, functools.partial(self._source_dropped, key)), pid)
             except BaseException:
-                self.entries.pop(key, None)
+                self.sources.pop(key, None)
+                self.segments.pop(handle.name, None)
                 close_shared_memory([handle], unlink=True)
                 raise
             finally:
@@ -1552,34 +1868,41 @@ class _ArrayTransport:
             return handle
         raise FileExistsError("no free shared-memory segment name")
 
-    def _finalizer(self, key: tuple) -> Any:
-        def dropped(_: Any) -> None:
-            self._drop(key)
-
-        return dropped
-
-    def _drop(self, key: tuple) -> None:
+    def _source_dropped(self, key: tuple, _: Any) -> None:
         with self.lock:
-            entry = self.entries.pop(key, None)
-        if entry is not None:
-            close_shared_memory([entry[2]], unlink=True)
+            self.sources.pop(key, None)
+
+    def _released(self, name: str, holder: weakref.ref) -> None:
+        with self.lock:
+            segment = self.segments.get(name)
+            if segment is not None:
+                segment.holders.pop(id(holder), None)
+                self._release_if_unused(name)
+
+    def _release_if_unused(self, name: str) -> None:
+        segment = self.segments[name]
+        if segment.holders or segment.flight > 0:
+            return
+        del self.segments[name]
+        _unlink_segment(name, segment.handle)
 
     def close(self) -> None:
         with self.lock:
-            handles = [entry[2] for entry in self.entries.values()]
-            handles += [handle for handle in self.filling.values() if handle is not None]
+            self.closed = True
+            segments = list(self.segments.items())
+            handles = [handle for handle in self.filling.values() if handle is not None]
             unopened = [name for name, handle in self.filling.items() if handle is None]
             copied = sorted(self.copied.items(), key=lambda item: -item[1][1])
-            self.entries.clear()
+            self.sources.clear()
+            self.segments.clear()
             self.filling.clear()
             self.in_flight.clear()
             self.copied.clear()
+        for name, segment in segments:
+            _unlink_segment(name, segment.handle)
         close_shared_memory(handles, unlink=True)
         for name in unopened:  # interrupted between its name and its handle: unlink it if it was created
-            try:
-                close_shared_memory([SharedMemory(name=name, create=False)], unlink=True)
-            except FileNotFoundError:
-                pass
+            _unlink_segment(name, None)
         if copied:
             gib = 1 << 30
             largest = "; ".join(f"{shape} {dtype} x{tasks}" for (shape, dtype), (tasks, _) in copied[:3])
@@ -1587,6 +1910,31 @@ class _ArrayTransport:
                 f"[transport] {sum(tasks for _, (tasks, _) in copied)} large task arrays "
                 f"({sum(size for _, (_, size) in copied) / gib:.2f} GiB) travelled by value: {largest}"
             )
+
+
+def _unlink_segment(name: str, handle: SharedMemory | None) -> None:
+    """Close and unlink a transport segment by handle, or by name when it was adopted (best effort)."""
+    if handle is None:
+        _unlink_name(name)
+        return
+    close_shared_memory([handle], unlink=True)
+
+
+def _unlink_name(name: str) -> None:
+    """Unlink a shared-memory name without mapping it (best effort): a segment interrupted between its creation and
+    its sizing is empty, and mapping it fails."""
+    try:
+        import _posixshmem
+    except ImportError:  # no POSIX shared memory: only a mapped handle unlinks
+        try:
+            close_shared_memory([SharedMemory(name=name, create=False, track=False)], unlink=True)  # type: ignore[call-arg]
+        except (OSError, ValueError):
+            pass
+        return
+    try:
+        _posixshmem.shm_unlink(name if name.startswith("/") else "/" + name)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -1627,6 +1975,9 @@ class WorkerGroup:
         # Each worker's announced shared-value segments, unlinked by close() whatever became of the worker.
         self.shared: dict[int, set[str]] = {}
         self.transport = _ArrayTransport()
+        # Coordinator traffic by (direction, stage): [messages, payload bytes, pickling or unpickling seconds, pipe
+        # receive seconds], logged when the group closes (where the coordinator's time goes).
+        self.traffic: dict[tuple[str, str], list[float]] = {}
         self.affinities: dict[str, int] = {}
         if static_affinities:
             from .scheduler import partition_chains
@@ -1666,16 +2017,25 @@ class WorkerGroup:
         else:
             self.handles[index] = handle
 
-    def free_worker(self, affinity: str | None) -> int | None:
-        """An idle worker for a task of ``affinity``: its pinned worker, else the first idle one. A new affinity is
-        pinned to it only when a task is sent (pin), not when admission may still refuse the task."""
+    def free_worker(self, affinity: str | None, reserved: Container[int] = (), own: Container[int] = ()) -> int | None:
+        """An idle worker for a task of ``affinity``: its pinned worker, else the first idle one outside
+        ``reserved`` (the workers a pinned chain or a pending gather will need), then one reserved for the task's own
+        chain or gather (``own``: what waits there waits for this task anyway), and another chain's only when no
+        other is idle. Another contig's task on a chain's worker held that chain's next step until it finished. A
+        new affinity is pinned to it only when a task is sent (pin), not when admission may still refuse the task."""
         if affinity in self.affinities:
             index = self.affinities[affinity]
             return index if self.handles[index].ready and self.handles[index].busy is None else None
+        mine = other = None
         for index, handle in enumerate(self.handles):
             if handle.ready and handle.busy is None:
-                return index
-        return None
+                if index not in reserved:
+                    return index
+                if index in own:
+                    mine = index if mine is None else mine
+                elif other is None:
+                    other = index
+        return mine if mine is not None else other
 
     def pin(self, affinity: str | None, index: int) -> None:
         """Pin ``affinity`` to worker ``index`` as its task is sent (its later tasks run there)."""
@@ -1687,13 +2047,26 @@ class WorkerGroup:
         if handle.busy is not None or not handle.ready:
             raise InvariantError("worker already has a task or has not initialized")
         handle.busy = task.key
-        handle.connection.send((self.transport.pack(index, task), token, lane))
+        began = time.perf_counter()
+        packed = self.transport.pack(index, task)
+        self._count("task", task.key.stage, len(packed.payload), time.perf_counter() - began, 0.0)
+        handle.connection.send((packed, token, lane))
+
+    def _count(self, direction: str, stage: str, size: int, seconds: float, receiving: float) -> None:
+        row = self.traffic.get((direction, stage))
+        if row is None:
+            row = self.traffic[direction, stage] = [0, 0, 0.0, 0.0]
+        row[0] += 1
+        row[1] += size
+        row[2] += seconds
+        row[3] += receiving
 
     def receive(self, timeout: float = 0.2) -> list[tuple[int, WorkerReply]]:
         ready = wait([h.connection for h in self.handles], timeout)
         replies = []
         for index, handle in enumerate(self.handles):
             if handle.connection in ready:
+                began = time.perf_counter()
                 try:
                     kind, value = handle.connection.recv()
                 except (EOFError, OSError) as error:
@@ -1711,6 +2084,10 @@ class WorkerGroup:
                         task_error.add_note(trace)
                     raise bootstrap.task_failure(task_error)
                 elif kind == "result":
+                    received = time.perf_counter()
+                    size = len(value.payload) if isinstance(value, _PackedReply) else 0
+                    value = self.transport.receive(value)
+                    self._count("reply", value.key.stage, size, time.perf_counter() - received, received - began)
                     if value.key != handle.busy:
                         raise InvariantError("worker replied for a different task")
                     handle.busy = None
@@ -1762,11 +2139,22 @@ class WorkerGroup:
             if handle.started is not None and _alive(handle.process.pid, handle.started):
                 handle.process.kill()
             handle.process.join(timeout=1.0)
-        for index, handle in enumerate(self.handles):
-            self._drain_shared(index, handle)
-            handle.connection.close()
-        self._unlink_shared()
-        self.transport.close()
+        try:
+            for index, handle in enumerate(self.handles):
+                self._drain_shared(index, handle)
+                handle.connection.close()
+            self._unlink_shared()
+        finally:
+            self.transport.close()
+        if self.traffic:
+            rows = sorted(self.traffic.items(), key=lambda item: -(item[1][2] + item[1][3]))
+            _LOG.info(
+                "[transport] coordinator traffic (messages, MiB, pickle s, receive s): "
+                + "; ".join(
+                    f"{direction} {stage} {int(n)} {size / (1 << 20):.0f} {pickled:.1f} {receiving:.1f}"
+                    for (direction, stage), (n, size, pickled, receiving) in rows[:12]
+                )
+            )
 
     def _drain_shared(self, index: int, handle: _WorkerHandle) -> None:
         """Read announcements still queued from a stopped worker (other messages no longer matter)."""
@@ -1792,13 +2180,7 @@ class WorkerGroup:
         names = sorted({name for announced in self.shared.values() for name in announced})
         self.shared.clear()
         for name in names:
-            try:
-                handle = SharedMemory(name=name, create=False)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                continue
-            close_shared_memory([handle], unlink=True)
+            _unlink_name(name)
 
     def __enter__(self) -> WorkerGroup:
         return self

@@ -25,7 +25,7 @@ from ...contracts.pedigree import (
 )
 from ...contracts.roles import require_schema
 from ...core.errors import InputError, InvariantError
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team, thread_team
 from ...engine.scheduler import TaskBudget, TaskSession, current_budget
 from ...engine.workers import ResidentRef, release_resident, resident_value, retain
 from ...science.pedigree import forward, m1, pair_bound, panel, selective_m1, selective_screen
@@ -335,7 +335,7 @@ def bound_run(
         previous = load_product(file, BOUNDS, identity, adapter)
         if previous is not None:
             return previous
-    with thread_team(threads):
+    with task_team(threads):
         product = PairBounds(
             prepared.contig, pair_bound.chromosome_bounds(prepared, compact, parameters, reverse=reverse)
         )

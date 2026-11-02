@@ -10,6 +10,7 @@ hoisted items. Arrays decoded here are read-only views; no input buffer is chang
 
 from __future__ import annotations
 
+import functools
 import types
 from collections.abc import Mapping
 from dataclasses import MISSING, fields, is_dataclass
@@ -141,6 +142,15 @@ def _decode(annotation: Any, value: Any) -> Any:
     raise InputError(f"no payload decoder for annotation {annotation!r}")
 
 
+@functools.cache
+def _record_layout(cls: type) -> tuple[dict[str, Any], frozenset[str], dict[str, Any]]:
+    """A record class's fields by name, its stored field names and its resolved annotations, once per class (classes do
+    not change; resolving annotations for every record dominated decoding thousands of small records)."""
+    declared = {item.name: item for item in fields(cls)}
+    stored = frozenset(name for name, item in declared.items() if item.metadata.get("stored", True))
+    return declared, stored, get_type_hints(cls)
+
+
 def from_payload(cls: type[T], payload: Mapping[str, Any], *, derived: Mapping[str, Any] | None = None) -> T:
     """Restore a record from exactly its stored fields and optional adapter-derived fields.
 
@@ -151,8 +161,7 @@ def from_payload(cls: type[T], payload: Mapping[str, Any], *, derived: Mapping[s
         raise InputError(f"{cls.__name__} is not a stored dataclass record")
     if getattr(cls, "__payload_custom__", False):
         raise InputError(f"{cls.__name__} requires its explicit payload codec")
-    declared = {item.name: item for item in fields(cls)}
-    stored = {name for name, item in declared.items() if item.metadata.get("stored", True)}
+    declared, stored, hints = _record_layout(cls)
     if "schema" in stored:
         version = declared["schema"].default
         if version is MISSING:
@@ -167,7 +176,6 @@ def from_payload(cls: type[T], payload: Mapping[str, Any], *, derived: Mapping[s
     }
     if invalid:
         raise InputError(f"{cls.__name__} unknown derived fields {sorted(invalid)}")
-    hints = get_type_hints(cls)
     values = {name: _decode(hints[name], value) for name, value in payload.items() if declared[name].init}
     values.update({name: _readonly(value) for name, value in supplied.items()})
     record = cls(**values)

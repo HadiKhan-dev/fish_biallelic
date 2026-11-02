@@ -32,6 +32,7 @@ from haplotype_reconstruction.contracts.assembly import (
 )
 from haplotype_reconstruction.contracts.roles import require_schema
 from haplotype_reconstruction.core.errors import InputError, SettingsError
+from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.science.assembly.refinement.parameters import SweepControl, SweepParameters
 from haplotype_reconstruction.science.assembly.refinement.search import sweep
 from haplotype_reconstruction.stages.framework import ResourceRequest, Task, TaskKey
@@ -132,7 +133,7 @@ def run_sweep(
         raise SettingsError(f"refinement window capacity must be positive, got {storage.capacity}")
     if storage.message_step is not None and storage.message_step < 1:
         raise SettingsError(f"refinement message step must be positive, got {storage.message_step}")
-    team = RefinementTeam(cores)
+    team = RefinementTeam(cores, current_budget())
     started = time.perf_counter()
     with team.scope():
         workspace = make_workspace(problem, storage)

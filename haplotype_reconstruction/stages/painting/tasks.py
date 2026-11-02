@@ -8,9 +8,10 @@ so an interrupted contig repeats model fitting, label continuity and release.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -165,6 +166,15 @@ def identity(
     ).identity
 
 
+def _at_batch_boundary(builder: Callable[..., Any], batch: int, *args: Any, **kwargs: Any) -> Any:
+    """A sample batch's emissions, after re-reading this task's CPU share (it grows into free CPUs and gives back
+    when peers are short) and applying it to the Numba team of the batch's kernels."""
+    from ...engine.scheduler import claim_threads
+
+    claim_threads(max_threads=batch)
+    return builder(*args, **kwargs)
+
+
 def run_contig(
     file: CheckpointFile,
     expected: str,
@@ -177,6 +187,7 @@ def run_contig(
     evidence: ContigEvidence | None = None,
     ties: TieSettings = _DEFAULT_TIES,
     threads: int = 1,
+    max_threads: int | None = None,
     batch_samples: int | None = None,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     census: bool = False,
@@ -206,17 +217,21 @@ def run_contig(
                     raise InvariantError("painting evidence payload binding differs")
                 from functools import partial
 
+                # Sample batches are sized by the most CPUs this task may use (its memory estimate assumes as much), and
+                # each batch re-reads the task's share first, so painting grows into CPUs its peers free within the
+                # step. Results do not depend on the batch size (per-sample statistics are summed in sample order).
+                batch = max(1, max(threads, max_threads or threads) if batch_samples is None else batch_samples)
                 return paint_chromosome(
                     materialise(assembly[1], assembly[0]),
                     source,
                     parameters,
                     genetic_map,
-                    batch_samples=max(1, threads if batch_samples is None else batch_samples),
+                    batch_samples=batch,
                     reverse=ties.reverse,
                     emission_cache_bytes=emission_cache_bytes,
                     model_sink=model_sink,
                     census_sink=census_sink if census or ties.census is not None else None,
-                    emission_builder=partial(windowed_emissions, sample_tile=max(1, threads)),
+                    emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
                 )
 
             wall, cpu = time.perf_counter(), time.process_time()
@@ -296,7 +311,11 @@ def painting_task(
         run_contig,
         (file, expected, assembly, genetic_map, parameters),
         kwargs=dict(
-            evidence_identity=evidence_identity, payload_identity=payload_identity, evidence=evidence, ties=ties
+            evidence_identity=evidence_identity,
+            payload_identity=payload_identity,
+            evidence=evidence,
+            ties=ties,
+            max_threads=max_cores,
         ),
         depends_on=dependencies,
         inputs=(RecordKey(contig, "assembly/final"), RecordKey(contig, "evidence")),

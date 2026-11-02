@@ -200,11 +200,15 @@ def _contig(results, contig: str):
     return rows, ambiguity
 
 
-def collect(results, contigs: Sequence[str], pedigree_events: TieCounts | None = None):
-    """Aggregate original source groups in contig order, followed by the pedigree."""
+def collect(results, contigs: Sequence[str], pedigree_events: TieCounts | None = None, collected=None):
+    """Aggregate original source groups in contig order, followed by the pedigree. ``collected``: the contigs'
+    (rows, ambiguity) already read (contig_ties, in ``contigs`` order), as the report's expansion supplies them."""
     rows, ambiguity = [], _Ambiguity()
-    for contig in contigs:
-        contig_rows, contig_ambiguity = _contig(results, contig)
+    if collected is None:
+        collected = [_contig(results, contig) for contig in contigs]
+    if len(collected) != len(contigs):
+        raise ValueError("ties: one collected result per contig is required")
+    for contig_rows, contig_ambiguity in collected:
         rows += contig_rows
         ambiguity.merge(contig_ambiguity)
     if pedigree_events is None:
@@ -243,6 +247,11 @@ def stage_totals(kinds: dict) -> dict:
     return out
 
 
+def contig_ties(results, contig: str):
+    """One contig's (rows, ambiguity): its record groups read on their own (the report's per-contig task)."""
+    return _contig(results, contig)
+
+
 def write_ties(
     output,
     results,
@@ -250,9 +259,10 @@ def write_ties(
     pedigree_events: TieCounts | None = None,
     *,
     reverse_conventions: bool = False,
+    collected=None,
 ) -> list[Path]:
     """Publish completed-run counters with the resolved explicit convention setting."""
-    rows, ambiguity = collect(results, contigs, pedigree_events)
+    rows, ambiguity = collect(results, contigs, pedigree_events, collected)
     kinds = totals(rows)
     directory = Path(output) / "ties"
     written = [write_rows(directory / "decisions.csv", rows, columns=DECISION_COLUMNS)]

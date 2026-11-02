@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyParameters
 from ...science.relatedness.run import concatenate_terms, contig_terms, fit_families
 from ...store.protocol import claim
@@ -37,7 +37,7 @@ def run(
     with claim(file, records.KEY, derivation) as compute:
         if not compute:
             return derivation
-        with thread_team(team):
+        with task_team(team):
             terms = evidence_pass(
                 root,
                 inputs,

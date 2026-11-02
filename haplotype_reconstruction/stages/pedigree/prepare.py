@@ -20,7 +20,7 @@ from ...contracts.roles import require_schema
 from ...core.digest import json_digest
 from ...core.errors import InputError
 from ...engine.graph import Expansion, ResultRef
-from ...engine.runtime import thread_team
+from ...engine.runtime import task_team
 from ...science.pedigree import prepare as science
 from ...science.pedigree.parameters import PedigreeConfig, PreparationConfig
 from ...store.container import CheckpointFile
@@ -86,7 +86,7 @@ def run(
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
             return previous
-    with thread_team(threads):
+    with task_team(threads):
         product = science.prepare_chromosome(
             painting, evidence, chromosome_map, parameters, rate_is_measured=rate_is_measured
         )
