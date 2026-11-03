@@ -360,7 +360,7 @@ class _BufferWriter:
         destination = memoryview(packed)
         for (raw, _readonly, _), offset in zip(buffers, offsets, strict=False):
             destination[offset : offset + raw.nbytes] = raw
-        # The packed copy now owns these bytes; source views are no longer used by asynchronous compression.
+        # Asynchronous compression reads the packed copy, so source views can be released.
         # Direct buffers retain their owners until done.
         self._release(key)
         self.prefix += _U32.pack(1)

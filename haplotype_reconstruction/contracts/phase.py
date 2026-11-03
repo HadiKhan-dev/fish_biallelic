@@ -541,7 +541,7 @@ class DecisionMargins:
 
 @dataclass(frozen=True)
 class PhaseComponentReceipt:
-    """Complete component observation contract with canonical named numerical outputs.
+    """Validation contract for complete component observations with canonical numerical outputs.
 
     E and the recomputation are evidence; no solver state is relabelled as a call.
     Every event index is in one invocation's execution order. The adapter's only
@@ -712,7 +712,7 @@ class AscentReceipt:
 
 @dataclass(frozen=True)
 class PhaseMechanismReceipt:
-    """One selected mechanism and its actual-producer receipts; other branches are explicit empty containers."""
+    """Validation contract for one mechanism and its producer receipts; other branches are empty containers."""
 
     kind: str = record_field("state", units="1", dtype="str")
     block: ViterbiReceipt | dict = record_field("state", units="1", dtype="ViterbiReceipt")
@@ -770,7 +770,7 @@ class PhaseBoundaryOperands:
 
 @dataclass(frozen=True)
 class PhaseBoundaryReceipt:
-    """Bounded actual PH2 producer results and the raw decisions that produced them."""
+    """Validation contract for bounded PH2 producer results and the raw decisions that produced them."""
 
     kind: str = record_field("state", units="1", dtype="str")
     pinned: tuple[bool, ...] = record_field("call", units="1", dtype="bool")

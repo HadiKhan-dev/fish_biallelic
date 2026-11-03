@@ -1214,9 +1214,7 @@
         "science/assembly/completion/run.py",
         "science/assembly/hierarchy/level.py"
       ],
-      "parameters": [
-        "BUNDLE_TASKS"
-      ]
+      "parameters": []
     },
     {
       "area": "assembly-joins",
@@ -2612,7 +2610,8 @@
       ],
       "sources": [
         "engine/kernels.py",
-        "engine/runtime.py"
+        "engine/runtime.py",
+        "interface/run.py"
       ],
       "parameters": []
     },
@@ -2726,7 +2725,9 @@
         "WP_C2 §4.2-4.3"
       ],
       "sources": [
-        "engine/kernels.py"
+        "engine/kernels.py",
+        "engine/runtime.py",
+        "interface/run.py"
       ],
       "parameters": []
     },
@@ -3138,6 +3139,7 @@
         "WP_EV1 §4.7"
       ],
       "sources": [
+        "science/evidence/read_model/calibrate.py",
         "science/evidence/read_model/fit.py",
         "stages/evidence/tasks.py",
         "science/evidence/run.py"
@@ -5433,7 +5435,6 @@
         "science/recombination/map.py"
       ],
       "parameters": [
-        "ROBUST_CONTAMINATION",
         "bin_bp"
       ]
     },
@@ -5482,7 +5483,7 @@
       "sources": [
         "science/assembly/refinement/capabilities.py",
         "science/assembly/refinement/costs.py",
-        "science/assembly/refinement/workspace.py"
+        "science/assembly/refinement/component_workspace.py"
       ],
       "parameters": [
         "reset_rate",
@@ -5522,7 +5523,7 @@
         "WP_AS8 §4.1"
       ],
       "sources": [
-        "science/assembly/refinement/emissions.py",
+        "science/assembly/refinement/component_workspace.py",
         "science/assembly/refinement/run.py"
       ],
       "parameters": [
@@ -5563,7 +5564,7 @@
         "science/assembly/refinement/messages.py"
       ],
       "parameters": [
-        "ROBUST_CONTAMINATION"
+        "genotype_error"
       ]
     },
     {
@@ -5789,7 +5790,7 @@
       ],
       "sources": [
         "science/assembly/refinement/costs.py",
-        "science/assembly/refinement/run.py"
+        "stages/assembly/refinement.py"
       ],
       "parameters": []
     },
@@ -5999,7 +6000,7 @@
       "sources": [
         "science/assembly/refinement/parameters.py",
         "science/assembly/refinement/reductions.py",
-        "science/assembly/refinement/search.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": [
         "sweep_limit",
@@ -6020,8 +6021,7 @@
         "contracts/assembly.py",
         "science/assembly/orders.py",
         "science/assembly/refinement/__init__.py",
-        "science/assembly/refinement/search.py",
-        "science/assembly/refinement/selection.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": []
     },
@@ -6035,7 +6035,7 @@
         "WP_AS7 §4.10"
       ],
       "sources": [
-        "science/assembly/refinement/search.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": [
         "polish"
@@ -6065,7 +6065,7 @@
         "WP_AS7 §4.10"
       ],
       "sources": [
-        "science/assembly/refinement/search.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": [
         "LONG_WINDOW",
@@ -6086,7 +6086,7 @@
         "WP_AS7 §4.10"
       ],
       "sources": [
-        "science/assembly/refinement/search.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": [
         "BRIDGE_BATCH_BYTES"
@@ -6102,7 +6102,7 @@
         "WP_AS7 §4.11"
       ],
       "sources": [
-        "science/assembly/refinement/search.py"
+        "science/assembly/refinement/fit.py"
       ],
       "parameters": [
         "WEAK_JUNCTION_MARGIN"
@@ -6149,7 +6149,8 @@
         "WP_RL1 §4.2"
       ],
       "sources": [
-        "science/relatedness/run.py"
+        "science/relatedness/run.py",
+        "science/relatedness/ibd.py"
       ],
       "parameters": [
         "minor_allele_frequency",

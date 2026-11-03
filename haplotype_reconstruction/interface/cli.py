@@ -40,7 +40,12 @@ def _add_run_options(command):
         help="Memory the run may plan to use at once, e.g. 200G "
         "([execution] memory_limit; default: available at start minus headroom).",
     )
-    command.add_argument("--contigs", nargs="+", help="Contigs in order ([input] contigs).")
+    command.add_argument(
+        "--contigs",
+        nargs="+",
+        help="Contigs in order ([input] contigs); run selects a subset of a configured list, "
+        "or supplies the initial list when none is configured.",
+    )
     command.add_argument("--stop-after", choices=("relatedness", "discovery", "painting"), help="[run] stop_after.")
     command.add_argument("--serial", action="store_true", default=None, help="[execution] serial.")
     command.add_argument("--max-contigs", type=int, help="[execution] max_contigs (implies --serial).")
@@ -119,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     export = commands.add_parser(
         "export",
         help="Write a finished run's founder VCF and phased sample VCF (the files of the run's export "
-        "stage, OUTPUT/export) to a new directory, optionally with per-component founder-track TSVs.",
+        "stage, OUTPUT/export) to a new directory, optionally with per-contig founder-track CSVs.",
     )
     export.add_argument("run_directory", type=Path, metavar="RUN")
     export.add_argument("destination", type=Path, metavar="DEST", help="New or empty directory.")
@@ -164,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_options(args) -> dict:
+def run_options(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     """Command-line flags of `run` as configuration sections (TOML-typed values)."""
     options: dict[str, dict[str, Any]] = {}
 
@@ -202,7 +207,9 @@ def _command_workflow(args: argparse.Namespace) -> int:
         options["input"].pop("contigs")
         if not options["input"]:
             del options["input"]
-    settings = load_settings(args.config, preset=args.preset, options=options, overrides=args.overrides)
+    settings = load_settings(
+        args.config, preset=args.preset, options=options, overrides=args.overrides, fallback_contigs=selected
+    )
     args.output = run_paths(settings).output
     execute(
         settings,

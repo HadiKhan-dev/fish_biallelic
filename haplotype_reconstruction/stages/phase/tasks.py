@@ -67,7 +67,7 @@ def component_task(
     states = inputs.painting.states.n_states
     bins = len(inputs.painting.bins.starts)
     sites = len(inputs.observations.positions)
-    # Original 3.5 FP23 resident estimate: four emission-sized workspaces,
+    # FP23 resident estimate: four emission-sized workspaces,
     # resident observations/releases, CAL2 state, and the fixed runtime allowance.
     # The pilot retains both solves' releases, so do not estimate only CAL2/E.
     working_set = 32 * samples * states * states * bins + 48 * samples * sites + 32 * states * sites + 2 * 1024**3
@@ -214,105 +214,3 @@ def publish_contig(
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
     return product
-
-
-def phase_task(
-    evidence: ContigEvidence,
-    painting: Painting,
-    refit: FounderRefit,
-    edges: ParentEdges,
-    genetic_map: ChromosomeGeneticMap,
-    parameters: PhaseParameters,
-    identities: PhaseInputIdentities,
-    *,
-    storage: str = "auto",
-    root: str | Path | None = None,
-    dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = 1,
-    file: CheckpointFile | None = None,
-    expected: Derivation | None = None,
-) -> Task:
-    """Declare one complete-contig phase task; upstream record keys use canonical stage spellings."""
-    from ...core.errors import InvariantError
-
-    if (file is None) != (expected is None):
-        raise InvariantError("phase publication requires both file and expected derivation")
-    n, length = len(evidence.sample_ids), len(evidence.positions)
-    largest = max((len(c.bins.starts) * c.states.n_states**2 for c in painting.components), default=0)
-    working_set = 32 * n * largest + 48 * n * length + (2 << 30)
-    return Task(
-        key=TaskKey("phase", "contig", evidence.contig),
-        function=execute_contig if file is None else publish_contig,
-        args=(evidence, painting, refit, edges, genetic_map, parameters, identities)
-        if file is None
-        else (file, evidence, painting, refit, edges, genetic_map, parameters, identities, expected),
-        kwargs=dict(storage=storage, root=root),
-        depends_on=dependencies,
-        inputs=(
-            RecordKey("run", "pedigree"),
-            RecordKey(evidence.contig, "evidence"),
-            RecordKey(evidence.contig, "painting"),
-            RecordKey(evidence.contig, "founder_refit"),
-        ),
-        outputs=(RecordKey(evidence.contig, "phase"),),
-        resources=ResourceRequest(1, max_cores, working_set, 0),
-        affinity=evidence.contig,
-    )
-
-
-def load_evidence(
-    file: CheckpointFile,
-    identity: str,
-    *,
-    storage: str = "auto",
-    root: str | Path | None = None,
-) -> ContigEvidence:
-    """Decode checked evidence directly into mapped buffers when its dimensions require windows.
-
-    ST1 verifies the immutable publication before exposing array descriptors. The
-    resident record and mapped record have the same canonical evidence contract;
-    only owned buffer allocation differs. No source file is reopened.
-    """
-    from ...contracts.evidence import ContigEvidence
-    from ...contracts.roles import require_schema
-    from ...core.errors import InvariantError
-    from ...store.mapped import discard_pages, mapped_array
-    from ...store.protocol import open_windows, read_items
-    from ..evidence import records as evidence_records
-
-    header = read_items(
-        file, evidence_records.EVIDENCE, identity, ("schema", "contig", "sample_ids", "payload_identity")
-    )
-    if header is None:
-        raise InvariantError("phase requires complete evidence")
-    require_schema(header.payload, evidence_records.SCHEMA)
-    names = tuple(name for name in evidence_records.ARRAYS if name != "counts")
-    # ST1 windows address row slices, not one-dimensional axis vectors.
-    window_names = ("likelihoods", "observed", "block_spans")
-    buffers = {}
-    with open_windows(file, evidence_records.EVIDENCE, identity, window_names) as arrays:
-        if arrays is None:
-            raise InvariantError("phase evidence arrays are absent")
-        n, length, _ = arrays["likelihoods"].shape
-        if use_windows(n, length, storage):
-            if root is None:
-                raise InvariantError("mapped phase evidence requires scratch root")
-            for name, value in arrays.items():
-                if len(value.shape) > 1:
-                    buffers[name] = mapped_array(value.shape, value.dtype, root=root)
-    values = evidence_records.load_arrays(file, names, expected_identity=identity, out=buffers or None)
-    for value in buffers.values():
-        discard_pages(value)
-    payload = header.payload
-    return ContigEvidence(
-        contig=payload["contig"],
-        sample_ids=tuple(payload["sample_ids"]),
-        counts=None,
-        payload_identity=payload["payload_identity"],
-        positions=values["positions"],
-        likelihoods=values["likelihoods"],
-        observed=values["observed"],
-        discovery_sites=values["discovery_sites"],
-        founder_excluded=values["founder_excluded"],
-        block_spans=values["block_spans"],
-    )

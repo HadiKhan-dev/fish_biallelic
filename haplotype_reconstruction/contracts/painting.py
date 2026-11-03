@@ -53,6 +53,35 @@ class PaintedChunk:
         freeze_record_arrays(self)
 
 
+def coalesce_chunks(
+    edges: np.ndarray,
+    labels: np.ndarray,
+    classes: np.ndarray,
+    status: np.ndarray,
+    members: np.ndarray,
+    member_sets: tuple[tuple[int, ...], ...],
+) -> list[PaintedChunk]:
+    """Coalesce adjacent bins with equal labels, classes, status and members on both tracks."""
+    if labels.shape[1] == 0:
+        return []
+    n_bins = labels.shape[1]
+    changed = np.zeros(n_bins, dtype=np.bool_)
+    changed[0] = True
+    for grid in (labels, classes, status, members):
+        changed[1:] |= (grid[0, 1:] != grid[0, :-1]) | (grid[1, 1:] != grid[1, :-1])
+    starts = np.flatnonzero(changed)
+    stops = np.r_[starts[1:], n_bins]
+    return [
+        PaintedChunk(
+            int(edges[start]),
+            int(edges[stop]),
+            (int(labels[0, start]), int(labels[1, start])),
+            (member_sets[members[0, start]], member_sets[members[1, start]]),
+        )
+        for start, stop in zip(starts, stops, strict=True)
+    ]
+
+
 def state_alt_probabilities(
     named_alleles: NDArray[np.int8], background_frequency: NDArray[np.float64]
 ) -> NDArray[np.float64]:
@@ -192,7 +221,7 @@ class ComponentPainting:
 
     panel: the founder panel painted (assembly's component after label
         continuity); rows of every grid below are its component-local rows.
-        None when the product was loaded without panels (records.load(panels=False)).
+        None when the product was loaded without panels (records.load(..., assembly=None)).
     states, bins, transitions: the HMM's state alphabet, bins and transition
         table (pedigree rebuilds its source model from exactly these).
     local_keys: int32[B, S] per-bin allele-equivalence keys of the states.
@@ -246,27 +275,14 @@ class ComponentPainting:
         status, members) on both tracks coalesce; ineligible samples have none."""
         if not self.eligible[sample] or self.bins.n_bins == 0:
             return []
-        labels = self.labels[sample]
-        classes = self.classes[sample]
-        status = self.status[sample]
-        members = self.member_ids[sample]
-        n_bins = labels.shape[1]
-        changed = np.zeros(n_bins, dtype=np.bool_)
-        changed[0] = True
-        for grid in (labels, classes, status, members):
-            changed[1:] |= (grid[0, 1:] != grid[0, :-1]) | (grid[1, 1:] != grid[1, :-1])
-        starts = np.flatnonzero(changed)
-        stops = np.r_[starts[1:], n_bins]
-        edges = self.bins.edges
-        return [
-            PaintedChunk(
-                int(edges[start]),
-                int(edges[stop]),
-                (int(labels[0, start]), int(labels[1, start])),
-                (self.member_sets[members[0, start]], self.member_sets[members[1, start]]),
-            )
-            for start, stop in zip(starts, stops, strict=True)
-        ]
+        return coalesce_chunks(
+            self.bins.edges,
+            self.labels[sample],
+            self.classes[sample],
+            self.status[sample],
+            self.member_ids[sample],
+            self.member_sets,
+        )
 
     def carrier_observed(
         self, positions: np.ndarray, columns: np.ndarray, observed: np.ndarray, n_rows: int

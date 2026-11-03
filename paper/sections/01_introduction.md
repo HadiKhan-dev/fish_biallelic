@@ -30,7 +30,7 @@ cohort or generation labels describe when an animal was sampled rather than who 
 A method that conditions on such labels, or on a declared design, risks reproducing errors in the
 records as apparent biological signal.
 
-Here we describe a method, released as version 4.0 of the software package
+Here we describe a method, released as version 4.3.0 of the software package
 `haplotype_reconstruction`, that addresses this setting jointly. It reads only a multi-sample
 VCF or BCF file with per-sample allele depths [@danecek2011; @danecek2021] and a genetic map;
 sample names are treated as identifiers and nothing else about a sample enters inference. From
@@ -54,13 +54,14 @@ Three principles run through the design. First, the inputs are the data alone: t
 parent–offspring relationship comes from the genetic evidence, never from a cohort label or a sex
 annotation, and the release rules prefer an explicit unresolved outcome to a forced call. Second,
 the method is meant to remain usable as crosses grow: the documented scale envelope targets up to
-N = 2,500 samples on bounded genome crops and K = 30 founder haplotypes, nothing is exponential in
-K, and every stage is held to at most cubic work in K apart from a small number of documented
-exemptions and exceptions. Third, results are
+N = 2,500 samples on bounded genome crops and K = 30 founder haplotypes. Potentially exponential
+candidate families have explicit budgets, and stage costs and above-cubic search mechanisms are
+documented separately from measured kernel scaling. Third, results are
 reproducible: all ties are resolved by declared rules, random draws come from named streams, and
 the released outputs do not depend on the number of processor cores used.
 
 We describe the models and decision rules of each stage, the simulation framework used to measure
-accuracy against recorded truth, and the computational design, and we report the measured scaling
-of every stage. [TO FILL: summary of the accuracy results on simulated crosses and of the analysis
-of the TroMau cross.]{.todo}
+accuracy against recorded truth, and the computational design. Validation on contrasting crosses
+separates local sequence accuracy from long-range founder identity and shows when pedigree
+inference abstains. The TroMau analysis illustrates supported relationships and explicit ambiguity
+in a real cross without individual parentage truth.

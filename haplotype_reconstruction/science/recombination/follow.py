@@ -6,14 +6,53 @@ not the full read posterior. No exposure crosses a reset or excluded order zone.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal, cast, overload
+
 import numpy as np
 
+from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.pedigree import ParentEdges
+from ...contracts.phase import PhasedSamples
 from ...contracts.recombination import AppliedBreakpoints, Recombination, RecombinationSummary
 from ...core.errors import InvariantError
 from . import junctions as junction_report
 from .diagnostics import RecombinationTrace, Traced
 from .junctions import contig_breakpoints
 from .map import aggregate_map, genetic_coordinates, map_bins, posterior_intervals
+from .parameters import RecombinationParameters
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from numpy.typing import NDArray
+
+    from ...contracts.recombination import RecombinationMap
+
+    _Breakpoints = tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]]
+    # schema_field is keyword-only at runtime; mypy cannot see through its helper.
+    _RecombinationFactory = Callable[
+        [
+            str,
+            tuple[str, ...],
+            NDArray[np.int64],
+            NDArray[np.int64],
+            NDArray[np.int64],
+            NDArray[np.int64],
+            NDArray[np.float64],
+            NDArray[np.int64],
+            NDArray[np.bool_],
+            NDArray[np.int64],
+            NDArray[np.float64],
+            NDArray[np.int64],
+            NDArray[np.float64],
+            NDArray[np.float64],
+            RecombinationMap,
+            tuple[junction_report.JunctionLocus, ...],
+            AppliedBreakpoints | None,
+            RecombinationSummary,
+        ],
+        Recombination,
+    ]
 
 
 def packed(rows, columns):
@@ -124,10 +163,54 @@ def follow_chain(source, support, reset, left, right, centres, segment, *, trace
     return Traced(result, audit) if trace else result
 
 
-def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace=False):
-    """RecombinationProduct of one chromosome.
+@overload
+def map_chromosome(
+    phase: PhasedSamples,
+    edges: ParentEdges,
+    config: RecombinationParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    *,
+    reverse: bool = False,
+    trace: Literal[False] = False,
+) -> Recombination: ...
 
-    ``phase`` FamilyPhaseProduct with meiosis chains (schema 4); ``edges`` ParentEdges (the edges the phase was
+
+@overload
+def map_chromosome(
+    phase: PhasedSamples,
+    edges: ParentEdges,
+    config: RecombinationParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    *,
+    reverse: bool = False,
+    trace: Literal[True],
+) -> Traced[Recombination]: ...
+
+
+@overload
+def map_chromosome(
+    phase: PhasedSamples,
+    edges: ParentEdges,
+    config: RecombinationParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    *,
+    reverse: bool = False,
+    trace: bool,
+) -> Recombination | Traced[Recombination]: ...
+
+
+def map_chromosome(
+    phase: PhasedSamples,
+    edges: ParentEdges,
+    config: RecombinationParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    *,
+    reverse: bool = False,
+    trace: bool = False,
+) -> Recombination | Traced[Recombination]:
+    """Recombination of one chromosome, or its producer trace when requested.
+
+    ``phase`` PhasedSamples with meiosis chains; ``edges`` ParentEdges (the edges the phase was
     conditioned on, whose order the chain rows follow).
     """
     audit = RecombinationTrace() if trace else None
@@ -154,7 +237,7 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
     genetic, knots, knot_genetic = genetic_coordinates(positions, chromosome_map)
     centre_genetic = None if knots is None else np.interp(centres, knots, knot_genetic)
     rate = chromosome_map.fallback_rate_per_bp
-    events, reported, spans, informative = [], [], [], []
+    events, reported, spans = [], [], []
     marker_counts = np.zeros((len(parents), 3), dtype=np.int64)
     expected = np.zeros((len(parents), len(bins) - 1))
     exposure = np.zeros_like(expected)
@@ -172,13 +255,10 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
             audit=audit,
         )
         if centre_genetic is None:
-            soft = posterior_intervals(
-                centres[markers], segment[markers], marker_reset, parity, bins, rate, audit=audit
-            )
+            soft = posterior_intervals(centres[markers], marker_reset, parity, bins, rate, audit=audit)
         else:
             soft = posterior_intervals(
                 centres[markers],
-                segment[markers],
                 marker_reset,
                 parity,
                 bins,
@@ -192,22 +272,24 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
         reported.append(report)
         spans.append(callable_spans)
         expected[edge], exposure[edge] = soft[0], soft[1]
-        informative.append(soft[2])
         marker_counts[edge] = counts
     crossover_offsets, crossover_rows = packed(events, 5)
     callable_offsets, callable_rows = packed(spans, 3)
-    informative_offsets, informative_rows = packed(informative, 3)
     reported_rows = np.concatenate(reported).astype(np.int64) if reported else np.zeros((0, 2), dtype=np.int64)
-    curve = aggregate_map(
-        bins, crossover_rows, callable_rows, expected, exposure, informative_rows, knots, knot_genetic
-    )
+    curve = aggregate_map(bins, crossover_rows, callable_rows, expected, exposure, knots, knot_genetic)
     applied = None
     if origin is not None:
         # Calls and spans were followed per segment; report assembly components again.
-        for rows, column in ((crossover_rows, 4), (callable_rows, 2), (informative_rows, 2)):
+        for rows, column in ((crossover_rows, 4), (callable_rows, 2)):
             if len(rows):
                 rows[:, column] = origin[rows[:, column].astype(np.int64)]
-        applied = AppliedBreakpoints(breakpoints[0], breakpoints[1], breakpoints[2], masked, origin)
+        applied = AppliedBreakpoints(
+            cast("_Breakpoints", breakpoints)[0],
+            cast("_Breakpoints", breakpoints)[1],
+            cast("_Breakpoints", breakpoints)[2],
+            masked,
+            origin,
+        )
     if audit is not None:
         audit.edge = -1
     reversed_calls = junction_report.in_reversed_segment(crossover_rows, breakpoints, audit=audit)
@@ -244,7 +326,7 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
         sum(locus.flagged for locus in loci),
         bool(phase.diagnostics.converged),
     )
-    product = Recombination(
+    product = cast("_RecombinationFactory", Recombination)(
         phase.contig,
         names,
         parents,
@@ -256,8 +338,6 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
         reversed_calls,
         callable_offsets,
         callable_rows,
-        informative_offsets,
-        informative_rows,
         marker_counts,
         expected,
         exposure,
@@ -267,4 +347,4 @@ def map_chromosome(phase, edges, config, chromosome_map, *, reverse=False, trace
         summary,
     )
 
-    return Traced(product, audit) if trace else product
+    return Traced(product, cast(RecombinationTrace, audit)) if trace else product

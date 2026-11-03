@@ -105,7 +105,6 @@ _WORKSPACE_1 = types.Tuple(
         _FLOAT64_2C,
     )
 )
-_INT64_3C = types.Array(types.int64, 3, "C", readonly=False)
 
 
 # Workspace budget of one site tile, not a statistical parameter: one site is the minimum, so
@@ -836,7 +835,6 @@ def _membership_groups(offsets, members):
             _INT64_1C,
             _INT64_1C,
             _UINT8_2C,
-            _INT64_3C,
             types.float64,
         ),
         (
@@ -867,7 +865,6 @@ def _membership_groups(offsets, members):
             _INT64_1C,
             _INT64_1C,
             _UINT8_2C,
-            _INT64_3C,
             types.float64,
         ),
     ),
@@ -902,7 +899,6 @@ def grouped_cavity_predictions(
     state_first,
     state_second,
     sample_support,
-    endpoint_counts=None,
     endpoint_equivalence_scale=None,
 ):
     """Solve and predict exact cases once in a bounded, site-parallel tile.
@@ -976,16 +972,6 @@ def grouped_cavity_predictions(
             g1 = likelihood[heldout, site, 1]
             g2 = likelihood[heldout, site, 2]
             endpoints = _eligible_endpoint_indices(work[1], work[2], work[3], elbo_tie)
-            if endpoint_counts is not None:
-                classes = 1
-                if len(endpoints) > 1:
-                    labels = _endpoint_class_labels(work[1], endpoints, endpoint_equivalence_scale)
-                    classes = 0
-                    for endpoint in range(len(endpoints)):
-                        if labels[endpoint] == endpoint:
-                            classes += 1
-                endpoint_counts[offset, heldout, 0] = len(endpoints)
-                endpoint_counts[offset, heldout, 1] = classes
             if len(endpoints) > 1:
                 predictions[offset, heldout, :] = _predictive_family_log_states(
                     work[1],
@@ -1260,7 +1246,6 @@ def _build_cavity_potentials(log_likelihood, rw_log_likelihood, k, member_offset
             types.float64,
             types.boolean,
             _UINT8_2C,
-            _INT64_2C,
             types.float64,
         ),
         (
@@ -1282,7 +1267,6 @@ def _build_cavity_potentials(log_likelihood, rw_log_likelihood, k, member_offset
             types.float64,
             types.boolean,
             _UINT8_2C,
-            _INT64_2C,
             types.float64,
         ),
     ),
@@ -1308,7 +1292,6 @@ def _score_mode_cavity_kernel(
     elbo_tie: float,
     reverse: bool,
     tie_mask: np.ndarray,
-    endpoint_counts=None,
     endpoint_equivalence_scale=None,
 ) -> tuple[np.ndarray, int]:
     """Fixed-assignment cavity log predictive of every sample of one complete panel, and the
@@ -1361,7 +1344,6 @@ def _score_mode_cavity_kernel(
     tile_width = max(1, PREDICTION_TILE_BYTES // bytes_per_site)
     for site_start in range(0, n_sites, tile_width):
         site_stop = min(n_sites, site_start + tile_width)
-        tile_endpoint_counts = np.empty((site_stop - site_start, n_samples, 2), dtype=np.int64)
         representatives, predictions, tile_not_converged = grouped_cavity_predictions(
             likelihood,
             log_likelihood,
@@ -1390,18 +1372,8 @@ def _score_mode_cavity_kernel(
             first,
             second,
             sample_support,
-            tile_endpoint_counts,
             endpoint_equivalence_scale,
         )
-        if endpoint_counts is not None:
-            # Counts refer to every held-out sample/site, including shared solves.
-            # Row zero: exact-distinct endpoints; row one: equivalence classes.
-            for offset in range(site_stop - site_start):
-                for heldout in range(n_samples):
-                    representative = representatives[offset, heldout]
-                    for identity in range(2):
-                        count = tile_endpoint_counts[offset, representative, identity]
-                        endpoint_counts[identity, count - 1] += 1
         for heldout in prange(n_samples):
             heldout_not_converged = not_converged_by_heldout[heldout]
             # Continue each sample's site-ordered accumulation across tiles.

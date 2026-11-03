@@ -42,7 +42,7 @@ from .cavity_kernels import (
     _floor_log_likelihood_kernel,
     _score_mode_cavity_kernel,
 )
-from .panel import FixedKSolution, log_haplotype_set_count, restricted, solution_tie_mask
+from .panel import FixedKSolution, log_haplotype_set_count, restricted, solution_tie_mask, state_layout
 from .parameters import CavityScoreConfig
 
 __all__ = ["CavityWorkspace", "PanelScore", "score_solutions", "shared_likelihood_triples"]
@@ -65,22 +65,13 @@ def shared_likelihood_triples(likelihood: np.ndarray) -> np.ndarray:
 def _state_geometry(k: int, config: CavityScoreConfig) -> tuple[np.ndarray, ...]:
     """(kind, first, second, prior base) of the states: row pairs (kind 0, row-major), row with
     an unknown copy (kind 1), two unknown copies (kind 2); prior base normalised to one."""
-    pair_i, pair_j = np.triu_indices(k)
-    n_rr = len(pair_i)
-    n_states = n_rr + k + 1
-    kind = np.empty(n_states, dtype=np.int64)
-    first = np.full(n_states, -1, dtype=np.int64)
-    second = np.full(n_states, -1, dtype=np.int64)
-    kind[:n_rr] = 0
-    first[:n_rr] = pair_i
-    second[:n_rr] = pair_j
-    kind[n_rr : n_rr + k] = 1
-    first[n_rr : n_rr + k] = np.arange(k)
-    kind[-1] = 2
+    kind, first, second = state_layout(k)
+    n_rr = k * (k + 1) // 2
+    n_states = len(kind)
     omega = config.unknown_prior_mass
     delta = config.double_unknown_fraction
     base = np.empty(n_states, dtype=np.float64)
-    base[:n_rr] = (1.0 - omega) * np.where(pair_i == pair_j, 1.0, 2.0) / float(k * k)
+    base[:n_rr] = (1.0 - omega) * np.where(first[:n_rr] == second[:n_rr], 1.0, 2.0) / float(k * k)
     base[n_rr : n_rr + k] = omega * (1.0 - delta) / k
     base[-1] = omega * delta
     base /= np.sum(base)
@@ -98,9 +89,6 @@ class CavityWorkspace:
         self.rw_log_likelihood, self.ww_log_emission = _build_evidence_emission_cache_kernel(self.likelihood, floor)
         self.shared_triple = shared_likelihood_triples(self.likelihood)
         self._geometry: dict[int, tuple] = {}
-        # Cumulative held-out sample/site counts by family size 1,2,3.
-        # Rows are exact-distinct endpoints and endpoint-equivalence classes.
-        self.endpoint_family_counts = np.zeros((2, 3), dtype=np.int64)
 
     def geometry(self, k: int) -> tuple[np.ndarray, ...]:
         value = self._geometry.get(k)
@@ -179,7 +167,6 @@ def score_solutions(
             float(_elbo_tie(solution)),
             False,
             mask,
-            workspace.endpoint_family_counts,
             float(config.mean_field_tolerance),
         )
         total = math.fsum(float(value) for value in sample_scores)

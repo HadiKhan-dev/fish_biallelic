@@ -1,5 +1,64 @@
 # Changelog
 
+## 4.3.0 (3 November 2026)
+
+This release tidies the outputs and the code before the analysis freeze. The science is 4.2's: every change leaves
+released outputs scientifically identical, apart from one exception path that no validation run reaches (the
+read-model fallback below).
+
+**One run-level table per kind.**
+- Every published table is one run-level CSV with snake_case columns and a leading `contig` column where it spans
+  chromosomes. Contigs follow the configured order; rows keep their order within a contig.
+- Shared identifiers use the same names everywhere: `contig`, `sample`, `component`, `founder`, `parent1`,
+  `parent2`. JSON outputs keep their keys.
+- Painting, quality, recombination and founder-identity tables are concatenated across contigs. Report tasks stay
+  parallel per contig; one writer per table publishes it atomically.
+- Per-chromosome files remain only for the VCFs and the optional founder tracks (`<contig>.tracks.csv.gz`). The
+  recombination figures are the pages of one `recombination/maps.pdf`.
+- `haplotypes export RUN DEST` writes the same layout. A TroMau run publishes 134 files instead of 514.
+- The [migration guide](docs/user/migration.md) maps every 4.2 path and column to its 4.3 name.
+
+**Recombination coverage is stored once.** The callable spans and the informative spans are equal by construction:
+the same consecutive released bins within a stretch, the same ends, components, merge and origin. Recombination
+products store them once, as `callable_spans` (schema 2), and the run writes one `coverage.csv`. Map aggregation,
+junctions and evaluation read that field.
+
+**Code audit.** Seven reviewers read the whole package for duplication, vestiges, inconsistency, truthfulness and
+boundary types. Every accepted change keeps released outputs scientifically identical.
+- **Methods text** now matches the code on scoring, evidence filters, posterior release, tie classes, convergence,
+  costs and compilation order. No rule changed to match the text.
+- **One home each** for state layouts, orientation, nearest-option shadows, pair indexing, painting chunks, the
+  phase tie projection, read-only array views, exclusion thresholds, the wide-class guard and evaluation
+  vocabularies.
+- **Removed:** dead helpers, unused kernel declarations and arguments, an unreleased posterior buffer, unused
+  diagnostics and version strings, an empty run-record field, and package functions that only tests called (they
+  now live with their tests).
+- **Boundary types:** record, array and callback hand-offs declare their types, and the package is type-clean.
+- Comments and docstrings describe current behaviour; schema and parameter provenance stay explicit.
+
+**Fixes.**
+- `haplotypes run --contigs` supplies the ordered contig list when the configuration has none; with a configured
+  list it still selects a subset.
+- `haplotypes status` shows selection work in progress.
+- A malformed genetic map is reported as an input error, and an unreadable breakpoint file as a settings error.
+- Evaluation records the resolved checkpoint root, including a separately configured one.
+- When the configured kernel cache directory cannot be used, kernels compile lazily without a disk cache, instead
+  of Numba writing cache files beside the installed package's source.
+- Read-model calibration keeps the fitted sample-binomial candidate when the later joint fit raises, as the
+  [evidence methods](docs/methods/evidence.md) describe; a pooled-fit exception still leaves only the shared
+  binomial candidate, and either exception is recorded. None of the 352 saved calibration decisions in the 4.2
+  release matrix recorded such an exception.
+
+**Validation.** The 39 cases of the 4.2 release matrix (simulations, and TroMau with its perturbations, both tie
+conventions) were rerun with 4.3. Each case's 4.2 outputs, converted to the 4.3 layout, were compared cell by cell
+with 4.3's: 161,352,568 cells in 1,660 tables, with no scientific difference. Only durations (704 cells) and the
+recorded checkpoint root (64 cells) differ. On matching node types, wall time is unchanged (median 0.98 of 4.2's over
+14 cases). The packaging gate installs the wheel and the sdist into fresh environments and reproduces the source
+run's scientific records.
+
+Recombination products are schema 2 and code identities change, so 4.3 cannot resume 4.2 checkpoints. Start a new
+checkpoint root.
+
 ## 4.2.0 (3 November 2026)
 
 This release covers the K = 30 review that 4.0 deferred, and the smaller items left after 4.1. Science changes are
@@ -93,7 +152,7 @@ Code identities change, so 4.2 cannot resume 4.1 checkpoints. Start a new checkp
 A speed release: scheduling, transport and start-up change; no model, parameter,
 threshold, tie rule or output format does. Released outputs are meant to be
 scientifically identical to 4.0's. It includes 4.0.1's manuscript
-([paper/](paper/README.md)), whose methods are those of this release.
+(`paper/`), whose methods are those of this release.
 
 **Start-up.** Kernels are compiled as tasks of the run's own graph, beside the
 stages, instead of all of them before the first stage; a stage that meets a kernel
@@ -136,7 +195,7 @@ sources until the workflow integration test is rerun on 4.1.
 ## 4.0.1 (2 November 2026)
 
 Adds the manuscript describing release 4.0, rebuilt from scratch from the 4.0 methods
-documentation and code, in [paper/](paper/README.md): the main text and Supplementary Information
+documentation and code, in `paper/`: the main text and Supplementary Information
 as Markdown sources, the bibliography, figure and table generators, and a build script that writes
 the PDF, HTML, DOCX and LaTeX versions. Figure 2 and Supplementary Tables S1 and S2 are drawn
 directly from the [cost page](docs/developer/costs.md) and the

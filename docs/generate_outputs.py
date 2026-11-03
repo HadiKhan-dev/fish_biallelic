@@ -12,29 +12,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "haplotype_reconstruction/outputs/reports"
 TARGET = ROOT / "docs/reference/output-columns.md"
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.columns import column_name  # noqa: E402
 
 FILES = {
     "relatedness.FAMILY_COLUMNS": "relatedness/families.csv",
     "relatedness.PAIR_COLUMNS": "relatedness/pairs.csv (optional; off by default)",
     "relatedness.HALF_SIB_COLUMNS": "relatedness/half_sib_links.csv",
-    "evidence.SAMPLE_COLUMNS": "quality/CONTIG.samples.tsv",
-    "evidence.SEGMENT_COLUMNS": "quality/CONTIG.segments.tsv",
-    "painting.FOUNDER_SUPPORT_COLUMNS": "painting/CONTIG/founder_support.tsv",
-    "painting.FOUNDER_SUPPORT_WINDOW_COLUMNS": "painting/CONTIG/founder_support_windows.tsv",
-    "painting.ASSEMBLY_SEARCH_PREFIX_COLUMNS": "painting/CONTIG/assembly_search.tsv (prefix)",
-    "painting.FOUNDER_COUNT_COLUMNS": "painting/CONTIG/founder_counts.tsv",
-    "painting.SAMPLE_SWITCH_COLUMNS": "painting/CONTIG/sample_switches.tsv",
-    "painting.SEGMENT_COLUMNS": "painting/CONTIG/sample_segments.tsv",
-    "painting.CONTINUITY_COLUMNS": "painting/CONTIG/label_continuity.tsv",
-    "painting.MODEL_COLUMNS": "painting/CONTIG/painting_model.tsv",
+    "evidence.SAMPLE_COLUMNS": "quality/samples.csv",
+    "evidence.SEGMENT_COLUMNS": "quality/segments.csv",
+    "painting.FOUNDER_SUPPORT_COLUMNS": "painting/founder_support.csv",
+    "painting.FOUNDER_SUPPORT_WINDOW_COLUMNS": "painting/founder_support_windows.csv",
+    "painting.ASSEMBLY_SEARCH_PREFIX_COLUMNS": "painting/assembly_search.csv (prefix)",
+    "painting.FOUNDER_COUNT_COLUMNS": "painting/founder_counts.csv",
+    "painting.SAMPLE_SWITCH_COLUMNS": "painting/sample_switches.csv",
+    "painting.SEGMENT_COLUMNS": "painting/sample_segments.csv",
+    "painting.CONTINUITY_COLUMNS": "painting/label_continuity.csv",
+    "painting.MODEL_COLUMNS": "painting/painting_model.csv",
     "tables.TRUTH_PEDIGREE_COLUMNS": "simulation/truth_pedigree.csv",
     "tables.REFIT_SUMMARY_COLUMNS": "founder_refit/summary.csv",
     "tables.PHASE_SUMMARY_COLUMNS": "family_phase/summary.csv",
-    "recombination.SPAN_COLUMNS": "recombination/CONTIG.coverage.csv and CONTIG.called_coverage.csv",
-    "recombination.CROSSOVER_COLUMNS": "recombination/CONTIG.crossovers.csv",
-    "recombination.JUNCTION_COLUMNS": "recombination/CONTIG.junctions.csv and junctions.csv",
-    "recombination.MAP_COLUMNS": "recombination/CONTIG.map.csv",
-    "recombination.MEIOSIS_COLUMNS": "recombination/CONTIG.meioses.csv",
+    "recombination.SPAN_COLUMNS": "recombination/coverage.csv",
+    "recombination.CROSSOVER_COLUMNS": "recombination/crossovers.csv",
+    "recombination.JUNCTION_COLUMNS": "recombination/junctions.csv",
+    "recombination.MAP_COLUMNS": "recombination/map.csv",
+    "recombination.MEIOSIS_COLUMNS": "recombination/meioses.csv",
     "recombination.SUMMARY_COLUMNS": "recombination/summary.csv",
     "ties.DECISION_COLUMNS": "ties/decisions.csv",
 }
@@ -65,7 +67,15 @@ def columns():
             ):
                 doc = str(body[index + 1].value.value)
             meanings = dict(re.findall(r"^\s+(\w+):\s*(.+)$", doc, re.MULTILINE))
-            yield path, target.id, list(names), meanings
+            if path.stem in ("painting", "evidence", "recombination") and "contig" not in names:
+                names = ("contig", *names)
+                meanings["contig"] = "contig identifier (text)."
+            yield (
+                path,
+                target.id,
+                [column_name(name) for name in names],
+                {column_name(name): meaning for name, meaning in meanings.items()},
+            )
 
 
 def render() -> str:
@@ -112,7 +122,7 @@ def render() -> str:
             out += [
                 "",
                 (
-                    "`ParentSlotBasis` is inserted immediately after `Parent2` when the typed view carries slot "
+                    "`parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot "
                     "assignment: `unordered`, `single` or `none`. The slots do not imply sex."
                 ),
             ]
@@ -120,16 +130,17 @@ def render() -> str:
             out += [
                 "",
                 (
-                    "Interval-bearing products append `LogELower`, `LogEUpper`, `LogEExact`, in that order. "
-                    "`LogE` is empty when the interval is not exact."
+                    "Interval-bearing products append `log_e_lower`, `log_e_upper`, `log_e_exact`, in that order. "
+                    "`log_e` is empty when the interval is not exact."
                 ),
             ]
         if path.stem == "pedigree" and constant == "EXCLUSION_DIAGNOSTICS_COLUMNS":
             out += [
                 "",
                 (
-                    "Interval-bearing products append `WeakestExclusionLogELower`, `WeakestExclusionLogEUpper`, "
-                    "`WeakestExclusionLogEExact`, in that order."
+                    "Interval-bearing products append `weakest_exclusion_log_e_lower`, "
+                    "`weakest_exclusion_log_e_upper`, "
+                    "`weakest_exclusion_log_e_exact`, in that order."
                 ),
             ]
         out.append("")

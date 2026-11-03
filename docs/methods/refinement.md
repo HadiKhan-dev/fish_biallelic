@@ -11,7 +11,7 @@ Every deletion is decided by the ordinary count rule; there is no separate zero-
 
 Restrict objective sites to kept sites with at least one called inference row; mark partial sites separately. Code uncalled leaves by row identity, identify informative evidence samples, and construct map hazards and count-dependent normalisers. Restrict only count-rule vectors to informative samples; total F still sums all evidence rows. An uninformative sample contributes an exact zero. A map is required and the fixed genotype-error model is checked.
 
-Implementation: [science/assembly/refinement/capabilities.py](../../haplotype_reconstruction/science/assembly/refinement/capabilities.py), [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [science/assembly/refinement/workspace.py](../../haplotype_reconstruction/science/assembly/refinement/workspace.py).
+Implementation: [science/assembly/refinement/capabilities.py](../../haplotype_reconstruction/science/assembly/refinement/capabilities.py), [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [science/assembly/refinement/component_workspace.py](../../haplotype_reconstruction/science/assembly/refinement/component_workspace.py).
 
 Parameters by name: `reset_rate`, `map_probability_floor`, `genotype_error`, `cost_scale`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -33,7 +33,7 @@ Cost and scope: O(1); O(gap). These terms describe the unit’s work/storage dim
 
 Choose the surrogate bin size from the component length, contig-level floor where applicable and named proposal limits. Restart bins within each block. Sum emissions in site order, using hard dosages for fully called blocks and distinct uncalled-row pair codes elsewhere. This binning changes offered moves and therefore belongs to the scientific parameters, not runtime tuning.
 
-Implementation: [science/assembly/refinement/emissions.py](../../haplotype_reconstruction/science/assembly/refinement/emissions.py), [science/assembly/refinement/run.py](../../haplotype_reconstruction/science/assembly/refinement/run.py).
+Implementation: [science/assembly/refinement/component_workspace.py](../../haplotype_reconstruction/science/assembly/refinement/component_workspace.py), [science/assembly/refinement/run.py](../../haplotype_reconstruction/science/assembly/refinement/run.py).
 
 Parameters by name: `proposal_max_bins`, `proposal_min_sites_per_bin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -59,7 +59,7 @@ Construct normalised forward and backward block messages with identical site-ste
 
 Implementation: [science/assembly/refinement/messages.py](../../haplotype_reconstruction/science/assembly/refinement/messages.py).
 
-Parameters by name: `ROBUST_CONTAMINATION`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters: `genotype_error` validates the fixed model. The shared emission in [science/shared/emissions.py](../../haplotype_reconstruction/science/shared/emissions.py) evaluates `max(log(0.99 * P + 0.01 / 3), -2.0)`. Refinement has no independent emission constants.
 
 Cost and scope: O(N L (Q + K)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -215,7 +215,7 @@ Cost and scope: One single-direction polish fit per distinct live start and term
 
 Construct component tasks from shared level settings and checked records. Execute independent components through the supplied team and storage capabilities, then assemble by component number. Runtime memory pressure governs task admission and cancellation; it does not alter candidate budgets, work accounts, component results or output order. Scientific code receives no worker-pool or memory-governor decision.
 
-Implementation: [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [science/assembly/refinement/run.py](../../haplotype_reconstruction/science/assembly/refinement/run.py).
+Implementation: [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [stages/assembly/refinement.py](../../haplotype_reconstruction/stages/assembly/refinement.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -351,7 +351,7 @@ Cost and scope: O(width x affected samples x K^2). These terms describe the unit
 
 Restore compatible saved rows, recompute messages/proposals, and alternate pass direction while holding the content convention fixed. An optimistic abort reruns the entire pass from its original panel with lexicographic messages. Rescore after accepted moves or missing resumed scores; check the predicted gain against the full score every sweep, including zero-move sweeps. Polish only at ordinary fixed points. Zero accepted moves means convergence; reaching the sweep limit records nonconvergence.
 
-Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/reductions.py](../../haplotype_reconstruction/science/assembly/refinement/reductions.py), [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/reductions.py](../../haplotype_reconstruction/science/assembly/refinement/reductions.py), [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `sweep_limit`, `WINDOW_MEMO_BYTES`, `tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -362,7 +362,7 @@ Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimen
 
 Reuse fits only for their full start identity. Run both direction starts, except the single-direction polish route, and compare their F values in the named tie policy. When distinct panels share the winning class, minimise switch count within that class and retain the other tied variant. Canonicalise founder rows after choosing. Branch replay can explicitly force a retained tied panel; it cannot invent an unrecorded alternative. The named tie policy receives the run's reversal convention explicitly (L8).
 
-Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py), [science/assembly/refinement/selection.py](../../haplotype_reconstruction/science/assembly/refinement/selection.py).
+Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -373,7 +373,7 @@ Cost and scope: O(N L Q). These terms describe the unit’s work/storage dimensi
 
 At a polish fixed point try beam escape, then long repair if nothing was accepted, then a bridge if still unchanged and fine offers exist. Bridges use the beam escape’s fine offers. Verify each accepted family by full rescoring and its named exactness tolerances, requiring positive improvement. Polish never changes founder count and never reruns the count decision; a work stop keeps the unpolished count-pass panel.
 
-Implementation: [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `polish`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -395,7 +395,7 @@ Cost and scope: O(W N (b^2 Q + h b (Q + R(K + b)) + h^2 Q)). These terms describ
 
 Generate long-window beam offers, choose the incumbent and agreement-ranked donors, then enumerate deduplicated private corrections. Score every variant exactly; filter by the strict acceptance threshold before forming the maximum gain band. Select the content-smallest rows in that band, offer them as coarse moves and verify accepted gains. A rejected chosen variant does not trigger a search through the offer’s discarded variants.
 
-Implementation: [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `LONG_WINDOW`, `LONG_STRIDE`, `LONG_CORRECTION`, `LONG_DONORS`, `LONG_BEAM_WIDTH`, `BRIDGE_BATCH_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -406,7 +406,7 @@ Cost and scope: O(B K / LONG_STRIDE); O(N · LONG_WINDOW blocks · K²). These t
 
 Choose each fine-window precursor in the maximum gain band, apply it privately, then examine suffix exchanges across its cuts. Choose the exchange within its band before testing the combined gain; a tied representative can therefore leave no offer. Compare surviving bridge offers by band and the declared tuple key, then verify the selected combined gain. Bridges bypass the coarse-move guard.
 
-Implementation: [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `BRIDGE_BATCH_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -419,7 +419,7 @@ Cost and scope: O(#windows x N x 8 blocks x K^2); O(N K^3). These terms describe
 
 Report junctions whose best exchange gain is strictly above the negative weak-junction margin. Keep this diagnostic separate from the acceptance threshold and from released panel state. No downstream scientific decision reads the report.
 
-Implementation: [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `WEAK_JUNCTION_MARGIN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 

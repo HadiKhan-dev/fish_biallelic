@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.special import ndtri
 
 from ..core.errors import SettingsError
@@ -32,7 +33,14 @@ from .parameters import FRAGMENT_QUANTILES, FRAGMENT_SD_LIMIT, MINIMUM_FRAGMENT_
 # Fragment-length quantiles used to compute the expected bases covered per fragment.
 
 
-def sample_reads(hap0, hap1, positions, depth: float, model: ReadModel, rng: np.random.Generator) -> np.ndarray:
+def sample_reads(
+    hap0: NDArray[np.int8],
+    hap1: NDArray[np.int8],
+    positions: NDArray[np.int64],
+    depth: float,
+    model: ReadModel,
+    rng: np.random.Generator,
+) -> NDArray[np.int64]:
     """REF/ALT read counts int64[N, L, 2] of individuals with haplotypes hap0, hap1 (int8[N, L])."""
     if model.read_length_bp:
         return _fragment_reads(hap0, hap1, positions, depth, model, rng)

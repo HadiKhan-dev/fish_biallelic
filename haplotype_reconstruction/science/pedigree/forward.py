@@ -21,6 +21,7 @@ PE1–PE3 preserve this 3.5 method.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 from numba import prange
@@ -138,7 +139,7 @@ def _fill_named_first_products(
     products, state_alt, child_gl, coefficient, site_index, site_start, site_stop, mismatch, child_start
 ):
     """Complete, in place, the cached products that no candidate changes when the first slot transmits a named state
-    and the second slot is the child's null source (M0/M1 configurations; release 3.4, PEDFAST).
+    and the second slot is the child's null source (M0/M1 configurations).
 
     A named state passes through every candidate's projection unchanged (projection._transmitted_alt), so under M0
     and M1 the entries with a named first state depend on the child, bin and state pair only, also where the second
@@ -768,7 +769,7 @@ def score_m1_cached(
     named_maximum,
     column_powered,
 ):
-    """_score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches (release 3.4, PEDFAST): the same
+    """_score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches: the same
     forward recursion, emission values and operations, so the same (tempered, full) log likelihoods.
 
     Where every named-first product of the bin is cached, the candidate's BACKGROUND row is accumulated site by site
@@ -1445,13 +1446,25 @@ def terms_args(p, t):
     )
 
 
-def component_m0(p, t, eligible_children, claim_threads):
+def component_m0(
+    p: Projection, t: ChildTerms, eligible_children: np.ndarray, claim_threads: Callable[[], int | None]
+) -> np.ndarray:
     claim_threads()
     a, b = _m0_kernel(*model_arguments(p), *terms_args(p, t), np.ascontiguousarray(eligible_children))
     return 0.5 * (a + b)
 
 
-def component_m1(p, t, pairs, zero_scores, first_child, products, powered, claim_threads, columns=None):
+def component_m1(
+    p: Projection,
+    t: ChildTerms,
+    pairs: np.ndarray,
+    zero_scores: np.ndarray,
+    first_child: int,
+    products: np.ndarray | None,
+    powered: np.ndarray | None,
+    claim_threads: Callable[[], int | None],
+    columns: tuple[np.ndarray, np.ndarray] | None = None,
+) -> np.ndarray:
     claim_threads()
     if columns is not None and products is not None and powered is not None:
         return _dyads_cached(

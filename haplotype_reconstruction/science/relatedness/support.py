@@ -27,7 +27,7 @@ def support_units(morgans: np.ndarray, unit_morgans: float) -> np.ndarray:
 
 def _support(part: _Partition, ranges):
     """Per chromosome (with family sites): whether each member's family is its best placement, and whether each
-    sequenced parent beats a latent one. A margin within the tolerance is a tie, not a win (release 3.4): a latent
+    sequenced parent beats a latent one. A margin within the tolerance is a tie, not a win: a latent
     one-member family is exactly its member alone, and a parent without reads on a unit exactly a latent one, so
     float noise must not decide those (it follows the sample order)."""
     ranges = [(lo, hi) for lo, hi in ranges if hi > lo]

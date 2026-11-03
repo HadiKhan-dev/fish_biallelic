@@ -1,51 +1,81 @@
 # Discussion
 
-We have described a method that reconstructs the founder haplotypes, pedigree, phase and
-recombination of an experimental cross from low-coverage sequencing, using only the allele depths
-of the sequenced samples and a genetic map. Its central choice is to let the data alone determine
-who is related to whom: no cohort, generation, sex or breeding record enters inference, every
-sequenced sample is a candidate parent of every other, and the direction of each relationship is
-inferred. The cost of that choice is that the method cannot be told which samples are founders or
-parents; the benefit is that errors in records cannot become apparent biological signal, and that
-the same pipeline applies to crosses whose records are incomplete or absent.
+The method reconstructs founder haplotypes, pedigree, phase and recombination from allele depths
+and a genetic map, with every sequenced sample considered as a candidate parent of every other.
+The simulations show that this can recover observed parentage and accurate genotypes without
+cohort labels or declared parental roles. They also show that success at one level does not
+establish success at another. Locally accurate founder sequence can change true-founder identity
+along a chromosome; accurate genotypes can coexist with an unresolved pedigree; and a high
+phased share can coexist with shorter phase sets or long orientation errors.
 
-[TO FILL: two or three paragraphs interpreting the simulation and TroMau results: where founder
-reconstruction, painting, pedigree and phase are accurate, how accuracy degrades with depth,
-missingness, backcrossing and unsequenced parents, and what the TroMau pedigree shows.]{.todo}
+Long-range founder identity is a substantial limitation in designs with unobserved parents and
+founder haplotypes absent from parts of the sequenced descendants. For example, `std` had
+30,360.1 one-to-one founder errors per million matched calls but 851.8 segment errors per million
+calls, with 654 segment-label switches. Its truth included both absent and single-copy founder
+alleles. The contrast is sharper in `longf3`: 64,503.9 one-to-one versus 132.7 segment errors per
+million. A row that follows the correct local sequences can therefore be a mosaic of different
+biological founders. Identity flags, withheld alleles and released segment boundaries qualify
+that claim; they do not eliminate every wrong continuity assertion. Founder labels should not be
+used as persistent biological identities across release segments, and good genotype accuracy
+should not be cited as proof that founder identity is correct.
 
-Several approximations should be kept in mind when interpreting the outputs. Discovery and assembly
-fit finite candidate panels with declared search orders and budgets, so a founder haplotype that no
-search reaches cannot be reported. Founder rows are inferred haplotypes within an assembled
-component; their labels are not chromosome-wide biological identities, and breaks, continuation
-ambiguity and identity flags qualify comparisons across components. The pedigree is chosen from a
-bounded candidate panel with composite evidence and chromosome-level calibration; its support
-fractions measure stability under resampling, not the enumeration of all joint pedigrees. Family
-phase releases modular calls conditional on the inferred pedigree rather than a single globally
-identified assignment of haplotypes. Recombination maps are conditional on the fixed inferred
-pedigree and the final phase, a supplied genetic map is a model input rather than observed truth,
-and an uninformative interval is not evidence for the absence of recombination. Because the method
-cannot exclude samples by label, individuals that do not belong to the cross must be removed from
-the input before analysis.
+Chromosome support also limits pedigree release. The three-chromosome backcross recovered
+0 of 120 observable edges and left all 80 states unresolved, whereas the eight-chromosome case
+recovered all 120. This is an explicit abstention of the release rules, not a finding that parents
+were absent. The map-support experiment recovered most edges on three chromosomes when an
+explicit map supplied genetic length, but also changed the seed. It shows the importance of the
+support definition without isolating a causal effect of chromosome count. An unmeasured fallback
+rate should not be relabelled as a measured map merely to obtain more parent calls.
 
-On the computational side, every stage is designed to be polynomial in the number of founder
-haplotypes, and the measured kernels of every stage gated as at most cubic in K stayed below that
-bound up to K = 30. Two kinds of cost remain outside that bound. Four decided exemptions keep
-bounded searches whose cost is documented and measured: rare context-coded screening in local
-selection, a fixed cap of nine ranked refits in assembly and refinement, bounded discovery and
-selection searches, and the optional pairwise IBD output. Four mechanisms have worst-case costs above cubic
-that are carried exactly as documented exceptions: structural screening in assembly joins, window
-fixing in refinement, label-continuity checks in painting and tie resolution in founder refit.
-None of them binds on the inputs analysed here, but they define where further algorithmic work is
-needed before crosses near K = 30 are analysed routinely; they are scheduled for review, as is the
-cap on ranked refits, which does not grow to enumerate every candidate at larger K. Independently
-of K, the pedigree is quadratic in the number of samples, because every sample is compared with
-every other as a candidate parent. The documented scale envelope of N = 2,500 samples was
-established on bounded genome crops; it does not by itself establish that every whole-genome
-dataset will fit a given machine.
+The $H=30$ test is a stronger warning against equating scale support with resolved biology. It
+used five short contigs and 80 sequenced samples, 60 of whom had no observed parents. Only
+24 parent states and eight exact configurations were correct. Exact calls recovered 4 of 40
+observable edges; including supported marginal edges recovered 11. The panel could release the
+true count on one chromosome while the pedigree remained weak. This design tests a particular
+short-input, sparse-parent setting; it does not establish accuracy for arbitrary thirty-founder
+crosses. Likewise, the combined read-stress design remained usable but had the lowest phased
+share and most long switches in this matrix. Since depth variation, read error, imbalance,
+dropout and partial observation changed together, these runs do not estimate separate effects or
+a coverage threshold. Each design has only one seed, apart from the second seed of the small
+cohort design; broader replication is needed for uncertainty across simulated datasets.
 
-Finally, the implementation treats reproducibility as part of the method. Ties between numerically
-indistinguishable alternatives are resolved by declared content-based rules, random draws come from
-named streams with recorded seeds, sums are taken in declared orders, and released outputs do not
-depend on the number of cores. These properties made it possible to compare a complete
-reimplementation of the pipeline with its predecessor run by run, and to attribute every observed
-difference to a declared numerical normalisation.
+TroMau supplies an application without individual-level parentage truth. The supported edges,
+chromosome-resampling fractions and candidate margins describe inference, and the generation
+labels cannot validate it. Chr3's component structure changed under tie-convention reversal.
+That sensitivity limits claims of a unique founder reconstruction even when numerical-noise and
+sample-order tests agree. Recombination output is further conditional on the inferred pedigree,
+released phase and supplied fallback map. In long uninformative intervals its expected counts
+approach the map model; absent exposure is not evidence of absent recombination. Reported
+junction flags warrant inspection rather than automatic biological interpretation.
+
+Search remains a methodological limit. Discovery's replacement starts and archive beam are
+bounded, and local selection retains bank budgets, fit backstops, context-snap limits and capped
+neighbourhood searches (cost exemption 0c). These can omit a better panel, even when every
+admitted candidate is fitted correctly. Complete founder-count candidate admission does not make
+the fixed-count search or the overall pipeline globally optimal. Shadow families, continuation
+branches and refinement windows also have explicit limits; their unresolved outcomes and
+unperformed searches should accompany downstream interpretation. Pedigree support is based on
+a bounded candidate panel and composite evidence rather than enumeration of every joint
+pedigree. Family-phase posteriors condition on the other samples' fitted configurations and are
+not joint pedigree marginals.
+
+The computational limits are equally explicit. Fitting every eligible count candidate costs
+more at large $K$, and repeated deletion rounds have a quartic worst case under the quadratic
+fixed-count work model. Rare context-coded selection is fifth order in $K$. Canonical refinement
+windows, painting label-continuity checks and founder-refit ties retain the above-cubic worst
+cases documented in the cost register; the cubic analytic bound for adaptive join screening
+should not be confused with its direct-route query-count trend. Small measured kernel slopes
+and small observed tie classes do not bound a whole adaptive search. Independently of $K$,
+all-candidate relatedness and pedigree comparisons are quadratic in sample count. The documented
+sample-scale envelope uses bounded genome crops and does not establish that any whole-genome
+cross of that size will fit a particular machine.
+
+Future work should redesign discovery and selection around a clearer search and stopping
+contract, rather than increase fixed budgets. Promising directions are structural decomposition
+of gauge ambiguity, bounds that certify which proposals can matter, and coordinated panel moves
+that reach alternatives missed by local fits. The same redesign should preserve complete
+founder-count candidate admission and explicit unresolved alternatives while reducing repeated
+fits, window work and tie interactions. Evaluation should then separate local allele recovery,
+founder identity continuity, supported parent edges and phase, over replicated crosses with
+controlled chromosome support and parental observation. These are distinct scientific claims
+and need distinct validation.

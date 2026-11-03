@@ -1,4 +1,4 @@
-"""The sibling-as-parent guard (release 3.4: family consistency): released edges whose parent is Mendelian-excluded
+"""The sibling-as-parent guard: released edges whose parent is Mendelian-excluded
 from most of the child's full sibs.
 
 A parent of c is a parent of every full sib of c, so it is Mendelian-compatible with each of them. A relative released
@@ -31,12 +31,11 @@ Method: docs/methods/pedigree.md#sibling-as-parent-guard.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 from ...contracts.pedigree import NO_PARENT, UNRESOLVED, EdgeFamily, GuardRecord, GuardVote, ParentEdges, PedigreeCalls
 from ...core.errors import InputError, InvariantError
+from . import exclusion
 from .parameters import PedigreeConfig
 
 __all__ = ["edge_families", "guard_dyads", "decide", "withheld_edges", "fixed_point", "apply_calls"]
@@ -119,7 +118,7 @@ def decide(
     """(excluded members, NaN when untested; call) per family. ``dyads``/``log_e``/``log_e_upper``: the exclusion
     evidence of (at least) guard_dyads(families) as (child, candidate) rows of any order; a member is excluded from the
     parent when log E >= log(2N/alpha), the threshold of the count release (N = ``sample_count``)."""
-    threshold = math.log(2 * sample_count / config.exclusion.alpha)
+    threshold = exclusion.log_threshold(sample_count, config.exclusion.alpha)
     evidence = {}
     for k, (a, b) in enumerate(np.asarray(dyads, dtype=np.int64).reshape(-1, 2).tolist()):
         lower = float(log_e[k])

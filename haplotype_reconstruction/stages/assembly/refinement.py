@@ -27,7 +27,7 @@ from time import perf_counter
 
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.refinement.component_workspace import ComponentWorkspace
-from haplotype_reconstruction.science.assembly.refinement.run import RefinementSettings
+from haplotype_reconstruction.science.assembly.refinement.run import MacroContext, RefinementSettings
 from haplotype_reconstruction.science.assembly.refinement.run import refine_component as science_refine_component
 from haplotype_reconstruction.science.assembly.refinement.window import RESIDENT_BYTES, resident_bytes, window_sites
 
@@ -40,7 +40,7 @@ def refine_component(
     component: FounderComponent,
     panels: Sequence[PreparedPanel],
     evidence: NDArray[np.float32],
-    context: object,
+    context: MacroContext | None,
     settings: RefinementSettings,
     team: RefinementExecution,
     records: RefinementRecords | None = None,
@@ -70,7 +70,7 @@ def refine_component(
 
     if component.stop - component.start < 2 or component.founders < 2:
         return science_refine_component(
-            number, component, panels, evidence, context, settings, team, records, incoming=incoming, workspace=None
+            number, component, panels, context, settings, team, records, incoming=incoming, workspace=None
         )
     with team.scope():
         workspace = ComponentWorkspace(
@@ -89,7 +89,6 @@ def refine_component(
             number,
             component,
             panels,
-            evidence,
             context,
             settings,
             team,
@@ -216,7 +215,7 @@ def _component_stage(
     component: FounderComponent,
     panels: Sequence[PreparedPanel],
     evidence: NDArray[np.float32] | SharedArrayRef,
-    context: object,
+    context: MacroContext | None,
     settings: RefinementSettings,
     records: RecordCapability | None,
     incoming: tuple,

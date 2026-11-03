@@ -20,7 +20,7 @@ from ...contracts.panels import unknown_copy_mass
 from ...core.kernels import kernel
 from ...core.ties import BlockQuanta, fixed_policy
 from .diagnostics import BlockDiagnostics
-from .panel import assignment_tie_mask, known_content_key, solution_tie_mask, unknown_alleles
+from .panel import assignment_tie_mask, known_content_key, solution_tie_mask, state_layout, unknown_alleles
 from .panel import state_membership as _state_membership
 from .parameters import EMISSION_FLOOR, DiscoveryConfig, ReleaseRuleConfig
 from .search import BlockSearch, SearchSummary
@@ -66,10 +66,7 @@ def _release(likelihoods, haplotypes, assignments, observed, unknown_copy_penalt
     k = haplotypes.shape[0]
     assignments = np.ascontiguousarray(assignments, dtype=np.int64)
     mask = assignment_tie_mask(assignments, k) if tie_mask is None else np.ascontiguousarray(tie_mask, dtype=np.uint8)
-    pair_i, pair_j = np.triu_indices(k)
-    kind = np.concatenate((np.zeros(len(pair_i), dtype=np.int64), np.ones(k, dtype=np.int64), [2]))
-    first = np.concatenate((pair_i, np.arange(k), [-1])).astype(np.int64)
-    second = np.concatenate((pair_j, np.full(k + 1, -1))).astype(np.int64)
+    kind, first, second = state_layout(k)
     offsets, members, first, second = _state_membership(assignments, k, mask, kind, first, second)
     carriers = _release_carriers(k, offsets, members, first, second)
     probability, supporters, calls, evaluated, banded = _release_kernel(

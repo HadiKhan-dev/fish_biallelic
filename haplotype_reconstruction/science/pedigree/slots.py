@@ -1,13 +1,13 @@
 """Released order of a child's two observed parents (release 2.2; Parent1/Parent2, family-phase slots).
 
 Scoring treats a parent pair as unordered; only the released products order it. The pipeline reads no sample
-metadata (release 3.4), so no sex is recorded and none is inferred: the slots carry no biological meaning (neither
+metadata, so no sex is recorded and none is inferred: the slots carry no biological meaning (neither
 maternal nor paternal).
 
-* ``unordered``: two observed parents. Their order is a canonical label that does not depend on sample names or
-  input order: the parent with more observed sites (read depth > 0) first, compared over the run's contigs in
-  configured order until they differ; the sample name decides only between parents whose observed patterns have
-  identical counts on every contig. Renaming samples changes no released order; the convention reversal
+* ``unordered``: two observed parents. Their order is a canonical label independent of input order: the parent
+  with more observed sites (read depth > 0) first, compared over the run's contigs in configured order until they
+  differ; the sample name decides only between parents whose observed patterns have identical counts on every
+  contig. Renaming samples preserves the order only when their count vectors differ; the convention reversal
   (maths.ties) flips the label.
 * ``single``: one observed parent, in slot 0.
 * ``none``: no observed parent.

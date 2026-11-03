@@ -221,8 +221,7 @@ def canonical_component_inputs(
 ) -> PhaseComponentInputs:
     """Project identity-checked canonical records onto one component, borrowing arrays.
 
-    Unlike the historical neutral-fixture adapter, this boundary reads each
-    record's independent sample axis. Painting/refit must retain their component
+    Read each record's independent sample axis. Painting/refit must retain their component
     panels (the canonical derived views), with identical row and site identities.
     Prior counts include every refit component, even ones without painting bins.
     """
@@ -281,46 +280,6 @@ def canonical_component_inputs(
         phase_map,
         identities=identities,
     )
-
-
-def phased_samples_from_baseline(payload: Mapping[str, Any]) -> PhasedSamples:
-    """Read a schema-4 fixture through the explicit PH2 storage projection.
-
-    Only the obsolete all-zero frames and execution elapsed time are omitted.
-    This adapter is for frozen 3.5 fixtures; production reads use schema 1 and
-    the shared payload codec. Missing chains and nonzero obsolete frames fail.
-    """
-    from dataclasses import fields
-
-    from ...contracts.phase import MirroredSolveDiagnostics, PairingDiagnostics, PhaseDiagnostics, PhasedSamples
-    from ...core.errors import InvariantError
-
-    if int(payload.get("schema", 1)) < 4:
-        raise InvariantError("phase fixture predates released meiosis chains")
-    for name in ("displayed_frame", "decoder_frame"):
-        if name in payload and np.any(payload[name]):
-            raise InvariantError(f"obsolete phase field {name} is not zero")
-    diagnostic = dict(payload["diagnostics"])
-    diagnostic.pop("elapsed_seconds", None)
-    extra = diagnostic.pop("extra", {})
-    count = len(diagnostic["sweeps"])
-    diagnostic["mirrored_solves"] = tuple(
-        MirroredSolveDiagnostics(**{**row, "objective": tuple(row["objective"])}) if row else None
-        for row in extra.get("mirrored_solves", [{}] * count)
-    )
-    diagnostic["pairings"] = tuple(
-        PairingDiagnostics(**row) if row else None for row in extra.get("pairings", [{}] * count)
-    )
-    for name in ("sweeps", "settled", "junction_candidates"):
-        diagnostic[name] = tuple(diagnostic[name])
-    diagnostic["objective"] = tuple(tuple(row) for row in diagnostic["objective"])
-    values = {
-        f.name: payload[f.name] for f in fields(PhasedSamples) if f.name not in ("schema", "diagnostics", "sample_ids")
-    }
-    if values["chain_source"] is None:
-        raise InvariantError("phase fixture has no meiosis chains")
-    diagnostic["history_steps"] = diagnostic.pop("sweeps")
-    return PhasedSamples(**values, sample_ids=tuple(payload["sample_ids"]), diagnostics=PhaseDiagnostics(**diagnostic))
 
 
 class PhasedSamplesAdapter:

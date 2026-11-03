@@ -11,16 +11,18 @@ PE1–PE3 preserve this 3.5 method.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 from numba import prange
 
-from ...contracts.pedigree import RelativeContrasts
+from ...contracts.pedigree import PreparedComponent, RelativeContrasts
 from ...core.kernels import kernel
 from ...core.numerics import ordered_sum
 from . import resident
 from .forward import apply_bridge, apply_excursion, apply_null, model_arguments, score_path, site_likelihood
 from .kernels.signatures import OVERLOADS
+from .parameters import PedigreeConfig
 
 __all__ = ["aggregate", "component_contrasts", "PROXY_MODEL"]
 PROXY_MODEL = "relative-proxy-v1"
@@ -486,7 +488,14 @@ def _m1_pairs(
     return out
 
 
-def component_contrasts(component, config, pairs, claim_threads=lambda: None, *, reverse: bool | None = None):
+def component_contrasts(
+    component: PreparedComponent,
+    config: PedigreeConfig,
+    pairs: np.ndarray,
+    claim_threads: Callable[[], int | None] = lambda: None,
+    *,
+    reverse: bool | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(M1 - second-degree proxy, M1 - full-sib proxy, usable) float64/float64/bool [E] of one prepared component
     for the (child, candidate) ``pairs`` int64 [E, 2]
     zero where the candidate has no evidence here."""

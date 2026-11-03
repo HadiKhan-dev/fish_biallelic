@@ -7,8 +7,11 @@ them.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
+import shutil
+import tempfile
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, is_dataclass
@@ -16,6 +19,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+
+from ...core.columns import column_name
 
 
 def temporary_path(path: Path) -> Path:
@@ -44,7 +49,7 @@ def write_frame(path, frame, *, sep: str = ",") -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = temporary_path(path)
-    frame.to_csv(temporary, sep=sep, index=False)
+    frame.rename(columns=column_name).to_csv(temporary, sep=sep, index=False)
     temporary.replace(path)
     return path
 
@@ -58,14 +63,64 @@ def write_rows(path, rows, *, columns=None, sep: str = ",") -> Path:
     return write_frame(path, json_cells(frame), sep=sep)
 
 
-def write_text_table(path, header, rows, *, sep: str = "\t") -> Path:
+def write_text_table(path, header, rows, *, sep: str = ",") -> Path:
     """Write a table whose cells are already text (header + rows of strings), one line per row."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = temporary_path(path)
-    temporary.write_text("\n".join(sep.join(map(str, line)) for line in (header, *rows)) + "\n")
+    with temporary.open("w", newline="") as handle:
+        writer = csv.writer(handle, delimiter=sep, lineterminator="\n")
+        writer.writerow([column_name(name) for name in header])
+        writer.writerows(rows)
     temporary.replace(path)
     return path
+
+
+def contig_part(output, family, contig, frames):
+    """Publish private CSV parts without retaining all chromosomes' report frames in memory."""
+    if not frames:
+        return contig, {}
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=f".{family}-", dir=output))
+    paths = {}
+    for name, frame in frames.items():
+        frame = frame.copy()
+        if "contig" not in frame:
+            frame.insert(0, "contig", contig)
+        else:
+            frame = frame[["contig", *(name for name in frame if name != "contig")]]
+        paths[name] = write_frame(directory / f"{name}.csv", json_cells(frame))
+    return contig, paths
+
+
+def write_contig_tables(output, family, parts):
+    """Concatenate private CSV cells in supplied contig order and publish each table atomically."""
+    directory = Path(output) / family
+    directory.mkdir(parents=True, exist_ok=True)
+    names = dict.fromkeys(name for _, paths in parts for name in paths)
+    written = []
+    try:
+        for name in names:
+            paths = [paths[name] for _, paths in parts if name in paths]
+            columns = {}
+            for path in paths:
+                with Path(path).open(newline="") as handle:
+                    columns.update(dict.fromkeys(next(csv.reader(handle), ())))
+            path = directory / f"{name}.csv"
+            temporary = temporary_path(path)
+            with temporary.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(columns), lineterminator="\n")
+                writer.writeheader()
+                for part in paths:
+                    with Path(part).open(newline="") as source:
+                        writer.writerows(csv.DictReader(source))
+            temporary.replace(path)
+            written.append(path)
+    finally:
+        for parent in {Path(path).parent for _, paths in parts for path in paths.values()}:
+            shutil.rmtree(parent)
+    return written
 
 
 def write_json(path, value) -> Path:

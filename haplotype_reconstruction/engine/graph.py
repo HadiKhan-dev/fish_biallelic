@@ -141,8 +141,8 @@ def dependency_order(tasks: Sequence[Task]) -> tuple[TaskKey, ...]:
             if output in writers:
                 raise SettingsError(f"{output}: multiple writers {writers[output]} and {task.key}")
             writers[output] = task.key
-    # Layers of keys whose dependencies all lie in earlier layers, each sorted (Kahn's algorithm by level: linear
-    # in tasks and dependencies; a long chain no longer rescans every remaining task per layer).
+    # Sorted layers whose dependencies all lie in earlier layers. Kahn's algorithm visits each task and
+    # dependency once; sorting orders the keys within each layer.
     waiting = {key: len(set(task.depends_on)) for key, task in indexed.items()}
     dependents: dict[TaskKey, list[TaskKey]] = {}
     for key, task in indexed.items():

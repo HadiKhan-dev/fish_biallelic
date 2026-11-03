@@ -191,18 +191,14 @@ def block_tables(
             continue
         for r in range(n0):
             for s in range(n0):
-                T0[b, r, s] = slot_log_transition(
-                    kinds[0], parents[0], r, s, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, S
-                )
+                T0[b, r, s] = slot_log_transition(kinds[0], r, s, b, lstay, lmove, mstay, mmove, ain, astay, bout, S)
         for r in range(n1):
             for s in range(n1):
-                T1[b, r, s] = slot_log_transition(
-                    kinds[1], parents[1], r, s, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, S
-                )
+                T1[b, r, s] = slot_log_transition(kinds[1], r, s, b, lstay, lmove, mstay, mmove, ain, astay, bout, S)
         if G == 2:
             for h in range(2):
                 for g in range(2):
-                    TG[b, h, g] = gauge_children_terms(n, b, h, g, V, child_tracks, mstay, mmove)
+                    TG[b, h, g] = gauge_children_terms(b, h, g, V, child_tracks, mstay, mmove)
     return em, T0, T1, TG, labs0, labs1
 
 

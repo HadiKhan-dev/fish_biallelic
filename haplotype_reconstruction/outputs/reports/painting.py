@@ -1,19 +1,19 @@
-"""OUTPUT/painting/<contig>/: read-only founder callability, carrier support, assembly-search, founder-count
+"""OUTPUT/painting/: read-only founder callability, carrier support, assembly-search, founder-count
 and sample-switch tables of one painted chromosome.
 
-  founder_support.tsv          per component and founder row: called/missing alleles, observed named carriers
+  founder_support.csv          per component and founder row: called/missing alleles, observed named carriers
                                (samples whose released painting names the row at a site with read depth),
                                pooled candidates (tracks the reads cannot separate between identical rows)
-  founder_support_windows.tsv  the same per 200-site window
-  assembly_search.tsv          every record of the final assembly's join searches (level, span, record fields)
-  founder_counts.tsv           per component: how firmly its founder count is determined (final count step,
+  founder_support_windows.csv  the same per 200-site window
+  assembly_search.csv          every record of the final assembly's join searches (level, span, record fields)
+  founder_counts.csv           per component: how firmly its founder count is determined (final count step,
                                count cycles and band-straddling decisions of the final and feedback join searches)
-  sample_switches.tsv          painted switches per sample relative to the cohort median
-  label_continuity.tsv         every accepted label-continuity move with its winners' switch directions and
+  sample_switches.csv          painted switches per sample relative to the cohort median
+  label_continuity.csv         every accepted label-continuity move with its winners' switch directions and
                                whether the founder identity across its link is identified (release 2.14)
-  sample_segments.tsv          the released painting per sample: runs of bins with one release (status, named
+  sample_segments.csv          the released painting per sample: runs of bins with one release (status, named
                                founder row, candidate rows), switch intervals included (release 2.2)
-  painting_model.tsv           per component: the estimated copying model (ancestry-change rate, panel-error
+  painting_model.csv           per component: the estimated copying model (ancestry-change rate, panel-error
                                entry and exit, the emissions' site correlation; release 2.14)
 
 Carrier support uses released named painting tracks intersected with positive read depth: it is
@@ -34,7 +34,7 @@ import numpy as np
 
 from ...contracts.painting import Painting
 from ...core.errors import InvariantError
-from .tables import json_cells, write_frame
+from .tables import contig_part, write_contig_tables
 
 WINDOW_SITES = 200
 SUPPORT_BASIS = "released named painting ancestry AND positive depth; correlated samples"
@@ -266,59 +266,54 @@ def sample_switch_table(painting, input_ids=None):
     return frame
 
 
-def report_bytes(decoded_bytes: int, samples: int, sites: int) -> int:
-    """Plan decoded records and carrier counts with the original allocator slack."""
-    return (decoded_bytes + samples * sites + 16 * sites) * 5 // 4
-
-
-def write_painting(output: str | Path, results: Results, contig: str) -> list[Path]:
+def contig_painting(output: str | Path, results: Results, contig: str):
     """Publish all painting tables from the typed results report view."""
     view = results.painting_report(contig)
     assert view is not None  # the writer runs after the contig's painting task published it
-    return write_tables(
+    return contig_part(
         output,
+        "painting",
         contig,
-        view.painting,
-        view.positions,
-        view.observed,
-        view.searches,
-        view.feedback_searches,
-        results.input_sample_ids,
+        painting_frames(
+            view.painting,
+            view.positions,
+            view.observed,
+            view.searches,
+            view.feedback_searches,
+            results.input_sample_ids,
+        ),
     )
 
 
-def write_tables(
-    output, contig: str, painting, positions, observed, searches=(), feedback=(), input_ids=None
-) -> list[Path]:
+def painting_frames(painting, positions, observed, searches=(), feedback=(), input_ids=None):
     """Format the eight painting tables; all inputs are recorded views."""
     import pandas as pd
 
     support, windows, search_rows = founder_support_tables(painting, positions, observed, searches)
     switches = sample_switch_table(painting, input_ids)
-    directory = Path(output) / "painting" / contig
     counts = founder_count_table(painting, searches, feedback)
-    frames = (pd.DataFrame(support), pd.DataFrame(windows), pd.DataFrame(search_rows), switches, pd.DataFrame(counts))
-    written = [
-        write_frame(directory / f"{name}.tsv", json_cells(frame), sep="\t")
-        for name, frame in zip(TABLES, frames, strict=False)
-    ]
-    segments = pd.DataFrame(segment_rows(painting, input_ids), columns=SEGMENT_COLUMNS)
-    written.append(write_frame(directory / "sample_segments.tsv", segments, sep="\t"))
-    written.append(
-        write_frame(
-            directory / "label_continuity.tsv",
-            pd.DataFrame(label_continuity_rows(painting), columns=CONTINUITY_COLUMNS),
-            sep="\t",
+    frames = dict(
+        zip(
+            TABLES,
+            (
+                pd.DataFrame(support, columns=None if support else FOUNDER_SUPPORT_COLUMNS),
+                pd.DataFrame(windows, columns=None if windows else FOUNDER_SUPPORT_WINDOW_COLUMNS),
+                pd.DataFrame(search_rows, columns=None if search_rows else ASSEMBLY_SEARCH_PREFIX_COLUMNS),
+                switches,
+                pd.DataFrame(counts, columns=None if counts else FOUNDER_COUNT_COLUMNS),
+            ),
+            strict=True,
         )
     )
-    written.append(
-        write_frame(
-            directory / "painting_model.tsv",
-            pd.DataFrame(painting_model_rows(painting), columns=MODEL_COLUMNS),
-            sep="\t",
-        )
-    )
-    return written
+    frames["sample_segments"] = pd.DataFrame(segment_rows(painting, input_ids), columns=SEGMENT_COLUMNS)
+    frames["label_continuity"] = pd.DataFrame(label_continuity_rows(painting), columns=CONTINUITY_COLUMNS)
+    frames["painting_model"] = pd.DataFrame(painting_model_rows(painting), columns=MODEL_COLUMNS)
+    return frames
+
+
+def write_painting(output, parts) -> list[Path]:
+    """Publish all eight run-level painting tables in configured contig order."""
+    return write_contig_tables(output, "painting", parts)
 
 
 SEGMENT_COLUMNS = ("SampleID", "Component", "Track", "Start", "End", "Status", "Label", "Rows")
@@ -501,9 +496,8 @@ def segment_rows(painting: Painting, input_ids=None) -> list[dict]:
     return rows
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
-# impose columns on those tables. Scientific values remain upstream contract fields.
+# Published table schemas, including contigs that contribute no rows.
+# Header spelling is normalized by the shared CSV writer.
 FOUNDER_SUPPORT_COLUMNS = (
     "Component",
     "Founder",

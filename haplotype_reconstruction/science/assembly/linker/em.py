@@ -107,8 +107,7 @@ class Transitions:
     log_forward: for each fitted gap g = 1 .. G (index g - 1), for each block i = 0 .. n - 1 - g, the float64
         matrix [K_i, K_{i+g}] of log P(founder v at block i + g | founder u at block i): the natural log of the
         fitted probability. Rows sum to 1 in probability; every entry is finite (the uniform mixture keeps
-        probabilities positive). Release 2.1 keeps float64 (base FastMesh rounded to float32, so a one-ulp change
-        of one entry under a tiny input perturbation reordered the endpoint beam; design 5.4, review r8).
+        probabilities positive). Keep float64 precision through the endpoint beam's score accumulation.
     diagnostics: one plain convergence record per fitted gap, in gap order. The hierarchy persists these as
         linker_em search events; old records without the events have unmeasured convergence, not zero residual.
     """
@@ -223,7 +222,7 @@ def _messages(scans, founders, log_forward, gap, workspace: LinkerWorkspace):
     return results[0], results[1]
 
 
-def _m_step(forward_scores, backward_scores, log_forward, gap, config, workspace: LinkerWorkspace):
+def _m_step(forward_scores, backward_scores, log_forward, gap, config):
     """Undamped regularised forward transitions from posterior homologue edge counts.
 
     This is the fixed-point map M(T). Damping belongs to the iteration, not its convergence residual.
@@ -268,7 +267,7 @@ def _fit_gap(scans, founders, gap, config: LinkerParameters, workspace: LinkerWo
     for updates in range(config.max_iterations + 1):
         log_forward = [entrywise_log(table) for table in forward]
         forward_scores, backward_scores = _messages(scans, founders, log_forward, gap, workspace)
-        target = _m_step(forward_scores, backward_scores, log_forward, gap, config, workspace)
+        target = _m_step(forward_scores, backward_scores, log_forward, gap, config)
         residuals = [_largest_change((table,), (value,)) for table, value in zip(forward, target, strict=False)]
         residual = max(residuals, default=0.0)
         residual_history.append(residual)

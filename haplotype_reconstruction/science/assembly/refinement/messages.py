@@ -30,7 +30,7 @@ maximum-score path, decomposed exactly like F; only the coarse-move guard reads 
 change F.
 
 Every kernel reads the log evidence and the switch costs of its orientation and K through a window
-(window.py, release 3.4): it covers each stretch of whole blocks before it reads it, a stretch at
+(window.py): it covers each stretch of whole blocks before it reads it, a stretch at
 most the window's capacity (the whole component for a resident window), and carries every sample's
 message from stretch to stretch, so the recursion and its values are those of one pass. The
 chromosome-wide kernels compute the samples of a range [s0, s1) into arrays the caller allocates

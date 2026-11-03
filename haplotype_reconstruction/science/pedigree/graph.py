@@ -19,9 +19,9 @@ from ...contracts.pedigree import M0, Alternatives, GraphSelection, LocalGraphCh
 from ...core import ties as tie_rules
 from ...core.errors import InvariantError
 from ...core.kernels import kernel
+from .kernels.signatures import OVERLOADS
 from .orientation import Orientation, parent_role_probability
 from .parameters import WINNER_NUMERICS
-from .signatures import OVERLOADS
 from .ties import contrast_tolerance, unique_finite_winner, winner_tolerance
 
 __all__ = ["is_acyclic", "select_local", "select_acyclic", "tie_conflict_children"]
@@ -184,7 +184,7 @@ def select_acyclic(
 
     def reachable(child: int) -> np.ndarray:
         """bool [N]: the child and every sample reachable from it, i.e. every x with a path child -> x (one
-        search per child visit instead of one per candidate row and parent; release 3.4, PEDFAST)."""
+        search per child visit instead of one per candidate row and parent)."""
         reach = np.zeros(n_samples, dtype=np.bool_)
         reach[child] = True
         stack = [child]

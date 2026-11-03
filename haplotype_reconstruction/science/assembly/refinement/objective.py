@@ -37,11 +37,10 @@ Robust emission of dosage d: max(log(0.99 p_d + 0.01/3), -2) - log(1/3) with p t
 genotype likelihoods (window.site_values gives the uncentred term; CENTER is subtracted as the site
 is read).
 
-Release 3.4: kernels read the log evidence and switch costs of a sample-site through a window
+Kernels read the log evidence and switch costs of a sample-site through a window
 (window.py: a stretch of sites held in memory, anything else computed on the spot with the same
 arithmetic), never through whole-component arrays; a whole-component kernel runs stretch by stretch,
-covering each before it reads it. The values, and so every kernel's result, are those of 3.3's
-arrays bit for bit.
+covering each before it reads it. Window boundaries preserve the per-site arithmetic and recursion order.
 
 Site steps. Forward (carried) messages take the transition entering the site, then emit; backward
 (stored) messages emit, then take the transition entering the site. A sample's first informative
@@ -375,7 +374,7 @@ def centred(e, ec):
 
 @kernel(overloads=overloads_for(__name__, "fused_step"), inline="always")
 def fused_step(row, c, R, Rn, ec, dos, i, scanned):
-    """Release 3.5: transition(row, c, R) (c finite; R the founder maxima of row when scanned, else
+    """Complete transition(row, c, R) (c finite; R the founder maxima of row when scanned, else
     computed here) then the emission ec[dos[i, q]], in one pass over the states that also collects
     the emitted row's founder maxima into Rn in founder_maxima()'s order. Every state takes the
     same operations in the same order as transition() then emit(), and Rn's maxima are taken over
@@ -444,7 +443,7 @@ def forward_sites(row, dos, lo, win, s, j0, j1, R, e):
     informative site the transition entering it (its switch cost) then its emission (dosage rows
     dos[j - lo]). R: (K,) and e: (7,) scratch.
 
-    Release 3.5: each site's transition and emission run as one pass (fused_step) that also takes
+    Each site's transition and emission run as one pass (fused_step) that also takes
     the founder maxima the next site's transition reads; bitwise transition() then emit()."""
     K = len(R)
     Rn = np.empty(K)
@@ -470,7 +469,7 @@ def backward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's backward (stored-convention) row over sites [j0, j1) from right to left:
     per informative site its emission, then the transition entering it.
 
-    Release 3.5: a site's transition is completed in the same pass as the next site's emission
+    A site's transition is completed in the same pass as the next site's emission
     (fused_step), which also takes that site's founder maxima; the last transition is completed
     alone. Bitwise emit() then transition() per site."""
     K = len(R)
@@ -526,7 +525,7 @@ def lex_founder_maxima(row, cst, R, Rc):
 
 @kernel(overloads=overloads_for(__name__, "lex_fused_step"), inline="always")
 def lex_fused_step(row, cst, c, R, Rc, Rn, Rcn, ec, dos, i, emit_here):
-    """Release 3.5: the rest of transition_lex(row, cst, c, R, Rc) given (R, Rc) = lex_founder_maxima(row, cst)
+    """Complete the rest of transition_lex(row, cst, c, R, Rc) given (R, Rc) = lex_founder_maxima(row, cst)
     (c finite), then, when emit_here, emit()'s addition ec[dos[i, q]] (ec = the site's e[code] - CENTER), in one
     pass over the states that also collects the resulting row's founder maxima into (Rn, Rcn) with
     lex_founder_maxima()'s comparisons in its order. Every state takes transition_lex()'s operations, then emit()'s,
@@ -613,7 +612,7 @@ def lex_emit_scan(row, cst, Rn, Rcn, ec, dos, i):
 def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """forward_sites() with the lexicographic switch costs.
 
-    Release 3.5: each site's transition and emission run as one pass (lex_fused_step) that also takes the
+    Each site's transition and emission run as one pass (lex_fused_step) that also takes the
     founder maxima the next site's transition reads; bitwise transition_lex() then emit()."""
     K = len(R)
     Rn = np.empty(K)
@@ -643,7 +642,7 @@ def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
 def backward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """backward_sites() with the lexicographic switch costs.
 
-    Release 3.5: a site's transition is completed in the same pass as the next site's emission
+    A site's transition is completed in the same pass as the next site's emission
     (lex_fused_step), which also takes that site's founder maxima; the last transition is completed alone.
     Bitwise emit() then transition_lex() per site."""
     K = len(R)

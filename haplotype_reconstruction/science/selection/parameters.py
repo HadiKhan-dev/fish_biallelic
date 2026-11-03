@@ -35,16 +35,11 @@ __all__ = [
     "CONSENSUS_CENSUS_WINDOW",
     "KIND_ORDER",
     "BACKGROUND_COUNT_BAND",
-    "SITE_HALF_BAND",
     "HALF_CENSUS_WINDOW",
     "FAVOURABLE_CENSUS_WINDOW",
     "UNKNOWN_CENSUS_WINDOW",
-    "REFIT_WORKER_RESIDENT_BYTES",
-    "BLOCK_WORKER_RESIDENT_BYTES",
     "TASK_WORKSPACE_BASE_BYTES",
     "SEARCH_GROWTH",
-    "BUNDLE_BYTES",
-    "BUNDLE_TASKS",
     "PARAMETER_PROVENANCE",
 ]
 
@@ -318,16 +313,11 @@ DECISION_MOTION = 5e-5
 CONSENSUS_CENSUS_WINDOW = 1e-3
 KIND_ORDER = {"drop": 0, "merge": 1, "add": 2}
 BACKGROUND_COUNT_BAND = 2.0**-15
-SITE_HALF_BAND = 2.0**-20
 HALF_CENSUS_WINDOW = 1e-3
 FAVOURABLE_CENSUS_WINDOW = 1e-3
 UNKNOWN_CENSUS_WINDOW = 1e-3
-REFIT_WORKER_RESIDENT_BYTES = 512 << 20
-BLOCK_WORKER_RESIDENT_BYTES = 768 << 20
 TASK_WORKSPACE_BASE_BYTES = 2048 << 20
 SEARCH_GROWTH = 8
-BUNDLE_BYTES = 256 << 20
-BUNDLE_TASKS = 256
 
 PARAMETER_PROVENANCE = {
     "FLIP_TIE": "3.5 fit.py:38; release 2.13 relative flip band scaled to 1e-6 GL noise",
@@ -345,14 +335,9 @@ PARAMETER_PROVENANCE = {
     "CONSENSUS_CENSUS_WINDOW": "3.5 search.py:77; diagnostic census window",
     "KIND_ORDER": "3.5 search.py:79; fixed same-panel representative preference",
     "BACKGROUND_COUNT_BAND": "3.5 context_refit.py:43; probability quantum 2**-15",
-    "SITE_HALF_BAND": "3.5 assembly founder_alleles/site_posterior.py; AS2 half band",
     "HALF_CENSUS_WINDOW": "3.5 context_refit.py:45; diagnostic census window",
     "FAVOURABLE_CENSUS_WINDOW": "3.5 release.py:46; diagnostic census window",
     "UNKNOWN_CENSUS_WINDOW": "3.5 release.py:49; diagnostic census window",
-    "REFIT_WORKER_RESIDENT_BYTES": "3.5 context_refit.py:50; resource-only resident allowance",
-    "BLOCK_WORKER_RESIDENT_BYTES": "3.5 rounds.py:254; resource-only resident allowance",
     "TASK_WORKSPACE_BASE_BYTES": "3.5 rounds.py:259; resource-only workspace allowance",
     "SEARCH_GROWTH": "3.5 rounds.py:261; resource-only founder growth allowance",
-    "BUNDLE_BYTES": "3.5 rounds.py:311; resource-only batch grouping",
-    "BUNDLE_TASKS": "3.5 rounds.py:312; resource-only batch grouping",
 }

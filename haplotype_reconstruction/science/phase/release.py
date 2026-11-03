@@ -3,8 +3,9 @@
 For each sample, every other sample fixed at the converged MAP, the block's exact forward-backward
 (kernels.forward_backward) gives posteriors of its ordered label pair per bin. The site model turns them into per-site
 ordered allele posteriors (kernels.site_posteriors): given its label pair, each homologue carries its label's panel
-allele except for a flip with that allele's leave-one-out uncertainty (allele_evidence.py: the probability that the
-state's allele is the other one given every other carrier's reads, so the sample's own reads are not counted twice),
+allele except for a flip with that allele's conditional uncertainty (allele_evidence.py: the sample's direct
+own-read term is removed with the fitted carriers, panel and empirical prior held fixed; indirect own-read
+influence on those fitted quantities remains),
 the pair departs from the alleles with probability ``site_deviation``, and its own reads at the site weigh the
 alternatives.
 

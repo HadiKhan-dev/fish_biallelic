@@ -455,7 +455,7 @@ class _Partition:
         merged = np.abs(ll_f + ll_g + np.where(np.isfinite(estimate), estimate, 0.0))
         return self.screen_error(np.abs(ll_f) + np.abs(ll_g) + merged)
 
-    def prefetch_near_best(self, samples, exclude_own=True):
+    def prefetch_near_best(self, samples):
         """Exact join gains near each listed sample's best placement (best_placement's), in one batch."""
         families, columns = [], []
         for c in samples:

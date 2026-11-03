@@ -286,7 +286,7 @@ def content_key(*arrays: np.ndarray) -> bytes:
 
 
 class _PackedState(TypedDict):
-    """Internal memo representation retained from 3.5; arrays are restored on demand."""
+    """Internal memo representation; arrays are restored on demand."""
 
     panel: tuple[int, np.ndarray]
     frequencies: np.ndarray

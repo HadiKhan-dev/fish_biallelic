@@ -42,7 +42,7 @@ from .allele_evidence import allele_evidence, allele_prior, flip_probabilities
 from .inputs import _state_alleles, edge_rates
 from .junctions import JunctionInputs, junction_candidates, withheld_joins
 from .model import LabelModel
-from .painting_inputs import component_bin_edges, tie_boundaries
+from .painting_inputs import component_bin_edges, tie_break_bins
 from .parameters import SITE_WINDOW, PhaseParameters
 from .release import ReleaseInputs, release_sample
 
@@ -183,11 +183,10 @@ def _forced_breaks(inputs, models, parents, bin_edges, audit=None):
             for child in [parent] + solved.children_of(parent):
                 pairing.setdefault(child, set()).add(int(edge))
     positions = inputs.observations.positions
-    ties = tie_boundaries((inputs.painting,), positions, np.arange(len(parents)))
+    ties = tie_break_bins((inputs.painting,), positions, parents, bin_edges)
     break_bins, tie_cuts = [], []
     for sample in range(len(parents)):
-        tie_bins = {int(np.searchsorted(bin_edges, positions[index + 1], side="right") - 1) for index in ties[sample]}
-        tie_bins = {b for b in tie_bins if 0 < b < model.B} if np.all(parents[sample] < 0) else set()
+        tie_bins = ties[sample]
         joins = set(withheld.get(sample, ()))
         pairs = {b for b in pairing.get(sample, ()) if 0 < b < model.B}
         break_bins.append(tuple(sorted(tie_bins | joins | pairs)))
@@ -425,15 +424,9 @@ def phase_contig(
         mirror_row, pairing_row = solve_diagnostics(state, parameters)
         mirrored.append(mirror_row)
         pairing_rows.append(pairing_row)
-        ties = tie_boundaries((painted,), component.observations.positions, np.arange(n))
+        ties = tie_break_bins((painted,), component.observations.positions, state.parents, bin_edges)
         for sample, agreed in enumerate(state.result.agreed):
-            tie_bins = {
-                int(np.searchsorted(bin_edges, component.observations.positions[m + 1], side="right") - 1)
-                for m in ties[sample]
-            }
-            tie_bins = (
-                {b for b in tie_bins if 0 < b < len(bin_edges) - 1} if np.all(state.parents[sample] < 0) else set()
-            )
+            tie_bins = ties[sample]
             joins = set(state.withheld.get(sample, ()))
             tie_breaks += len(tie_bins)
             withheld_joins += len(joins - tie_bins)

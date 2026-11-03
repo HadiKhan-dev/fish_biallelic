@@ -397,7 +397,6 @@ def _release(
         decided.scores.panel,
         decided.eligibility,
         released.pre_guard_calls.parents,
-        decided.scores.sample_ids,
         reverse=parameters.reverse_conventions,
     )
     if not isinstance(search, tuple) or not all(isinstance(row, SearchDiagnosticView) for row in search):

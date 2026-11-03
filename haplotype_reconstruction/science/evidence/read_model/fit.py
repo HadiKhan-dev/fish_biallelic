@@ -13,13 +13,12 @@ Candidates, from simplest (the order is the tie rule of the selection):
 
 Genotype mixtures are fitting nuisances only: they are never returned as genotype priors.
 Optimiser stop reasons (convergence, iteration cap, line-search stop) are recorded as diagnostics
-(``ReadModelFit.success``) and never decide which fit is used (class-B fix B-RM). Every L-BFGS-B fit is finished by
-a Newton polish to its stationary point (release 2.1, design A-5): the optimiser's stopping point depends on its
+(``ReadModelFit.success``) and never decide which fit is used. Every L-BFGS-B fit is finished by
+a Newton polish to its stationary point: the optimiser's stopping point depends on its
 path, which rounding-level arithmetic changes (another CPU, BLAS kernel or SIMD path) alter, while the optimum does
 not; successful shared-binomial EM endpoints are likewise finished at stationarity before the
 endpoint-equivalence and training-likelihood policy is applied. Homozygotes are
-binomial in every candidate: the shared homozygote-overdispersion extension of earlier versions
-was removed by the owner's decision (17 Oct 2026; tickets/B-RM).
+binomial in every candidate; only heterozygotes have an overdispersion parameter.
 """
 
 from __future__ import annotations
@@ -791,7 +790,7 @@ def _fit_sample(task, depth, alt, shared: ReadModelFit, prior=None):
     fitted = minimize(
         reduced, vector[free], jac=True, method="L-BFGS-B", bounds=active_bounds, options=_SAMPLE_FIT_OPTIONS
     )
-    # Newton polish to the optimum itself (release 2.1): the result no longer depends on L-BFGS-B's path.
+    # Newton polish to the stationary point makes the result independent of L-BFGS-B's path.
     polished, _, polish_converged = _polish(
         reduced, fitted.x, [bound[0] for bound in active_bounds], [bound[1] for bound in active_bounds]
     )
@@ -935,7 +934,7 @@ def fit_joint(hist, depth, alt, pooled: ReadModelFit, config: ReadModelParameter
         bounds=bounds,
         options=_JOINT_FIT_OPTIONS,
     )
-    # Newton polish to the optimum itself (release 2.1): the result no longer depends on L-BFGS-B's path.
+    # Newton polish to the stationary point makes the result independent of L-BFGS-B's path.
     polished, steps, converged = _polish_joint(
         result.x, hist, depth, alt, mean, variance, [bound[0] for bound in bounds], [bound[1] for bound in bounds]
     )

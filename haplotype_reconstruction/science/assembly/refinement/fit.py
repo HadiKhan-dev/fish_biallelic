@@ -14,9 +14,9 @@ programme truncates: counted as beam_truncations), and where an L1 context
 exists for every founder and every coarse window the same over L1 span tuples; (iii) runs one exact
 acceptance pass (acceptance.py), its direction alternating between sweeps; (iv) recomputes the
 exact F, which must equal the start F plus the accepted gains. A sweep that accepts nothing stops
-the search: every proposal of that sweep was computed against the final panel and every move of the
-move set was scored exactly against it, so the result is a certified local optimum of F under that
-move set (relative to the surrogate's proposals; F is non-convex and no global optimum is claimed).
+the search at a fixed point of the offered moves under the gain threshold and coarse-move guard.
+An improving offer can remain below the threshold or fail the guard; convergence does not certify
+a local or global optimum of F.
 The sweep limit only marks a fit non-converged, never silently.
 
 Best of two: every fit runs this search twice from the same start, concurrently, once with its
@@ -1339,7 +1339,7 @@ class SweepEngine:
                         kept = (fwd, None, fcnt, None, fscale, None)
                         # A reversed pass reads the clamped forward messages, and its backward half is not
                         # kept for the next sweep: drop this search's references now, so it does not hold
-                        # both message sets during the pass (memory only, release 3.4).
+                        # both message sets during the pass (memory only).
                         bwd = bcnt = bscale = None
                     else:
                         orientation, stored, stored_cnt, stored_scale = self.forward, bwd, bcnt, bscale

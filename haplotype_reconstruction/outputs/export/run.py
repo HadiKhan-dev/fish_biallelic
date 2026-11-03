@@ -29,7 +29,7 @@ from .records import COMMON_ALLELE_RULE, RULE_DESCRIPTIONS, ExportConfig
 from .samples import write_sample_phase
 from .vcf import place, suffix
 
-SCHEMA = "released-allele-export-v3"
+SCHEMA = "released-allele-export-v4"
 
 
 def _released_alleles(calls: np.ndarray) -> bool:
@@ -107,12 +107,13 @@ def export_contig(
                 index=index,
             )
         )
+    track_name = None
+    if "tracks" in products:
+        track_name = f"{stem}.tracks.csv.gz"
+        write_founder_tracks(destination / track_name, contig, panels)
+        files.append(track_name)
     for component, (positions, calls) in enumerate(panels or ()):
-        filename = None
-        if "tracks" in products:
-            filename = f"{stem}.component{component:04d}.founders.tsv.gz"
-            write_founder_tracks(destination / filename, contig, positions, calls)
-            files.append(filename)
+        filename = track_name
         components.append(
             component_record(
                 contig,
@@ -219,7 +220,7 @@ def write_manifest(
                 "has calls only inside its segment's span and is '.' outside it"
             ),
             founder_identity_flags=(
-                "CONTIG.founder_identity.tsv: junctions where a founder row copies other rows' "
+                "founder_identity.csv: junctions where a founder row copies other rows' "
                 "prepared local rows on both sides with disjoint partner sets "
                 "(local_duplicate_partner_change): no local content of the row's own carries "
                 "it across. Diagnostic only: no routing, call, column or break changes; not a "
@@ -329,10 +330,8 @@ def export_records(
     if need_founders:
         assert founders is not None
         entry["refit_ambiguous_alleles"] = int(founders.refit_ambiguous_alleles)
-        filename = quote(contig, safe="") + ".founder_identity.tsv"
-        count = write_identity_flags(destination / filename, contig, "founder_refit", founders.identity_flags)
-        entry["files"].append(filename)
-        entry["founder_identity_flags"] = count
+        entry["files"].append("founder_identity.csv")
+        entry["founder_identity_flags"] = len(founders.identity_flags)
         entry.update(
             assembly_release_phase_seconds=dict(release_phase_seconds or {}),
             assembly_release_work_counters=dict(founders.work_counters),
@@ -343,3 +342,18 @@ def export_records(
             assembly_count_unverified_records=int(founders.assembly_count_unverified_records),
         )
     return entry
+
+
+def write_founder_identity(destination: Path, results, contigs, products) -> Path | None:
+    """Gather the checked release flags for both pipeline export and standalone re-export."""
+    if not {"founders", "tracks"}.intersection(products):
+        return None
+
+    def records():
+        for contig in contigs:
+            release = results.founder_release(contig)
+            if release is None:
+                raise InvariantError(f"{contig}: missing released founder identity flags")
+            yield contig, "founder_refit", release.identity_flags
+
+    return write_identity_flags(Path(destination) / "founder_identity.csv", records())

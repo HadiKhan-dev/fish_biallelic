@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..contracts.roles import freeze_record_arrays, record_field, require_schema, schema_field
-from ..core.errors import InputError
 from .pedigree import PedigreeTable
 
 MANIFEST = "simulation/manifest"
@@ -227,17 +226,3 @@ def truth_from_record(payload: dict) -> ContigTruth:
         painting=TruthPainting(**payload["painting"]),
         crossovers=TruthCrossovers(**payload["crossovers"]),
     )
-
-
-def truth_pedigree_table(manifest: SimulationManifest) -> tuple[list[str], list[list[str]]]:
-    """Rows of OUTPUT/simulation/truth_pedigree.csv: the analysed samples and their true parents."""
-    table = manifest.observed
-    if table is None:
-        raise InputError("simulation manifest has no observed pedigree")
-    header = ["sample", "cohort", "parent1", "parent2"]
-    return header, [
-        [sample, f"F{cohort}", first, second]
-        for sample, cohort, first, second in zip(
-            table.samples, table.cohorts, table.parent1, table.parent2, strict=False
-        )
-    ]

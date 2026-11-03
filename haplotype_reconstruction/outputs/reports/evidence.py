@@ -16,7 +16,7 @@ def _cell(value, digits):
 
 
 def sample_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], list[list[str]]] | None:
-    """Rows of OUTPUT/quality/<contig>.samples.tsv (the sample quality exclusion per sample), or None when
+    """Rows of OUTPUT/quality/samples.csv (the sample quality exclusion per sample), or None when
     the QC did not run on this contig."""
     samples = report.sample_quality
     if samples is None:
@@ -46,7 +46,7 @@ def sample_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], list
 
 
 def segment_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], list[list[str]]] | None:
-    """Rows of OUTPUT/quality/<contig>.segments.tsv (inherited-segment regions), or None when the QC
+    """Rows of OUTPUT/quality/segments.csv (inherited-segment regions), or None when the QC
     did not run on this contig."""
     samples = report.sample_quality
     if samples is None:

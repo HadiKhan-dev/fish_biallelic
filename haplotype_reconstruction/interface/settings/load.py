@@ -14,7 +14,7 @@ import math
 import os
 import re
 import tomllib
-from collections.abc import Set
+from collections.abc import Sequence, Set
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,7 @@ from .schema import Settings, schema_fields
 
 PRESETS = ("tromau", "generic")
 
-# Release 3.4: the pipeline uses no sample metadata. Inference reads only the observations (VCF/BCF, or the simulated
+# The pipeline uses no sample metadata. Inference reads only the observations (VCF/BCF, or the simulated
 # reads) and the genetic map, and sample names are identifiers; every sequenced sample is a candidate parent of every
 # other. A configuration (file, preset, option or --set) that still sets one of these sections fails at load.
 REMOVED_SECTIONS = {
@@ -202,7 +202,7 @@ def _check_removed(mapping: dict) -> None:
         )
 
 
-def build_settings(mapping: dict, *, cwd=None) -> Settings:
+def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     """A typed Settings from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
     _check_removed(mapping)
     settings = _build(Settings, mapping, (), Path.cwd() if cwd is None else Path(cwd))
@@ -212,12 +212,20 @@ def build_settings(mapping: dict, *, cwd=None) -> Settings:
 
 
 def load_settings(
-    path=None, *, preset: str | None = None, options: dict | None = None, overrides=(), cwd=None
+    path: str | Path | None = None,
+    *,
+    preset: str | None = None,
+    options: dict | None = None,
+    overrides: Sequence[str] = (),
+    cwd: str | Path | None = None,
+    fallback_contigs: Sequence[str] | None = None,
 ) -> Settings:
     """Resolve and validate a run configuration (see the module docstring).
 
     ``path``: TOML file or None; ``preset``: overrides the file's ``preset``; ``options``: {section: {key: value}}
     from command-line flags (TOML-typed values); ``overrides``: `--set` strings.
+    ``fallback_contigs`` supplies an initial list only when the merged configuration has none;
+    run otherwise uses its CLI contigs as a graph cut over the configured list.
     """
     user = {}
     if path is not None:
@@ -239,6 +247,9 @@ def load_settings(
         given |= _given_keys(layer)
     merged["preset"] = chosen
     config = build_settings(merged, cwd=cwd)
+    if fallback_contigs is not None and not config.input.contigs:
+        merged.setdefault("input", {})["contigs"] = list(fallback_contigs)
+        config = build_settings(merged, cwd=cwd)
     validate(config, given)
     return config
 
@@ -336,7 +347,7 @@ def settings_text(config: Settings) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_settings(config: Settings, path) -> Path:
+def write_settings(config: Settings, path: str | Path) -> Path:
     """Write the resolved configuration atomically; return the path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

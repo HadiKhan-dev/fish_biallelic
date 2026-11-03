@@ -55,7 +55,7 @@ Sum expected counts and exposure over edges in the declared array reduction orde
 
 Implementation: [science/recombination/map.py](../../haplotype_reconstruction/science/recombination/map.py).
 
-Parameters by name: `ROBUST_CONTAMINATION`, `bin_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `bin_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(E bins + calls). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

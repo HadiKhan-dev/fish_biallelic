@@ -15,6 +15,8 @@ from typing import Protocol, TypeVar
 import numpy as np
 from numpy.typing import NDArray
 
+from haplotype_reconstruction.contracts.genetic_map import ChromosomeGeneticMap
+
 _T = TypeVar("_T")
 _R = TypeVar("_R")
 
@@ -103,7 +105,7 @@ class ComponentWorkspaceView(Protocol):
     penalty: float
     windows: EvidenceWindows
     message_step: int | None
-    genetic_map: object
+    genetic_map: ChromosomeGeneticMap
     reset_rate: float
     map_probability_floor: float
 

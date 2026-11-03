@@ -151,7 +151,7 @@ def _negative_log_where(values, mask):
 
 @dataclass(frozen=True)
 class TieClasses:
-    """Anchored tie classes of a value array.
+    """Consecutive-gap single-linkage tie classes of a value array.
 
     order: int64[n] element indices in decision order: (class, secondary, content), or (class, value, secondary,
         content) inside a wide class (width guard).
@@ -258,7 +258,7 @@ def tie_classes(
     motion: float | None = None,
     reverse: bool = False,
 ) -> TieClasses:
-    """Anchored tie classes of ``values`` and the decision order.
+    """Consecutive-gap single-linkage tie classes of ``values`` and the decision order.
 
     values: finite or infinite floats (NaN is refused). quantum: q > 0. content: one exact key per element (bytes,
     str, ints, tuples, integer arrays); None means the elements are exchangeable and their index order is used.
@@ -456,7 +456,7 @@ def class_winner(
     kind: str = "",
     reverse: bool = False,
 ):
-    """The first item of :func:`class_sort`: the best class (anchored at the best value, everything chained from it),
+    """The first item of :func:`class_sort`: the best consecutive-gap class, chained from the best value,
     cut by secondary and content keys.
 
         Returns None for empty items. Mutates a supplied counter through class_sort; all callback/classification

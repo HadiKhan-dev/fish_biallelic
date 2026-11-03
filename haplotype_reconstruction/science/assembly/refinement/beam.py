@@ -29,6 +29,7 @@ from numba.typed import List
 from haplotype_reconstruction.core.kernels import kernel
 
 from .. import orders as tie_rules
+from ..pairs import emission_pair_index as pair
 from .component_workspace import map_hazards
 from .objective import row_max, unordered_pairs
 from .overloads import overloads_for
@@ -36,11 +37,6 @@ from .parameters import POLISH_BEAM_WIDTH as BEAM_WIDTH
 from .parameters import PROGRAMME_RELATIVE_MARGIN
 from .proposals import window_templates
 from .window import switch_cost
-
-
-@kernel(overloads=(), inline="always")
-def pair(a, b):
-    return max(a, b) * (max(a, b) + 1) // 2 + min(a, b)
 
 
 @kernel(overloads=(), inline="always")

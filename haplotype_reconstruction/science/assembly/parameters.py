@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from haplotype_reconstruction.core.ties import WIDE_CLASS_QUANTA as WIDE_CLASS_QUANTA
+
 from .completion.parameters import CompletionParameters
 from .count_rule.parameters import CountRuleParameters
 from .refinement.parameters import RefinementParameters
@@ -202,8 +204,6 @@ SEGMENT_MINIMUM_SPAN = 2
 SEGMENT_WINDOW = 8
 # AS6, U13 alternatives.py: bounded Cartesian continuation, not the AS4 beam quota.
 BRANCH_LIMIT = 16
-# AS6, U13 terminal_winners: single-linkage class width in join_ll quanta.
-WIDE_CLASS_QUANTA = 4
 
 # AS3, P0 assembly-joins.parameters.csv and 3.5 linker/{em,kernels}.py.
 LINKER_THETA_CAP = 0.5

@@ -3817,7 +3817,7 @@ Source: [haplotype_reconstruction/contracts/recombination.py](../../haplotype_re
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 | `contig` | `str` | obs | () | 1 | str | True | `required` |
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
 | `edge_parent` | `NDArray[np.int64]` | call | ('E',) | 1 | int64 | True | `required` |
@@ -3829,8 +3829,6 @@ Source: [haplotype_reconstruction/contracts/recombination.py](../../haplotype_re
 | `in_reversed_segment` | `NDArray[np.bool_]` | call | ('Q',) | 1 | bool | True | `required` |
 | `callable_offsets` | `NDArray[np.int64]` | call | ('E+1',) | 1 | int64 | True | `required` |
 | `callable_spans` | `NDArray[np.float64]` | call | ('R', '3') | bp,bp,index | float64 | True | `required` |
-| `informative_offsets` | `NDArray[np.int64]` | call | ('E+1',) | 1 | int64 | True | `required` |
-| `informative_spans` | `NDArray[np.float64]` | call | ('M', '3') | bp,bp,index | float64 | True | `required` |
 | `marker_counts` | `NDArray[np.int64]` | report | ('E', '3') | 1 | int64 | True | `required` |
 | `expected_crossovers` | `NDArray[np.float64]` | report | ('E', 'Bm') | 1 | float64 | True | `required` |
 | `exposure` | `NDArray[np.float64]` | report | ('E', 'Bm') | meiosis-bp | float64 | True | `required` |

@@ -198,7 +198,7 @@ def path_class_order(
         raise ValueError("tie classes of NaN are undefined")
     sign = -1.0 if descending else 1.0
     signed = sign * values
-    # One mixed-radix code per path orders the paths exactly as their columns do (release 3.5: two sort keys
+    # One mixed-radix code per path orders the paths exactly as their columns do (two sort keys
     # instead of B + 1; the same stable sorts, so the same permutations).
     codes = path_codes(paths)
     columns = (codes,) if codes is not None else tuple(paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))

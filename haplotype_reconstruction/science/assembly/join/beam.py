@@ -10,9 +10,9 @@ selected at any refinement step is kept in an archive, so full paths through int
 Cut tie classes are split in canonical content order; every endpoint stays within its quota.
 Constant transition families use first-covering representatives without Cartesian enumeration.
 
-Arithmetic and ties (release 2.1, design 5.4): the log transitions are float64 (linker.em), scores accumulate in
-float64 in past-block order and divide by the transition count in float64, so a one-ulp change of a stored
-transition no longer reorders paths. Candidates are ranked by anchored tie classes of their scores
+Arithmetic and ties: the log transitions are float64 (linker.em), scores accumulate in
+float64 in past-block order and divide by the transition count in float64. Candidates are ranked by anchored
+tie classes of their scores
 (maths.ties rules; quantum ``ties.quantum("beam", scale of the cut)``), the lexicographic path deciding inside
 a class; identical paths are kept once (their best score); an endpoint's quota keeps at most q paths,
 including when it cuts a tie class. The archive is returned in the same tie-class order
@@ -275,7 +275,7 @@ def _ranked(paths, scores, *, tie_settings: ties.TieSettings = DEFAULT_TIE_SETTI
     if count > 1:
         codes = path_codes(paths)
         if codes is not None:
-            # One mixed-radix code per path: the same stable sort as by the columns (release 3.5).
+            # One mixed-radix code per path gives the same stable order as sorting by columns.
             grouped = np.lexsort((-scores, codes))
             ordered = codes[grouped]
             first = np.ones(count, dtype=bool)

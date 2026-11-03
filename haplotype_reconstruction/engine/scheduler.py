@@ -2363,13 +2363,13 @@ def _completed_tasks(budget: CpuBudget, functions, label):
     queued = list(range(len(functions)))
     running: dict[Future[Any], int] = {}
     try:
-        yield from _drive_slots(budget, functions, slots, queued, running, reserve, execute, governor)
+        yield from _drive_slots(slots, queued, running, reserve, execute, governor)
     finally:
         if lease is not None:
             lease_exit(lease)
 
 
-def _drive_slots(budget, functions, slots, queued, running, reserve, execute, governor):
+def _drive_slots(slots, queued, running, reserve, execute, governor):
     """Start daemon threads only for admitted slots; propagate failure before cleanup.
 
     Python cannot interrupt another thread's native call. On failure the worker

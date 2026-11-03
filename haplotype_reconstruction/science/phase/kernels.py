@@ -1,4 +1,4 @@
-"""Numba kernels of the family-phase model (release 3.0 rebuild; docs/methods/family_phase.md).
+"""Numba kernels of the family-phase model (docs/methods/family_phase.md).
 
 Owns FP03-FP04 and FP15-FP16 recurrences; must not read storage or schedule work.
 Style exception: hot recurrences remain whole, preserving the three-factor
@@ -63,8 +63,6 @@ _OVERLOADS = {
             types.int64,
             types.int64,
             types.int64,
-            types.Array(types.int64, 3, "C", False, aligned=True),
-            types.int64,
             types.Array(types.float64, 1, "C", False, aligned=True),
             types.Array(types.float64, 1, "C", False, aligned=True),
             types.Array(types.float64, 1, "C", False, aligned=True),
@@ -78,8 +76,6 @@ _OVERLOADS = {
             types.int64,
             types.int64,
             types.int64,
-            types.int64,
-            types.Array(types.int64, 3, "C", False, aligned=True),
             types.int64,
             types.Array(types.float64, 1, "C", False, aligned=True),
             types.Array(types.float64, 1, "C", False, aligned=True),
@@ -94,7 +90,6 @@ _OVERLOADS = {
     "slot_init": ((types.int64, types.int64, types.float64, types.float64),),
     "gauge_children_terms": (
         (
-            types.int64,
             types.int64,
             types.int64,
             types.int64,
@@ -247,7 +242,7 @@ def slot_label(kind, p, s, X, b):
 
 
 @kernel(overloads=_OVERLOADS["slot_log_transition"], cache=True)
-def slot_log_transition(kind, p, s, t, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, nlabels):
+def slot_log_transition(kind, s, t, b, lstay, lmove, mstay, mmove, ain, astay, bout, nlabels):
     """log P(source s at bin b-1 -> t at bin b) for one homologue slot (b >= 1)."""
     if kind == 0:
         return lstay[b - 1] if s == t else lmove[b - 1]
@@ -271,8 +266,8 @@ def slot_init(kind, s, init_copy, init_bottom):
 
 
 @kernel(overloads=_OVERLOADS["gauge_children_terms"], cache=True)
-def gauge_children_terms(n, b, g0, g1, V, child_tracks, mstay, mmove):
-    """Sum over n's child tracks of the chain transition term at edge (b-1, b) with the children's chains read
+def gauge_children_terms(b, g0, g1, V, child_tracks, mstay, mmove):
+    """Sum over the supplied child tracks of the chain transition term at edge (b-1, b) with the children's chains read
     through gauge g0 at b-1 and g1 at b (only 0/1 -> 0/1 transitions depend on the gauge)."""
     total = 0.0
     for i in range(len(child_tracks)):
@@ -399,18 +394,14 @@ def _block_viterbi(
             continue
         for r0 in range(n0):
             for s0 in range(n0):
-                T0[r0, s0] = slot_log_transition(
-                    kinds[0], parents[0], r0, s0, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, S
-                )
+                T0[r0, s0] = slot_log_transition(kinds[0], r0, s0, b, lstay, lmove, mstay, mmove, ain, astay, bout, S)
         for r1 in range(n1):
             for s1 in range(n1):
-                T1[r1, s1] = slot_log_transition(
-                    kinds[1], parents[1], r1, s1, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, S
-                )
+                T1[r1, s1] = slot_log_transition(kinds[1], r1, s1, b, lstay, lmove, mstay, mmove, ain, astay, bout, S)
         if G == 2:
             for h in range(2):
                 for g in range(2):
-                    TG[h, g] = gauge_children_terms(n, b, h, g, V, child_tracks, mstay, mmove)
+                    TG[h, g] = gauge_children_terms(b, h, g, V, child_tracks, mstay, mmove)
         c0 = cur0[b - 1]
         c1 = cur1[b - 1]
         # stage 1: previous source 0
@@ -639,9 +630,7 @@ def objective(E, X, V, par, lstay, lmove, mstay, mmove, ain, astay, bout, init_c
                     t = V[n, k, b]
                     ss = s if s < 2 else 2 + X[n, k, b - 1]
                     tt = t if t < 2 else 2 + X[n, k, b]
-                    total += slot_log_transition(
-                        1, p, ss, tt, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, E.shape[1]
-                    )
+                    total += slot_log_transition(1, ss, tt, b, lstay, lmove, mstay, mmove, ain, astay, bout, E.shape[1])
     return total
 
 
@@ -673,9 +662,7 @@ def row_terms(E, X, V, par, rows, lstay, lmove, mstay, mmove, ain, astay, bout, 
                     t = V[i, k, b]
                     ss = s if s < 2 else 2 + X[i, k, b - 1]
                     tt = t if t < 2 else 2 + X[i, k, b]
-                    total += slot_log_transition(
-                        1, p, ss, tt, X, b, lstay, lmove, mstay, mmove, ain, astay, bout, E.shape[1]
-                    )
+                    total += slot_log_transition(1, ss, tt, b, lstay, lmove, mstay, mmove, ain, astay, bout, E.shape[1])
         out[i] = total
     return out
 

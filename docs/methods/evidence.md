@@ -240,9 +240,9 @@ Cost and scope: O(N L); O(M C N). These terms describe the unit’s work/storage
 <a id="ec22"></a>
 ## ec22 Fixed binomial fallback and fallback reasons
 
-Use the fixed binomial model when calibration is disabled, folds lack admitted evidence, the shared fit is unresolved/failed, or its predictive total is non-finite. A failed complex fit alone does not discard a valid simpler candidate. Return a typed fallback reason for the application layer to report.
+Use the fixed binomial model when calibration is disabled, folds lack admitted evidence, the shared fit is unresolved/failed, or its predictive total is non-finite. A failed complex fit alone does not discard a valid simpler candidate. A joint-fit exception keeps the fitted sample-binomial candidate in held-out selection; a pooled-fit exception leaves only the shared binomial candidate. Record either exception as complex_fit_failure. Return a typed fallback reason for the application layer to report.
 
-Implementation: [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py).
+Implementation: [science/evidence/read_model/calibrate.py](../../haplotype_reconstruction/science/evidence/read_model/calibrate.py), [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py).
 
 Parameters by name: `fixed_error`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 

@@ -7,7 +7,8 @@ accepted one when its held-out log-likelihood gain over it is at least ``selecti
 estimated from the gains of the held-out stretches with admitted cells (the folds 2/3 of each four-window cycle),
 because sites linked through ancestry or sharing reads are not independent observations; with fewer than
 ``selection_minimum_blocks`` such stretches the shared model is kept. A fit that fails with an error cannot displace the
-shared model; optimiser convergence flags are diagnostics and decide nothing. The selected fit is applied to every
+shared model; successful simpler candidates remain eligible after a more complex fit raises.
+Optimiser convergence flags are diagnostics and decide nothing. The selected fit is applied to every
 cell of the contig without genotype-mixture priors. When calibration is disabled, the training or held-out folds are
 empty, the shared model cannot be fitted or it has no finite held-out score, the fixed binomial model applies
 (``EvidenceParameters.fixed_error``).
@@ -37,7 +38,6 @@ from .parameters import (
 )
 from .parameters import ReadModelParameters
 
-MODEL_VERSION = "heldout-read-model-v7"
 # Folds 0/1 (of every four fold windows) train, folds 2/3 are held out.
 # A selection whose z lies within this distance of selection_z is counted as a near-tie in the ties report.
 
@@ -141,8 +141,9 @@ def calibrate(
     complex_failure = None
     try:
         pooled = fits.fit_pooled_samples(training, depth, alt, shared, team)
+        candidates[fits.SAMPLE_BINOMIAL] = pooled
         joint = fits.fit_joint(training, depth, alt, pooled, config)
-        candidates.update({fits.SAMPLE_BINOMIAL: pooled, fits.SAMPLE_JOINT: joint})
+        candidates[fits.SAMPLE_JOINT] = joint
     except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
         complex_failure = str(error)
     blocks, exposure = block_scores(counts, positions, config, depth, alt, list(candidates.values()))
@@ -167,7 +168,7 @@ def calibrate(
     return candidates[selected], ReadModelDecision(applied=True, selected=selected, fallback_reason=None, **common)
 
 
-def _step(gains, exposure, config: ReadModelParameters):
+def _step(gains, config: ReadModelParameters):
     """(gain, SE, z, accepted) of one comparison over the stretches with admitted cells."""
     count = len(gains)
     gain = float(gains.sum())
@@ -196,14 +197,14 @@ def select(blocks, names, config: ReadModelParameters, exposure=None):
         if not np.isfinite(totals[nxt]):
             continue
         gains = blocks[:, nxt] - blocks[:, current]
-        gain, error, z, accepted = _step(gains, exposure, config)
+        gain, error, z, accepted = _step(gains, config)
         count = len(gains)
         if count > 1:
             per_cell = gain / max(1, int(exposure.sum()))
             centred = float(np.sqrt(count / (count - 1) * np.sum((gains - exposure * per_cell) ** 2)))
         else:
             centred = float("nan")
-        flips = sum(_step(np.delete(gains, b), np.delete(exposure, b), config)[3] != accepted for b in range(count))
+        flips = sum(_step(np.delete(gains, b), config)[3] != accepted for b in range(count))
         steps.append(
             dict(
                 candidate=names[nxt],

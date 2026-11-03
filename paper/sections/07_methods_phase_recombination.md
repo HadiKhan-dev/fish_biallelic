@@ -34,7 +34,7 @@ The ascent starts from each sample's free-label Viterbi path on its own emission
 
 Block moves alone cannot fix one configuration. Where both homologues of a sample without a released parent change label at the same bin edge, its own unordered-pair emissions cannot tell which old label continues into which new one; only its children can. A child copying the arbitrary pairing absorbs it by switching its other homologue, which no single block can undo. A joint move therefore exchanges the parent's homologues from that edge onwards, propagates the copied labels and re-solves each child's block. It is kept only when $J$ rises by more than $\log[\tau_s/(1-\tau_s)]$, the odds of the set-continuation threshold $\tau_s$ defined below; a pairing whose alternative lies within that margin is recorded as ambiguous and breaks phase sets. The margin is a working value against one optimised alternative, not a calibrated pairing posterior.
 
-Arbitrary conventions (visit order within a pedigree depth, tie-scan direction, descendant order) can decide ties, so the optimisation is run twice, independently, under opposite conventions. Release requires the two solves to agree, so that released outputs do not depend on a convention.
+Arbitrary conventions (visit order within a pedigree depth, tie-scan direction, descendant order) can decide ties, so the optimisation is run twice, independently, under opposite conventions. For fixed upstream painting, founder-refit and pedigree inputs, release requires the two solves to agree on a call or phase join. Reversing conventions elsewhere in the pipeline can change those upstream inputs, so this within-stage agreement does not guarantee convention-invariant whole-run output.
 
 **Release of genotypes and phase.** For each sample and solve, with all other samples fixed at that solve's optimum, the exact forward–backward recursion [@baum1970; @rabiner1989] over the same block gives posterior probabilities $\pi_{ib}(x,y)$ of the ordered label pair. These posteriors are conditional on the rest of the pedigree's optimal configuration; they are not joint marginals. At a released site $j$ in bin $b$ (a refit panel site inside a painting bin), a named state's allele $\hat h_{xj}$ is known only when all rows of its class carry the same called refit allele; BACKGROUND has no allele. Posteriors of the ordered alleles $(u_0,u_1)$ carried by homologues 0 and 1 are
 $$
@@ -66,3 +66,11 @@ Expected crossovers $X_t$ and exposure $W_t$ (meiosis-bp) are summed over edges 
 ### Released outputs
 
 For each contig, export writes a founder VCF and a phased-sample VCF [@danecek2011] on the same rows: by default every input biallelic SNP that reached the site filter, removed sites listing their removing rules in FILTER. The founder file has one haploid column per founder row of each released assembly segment. Labels are local to a segment, so no column asserts identity across segments. Alleles that are unknown, ambiguous or without read support from a painted carrier, and positions outside the segment's span, are `.`; at sites removed only as uninformative, the strict read-count majority allele may fill unblocked rows. The sample file holds the family-phase calls as GT:PS in input sample order, without imputation. PS is the position of the phase set's first site; an unphased heterozygote is written `a/b` with missing PS without ending its set, and filtered sites are `./.`. Recombination tables report per-meiosis calls, exposure and map bins in the units above.
+
+
+Each table family is written once per run as CSV with snake_case columns; chromosome-resolved
+rows have a leading `contig` column and follow configured contig order. Per-chromosome files
+are limited to the VCFs and optional `export/<contig>.tracks.csv.gz`; recombination produces one
+multi-page `recombination/maps.pdf` and one `recombination/coverage.csv` of spans between
+consecutive released markers of a followed stretch, shared by map aggregation, junctions and
+evaluation.

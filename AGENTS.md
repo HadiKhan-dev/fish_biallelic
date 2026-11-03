@@ -1099,7 +1099,8 @@ This is a namespace failure, not a full disk.
   disable an outer sandbox.
 
 **The Codex runner's temporary directory** is persistent private storage, set host-side in `/home/ahk39/.codex/.env`
-as `TMPDIR=/rds/user/ahk39/hpc-work/codex-runner-tmp.gKhMfcvc`.
+as `TMPDIR=/rds/project/rds-8b3VcZwY7rY/projects/claude_lab/codex-runner-tmp` (moved from hpc-work on 2 November
+2026, when hpc-work's file quota filled).
 - Preserve the setting and the directory during cleanup. It is runner scratch, not a place for results or
   checkpoints.
 - After a runner restart or host change, check `hostname`, `TMPDIR`, and `df -h` and `df -i` of the directory before

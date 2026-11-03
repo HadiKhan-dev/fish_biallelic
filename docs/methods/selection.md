@@ -141,7 +141,7 @@ Cost and scope: One fitted continuation, and at most one additional incumbent co
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Reuse a whole search only when its complete search-input key agrees. Cache context-dependent fits with context rows and called masks; reconstruct omitted posterior arrays with the same exact E-step. Cache/memo capacity may alter work but not selected endpoints or release.
+Reuse a whole search when the retained key for the start, candidate bank, genotype likelihoods, observation mask, rates, founders, unknown mass and search settings agrees. This key excludes the incumbent and memo history: a hit returns the incumbent before continuation. A dependency-complete reuse predicate remains an open design item in the [accretion register](../developer/accretions.md). Context-dependent fits bind context rows and called masks; omitted posterior arrays are reconstructed by the same exact E-step, preserving packed-memo hit/completion precedence. Completed blocks require their persisted initial/L1 memos. That recorded memo route is part of the retained execution contract; replacing it with cold fits or changing memo capacity is not guaranteed to preserve selected endpoints or release.
 
 Implementation: [science/selection/search.py](../../haplotype_reconstruction/science/selection/search.py).
 
@@ -253,7 +253,7 @@ Cost and scope: One context matching over panel/context rows, plus witnessed-sit
 <a id="ls23"></a>
 ## ls23 Unknown-copy summary
 
-At each observed site count the number of comparable posterior copy alternatives under the declared band, capped by the diploid unknown-slot interpretation. Take each sample’s maximum over sites. Tied released alternatives use their maximum uncertainty, not their average certainty.
+At each observed site aggregate posterior mass into zero, one and two unknown-copy categories. Choose the smallest count whose mass is at least `(1 - unknown_count_band)` times the largest mass: a banded MAP choice among those three categories. Take each sample’s maximum selected count over observed sites and over tied released panels. A sample without depth receives two unknown slots.
 
 Implementation: [science/selection/path_model.py](../../haplotype_reconstruction/science/selection/path_model.py), [science/selection/rounds.py](../../haplotype_reconstruction/science/selection/rounds.py), [science/selection/run.py](../../haplotype_reconstruction/science/selection/run.py), [stages/selection/tasks.py](../../haplotype_reconstruction/stages/selection/tasks.py), [contracts/panels.py](../../haplotype_reconstruction/contracts/panels.py).
 

@@ -10,6 +10,7 @@ import numba
 import numpy as np
 
 from ...core.kernels import kernel
+from .pair_index import pair_indices
 
 _b2C = numba.types.Array(numba.boolean, 2, "C", readonly=False)
 _float641A = numba.types.Array(numba.float64, 1, "A", readonly=False)
@@ -20,33 +21,6 @@ _float643C = numba.types.Array(numba.float64, 3, "C", readonly=False)
 _int642C = numba.types.Array(numba.int64, 2, "C", readonly=False)
 
 IBD_MASKS = np.array([[1, 1, 1], [0, 1, 1], [1, 1, 0]], dtype=np.bool_)
-
-
-@kernel(
-    overloads=(
-        (
-            numba.int64,
-            numba.int64,
-            numba.int64,
-        ),
-    ),
-    cache=True,
-)
-def pair_indices(n, lo, hi):
-    """Unordered sample pairs [lo, hi) in row-major upper-triangle order, without triu temporaries."""
-    out = np.empty((hi - lo, 2), dtype=np.int64)
-    f, offset = 0, 0
-    while f < n - 1 and offset + n - f - 1 <= lo:
-        offset += n - f - 1
-        f += 1
-    g = f + 1 + lo - offset
-    for t in range(hi - lo):
-        out[t, 0], out[t, 1] = f, g
-        g += 1
-        if g == n:
-            f += 1
-            g = f + 1
-    return out
 
 
 @kernel(
@@ -86,7 +60,7 @@ def pair_ibd(gl, observed, p, stay, pairs, masks, posterior, loglik):
     L = gl.shape[1]
     M = masks.shape[0]
     P = pairs.shape[0]
-    # Release 3.4: contiguous blocks of pairs share their chain buffers (allocated once per block, not per pair)
+    # Contiguous blocks of pairs share their chain buffers (allocated once per block, not per pair)
     blocks = min(P, 16 * numba.get_num_threads())
     for block in numba.prange(blocks):
         em = np.empty((L, 3))
@@ -137,7 +111,7 @@ def pair_ibd(gl, observed, p, stay, pairs, masks, posterior, loglik):
 )
 def _pair_chain(gl, observed, p, stay, i, j, masks, M, L, em, alpha, scale, posterior, loglik):
     """pair_ibd for one pair (i, j), in the buffers em, alpha [L, 3] and scale [L]; accumulates into its rows
-    posterior [4] and loglik [M]. Release 3.4: the emissions, the full chain's forward pass and the masked chains run
+    posterior [4] and loglik [M]. The emissions, the full chain's forward pass and the masked chains run
     in one pass over the sites (each chain's arithmetic and order as before; independent chains overlap)."""
     a = np.zeros((M, 3))
     allowed = np.zeros(M, dtype=np.int64)

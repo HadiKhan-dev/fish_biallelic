@@ -9,6 +9,7 @@ from typing import TypeAlias, cast
 import numpy as np
 
 from ...contracts.genetic_map import DEFAULT_RATE_CM_PER_MB, ChromosomeGeneticMap, GeneticMapSet
+from ...core.errors import InputError
 
 __all__ = ["load_genetic_maps"]
 MapPath: TypeAlias = str | PathLike[str]
@@ -99,11 +100,14 @@ def load_genetic_maps(
         sources = path_or_mapping.items() if isinstance(path_or_mapping, Mapping) else [(None, path_or_mapping)]
         for assigned_contig, path in sources:
             assigned_contig = None if assigned_contig is None else str(assigned_contig)
-            for contig, (positions, cm) in _read_map(path, assigned_contig).items():
-                maps[contig] = ChromosomeGeneticMap(
-                    contig,
-                    np.asarray(positions, dtype=np.float64),
-                    np.asarray(cm, dtype=np.float64),
-                    default_rate_cm_per_mb,
-                )
+            try:
+                for contig, (positions, cm) in _read_map(path, assigned_contig).items():
+                    maps[contig] = ChromosomeGeneticMap(
+                        contig,
+                        np.asarray(positions, dtype=np.float64),
+                        np.asarray(cm, dtype=np.float64),
+                        default_rate_cm_per_mb,
+                    )
+            except (OSError, ValueError) as error:
+                raise InputError(f"{path}: {error}") from error
     return GeneticMapSet(maps, default_rate_cm_per_mb)

@@ -27,7 +27,7 @@ class ResidentComponent:
 def resident(
     component: PreparedComponent,
     config: PedigreeConfig,
-    claim_threads: Callable[[], None] = lambda: None,
+    claim_threads: Callable[[], int | None] = lambda: None,
     *,
     reverse: bool | None = None,
     include_pair_masses: bool = True,

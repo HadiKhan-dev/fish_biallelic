@@ -718,13 +718,3 @@ def _publish(state: CacheState) -> None:
             pass
     for _, stale in sorted(recent, reverse=True)[KEEP_KEYS:]:
         shutil.rmtree(stale, ignore_errors=True)
-
-
-@contextmanager
-def persistent_kernel_cache(roots: Iterable[str], requests: Mapping, team, **options: Any):
-    """Publish learned compilation state even when the scientific operation raises."""
-    state = warm_up(roots, requests, team, **options)
-    try:
-        yield state
-    finally:
-        publish(state)

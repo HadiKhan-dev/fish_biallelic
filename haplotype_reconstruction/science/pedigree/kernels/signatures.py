@@ -2442,4 +2442,39 @@ OVERLOADS = {
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
     ),
+    "graph._is_acyclic": (
+        (
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 2, "C", readonly=False),
+        ),
+    ),
+    "resampling._accumulate": (
+        (
+            types.Array(types.int64, 2, "C", readonly=False),
+            types.Array(types.int64, 2, "C", readonly=False),
+            types.Array(types.int8, 2, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 2, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 2, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.int64, 1, "C", readonly=False),
+        ),
+    ),
+    "selection._pack_presence": ((types.Array(types.bool, 2, "C", readonly=False),),),
+    "selection._units_present": (
+        (
+            types.Array(types.uint64, 2, "C", readonly=False),
+            types.Array(types.float64, 1, "C", readonly=False),
+            types.Array(types.float64, 2, "C", readonly=False),
+        ),
+    ),
+    "ties._top_two_finite": (
+        (
+            types.Array(types.int64, 1, "C", readonly=False),
+            types.Array(types.float64, 1, "C", readonly=False),
+        ),
+    ),
 }

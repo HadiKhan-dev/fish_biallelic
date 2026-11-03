@@ -110,9 +110,9 @@ class SearchSummary:
         or "expansion_backstop".
     certified: the selected panel's generated neighbourhood was completely generated and scored
         without improvement (a local certificate, not a global one).
-    Release 2.1 (defaults keep 2.0 records decodable):
+    Optional recorded diagnostics (defaults permit records that omit them):
     tie_quantum: the block's ``nll`` tie quantum (selection and archive orders).
-    escalated, conventions: historical metadata only; the alternative modes were removed in 2.5.
+    escalated, conventions: recorded metadata; neither field selects a search mode.
     ambiguous: the winning cavity class after the wide-class rule and smaller-K prior has alternatives.
     tied_alternatives: the number of other members of that complete fitted set.
     score_margin: the selected score minus the best other represented K's score (inf if none).
@@ -127,7 +127,7 @@ class SearchSummary:
     selected_mean_field_failures: held-out site solves whose starts all failed, summed over
         the complete winning set, including tied selected alternatives.
     other_mean_field_failures: the same count over uniquely scored cached panels outside
-        that winning set (including panels no longer in the archive). Old records use None.
+        that winning set, including panels absent from the archive. None denotes an unrecorded membership.
     """
 
     k_values: np.ndarray = record_field("state", axes=("R",), dtype="int16")

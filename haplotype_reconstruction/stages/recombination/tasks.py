@@ -1,4 +1,4 @@
-"""Declare one recombination contig task and its identity-checked publication boundary.
+"""Compute and publish one identity-checked recombination contig.
 
 Science reads only PhasedSamples, conditioned ParentEdges and the shared map.
 The task owns no pipeline orchestration, hidden cache or source-data reopening.
@@ -17,7 +17,6 @@ from ...science.recombination.follow import map_chromosome
 from ...science.recombination.parameters import RecombinationParameters
 from ...store.container import CheckpointFile
 from ...store.protocol import Derivation, mark_complete
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
 from . import records
 
 
@@ -79,38 +78,3 @@ def publish_contig(
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
     return product
-
-
-def recombination_task(
-    phase: PhasedSamples,
-    edges: ParentEdges,
-    parameters: RecombinationParameters,
-    genetic_map: ChromosomeGeneticMap,
-    *,
-    reverse: bool = False,
-    dependencies: tuple[TaskKey, ...] = (),
-    decoded_phase_bytes: int | None = None,
-    file: CheckpointFile | None = None,
-    expected: Derivation | None = None,
-) -> Task:
-    """Declare one serial contig computation with the native decoded-phase memory estimate."""
-    if (file is None) != (expected is None):
-        raise InvariantError("recombination publication requires both file and expected derivation")
-    if decoded_phase_bytes is None:
-        decoded_phase_bytes = sum(
-            getattr(phase, name).nbytes
-            for name in ("calls", "frame_undetermined", "chain_source", "chain_support", "chain_reset")
-        )
-    return Task(
-        key=TaskKey("recombination", "contig", phase.contig),
-        function=execute_recombination if file is None else publish_contig,
-        args=(phase, edges, parameters, genetic_map)
-        if file is None
-        else (file, phase, edges, parameters, genetic_map, expected),
-        kwargs=dict(reverse=reverse),
-        depends_on=dependencies,
-        inputs=(RecordKey(phase.contig, "phase"), RecordKey("run", "pedigree")),
-        outputs=(RecordKey(phase.contig, records.KEY),),
-        resources=ResourceRequest(1, 1, 2 * decoded_phase_bytes + (2 << 30), 0),
-        affinity=phase.contig,
-    )

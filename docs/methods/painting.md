@@ -126,9 +126,9 @@ Parameters by name: `MAXIMUM_MASK_STATES`. Values and provenance are in the [gen
 Cost and scope: O(n L_s); O(n B); O(n B S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pr12"></a>
-## pr12 Release posteriors qV, qA, qF, qAF (min over the two conventions' Viterbi pairs)
+## pr12 Release posteriors qF and qAF (min over the two conventions' Viterbi pairs)
 
-Compute the Viterbi-pair and allele-equivalence posterior quantities, with faithful-track variants, and take the conservative value over the two conventions. These values feed staged release; they do not independently create a new acceptance threshold.
+Compute the faithful Viterbi-pair posterior qF and its local allele-equivalence posterior qAF, and take the conservative value over the two conventions. These values feed staged release; they do not independently create a new acceptance threshold.
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py).
 

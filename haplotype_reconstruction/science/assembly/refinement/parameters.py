@@ -32,9 +32,6 @@ PARAMETER_PROVENANCE = {
     "CONTENT_FULL_ROUNDS": "RS08; base40 acceptance.py full re-ranking cap; refinement-search.parameters.csv",
     "EXCHANGE_ROUNDS": "RS08; base40 acceptance.py exchange cap; refinement-search.parameters.csv",
 }
-# RC05: uniform predictive contamination and per-observation log floor.
-ROBUST_CONTAMINATION = 0.01
-ROBUST_LOG_FLOOR = -2.0
 # RS11: original exactness certificate; relative allowance plus allowance per accepted move, in nats.
 EXACT_GAIN_RELATIVE = 1e-9
 EXACT_GAIN_ABSOLUTE = 1e-6

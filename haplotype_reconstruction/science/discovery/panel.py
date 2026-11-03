@@ -29,6 +29,27 @@ from .parameters import SET_COUNT_ROUNDING_FLOOR
 if TYPE_CHECKING:
     from .fixed_k.workspace import FixedKWorkspace
 
+
+def state_layout(k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Kind and endpoints of row-major known pairs, row-unknown states and the all-unknown state.
+
+    Endpoints are int64; unused endpoints are -1 until state_membership maps them to K.
+    """
+    pair_i, pair_j = np.triu_indices(k)
+    n_rr = len(pair_i)
+    n_states = n_rr + k + 1
+    kind = np.empty(n_states, dtype=np.int64)
+    first = np.full(n_states, -1, dtype=np.int64)
+    second = np.full(n_states, -1, dtype=np.int64)
+    kind[:n_rr] = 0
+    first[:n_rr] = pair_i
+    second[:n_rr] = pair_j
+    kind[n_rr : n_rr + k] = 1
+    first[n_rr : n_rr + k] = np.arange(k)
+    kind[-1] = 2
+    return kind, first, second
+
+
 FitResult = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None]
 _T = TypeVar("_T")
 
@@ -168,7 +189,7 @@ def _canonical_panel_kernel(haplotypes, assignments):
 )
 def lexicographic_row_order(rows):
     """The stable lexicographic order of a panel's rows compared numerically, first site most significant: the
-    permutation ``np.lexsort(rows.T[::-1])`` (release 3.5: one compiled insertion sort instead of L sort keys)."""
+    permutation ``np.lexsort(rows.T[::-1])``, computed by one compiled insertion sort."""
     k = rows.shape[0]
     n_sites = rows.shape[1]
     order = np.arange(k)
@@ -228,7 +249,7 @@ def canonical_solution(
         remapped = np.where(
             hi < k, lo * k - lo * (lo - 1) // 2 + hi - lo, np.where(lo < k, n_pairs + lo, n_pairs + k)
         ).astype(np.int64)
-        # Each sample's state IDs sorted ascending, all segments in one sort (release 3.5): state IDs lie in
+        # Each sample's state IDs sorted ascending, all segments in one sort: state IDs lie in
         # [0, n_pairs + k], so segment * (n_pairs + k + 1) + ID orders by segment first, then ID.
         segment = np.repeat(np.arange(len(offsets) - 1, dtype=np.int64), np.diff(offsets))
         stride = segment * (n_pairs + k + 1)

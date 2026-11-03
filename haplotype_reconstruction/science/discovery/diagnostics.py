@@ -14,8 +14,7 @@ from ...contracts.roles import record_field
 if TYPE_CHECKING:
     from .search import SearchSummary
 
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from ...core.ties import TieCount, TieCounts
@@ -25,8 +24,6 @@ __all__ = [
     "CliqueStatistic",
     "DiscoveryDiagnostics",
     "BlockDiagnostics",
-    "diagnostic_block",
-    "diagnostic_phase",
     "backstop_counts",
 ]
 
@@ -110,22 +107,6 @@ class BlockDiagnostics:
             fit_schedule_counts=self.fit_schedule_counts,
             endpoint_family_counts=self.endpoint_family_counts,
         )
-
-    def summary_fields(self) -> dict:
-        """No timings originate in science; retained until DI2 finishes the summary split."""
-        return {}
-
-
-@contextmanager
-def diagnostic_block(diagnostics: BlockDiagnostics | None = None) -> Iterator[BlockDiagnostics]:
-    """Use an explicit block accumulator, allocating an empty one when omitted."""
-    yield diagnostics if diagnostics is not None else BlockDiagnostics()
-
-
-@contextmanager
-def diagnostic_phase(name: str, diagnostics: BlockDiagnostics | None = None) -> Iterator[BlockDiagnostics | None]:
-    """Mark an algorithmic phase without consulting a clock or implicit task state."""
-    yield diagnostics
 
 
 def backstop_counts(summary) -> dict[str, int]:

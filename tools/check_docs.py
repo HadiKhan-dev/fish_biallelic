@@ -64,7 +64,7 @@ TOML_KEY_SPAN = re.compile(r"^\[([a-z_][\w.]*)\](?:\s+([a-z_]\w*)(?:\s*=\s*(.+))
 CONSTANT_SPAN = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)(?:\s*=\s*(.+))?$")
 MODULE_FILE_SPAN = re.compile(r"^(?:haplotype_reconstruction/)?([\w/]+\.py)$")
 DOCS_REFERENCE = re.compile(r"\bdocs/([\w/.-]+?\.md)(?:#([\w.-]+))?")
-OUTPUT_NAME = re.compile(r"\.(?:csv|tsv|json|png|tsv\.gz|npz|vcf\.gz|bcf|csi|tbi)$")
+OUTPUT_NAME = re.compile(r"\.(?:csv|tsv|json|png|pdf|csv\.gz|tsv\.gz|npz|vcf\.gz|bcf|csi|tbi)$")
 
 # Package subtrees allowed to touch the process environment: the runtime only (ARCHITECTURE_40 §1, WP_IN4 §4.6).
 ENVIRONMENT_OWNERS = ("engine",)
@@ -78,15 +78,31 @@ CONTIG_NAMES = frozenset({"contig", "stem"})
 # Names built from another variable: (writer module, name pattern) -> where the concrete names come from. A pattern
 # whose source changes makes its entry stale, which is an error: the table is maintained with the writers.
 DYNAMIC_OUTPUTS = {
-    ("outputs/reports/painting.py", "*.tsv"): ("constant", "outputs/reports/painting.py", "TABLES", "{}.tsv"),
-    ("outputs/reports/pedigree.py", "*.csv"): ("keys", "outputs/reports/pedigree.py", "COLUMNS", "{}.csv"),
-    ("outputs/reports/quality.py", "CONTIG.*.tsv"): ("names", ("CONTIG.samples.tsv", "CONTIG.segments.tsv")),
-    ("outputs/export/run.py", "CONTIG.component*.founders.tsv.gz"): (
+    ("outputs/reports/tables.py", "*.csv"): (
         "names",
-        ("CONTIG.componentNNNN.founders.tsv.gz",),
+        (
+            "sample_segments.csv",
+            "sample_switches.csv",
+            "founder_support.csv",
+            "founder_support_windows.csv",
+            "founder_counts.csv",
+            "label_continuity.csv",
+            "painting_model.csv",
+            "assembly_search.csv",
+            "samples.csv",
+            "segments.csv",
+            "map.csv",
+            "crossovers.csv",
+            "meioses.csv",
+            "coverage.csv",
+            "junctions.csv",
+            "summary.csv",
+        ),
     ),
+    ("outputs/reports/pedigree.py", "*.csv"): ("keys", "outputs/reports/pedigree.py", "COLUMNS", "{}.csv"),
     ("interface/example.py", "*.npz"): ("names", ("CONTIG.npz",)),
 }
+
 # Export file names are concatenated from a stem, a role and a format suffix (outputs/export/{run,vcf}.py).
 EXPORT_NAMES = {
     ".founders": ("CONTIG.founders.vcf.gz", "CONTIG.founders.bcf"),
@@ -136,7 +152,9 @@ def evaluation_keys(package: Path = PACKAGE) -> dict[str, str]:
                         found += [item.value for item in ast.walk(node.value) if isinstance(item, ast.Constant)]
             for key in found:
                 keys.setdefault(key, f"evaluation/{name}:{node.lineno}")
-    return {key: where for key, where in keys.items() if key not in EVALUATION_INTERNAL_KEYS}
+    from haplotype_reconstruction.core.columns import column_name
+
+    return {column_name(key): where for key, where in keys.items() if key not in EVALUATION_INTERNAL_KEYS}
 
 
 def undefined_evaluation_keys(dictionary: str, package: Path = PACKAGE) -> list[tuple[str, str]]:
@@ -941,19 +959,20 @@ class Checker:
 
 
 def evaluation_stages(path: Path = PACKAGE / "evaluation/evaluate.py") -> set[str]:
-    """`evaluate --stages` names from the module's literal stage tuples (no numerical import)."""
+    """Stage names from the results vocabulary and evaluation tuples, without numerical imports."""
     tuples: dict[str, list[str]] = {}
-    for node in ast.parse(path.read_text()).body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
-            names: list[str] = []
-            for item in node.value.elts:
-                if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                    names.append(item.value)
-                elif isinstance(item, ast.Starred) and isinstance(item.value, ast.Name):
-                    names += tuples[item.value.id]
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    tuples[target.id] = names
+    for source in (path.parent.parent / "results/panels.py", path):
+        for node in ast.parse(source.read_text()).body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
+                names: list[str] = []
+                for item in node.value.elts:
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                        names.append(item.value)
+                    elif isinstance(item, ast.Starred) and isinstance(item.value, ast.Name):
+                        names += tuples[item.value.id]
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        tuples[target.id] = names
     return {*tuples["EVALUATION_STAGES"], "available", "all"}
 
 

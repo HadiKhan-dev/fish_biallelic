@@ -61,7 +61,7 @@ def gather_evidence(scoring, samples, sites):
     return result
 
 
-def join_inputs(task: JoinTask, scoring: np.ndarray, budget) -> JoinInputs:
+def join_inputs(task: JoinTask, scoring: np.ndarray) -> JoinInputs:
     """The batch's materialised input components and their evidence."""
     blocks = tuple(panel for panel in materialise(task.components, task.prepared))
     if task.common_usable:
@@ -114,7 +114,7 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
     workspace = linker_em.LinkerWorkspace(
         map_tasks=ordered_map, lane_threads=None if budget is None else budget.threads
     )
-    inputs = join_inputs(task, scoring, budget)
+    inputs = join_inputs(task, scoring)
     phase_seconds = {}
     # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
     label = None

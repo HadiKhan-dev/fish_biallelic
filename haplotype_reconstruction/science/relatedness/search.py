@@ -266,7 +266,7 @@ def _assign_parents(part: _Partition, penalty: float, keep_versions=()) -> int:
 
 
 def _moves(part: _Partition) -> int:
-    """Best-improvement single-sample moves (release 3.4): repeatedly the one move with the largest gain over all
+    """Best-improvement single-sample moves: repeatedly the one move with the largest gain over all
     samples, each sample to its best valid placement (another family, or a new one-member family), at most N moves per
     sweep, until no move gains more than the tolerance. Ties go to content keys (_top), so the moves do not depend
     on sample names or input order.
@@ -349,7 +349,7 @@ def _moves(part: _Partition) -> int:
 
 
 def _content_moves(part: _Partition) -> int:
-    """First-improvement single-sample moves in content order (release 3.4, the second search): each sample once, by
+    """First-improvement single-sample moves in content order (the second search): each sample once, by
     decreasing content key, moves to its best valid placement when that gains more than the tolerance. Exact join
     gains near the best are prepared for a batch of the coming samples at a time (and again for a sample whose
     candidate families changed meanwhile)."""
@@ -453,7 +453,15 @@ def _merge_one(part: _Partition) -> int:
     return 0
 
 
-def fit(C, logpi, logpost, ranges, *, max_sweeps: int, parameters: FamilyParameters = _DEFAULT_FAMILY) -> FamilyFit:
+def fit(
+    C: np.ndarray,
+    logpi: np.ndarray,
+    logpost: np.ndarray,
+    ranges: tuple[tuple[int, int], ...],
+    *,
+    max_sweeps: int,
+    parameters: FamilyParameters = _DEFAULT_FAMILY,
+) -> FamilyFit:
     """Families over the samples of C [N, M, 9] (child terms), logpi [M, 3], logpost [N, M, 3]; ``ranges``: each
     support unit's site range (lo, hi). Two bounded production searches; screens use exact fallback gains."""
     # Partition sums borrow singleton rows before detaching on mutation. A readonly
@@ -464,7 +472,7 @@ def fit(C, logpi, logpost, ranges, *, max_sweeps: int, parameters: FamilyParamet
     part = _Partition(C, logpi, logpost, parameters)
     penalty = float(np.log(part.N))
     _agglomerate(part)
-    # Release 3.4: two order-free searches from the agglomeration, and the higher objective is kept (the first on a
+    # Two order-free searches from the agglomeration, and the higher objective is kept (the first on a
     # tie): the objective has many local optima, and neither search reaches the better one on every design.
     start = part.snapshot(keep=True)
     start_versions = [(f, int(start[4]["version"][f])) for f in start[4]["S"]]

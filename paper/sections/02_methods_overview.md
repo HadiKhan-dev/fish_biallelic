@@ -15,7 +15,7 @@ relatedness and by every stage from local selection onwards; where no map is giv
 last position, a uniform fallback rate is used. Founder discovery works within short blocks and uses
 no map.
 
-![The stage graph of release 4.0. Each per-contig chain (blue) runs independently for every
+![The stage graph of the method. Each per-contig chain (blue) runs independently for every
 contig. Relatedness consumes only the evidence of all contigs and runs alongside the per-contig
 reconstruction; pedigree inference pools the relatedness families, paintings and genotype likelihoods of all contigs
 (orange). Local selection proceeds in three rounds (initial, L1 and L2); the second and third use

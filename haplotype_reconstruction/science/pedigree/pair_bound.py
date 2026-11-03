@@ -1,4 +1,4 @@
-"""Valid upper bounds on the M2 likelihood of every pair of a child's genome-retained parents (release 3.4).
+"""Valid upper bounds on the M2 likelihood of every pair of a child's genome-retained parents.
 
 The M2 panel (``panel.bounded_panel``) admits a pair only when this bound can reach the child's best known
 configuration, so no pair whose M2 could be best (or within the panel window of the best) is left out, while the

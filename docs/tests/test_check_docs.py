@@ -140,13 +140,13 @@ def test_environment_read_outside_runtime_fails(tmp_path):
 def test_published_file_without_dictionary_entry_fails(tmp_path):
     reports = tmp_path / "outputs/reports"
     reports.mkdir(parents=True)
-    (reports / "painting.py").write_text('TABLES = ("support",)\nnames = [f"{name}.tsv" for name in TABLES]\n')
+    (reports / "tables.py").write_text('names = [f"{name}.csv" for name in ()]\n')
     (reports / "extra.py").write_text('def write(contig, kind):\n    return f"{kind}.csv", f"{contig}.map.csv"\n')
     (tmp_path / "outputs/export").mkdir()
     (tmp_path / "outputs/export/run.py").write_text('stem = ".founders" ".samples" ".csi" ".tbi"\n')
     (tmp_path / "outputs/export/vcf.py").write_text("")
     names, problems = check_docs.published_names(tmp_path)
-    assert "support.tsv" in names and "CONTIG.map.csv" in names
+    assert "founder_support.csv" in names and "CONTIG.map.csv" in names
     assert any("'*.csv' has no DYNAMIC_OUTPUTS entry" in problem for problem in problems)
     assert any("no longer matches the writer" in problem for problem in problems)
     assert check_docs.documented_output("CONTIG.map.csv", "`recombination/CONTIG.map.csv`")

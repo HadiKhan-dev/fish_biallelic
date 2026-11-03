@@ -83,6 +83,7 @@ class EvaluationReader(Protocol):
     """Read selected original-axis products without exposing stage implementations."""
 
     root: Path
+    checkpoints: Path
 
     def simulation_manifest(self) -> SimulationManifest | None: ...
     def simulation_truth(self, contig: str) -> ContigTruth: ...

@@ -31,9 +31,9 @@ CODE_ROOTS = ("haplotype_reconstruction.stages.recombination.tasks",)
 
 
 class RecombinationAdapter:
-    """Store schema 1 as named plain fields, preserving every scientific dtype and axis."""
+    """Store schema 2 as named plain fields, preserving every scientific dtype and axis."""
 
-    schema = 1
+    schema = 2
 
     def encode(self, product: Recombination) -> dict[str, Any]:
         return to_payload(product)
@@ -58,11 +58,33 @@ def derivation(
     """Bind the actual phase, pedigree, map, parameters, code closure and convention."""
     if not phase_identity or contig != genetic_map.contig or sample_ids != edges.sample_ids:
         raise InvariantError("recombination upstream identity, sample order or contig is inconsistent")
+    return _bound_derivation(
+        contig,
+        sample_ids,
+        parameters,
+        dict(phase=phase_identity, pedigree=edges.identity, genetic_map=json_digest(genetic_map.identity())),
+        reverse=reverse,
+        code=code,
+        policy=policy,
+    )
+
+
+def _bound_derivation(
+    contig: str,
+    sample_ids: tuple[str, ...],
+    parameters: RecombinationParameters,
+    inputs: Mapping[str, str],
+    *,
+    reverse: bool,
+    code: CodeIdentity | None = None,
+    policy: NumericalPolicy | None = None,
+) -> Derivation:
+    """One recipe over independently checked phase, pedigree and map identities."""
     return Derivation(
         code_dependency_identity(CODE_ROOTS) if code is None else code,
         dict(contig=contig, sample_ids=sample_ids, recombination=parameters),
         NumericalPolicy.current() if policy is None else policy,
-        dict(phase=phase_identity, pedigree=edges.identity, genetic_map=json_digest(genetic_map.identity())),
+        inputs,
         tie_reverse=bool(reverse),
     )
 
@@ -114,21 +136,13 @@ def write(file: CheckpointFile, expected: Derivation, product: Recombination) ->
     publish(file, KEY, identity, RecombinationAdapter().encode(product))
 
 
-def check_binding(file: CheckpointFile, expected_identity: str) -> None:
-    """Read-only alias preflight: refuse stale bindings, including a crash before product publication."""
-    if file.has(BINDING_KEY):
-        resume(file, BINDING_KEY, expected_identity)
-    if file.has(KEY):
-        resume(file, KEY, expected_identity)
-
-
 @dataclass(frozen=True)
 class Reader:
     """Concrete Results request with its expected identity rebuilt from manifest and checked phase."""
 
     identity: str
     key: str = KEY
-    schema: int = 1
+    schema: int = 2
     items: tuple[str, ...] | None = None
 
     def decode(self, payload: Mapping[str, Any]) -> Recombination:
@@ -171,12 +185,13 @@ def result_reader(
     )
     if parameters is None:
         parameters = bound_parameters(file, configuration_identity(contig, tuple(manifest["sample_ids"]), inputs))
-    expected = Derivation(
-        code_dependency_identity(CODE_ROOTS),
-        dict(contig=contig, sample_ids=tuple(manifest["sample_ids"]), recombination=parameters),
-        NumericalPolicy(**manifest["numerical_policy"]),
+    expected = _bound_derivation(
+        contig,
+        tuple(manifest["sample_ids"]),
+        parameters,
         inputs,
-        tie_reverse=bool(manifest["ties"]["reverse"]),
+        reverse=bool(manifest["ties"]["reverse"]),
+        policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
     return Reader(expected.identity)
 

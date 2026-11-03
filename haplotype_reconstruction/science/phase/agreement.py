@@ -128,7 +128,7 @@ __all__ = []
 
 
 def edge_chains(model, mirror, chains, mirrored_chains, theta_m, starts, tau, *, trace=False):
-    """Release chains under both aligned solves; observe raw cutoffs and each alignment segment."""
+    """Validation path for aligned chain release, optionally observing cutoffs and alignment segments."""
     audit = DecisionTrace(extended=True) if trace else None
     value = _edge_chains(model, mirror, chains, mirrored_chains, theta_m, starts, tau, audit=audit)
     return PhaseTrace(value, tuple(audit.rows)) if trace else value

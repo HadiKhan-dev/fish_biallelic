@@ -207,13 +207,13 @@ Cost and scope: Directory/layout inspection and incremental record-index reads.
 <a id="eng-19"></a>
 ## eng-19 Process bootstrap and numerical-library set-up
 
-Validate affinity and establish numerical-library policy before starting the forkserver. Preload the declared import closure before workers begin, initialise their threading runtime safely and enforce declared signatures. Kernel warm-up precedes scientific task pools. One application boundary owns these process-wide effects; importing science must perform none.
+Validate affinity and establish numerical-library policy before starting the forkserver. Preload the declared import closure before workers begin, initialise their threading runtime safely and enforce declared signatures. Ordinary worker graphs compile missing kernels alongside ready scientific tasks, synchronizing only at the compile lock of a kernel in use. Simulation init and in-process graphs warm the required kernels before scientific tasks start. One application boundary owns these process-wide effects; importing science must perform none.
 
-Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py), [engine/runtime.py](../../haplotype_reconstruction/engine/runtime.py).
+Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py), [engine/runtime.py](../../haplotype_reconstruction/engine/runtime.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: Process/bootstrap and code-closure overhead before task execution.
+Cost and scope: Process/bootstrap and code-closure overhead; compilation runs beside scientific tasks on ordinary worker graphs or before them on eager routes.
 
 <a id="eng-20"></a>
 ## eng-20 CPU budget tree and the fair-share rule
@@ -295,9 +295,9 @@ Cost and scope: One bounded process-accounting scan per configured poll while re
 <a id="eng-27"></a>
 ## eng-27 Kernel cache and warm-up
 
-Derive the kernel cache namespace from the declared code/numerical closure, warm missing signatures in the specified cost order and publish valid cache state even after a later scientific failure. Cache presence may save compilation but cannot change the declared supported signatures or numerical policy. Do not fork after activating an incompatible numerical runtime.
+Derive the kernel cache namespace from the declared code/numerical closure and publish valid cache state even after a later scientific failure. Ordinary worker graphs schedule missing-signature compilation beside ready stages with stage priority; a stage waits only on a compile lock for the kernel it uses. Simulation init, in-process graphs and explicit warm_up callers compile missing signatures eagerly in the specified cost order before scientific execution. Cache presence may save compilation but cannot change the declared supported signatures or numerical policy. Do not fork after activating an incompatible numerical runtime.
 
-Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py).
+Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py), [engine/runtime.py](../../haplotype_reconstruction/engine/runtime.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 

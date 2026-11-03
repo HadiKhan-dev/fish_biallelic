@@ -1,6 +1,6 @@
 """Genome-retained parent identities define the fixed M2 panel.
 
-Release 3.4: the panel holds the bounded pairs of retained identities (``bounded_panel``): a pair enters when a valid
+The panel holds the bounded pairs of retained identities (``bounded_panel``): a pair enters when a valid
 upper bound on its joint M2 likelihood (``pedigree.pair_bound``) comes within ``PanelConfig.pair_relevance_margin`` of
 the child's best known configuration in the full-data fit or in a leave-one-chromosome-out fit. Pairs outside the
 panel contribute nothing to the M2 evidence (a lower bound), as pairs of non-retained identities already did. The
@@ -104,7 +104,7 @@ def bounded_panel(
     eligibility: ParentEligibility,
     config: PedigreeConfig,
 ) -> tuple[CandidatePanel, dict]:
-    """The eligible retained pairs whose joint M2 bound reaches the child's best known configuration (release 3.4),
+    """The eligible retained pairs whose joint M2 bound reaches the child's best known configuration,
     and counts for the log.
 
     ``compact`` the certified M1 profile (raw chromosome M1 of each child's retained parents), ``zero`` float64 [C, N]
@@ -150,7 +150,6 @@ def search_diagnostics(
     panel: CandidatePanel,
     eligibility: ParentEligibility,
     called_parents: np.ndarray,
-    sample_ids: tuple[str, ...] | None = None,
     *,
     reverse: bool = False,
 ) -> tuple[SearchDiagnosticView, ...]:

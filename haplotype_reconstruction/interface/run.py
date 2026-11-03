@@ -25,6 +25,7 @@ from .settings.schema import Settings
 
 if TYPE_CHECKING:
     from ..contracts.genetic_map import GeneticMapSet
+    from ..contracts.recombination import RecombinationMap
     from ..core.ties import TieCensus, TieSettings
     from ..engine.graph import Expansion, RecordKey, Task, TaskKey
     from ..engine.records import RunRecorder
@@ -1119,7 +1120,7 @@ def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], ful
     """Publish the export manifest after every selected contig's durable output record."""
     from ..contracts.roles import require_schema
     from ..outputs.export.records import SCHEMA, ExportConfig
-    from ..outputs.export.run import write_manifest
+    from ..outputs.export.run import write_founder_identity, write_manifest
     from ..store.protocol import read_output
 
     reader = _task_reader(output, root)
@@ -1133,6 +1134,7 @@ def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], ful
             raise SettingsError(f"{contig}: export differs from current published products or options")
         require_schema(record.payload, SCHEMA)
         entries.append(dict(record.payload["entry"]))
+    write_founder_identity(Path(output) / "export", reader, contigs, ExportConfig(full_length=full_length).products)
     write_manifest(
         Path(output) / "export",
         Path(root),
@@ -1230,11 +1232,15 @@ def _task_seconds(output: Path, stage: str) -> dict[str, float]:
     return seconds
 
 
-def _recombination_report(output: Path, reader: Results, contigs: tuple[str, ...]) -> list[Path]:
+def _recombination_contig(
+    output: Path, reader: Results, contig: str
+) -> tuple[tuple[str, dict[str, Path]], RecombinationMap]:
     """Attach observed task timings from invocation records to RC1's report rows."""
-    from ..outputs.reports.recombination import write_recombination
+    from ..outputs.reports.recombination import contig_recombination
 
-    return write_recombination(output, reader, contigs, elapsed_seconds=_task_seconds(output, "recombination"))
+    return contig_recombination(
+        output, reader, contig, elapsed_seconds=_task_seconds(output, "recombination").get(contig)
+    )
 
 
 def _phase_report(output: Path, reader: Results) -> Path:
@@ -1249,7 +1255,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     from dataclasses import replace
 
     from ..engine.graph import RecordKey, ResourceRequest, Task, TaskKey
-    from ..outputs.reports.tasks import contig_tasks, run_tasks
+    from ..outputs.reports.tasks import run_tasks
     from ..results.reader import Results
 
     reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints)
@@ -1288,13 +1294,9 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
                 depends_on=tuple(key(stage, c) for stage in ("sites", "release", "phase")),
                 outputs=(RecordKey(c, "outputs/export"),),
             )
-        actions.update(
-            (task.key, task)
-            for task in contig_tasks(
-                reader, prepared.paths.output, c, evidence=key("evidence", c), painting=key("painting", c)
-            )
-        )
     dependencies = {
+        "quality": tuple(key("evidence", c) for c in resolved.contigs),
+        "painting": tuple(key("painting", c) for c in resolved.contigs),
         "relatedness": (key("relatedness"),),
         "pedigree": (key("pedigree"),),
         "refit": tuple(key("refit", c) for c in resolved.contigs),
@@ -1320,8 +1322,8 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     for task in run_tasks(
         reader, prepared.paths.output, dependencies, reverse_conventions=reader.manifest["ties"]["reverse"]
     ):
-        if task.key.round == "recombination":
-            task = replace(task, function=_recombination_report, kwargs={})
+        if task.key.round == "recombination" and task.key.unit == "contig":
+            task = replace(task, function=_recombination_contig, kwargs={})
         elif task.key.round == "phase":
             task = replace(task, function=_phase_report, kwargs={})
         actions[task.key] = task
@@ -1332,12 +1334,25 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
     """Attach writers whose science is in this cut, retaining the checked external prerequisites."""
     from dataclasses import replace
 
-    if cut.step not in {"run", "evidence", "relatedness", "reconstruct", "pedigree", "phase"}:
+    from ..engine.graph import TaskKey
+
+    if cut.step not in {"run", "evidence", "relatedness", "reconstruct", "pedigree", "phase", "recombination"}:
         return cut
     selected = set(cut.nodes)
     for node in graph.nodes:
         if node.key.stage == "report" and set(node.dependencies) <= selected:
             selected.add(node.key)
+    # A scatter cut cannot publish a run-level family until all its parts are ready.
+    selected = {
+        key
+        for key in selected
+        if not (
+            key.stage == "report"
+            and key.unit == "contig"
+            and key.round in {"quality", "painting", "recombination"}
+            and TaskKey("report", "run", "run", key.round) not in selected
+        )
+    }
     return replace(cut, nodes=tuple(node.key for node in graph.nodes if node.key in selected))
 
 
@@ -1823,7 +1838,7 @@ def export_command(args: argparse.Namespace) -> int:
     prepared, _ = _recorded_run(settings, args.run_directory)
     from ..engine.graph import run_graph
     from ..outputs.export.records import ExportConfig
-    from ..outputs.export.run import write_manifest
+    from ..outputs.export.run import write_founder_identity, write_manifest
     from ..outputs.export.task import make_task
     from ..results.reader import Results
 
@@ -1851,6 +1866,7 @@ def export_command(args: argparse.Namespace) -> int:
             preload=("haplotype_reconstruction.outputs.export.task",),
         )
         entries = [dict(completed[task.key].entry) for task in tasks]
+        write_founder_identity(destination, reader, contigs, config.products)
         write_manifest(
             destination,
             prepared.paths.checkpoints,
@@ -1904,8 +1920,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     from ..engine.graph import run_graph
     from ..engine.records import record_run, run_log
     from ..engine.runtime import kernel_run
-    from ..results.reader import Results
-    from ..stages.graph import bind_tasks, build_graph, workflow_cut
+    from ..stages.graph import Node, bind_tasks, build_graph, workflow_cut
     from ..store.store import CheckpointStore
     from .settings.load import write_settings
     from .settings.schema import to_dict
@@ -1913,10 +1928,13 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     store = CheckpointStore(prepared.paths.checkpoints, nthreads=prepared.cores)
     assert prepared.manifest is not None
     _check_recombination_bindings(store, prepared.manifest, resolved)
-    graph = build_graph(resolved.contigs)
-    cut = workflow_cut(graph, "recombination")
+    outputs = _output_actions(prepared, resolved)
+    graph = build_graph(
+        resolved.contigs, output_nodes=tuple(Node(task.key, task.depends_on) for task in outputs.values())
+    )
+    cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)
-    tasks = bind_tasks(graph, cut, _model_actions(prepared, resolved, cut), completed=completed)
+    tasks = bind_tasks(graph, cut, _model_actions(prepared, resolved, cut, outputs=outputs), completed=completed)
     preload = _task_preloads(tasks)
     _start_runtime(prepared, preload=preload)
     prepared.paths.logs.mkdir(parents=True, exist_ok=True)
@@ -1942,8 +1960,6 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
             on_task=recorder.task_finished,
         )
         _complete_workflow(prepared, cut, tasks, values, recorder)
-        reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints)
-        _recombination_report(prepared.paths.output, reader, resolved.contigs)
         write_settings(prepared.settings, prepared.paths.output / "config.toml")
     return RunResult("complete", None, resolved.contigs)
 

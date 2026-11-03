@@ -34,7 +34,7 @@ def literal(value) -> str:
 def parameter_catalog() -> list[dict]:
     """All declared parameter fields and public constants, in source order."""
     rows = []
-    for path in sorted(PACKAGE.rglob("*parameters.py")):
+    for path in sorted([*PACKAGE.rglob("*parameters.py"), PACKAGE / "core/ties.py"]):
         source = path.read_text()
         lines = source.splitlines()
         tree = ast.parse(source)
@@ -44,7 +44,8 @@ def parameter_catalog() -> list[dict]:
         def declarations(body, owner="", description="", lines=lines, module=module, module_doc=module_doc, path=path):
             for node in body:
                 if isinstance(node, ast.ClassDef):
-                    declarations(node.body, node.name, ast.get_docstring(node) or "")
+                    if path.name.endswith("parameters.py"):
+                        declarations(node.body, node.name, ast.get_docstring(node) or "")
                     continue
                 if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
                     continue

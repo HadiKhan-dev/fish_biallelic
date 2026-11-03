@@ -29,9 +29,9 @@ Cost and scope: O(6 · N · L_c). These terms describe the unit’s work/storage
 <a id="rl03"></a>
 ## rl03 Site selection and thinning (family sites, IBD sites)
 
-Apply the inclusive minor-frequency and observed-share gates, then the declared thinning separately for family and pair-chain sites. The observed-share gate is evaluated from integer counts. Do not reuse the pair output selection to change the family evidence axis.
+For family sites, apply the inclusive minor-frequency gate and compare the floating mean of the Boolean observation mask with the inclusive observed-share threshold, then thin the survivors. The optional pair chain takes the direct `::ibd_site_step` slice without those family gates; it handles joint observation inside the chain. Keep the two evidence axes separate.
 
-Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
 
 Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`, `ibd_site_step`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 

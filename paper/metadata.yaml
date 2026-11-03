@@ -3,7 +3,7 @@ title: "Reconstructing founder haplotypes, pedigrees and recombination from low-
 author:
   - "Hadi Khan [ORCID 0000-0001-6222-2088]"
   - "[TO FILL: co-authors and affiliations]{.todo}"
-date: "Draft for release 4.0.1 of the software, 2 November 2026"
+date: "Draft for release 4.3.0 of the software, 3 November 2026"
 abstract: |
   Low-coverage whole-genome sequencing makes it affordable to sequence every member of an
   experimental cross, but leaves each individual's genotypes uncertain, and in many crosses
@@ -16,10 +16,12 @@ abstract: |
   conditional on the inferred pedigree and estimates recombination maps from the resulting
   meiosis chains. No sample metadata, sex, cohort or known parent enters inference; parents
   that were not sequenced and relationships that the data cannot resolve are reported as such
-  rather than forced. Every stage is designed to stay polynomial in the number of founder
-  haplotypes up to K = 30, and the implementation gives identical results whatever the number
-  of processor cores. [TO FILL: one or two sentences of headline results from the simulation
-  matrix and the TroMau cross, once the 4.0 validation matrix is scored.]{.todo} The software is
-  open source (MIT licence).
+  rather than forced. Work and storage are documented up to K = 30, including above-cubic search
+  costs and explicit candidate budgets. Across 15 simulated datasets, genotype errors ranged from
+  7.6 to 811.3 per million called genotypes; pedigree recovery depended strongly on chromosome
+  support and parental observation. In 116 TroMau samples on 22 chromosomes, the method inferred
+  70 supported parent edges, while founder structure on chr3 was sensitive to the tie convention.
+  These real-data outputs are inference without individual parentage truth. The software is open
+  source (MIT licence).
 link-citations: true
 ---

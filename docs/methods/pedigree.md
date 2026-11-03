@@ -284,7 +284,7 @@ Cost and scope: O(3 × terms); O(C E). These terms describe the unit’s work/st
 <a id="pd04"></a>
 ## pd04 Weighted genome likelihood with one M0 contamination mixture
 
-Aggregate chromosome likelihoods in configured-contig order with the declared float64 weighted left fold, skipping zero weights. L2 fixes this arithmetic independently of BLAS layout or workers. Apply the M0 contamination mixture once to M1/M2 aggregates; leave M0 unchanged. This robust composite transform does not make chromosomes independent observations.
+Aggregate chromosome likelihoods in configured-contig order with the declared float64 weighted left fold. Every row is multiplied, including zero weights, preserving IEEE nonfinite propagation; the separate panel-admission fold omits zero weights. L2 fixes this arithmetic independently of BLAS layout or workers. Apply the M0 contamination mixture once to M1/M2 aggregates; leave M0 unchanged. This robust composite transform does not make chromosomes independent observations.
 
 Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
 
@@ -407,7 +407,7 @@ Cost and scope: O(A). These terms describe the unit’s work/storage dimensions;
 <a id="pd15"></a>
 ## pd15 Informative chromosomes and informative map units
 
-For each chromosome, use the same abstaining winner rule on its own score scale to identify evidence supporting the selected state/configuration. Sum the declared informative map units, using the nonfinite-length fallback. Apply the later release threshold without a tie band. Without measured support the units are contig counts, not inferred physical map length.
+For each chromosome, apply the abstaining winner rule to its own parent-count state evidence. A chromosome is informative when any state has a unique winner; it need not agree with the genome-wide state or configuration. Sum the declared informative map units, using the nonfinite-length fallback. Apply the later release threshold without a tie band. Without measured support the units are contig counts, not inferred physical map length.
 
 Implementation: [science/pedigree/decision.py](../../haplotype_reconstruction/science/pedigree/decision.py).
 

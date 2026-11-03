@@ -19,11 +19,11 @@
 | assembly.completion | assembly.crossfit | two-fold crossfit L32, ten-percent unknown calls, default budgets | 1.34 ± 0.08 (≤ cubic) | 0.81 ± 0.03 (measured) |
 | assembly.site_model | assembly.site_posterior | weak informative site, all K uncertain; exact/core route recorded | 3.06 ± 0.11 (≤ cubic) | 1.00 ± 0.00 (measured) |
 | assembly.linker | assembly.linker_scan | forward micro-HMM L32 with nonuniform priors; no zero-prior memo reuse | 1.90 ± 0.03 (≤ cubic) | 0.98 ± 0.02 (measured) |
-| assembly.joins | assembly.join_score | exact panel score, four blocks of four bins; structural-query count remains unresolved | 1.75 ± 0.06 (≤ cubic) | 1.02 ± 0.02 (measured) |
-| assembly.shadow_refits | assembly.count_rule | K count decisions with default bootstrap; exemption 0b ranked refits separate | 1.00 ± 0.01 (exempt) | 1.28 ± 0.08 (exempt) |
+| assembly.joins | assembly.join_score | exact panel score, four blocks of four bins; adaptive structural screening costed separately | 1.75 ± 0.06 (≤ cubic) | 1.02 ± 0.02 (measured) |
+| assembly.shadow_refits | assembly.count_rule | K count decisions with default bootstrap; complete candidate refits and repeated rounds costed separately | 1.00 ± 0.01 (kernel only) | 1.28 ± 0.08 (kernel only) |
 | assembly.orchestration_release | assembly.release | full release of four-block K-row component without alternatives; no intrinsic N | 0.10 ± 0.01 (≤ cubic) | -0.01 ± 0.04 (measured) |
 | refinement.search | refinement.score | direct exact whole-site score L64; canonical-fixing complexity remains unresolved | 1.71 ± 0.06 (≤ cubic) | 1.00 ± 0.00 (measured) |
-| refinement.count | refinement.count_bound | exact one-deletion upper bounds in four blocks with K+1 rows; exemption 0b refits separate | 1.85 ± 0.12 (exempt) | 1.00 ± 0.00 (exempt) |
+| refinement.count | refinement.count_bound | exact one-deletion upper bounds in four blocks with K+1 rows; complete candidate refits and repeated rounds separate | 1.85 ± 0.12 (kernel only) | 1.00 ± 0.00 (kernel only) |
 | painting.coalescence | painting.transposition_gains | all K(K-1)/2 transposition gains at two links; worst candidate rechecks remain analytic | 2.39 ± 0.05 (≤ cubic) | 1.00 ± 0.00 (measured) |
 | painting | painting.chain | structured sum-product, N×8 bins, Sprime=2K+1, masses enabled | 1.94 ± 0.01 (≤ cubic) | 1.00 ± 0.00 (measured) |
 | painting | painting.decode_masks | both Viterbi conventions plus interval/canonical masks, N×8 bins | 1.73 ± 0.02 (≤ cubic) | 1.02 ± 0.00 (measured) |
@@ -47,7 +47,7 @@
 | engine_graph | engine.graph | independent-task validation proxy count=N*K; not scheduler throughput | 1.98 ± 0.01 (size proxy) | 1.99 ± 0.00 (size proxy) |
 | interface | interface.settings | settings resolution proxy: TOML load, merge, typed build, validation and settings_text of a simulation configuration with cohorts (K, N) negligible; no intrinsic N or K | 0.00 ± 0.00 (size proxy) | -0.00 ± 0.01 (size proxy) |
 
-Table: Kernel ladders of release 4.0. Each probe times one kernel on direct synthetic inputs, on one thread, after a discarded first call; slopes are fitted log–log exponents with standard errors. A K slope at or below 3.3 is accepted as at most cubic; “exempt” marks a stage under a decided cost exemption, and “size proxy” an operational kernel whose size stands in for K and N. Source: docs/developer/costs.md.
+Table: Kernel ladders for the method in release 4.3.0. Each probe times one kernel on direct synthetic inputs, on one thread, after a discarded first call; slopes are fitted log–log exponents with standard errors. A K slope at or below 3.3 is accepted as at most cubic; kernel-only rows do not bound complete count-refit passes; “exempt” marks a stage under a decided cost exemption, and “size proxy” an operational kernel whose size stands in for K and N. Source: docs/developer/costs.md.
 
 | Entry | Category | Form | Where it acts |
 |-------|-----------------|----------------------------------------------|------------------------------|
@@ -65,6 +65,6 @@ Table: Kernel ladders of release 4.0. Each probe times one kernel on direct synt
 | L12 | Formula unification | Pedigree emissions use `pow(x / max, η)`, skipping the power at η = 1, on every route | child emissions |
 | L13 | Formula unification | Relatedness predicts and rescores a family's log-likelihood with one function of the member sum | relatedness family terms |
 | L14 | Formula unification | The template linker is compiled without fast-math reassociation; it acts only when templates are rebuilt | template linker |
-| L15 | Output representation | Unphased sample genotypes are written in ascending allele order, missing first, instead of 3.5's internal order | sample phase VCF |
+| L15 | Output representation | Unphased sample genotypes are written in ascending allele order, missing first | sample phase VCF |
 
-Table: The numerical ledger of release 4.0: declared normalisations in which one arithmetic form replaces several, or a declared order replaces one chosen by workers, memory, object identity or the environment. No entry changes a model, objective, threshold, candidate set, search order or budget. Source: docs/developer/ties.md.
+Table: The numerical ledger for release 4.3.0: declared normalisations in which one arithmetic form replaces several, or a declared order replaces one chosen by workers, memory, object identity or the environment. No entry changes a model, objective, threshold, candidate set, search order or budget. Source: docs/developer/ties.md.

@@ -860,7 +860,7 @@ def reference_refit_alleles(
     *,
     observer: Callable[[str, Mapping[str, Any]], None],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Run the serial reference site loop with a complete native decision observer.
+    """Validation path: run the serial reference site loop with a complete native decision observer.
 
     The same numerical helpers score every candidate. Observer calls occur before
     qualification and after conflict restoration; the observer must not mutate its

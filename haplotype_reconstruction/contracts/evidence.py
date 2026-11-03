@@ -11,18 +11,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 import numpy as np
-from numpy.typing import ArrayLike, DTypeLike, NDArray
+from numpy.typing import NDArray
 
 from ..core.ties import TieCounts
-from .roles import freeze_record_arrays, record_field, schema_field
-
-
-def _frozen(array: ArrayLike, dtype: DTypeLike) -> np.ndarray:
-    value = np.ascontiguousarray(array, dtype=dtype)
-    if value is array and value.flags.writeable:
-        value = value.view()
-    value.flags.writeable = False
-    return value
+from .roles import freeze_record_arrays, frozen_array, record_field, schema_field
 
 
 @dataclass(frozen=True)
@@ -66,17 +58,17 @@ class ContigEvidence:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample_ids", tuple(map(str, self.sample_ids)))
-        object.__setattr__(self, "positions", _frozen(self.positions, np.int64))
+        object.__setattr__(self, "positions", frozen_array(self.positions, np.int64))
         if self.counts is not None:
-            object.__setattr__(self, "counts", _frozen(self.counts, np.int32))
-        object.__setattr__(self, "likelihoods", _frozen(self.likelihoods, np.float64))
-        object.__setattr__(self, "observed", _frozen(self.observed, np.bool_))
-        object.__setattr__(self, "discovery_sites", _frozen(self.discovery_sites, np.bool_))
-        object.__setattr__(self, "founder_excluded", _frozen(self.founder_excluded, np.bool_))
+            object.__setattr__(self, "counts", frozen_array(self.counts, np.int32))
+        object.__setattr__(self, "likelihoods", frozen_array(self.likelihoods, np.float64))
+        object.__setattr__(self, "observed", frozen_array(self.observed, np.bool_))
+        object.__setattr__(self, "discovery_sites", frozen_array(self.discovery_sites, np.bool_))
+        object.__setattr__(self, "founder_excluded", frozen_array(self.founder_excluded, np.bool_))
         spans = np.asarray(self.block_spans, np.int64)
         if spans.ndim != 2 or spans.shape[1] != 2:
             spans = spans.reshape(-1, 2)
-        object.__setattr__(self, "block_spans", _frozen(spans, np.int64))
+        object.__setattr__(self, "block_spans", frozen_array(spans, np.int64))
 
     @property
     def n_samples(self) -> int:

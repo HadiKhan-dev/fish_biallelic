@@ -16,8 +16,8 @@ import math
 import numpy as np
 
 from ...core.kernels import kernel
+from .kernels.signatures import OVERLOADS
 from .parameters import WINNER_NUMERICS
-from .signatures import OVERLOADS
 
 __all__ = ["contrast_tolerance", "magnitude", "tied_rank_probabilities", "winner_tolerance", "unique_finite_winner"]
 

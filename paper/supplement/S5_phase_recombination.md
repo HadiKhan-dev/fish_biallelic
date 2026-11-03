@@ -2,7 +2,7 @@
 
 ## Family phase
 
-Notation follows the main text. Parameter names are those of the generated parameter reference; values are 4.0 defaults.
+Notation follows the main text. Parameter names are those of the generated parameter reference; values are 4.3.0 defaults.
 
 **Emissions, released sites and state alleles (FP01, FP13).** The pair emissions $e_{ib}(x,y)$ are the painting's binned emissions, read from its cache or recomputed identically with its `robustness_epsilon` (0.01), `emission_log_floor` (−50 nats) and design effect $1+(n_{ib}-1)\rho_s$. Here $n_{ib}$ counts informative sites of sample $i$ in bin $b$ and $\rho_s$ is `emission_site_correlation` (0.1). Both solves share these pre-refit emissions. Released sites are refit panel positions inside a painting bin; other sites keep missing calls. A named state's allele $\hat h_{xj}$ exists only where every row of its class has a called refit allele and all agree; BACKGROUND has none. Components without painting bins are not solved. They keep their geometry (fallback bins of `EMPTY_COMPONENT_BIN_SITES` = 100 panel sites), but their calls and chain sources stay missing.
 
@@ -48,9 +48,9 @@ with $x$ the label on homologue $v$ and $z$ the exchanged label. The partner $y'
 
 **Conditional map (recombination RC04, RC05).** Map bins start every `bin_bp` (1,000,000 bp) from the first site, with extra edges at the two sites flanking each segment change. $\lambda$ is the difference of cumulative Morgans interpolated at bin centres. Map knots between the end sites are retained, so hotspots between SNPs keep their mass. The fallback rate `[genetic_map] rate_cm_per_mb` (default 5 cM/Mb) applies without a map and beyond its knots. An odd interval of zero genetic length contributes one crossover: the data override the map's zero prior. Edge sums follow a fixed order. The columns are:
 
-- `rate_cM_per_Mb` is $10^8X_t/W_t$, missing where $W_t=0$.
+- `rate_c_m_per_mb` is $10^8X_t/W_t$, missing where $W_t=0$.
 - `covered_bp` is the union of all meioses' informative intervals within the bin.
-- `cM_on_covered_bp` is rate × covered bp / $10^6$; the cumulative sum counts missing values as zero.
+- `c_m_on_covered_bp` is rate × covered bp / $10^6$; the cumulative sum counts missing values as zero.
 - `effective_meioses` is $W_t$ divided by the map-bin width.
 - The called rate divides called crossovers (spread by genetic mass, else uniformly in bp) by callable exposure.
 
@@ -74,6 +74,17 @@ The documented rationale is that no locus gives real crossovers in more than 5% 
 
 **Sample VCF (OU05, OU09).** Columns are in input order. A set starts at a component's first kept site and at the site after each released break; its PS is that bp position, which need not be heterozygous. Inside a set, homozygous and missing cells also use `|` and PS. A frame-undetermined heterozygote is written `/` with ascending alleles (missing first) and PS `.`, without ending its set. Sites outside components are unphased, removed sites are `./.:.`, and there is no r5 fill.
 
-**Recombination tables (OU18).** For each contig there are crossover, meiosis, map, coverage, called-coverage and junction tables, plus a summary, with call intervals $(\text{left},\text{right}]$. The plot and tables are views of one conditional map.
+**Recombination tables (OU18).** Run-level `recombination/crossovers.csv`, `meioses.csv`,
+`map.csv`, `coverage.csv`, `junctions.csv` and `summary.csv` use a leading `contig` column and
+snake_case fields; call intervals are $(\text{left},\text{right}]$. The single coverage table
+contains spans between consecutive released markers within a followed stretch, used by map
+aggregation, called exposure, junctions and evaluation. `recombination/maps.pdf` has one page per
+chromosome in configured contig order, presenting the same conditional map as the tables.
+
+**Identity and optional tracks.** `export/founder_identity.csv` is the run-level identity table,
+with `contig`, `component` and `founder` identifiers. Optional per-chromosome
+`export/<contig>.tracks.csv.gz` files use `contig`, `component`, `pos` and `hk` columns; shorter
+segments leave unused founder columns empty, while an existing unknown allele remains `.`.
+The per-chromosome VCF paths and their sample/founder column identifiers are retained.
 
 **Cost.** The sample VCF costs $O(NL)$ and the founder VCF $O(L\times\text{columns})$ over $L$ written sites, at most quadratic in $K$.

@@ -50,7 +50,7 @@ __all__ = [
 
 
 def informative_chromosomes(alternatives: Alternatives, *, counter=None) -> np.ndarray:
-    """bool [C, N]: chromosomes on which the child's own state evidence has a unique winner."""
+    """bool [C, N]: chromosomes with any unique parent-count evidence winner, regardless of the genome-wide call."""
     winners = np.zeros((len(alternatives.log_likelihoods), alternatives.n_samples), dtype=np.bool_)
     states = np.arange(3, dtype=np.int64)
     for contig, likelihoods in enumerate(alternatives.log_likelihoods):
@@ -226,8 +226,9 @@ def decide_floored(
 ) -> Decision:
     """Decide from the already fixed full-genome M1 profile, resampling serially in this process.
 
-    Used by the certified screen. The genome floor is not idempotent: raw
-    chromosome scores must use ``decide`` instead. ``eligibility`` must be the one ``scores`` was stacked with.
+    Used by the certified screen. The genome floor is not idempotent: chromosome M1 inputs
+    must already have been floored exactly once using the fixed genome profile.
+    ``eligibility`` must be the one ``scores`` was stacked with.
     ``executor``: the stage's calibration term executor (None: serial). The stage runs the same resampling
     tasks as independent engine subtasks between fit_full and decide_resampled.
     """

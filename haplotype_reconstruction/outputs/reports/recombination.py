@@ -1,24 +1,13 @@
-"""OUTPUT/recombination/: readable recombination maps, calls, exposure and junction loci.
+"""Run-level recombination CSVs and maps.pdf from checked per-contig products.
 
-Per contig (from its recombination record):
-  <contig>.map.csv              per map bin [left_bp, right_bp): called and expected crossovers, observable
-                                exposure, rates (cM/Mb), effective meioses, cumulative observed cM
-  <contig>.crossovers.csv       called crossover intervals per meiosis (parent, child, parent slot): between
-                                centres of consecutive released-chain bins; reported_left/right_bp include
-                                both bins, with origin probabilities, component and reversed-segment flag
-  <contig>.coverage.csv         informative spans per meiosis; <contig>.called_coverage.csv: spans between
-                                supported markers
-  <contig>.meioses.csv          per meiosis: marker counts, calls, expected crossovers, exposure
-  <contig>.junctions.csv        junction loci (overlapping reported calls) and their flags
-  <contig>.png                  conditional rate and effective meioses along the chromosome
-Genome-wide: junctions.csv (every contig's loci) and summary.csv (one row per contig). Maps are conditional on
-the final phase and the fixed inferred pedigree.
+Tables retain each contig's recorded bin/edge/call/locus order. Coverage is the
+single callable-span representation: consecutive released markers in a followed
+stretch. Figures retain the conditional rates and effective-meiosis staircase.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +17,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-from .tables import record_mapping, temporary_path, write_rows
+from .tables import contig_part, record_mapping, temporary_path, write_contig_tables
 
 SPAN_COLUMNS = ("parent", "child", "parent_slot", "left_bp", "right_bp", "component_id")
 """Columns in published order.
@@ -69,16 +58,10 @@ CROSSOVER_COLUMNS = (
     reported_right_bp: reported crossover interval right edge including the following chain bin (bp).
     in_reversed_segment: in reversed segment (1).
 """
-PLOT_BYTES = 128 << 20  # one figure (and matplotlib on first use)
-
-
-def _locus_columns() -> tuple[str, ...]:
-    """Published JunctionLocus columns in the frozen 3.5 dataclass order."""
-    return JUNCTION_COLUMNS
 
 
 def map_table(curve: RecombinationMap) -> dict:
-    """Columns of <contig>.map.csv from a RecombinationMap."""
+    """Columns of map.csv from a RecombinationMap."""
     bins = np.asarray(curve.edges_bp)
     table = {"left_bp": bins[:-1], "right_bp": bins[1:]}
     table.update(
@@ -92,12 +75,11 @@ def map_table(curve: RecombinationMap) -> dict:
     return table
 
 
-def meiosis_tables(product: Recombination) -> tuple[list, list, list, list]:
-    """(crossovers, coverage, called_coverage, meioses) rows of one chromosome's RecombinationProduct."""
+def meiosis_tables(product: Recombination) -> tuple[list, list, list]:
+    """(crossovers, coverage, meioses) rows of one chromosome's RecombinationProduct."""
     names = product.sample_ids
     crossovers: list[dict] = []
     coverage: list[dict] = []
-    called_coverage: list[dict] = []
     meioses: list[dict] = []
     for edge, (parent, child, slot) in enumerate(
         zip(product.edge_parent.tolist(), product.edge_child.tolist(), product.edge_slot.tolist(), strict=False)
@@ -121,12 +103,8 @@ def meiosis_tables(product: Recombination) -> tuple[list, list, list, list]:
                     "in_reversed_segment": bool(product.in_reversed_segment[first + index]),
                 }
             )
-        for rows, spans in (
-            (coverage, product.edge_informative_spans(edge)),
-            (called_coverage, product.edge_callable_spans(edge)),
-        ):
-            for left, right, component in spans.tolist():
-                rows.append({**labels, "left_bp": int(left), "right_bp": int(right), "component_id": int(component)})
+        for left, right, component in product.edge_callable_spans(edge).tolist():
+            coverage.append({**labels, "left_bp": int(left), "right_bp": int(right), "component_id": int(component)})
         counts = product.marker_counts[edge]
         meioses.append(
             {
@@ -139,11 +117,11 @@ def meiosis_tables(product: Recombination) -> tuple[list, list, list, list]:
                 "exposure_meiosis_bp": float(product.exposure[edge].sum()),
             }
         )
-    return crossovers, coverage, called_coverage, meioses
+    return crossovers, coverage, meioses
 
 
-def write_plot(path: Path, contig: str, curve: RecombinationMap) -> Path:
-    """<contig>.png: expected and called rates, and effective meioses (no global plotting state)."""
+def map_figure(contig: str, curve: RecombinationMap):
+    """One chromosome's unchanged rate/exposure figure, for a page of maps.pdf."""
     from matplotlib.figure import Figure
 
     bins = np.asarray(curve.edges_bp)
@@ -159,54 +137,40 @@ def write_plot(path: Path, contig: str, curve: RecombinationMap) -> Path:
     axes[1].set_xlabel("Position (Mb)")
     axes[0].set_title(f"{contig}: missing-aware recombination and exposure")
     figure.tight_layout()
-    temporary = temporary_path(path)
-    figure.savefig(temporary, format="png", dpi=150)
-    temporary.replace(path)
-    return path
+    return figure
 
 
-def write_chromosome(directory: Path, product: Recombination) -> list[Path]:
-    """Every per-contig file of one RecombinationProduct."""
+def contig_recombination(output: str | Path, results: Results, contig: str, *, elapsed_seconds: float | None = None):
+    """Collect one checked chromosome's cells in parallel with the other chromosomes."""
     import pandas as pd
 
-    from .tables import write_frame
-
-    contig = product.contig
-    crossovers, coverage, called_coverage, meioses = meiosis_tables(product)
-    written = [
-        write_frame(directory / f"{contig}.map.csv", pd.DataFrame(map_table(product.map))),
-        write_rows(directory / f"{contig}.meioses.csv", meioses),
-        write_rows(directory / f"{contig}.crossovers.csv", crossovers, columns=CROSSOVER_COLUMNS),
-        write_rows(directory / f"{contig}.junctions.csv", product.junctions, columns=_locus_columns()),
-        write_rows(directory / f"{contig}.coverage.csv", coverage, columns=SPAN_COLUMNS),
-        write_rows(directory / f"{contig}.called_coverage.csv", called_coverage, columns=SPAN_COLUMNS),
-        write_plot(directory / f"{contig}.png", contig, product.map),
-    ]
-    return written
+    product = results.recombination(contig)
+    assert product is not None
+    crossovers, coverage, meioses = meiosis_tables(product)
+    frames = {
+        "map": pd.DataFrame(map_table(product.map)),
+        "crossovers": pd.DataFrame(crossovers, columns=CROSSOVER_COLUMNS),
+        "meioses": pd.DataFrame(meioses, columns=MEIOSIS_COLUMNS),
+        "coverage": pd.DataFrame(coverage, columns=SPAN_COLUMNS),
+        "junctions": pd.DataFrame([record_mapping(locus) for locus in product.junctions], columns=JUNCTION_COLUMNS),
+        "summary": pd.DataFrame([{**record_mapping(product.summary), "elapsed_seconds": elapsed_seconds}]),
+    }
+    return contig_part(output, "recombination", contig, frames), product.map
 
 
-def contig_bytes(decoded_bytes: int) -> int:
-    """Plan row/frame temporaries and one figure from the reader's decoded size."""
-    return 3 * decoded_bytes + PLOT_BYTES
+def write_recombination(output, parts) -> list[Path]:
+    """Publish six run-level CSVs and one PDF page per contig, in configured order."""
+    from matplotlib.backends.backend_pdf import PdfPages
 
-
-def write_recombination(
-    output: str | Path, results: Results, contigs: Sequence[str], *, elapsed_seconds: Mapping[str, float] | None = None
-) -> list[Path]:
-    """Read each typed recombination result once and publish tables in contig order."""
-    directory = Path(output) / "recombination"
-    directory.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    loci: list[dict] = []
-    summaries: list[dict] = []
-    for contig in contigs:
-        product = results.recombination(contig)
-        assert product is not None  # the report runs after every contig's recombination task published it
-        written.extend(write_chromosome(directory, product))
-        loci.extend(asdict(locus) for locus in product.junctions)
-        summaries.append({**record_mapping(product.summary), "elapsed_seconds": (elapsed_seconds or {}).get(contig)})
-    written.append(write_rows(directory / "junctions.csv", loci, columns=_locus_columns()))
-    written.append(write_rows(directory / "summary.csv", summaries))
+    written = write_contig_tables(output, "recombination", [part for part, _ in parts])
+    if parts:
+        path = Path(output) / "recombination" / "maps.pdf"
+        temporary = temporary_path(path)
+        with PdfPages(temporary, metadata={"CreationDate": None}) as pages:
+            for (contig, _), curve in parts:
+                pages.savefig(map_figure(contig, curve), dpi=150)
+        temporary.replace(path)
+        written.append(path)
     return written
 
 
@@ -271,9 +235,8 @@ JUNCTION_COLUMNS = (
 """
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
-# impose columns on those tables. Scientific values remain upstream contract fields.
+# Published table schemas, including contigs that contribute no rows.
+# Header spelling is normalized by the shared CSV writer.
 MAP_COLUMNS = (
     "left_bp",
     "right_bp",

@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike, DTypeLike
 
 from ..core.errors import InputError
 
@@ -28,6 +29,7 @@ __all__ = [
     "field_specs",
     "require_schema",
     "freeze_record_arrays",
+    "frozen_array",
 ]
 
 
@@ -131,6 +133,15 @@ def require_schema(record: Any, supported: int | tuple[int, ...]) -> int:
     if type(version) is not int or version not in versions:
         raise InputError(f"schema {version!r} is unsupported; expected {versions}")
     return version
+
+
+def frozen_array(array: ArrayLike, dtype: DTypeLike) -> np.ndarray:
+    """Coerce to contiguous dtype and share a read-only view without freezing a caller's writable array."""
+    value = np.ascontiguousarray(array, dtype=dtype)
+    if value is array and value.flags.writeable:
+        value = value.view()
+    value.flags.writeable = False
+    return value
 
 
 def freeze_record_arrays(record: Any) -> None:

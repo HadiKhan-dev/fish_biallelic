@@ -54,10 +54,13 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+from collections.abc import Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numba import prange
+from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import BestFReplacement, CountDecisionRecord, CountPass
 from haplotype_reconstruction.core import ties
@@ -68,6 +71,11 @@ from .. import orders as tie_rules
 from ..count_rule import shadow_bounds
 from ..count_rule.geometry import shadow_choices
 from .acceptance import TOL
+from .capabilities import RefinementExecution
+
+if TYPE_CHECKING:
+    from .fit import SweepEngine
+
 from .objective import CENTER, forward_sites, pair_code7, row_max, selected_alleles, transition, unordered_pairs
 from .overloads import overloads_for
 from .parameters import (
@@ -781,8 +789,8 @@ def _waves(sizes):
 
 
 def _scores_many(engine, panels, budget, label):
-    """engine.per_sample of several panels as concurrent in-process tasks, each on its live share of the budget
-    (2.10: the count pass's independent scorings no longer run one after another); results in input order.
+    """engine.per_sample of several panels as concurrent in-process tasks, each on its live share of the budget;
+    results in input order.
     Scores never depend on threads (fixed-order per-sample recursions). Each task holds its transient bytes
     with the run's memory governor, so concurrent scorings are paced by memory."""
     if len(panels) < 2:
@@ -875,7 +883,7 @@ def _refit_choice(values, keys, scale, counter=None, census_key=None, *, reverse
     return pick, members
 
 
-def _tied_resolution(members, pick, outcomes, refits, X, engine=None, budget=None, shadow_details=None):
+def _tied_resolution(members, pick, outcomes, refits, X, engine=None, budget=None):
     """Release 2.2: the count decision among the members of the selected refit's tie class (refits whose F
     the data do not separate), decided by the data where they can and by stated priors otherwise -- never by
     index or content order (design tickets/IC/DESIGN_22.md B1).
@@ -1586,7 +1594,7 @@ def _count_pass_point(
         tied, tie_records, agree, outcomes = tie_outcomes(
             "deletion", label, members, pick, chosen, refits, decide_member
         )
-        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X, engine, budget, shadow_details)
+        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X, engine, budget)
         flags = _shadow_flags(flags, shadow_details, refits, X)
         resolved, selected_decision, flags = _count_choice(
             engine, "deletion", label, X, members, resolved, outcomes, refits, shadow_options, shadow_details, flags
@@ -1795,7 +1803,7 @@ def _count_pass_point(
         tied, tie_records, agree, outcomes = tie_outcomes(
             "addition", label, members, pick, chosen, refits, decide_member
         )
-        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X, engine, budget, shadow_details)
+        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X, engine, budget)
         flags = _shadow_flags(flags, shadow_details, refits, X)
         resolved, selected_decision, flags = _count_choice(
             engine, "addition", label, X, members, resolved, outcomes, refits, shadow_options, shadow_details, flags
@@ -1965,19 +1973,18 @@ def _count_pass_point(
 
 
 def count_pass(
-    engine,
-    geometry,
-    start,
-    cost,
-    rule,
-    budget,
-    seed_key,
-    additions,
-    counter=None,
-    census_prefix=None,
-    alternative_starts=(),
-):
-    """At most four joint input/fit-direction/count-choice continuations.
+    engine: SweepEngine,
+    geometry: count_rule.RowGeometry,
+    start: NDArray[np.int64],
+    cost: float,
+    rule: count_rule.CountRuleConfig,
+    budget: RefinementExecution,
+    seed_key: Sequence[int | str],
+    additions: bool,
+    counter: tie_rules.SharedCounter | None = None,
+    alternative_starts: Sequence[Sequence[Sequence[int]]] = (),
+) -> CountPass:
+    """Joint input/fit-direction/count-choice continuations within the configured leaf budget.
 
     Every branch replays the original input, reconstructing bootstrap labels,
     round counters, best-by-K records and cycle history before selecting
@@ -2025,6 +2032,12 @@ def count_pass(
     def remaining_families(state):
         return tuple(family for family in state["result"].unresolved_alternatives if not handled(family, state))
 
+    # Branch states and reports are heterogeneous records; the same local names
+    # later hold their serialized terminal summaries.
+    live: Sequence[dict[str, Any]]
+    keys: list[Any] | tuple[Any, ...]
+    family: dict[str, Any]
+    event: tuple[str, Any, dict[str, Any]] | dict[str, Any] | None
     engine.ledger.forced_count_choices = {}
     initial = run(engine, start, seed_key)
     nominal_input = tie_rules.panel_key(start)
@@ -2122,7 +2135,7 @@ def count_pass(
             initial, branch_status=("unresolved_count_continuation" if initial.unresolved_alternatives else "none")
         )
     begun = 0.0
-    pending = [
+    pending: list[dict[str, Any]] = [
         dict(
             choices={},
             count_choices={},
@@ -2155,6 +2168,7 @@ def count_pass(
             )
         )
     pending.sort(key=lambda state: state["input_key"])
+    count_events: list[dict[str, Any]]
     leaves, budget_families, count_events = [], [], []
     overflow = False
     while pending:
@@ -2209,7 +2223,7 @@ def count_pass(
                 if kind == "count":
                     count_evaluations += 1
                     count_seconds += seconds
-                    record["replay_seconds"] += seconds
+                    cast(dict[str, Any], record)["replay_seconds"] += seconds
                 pending.append(dict(state, choices=choices, count_choices=count_choices, result=result, engine=branch))
 
     # Compare only outputs of the same K by F. Different supported count outcomes
@@ -2290,7 +2304,7 @@ def count_pass(
             )
         )
     # Repeat discovery through reconverged paths does not multiply uncertainty records.
-    unique = {}
+    unique: dict[tuple, dict[str, Any]] = {}
     for family in uncontinued:
         key = (family["reason"], tuple(sorted(family["panels"])))
         unique.setdefault(key, family)
@@ -2311,7 +2325,7 @@ def count_pass(
     )
     count_reports = []
 
-    def digest(panel):
+    def terminal_digest(panel):
         return hashlib.sha256(repr(panel).encode()).hexdigest()
 
     for event in count_events:
@@ -2330,12 +2344,13 @@ def count_pass(
             histories.append(
                 dict(
                     branch=state["engine"].branch_key,
-                    source_panel=digest(selected),
-                    terminal_panel=digest(tie_rules.panel_key(point.rows)),
+                    source_panel=terminal_digest(selected),
+                    terminal_panel=terminal_digest(tie_rules.panel_key(point.rows)),
                     terminal_K=len(point.rows),
                     terminal_F=float(point.F),
                     terminal_candidates=tuple(
-                        dict(panel=digest(p), K=len(p), F=float(f)) for p, f in terminal_panels_of(state).items()
+                        dict(panel=terminal_digest(p), K=len(p), F=float(f))
+                        for p, f in terminal_panels_of(state).items()
                     ),
                     unverified_history=bool(
                         state.get("unfinished_budget")
@@ -2369,7 +2384,7 @@ def count_pass(
         # Compare complete terminal outputs by the same within-K F classes as
         # the scientific selector. A representative prior never removes an
         # equal-F biological family from this report.
-        retained = []
+        retained: list[str] | tuple[str, ...] = []
         f_margins = []
         for founders in terminal_counts:
             group = [c for c in candidates if c["K"] == founders]
@@ -2381,7 +2396,7 @@ def count_pass(
                 reverse=engine.reverse,
             ).classes(values, content=keys, descending=True)
             winning = {int(i) for i in classes.members(int(classes.classes[classes.winner]))}
-            retained.extend(keys[i] for i in winning)
+            cast(list[str], retained).extend(keys[i] for i in winning)
             other = [value for i, value in enumerate(values) if i not in winning]
             f_margins.append(dict(K=founders, margin=None if not other else max(values) - max(other)))
         retained = tuple(sorted(set(retained)))
@@ -2407,8 +2422,8 @@ def count_pass(
                 round=event["family"].get("source_decision"),
                 source_choice_count=len(event["options"]),
                 source_choice_Ks=tuple(len(p) for p in event["options"]),
-                source_panels=tuple(digest(p) for p in event["options"]),
-                nominal_source_panel=digest(event["nominal"]),
+                source_panels=tuple(terminal_digest(p) for p in event["options"]),
+                nominal_source_panel=terminal_digest(event["nominal"]),
                 evaluated_terminal_histories=len(histories),
                 evaluated_source_choices=len(seen),
                 source_choices_complete=source_complete,

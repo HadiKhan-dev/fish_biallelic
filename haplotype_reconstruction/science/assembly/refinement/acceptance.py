@@ -86,27 +86,24 @@ from .parameters import (
 from .window import cover
 from .workspace import sample_threads
 
-# A move is accepted while its exact F gain exceeds TOL (log units). Release 2.13: 2^-9, the noise_quantum of the
-# motion of refinement contrasts under 1e-6 relative GL noise (p99 9e-5 nats over ~4,300 fit contrasts of 1e-6 jitter
-# runs), the refine_F floor; 2.1-2.12: 1e-4, placed against 1e-9 noise.
+# A move is accepted while its exact F gain exceeds TOL (log units), the refine_F noise floor.
+# The 2^-9 quantum covers measured motion under 1e-6 relative GL noise (p99 9e-5 nats over ~4,300 contrasts).
 TOL = ACCEPTANCE_GAIN_FLOOR
 # A coarse move "lowers E" when gain + switch-cost change < -GUARD_TOLERANCE (E = F + the
-# switch cost of the samples' lexicographic maximum paths). A scientific guard on dE, not a tie between scores: kept
-# at its 2.1 value in release 2.13 (raising it would let moves with small negative dE bypass the guard; its contrast
-# under 1e-6 GL noise is not yet measured).
+# switch cost of the samples' lexicographic maximum paths). This guards dE, rather than a score tie:
+# raising it would let moves with small negative dE bypass the guard. Its contrast under 1e-6 GL noise is unmeasured.
 # Forward messages of the current panel computed ahead of the pass position at a time: at least this many blocks,
-# further when a candidate starts further ahead. Release 3.5: 4 (16 before). An acceptance truncates the lookahead
-# at its edit and discards what lay beyond it, so a shorter floor wastes less; the extent never changes a value
-# (TroMau chr15 L3: about 1% less time).
+# further when a candidate starts further ahead. An acceptance truncates the lookahead at its edit and discards
+# what lay beyond it, so a short floor limits wasted work. The extent never changes a value.
 AHEAD_BLOCKS = 4
 # Junctions per nogil call (the Numba team is re-read between calls).
 JUNCTION_BATCH = 16
-# Release 3.4: on reaching a junction the pass covers the blocks it reads first (the lookahead and a fine
+# On reaching a junction the pass covers the blocks it reads first (the lookahead and a fine
 # window ahead of it), so a streaming window slides with the pass instead of jumping between its reads.
-JUNCTION_REACH = 16 + 8  # 3.4's AHEAD_BLOCKS + 8, kept by release 3.5 (a streaming window's reach)
+JUNCTION_REACH = 16 + 8  # Streaming window reach, in blocks.
 # A tie class wider than this many quanta keeps value order (maths.ties.WIDE_CLASS_QUANTA).
 WIDE_QUANTA = WIDE_CLASS_QUANTA
-# Release 2.8: K-independent bounds on rescoring at one junction, so a pass stays
+# K-independent bounds on rescoring at one junction, so a pass stays
 # O(K^3). Content candidates: the first CONTENT_FULL_ROUNDS acceptances rescore every remaining item
 # (best first); after that the remaining items of the last full ranking are rescored one at a time in
 # that ranking's order and each accepted while its own exact gain exceeds TOL (and the guard passes),
@@ -121,8 +118,8 @@ MOVE_FINE, MOVE_COARSE = 1, 2
 # the last full ranking was rescored alone (a junction that reaches the cap with no positive untried item exits
 # without it); stale_evaluated: those single rescorings (their decisions compare one item, so content_tie does
 # not count ties there); exchange_cap: junctions left with a positive exchange after EXCHANGE_ROUNDS; lex_items:
-# coarse items above TOL in guarded rounds (3.4 rescored all of them lexicographically; since 3.5 only those the
-# ranking reaches are, see _score_items; the count keeps its 3.4 value, which decides a search's next sweep mode);
+# coarse items above TOL in guarded rounds, whether or not the ranking reaches their lexicographic rescore
+# (see _score_items); this count decides the search's next sweep mode;
 # lex_abort: plain passes stopped for a guarded rerun.
 ACC_KEYS = (
     "fine",
@@ -432,10 +429,9 @@ def _score_items(
     """Exact gains of the items at junction p: with lex_item < 0 every item with the plain kernel (switch
     changes zero); with lex_item = i >= 0 item i alone with the lexicographic kernel, for its switch-cost
     changes (its gains equal the plain ones: the lexicographic recursion's scores are the plain recursion's).
-    Lazy lexicographic scoring (release 3.5): under the guard the ranking loop rescores lexicographically
-    only the coarse items it reaches in decision order (up to the chosen one); 3.4 rescored every coarse
-    item above TOL, most of whose switch changes were never read. Items the loop does not reach are not
-    decided on in this round, so the decisions are unchanged. Returns (total gains, total switch changes,
+    Lazy lexicographic scoring: under the guard the ranking loop rescores lexicographically
+    only the coarse items it reaches in decision order (up to the chosen one). The round makes no
+    decision on an item it does not reach. Returns (total gains, total switch changes,
     per-sample gains, per-sample switch changes, chain, ahead); totals are summed in sample order."""
     samples, states = stored[0].shape[1], stored[0].shape[2]
     gain = np.zeros(n_items)
@@ -454,8 +450,7 @@ def _score_items(
         lex = group == 1
         members = members[:n_mem]
         # The lookahead covers every member's first block, the only forward message the candidate kernels
-        # read (f_start; release 3.5: 2.6's background fast paths, which read the chain up to the
-        # candidates' ends, are gone since 2.8, so a lookahead to the ends was discarded at every acceptance).
+        # read (f_start); accepted edits invalidate forward messages beyond their starts.
         last = it_p1[members[0]]
         for i in members:
             last = max(last, it_p1[i])
@@ -1318,8 +1313,8 @@ def accept_pass(
     accepted move the carried forward message is read from them. budget: the live thread share
     (the explicit stage team), re-read before every JUNCTION_BATCH junctions. scale: |F| of the pass's
     start panel (the tie quantum's scale, tie_rules.quantum("refine_F", scale)). reverse (required): the content-order
-    convention of the pass. The fixed-K search passes its own ((first == "rev"), as 3.5 did); a copy-only pass
-    passes the run's TieSettings reversal (3.5 read the run's global reversal there).
+    convention of the pass. The fixed-K search passes ``first == "rev"``; a copy-only pass
+    passes the run's TieSettings reversal.
     optimistic (unguarded passes only): the pass stops, with counters["lex_abort"] = 1 and X
     partly edited, at the first coarse item whose gain exceeds TOL; until then a guarded pass of the
     same inputs makes exactly the same decisions (its gains and orders equal the plain ones).

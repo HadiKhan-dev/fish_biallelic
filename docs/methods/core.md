@@ -38,9 +38,9 @@ Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [gener
 Cost and scope: O(1); O(N L_block). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ec31"></a>
-## ec31 Anchored tie classes, decision order, guards and TieCounter
+## ec31 Consecutive-gap single-linkage tie classes, decision order, guards and TieCounter
 
-Sort values stably, join consecutive values into anchored tie classes according to the policy, and record boundary/width events. Apply secondary/content ordering inside ordinary classes and value-first ordering in wide classes. Equal non-finite endpoints and NaNs follow explicit guards; reversal never changes class membership.
+Sort values stably, join consecutive values whose gap is at most the policy quantum into single-linkage tie classes. Membership compares each value with its predecessor. Record boundary/width events. Apply secondary/content ordering inside ordinary classes and value-first ordering in wide classes. Equal non-finite endpoints and NaNs follow explicit guards; reversal never changes class membership.
 
 Implementation: [core/ties.py](../../haplotype_reconstruction/core/ties.py).
 

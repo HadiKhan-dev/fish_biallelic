@@ -6,8 +6,6 @@ Method: docs/methods/pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-co
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 from ...contracts.pedigree import (
@@ -19,6 +17,7 @@ from ...contracts.pedigree import (
     CountReleaseBasis,
 )
 from ...core.errors import InputError
+from . import exclusion
 from .eligibility import ParentEligibility
 from .parameters import PedigreeConfig
 from .release import PartialEdges, TierCalls
@@ -70,7 +69,7 @@ def release_counts(
         for slot in range(2):
             if partial_b.supported[child, slot] and (int(partial_b.parents[child, slot]), child) not in withheld:
                 outgoing[int(partial_b.parents[child, slot])].add(child)
-    threshold = math.log(2 * n / config.exclusion.alpha)
+    threshold = exclusion.log_threshold(n, config.exclusion.alpha)
     if log_e_upper is not None:
         upper_evidence = {(int(c), int(p)): float(e) for (c, p), e in zip(dyads, log_e_upper, strict=False)}
         if np.any((log_e < threshold) & (log_e_upper >= threshold) & (log_e != log_e_upper)):

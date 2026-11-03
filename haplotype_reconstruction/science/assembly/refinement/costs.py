@@ -29,15 +29,13 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
     """Peak bytes of one component's workspace (the component task's memory estimate, execution.memory): its log
     evidence and switch costs (window.py: the resident tables of a small component, 24 S L float64 codes 0-2, the
     partial sites' codes 3-6 and up to COST_ARRAYS float32 cost arrays; for a streaming component one window of the
-    count pass's own kernels: each search's window is in its fit_bytes), a gathered evidence copy when the
-    panels are not adjacent (12 S L float32), the binned emissions (8 S R_b(R_b + 1)/2 bins_b per block) and the coded
-    leaves (R_b x L_b int16, forward and reversed orientation), plus COMPONENT_BASE_BYTES. The fits' message arrays,
-    the window solves and the score tables
+    count pass's own kernels: each search's window is in its fit_bytes), a component evidence copy
+    (12 S L float32, reserved even when a contiguous whole-span view is possible), the binned emissions
+    (8 S R_b(R_b + 1)/2 bins_b per block) and the coded leaves (R_b x L_b int16, forward and reversed
+    orientation), plus COMPONENT_BASE_BYTES. The fits' message arrays, the window solves and the score tables
     reserve their own bytes (additive estimates); calibrated on K30's map (founder_refinement.md 3.2-3.3)."""
     sites = sum(panel.sites for panel in panels)
     bin_size = max(int(min_sites_per_bin), math.ceil(sites / max_bins))
-    starts = [panel.site_start for panel in panels]
-    adjacent = all(b == a + panel.sites for a, b, panel in zip(starts, starts[1:], panels, strict=False))
     emissions = sum(
         8 * samples * (panel.rows * (panel.rows + 1) // 2) * ((panel.sites + bin_size - 1) // bin_size)
         for panel in panels
@@ -55,7 +53,7 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
     if not (resident_bytes(samples, sites, partials) <= RESIDENT_BYTES):
         width = min(sites, window_sites(samples))
         tables = samples * width * 28 + samples * min(partials, width) * PARTIAL_SITE_BYTES
-    return tables + (0 if adjacent else 12 * samples * sites) + emissions + leaves + beam_table + COMPONENT_BASE_BYTES
+    return tables + 12 * samples * sites + emissions + leaves + beam_table + COMPONENT_BASE_BYTES
 
 
 def fit_bytes(workspace, founders, guarded, cached_boundaries, polish=False):

@@ -32,38 +32,17 @@ import numpy as np
 from ..contracts.pedigree import ParentEdges, PedigreeCalls
 from ..contracts.recombination import Recombination
 from ..core.errors import InputError
-from ..results.panels import StagePanel
+from ..results.panels import FOUNDER_STAGES, StagePanel
 from ..simulation.truth import ContigTruth, PedigreeTable, TruthCrossovers
+from .metrics import SAMPLE_COLUMNS
 from .parameters import PHASE_METRIC
 from .tasks import ChromosomeEvaluation, ChromosomeInput, EvaluationReader, EvaluationTask, MetricRow, PhaseArrays
 
-FOUNDER_STAGES = (
-    "discovery",
-    "local_selection_initial",
-    "local_selection_l1",
-    "local_selection_l2",
-    "assembly_l1",
-    "assembly_l2",
-    "assembly_l3",
-    "assembly_l4",
-    "founder_refinement",
-    "painting",
-    "founder_refit",
-)
 EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
 # Released-phase counts (release 3.2, evaluation.metrics): summed over samples per chromosome (all samples) and
 # per parent group; the N50 columns and phased_share are derived from them.
-PHASE_COLUMNS = (
-    "called_genotypes",
-    "genotype_errors",
-    "correct_true_heterozygotes",
-    "phased_true_heterozygotes",
-    "phase_sets",
-    "set_aligned_errors",
-    "switch_errors",
-    "long_switches",
-    "released_phase_sets",
-)
+PHASE_COLUMNS = SAMPLE_COLUMNS
+
 # Parent groups: the number of released (Tier-B supported) pedigree edges into the sample, 0, 1 or 2.
 PARENT_GROUPS = ("parents0", "parents1", "parents2")
 
@@ -168,7 +147,7 @@ def map_counts(product: Recombination, events: dict[tuple[str, str], np.ndarray]
         if raw is None:
             unmatched += 1
             continue
-        for span in product.edge_informative_spans(edge):
+        for span in product.edge_callable_spans(edge):
             left, right = span[:2]
             true_observed += int(np.searchsorted(raw, right, side="right") - np.searchsorted(raw, left, side="right"))
         expected += float(product.expected_crossovers[edge].sum())
@@ -221,8 +200,11 @@ def _phase_shares(row: dict) -> None:
 def _write_table(destination: Path, filename: str, rows) -> None:
     import pandas as pd
 
+    from ..core.columns import column_name
+
     temporary = destination / f".{filename}.tmp"
-    pd.DataFrame(rows).to_csv(temporary, index=False)
+
+    pd.DataFrame(rows).rename(columns=column_name).to_csv(temporary, index=False)
     temporary.replace(destination / filename)
 
 
@@ -501,7 +483,7 @@ def plan_evaluation(
         if len(set(contigs)) != len(contigs) or set(contigs) - set(selected):
             raise InputError("evaluation contigs must be unique names in this simulation")
         selected = tuple(c for c in selected if c in contigs)
-    report = new_report(manifest.seed, names, requested, reader.root)
+    report = new_report(manifest.seed, names, requested, reader.checkpoints)
     pedigree = reader.pedigree()
     if automatic or "pedigree" in requested:
         if pedigree is not None:

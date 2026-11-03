@@ -33,7 +33,7 @@ Evidence normalisation follows base exactly: the block's likelihoods are normali
 focal-informative mask and the site posteriors, and the bin statistics and site posteriors
 normalise their (already normalised) input again. Every repeated normalisation and positive-mass accumulation is
 part of the
-preserved 3.5 arithmetic; changes must pass the strict native fixture replay.
+declared arithmetic; changes must pass the strict native fixture replay.
 
 
 Owns the completion cavity_fill boundary (U05). Must not read files, clocks or

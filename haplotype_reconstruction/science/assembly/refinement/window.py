@@ -1,4 +1,4 @@
-"""Streamed log evidence and switch costs of a component's refinement (release 3.4).
+"""Streamed log evidence and switch costs of a component's refinement.
 
 Owns mathematical window kernels and dimension constants; stage capabilities own evidence buffers.
 Method: docs/methods/founder_refinement.md#workspace (RC02–RC04).

@@ -27,9 +27,7 @@ def generate(roots: tuple[str, ...], destination: Path) -> None:
     for declaration in declarations():
         dispatcher = declaration.dispatcher
         # Code spans: a signature such as Literal[int](-1) would otherwise render as a Markdown link.
-        signatures = "<br>".join(
-            "`" + str(signature).replace("|", r"\|") + "`" for signature in declaration.overloads
-        )
+        signatures = "<br>".join("`" + str(signature).replace("|", r"\|") + "`" for signature in declaration.overloads)
         parallel = bool(dispatcher.targetoptions.get("parallel", False))
         scope = " ".join((dispatcher.py_func.__doc__ or "").split()) if parallel else "Serial scalar/array kernel"
         rows.append(

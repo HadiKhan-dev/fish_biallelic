@@ -23,7 +23,7 @@ def refit_chromosome(
 ) -> FounderRefit:
     """Refit every painted component of one chromosome; the painting is unchanged.
 
-    ``painting`` must carry its panels (painting.records.load(..., panels=True));
+    ``painting`` must carry its panels (painting.records.load(..., assembly=assembly));
     ``evidence`` is the contig's evidence (its founder view is used here).
     """
     founder = evidence.founder_view()

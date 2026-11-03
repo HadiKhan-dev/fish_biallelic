@@ -11,7 +11,7 @@ PE1–PE3 preserve this 3.5 method.
 
 from __future__ import annotations
 
-import math
+from collections.abc import Callable
 
 import numpy as np
 from numba import prange
@@ -21,6 +21,7 @@ from ...core.errors import InputError
 from ...core.kernels import kernel
 from . import exclusion
 from .kernels.signatures import OVERLOADS
+from .parameters import ExclusionConfig
 
 MODEL = "completed-window-exclusion-v1"
 
@@ -164,12 +165,20 @@ def _completed_windows(
 
 
 def score_contig(
-    contig, likelihoods, observed, positions, dyads, config, genome_contigs, sample_count, claim_threads=lambda: None
-):
+    contig: str,
+    likelihoods: np.ndarray,
+    observed: np.ndarray,
+    positions: np.ndarray,
+    dyads: np.ndarray,
+    config: ExclusionConfig,
+    genome_contigs: int,
+    sample_count: int,
+    claim_threads: Callable[[], int | None] = lambda: None,
+) -> tuple[ExclusionEvidence, dict[str, int | float]]:
     """Bounded scorer with exact fallback and the required FINAL average divisor."""
     if genome_contigs < 1 or sample_count < 1:
         raise InputError("positive chromosome and sample counts required")
-    threshold = math.log(2 * sample_count / config.alpha)
+    threshold = exclusion.log_threshold(sample_count, config.alpha)
     spans = exclusion.physical_windows(positions, config.window_widths_bp)
     starts = np.unique(spans[:, 0])
     order = np.argsort(spans[:, 1], kind="stable")

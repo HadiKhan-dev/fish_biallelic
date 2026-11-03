@@ -7,14 +7,16 @@ Dense message views last until update; reconstructed views last until another re
 of the same segment parity. Proposal flanks are copied before parallel workers run.
 """
 
+import numpy as np
 from numba.typed import List
 
 from haplotype_reconstruction.contracts.assembly import RefinementProblem
 from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD, sample_team
 
-from .capabilities import EvidenceWindows, RefinementExecution
+from .capabilities import ComponentWorkspaceView, EvidenceWindows, RefinementExecution, SweepWorkspaceView
+from .objective import selected_alleles
 
-__all__ = ["SweepWorkspace", "sample_ranges", "sample_threads"]
+__all__ = ["Orientation", "SweepWorkspace", "sample_ranges", "sample_threads"]
 
 # A search's messages and per-sample scores run over consecutive sample ranges and re-read its thread share before
 # each range, so a search whose share grows while it computes them (its peers finished) takes the freed threads
@@ -40,6 +42,34 @@ def sample_ranges(samples: int, team: RefinementExecution):
         stop = min(samples, start + max(-(-samples // SAMPLE_RANGES), SAMPLES_PER_THREAD * share))
         yield start, stop, sample_team(stop - start, share)
         start = stop
+
+
+class Orientation:
+    """View coded leaves and offsets in one pass direction, retaining forward evidence.
+
+    Reverse creates an int16[R_b,L_b] leaf copy and int64[B+1] offsets. haps returns
+    a private int16[K,L] materialisation; window returns a workspace-owned view.
+    """
+
+    def __init__(self, workspace: SweepWorkspaceView | ComponentWorkspaceView, reverse: bool):
+        sites = int(workspace.offsets[-1])
+        self.reverse = reverse
+        self.workspace = workspace
+        if reverse:
+            self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
+            self.leaves = List([np.ascontiguousarray(leaf[:, ::-1]) for leaf in list(workspace.leaves)[::-1]])
+        else:
+            self.offsets = np.ascontiguousarray(workspace.offsets, np.int64)
+            self.leaves = workspace.leaves
+        self.blocks = len(self.offsets) - 1
+
+    def haps(self, panel):
+        """Return private int16[K,L] coded alleles of int64[K,B] oriented founder rows."""
+        return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
+
+    def window(self, founders):
+        """Read K's evidence/cost capability; its view lifetime is the workspace lease."""
+        return self.workspace.windows.view(founders, self.reverse)
 
 
 class SweepWorkspace:

@@ -6,9 +6,8 @@ prior), pedigree, family_phase, recombination, export (the final founder and sam
 generating parameters only). Stage-internal constants are not settings: they are the defaults of each stage's own
 config (stages/configure.py maps these sections into them).
 
-The pipeline reads no sample metadata (release 3.4): inference uses only the observations (VCF/BCF, or the
-simulated reads) and the genetic map, and sample names are identifiers. The settings loader names the sections that
-were removed for this reason.
+The pipeline reads only the observations (VCF/BCF, or the simulated reads) and the genetic map. Sample names
+are identifiers. The settings loader rejects sample-metadata sections.
 
 Every field carries its kind (how TOML values are parsed and checked) and a one-line description (docs are
 generated from it). Paths are resolved against the working directory when the configuration is loaded.

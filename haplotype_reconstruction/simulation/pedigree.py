@@ -19,11 +19,14 @@ every crossover; mutations flip alleles at a per-bp rate (exponential gaps, roun
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
+from ..contracts.genetic_map import ChromosomeGeneticMap
 from ..contracts.roles import record_field
 from ..core.errors import InputError
 from ..core.random import child_seeds, stream, structure_stream
@@ -245,7 +248,7 @@ class SimulatedContig:
 class _TaskRunner:
     """Relocation runner: execute the unchanged independent child batches in order."""
 
-    def __init__(self, budget, processes, runner=None):
+    def __init__(self, runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None) -> None:
         self.runner = runner
 
     def __enter__(self):
@@ -267,18 +270,18 @@ def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
 
 
 def simulate_pedigree(
-    founders_by_contig,
-    sites_by_contig,
-    cohort_sizes,
+    founders_by_contig: Sequence[Sequence[Sequence[NDArray[np.int8]]]],
+    sites_by_contig: Sequence[NDArray[np.int64]],
+    cohort_sizes: Sequence[int],
     *,
     seed: int,
     recombination_rate: float,
     mutation_rate: float,
-    chromosome_maps,
+    chromosome_maps: Sequence[ChromosomeGeneticMap | None],
     design: SimulationDesign,
-    budget=1,
-    runner=None,
-):
+    budget: int = 1,
+    runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None,
+) -> tuple[PedigreeTable, list[SimulatedContig]]:
     """Simulate the cohorts on every contig with one shared pedigree structure.
 
     founders_by_contig[c]: list of founders [hap0, hap1] (int8[L_c]); sites_by_contig[c]: int64[L_c];
@@ -304,7 +307,7 @@ def simulate_pedigree(
     ancestry_registry = [dict(zip(parent_ids, ancestries, strict=False)) for ancestries in ancestries_by_contig]
 
     processes = int(budget)
-    with _TaskRunner(budget, processes, runner) as pool:
+    with _TaskRunner(runner) as pool:
         for cohort_index, n_children in enumerate(cohort_sizes):
             cohort_name = f"F{cohort_index + 1}"
             backcrossing = design.backcross_fraction > 0 and cohort_index + 1 >= design.backcross_start_cohort
@@ -385,17 +388,17 @@ def simulate_pedigree(
 
 
 def simulate_explicit_pedigree(
-    founders_by_contig,
-    sites_by_contig,
+    founders_by_contig: Sequence[Sequence[Sequence[NDArray[np.int8]]]],
+    sites_by_contig: Sequence[NDArray[np.int64]],
     rows: tuple[PedigreeRow, ...],
     *,
     seed: int,
     recombination_rate: float,
     mutation_rate: float,
-    chromosome_maps,
-    budget=1,
-    runner=None,
-):
+    chromosome_maps: Sequence[ChromosomeGeneticMap | None],
+    budget: int = 1,
+    runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None,
+) -> tuple[PedigreeTable, list[SimulatedContig]]:
     """Simulate an explicit pedigree table (design.read_pedigree_table rows) on every contig (release 2.17).
 
     Founder rows take the template founders in table order (their numbers must agree). Children are simulated by
@@ -425,7 +428,7 @@ def simulate_explicit_pedigree(
             contigs[c].haplotypes[index] = list(founders_by_contig[c][founder])
             contigs[c].ancestry[index] = [[(start, end, 2 * founder)], [(start, end, 2 * founder + 1)]]
     processes = int(budget)
-    with _TaskRunner(budget, processes, runner) as pool:
+    with _TaskRunner(runner) as pool:
         for level in range(1, max(depth.values()) + 1):
             members = [index for index, row in enumerate(rows) if depth[row.sample] == level]
             ancestors = sorted(

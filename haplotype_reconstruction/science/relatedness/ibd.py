@@ -64,7 +64,10 @@ def accumulate_pairwise_ibd(
     ibd_parameters: PairwiseIbdParameters = _DEFAULT_IBD,
     frequency_parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
 ) -> None:
-    """Add one contig to state; keep reverse site accumulation, forward masked-chain totals."""
+    """Add one contig at the unconditional site stride, without the family frequency/observation gates.
+
+    Keep reverse site accumulation and forward masked-chain totals.
+    """
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         return

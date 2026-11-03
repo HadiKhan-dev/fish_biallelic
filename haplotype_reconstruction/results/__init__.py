@@ -1,5 +1,14 @@
 """Expose versioned run readers while keeping package import free of numerical initialization."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .reader import Results
+
 __all__ = ["Results", "StagePanel", "RelatednessView", "recorded_input_order", "store_input_order", "open_results"]
 
 
@@ -19,7 +28,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def open_results(path, *, checkpoints=None):
+def open_results(path: str | Path, *, checkpoints: str | Path | None = None) -> Results:
     """Open the versioned reader without routing through the application layer."""
     from .reader import Results
 

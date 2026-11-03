@@ -12,8 +12,8 @@ quiescent, tier 2 bounds every same-count move of an explicit K-scaled neighbour
 (:mod:`.certify`, :mod:`.moves`) and scores the survivors exactly (one-path moves only on the
 samples their bound leaves open); an improving move returns the search to tier 1. A same-count
 move must leave every changed path a private cell. At a panel certified for both, the
-duplicate-seed births run (copies of the main coverers of chimera-trap indicators, refitted
-concurrently) and then a pool-saturation step re-runs the endpoint beam with doubled quotas
+duplicate-seed births run (a copy of every selected founder when chimera-trap indicators
+are present, refitted concurrently) and then a pool-saturation step re-runs the endpoint beam with doubled quotas
 before the panel is certified (up to 256 paths per endpoint, up to 1024 for a join whose 256 rung
 accepted a move). The panel size follows from the count rule; the pool, not a cap, bounds it; a
 reported backstop never decides a normal result.
@@ -30,9 +30,9 @@ forwards, each certify pass); the caller binds each concurrent refit to its assi
 
 Ties (release 2.1, design 5.4): the panel is kept in canonical order (its paths sorted, tie_rules.sort_panel) after
 every change, so every slot tie-break (painting ties to the lower slot, proposal descriptions, the death candidate,
-main coverers) is a content rule; the pool comes from the beam in tie-class order. Every choice between candidates
-on a continuous value (start panel, tier-1 winner, the top proposals of each kind, tier-2 winner, death candidate,
-birth and seed choices) uses anchored tie classes of the join log likelihood (quantum
+duplicate-seed enumeration) is a content rule; the pool comes from the beam in tie-class order. Every choice
+between candidates on a continuous value (start panel, tier-1 winner, the top proposals of each kind,
+tier-2 winner, death candidate, birth and seed choices) uses anchored tie classes of the join log likelihood (quantum
 ties.quantum("join_ll", |LL|)) with the candidate panel's content (its sorted paths) deciding inside a class;
 a truncation keeps every proposal of the class it cuts (at most twice the budget).
 
@@ -124,18 +124,6 @@ BeamRunner = Callable[[int, Mapping[tuple[int, int], int] | None], Beam]
 # Count changes (decisions plus seed swaps) per search before births and seed swaps stop (a reported backstop, never
 # expected to bind: normal searches make at most a few count changes; release 2.1 guard against count cycles that
 # return through seed swaps, which the born-path freeze cannot see).
-# Bytes per path of the pool's beam lists and move arrays per input block and founder pair (base
-# hierarchy._hmm_batch_memory_gb's 200 B q K^2): a batch reserves them up to the ladder's normal top
-# (hierarchy.level.batch_memory_bytes); a search whose ladder climbs on reserves the rest itself.
-POOL_BYTES_PER_PATH_PAIR = 200
-
-
-def ladder_extension_bytes(blocks: int, founders: int, paths_per_endpoint: int) -> int:
-    """Memory a search reserves when its saturation ladder climbs past the normal top (quota
-    paths_per_endpoint x 2**POOL_QUOTA_DOUBLINGS) to the backstop (x 2**POOL_EXTENDED_DOUBLINGS):
-    beam lists and move arrays for the extra quota, O(B q K^2)."""
-    extra = paths_per_endpoint * (2**POOL_EXTENDED_DOUBLINGS - 2**POOL_QUOTA_DOUBLINGS)
-    return POOL_BYTES_PER_PATH_PAIR * blocks * extra * founders * founders
 
 
 # Distinct-path sets whose birth bounds are kept for reuse (memory: one samples-long vector per
@@ -918,7 +906,7 @@ class PanelSearch:
         )
         return values, True
 
-    def _painting_proposals(self, panel, local, eligible, wide_quota, convention):
+    def _painting_proposals(self, panel, local, eligible, convention):
         """The proposals of the painting-dependent generators (replace, local, one-sided, splices,
         switch splices, cycles) from the panel's Viterbi paintings with the traceback tie convention
         ``convention`` (release 2.2: _tier1_sweep merges both conventions). Returns (proposals by kind,
@@ -1076,7 +1064,7 @@ class PanelSearch:
         # merged, the larger proxy of a repeated edit kept: the union does not depend on the order.
         merged = {}
         for convention in (False, True):
-            generated, local_screened = self._painting_proposals(panel, local, eligible, wide_quota, convention)
+            generated, local_screened = self._painting_proposals(panel, local, eligible, convention)
             proposal_counts["local"] = local_screened
             for kind, items in generated.items():
                 if isinstance(items, ScoredEdits):

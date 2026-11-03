@@ -26,9 +26,9 @@ from ...core.numerics import ordered_sum, weighted_chromosome_sum
 from ...core.random import bootstrap_multiplicities
 from . import selection
 from .family import FamilyMessageNonConvergence
+from .kernels.signatures import OVERLOADS
 from .parameters import PedigreeConfig, TierThresholds
 from .selection import DecisionInputs
-from .signatures import OVERLOADS
 
 __all__ = [
     "FitTask",
@@ -159,7 +159,7 @@ def plan(inputs: DecisionInputs, config: PedigreeConfig, cpus: int = 1) -> Resam
     # solves), so small tasks keep the tail short. Support counts are integer sums: neither order nor grouping
     # changes them.
     chunk = 1 if worker_count > 1 else max(1, fitted)
-    # Release 3.5: then the bootstrap vectors that omit the most chromosomes (weaker evidence, typically the slowest
+    # Then the bootstrap vectors that omit the most chromosomes (weaker evidence, typically the slowest
     # family solves), so that long fits start early rather than in the tail.
     order = np.argsort(-np.count_nonzero(distinct == 0.0, axis=1), kind="stable")
     tasks: list[FitTask] = []

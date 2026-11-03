@@ -1,0 +1,244 @@
+{
+  "cases": 39,
+  "evaluation_stages": {
+    "4.1/backcross": [
+      "founder_refit"
+    ],
+    "4.1/bc8": [
+      "founder_refit"
+    ],
+    "4.1/f3": [
+      "founder_refit"
+    ],
+    "4.1/f3x8": [
+      "founder_refit"
+    ],
+    "4.1/famhs": [
+      "founder_refit"
+    ],
+    "4.1/hsrand": [
+      "founder_refit"
+    ],
+    "4.1/k30": [
+      "founder_refit"
+    ],
+    "4.1/longbc": [
+      "founder_refit"
+    ],
+    "4.1/longf3": [
+      "founder_refit"
+    ],
+    "4.1/seed": [
+      "founder_refit"
+    ],
+    "4.1/sibrich": [
+      "founder_refit"
+    ],
+    "4.1/std": [
+      "founder_refit"
+    ],
+    "4.1/tl": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_iid12_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_iid9_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_perm_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_ref": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_rev": [
+      "founder_refit"
+    ],
+    "4.1/zero_std_n80_val12_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_iid12_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_iid9_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_perm_s1": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_ref": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_rev": [
+      "founder_refit"
+    ],
+    "4.1/zero_stress_n80_val12_s1": [
+      "founder_refit"
+    ],
+    "4.2/backcross": [
+      "founder_refit"
+    ],
+    "4.2/bc8": [
+      "founder_refit"
+    ],
+    "4.2/f3": [
+      "founder_refit"
+    ],
+    "4.2/f3x8": [
+      "founder_refit"
+    ],
+    "4.2/famhs": [
+      "founder_refit"
+    ],
+    "4.2/hsrand": [
+      "founder_refit"
+    ],
+    "4.2/k30": [
+      "founder_refit"
+    ],
+    "4.2/longbc": [
+      "founder_refit"
+    ],
+    "4.2/longf3": [
+      "founder_refit"
+    ],
+    "4.2/seed": [
+      "founder_refit"
+    ],
+    "4.2/sibrich": [
+      "founder_refit"
+    ],
+    "4.2/std": [
+      "founder_refit"
+    ],
+    "4.2/tl": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_iid12_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_iid9_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_perm_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_ref": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_rev": [
+      "founder_refit"
+    ],
+    "4.2/zero_std_n80_val12_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_iid12_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_iid9_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_perm_s1": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_ref": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_rev": [
+      "founder_refit"
+    ],
+    "4.2/zero_stress_n80_val12_s1": [
+      "founder_refit"
+    ]
+  },
+  "limitations": [
+    "Only founder_refit truth scores are present; no stage-by-stage trajectory.",
+    "Perturbations are repeated analyses of the same data, not independent simulations.",
+    "TroMau and actm3 have no individual-level ground truth.",
+    "Stress changes several conditions simultaneously; no depth-only sensitivity curve."
+  ],
+  "manuscript_target_release": "4.3",
+  "mosaic_chromosome": "chr1",
+  "numeric_table_absolute_tolerance": 1e-08,
+  "numeric_table_relative_tolerance": 1e-09,
+  "peak_rss_scope": "GNU time maximum resident set size; not a sum of worker RSS",
+  "release43_validation": "39-case matrix pending; cost measurements retain their measured versions",
+  "releases": [
+    "4.1",
+    "4.2"
+  ],
+  "robustness_scope": {
+    "founder_alleles": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "export/*.founders.vcf.gz"
+    },
+    "founder_counts": {
+      "columns": [
+        "Component",
+        "FirstVariant1Based",
+        "LastVariant1Based",
+        "FounderRows",
+        "FounderCountAmbiguous"
+      ],
+      "pattern": "painting/*/founder_counts.tsv"
+    },
+    "paintings": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "painting/*/sample_segments.tsv"
+    },
+    "pedigree": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "pedigree/tier_*relationships.csv"
+    },
+    "phase_summary": {
+      "columns": [
+        "contig",
+        "samples",
+        "sites",
+        "components",
+        "called_alleles",
+        "phased_heterozygotes",
+        "unphased_heterozygotes",
+        "phase_sets"
+      ],
+      "pattern": "family_phase/summary.csv"
+    },
+    "recombination": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "recombination/*.csv"
+    },
+    "relatedness": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "relatedness/*.csv"
+    },
+    "release_segments": {
+      "columns": [
+        "contig",
+        "first_position",
+        "last_position",
+        "founder_row_count",
+        "withheld_ambiguous_alleles",
+        "withheld_unobserved_alleles"
+      ],
+      "pattern": "export/manifest.json"
+    },
+    "sample_GT_PS": {
+      "columns": "all except elapsed_seconds and parent_slot; rows aligned; family IDs and unordered parent slots canonicalized",
+      "pattern": "export/*.samples.vcf.gz"
+    }
+  },
+  "schema": 1,
+  "simulation_cases": 25,
+  "sources": "Logical paths relative to supplied matrix/probe roots; no absolute paths or host names stored",
+  "timing_scope": "run command only, excluding separate init and evaluate; no repeated-run error bars",
+  "tromau_processor_comparison": {
+    "additional_retained_times": "init and init plus run",
+    "agreement_source": "STATUS_42.md (completed TroMau Sapphire comparison)",
+    "design": "Full nodes of different processor architectures and core counts; one observation each",
+    "measured_version": "4.2",
+    "plotted_time": "run command only",
+    "released_result_agreement": "Identical, as reported by the coordinator and owner; invocation timings excluded"
+  },
+  "vcf_agreement": "SHA-256 of #CHROM and all records; ## metadata excluded; sample columns aligned to reference; founder labels and phase orientation retained"
+}

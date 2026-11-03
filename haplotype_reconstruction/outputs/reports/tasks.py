@@ -1,8 +1,7 @@
-"""Declare report publication after its typed products, with ties after run completion.
+"""Collect chromosome reports in parallel, then publish one ordered writer per family.
 
-Owns OU11 scheduling declarations only. Engine/interface executes these tasks;
-report completion never enters a scientific identity. Every invocation republishes.
-Method: docs/methods/outputs.md; baseline pipeline/outputs.py and driver call sites.
+Report completion never enters a scientific identity. Private CSV parts preserve
+per-contig cell formatting and are removed by the run-level atomic writers.
 """
 
 from __future__ import annotations
@@ -11,11 +10,11 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
-from .painting import write_painting
+from ...engine.graph import ResourceRequest, ResultRef, Task, TaskKey
+from .painting import contig_painting, write_painting
 from .pedigree import write_pedigree
-from .quality import write_quality
-from .recombination import write_recombination
+from .quality import contig_quality, write_quality
+from .recombination import contig_recombination, write_recombination
 from .relatedness import write_relatedness
 from .tables import write_family_phase, write_founder_refit, write_truth_pedigree
 from .ties import contig_ties, write_ties
@@ -23,7 +22,7 @@ from .ties import contig_ties, write_ties
 if TYPE_CHECKING:
     from ...results.reader import Results
 
-__all__ = ["make_task", "contig_tasks", "run_tasks"]
+__all__ = ["make_task", "run_tasks"]
 
 
 def make_task(
@@ -34,56 +33,17 @@ def make_task(
     kwargs: Mapping | None = None,
     contig: str | None = None,
     depends_on: Sequence[TaskKey] = (),
-    inputs: Sequence[RecordKey] = (),
     working_set_bytes: int = 0,
 ) -> Task:
-    """Declare an idempotent file writer with explicit prerequisites and one CPU."""
+    """Declare an idempotent collector or writer with explicit prerequisites and one CPU."""
     return Task(
         TaskKey("report", "contig" if contig else "run", scope=contig or "run", round=name),
         writer,
         args=args,
         kwargs={} if kwargs is None else dict(kwargs),
         depends_on=tuple(depends_on),
-        inputs=tuple(inputs),
         resources=ResourceRequest(working_set_bytes=working_set_bytes),
     )
-
-
-def contig_tasks(
-    results: Results,
-    output: Path,
-    contig: str,
-    *,
-    evidence: TaskKey | None = None,
-    painting: TaskKey | None = None,
-    painting_bytes: int = 0,
-) -> tuple[Task, ...]:
-    """Write quality after evidence and painting tables after painting, including reused products."""
-    tasks = []
-    if evidence is not None:
-        tasks.append(
-            make_task(
-                "quality",
-                write_quality,
-                (output, results, contig),
-                contig=contig,
-                depends_on=(evidence,),
-                inputs=(RecordKey(contig, "evidence"),),
-            )
-        )
-    if painting is not None:
-        tasks.append(
-            make_task(
-                "painting",
-                write_painting,
-                (output, results, contig),
-                contig=contig,
-                depends_on=(painting,),
-                inputs=(RecordKey(contig, "painting"),),
-                working_set_bytes=painting_bytes,
-            )
-        )
-    return tuple(tasks)
 
 
 def _relatedness(output: Path, results: Results):
@@ -117,54 +77,79 @@ def run_tasks(
     recombination_bytes: int = 0,
     recombination_seconds: Mapping[str, float] | None = None,
 ) -> tuple[Task, ...]:
-    """Declare available gather writers in baseline order; ties require the completed-run dependency.
+    """Declare collectors and gathers without probing products or traversing the store.
 
-    Keys are truth, relatedness, pedigree, refit, phase, recombination, complete, and optionally science: the
-    completed scientific stages without output formatting (exports), which the contigs' tie readers follow (they read
-    only stage records); without it they follow complete. The ties report itself always follows complete.
-    The interface supplies dependencies only for available products, including reused
-    ones; no reader probes or store traversal happens while constructing the graph.
+    Quality, painting and recombination dependencies follow results.contigs. Other
+    keys are truth, relatedness, pedigree, refit, phase, complete and optional science.
     """
-    writers = (
+    tasks: list[Task] = []
+    writer: Callable[..., list[Path]]
+    for family, collector, writer in (
+        ("quality", contig_quality, write_quality),
+        ("painting", contig_painting, write_painting),
+        ("recombination", contig_recombination, write_recombination),
+    ):
+        if family not in dependencies:
+            continue
+        readers = tuple(
+            make_task(
+                family,
+                collector,
+                (output, results, contig),
+                contig=contig,
+                depends_on=(dependency,),
+                kwargs={"elapsed_seconds": (recombination_seconds or {}).get(contig)}
+                if family == "recombination"
+                else {},
+            )
+            for contig, dependency in zip(results.contigs, dependencies[family], strict=True)
+        )
+        tasks.extend(readers)
+        tasks.append(
+            make_task(
+                family,
+                writer,
+                (output, tuple(ResultRef(task.key) for task in readers)),
+                depends_on=tuple(task.key for task in readers),
+                working_set_bytes=recombination_bytes if family == "recombination" else 0,
+            )
+        )
+    for name, writer in (
         ("truth", _truth),
         ("relatedness", _relatedness),
         ("pedigree", _pedigree),
         ("refit", _refit),
         ("phase", _phase),
-        ("recombination", write_recombination),
         ("complete", write_ties),
-    )
-    tasks: list[Task] = []
-    for name, writer in writers:
+    ):
         if name not in dependencies:
             continue
-        kwargs: dict[str, object] = {"reverse_conventions": reverse_conventions} if name == "complete" else {}
+        kwargs = {}
+        after = tuple(dependencies[name])
         if name == "complete":
-            # Each contig's tie sources are read by a task of its own (they are independent; read in turn they made
-            # one serial step of the whole run); the report merges them in contig order.
             readers = tuple(
                 make_task(
                     "ties",
                     contig_ties,
                     (results, contig),
                     contig=contig,
-                    depends_on=dependencies.get("science", dependencies[name]),
+                    depends_on=dependencies.get("science", after),
                 )
                 for contig in results.contigs
             )
-            tasks += readers
-            kwargs["collected"] = tuple(ResultRef(task.key) for task in readers)
-            dependencies = {**dependencies, name: (*dependencies[name], *(task.key for task in readers))}
-        if name == "recombination":
-            kwargs = {"elapsed_seconds": recombination_seconds}
+            tasks.extend(readers)
+            kwargs = {
+                "collected": tuple(ResultRef(task.key) for task in readers),
+                "reverse_conventions": reverse_conventions,
+            }
+            after += tuple(task.key for task in readers)
         tasks.append(
             make_task(
                 "ties" if name == "complete" else name,
                 writer,
-                (output, results, results.contigs) if name in ("recombination", "complete") else (output, results),
+                (output, results, results.contigs) if name == "complete" else (output, results),
                 kwargs=kwargs,
-                depends_on=dependencies[name],
-                working_set_bytes=recombination_bytes if name == "recombination" else 0,
+                depends_on=after,
             )
         )
     return tuple(tasks)

@@ -153,7 +153,6 @@ from .parameters import (
     SAMPLE_WEIGHT_START as _WEIGHT_START,
 )
 
-VERSION = "private-allele-artefact-mixture-qc-v7"
 # Numerical settings of the fit, not scientific thresholds.
 # Own-heterozygote latent dispersion grid (rho; latent SD sqrt(h (1 - h) rho), at most 0.1 at h = 1/2): a bounded
 # working nuisance, the same in both orientations.

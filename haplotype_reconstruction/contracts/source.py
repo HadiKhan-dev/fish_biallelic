@@ -16,9 +16,9 @@ from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 import numpy as np
-from numpy.typing import DTypeLike, NDArray
+from numpy.typing import NDArray
 
-from .roles import record_field
+from .roles import frozen_array, record_field
 
 __all__ = [
     "ContigReads",
@@ -34,14 +34,6 @@ DROPPED_NOT_SNP = "not_snp"
 DROPPED_MULTIALLELIC = "multiallelic"
 DROPPED_DUPLICATE_POSITION = "duplicate_position"
 DROPPED_REASONS = (DROPPED_NOT_SNP, DROPPED_MULTIALLELIC, DROPPED_DUPLICATE_POSITION)
-
-
-def _frozen(array: np.ndarray, dtype: DTypeLike) -> np.ndarray:
-    value = np.ascontiguousarray(array, dtype=dtype)
-    if value is array and value.flags.writeable:
-        value = value.view()
-    value.flags.writeable = False
-    return value
 
 
 @dataclass(frozen=True)
@@ -61,8 +53,8 @@ class ContigReads:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample_ids", tuple(map(str, self.sample_ids)))
-        object.__setattr__(self, "positions", _frozen(self.positions, np.int64))
-        object.__setattr__(self, "counts", _frozen(self.counts, np.int32))
+        object.__setattr__(self, "positions", frozen_array(self.positions, np.int64))
+        object.__setattr__(self, "counts", frozen_array(self.counts, np.int32))
         object.__setattr__(self, "dropped", MappingProxyType({str(k): int(v) for k, v in self.dropped.items()}))
 
     @property

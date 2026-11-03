@@ -31,17 +31,34 @@ changes; this module adds:
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 from numba import types
 from numpy.typing import NDArray
 
+from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.recombination import JunctionLocus
 from ...core.kernels import kernel
 from ...core.ties import conv_argmax
 from ..shared.recombination import haldane_fraction
 from .diagnostics import RecombinationTrace, Traced
+from .parameters import JunctionParameters
+
+if TYPE_CHECKING:
+    from numbers import Real
+    from typing import TypedDict
+
+    class _Locus(TypedDict):
+        left: int
+        right: int
+        first: float
+        last: float
+        members: list[tuple[int, int]]
+        odd: NDArray[np.int64]
+        decidable: NDArray[np.bool_]
+
 
 REVERSED_SEGMENT = "reversed_segment"
 
@@ -107,7 +124,51 @@ def breakpoint_intervals(breakpoints):
     return intervals
 
 
-def split_at_breakpoints(positions, components, breakpoints, bin_edges, *, trace=False, audit=None):
+@overload
+def split_at_breakpoints(
+    positions: NDArray[np.int64],
+    components: NDArray[np.int32],
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
+    bin_edges: Sequence[NDArray[np.int64]],
+    *,
+    trace: Literal[False] = False,
+    audit: RecombinationTrace | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]: ...
+
+
+@overload
+def split_at_breakpoints(
+    positions: NDArray[np.int64],
+    components: NDArray[np.int32],
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
+    bin_edges: Sequence[NDArray[np.int64]],
+    *,
+    trace: Literal[True],
+    audit: RecombinationTrace | None = None,
+) -> Traced[tuple[np.ndarray, np.ndarray, int]]: ...
+
+
+@overload
+def split_at_breakpoints(
+    positions: NDArray[np.int64],
+    components: NDArray[np.int32],
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
+    bin_edges: Sequence[NDArray[np.int64]],
+    *,
+    trace: bool,
+    audit: RecombinationTrace | None = None,
+) -> tuple[np.ndarray, np.ndarray, int] | Traced[tuple[np.ndarray, np.ndarray, int]]: ...
+
+
+def split_at_breakpoints(
+    positions: NDArray[np.int64],
+    components: NDArray[np.int32],
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
+    bin_edges: Sequence[NDArray[np.int64]],
+    *,
+    trace: bool = False,
+    audit: RecombinationTrace | None = None,
+) -> tuple[np.ndarray, np.ndarray, int] | Traced[tuple[np.ndarray, np.ndarray, int]]:
     """(segment ids int32 [L], segment -> component int32, masked sites) of the axis split at breakpoints.
 
     Sites inside a breakpoint interval, or inside a painting bin overlapping it, get segment -1; a new segment
@@ -124,8 +185,8 @@ def split_at_breakpoints(positions, components, breakpoints, bin_edges, *, trace
             if audit is not None:
                 audit.emit("split.overlap", overlap, first=int(edges[0]), last=int(edges[-1]), lo=lo, hi=hi)
             if overlap:
-                first = max(np.searchsorted(edges, lo, side="right") - 1, 0)
-                last = min(np.searchsorted(edges, hi, side="left"), len(edges) - 1)
+                first = cast("int | np.integer", max(np.searchsorted(edges, lo, side="right") - 1, 0))
+                last = cast("int | np.integer", min(np.searchsorted(edges, hi, side="left"), len(edges) - 1))
                 lo, hi = min(lo, int(edges[first])), max(hi, int(edges[last]))
         excluded |= (positions >= lo) & (positions < hi)
         cuts.append(hi)
@@ -143,7 +204,7 @@ def split_at_breakpoints(positions, components, breakpoints, bin_edges, *, trace
     result = segments, np.asarray(origin, dtype=np.int32), int(excluded.sum())
     if audit is not None:
         audit.axis = dict(segments=result[0].copy(), origin=result[1].copy(), masked=result[2])
-    return Traced(result, audit) if trace else result
+    return Traced(result, cast(RecombinationTrace, audit)) if trace else result
 
 
 def in_reversed_segment(crossovers, breakpoints, *, trace=False, audit=None):
@@ -282,24 +343,87 @@ def _hotspot_ceiling(left, right, config, chromosome_map):
     return point + background - 2.0 * point * background
 
 
+@overload
 def detect_junctions(
-    contig,
-    names,
-    parents,
-    children,
-    crossovers,
-    crossover_offsets,
-    reported,
-    callable_spans,
-    callable_offsets,
-    config,
-    chromosome_map,
-    breakpoints=None,
+    contig: str,
+    names: Sequence[str],
+    parents: np.ndarray,
+    children: np.ndarray,
+    crossovers: np.ndarray,
+    crossover_offsets: np.ndarray,
+    reported: np.ndarray,
+    callable_spans: np.ndarray,
+    callable_offsets: np.ndarray,
+    config: JunctionParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
     *,
-    reverse=False,
-    trace=False,
-    audit=None,
-):
+    reverse: bool = False,
+    trace: Literal[False] = False,
+    audit: RecombinationTrace | None = None,
+) -> tuple[JunctionLocus, ...]: ...
+
+
+@overload
+def detect_junctions(
+    contig: str,
+    names: Sequence[str],
+    parents: np.ndarray,
+    children: np.ndarray,
+    crossovers: np.ndarray,
+    crossover_offsets: np.ndarray,
+    reported: np.ndarray,
+    callable_spans: np.ndarray,
+    callable_offsets: np.ndarray,
+    config: JunctionParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
+    *,
+    reverse: bool = False,
+    trace: Literal[True],
+    audit: RecombinationTrace | None = None,
+) -> Traced[tuple[JunctionLocus, ...]]: ...
+
+
+@overload
+def detect_junctions(
+    contig: str,
+    names: Sequence[str],
+    parents: np.ndarray,
+    children: np.ndarray,
+    crossovers: np.ndarray,
+    crossover_offsets: np.ndarray,
+    reported: np.ndarray,
+    callable_spans: np.ndarray,
+    callable_offsets: np.ndarray,
+    config: JunctionParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
+    *,
+    reverse: bool = False,
+    trace: bool,
+    audit: RecombinationTrace | None = None,
+) -> tuple[JunctionLocus, ...] | Traced[tuple[JunctionLocus, ...]]: ...
+
+
+def detect_junctions(
+    contig: str,
+    names: Sequence[str],
+    parents: np.ndarray,
+    children: np.ndarray,
+    crossovers: np.ndarray,
+    crossover_offsets: np.ndarray,
+    reported: np.ndarray,
+    callable_spans: np.ndarray,
+    callable_offsets: np.ndarray,
+    config: JunctionParameters,
+    chromosome_map: ChromosomeGeneticMap,
+    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
+    *,
+    reverse: bool = False,
+    trace: bool = False,
+    audit: RecombinationTrace | None = None,
+) -> tuple[JunctionLocus, ...] | Traced[tuple[JunctionLocus, ...]]:
     """Junction loci of one chromosome (module docstring); per-edge tables are packed with offsets. Exact ties of
     the report go to the last candidate under the convention reversal (module docstring)."""
     audit = RecombinationTrace() if trace and audit is None else audit
@@ -310,7 +434,8 @@ def detect_junctions(
         for edge in range(edges)
         for index in range(crossover_offsets[edge], crossover_offsets[edge + 1])
     )
-    groups = []
+    groups: list[list[Any]] = []
+    index: int | np.integer
     for lo, hi, edge, index in members_of:
         overlaps = bool(groups and lo <= groups[-1][1])
         if audit is not None and groups:
@@ -320,7 +445,7 @@ def detect_junctions(
             groups[-1][2].append((edge, index))
         else:
             groups.append([lo, hi, [(edge, index)]])
-    loci = []
+    loci: list[_Locus] = []
     for left, right, members in groups:
         parent_count = len({int(parents[edge]) for edge, _ in members})
         if audit is not None:
@@ -333,20 +458,28 @@ def detect_junctions(
         if parent_count < config.minimum_parents:
             continue
         decoded = np.asarray([crossovers[index, :2] for _, index in members])
-        first, last = float(decoded[:, 0].min()), float(decoded[:, 1].max())
+        first, last = (
+            float(cast(Callable[[], np.float64], decoded[:, 0].min)()),
+            float(cast(Callable[[], np.float64], decoded[:, 1].max)()),
+        )
         odd = np.zeros(edges, dtype=np.int64)
         for edge, _ in members:
             odd[edge] ^= 1
         with_calls = {edge for edge, _ in members}
-        decidable = np.asarray(
-            [
-                edge in with_calls
-                or any(
-                    span_left <= first and span_right >= last
-                    for span_left, span_right, _ in callable_spans[callable_offsets[edge] : callable_offsets[edge + 1]]
-                )
-                for edge in range(edges)
-            ]
+        decidable = cast(
+            NDArray[np.bool_],
+            np.asarray(
+                [
+                    edge in with_calls
+                    or any(
+                        span_left <= first and span_right >= last
+                        for span_left, span_right, _ in callable_spans[
+                            callable_offsets[edge] : callable_offsets[edge + 1]
+                        ]
+                    )
+                    for edge in range(edges)
+                ]
+            ),
         )
         if audit is not None:
             for edge in range(edges):
@@ -361,13 +494,15 @@ def detect_junctions(
                     locus_edge=edge,
                 )
         loci.append(dict(left=left, right=right, first=first, last=last, members=members, odd=odd, decidable=decidable))
-    rows = []
+    rows: list[dict[str, Any]] = []
     # Integer counts per parent need one pass over edges per locus. Stable CSR
     # preserves the parent and child report order and the likelihood sum order.
     unique_parents, parent_index, parent_sizes = np.unique(parents, return_inverse=True, return_counts=True)
     parent_edges = np.argsort(parents, kind="stable")
     parent_offsets = np.r_[0, np.cumsum(parent_sizes)].astype(np.int64)
     for number, locus in enumerate(loci):
+        counts: list[tuple[int, int]] | NDArray[np.int64]
+        children_text: list[str]
         counts, parent_text, children_text = [], [], []
         mixed = all_or_none = 0
         odd_decidable = locus["decidable"] & (locus["odd"] == 1)
@@ -429,7 +564,10 @@ def detect_junctions(
                 parents_with_calls=len(parent_text),
                 odd_meioses=int(counts[:, 0].sum()),
                 decidable_meioses=int(counts[:, 1].sum()),
-                switch_fraction=float(counts[:, 0].sum() / max(counts[:, 1].sum(), 1)),
+                # NumPy integer counts use real arithmetic and yield a float64 quotient.
+                switch_fraction=float(
+                    cast(np.float64, cast("Real", counts[:, 0].sum()) / cast("Real", max(counts[:, 1].sum(), 1)))
+                ),
                 flip_adjusted_switch_fraction=float(SWITCH_GRID[fraction_index]),
                 hotspot_ceiling=ceiling,
                 mixed_parents=mixed,
@@ -463,7 +601,7 @@ def detect_junctions(
     for i, locus in enumerate(loci):
         # The best pairing is the first locus with the largest positive score (the last under the reversal).
         j = -1 if scores is None else conv_argmax(scores[i], reverse=rev)
-        positive = j >= 0 and scores[i, j] > 0.0
+        positive = j >= 0 and cast(np.ndarray, scores)[i, j] > 0.0
         if audit is not None and scores is not None:
             audit.emit("tie.pairing", j, scores=scores[i].copy(), reverse=rev)
             audit.emit("locus.pairing", positive, score=float(scores[i, j]))
@@ -473,7 +611,7 @@ def detect_junctions(
             rows[i].update(
                 paired_locus=rows[j]["locus"],
                 paired_odd_meioses=int(((locus["odd"] == 1) & (other["odd"] == 1) & both).sum()),
-                pairing_log_lr=float(scores[i, j]),
+                pairing_log_lr=float(cast(np.ndarray, scores)[i, j]),
             )
         rows[i]["pairing_tests"] = tests
     result = []
@@ -506,7 +644,7 @@ def detect_junctions(
             )
         result.append(JunctionLocus(**row))
     value = tuple(result)
-    return Traced(value, audit) if trace else value
+    return Traced(value, cast(RecombinationTrace, audit)) if trace else value
 
 
 def contig_breakpoints(

@@ -273,11 +273,11 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fp25"></a>
-## fp25 Full-objective delta-check reference path (check_deltas)
+## fp25 Full-objective enumeration and threshold reference checks
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-The test-only reference recomputes full objective deltas for each block and pairing move and compares them with the local-gain calculation under the declared verification tolerance. It checks both keep and ambiguity predicates. This diagnostic does not switch production arithmetic or select a different move; a verification failure exposes a divergence to investigate.
+Independent tests enumerate small block-path objectives, including blocks with children in both conventions, and compare the selected path with the full objective. Separate threshold tests check the strict block-gain and pairing-keep predicates. Production computes local row differences and records diagnostic traces; it does not run a per-move full-objective verification wrapper.
 
 Implementation: [science/phase/model.py](../../haplotype_reconstruction/science/phase/model.py).
 

@@ -40,7 +40,20 @@ from .diagnostics import CensusSink
 from .fit import unique_rows
 from .parameters import BACKGROUND_COUNT_BAND, HALF_CENSUS_WINDOW, ContextRefitConfig, SelectionParameters
 
-__all__ = ["refit_task_bytes", "refit_component", "ContextRefitTask", "finish_component", "refit_tasks"]
+__all__ = [
+    "refit_task_bytes",
+    "refit_component",
+    "ContextRefitTask",
+    "finish_component",
+    "refit_tasks",
+    "RefitReport",
+    "RefitOutputs",
+    "RefitFinished",
+]
+
+RefitReport = dict[str, int | float | dict[int, int]]
+RefitOutputs = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, RefitReport, np.ndarray]
+RefitFinished = tuple[int, list[ContextProposal], int, int, int, int, RefitReport]
 
 
 # Per site, a copy state's allele probability is 0 or 1 (a called founder) or the site
@@ -387,7 +400,7 @@ def refit_component(
     reverse: bool,
     census_sink: CensusSink | None = None,
     claim_threads: Callable[[], object] = lambda: None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, int | float | dict[int, int]], np.ndarray]:
+) -> RefitOutputs:
     """(refitted calls, ALT posterior, carrier support, per-bin MAP background-copy counts
     (N, B), site-posterior report, released) of one component's founders ``h`` over its blocks' sites; the refitted
     calls are the refit's releases where it released (``released``, bool) and ``h`` elsewhere.
@@ -476,7 +489,7 @@ class ContextRefitTask:
         freeze_record_arrays(self)
 
 
-def finish_component(task: ContextRefitTask, outputs, observed: np.ndarray):
+def finish_component(task: ContextRefitTask, outputs: RefitOutputs, observed: np.ndarray) -> RefitFinished:
     """Finish one component into its member blocks without scheduling or evidence I/O.
 
     observed is bool[N,L_component]. The refit owns outputs and this function fills

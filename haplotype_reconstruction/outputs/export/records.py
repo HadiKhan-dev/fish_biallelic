@@ -112,7 +112,7 @@ class ExportConfig:
 
 PRODUCTS = ("founders", "samples", "tracks")
 FORMATS = ("vcf", "bcf")
-SCHEMA = 3
+SCHEMA = 4
 
 
 def project_sites(record: ReleasedSites, *, full_length: bool) -> SiteTable:

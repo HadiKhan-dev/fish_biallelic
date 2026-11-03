@@ -689,7 +689,7 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
     tracks); expected error-run starts and ends and kept faithful and kept error transitions of anchored labels that
     stay, and label moves into an anchored label's error and faithful states (summed over edges); the first bin's
     expected anchored tracks in error and faithful; the log-likelihood; and (``want_masses``) the posterior masses of
-    every label pair and of every label pair with both tracks faithful, float64[N, S*S, B]."""
+    every label pair with both tracks faithful, float64[N, S*S, B]."""
     n_samples, n_pairs, n_bins = emissions.shape
     n = len(labels)
     n_labels = len(capable)
@@ -703,7 +703,6 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
     first_error = np.zeros(n_samples)
     first_faithful = np.zeros(n_samples)
     log_likelihood = np.zeros(n_samples)
-    pair_mass = np.zeros((n_samples if want_masses else 0, n_labels * n_labels, n_bins))
     faithful_mass = np.zeros((n_samples if want_masses else 0, n_labels * n_labels, n_bins))
     for sample in prange(n_samples):
         if not eligible[sample]:
@@ -779,7 +778,6 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
                     mass = weight[p] / total
                     first, second = p // n, p % n
                     pair = labels[first] * n_labels + labels[second]
-                    pair_mass[sample, pair, bin_index] += mass
                     if fids[first] == 0 and fids[second] == 0:
                         faithful_mass[sample, pair, bin_index] += mass
             if bin_index == 0:
@@ -937,7 +935,6 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
         first_error,
         first_faithful,
         log_likelihood,
-        pair_mass,
         faithful_mass,
     )
 
@@ -955,7 +952,7 @@ def chain_statistics(
 ):
     """(label changes float64[N, B - 1], error-run starts [N], ends [N], kept faithful [N], kept error [N], moves into
     an anchored error state [N] and faithful state [N], first-bin anchored tracks in error [N] and faithful [N],
-    log-likelihood [N], label-pair masses [N, S*S, B], faithful label-pair masses [N, S*S, B]) of the structured
+    log-likelihood [N], faithful label-pair masses [N, S*S, B]) of the structured
     emissions (see _chain_kernel; the masses are empty unless ``want_masses``)."""
     capable = np.ascontiguousarray(capable, dtype=np.int64)
     return _chain_kernel(
@@ -1195,7 +1192,7 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
         tracks = 0
         for raw, eligible in raw_batches():
             emissions = structured_emissions(raw, tracks_states)
-            (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _, _) = chain_statistics(
+            (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _) = chain_statistics(
                 emissions, tracks_states, capable, theta, entry, exit_, eligible
             )
             del emissions
@@ -1315,7 +1312,7 @@ def release_posteriors(raw, model: ChainModel, capable, paths, other_paths, publ
     """qF and qAF float64[N,B], the smaller faithful Viterbi-pair mass over both conventions."""
     tracks = track_states(capable)
     emissions = structured_emissions(raw, tracks)
-    *_, pair_mass, faithful_mass = chain_statistics(
+    *_, faithful_mass = chain_statistics(
         emissions,
         tracks,
         capable,

@@ -26,7 +26,6 @@ from haplotype_reconstruction.engine.workers import (
     SharedArrayRef,
     attach_shared_array,
     close_shared_memory,
-    create_shared_array,
 )
 from haplotype_reconstruction.science.assembly.completion.parameters import CompletionParameters
 from haplotype_reconstruction.science.assembly.completion.run import (
@@ -91,7 +90,7 @@ def complete_range(
     folds: np.ndarray,
     settings: np.ndarray,
 ) -> tuple[CompletionBlockResult, ...]:
-    """Complete a consecutive run of blocks (one numeric thread, as 3.5's completion workers); the contig's evidence
+    """Complete a consecutive run of blocks (one numeric thread); the contig's evidence
     arrives as shared segments, attached without a copy."""
     with ExitStack() as stack, thread_team(1):
         neutral = stack.enter_context(attached_array(neutral))
@@ -137,8 +136,7 @@ def expand_completion(
     cores: int = 1,
 ) -> Any:
     """Resume a published completion, or run its blocks as independent engine tasks of up to
-    COMPLETION_BLOCKS_PER_TASK consecutive blocks (they ran one after another in the assembly task: 15-22 s on each
-    contig's critical path, three times per contig) and continue in their gather. Results equal complete()'s: the same
+    COMPLETION_BLOCKS_PER_TASK consecutive blocks and continue in their gather. Results equal complete()'s: the same
     blocks, plan and order (WP_AS1 §6.2)."""
     stored = None if records is None else records.load(COMPLETION)
     if stored is not None:
@@ -232,33 +230,6 @@ class SharedEvidence:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-
-def share_evidence(evidence: AssemblyEvidence) -> SharedEvidence:
-    """Copy a completed view once into engine segments, then publish read-only views.
-
-    IN1 owns this context across selection and assembly. bind_session accepts the
-    owner explicitly; a plain AssemblyEvidence remains valid for bounded replays.
-    """
-    handles: dict[str, SharedMemory] = {}
-    references: dict[str, SharedArrayRef] = {}
-    arrays: dict[str, Any] = {}
-    try:
-        for name in ("positions", "neutral", "scoring", "observed", "kept"):
-            source = getattr(evidence, name)
-            if source is None:
-                arrays[name] = None
-                continue
-            handle, reference = create_shared_array(source)
-            handles[name], references[name] = handle, reference
-            array = np.ndarray(reference.shape, dtype=np.dtype(reference.dtype), buffer=handle.buf)
-            array.flags.writeable = False
-            arrays[name] = array
-        view = AssemblyEvidence(**arrays, identity=evidence.identity, depth_keys=evidence.depth_keys)
-        return SharedEvidence(view, references, handles)
-    except BaseException:
-        close_shared_memory(tuple(handles.values()), unlink=True)
-        raise
 
 
 @contextmanager

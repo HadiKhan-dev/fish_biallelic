@@ -39,7 +39,11 @@ def read_breakpoint_table(path: str | Path) -> BreakpointTable:
     """Read native TSV semantics; malformed rows raise SettingsError with the line number."""
     rows = []
     header = None
-    with open(path, encoding="utf-8") as handle:
+    try:
+        handle = open(path, encoding="utf-8")
+    except OSError as error:
+        raise SettingsError(f"{path}: {error}") from error
+    with handle:
         for number, line in enumerate(handle, 1):
             text = line.split("#", 1)[0].rstrip("\r\n")
             if not text.strip():

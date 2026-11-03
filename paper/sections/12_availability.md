@@ -1,15 +1,15 @@
 # Code and data availability
 
 The software is available at <https://github.com/HadiKhan-dev/fish_biallelic> under the MIT
-licence. This manuscript describes release 4.0; release 4.0.1 adds the manuscript sources and
-leaves the scientific code of 4.0.0 unchanged. The repository contains the methods documentation of
-every stage (`docs/methods/`), the generated parameter and settings references, the cost and
-scaling tables summarised in Figure 2, the simulation and evaluation commands, and the sources and
-build script of this manuscript (`paper/`). The software runs on Linux x86_64 with Python 3.14 or
-later; exact tested dependency versions are pinned in `requirements-tested.txt`.
+licence. This manuscript describes release 4.3.0. The repository contains the methods documentation
+of every stage (`docs/methods/`), generated parameter and settings references, the cost register
+and kernel ladders, simulation and evaluation commands, and manuscript sources. The software
+runs on Linux x86_64 with Python 3.14 or later; exact tested dependency versions are pinned in
+`requirements-tested.txt`. Checkpoint identities bind the scientific implementation, so a new
+checkpoint root is required when moving from an earlier release to 4.3.0.
 
-[TO FILL: accession numbers and location of the TroMau sequencing data and BCF, of the simulation
-founder templates, and of the outputs of the validation matrix.]{.todo}
+[TO FILL: accession numbers and public locations of the TroMau sequencing data and input BCF,
+simulation founder templates, validation outputs, and explicit simulation pedigree/map inputs]{.todo}.
 
 # Acknowledgements {.unnumbered}
 

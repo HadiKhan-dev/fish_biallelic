@@ -21,7 +21,7 @@ def allele_frequency(
     """float64 [L]: the alternative allele frequency under Hardy-Weinberg (EM over the samples' genotype likelihoods
     gl [N, L, 3]; unobserved cells carry the prior), clipped to [clip, 1 - clip].
 
-    Release 3.4: one parallel pass per site (allele_frequency_sites), a mathematically equivalent per-site form of the
+    One parallel pass per site (allele_frequency_sites), a mathematically equivalent per-site form of the
     array expression it replaced (allele_frequency_reference), without [N, L, 3] temporaries. It agrees bitwise on the
     production replays checked (all contigs of the validation runs); other array shapes can differ in the last bit,
     as numpy's own reductions may associate differently."""

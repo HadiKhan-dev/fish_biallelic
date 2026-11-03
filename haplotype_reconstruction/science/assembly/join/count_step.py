@@ -108,7 +108,7 @@ class PendingDecision:
     the shadow and birth choices compare verdicts, margins and gains. :meth:`resolve` returns the
     CountDecision count_rule.decide would have returned (with accept_larger False where the
     shadow family's opposed verdicts withheld the larger panel), so every recorded field is
-    unchanged; the other candidates' bands are never drawn (release 3.5, speed only).
+    unchanged; the other candidates' bands are never drawn (computed only for the winner).
     """
 
     __slots__ = ("kind", "accept_larger", "margin", "total", "sequence", "_inputs", "_resolved")
@@ -264,7 +264,7 @@ class CountStep:
         self._counts = threading.Lock()  # concurrent seed refits settle on one CountStep
         self.tie_counter = tie_counter
         self.label = label
-        # Birth memo (release 3.5): the pure numerics of the births at one panel (its novelty tests, sparse
+        # Birth memo: the pure numerics of the births at one panel (its novelty tests, sparse
         # exact scores and point decisions per pool path), reused when the search decides births again at the
         # same panel with the same scores and forwards (after a pool extension and again after tier 2).
         self._memo_context = None
@@ -604,9 +604,9 @@ class CountStep:
         scored exactly in decreasing sum u until no remaining bound can beat the best
         accepted total gain; exact scores are restricted to samples whose bound exceeds V_s(P).
 
-        Returns (record, larger panel or None, its per-sample scores or None, indicators):
-        indicators are the chimera-trap indicators, (total bound gain, path) of the pure-mosaic
-        pool births that could pass on their total gain, strongest first.
+        Returns (record, larger panel or None, its per-sample scores or None, trap_count):
+        trap_count counts pure-mosaic pool births that could pass on their total gain.
+        Their presence triggers duplicate seeds from every selected founder.
         """
         k = len(panel)
         rows = np.asarray(panel, dtype=np.int64)
@@ -638,7 +638,7 @@ class CountStep:
             trap_indicators=0,
         )
         if not outside:
-            return record, None, None, []
+            return record, None, None, 0
         bounds_all = forwards.birth_values(self.rows(outside), self.offsets)
         gain_all = np.maximum(bounds_all - base[:, None], 0.0)
         totals_all = column_sums(gain_all)
@@ -652,13 +652,12 @@ class CountStep:
         # Pure-mosaic pool births that could pass on their total gain: a panel path covers
         # their cells (the chimera-trap indicator); their presence triggers all selected seeds.
         trap = np.flatnonzero(passing & ~is_novel)
-        record["trap_indicators"] = int(len(trap))
-        # Only presence/count steers AJ23 now; ranking these indicators has no consumer.
-        indicators = [(float(totals_all[i]), outside[i]) for i in trap.tolist()]
+        trap_count = int(len(trap))
+        record["trap_indicators"] = trap_count
         novel_index = np.flatnonzero(is_novel)
         novel = [outside[i] for i in novel_index.tolist()]
         if not novel:
-            return record, None, None, indicators
+            return record, None, None, trap_count
         bounds = bounds_all[:, novel_index]
         totals = totals_all[novel_index]
         survivors = np.flatnonzero(passing[novel_index])
@@ -701,7 +700,7 @@ class CountStep:
                 self._record_shadow_family(alternative, panel, details, key)
                 record.setdefault("shadow_alternatives", []).append(details)
         if best is None:
-            return record, None, None, indicators
+            return record, None, None, trap_count
         total, index, decision, larger, lost = self._choose(
             "assembly.join_birth",
             accepted,
@@ -723,7 +722,7 @@ class CountStep:
             total=_test_record(decision.total),
             sequence=_test_record(decision.sequence),
         )
-        return record, list(panel) + [novel[index]], larger, indicators
+        return record, list(panel) + [novel[index]], larger, trap_count
 
     def settle(self, panel, scores, key=None):
         """A refitted seed panel: delete paths without private cells (best-F first), then the
@@ -943,12 +942,12 @@ def count_decision(search: SearchState, forwards, pool, seeds) -> bool:
         )
     if search.births_frozen:
         return False
-    record, larger_panel, values, indicators = search.counter.birth(
+    record, larger_panel, values, trap_count = search.counter.birth(
         search.selected, pool_paths, forwards, search.baseline_scores, key=f"c{search.count_steps}"
     )
     count["trap_indicators"] = max(count["trap_indicators"], record["trap_indicators"])
     best = None if larger_panel is None else (float(values.sum()), larger_panel, values, record, "pool")
-    if seeds and best is None and indicators:
+    if seeds and best is None and trap_count:
         # The chimera indicator triggers the same AJ23 route; every selected founder is
         # a duplicate seed. No indicator ranking can exclude a converged endpoint.
         # O(K) quadratic fits cost O(N L K^3) per round; repeated count rounds can

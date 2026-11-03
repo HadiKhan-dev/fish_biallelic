@@ -5,6 +5,8 @@ PE1–PE3 preserve this 3.5 method.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from numba import prange
 
@@ -16,6 +18,11 @@ from .parameters import EXCLUSION_DYAD_BATCH, EXCLUSION_PATTERN_LIMIT, EXCLUSION
 MAX_PATTERNS = EXCLUSION_PATTERN_LIMIT
 
 DYAD_BATCH = EXCLUSION_DYAD_BATCH
+
+
+def log_threshold(sample_count: int, alpha: float) -> float:
+    """Exclusion log-e threshold shared by certificates, count release and the sibling guard."""
+    return math.log(2 * sample_count / alpha)
 
 
 def physical_windows(positions: np.ndarray, widths: tuple[int, ...]) -> np.ndarray:

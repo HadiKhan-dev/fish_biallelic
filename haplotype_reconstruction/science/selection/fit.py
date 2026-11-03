@@ -285,7 +285,7 @@ def fit_fixed(
         best = (selection(panel, frequencies, score), panel.copy(), frequencies.copy(), score, -1)
     converged = False
     termination = "update_backstop"
-    # The frequency step's E-step computes the exact one-bit gains in the same pass (release 3.5) unless
+    # The frequency step's E-step computes the exact one-bit gains in the same pass unless
     # the next state is unlikely to be stationary: the first update of a panel with more than
     # EXACT_FIRST_UPDATE_MAX_K founders. A stationary state needs the exact gains, and a FLIPS-level
     # pass would be redone at EXACT: stationary after the first update in 0.88-0.95 of TroMau fits

@@ -26,22 +26,19 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from haplotype_reconstruction.core import ties
-
 
 class RowGeometry:
     """Called-site distances between the rows of a batch's blocks (computed lazily, cached).
 
     ``calls``: per block, int8[K_b, L_b] alleles of its rows (-1 = no call).
     nearest(b, r, covered): sigma_b(r), the covered row nearest to r (Hamming over sites called in
-    both; ties to the lowest row). span_mismatch(p, g): the called-site mismatch rate of two paths
-    over the batch's span.
+    both; ties to the lowest row, or highest under reversal). span_mismatch(p, g): the called-site
+    mismatch rate of two paths over the batch's span.
     """
 
     def __init__(self, calls: Sequence[np.ndarray], *, reverse: bool = False):
         self.reverse = reverse
         self.calls = [np.asarray(value, dtype=np.int8) for value in calls]
-        self._nearest: dict[tuple[int, int, tuple[int, ...]], int] = {}
         self._nearest_options: dict[tuple[int, int, tuple[int, ...]], tuple[int, ...]] = {}
         self._pairs: dict[tuple[int, int, int], tuple[int, int]] = {}
 
@@ -52,18 +49,8 @@ class RowGeometry:
         return cls([panel.inference for panel in panels], reverse=reverse)
 
     def nearest(self, block: int, row: int, covered: tuple[int, ...]) -> int:
-        key = (block, row, covered)
-        found = self._nearest.get(key)
-        if found is None:
-            calls = self.calls[block]
-            target = calls[row]
-            candidates = calls[list(covered)]
-            both = (target >= 0)[None, :] & (candidates >= 0)
-            distance = ((candidates != target[None, :]) & both).sum(axis=1)
-            # covered is sorted: ties -> lowest row (the highest under ties.reverse_conventions())
-            found = covered[ties.conv_argmin(distance, reverse=self.reverse)]
-            self._nearest[key] = found
-        return found
+        options = self.nearest_options(block, row, covered)
+        return options[-1] if self.reverse else options[0]
 
     def nearest_options(self, block, row, covered):
         """All equally nearest rows, cached independently of the traversal convention."""

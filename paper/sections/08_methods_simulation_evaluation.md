@@ -4,7 +4,7 @@ Accuracy is measured only on simulated crosses, because the real cross has no in
 
 ### Founder templates
 
-A contig's template gives marker positions and, for each of $H$ founder haplotypes ($H$ even and equal across contigs), a probability for each allele. The `haplotypes templates` command builds templates from an observed VCF [TO FILL: state which VCF and contigs]{.todo}. It runs the pipeline's block discovery on fixed-error evidence (filters and read calibration disabled) in 100 kb windows at a 50 kb stride, treating uncalled alleles as neutral (0.5, 0.5). A simple linker chains windows into up to six contig-length paths by penalised dynamic programming over junction mismatch scores, merging overlaps by adding signed allele information. Templates thus have realistic marker density and haplotype structure but are approximations.
+A contig's template gives marker positions and, for each of $H$ founder haplotypes ($H$ even and equal across contigs), a probability for each allele. The `haplotypes templates` command builds templates from an observed VCF. The reported validation uses pre-existing empirical templates and a constructed high-founder-count set, whose recorded provenance and contigs are given in Supplementary Information, section S6. It runs the pipeline's block discovery on fixed-error evidence (filters and read calibration disabled) in 100 kb windows at a 50 kb stride, treating uncalled alleles as neutral (0.5, 0.5). A simple linker chains windows into up to six contig-length paths by penalised dynamic programming over junction mismatch scores, merging overlaps by adding signed allele information. Templates thus have realistic marker density and haplotype structure but are approximations.
 
 Founder alleles are the more probable template allele at each marker. Exact ties, including neutral cells, are resolved by a per-contig random stream, so no reference bias enters the truth. Consecutive haplotypes are paired into $H/2$ diploid founders.
 
@@ -54,7 +54,7 @@ Phase is scored per sample within released phase sets, maximal runs of the sampl
 
 ### Pedigree
 
-Released Tier-B calls are compared with the true parents restricted to sequenced samples. Edges are matched by sample name, ignoring slot order; an unsequenced true parent is not an observable edge. A configuration is exact when the called parent state (zero, one or two observed parents) and the parent set both equal the truth; an unresolved call is never exact. Correct, extra and missing parent–child edges are counted separately.
+The exact-configuration Tier-B call product is compared with the true parents restricted to sequenced samples. The supported-edge product used for phase and recombination also includes marginal edges from incompletely resolved configurations; it is scored separately in Supplementary Table S5. Edges are matched by sample name, ignoring slot order; an unsequenced true parent is not an observable edge. A configuration is exact when the called parent state (zero, one or two observed parents) and the parent set both equal the truth; an unresolved call is never exact. Correct, extra and missing parent–child edges are counted separately.
 
 ### Recombination
 

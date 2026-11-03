@@ -2,7 +2,7 @@
 
 A tier releases a child's marginal parent state when its informative chromosomes hold enough map units, the state
 survives the bootstrap and leave-one-chromosome-out (LOCO) cut-offs and, for M0, every alternative
-prior, and, for M1 and M2, some parent of the local configuration is stable (release 3.4); it releases the exact
+prior, and, for M1 and M2, some parent of the local configuration is stable; it releases the exact
 configuration when the local configuration is also the graph's choice,
 is resampling-stable as local and graph configuration, each named parent is stable, and every
 edge has a decisive full-data orientation (direction is always inferred). Marginal ("partial") edges are
@@ -186,7 +186,7 @@ def tier_calls(
             )
             for slot in named
         ]
-        # Release 3.4: a count of observed parents needs an identifiable observed parent. An M1 or M2 state passes
+        # A count of observed parents needs an identifiable observed parent. An M1 or M2 state passes
         # only when some parent of the local configuration meets the parent cut-offs (the identity half of the
         # parent rule; orientation is not required). A count that stays stable while the winning candidate changes
         # across resamples (typically relatives of an unsampled parent) is not released.

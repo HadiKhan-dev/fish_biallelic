@@ -1,7 +1,8 @@
 """Founder products of one chromosome.
 
-Founder tracks (product ``tracks``): one gzip TSV per release segment, `CHROM POS H0 H1 ...`, one row per panel site.
-Cells are the released calls 0 / 1, or `.` where the panel withholds the allele (no imputation). Column Hk is
+Founder tracks (product ``tracks``): one gzip CSV per chromosome with contig/component/pos/h0/h1/... columns,
+one row per panel site.
+Cells are the released calls 0 / 1, or `.` where the panel withholds the allele (no imputation). Column hk is
 founder row k of this segment: founder labels are segment-local (H0 of two segments is not one founder).
 
 Founder VCF (product ``founders``): one BCF/VCF.gz per chromosome at the rows of an export.sites table, FORMAT GT
@@ -14,19 +15,14 @@ Source inference components and segment indices are retained in the manifest and
 
 from __future__ import annotations
 
+import csv
 import gzip
-from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-from ...core.errors import InvariantError
-
-if TYPE_CHECKING:
-    from ...contracts.assembly import FounderIdentityFlag
 
 import numpy as np
 
-from ..reports.tables import temporary_path
+from ...core.errors import InvariantError
+from ..reports.tables import temporary_path, write_text_table
 from .records import SiteTable
 from .vcf import FILEFORMAT, common_allele_line, contig_line, site_header_lines
 
@@ -37,18 +33,19 @@ CHUNK_SITES = 1 << 16
 VCF_CHUNK_SITES = 4096
 
 
-def write_founder_tracks(path: Path, contig: str, positions: np.ndarray, calls: np.ndarray) -> None:
-    """Write ``calls`` int8 [K, L] (-1 / 0 / 1) at ``positions`` int64 [L] atomically to ``path``."""
+def write_founder_tracks(path: Path, contig: str, panels) -> None:
+    """One wide CSV per contig; component distinguishes the segment-local founder rows."""
     path = Path(path)
     temporary = temporary_path(path)
-    calls = np.asarray(calls)
-    positions = np.asarray(positions)
-    with gzip.open(temporary, "wt", compresslevel=6) as handle:
-        handle.write("CHROM\tPOS\t" + "\t".join(f"H{row}" for row in range(len(calls))) + "\n")
-        for start in range(0, len(positions), CHUNK_SITES):
-            text = _TEXT[calls[:, start : start + CHUNK_SITES].astype(np.int64) + 1]
-            for site, position in enumerate(positions[start : start + CHUNK_SITES].tolist()):
-                handle.write(f"{contig}\t{int(position)}\t" + "\t".join(text[:, site]) + "\n")
+    width = max((len(calls) for _, calls in panels), default=0)
+    with gzip.open(temporary, "wt", compresslevel=6, newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["contig", "component", "pos", *(f"h{row}" for row in range(width))])
+        for component, (positions, calls) in enumerate(panels):
+            for start in range(0, len(positions), CHUNK_SITES):
+                text = _TEXT[calls[:, start : start + CHUNK_SITES].astype(np.int64) + 1]
+                for site, position in enumerate(positions[start : start + CHUNK_SITES].tolist()):
+                    writer.writerow([contig, component, int(position), *text[:, site], *([""] * (width - len(calls)))])
     temporary.replace(path)
 
 
@@ -68,7 +65,7 @@ def component_record(
     withheld: int | None = None,
     release_segment: dict | None = None,
 ) -> dict:
-    """The manifest entry of one exported component (``filename``: its track TSV; ``vcf_file``: the founder VCF
+    """The manifest entry of one exported component (``filename``: its contig track CSV; ``vcf_file``: the founder VCF
     holding its columns; ``withheld``: alleles released as '.' because no painted carrier observes them)."""
     calls = np.asarray(calls)
     entry = dict(contig=contig, component=component)
@@ -276,16 +273,11 @@ IDENTITY_COLUMNS = (
 )
 
 
-def write_identity_flags(path: Path, contig: str, stage: str, flags: Sequence[FounderIdentityFlag]) -> int:
-    """Write already-decided identity flags in their source enumeration order.
-
-    Partner names use each stored owner and row. No detection, segmentation, sorting
-    or release decision occurs here. Returns the number written; input is unchanged.
-    """
-    lines = []
-    for flag in flags:
-        lines.append(
-            (
+def identity_rows(records):
+    """Already-decided flags in contig then source enumeration order."""
+    for contig, stage, flags in records:
+        for flag in flags:
+            yield (
                 contig,
                 vcf_column(flag.export_component, flag.founder_row),
                 flag.export_component,
@@ -305,11 +297,8 @@ def write_identity_flags(path: Path, contig: str, stage: str, flags: Sequence[Fo
                 flag.method,
                 flag.status,
             )
-        )
-    path = Path(path)
-    temporary = temporary_path(path)
-    temporary.write_text(
-        "\t".join(IDENTITY_COLUMNS) + "\n" + "".join("\t".join(map(str, line)) + "\n" for line in lines)
-    )
-    temporary.replace(path)
-    return len(lines)
+
+
+def write_identity_flags(path: Path, records) -> Path:
+    """Publish the single founder-identity CSV without making an identity decision."""
+    return write_text_table(path, IDENTITY_COLUMNS, identity_rows(records))

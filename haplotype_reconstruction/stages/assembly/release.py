@@ -7,7 +7,7 @@ this product. Method: WP_AS6 §4.7; WP_OU1 OU03/OU06.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -19,7 +19,6 @@ from haplotype_reconstruction.contracts.painting import Painting
 from haplotype_reconstruction.contracts.payload import from_payload, to_payload
 from haplotype_reconstruction.contracts.refit import FounderRefit
 from haplotype_reconstruction.core.errors import InvariantError
-from haplotype_reconstruction.engine.graph import RecordKey, ResourceRequest, Task, TaskKey
 from haplotype_reconstruction.engine.runtime import task_team
 from haplotype_reconstruction.science.assembly.release import budget_overflow, release_founders, withhold_unobserved
 from haplotype_reconstruction.store.container import CheckpointFile
@@ -107,8 +106,8 @@ def compute_release(
         refit_ambiguous_alleles=ambiguous,
     )
     if phase_seconds is not None:
-        # The native release phase times this call; OU06 flag construction now
-        # belongs to this call as well. Preparation and serialization are separate.
+        # Time founder release and OU06 flag construction together. Preparation
+        # and serialization are separate.
         phase_seconds["release"] = perf_counter() - started
     return result
 
@@ -127,27 +126,3 @@ def execute_release(inputs: ReleaseInputs, file: CheckpointFile, identity: str, 
         publish(file, RELEASE_TIMINGS, identity, dict(schema=1, phase_seconds=phase_seconds))
         publish(file, RELEASE, identity, to_payload(result))
         return result
-
-
-def release_task(
-    contig: str,
-    inputs: ReleaseInputs,
-    file: CheckpointFile,
-    identity: str,
-    *,
-    depends_on: Sequence[TaskKey] = (),
-    upstream_records: Sequence[RecordKey] = (),
-    max_cores: int = 1,
-) -> Task:
-    """Declare release[c], downstream of refit, painting, assembly and evidence."""
-    return Task(
-        TaskKey("release", "contig", contig),
-        execute_release,
-        args=(inputs, file, identity),
-        depends_on=tuple(depends_on),
-        inputs=tuple(upstream_records),
-        outputs=(RecordKey(contig, RELEASE), RecordKey(contig, RELEASE_TIMINGS)),
-        resources=ResourceRequest(1, max_cores),
-        affinity=contig,
-        thread_argument="cores",
-    )

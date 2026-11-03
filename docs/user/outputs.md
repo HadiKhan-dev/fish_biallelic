@@ -14,20 +14,24 @@ semantics and encodings that those tables cannot express.
 ## Coordinates, ordering and text
 
 Positions are 1-based input SNP coordinates. Painting intervals labelled
-`Start, End` are half-open `[Start, End)`. Recombination call intervals use
+`start, end` are half-open `[start, end)`. Recombination call intervals use
 `(left, right]`; reported uncertainty intervals have the additional meaning below.
 A founder **row** is a panel haplotype; a VCF **row** is a genomic site.
 
 Records use canonical sample-name order. Per-sample published tables and sample
 VCF columns use the input sample order. Contigs follow configuration order.
 Founder labels are local to an export segment. Export filenames percent-encode
-contig names; report directories use contig names directly.
+contig names; every run-level table uses the original contig name in its leading `contig` column.
+Rows concatenate contigs in configuration order, then retain each contig's existing order.
+All table columns are snake_case; shared keys are `contig`, `sample`,
+`component`, `founder`, `parent1` and `parent2`. VCF fields retain their standard spelling.
+CSV uses standard quoting, including for JSON cells containing commas or quotes.
 
-CSV/TSV files have no pandas index column. Ordinary floats use shortest round-trip
+CSV files have no pandas index column. Ordinary floats use shortest round-trip
 text; `NaN` and `None` become empty cells, and booleans become `True` or `False`.
 Row-dictionary and painting writers encode list, tuple and dictionary cells as
 JSON with sorted dictionary keys. **Pedigree tables use Python tuple reprs**:
-`('sample_a', 'sample_b')`, `()`, and nested tuples for `ConfigurationCandidates`.
+`('sample_a', 'sample_b')`, `()`, and nested tuples for `configuration_candidates`.
 Do not parse these cells as JSON. Quality tables have their own fixed decimal
 formats and `NA` spelling, described below.
 
@@ -122,7 +126,7 @@ Data and index are created before placement; obsolete index types are removed.
 
 ## D3: export manifest
 
-`export/manifest.json` has schema `released-allele-export-v3`. Its ordered top-level
+`export/manifest.json` has schema `released-allele-export-v4`. Its ordered top-level
 keys are `schema`, `checkpoint_root`, `coordinate_system`, `unknown_allele`,
 `founder_identity`, `unobserved_founder_alleles`, `sample_phase`, `synthetic_alleles`,
 `reference_vcf`, `contigs`, `products`, `format`, `site_set`, `omitted_records`,
@@ -146,8 +150,8 @@ an omitted product is not represented by invented empty data.
 
 ## D4: founder identity flags
 
-`export/CONTIG.founder_identity.tsv` is header-only when no flag is present. Its
-columns, in order, are `contig, column, export_component, founder_row, source_stage,
+`export/founder_identity.csv` is header-only when no flag is present. Its
+columns, in order, are `contig, column, component, founder, source_stage,
 source_component, source_row, block, left_position, right_position, left_local_row,
 right_local_row, left_partners, right_partners, at_release_break, reason, method,
 status`.
@@ -162,32 +166,35 @@ or an instruction to merge columns.
 
 ## D5: founder tracks
 
-Selecting `tracks` with standalone export writes
-`export/CONTIG.componentNNNN.founders.tsv.gz`. The gzip-compressed header is
-`CHROM, POS, H0, H1, ...` with tabs. Rows are panel sites, not full-length filler
-sites. `NNNN` is the four-digit export segment index, and `Hk` is local to that
-segment. Cells are `.`, `0`, `1`. The ordinary run's export defaults select founder
-and sample VCFs; standalone product selection controls tracks.
+Selecting `tracks` with standalone export writes `export/CONTIG.tracks.csv.gz`.
+The gzip CSV header is `contig, component, pos, h0, h1, ...`. Rows list export
+segments in order, then panel sites within each segment; they exclude full-length
+filler sites. `component` is the export segment index and `hk` is row k local to
+that segment. The header extends to the largest segment's founder count; cells
+beyond a shorter segment's row count are empty, while an existing unknown allele
+is `.`. Called alleles are `0` or `1`. Manifest `local_columns` retains its `Hk`
+keys for the segment-local founder labels, which correspond to track columns `hk`.
+The ordinary run selects founder and sample VCFs; standalone selection controls tracks.
 
 ## D6: report tables
 
 The generated [column dictionary](../reference/output-columns.md) lists every
 base column, position, meaning and unit, including all 17 pedigree tables.
 
-| Files | Rows and ordering |
+| Files | rows and ordering |
 |---|---|
-| `quality/CONTIG.samples.tsv`, `.segments.tsv` | Samples in input order; inherited-segment rows in recorded order; written only where sample QC ran |
-| `painting/CONTIG/founder_support.tsv`, `founder_support_windows.tsv` | Component, founder row, then window in genomic order |
-| `painting/CONTIG/assembly_search.tsv`, `founder_counts.tsv` | Recorded final assembly join searches; components in order |
-| `painting/CONTIG/sample_switches.tsv` | Input sample order |
-| `painting/CONTIG/sample_segments.tsv` | Input sample, component, track, maximal run of one status/label/member set |
-| `painting/CONTIG/label_continuity.tsv`, `painting_model.tsv` | Accepted relabellings in recorded order; model rows by component |
+| `quality/samples.csv`, `quality/segments.csv` | Samples in input order; inherited-segment rows in recorded order; written only where sample QC ran |
+| `painting/founder_support.csv`, `founder_support_windows.csv` | component, founder row, then window in genomic order |
+| `painting/assembly_search.csv`, `founder_counts.csv` | Recorded final assembly join searches; components in order |
+| `painting/sample_switches.csv` | Input sample order |
+| `painting/sample_segments.csv` | Input sample, component, track, maximal run of one status/label/member set |
+| `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component |
 | `relatedness/families.csv` | Input sample order; each member repeats its family's parents and support |
 | `relatedness/half_sib_links.csv` | Recorded sorted family-pair order |
 | `relatedness/pairs.csv` | Recorded sample-pair order; **optional and off by default** |
-| `pedigree/*.csv` | Stable input order where a `Sample` column exists; otherwise recorded order |
+| `pedigree/*.csv` | Stable input order where a `sample` column exists; otherwise recorded order |
 | `founder_refit/summary.csv`, `family_phase/summary.csv` | One recorded summary per contig |
-| `recombination/CONTIG.*.csv` | Bins, edges, calls or loci in recorded order; genome-wide tables concatenate contigs in configuration order |
+| `recombination/map.csv`, `recombination/crossovers.csv`, `recombination/meioses.csv`, `recombination/coverage.csv`, `recombination/junctions.csv`, `recombination/summary.csv` | bins, edges, calls or loci in recorded order; genome-wide tables concatenate contigs in configuration order |
 | `ties/decisions.csv` | Contigs, stage order, record-group string, kind string; run-level pedigree last |
 | `simulation/truth_pedigree.csv` | Analysed samples in pedigree order; parent names may identify unsequenced individuals |
 
@@ -209,14 +216,14 @@ samples, not independent lineage evidence. Support windows use
 
 Painting segment status is one of `INELIGIBLE_NO_EVIDENCE`,
 `LOW_POSTERIOR_ABSTENTION`, `SINGLETON_NAMED`, `POOLED_EQUIVALENCE`, `BACKGROUND`,
-`UNANCHORED_TRAJECTORY`, `LOCAL_ALLELE_EQUIVALENCE`, `SWITCH_INTERVAL`. `Label` is
-populated only for a singleton named run; `Rows` joins row indices with semicolons.
+`UNANCHORED_TRAJECTORY`, `LOCAL_ALLELE_EQUIVALENCE`, `SWITCH_INTERVAL`. `label` is
+populated only for a singleton named run; `rows` joins row indices with semicolons.
 Switch ratios use the median over samples painted in at least one component,
 without generation groups; a nonpositive median gives an empty ratio. Model
-`ErrorRunBinsKeepingLabel` is reciprocal error-exit probability, empty at zero.
+`error_run_bins_keeping_label` is reciprocal error-exit probability, empty at zero.
 Assembly-search rows describe each recorded final-assembly join search: its event
-records in order, then one closing record. Every row starts with `Level`,
-`FirstVariant1Based`, `LastVariant1Based` (the joined batch's level and its first
+records in order, then one closing record. Every row starts with `level`,
+`first_variant_1based`, `last_variant_1based` (the joined batch's level and its first
 and last variant, 1-based). Columns are the first-seen union of the records' fields,
 so a field absent from a record is blank. An event record has a `stage` field naming
 its kind (`beam_covering_proposals`, `linker_em`, `join_replay`, `parent_shadow_join`,
@@ -247,7 +254,7 @@ when selection is on **and** the checked `relatedness/pairs` publication exists.
 When off, report publication removes a stale pairs CSV while retaining the stored
 pair product for later use.
 
-Family IDs are canonical dense ranks ordered by the family's smallest canonical
+family IDs are canonical dense ranks ordered by the family's smallest canonical
 member index. They are not that minimum index itself. Empty parents are latent
 slots. `relatedness/summary.json` contains exactly these keys, in order; there is
 no pair-selection key.
@@ -255,14 +262,14 @@ no pair-selection key.
 | Key | Meaning |
 |---|---|
 | `families` | Number of fitted full-sib families |
-| `sequenced_parent_slots` | Parent slots filled by a sequenced sample |
-| `half_sib_links` | Released half-sib links between families |
+| `sequenced_parent_slots` | parent slots filled by a sequenced sample |
+| `half_sib_links` | released half-sib links between families |
 | `loglik` | The composite family model's final log-likelihood, nats |
 | `sweeps` | Move sweeps of the family search |
 | `converged` | Whether the family search converged within its sweep limit |
 | `search` | Which of the two bounded searches supplied the released partition |
 | `search_margin` | That search's objective minus the other search's, nats; null when the other search was not measured |
-| `family_sites` | Sites on the family evidence axis |
+| `family_sites` | sites on the family evidence axis |
 | `chromosome_sites` | Object: family sites per contig, in configuration order |
 
 ### Pedigree tables and JSON
@@ -275,20 +282,20 @@ The 17 CSV names, in publication order, are `tier_b_relationships`,
 `evidence_summary`, `chromosome_summary`, `relative_contrasts`, `sibling_guard`.
 Optional views can be absent; absence is distinct from an empty available table.
 
-The first six relationship/candidate views insert `ParentSlotBasis` after `Parent2`
+The first six relationship/candidate views insert `parent_slot_basis` after `parent2`
 when slot assignment is available: `unordered`, `single`, `none`. Slots do not
 encode maternal/paternal labels. Diagnostic configurations retain their internal
-order. `ParentState` is `zero_observed_parents`, `one_observed_parent`,
+order. `parent_state` is `zero_observed_parents`, `one_observed_parent`,
 `two_observed_parents` or `unresolved`; an unresolved count is empty.
-`ConfigurationSupportSet` is `state:parents:prob` text, with semicolon-separated
+`configuration_support_set` is `state:parents:prob` text, with semicolon-separated
 configurations and three-decimal probability. M0 uses `external+external`.
-Nested `ConfigurationCandidates` retain tuple reprs. Alternatives list the retained
+Nested `configuration_candidates` retain tuple reprs. Alternatives list the retained
 local/graph and finite identity-score alternatives in ascending configuration row.
 
 Interval-bearing exclusion tables append the lower, upper and exactness columns
-shown in the generated dictionary. A non-exact interval has an empty point `LogE`.
+shown in the generated dictionary. A non-exact interval has an empty point `log_e`.
 Exclusion evidence can exist for guard dyads even when there are no count-release
-targets. Released relationship views are post-guard; complete relationships,
+targets. released relationship views are post-guard; complete relationships,
 selection/search diagnostics and relative contrasts describe pre-guard evidence.
 
 `pedigree/evidence_calibration.json` serialises the typed calibration report
@@ -312,15 +319,16 @@ null for undefined values.
 ### Recombination and ties
 
 Map CSVs give bp bin bounds, expected/called crossovers and exposure, rates in
-cM/Mb, effective meioses and cumulative observed cM at the right edge. Coverage and
-called-coverage tables distinguish informative from callable exposure. A called
+cM/Mb, effective meioses and cumulative observed cM at the right edge. `recombination/coverage.csv` lists spans between consecutive released markers of
+a followed stretch. These same callable spans define map coverage, called exposure,
+junction decidability and evaluation; an unresolved or interrupted stretch contributes no span. A called
 crossover lies between centres of consecutive released chain bins; its reported
 uncertainty interval includes both bins' bp bounds. Evaluation reads a true event
 in `(low, high]`, and its boundary rule is stated explicitly in the metrics.
 The joint endpoint lower bound is `max(0, left_probability + right_probability - 1)`.
-`CONTIG.junctions.csv` and run-level `junctions.csv` use the 27 `JunctionLocus`
-fields in order. `CONTIG.png` plots expected and called rates against Mb and
-an effective-meiosis staircase (9 × 6 inches, 150 dpi).
+`recombination/junctions.csv` uses the 27 `JunctionLocus` fields in order.
+`recombination/maps.pdf` has one 9 × 6 inch page per contig in configuration
+order, plotting expected and called rates against Mb and an effective-meiosis staircase.
 
 `ties/summary.json` has these keys, in order:
 
@@ -341,15 +349,81 @@ are diagnostics, not evidence or release probabilities.
 
 ### Empty tables
 
-A table constructed from no row dictionaries and no fixed columns is a single
-newline with no header: recombination meioses/summary, refit/phase summaries and
-painting support/window/search/count tables. Fixed-schema empty tables retain
-headers: crossover, junction, coverage, called coverage, map, tie decisions,
-truth pedigree, painting segments/continuity/model and quality tables, plus the
-relatedness tables. Pedigree emptiness follows each constructor: many tables are
-headerless, while exclusion evidence and evidence summary keep their columns and
-slot/guard additions follow their view. Consumers must handle both an absent file
-and an available empty file; neither implies a zero-valued scientific estimate.
+The run-level quality, painting and recombination tables retain their headers
+when empty. A contig with no rows contributes no rows; a contig where sample QC
+did not run contributes no quality table part. Optional unavailable products
+remain absent. Refit/phase summaries constructed without rows remain a single
+newline with no header. Pedigree emptiness follows each view: many tables are
+headerless, while exclusion evidence and evidence summary retain their columns;
+slot/guard additions follow their view. An empty available table does not imply
+a zero-valued scientific estimate.
+
+<!-- output-columns:start -->
+### Complete report column inventory
+
+Columns below are in publication order. Optional pedigree suffixes and dynamic
+assembly-search columns follow the rules immediately below; evaluation, tracks
+and identity columns are listed in their own sections.
+
+| Table | Columns |
+|---|---|
+| `quality/samples.csv` | `contig`, `sample`, `observed_cells`, `eligible_cells`, `eligible_windows`, `minor_cells`, `near_private_cells`, `lrt`, `foreign_fraction`, `foreign_share`, `artefact_share`, `artefact_peak`, `heterozygote_fit`, `heterozygote_dispersion`, `error_fit`, `flagged` |
+| `quality/segments.csv` | `contig`, `sample`, `partner`, `start`, `end`, `events`, `cells`, `minor_read_fraction`, `partner_minor_read_fraction` |
+| `painting/sample_segments.csv` | `contig`, `sample`, `component`, `track`, `start`, `end`, `status`, `label`, `rows` |
+| `painting/label_continuity.csv` | `contig`, `component`, `atomic_span`, `position`, `row_a`, `row_b`, `score_gain_switches`, `painted_switch_change`, `winners`, `losers`, `winners_ato_b`, `winners_bto_a`, `identity` |
+| `painting/painting_model.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `bins`, `states`, `error_capable_classes`, `switch_rate_per_morgan`, `error_entry`, `error_exit`, `error_run_bins_keeping_label`, `site_correlation`, `eligible_samples` |
+| `painting/founder_support.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `break_before`, `break_after`, `marker_count`, `called_alleles`, `missing_alleles`, `observed_carrier_samples`, `called_sites_without_observed_named_carrier`, `minimum_observed_carriers`, `mean_observed_carriers`, `observed_pooled_candidate_samples`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate`, `support_basis` |
+| `painting/founder_support_windows.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `marker_count`, `called_alleles`, `missing_alleles`, `called_sites_without_observed_named_carrier`, `mean_observed_carriers`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate` |
+| `painting/assembly_search.csv (prefix)` | `contig`, `level`, `first_variant_1based`, `last_variant_1based` |
+| `painting/founder_counts.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `founder_rows`, `founder_count_ambiguous`, `undecided_count_cycles`, `count_step_founders_before`, `count_step_cycle`, `count_step_cycle_undecided`, `count_step_ambiguous_decisions`, `count_step_decisions`, `join_count_cycles`, `join_undecided_cycles`, `join_ambiguous_count_calls`, `feedback_join_count_cycles`, `feedback_join_undecided_cycles`, `feedback_join_ambiguous_count_calls` |
+| `painting/sample_switches.csv` | `contig`, `sample_index`, `sample`, `painted_components`, `painted_switches`, `cohort_median_switches`, `switches_over_cohort_median` |
+| `pedigree/tier_b_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `release_evidence` |
+| `pedigree/tier_b_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `release_evidence` |
+| `pedigree/tier_a_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status` |
+| `pedigree/tier_a_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum` |
+| `pedigree/complete_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status` |
+| `pedigree/tier_b_candidate_sets.csv` | `sample`, `parent_state`, `observed_parent_count`, `parent1`, `parent2`, `parent1_candidates`, `parent2_candidates`, `configuration_candidates`, `exact_configuration_resolved`, `inference_status`, `parent1_supported`, `parent2_supported`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `tier_b_final_state_call`, `tier_b_release_evidence` |
+| `pedigree/parent_state_calls.csv` | `sample`, `selected_parent_state`, `local_winner_parent_state`, `observed_parent_count`, `local_observed_parent_count`, `inference_status`, `dag_displaced`, `graph_conflict`, `graph_tie_conflict`, `graph_direction_resolved_alternative`, `selected_parent_role_probability`, `tier_a_state_call`, `tier_b_state_call`, `tier_b_final_state_call`, `tier_b_release_evidence` |
+| `pedigree/diagnostics.csv` | `sample`, `m0_prior_sensitivity_state_agreement`, `m0_prior_sensitivity_graph_agreement`, `m0_prior_sensitivity_tier_veto`, `structure_child_evaluable`, `structure_selected_row_exposure_testable`, `structure_selected_row_cx_compatible`, `structure_parent1_coverage`, `structure_parent2_coverage`, `structure_pair_explainability`, `structure_parent1_direction_probability`, `structure_parent2_direction_probability`, `best_m1_parent`, `best_m1_conditional_identity_margin`, `best_m2_parent1`, `best_m2_parent2`, `best_m2_conditional_identity_margin`, `local_parent1`, `local_parent2`, `eligible_child`, `eligible_parent_count`, `eligible_parent_pair_count`, `complete_parent1`, `complete_parent2`, `selected_parent_state`, `local_winner_parent_state`, `observed_parent_count`, `local_observed_parent_count`, `identifiable`, `dag_displaced`, `graph_conflict`, `graph_tie_conflict`, `graph_direction_resolved_alternative`, `local_parent_role_probability`, `selected_parent_role_probability`, `raw_ancestry_junction_count`, `callable_ancestry_haplotype_bin_count`, `adjusted_ancestry_junction_burden`, `ancestry_painting_callability_fraction`, `informative_contig_count`, `informative_map_units`, `local_state_bootstrap_fraction`, `local_configuration_bootstrap_fraction`, `graph_configuration_bootstrap_fraction`, `selected_graph_configuration_bootstrap_fraction`, `selected_graph_parent1_bootstrap_fraction`, `selected_graph_parent2_bootstrap_fraction`, `parent1_bootstrap_fraction`, `parent2_bootstrap_fraction`, `local_state_loco_fraction`, `local_configuration_loco_fraction`, `graph_configuration_loco_fraction`, `selected_graph_configuration_loco_fraction`, `selected_graph_parent1_loco_fraction`, `selected_graph_parent2_loco_fraction`, `parent1_loco_fraction`, `parent2_loco_fraction`, `state_winner_margin`, `conditional_identity_margin`, `unconstrained_winner_margin`, `selected_aggregate_utility`, `selected_minus_unconstrained_best`, `state_log_evidence0`, `state_log_evidence1`, `state_log_evidence2`, `state_support0`, `state_support1`, `state_support2`, `scored_candidate_count2`, `m2_candidate_screen_incomplete`, `prior_sensitivity_local_state_agreement_fraction`, `prior_sensitivity_local_identity_agreement_fraction`, `prior_sensitivity_graph_agreement_fraction`, `prior_sensitivity_selected_state_minimum_support`, `inference_status`, `tier_a_state_call`, `tier_b_state_call`, `tier_a_exact_configuration`, `tier_b_exact_configuration`, `tier_a_exact_pair`, `tier_b_exact_pair`, `tier_a_parent1`, `tier_a_parent2`, `tier_b_parent1`, `tier_b_parent2`, `configuration_support_set`, `parent1_candidate_set`, `parent2_candidate_set`, `evidence_configuration_set`, `tier_b_final_state_call`, `tier_b_release_evidence` |
+| `pedigree/call_explanations.csv` | `sample`, `parent_state`, `observed_parent_count`, `parent1`, `parent2`, `parent1_candidates`, `parent2_candidates`, `configuration_candidates`, `exact_configuration_resolved`, `inference_status`, `parent1_supported`, `parent2_supported`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `local_winner_parent_state`, `selected_parent_state`, `local_parent1`, `local_parent2`, `graph_conflict`, `state_winner_margin`, `conditional_identity_margin`, `local_state_bootstrap_fraction`, `local_state_loco_fraction`, `eligible_m2_pairs`, `scored_m2_pairs`, `incomplete_m2_search`, `graph_changed_local_configuration`, `interpretation`, `tier_b_final_state_call`, `tier_b_release_evidence` |
+| `pedigree/alternative_explanations.csv` | `sample`, `parent_state`, `parent1`, `parent2`, `local_winner`, `graph_winner`, `within_state_rank`, `genetic_log_evidence`, `structural_state_log_evidence`, `structural_identity_eligible`, `direction_log_contribution`, `reciprocal_family_log_contribution`, `ancestry_path_log_contribution`, `adjusted_state_log_evidence`, `adjusted_identity_log_evidence`, `parent_state_log_prior`, `log_eligible_identity_multiplicity`, `marginal_state_log_evidence`, `graph_decision_utility` |
+| `pedigree/search_diagnostics.csv` | `sample`, `eligible_parents`, `scored_m2_pairs`, `m2_panel_parents`, `screen_boundary_rank`, `screen_boundary_gap`, `omitted_parent_count`, `strongest_omitted_parent`, `parent1_screen_rank`, `parent2_screen_rank`, `selected_parent_at_screen_boundary` |
+| `pedigree/exclusion_evidence.csv` | `sample`, `candidate_parent`, `log_e`, `observed_sites` |
+| `pedigree/exclusion_diagnostics.csv` | `sample`, `eligible_candidates`, `compatible_candidates`, `supported_reverse_candidates`, `remaining_candidates`, `weakest_exclusion_log_e`, `threshold_log_e`, `complete_candidate_evidence`, `released`, `release_conditional_on_supported_directions` |
+| `pedigree/evidence_summary.csv` | `contig`, `informative_markers`, `mean_minimum_ancestry_junctions`, `mean_callable_haplotype_bins` |
+| `pedigree/chromosome_summary.csv` | `contig`, `component_count`, `scored_component_count`, `informative_markers`, `omitted_reason` |
+| `pedigree/relative_contrasts.csv` | `sample`, `candidate_parent`, `views`, `proxy_model`, `m1_minus_second_degree_proxy_nats`, `m1_minus_full_sib_proxy_nats`, `usable_chromosomes`, `negative_chromosomes_second_degree`, `negative_chromosomes_full_sib`, `min_chromosome_contrast_second_degree` |
+| `pedigree/sibling_guard.csv` | `parent`, `child`, `supported_members`, `dropped_linked`, `dropped_half_sib`, `dropped_members`, `tested_members`, `excluded_members`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis` |
+| `recombination/coverage.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `component` |
+| `recombination/crossovers.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `left_origin_probability`, `right_origin_probability`, `joint_endpoint_probability_lower_bound`, `component`, `reported_left_bp`, `reported_right_bp`, `in_reversed_segment` |
+| `recombination/junctions.csv` | `contig`, `locus`, `left_bp`, `right_bp`, `calls_left_bp`, `calls_right_bp`, `calls`, `parents_with_calls`, `odd_meioses`, `decidable_meioses`, `switch_fraction`, `flip_adjusted_switch_fraction`, `hotspot_ceiling`, `mixed_parents`, `all_or_none_parents`, `parents`, `children`, `mixing_log_lr`, `paired_locus`, `paired_odd_meioses`, `pairing_log_lr`, `pairing_tests`, `junction_log_lr`, `flagged`, `interpretation`, `nearest_supplied_breakpoint`, `breakpoint_distance_bp` |
+| `recombination/map.csv` | `contig`, `left_bp`, `right_bp`, `crossover_count`, `exposure_meiosis_bp`, `expected_crossovers`, `called_exposure_meiosis_bp`, `called_rate_c_m_per_mb`, `covered_bp`, `effective_meioses`, `rate_c_m_per_mb`, `c_m_on_covered_bp`, `cumulative_observed_c_m_at_right` |
+| `recombination/meioses.csv` | `contig`, `parent`, `child`, `parent_slot`, `released_chain_bins`, `followed_chain_bins`, `unresolved_chain_bins`, `called_crossovers`, `expected_crossovers`, `exposure_meiosis_bp` |
+| `recombination/summary.csv` | `contig`, `meioses`, `observable_meioses`, `crossovers`, `expected_crossovers`, `unresolved_bins`, `exposure_meiosis_bp`, `covered_bp`, `cumulative_observed_c_m`, `uncovered_bins`, `order_breakpoints`, `order_breakpoint_masked_sites`, `junction_loci`, `junction_loci_flagged`, `family_phase_converged`, `elapsed_seconds` |
+| `relatedness/families.csv` | `sample`, `family`, `family_support`, `parent1`, `parent1_support`, `parent2`, `parent2_support` |
+| `relatedness/pairs.csv (optional; off by default)` | `sample_a`, `sample_b`, `ibd0`, `ibd1`, `ibd2`, `sites`, `ibd0_evidence`, `ibd2_evidence` |
+| `relatedness/half_sib_links.csv` | `family_a`, `family_b`, `gain` |
+| `simulation/truth_pedigree.csv` | `sample`, `cohort`, `parent1`, `parent2` |
+| `founder_refit/summary.csv` | `contig`, `components`, `founder_rows`, `sites`, `called_alleles`, `changed_alleles`, `ambiguous_alleles`, `filled_alleles`, `changed_inference_alleles`, `changed_sites`, `median_changed_gain_nats`, `excluded_samples` |
+| `family_phase/summary.csv` | `contig`, `samples`, `sites`, `components`, `sweeps`, `settled`, `objective`, `junction_candidates`, `withheld_joins`, `tie_breaks`, `called_alleles`, `phased_heterozygotes`, `unphased_heterozygotes`, `phase_sets`, `elapsed_seconds` |
+| `ties/decisions.csv` | `contig`, `stage`, `records`, `kind`, `decisions`, `inside_tie`, `wide`, `boundary` |
+
+Relationship/candidate tables insert `parent_slot_basis` after `parent2` when
+available. Exclusion evidence appends `log_e_lower`, `log_e_upper`, `log_e_exact`;
+exclusion diagnostics appends `weakest_exclusion_log_e_lower`,
+`weakest_exclusion_log_e_upper`, `weakest_exclusion_log_e_exact`. These suffixes
+retain their lower/upper/exact meaning.
+
+Assembly-search columns are the first-seen union across contigs as well as
+records. Its prefix is always present. The closing-record fields and their
+meaning are listed above; event-specific columns are:
+
+`accepted`, `additional_seconds`, `alternatives`, `branch_k`, `branch_ll`, `certified`, `change`, `changes`, `complete`, `continued`, `cycle_excluded`, `cycle_excluded_panels`, `exact`, `kind`, `minimum_switches`, `objective`, `observed_panels`, `panel`, `panel_size`, `panels`, `proposed_paths`, `reason`, `replay_choices`, `representative_prior`, `represented_paths`, `resolution_seconds`, `resolved`, `source`, `source_choices`, `source_decision`, `source_replay_complete`, `source_search_certified`, `stage`, `status`, `survivors`, `unresolved_search`, `values`.
+
+Each event keeps its recorded operand value; a field absent from a record is an
+empty cell. Nested object keys inside these CSV cells retain their original names.
+
+<!-- output-columns:end -->
 
 ## D7: evaluation outputs
 
@@ -480,7 +554,7 @@ One row per contig, stage and component. Columns, in order: `contig`, `stage`,
 ### founder_matches.csv
 
 One row per one-to-one match, in panel-row order: `contig`, `stage`, `component`,
-`founder_key` (the panel row as text), `predicted_row`, `truth_founder`,
+`founder` (the panel row as text), `predicted_row`, `truth_founder`,
 `called_alleles`, `errors`, `missing` (the row's calls, mismatches against the
 matched truth founder, and missing calls).
 

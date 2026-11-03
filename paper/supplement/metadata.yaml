@@ -2,7 +2,7 @@
 title: "Supplementary Information: Reconstructing founder haplotypes, pedigrees and recombination from low-coverage sequencing of experimental crosses"
 author:
   - "Hadi Khan"
-date: "Draft for release 4.0.1 of the software, 2 November 2026"
+date: "Draft for release 4.3.0 of the software, 3 November 2026"
 link-citations: true
 header-includes: |
   <style>:root { --figure-prefix: "Supplementary Figure S"; --table-prefix: "Supplementary Table S"; }</style>
@@ -13,4 +13,4 @@ This supplement gives the finer rules of every stage, with the default value of 
 parameter. Codes in parentheses (for example EC05 or AJ17) identify the method unit in the
 software's methods documentation (`docs/methods/` in the repository), where each rule is stated in
 full together with the code that implements it. Default values are those of the generated parameter
-reference (`docs/reference/parameters.md`) for release 4.0.
+reference (`docs/reference/parameters.md`) for release 4.3.0.

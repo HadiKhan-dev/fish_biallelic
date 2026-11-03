@@ -2,7 +2,7 @@
 
 ## Painting
 
-Parameter names follow the generated reference; values are 4.0 defaults; method units are in parentheses.
+Parameter names follow the generated reference; values are 4.3.0 defaults; method units are in parentheses.
 
 **Alphabet, bins and local keys.** Classes are exact call signatures, numbered by first appearance; unanchored classes and BACKGROUND share one public UNKNOWN identifier (PR01). Bins split the $L_s$ selected sites into $\max(1,\lfloor L_s/\texttt{snps\_per\_bin}\rfloor)$ runs, with `snps_per_bin` = 100; the first $L_s \bmod B$ runs are one site longer, independently of task windows or sample batches (PR02). In each bin, anchored classes called there with identical $\{-1,0,1\}$ vectors share their smallest index as a key; other anchored classes key to themselves, and the rest to UNKNOWN. Local equality does not imply chromosome-wide row identity (PR03).
 
@@ -30,7 +30,7 @@ over `ENTRY_BOUNDS` = $(10^{-6},0.5)$ and `EXIT_BOUNDS` = $(10^{-3},0.999)$. It 
 
 Acceptance requires the painted-switch total to fall by at least 2, with losers at most `label_continuity_maximum_loser_ratio` = 0.1 times winners. A tie class is skipped when another acceptable member would relabel differently, and a candidate that changes a class's error capability is rejected. Each accepted move lowers the total, ensuring termination (PR17). Verification requires the relabelled panel to have identical classes, sites and anchoring and a strictly lower repainted total; otherwise the assembled panel is kept, with a recorded reason (PR18). The stage order is model, continuity, decode, release (PR19).
 
-**Cost.** The chain costs $O(NBS'^2)$, masks at worst $O(NBS^3)$, and the screen $O(\text{links}\,NS^3)$ per iteration. Label-continuity checks have an $O(K^4)$ worst case, carried as documented exception 0e for review in release 4.1 (PR17).
+**Cost.** The chain costs $O(NBS'^2)$, masks at worst $O(NBS^3)$, and the screen $O(\text{links}\,NS^3)$ per iteration. Label-continuity checks have an $O(K^4)$ worst case, carried as documented exception 0e (PR17). Tie peers are grouped once per iteration; each tested candidate can still require a full decode.
 
 ## Pedigree scoring
 
@@ -90,4 +90,15 @@ The final solve runs undamped to `final_tolerance` = $10^{-8}$ within `final_max
 
 Evidence uses the founder-construction view, so QC-flagged samples are unobserved. A sample scores at a site only when both of its tracks carry released singleton rows, and sites with no scoring sample are unchanged (FR01). Each site gets `coordinate_sweeps` = 3 sweeps. A sweep has a flip phase, then a two-row phase in which swaps and pair flips are restricted to co-painted rows. A move qualifies when its gain is positive and at least `minimum_gain_nats` = 5 per changed cell. A round applies qualifying moves in decision order, skipping any that share a row, or a row co-painted with one of theirs, with a move already applied. A row changes at most once per phase and sweep, and a sweep without changes ends the site. Qualification and rechecks use the same direct two-row gain (FR02).
 
-Tie classes chain gains within $\max(2^{-16},(n_i+n_j)2^{-18})$ nats, where $n$ counts scoring carriers (`REFIT_TIE_QUANTUM`, `REFIT_TIE_QUANTUM_PER_CARRIER`). A class wider than `WIDE_QUANTA` = 4 quanta keeps value order; otherwise row or pair index decides. Reversal reorders a class but never changes its membership (FR03). Interacting candidates in one tie class are applied hypothetically in both orders; if either then fails to qualify, all rows involved become unknown in one pass, the round is rescored, and those alleles cannot be filled later (FR04). A fill applies only to alleles unknown in the painted panel. It needs a gain of 5 nats and at least `fill_min_supporters` = 2 carriers whose reads favour the allele by more than $2^{-16}$. Fills are decided against the post-sweep state and applied together (FR05). The refit panel goes to family phase and export; pedigree keeps the pre-refit founders (FR06). The cost per site and sweep is $O(N+K^3\log K)$. In the worst case, two-row gains cost $O(K^4)$, and tie resolution $O(K^4)$ flips and $O(K^5)$ swaps per phase. This is exception 0e (FR04), carried for review in release 4.1.
+Tie classes chain gains within $\max(2^{-16},(n_i+n_j)2^{-18})$ nats, where $n$ counts scoring carriers (`REFIT_TIE_QUANTUM`, `REFIT_TIE_QUANTUM_PER_CARRIER`). A class wider than `WIDE_QUANTA` = 4 quanta keeps value order; otherwise row or pair index decides. Reversal reorders a class but never changes its membership (FR03). Interacting candidates in one tie class are applied hypothetically in both orders; if either then fails to qualify, all rows involved become unknown in one pass, the round is rescored, and those alleles cannot be filled later (FR04). A fill applies only to alleles unknown in the painted panel. It needs a gain of 5 nats and at least `fill_min_supporters` = 2 carriers whose reads favour the allele by more than $2^{-16}$. Fills are decided against the post-sweep state and applied together (FR05). The refit panel goes to family phase and export; pedigree keeps the pre-refit founders (FR06). The cost per site and sweep is $O(N+K^3\log K)$. In the worst case, two-row gains cost $O(K^4)$, and tie resolution $O(K^4)$ flips and $O(K^5)$ swaps per phase. These analytic worst cases remain under exception 0e (FR04).
+
+
+## Published tables
+
+Painting writes the run-level tables `painting/sample_segments.csv`, `sample_switches.csv`,
+`founder_support.csv`, `founder_support_windows.csv`, `founder_counts.csv`,
+`label_continuity.csv`, `painting_model.csv` and `assembly_search.csv`, each with a leading
+`contig` column. The segment table uses `sample`, `component`, `track`, `start`, `end`, `status`,
+`label` and `rows`; relatedness and pedigree tables likewise use snake_case names such as
+`sample`, `parent1`, `parent2`, `parent_state` and `release_evidence`, and retain their run-level
+paths. These table keys identify inferred output rows and carry no biological parentage truth.

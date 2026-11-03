@@ -4,22 +4,28 @@ Owns immutable component dimensions and surrogate emissions; storage comes from 
 Method: docs/methods/founder_refinement.md#workspace (RC01–RC03).
 
 The prepared panels (alleles and evidence masks), the objective's site mask and the binned surrogate
-emissions are fixed across count rounds and fits. The component's evidence is a view of the
-chromosome's float32 neutral evidence (the joins' copy; a gathered copy only when the component's
-prepared panels are not adjacent on the site axis). Release 3.4: the robust log evidence and the switch
-costs are not held for the whole component; kernels read them through windows (window.py, `windows`),
-resident for a small component and streamed per consumer for a large one.
+emissions are fixed across count rounds and fits. The component's float32 neutral evidence
+shares the chromosome's array only when its site slice is C-contiguous. An adjacent interior
+span across multiple samples requires a contiguous copy, as do nonadjacent prepared sites.
+The robust log evidence and the switch costs are not held for the whole component; kernels
+read them through windows (window.py, `windows`), resident for a small component and streamed
+per consumer for a large one.
 """
 
 from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Callable, Sequence
+from typing import cast
 
 import numpy as np
 from numba import prange
 from numba.typed import List
+from numpy.typing import NDArray
 
+from haplotype_reconstruction.contracts.genetic_map import ChromosomeGeneticMap
+from haplotype_reconstruction.contracts.panels import PreparedPanel
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.science.shared.emissions import (
     CENTER,
@@ -30,6 +36,7 @@ from haplotype_reconstruction.science.shared.emissions import (
 )
 
 from ..pairs import emission_pair_index as pair_index
+from .capabilities import EvidenceWindows
 from .configuration import DEFAULT_GENOTYPE_ERROR, DEFAULT_RESET_RATE, MAP_PROBABILITY_FLOOR
 from .objective import SWITCH_PENALTY
 from .overloads import overloads_for
@@ -109,8 +116,8 @@ def frozen(array, dtype):
 
 
 def component_evidence(evidence, panels):
-    """The component's (S, L_c, 3) float32 evidence, frozen: the chromosome's own array when the component spans it
-    (or a view of a contiguous span), else a copy of the component's sites."""
+    """Frozen float32[S,L_c,3] evidence: a view when the component's site slice is C-contiguous,
+    otherwise a contiguous copy, including adjacent interior spans across multiple samples."""
     starts = np.asarray([panel.site_start for panel in panels], np.int64)
     lengths = np.asarray([panel.sites for panel in panels], np.int64)
     if np.all(starts[1:] == starts[:-1] + lengths[:-1]):
@@ -141,18 +148,21 @@ class ComponentWorkspace:
 
     def __init__(
         self,
-        panels,
-        evidence,
+        panels: Sequence[PreparedPanel],
+        evidence: NDArray[np.float32],
         *,
-        min_sites_per_bin,
-        max_bins,
-        genetic_map=None,
-        genotype_error=DEFAULT_GENOTYPE_ERROR,
-        reset_rate=DEFAULT_RESET_RATE,
-        map_probability_floor=MAP_PROBABILITY_FLOOR,
-        windows_factory=None,
-        message_step=None,
-    ):
+        min_sites_per_bin: int,
+        max_bins: int,
+        genetic_map: ChromosomeGeneticMap | None = None,
+        genotype_error: float = DEFAULT_GENOTYPE_ERROR,
+        reset_rate: float = DEFAULT_RESET_RATE,
+        map_probability_floor: float = MAP_PROBABILITY_FLOOR,
+        windows_factory: Callable[
+            [NDArray[np.float32], NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]], EvidenceWindows
+        ]
+        | None = None,
+        message_step: int | None = None,
+    ) -> None:
         if genetic_map is None:
             raise ValueError("founder refinement needs the contig's genetic map (map-derived switch costs)")
         if genotype_error != DEFAULT_GENOTYPE_ERROR:
@@ -194,9 +204,13 @@ class ComponentWorkspace:
         self.genetic_map = genetic_map
         self.reset_rate = float(reset_rate)
         self.map_probability_floor = float(map_probability_floor)
-        self.windows = windows_factory(evidence, self.kept, self.partial, self.hazards)
+        # The stage supplies this factory on every supported construction path.
+        self.windows = cast(
+            Callable[[NDArray[np.float32], NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]], EvidenceWindows],
+            windows_factory,
+        )(evidence, self.kept, self.partial, self.hazards)
         self.message_step = message_step
-        self._normalisers = {}
+        self._normalisers: dict[int, NDArray[np.float64]] = {}
         self._cost_lock = threading.Lock()
 
     def normalisers(self, founders):

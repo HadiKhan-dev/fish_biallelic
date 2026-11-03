@@ -1,6 +1,6 @@
 """Reuse exact window results without changing template order or charged logical work.
 
-Owns orientation views, a per-search proposal cache and the bounded cross-root
+Owns a per-search proposal cache and the bounded cross-root
 memo. Must not open storage, choose scientific budgets, or inspect free memory.
 Method: docs/methods/founder_refinement.md#fixed-k-search (RS04, RS06, RS11).
 Cache keys bind row/flank bytes, convention and frontier cap. A memo hit restores
@@ -14,39 +14,13 @@ import threading
 from collections import OrderedDict
 
 import numpy as np
-from numba.typed import List
 
-from .objective import selected_alleles
 from .parameters import WINDOW_MEMO_BYTES
 from .parameters import WINDOW_MEMO_ENTRIES as _WINDOW_MEMO_ENTRIES
 from .parameters import WINDOW_MEMO_OVERHEAD as _WINDOW_MEMO_OVERHEAD
+from .workspace import Orientation
 
 __all__ = ["Orientation", "ProposalCache", "WindowMemo"]
-
-
-class Orientation:
-    """Leaves and block offsets in forward or reversed site order; window(K) reads the log evidence
-    and the switch costs of K in that order (window.Windows.view: no reversed copy of the evidence)."""
-
-    def __init__(self, workspace, reverse):
-        sites = int(workspace.offsets[-1])
-        self.reverse = reverse
-        self.workspace = workspace
-        if reverse:
-            self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
-            self.leaves = List([np.ascontiguousarray(leaf[:, ::-1]) for leaf in list(workspace.leaves)[::-1]])
-        else:
-            self.offsets = np.ascontiguousarray(workspace.offsets, np.int64)
-            self.leaves = workspace.leaves
-        self.blocks = len(self.offsets) - 1
-
-    def haps(self, panel):
-        """int8 (K, L) alleles of the panel (K x B rows in this orientation's block order)."""
-        return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
-
-    def window(self, founders):
-        """The window of K = founders in this orientation's site order (window.Windows.view)."""
-        return self.workspace.windows.view(founders, self.reverse)
 
 
 # Only components with multiple incoming roots retain these optional window results.

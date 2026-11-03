@@ -927,7 +927,7 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
     mean log odds over its records), with the number of contributing samples. ``members`` are
     ordered by sample.
 
-    Release 3.5 (speed only): each site keeps its contributing samples' terms contiguously, and only those enter the
+    Each site keeps its contributing samples' terms contiguously, and only those enter the
     site's exact sum. A sample without weight at a site adds an exact +0, which leaves the correctly rounded sum
     unchanged (up to the sign of a zero total, which the logistic maps to 1/2 either way). One partials buffer
     serves every site, and no members x sites matrix is allocated."""
@@ -985,7 +985,7 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
 )
 def _sample_support(ordered, sample_indices, weights):
     """(distinct samples, each sample's capped support min(1, running sum of its records' weights) in member
-    order). ``ordered`` is sorted by sample, so each sample is one run (release 3.5: the per-record Python loop of
+    order). ``ordered`` is sorted by sample, so each sample is one run (the per-record loop of
     soft_candidates, same arithmetic in the same order)."""
     support = np.empty(ordered.shape[0], dtype=np.float64)
     count = 0
@@ -1267,7 +1267,7 @@ def soft_candidates(
     prepared = []
     consensus_by_members: dict[tuple, tuple] = {}
     # Members ordered by (sample, subtracted row, record index): the rank of every record in that total order,
-    # computed once (release 3.5; the same order as sorting each source by that key).
+    # computed once (the same order as sorting each source by that key).
     record_rank = np.empty(n_records, dtype=np.int64)
     record_rank[np.lexsort((np.arange(n_records), subtracted, sample_indices))] = np.arange(n_records)
     for source_index, members in enumerate(sources):

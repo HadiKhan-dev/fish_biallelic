@@ -9,47 +9,11 @@ EMPTY_COMPONENT_BIN_SITES-site bins over its panel positions.
 
 from __future__ import annotations
 
-from typing import NamedTuple
-
 import numpy as np
 
+from ...contracts.painting import PaintedChunk, coalesce_chunks
 from .diagnostics import DecisionTrace, PhaseTrace
 from .parameters import EMPTY_COMPONENT_BIN_SITES
-
-
-class PaintedChunk(NamedTuple):
-    start: int
-    end: int
-    labels: tuple[int, int]
-    members: tuple[tuple[int, ...], tuple[int, ...]]
-
-
-def _chunks(self, sample: int) -> list[PaintedChunk]:
-    """Released chunks of one sample: consecutive bins with equal (label, class,
-    status, members) on both tracks coalesce; ineligible samples have none."""
-    if not self.eligible[sample] or len(self.bins.starts) == 0:
-        return []
-    labels = self.labels[sample]
-    classes = self.classes[sample]
-    status = self.status[sample]
-    members = self.member_ids[sample]
-    n_bins = labels.shape[1]
-    changed = np.zeros(n_bins, dtype=np.bool_)
-    changed[0] = True
-    for grid in (labels, classes, status, members):
-        changed[1:] |= (grid[0, 1:] != grid[0, :-1]) | (grid[1, 1:] != grid[1, :-1])
-    starts = np.flatnonzero(changed)
-    stops = np.r_[starts[1:], n_bins]
-    edges = self.bins.edges
-    return [
-        PaintedChunk(
-            int(edges[start]),
-            int(edges[stop]),
-            (int(labels[0, start]), int(labels[1, start])),
-            (self.member_sets[members[0, start]], self.member_sets[members[1, start]]),
-        )
-        for start, stop in zip(starts, stops, strict=False)
-    ]
 
 
 def component_bin_edges(painted, panel_positions):
@@ -111,7 +75,18 @@ def tie_boundaries(painting, positions, samples, *, trace=False, audit=None):
         n_classes = len(classes)
         class_of = {int(row): index for index, members in enumerate(classes) for row in members}
         for sample, boundaries in found.items():
-            chunks = _chunks(painted, sample)
+            chunks = (
+                coalesce_chunks(
+                    painted.bins.edges,
+                    painted.labels[sample],
+                    painted.classes[sample],
+                    painted.status[sample],
+                    painted.member_ids[sample],
+                    painted.member_sets,
+                )
+                if painted.eligible[sample]
+                else []
+            )
             for left, right in zip(chunks[:-1], chunks[1:], strict=False):
                 b = int(np.searchsorted(edges, right.start, side="right")) - 1
                 direct, crossed = (
@@ -146,6 +121,17 @@ def tie_boundaries(painting, positions, samples, *, trace=False, audit=None):
     return {sample: np.unique(np.asarray(values, dtype=np.int64)) for sample, values in found.items()}
 
 
+def tie_break_bins(painting, positions: np.ndarray, parents: np.ndarray, bin_edges: np.ndarray) -> tuple[set[int], ...]:
+    """Internal phase bins at painting ties, only for samples without a linked parent."""
+    ties = tie_boundaries(painting, positions, np.arange(len(parents)))
+    n_bins = len(bin_edges) - 1
+    result = []
+    for sample in range(len(parents)):
+        bins = {int(np.searchsorted(bin_edges, positions[index + 1], side="right") - 1) for index in ties[sample]}
+        result.append({b for b in bins if 0 < b < n_bins} if np.all(parents[sample] < 0) else set())
+    return tuple(result)
+
+
 def coverage(painting, positions, samples):
     """(coverage int64 [R, 2] site ranges [start, stop), offsets int64 [N + 1]): each sample's painted spans."""
     pos = np.asarray(positions, dtype=np.int64)
@@ -172,4 +158,4 @@ def coverage(painting, positions, samples):
     return np.asarray(ranges, dtype=np.int64).reshape(-1, 2), np.asarray(offsets, dtype=np.int64)
 
 
-__all__ = ["PaintedChunk", "component_bin_edges", "tie_boundaries", "coverage"]
+__all__ = ["PaintedChunk", "component_bin_edges", "tie_boundaries", "tie_break_bins", "coverage"]

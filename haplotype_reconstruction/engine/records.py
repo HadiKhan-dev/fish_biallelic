@@ -353,13 +353,6 @@ class RunRecorder:
             self.data["finished_utc"] = datetime.now(UTC).isoformat()
             if error is not None:
                 self.data["error"] = f"{type(error).__name__}: {error}"
-            if self.checkpoints and os.path.exists(os.path.join(self.checkpoints, "run.ckpt")):
-                from ..store.container import CheckpointFile
-
-                run = CheckpointFile(os.path.join(self.checkpoints, "run.ckpt"), kind="run")
-                self.data["checkpoint_identities"] = {
-                    key[len("identity/") :]: run.get(key) for key in run.keys("identity/")
-                }
             main = sum(row["exclusive_seconds"] for row in self.data["stages"] if row["thread"] == "main")
             self.data["unclassified_seconds"] = max(0.0, time.monotonic() - self.start - main)
             self._record_memory()

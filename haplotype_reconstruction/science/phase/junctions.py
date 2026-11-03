@@ -14,7 +14,7 @@ class JunctionInputs:
     """Borrow only the final labels, sources, emissions, pedigree and pin parameters."""
 
     X: np.ndarray = record_field("state", units="1", dtype="int64", stored=False)
-    V: np.ndarray = record_field("state", units="1", dtype="int64", stored=False)
+    V: np.ndarray = record_field("state", units="1", dtype="int8", stored=False)
     E: np.ndarray = record_field("evidence", units="nats", dtype="float64", stored=False)
     par: np.ndarray = record_field("call", units="1", dtype="int64", stored=False)
     config: PhaseParameters = record_field("state", units="1", dtype="PhaseParameters", stored=False)

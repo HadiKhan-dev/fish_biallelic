@@ -7,23 +7,32 @@ no files, runtime configuration, clocks or live resource admission occur here.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import ComponentRefinement, LevelSummary
-from haplotype_reconstruction.contracts.panels import CountCall, CountStepDecision
+from haplotype_reconstruction.contracts.genetic_map import ChromosomeGeneticMap
+from haplotype_reconstruction.contracts.panels import CountCall, CountStepDecision, FounderComponent, PreparedPanel
 from haplotype_reconstruction.core import ties
 from haplotype_reconstruction.core.ties import TieCensus
 
 from .. import count_rule
 from .. import orders as tie_rules
+from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
 from .configuration import FounderRefinementConfig
 from .count import _terminal_family, count_pass
 from .fit import SweepEngine
 from .reductions import panel_objective
 from .work_limit import WindowWorkLimit
+
+if TYPE_CHECKING:
+    from haplotype_reconstruction.contracts.assembly import WindowDomain
+
+MacroContext = tuple[list[tuple[int, int]], list[NDArray[np.int64]]]
 
 
 @dataclass(frozen=True)
@@ -34,7 +43,7 @@ class RefinementSettings:
     additions: bool
     count_rule: count_rule.CountRuleConfig
     level: int = 0
-    genetic_map: object = None
+    genetic_map: ChromosomeGeneticMap | None = None
     reverse: bool = False
     census: Callable[[TieCensus], None] | None = field(
         default=None, repr=False, compare=False, metadata={"stored": False}
@@ -220,11 +229,20 @@ def _count_call(refinement: ComponentRefinement) -> CountCall:
 
 
 def refine_component(
-    number, component, panels, evidence, context, settings, budget, fit_records, incoming=(), *, workspace
-):
+    number: int,
+    component: FounderComponent,
+    panels: Sequence[PreparedPanel],
+    context: MacroContext | None,
+    settings: RefinementSettings,
+    budget: RefinementExecution,
+    fit_records: RefinementRecords | None,
+    incoming: Sequence[Mapping[str, Any]] = (),
+    *,
+    workspace: ComponentWorkspaceView | None,
+) -> tuple[FounderComponent, ComponentRefinement]:
     """Refine one component (the converged fit of its incoming panel and its count pass).
 
-    panels: its prepared panels; evidence: its float32 (S, L_c, 3) evidence; context: its L1
+    panels: its prepared panels; workspace supplies its float32 (S, L_c, 3) evidence; context: its L1
     context (macro_context); fit_records: its fit-state scope or None. Returns (refined
     FounderComponent with its count call, ComponentRefinement). The refined founders are in
     canonical order (rows sorted lexicographically, design 5.1)."""
@@ -251,7 +269,7 @@ def refine_component(
     # The component's set-up kernels run on its whole share (also in a pool worker).
     with budget.scope(max(1, int(budget.threads()))):
         engine = SweepEngine(
-            workspace,
+            cast(ComponentWorkspaceView, workspace),
             context,
             settings.config,
             fit_records,
@@ -266,7 +284,11 @@ def refine_component(
     # S = the component's informative samples: founder-excluded (uniform) samples and samples
     # without evidence at a complete site score exactly 0 for every panel.
     cost = float(
-        count_rule.founder_cost([panel.sites for panel in panels], workspace.count_sample_count, settings.cost_scale)
+        count_rule.founder_cost(
+            [panel.sites for panel in panels],
+            cast(ComponentWorkspaceView, workspace).count_sample_count,
+            settings.cost_scale,
+        )
     )
     # Deterministic bootstrap streams per component and decision (positions, size).
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks), int(founders)]
@@ -284,15 +306,15 @@ def refine_component(
                 seed_key,
                 settings.additions,
                 counter=counter,
-                census_prefix=census_prefix,
                 alternative_starts=alternative_starts,
             )
     except WindowWorkLimit:
         # No interrupted direction, count fit or replay may enter a
         # scientific comparison. Preserve the complete original component/families.
         stop = engine.windows.work.stop_record()
+        domains: tuple[WindowDomain, ...] | tuple[dict[str, Any], ...]
         domains, work = (stop.domain,), stop.work
-        domains = tuple(asdict(domain) for domain in domains)
+        domains = tuple(asdict(cast("WindowDomain", domain)) for domain in domains)
         work = asdict(work)
         window_seconds = 0.0
         family = dict(
@@ -317,7 +339,7 @@ def refine_component(
             window_stop=stop,
             founders_before=int(founders),
             founders=int(founders),
-            bin_size=int(workspace.bin_size),
+            bin_size=int(cast(ComponentWorkspaceView, workspace).bin_size),
             coarse_units=engine.windows.coarse_units,
             cost=cost,
             elapsed_seconds=0.0 - started,
@@ -333,7 +355,7 @@ def refine_component(
         return replace(component, count_call=_count_call(refinement)), refinement
     count_seconds = 0.0 - count_started
     polish_seconds = 0.0
-    polish = dict(status="off")
+    polish: dict[str, Any] = dict(status="off")
     stop = None
     if engine.beam is not None:
         polish_started = 0.0
@@ -360,10 +382,10 @@ def refine_component(
         reason=None,
         founders_before=int(founders),
         founders=int(len(rows)),
-        F0=float(result.input_F0),
+        F0=float(cast(float, result.input_F0)),
         F=float(result.F),
         changed_local_rows=int(np.count_nonzero(rows != start_rows)) if same_shape else None,
-        bin_size=int(workspace.bin_size),
+        bin_size=int(cast(ComponentWorkspaceView, workspace).bin_size),
         coarse_units=engine.windows.coarse_units,
         cost=cost,
         decisions=result.decisions,

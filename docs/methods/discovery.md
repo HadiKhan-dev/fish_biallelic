@@ -284,7 +284,7 @@ Cost and scope: Linear in accumulated search diagnostics; omission lists can gro
 <a id="di26"></a>
 ## di26 Raw allele release rule
 
-Evaluate raw allele evidence and favourable carrier support, then apply the named posterior and support gates. The zero-contribution boundary uses its declared tie band; the release probability gate remains its continuous comparison. Withheld alleles remain unknown rather than adopting the latent fit.
+Evaluate raw allele evidence and informative carrier support in either direction, then apply the named pseudo-probability and minimum-support gates. Each sample counts at most once per founder/site when its absolute capped contribution exceeds the cell band, whether it favours REF or ALT; its signed contribution still enters the pseudo-odds. Selection’s favourable-carrier statistic is a separate rule. The zero-contribution boundary uses its declared tie band; the release probability gate remains its continuous comparison. Withheld alleles remain unknown rather than adopting the latent fit.
 
 Implementation: [science/discovery/api.py](../../haplotype_reconstruction/science/discovery/api.py), [science/discovery/release.py](../../haplotype_reconstruction/science/discovery/release.py).
 

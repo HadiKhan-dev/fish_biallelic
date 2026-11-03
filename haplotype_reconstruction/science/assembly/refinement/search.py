@@ -14,7 +14,6 @@ switch costs; its partial edits and trace are discarded before the guarded retry
 from __future__ import annotations
 
 import numpy as np
-from numba.typed import List
 
 from haplotype_reconstruction.contracts.assembly import (
     AcceptanceCounters,
@@ -35,37 +34,9 @@ from .parameters import EXACT_GAIN_ABSOLUTE, EXACT_GAIN_RELATIVE, PAIR_TABLE_BYT
 from .proposals import WindowSolver
 from .reductions import panel_objective
 from .work_limit import WindowWorkLimit
-from .workspace import sample_ranges
+from .workspace import Orientation, sample_ranges
 
 __all__ = ["sweep", "Orientation"]
-
-
-class Orientation:
-    """View coded leaves and offsets in one pass direction, retaining forward evidence.
-
-    Reverse creates an int16[R_b,L_b] leaf copy and int64[B+1] offsets. haps returns
-    a private int16[K,L] materialisation; window returns a workspace-owned view.
-    """
-
-    def __init__(self, workspace: SweepWorkspaceView, reverse: bool):
-        sites = int(workspace.offsets[-1])
-        self.reverse = reverse
-        self.workspace = workspace
-        if reverse:
-            self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
-            self.leaves = List([np.ascontiguousarray(leaf[:, ::-1]) for leaf in list(workspace.leaves)[::-1]])
-        else:
-            self.offsets = np.ascontiguousarray(workspace.offsets, np.int64)
-            self.leaves = workspace.leaves
-        self.blocks = len(self.offsets) - 1
-
-    def haps(self, panel):
-        """Return private int16[K,L] coded alleles of int64[K,B] oriented founder rows."""
-        return selected_alleles(self.leaves, self.offsets, np.ascontiguousarray(panel, np.int64))
-
-    def window(self, founders):
-        """Read K's evidence/cost capability; its view lifetime is the workspace lease."""
-        return self.workspace.windows.view(founders, self.reverse)
 
 
 def _scores(rows, workspace, team):

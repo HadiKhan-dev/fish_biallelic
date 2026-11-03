@@ -22,12 +22,13 @@ per component), so results do not depend on the thread count.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import numpy as np
 from numba import prange, types
 from numba.typed import List
+from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment
 
 from ..core.errors import InputError
@@ -375,8 +376,14 @@ def _compare_counts(counts, missing, represented_counts, sites, order=None):
 
 
 def evaluate_founders(
-    panels: Sequence[tuple[np.ndarray, np.ndarray]], positions, truth, represented, *, contig: str, stage: str
-):
+    panels: Sequence[tuple[np.ndarray, np.ndarray]],
+    positions: NDArray[np.int64],
+    truth: NDArray[np.int8],
+    represented: NDArray[np.bool_],
+    *,
+    contig: str,
+    stage: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Compare one stage's founder panels of a chromosome with the true founder haplotypes.
 
     ``panels``: (positions int64 [L_c], calls int8 [K_c, L_c]) per component/block in the stage's order;
@@ -392,7 +399,7 @@ def evaluate_founders(
     calls_list, indices, spans = [], [], []
     if len(truth) == 0:
         raise InputError("founder truth must not be empty")
-    if truth.min() < 0 or truth.max() > 1:
+    if cast(Callable[[], np.int8], truth.min)() < 0 or cast(Callable[[], np.int8], truth.max)() > 1:
         raise InputError("require -1/0/1 calls and complete 0/1 founder truth")
     if represented.shape != truth.shape:
         raise InputError("ancestry representation mask has the wrong axes")

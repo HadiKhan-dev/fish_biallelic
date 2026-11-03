@@ -421,8 +421,8 @@ def _distinguishable(
 
     Different calls (0, 1 or uncalled = -1; BACKGROUND is uncalled everywhere) differ. Equal calls give equal laws,
     except where both are uncalled and exactly one of the two classes is the partner's own class: two
-    tracks in one class share one latent allele (no heterozygote), two different classes do not (release 2.14; the
-    interval used to treat every equal call, -1 included, as interchangeable)."""
+    tracks in one class share one latent allele (no heterozygote), whereas different classes have independent
+    latent alleles."""
     first_shared = first == partner and first < n_classes
     second_shared = second == partner and second < n_classes
     for site in range(bin_starts[bin_index], bin_stops[bin_index]):

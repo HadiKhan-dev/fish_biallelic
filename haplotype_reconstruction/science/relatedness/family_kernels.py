@@ -11,6 +11,7 @@ import numba
 import numpy as np
 
 from ...core.kernels import kernel
+from .pair_index import pair_indices
 from .parameters import LOG_ZERO, SCALE_EXPONENT, SCREEN_FLOOR, SCREEN_SITE_TILE
 
 _b1C = numba.types.Array(numba.boolean, 1, "C", readonly=False)
@@ -173,33 +174,6 @@ def slot_gains(S_f, Au, logpost, allowed, out):
     M = S_f.shape[0]
     for p in numba.prange(logpost.shape[0]):
         out[p] = family_loglik(S_f, S_f, 0.0, Au, logpost[p], 0, M) if allowed[p] else np.nan
-
-
-@kernel(
-    overloads=(
-        (
-            numba.int64,
-            numba.int64,
-            numba.int64,
-        ),
-    ),
-    cache=True,
-)
-def pair_indices(n, lo, hi):
-    """Unordered sample pairs [lo, hi) in row-major upper-triangle order, without triu temporaries."""
-    out = np.empty((hi - lo, 2), dtype=np.int64)
-    f, offset = 0, 0
-    while f < n - 1 and offset + n - f - 1 <= lo:
-        offset += n - f - 1
-        f += 1
-    g = f + 1 + lo - offset
-    for t in range(hi - lo):
-        out[t, 0], out[t, 1] = f, g
-        g += 1
-        if g == n:
-            f += 1
-            g = f + 1
-    return out
 
 
 @kernel(

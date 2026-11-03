@@ -1,10 +1,9 @@
-"""Per-chromosome screen (M0 + all-pairs M1) and score (M2 for the fixed panel, exposure, junctions).
+"""Per-chromosome M2 scoring, exposure and junction evidence for the fixed panel.
 
-The screen and the score of a chromosome share each component's exact source pair masses,
-projection and child terms: a chromosome worker keeps them resident across the genome-wide panel barrier (they
-are rebuilt from the prepared record only after an interruption). The score phase reuses the
-screen's M0/M1 values, so both phases agree exactly. A chromosome's evidence is the sum over its
-components (in component order).
+Scoring reconstructs resident projections and M0 after the selective screen. Its
+component scratch scores contain raw M1 only for fallback dyads where one parent
+is unavailable; the published M1 profile is supplied separately. Chromosome
+scores sum components in their prepared order.
 
 Method: docs/methods/pedigree.md#ragged-quadratic-scoring-of-m0-m1-and-m2
 PE1–PE3 preserve this 3.5 method.
@@ -25,10 +24,10 @@ from .resident import ResidentComponent, resident
 
 @dataclass(frozen=True)
 class ComponentScreen:
-    """Pooled M0 and all-pairs M1 composite log likelihoods of one component.
+    """M0 and partial fallback raw M1 composite log likelihoods of one component.
 
     zero: float64 [N], -inf for samples that are not eligible children.
-    one:  float64 [N, N] [child, parent], -inf off the eligible edges (and on the diagonal).
+    one:  float64 [N, N] [child, parent], -inf except for the scored fallback dyads.
     """
 
     zero: np.ndarray
@@ -37,15 +36,9 @@ class ComponentScreen:
 
 @dataclass(frozen=True)
 class ChromosomeScreen:
-    """Screen of one informative contig (record ``pedigree/screen``); components as prepared."""
+    """Transient component scratch scores for the fixed-panel scorer, in prepared order."""
 
-    contig: str
     components: tuple[ComponentScreen, ...]
-    informative_markers: int
-
-    def pair_scores(self) -> np.ndarray:
-        """float64 [N, N]: the contig's M1 screen, the sum over its components."""
-        return np.sum(np.stack([component.one for component in self.components]), axis=0)
 
 
 def interval_morgans(component, interval_cap: float) -> np.ndarray:
@@ -72,7 +65,9 @@ def score_chromosome(
     one_values=None,
     reverse: bool | None = None,
 ) -> ChromosomeScores:
-    """M2, exposure and junction evidence for the panel ``trios``; M0/M1 from ``screen``."""
+    """M2, exposure and junction evidence for ``trios``; M0 and fallback M1 from ``screen``.
+
+    ``one_values`` supplies the fixed chromosome M1 profile for publication."""
     reverse = config.reverse_conventions if reverse is None else reverse
     required = eligibility.parents | eligibility.parents.T
     np.fill_diagonal(required, True)
@@ -203,7 +198,7 @@ def score_chromosome_selective(
                 del products, powered
         screens.append(ComponentScreen(zero, partial))
         states.append(state)
-    screen = ChromosomeScreen(prepared.contig, tuple(screens), prepared.informative_markers)
+    screen = ChromosomeScreen(tuple(screens))
     return score_chromosome(
         prepared, screen, states, trios, eligibility, config, claim_threads, one_values=one, reverse=reverse
     )

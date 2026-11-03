@@ -13,7 +13,7 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import numpy as np
 
@@ -32,6 +32,7 @@ from ...science.assembly.run import AssemblyResult
 from ...science.discovery.parameters import DiscoveryParameters
 from ...science.selection.context_refit import (
     ContextRefitTask,
+    RefitFinished,
     finish_component,
     refit_component,
     refit_task_bytes,
@@ -79,9 +80,6 @@ def live_share(interval: float = SHARE_REREAD_SECONDS) -> Callable[[], int]:
         return share[0]
 
     return read
-
-
-RefitFinished = tuple[int, list[ContextProposal], int, int, int, int, dict[str, int]]
 
 
 class FounderEvidence(Protocol):
@@ -361,11 +359,11 @@ def _gather_context(
         changes += changed
         fills += filled
         sites += length
-        half += report["half_band_sites"]
-        support += report["support_band_sites"]
+        half += cast(int, report["half_band_sites"])
+        support += cast(int, report["support_band_sites"])
         max_founders = max(max_founders, founders)
         for key in totals:
-            totals[key] += int(report[key])
+            totals[key] += int(cast(int, report[key]))
         for member, proposal in zip(specs[index].members, finished, strict=True):
             proposals[member] = proposal
     ties = {

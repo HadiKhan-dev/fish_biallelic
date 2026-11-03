@@ -33,10 +33,10 @@ from ...core.numerics import weighted_chromosome_sum
 from . import alternatives as alternatives_module
 from . import family, graph
 from .alternatives import Alternatives, softmax_finite
+from .kernels.signatures import OVERLOADS
 from .orientation import Orientation
 from .orientation import fit as fit_orientation
 from .parameters import ExposureConfig, PedigreeConfig
-from .signatures import OVERLOADS
 from .ties import magnitude, unique_finite_winner
 
 __all__ = ["map_units", "testable", "fit_scores", "select", "fit", "build_exposure"]
@@ -93,7 +93,7 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig
     total_bins = float(weighted_chromosome_sum(weights, exposure.total_bins))
     edge_fraction = np.divide(edge_exposed, total_bins, out=np.zeros_like(edge_exposed), where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed), where=total_bins > 0.0)
-    # Release 3.2: exposed chromosomes count by their map units (a short chromosome once), not one each.
+    # Exposed chromosomes count by their map units (a short chromosome once), not one each.
     weights = np.ascontiguousarray(weights, dtype=np.float64)
     edge_units = _units_present(exposure.edge_present, weights, exposure.edge_units)
     pair_units = _units_present(exposure.pair_present, weights, exposure.pair_units)
@@ -125,7 +125,11 @@ def fit_scores(
     config: PedigreeConfig,
     trace: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(state scores, identity scores) [A] of one weighted fit, family terms included."""
+    """(state scores, identity scores) [A] of one weighted fit, family terms included.
+
+    The chromosome fold multiplies every row, including zero weights; IEEE nonfinite
+    propagation differs from the panel-admission fold that omits zero-weight rows.
+    """
     alternatives = inputs.alternatives
     aggregate = alternatives_module.mix_m0(
         weighted_chromosome_sum(weights, alternatives.log_likelihoods),

@@ -9,6 +9,7 @@ nothing and creates no files. The only registry is this small kernel inventory.
 from __future__ import annotations
 
 import base64
+import os
 import pickle
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -102,14 +103,33 @@ def sample_team(samples: int, share: int) -> int:
     return max(1, min(int(share), int(samples) // SAMPLES_PER_THREAD))
 
 
+def _writable_directory(directory: str) -> bool:
+    """Whether ``directory`` exists or can be created, and can be written (as Numba's own cache locator requires)."""
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(directory, os.W_OK | os.X_OK)
+
+
 def enable_caches() -> tuple[str, ...]:
     """Activate requested disk caches explicitly, after runtime chooses its namespace.
 
     The engine calls this before warm-up or task execution, after importing kernels.
     A newly imported kernel is picked up on the next call. No compilation is forced.
     Unavailable disk caches leave dispatch lazy and return their names for the
-    runtime diagnostic; other kernels can still use their caches.
+    runtime diagnostic; other kernels can still use their caches. A configured
+    cache directory (NUMBA_CACHE_DIR) that cannot be created or written leaves every
+    kernel lazy: Numba would otherwise fall back to a cache beside the source, inside
+    the installed package.
     """
+    directory = getattr(numba.config, "CACHE_DIR", "")
+    if directory and not _writable_directory(directory):
+        return tuple(
+            f"{entry.module}.{entry.function}"
+            for entry in declarations()
+            if entry.cache and entry.dispatcher not in _CACHED_DISPATCHERS
+        )
     failures = []
     for declaration in declarations():
         if declaration.cache and declaration.dispatcher not in _CACHED_DISPATCHERS:

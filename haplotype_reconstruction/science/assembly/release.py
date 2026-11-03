@@ -9,18 +9,38 @@ Method: docs/methods/assembly.md#release; WP_AS6 §4.7 and WP_OU1 §5.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from functools import cache
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import (
     FounderIdentityFlag,
     FounderRelease,
+    ReleaseAxes,
     ReleaseFamily,
     ReleaseSegment,
 )
-from haplotype_reconstruction.contracts.panels import partner_changes
+from haplotype_reconstruction.contracts.panels import FounderComponent, partner_changes
 from haplotype_reconstruction.core.errors import InvariantError
+
+if TYPE_CHECKING:
+    from typing import TypedDict
+
+    class _ReleaseSegmentMetadata(TypedDict):
+        source_component: int
+        segment_index: int
+        block_start: int
+        block_stop: int
+        source_founder_rows: tuple[int, ...]
+        ambiguity: tuple[Mapping[str, Any], ...]
+        continuation_unverified: tuple[Mapping[str, Any], ...]
+        count_unverified: tuple[Mapping[str, Any], ...]
+        withheld_ambiguous_alleles: int
+        r5_withheld_rows: tuple[int, ...]
+
 
 # Contract statuses, P0 U16 assembly/release.py. These are not tuning parameters.
 COUNT_UNVERIFIED = "count_unverified"
@@ -389,22 +409,25 @@ def _terminal_shared_rows(paths, panel, lo, hi):
 
 
 def release_founders(
-    component_panels,
-    panels,
-    alternatives,
+    component_panels: Sequence[ReleaseAxes],
+    panels: Sequence[tuple[NDArray[np.int64], NDArray[np.int8]]],
+    alternatives: Sequence[ReleaseFamily | Mapping[str, Any]] | None,
     *,
-    unobserved_masks=None,
-    nominal_components=None,
-    prepared_alleles=None,
-    identity_paths=(),
-    refit_ambiguous_alleles=0,
-):
+    unobserved_masks: Sequence[NDArray[np.bool_]] | None = None,
+    nominal_components: Sequence[FounderComponent] | None = None,
+    prepared_alleles: Sequence[NDArray[np.int8]] | None = None,
+    identity_paths: Sequence[tuple[int, NDArray[np.int64], NDArray[np.int64], NDArray[np.int32]]] = (),
+    refit_ambiguous_alleles: int = 0,
+) -> FounderRelease:
     """Slice already carrier-masked painted/refit panels at final assembly ambiguity.
 
     ``component_panels`` supplies painted rows and atomic offsets; ``panels`` supplies the
     same axes after existing export masks. Withheld counts use the original carrier masks.
     The returned segment metadata includes rows on which r5 filling must remain disabled.
     """
+    metadata: list[dict[str, Any]]
+    nominal: ReleaseAxes | FounderComponent | NDArray[np.int32]
+    paths: tuple[np.ndarray, ...] | np.ndarray
     released, counts, metadata = [], [], []
     total_breaks = total_hidden = 0
     unverified_sources = set()
@@ -415,6 +438,7 @@ def release_founders(
         offsets = np.append(np.asarray(panel.atomic_offsets, dtype=np.int64), len(positions))
         cuts = {panel.start, panel.stop}
         hidden = np.zeros(calls.shape, dtype=bool)
+        details: list[dict[str, Any]]
         details, verification, continuation = [], [], []
         # r5 rows are disabled where a local row's content/correspondence was withheld.
         blocked = np.zeros((len(calls), panel.stop - panel.start), dtype=bool)
@@ -562,7 +586,7 @@ def release_founders(
                     # Family-local protection precedes the union: no independent
                     # family, carrier mask or r5 veto can be cleared. Missing source
                     # alleles still cannot authorize a downstream refit fill.
-                    source_calls = np.asarray(prepared_alleles[block], dtype=np.int8)
+                    source_calls = np.asarray(cast(Sequence[NDArray[np.int8]], prepared_alleles)[block], dtype=np.int8)
                     mask[shared_rows] = source_calls[nominal[shared_rows]] < 0
                 blocked[:, block - panel.start] |= np.any(mask, axis=1)
                 hidden[:, a:b] |= mask
@@ -662,19 +686,22 @@ def release_founders(
         ReleaseSegment(
             positions=position,
             calls=call,
-            **{
-                key: tuple(value)
-                if key
-                in (
-                    "source_founder_rows",
-                    "ambiguity",
-                    CONTINUATION_UNVERIFIED,
-                    COUNT_UNVERIFIED,
-                    "r5_withheld_rows",
-                )
-                else value
-                for key, value in meta.items()
-            },
+            **cast(
+                "_ReleaseSegmentMetadata",
+                {
+                    key: tuple(value)
+                    if key
+                    in (
+                        "source_founder_rows",
+                        "ambiguity",
+                        CONTINUATION_UNVERIFIED,
+                        COUNT_UNVERIFIED,
+                        "r5_withheld_rows",
+                    )
+                    else value
+                    for key, value in meta.items()
+                },
+            ),
             first_position=int(position[0]),
             last_position=int(position[-1]),
             markers=len(position),
@@ -711,7 +738,10 @@ def release_founders(
     )
 
 
-def withhold_unobserved(panels, carrier_seen):
+def withhold_unobserved(
+    panels: Sequence[tuple[NDArray[np.int64], NDArray[np.int8]]],
+    carrier_seen: Sequence[NDArray[np.bool_]],
+) -> tuple[tuple[tuple[NDArray[np.int64], NDArray[np.int8]], ...], tuple[int, ...], tuple[NDArray[np.bool_], ...]]:
     """Apply OU03 to already aligned PA2 carrier-observation masks.
 
     panels contain (int64 positions[L], int8 calls[K,L]); carrier_seen contains

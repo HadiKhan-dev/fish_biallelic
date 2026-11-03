@@ -11,7 +11,7 @@ configuration; genetic scoring and the parent-count priors are unchanged.
    both focal parents are excluded, omitted panel mass is neutral (truncation only weakens it).
 The path factor is prepared from four synchronous passes, then frozen while a converged final
 reciprocal solve replaces the preparatory reciprocal term. Every edge's direction is inferred: no
-edge is exempt from the three terms (release 3.4: no design chronology from sample metadata).
+edge is exempt from the three terms; sample metadata supplies no design chronology.
 
 Method: docs/methods/pedigree.md#converged-final-reciprocal-solve
 PE1–PE3 preserve this 3.5 method.
@@ -55,9 +55,9 @@ class FamilyMessageNonConvergence(FloatingPointError):
         self.diagnostics = diagnostics
 
 
-# Parallel layout (release 3.4, PEDFAST): every kernel below is parallel over independent children, parents or
-# rows, and each output element is computed by the same operations in the same order as the serial kernels of 3.3
-# (no floating-point reduction is split across threads: the residual's maximum is folded serially), so the results do
+# Parallel layout: every kernel below is parallel over independent children, parents or
+# rows. Each output element follows its serial operation order; no floating-point reduction is split across
+# threads, and the residual's maximum is folded serially, so the results do
 # not depend on the thread count. Work is dealt to threads in interleaved lanes (item = lane, lane + lanes, ...) so
 # that children with many configuration rows spread over the team.
 # Read the current thread count at each Python entry after claiming the CPU share. Passing it into
@@ -212,8 +212,8 @@ def _child_cavity(
     messages,
 ):
     """One child's row of a final-solve iteration: _with_incoming, _child_log_odds and the cavity update of
-    _cavity_iterations fused (release 3.5). Every value is computed by the same operations in the same order as
-    there: the child's adjusted row values are computed once and reused by every scan, and the best row's two
+    _cavity_iterations fused. The arithmetic follows each row's slot order: adjusted row values are computed
+    once and reused by every scan, and the best row's two
     parents share one pair of exclusion scans (each parent's own maximum and sum, over the rows in order).
     Writes messages[child] and returns the row's residual (the maximum of its changes) and whether a change is NaN.
     """
@@ -371,10 +371,10 @@ def _cavity_iterations(
     odds), 2 = paused, 0 = ``stop`` reached (the messages are the damped state to continue from). ``history`` (the
     pause rule's residual ring) is updated in place. ``previous`` is read, never written.
 
-    Release 3.5: one fused parallel pass per iteration (_child_cavity) and reused buffers; the values are those of
-    the 3.4 iteration (_with_incoming, _family_log_odds, then the cavity update): each element by the same
-    operations in the same order. The residual is a maximum of non-negative changes, which any grouping returns
-    exactly; when a change is NaN it is refolded serially in the 3.3 order, whose NaN handling depends on order.
+    Each iteration fuses incoming-message adjustment, family log odds and the cavity update in one parallel
+    pass (_child_cavity), reusing buffers. The residual is a maximum of non-negative changes, which any grouping
+    returns exactly; a NaN change triggers a serial fold in child/parent slot order because NaN handling depends
+    on order.
     """
     starts = np.searchsorted(rows[:, 0], np.arange(samples + 1))
     widest = 0
@@ -417,7 +417,7 @@ def _cavity_iterations(
             )
         residual = 0.0
         if np.any(row_undefined):
-            # The 3.3 serial fold over the changes, recomputed from the same operands.
+            # Fold changes in child/parent slot order, recomputing from the same operands.
             for child in range(samples):
                 for parent in range(samples):
                     residual = max(residual, abs(messages[child, parent] - current[child, parent]))

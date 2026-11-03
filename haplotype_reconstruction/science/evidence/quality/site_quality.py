@@ -147,7 +147,6 @@ from .parameters import (
     SITE_SITE_TILE_CELLS as _SITE_TILE_CELLS,
 )
 
-VERSION = "self-calibrated-site-quality-v4"
 RULES = ("r1", "r2", "r3", "r4", "r5")
 QUALITY_RULES = RULES[:4]
 
@@ -634,7 +633,7 @@ def _chunk_totals(rows):
     return total
 
 
-def _negative_binomial_objective(q, W, lam, kap, w, weight_total):
+def _negative_binomial_objective(q, W, lam, kap, w):
     """Weighted artefact log likelihood of r3 at q = (log eps1, log k), its gradient and Hessian."""
     total = _chunk_totals(_negative_binomial_terms(W, lam, kap, w, math.exp(q[0]), math.exp(q[1])))
     return (total[0], total[1:3], np.array([[total[3], total[5]], [total[5], total[4]]]))
@@ -762,7 +761,7 @@ def _error_mixture(W, lam, kap, evaluate):
         if wa.sum() > ERROR_MIXTURE_WEIGHT_FLOOR:
             weight = float(wa.sum())
             q, status, gradient = _newton_maximum(
-                lambda q, wa=wa, weight=weight: _negative_binomial_objective(q, W, lam, kap, wa, weight),
+                lambda q, wa=wa: _negative_binomial_objective(q, W, lam, kap, wa),
                 [np.log(e1), np.log(k)],
                 _ERROR_LOWER,
                 _ERROR_UPPER,

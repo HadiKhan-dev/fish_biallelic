@@ -124,14 +124,14 @@ class Recombination:
     crossovers float64 [n, 5] (left bp, right bp, released-homologue support left/right, assembly component: changes
     of parental homologue between the centres of consecutive released chain bins; even crossovers within one
     interval are not identifiable) with reported_intervals int64 [n, 2] (both bins, inclusive bp) and
-    in_reversed_segment bool [n]; callable_spans float64 [m, 3] and informative_spans float64 [k, 3] (the followed
+    in_reversed_segment bool [n]; callable_spans float64 [m, 3] (the followed
     stretches between released chain bins, as (left bp, right bp, component)); marker_counts int64 [E, 3] (released
     chain bins, bins of followed stretches, of them without a released homologue); expected_crossovers / exposure
     float64 [E, B] per map bin (working expected crossovers: Haldane interpolations conditional on the called
     endpoint states of the released chain bins, not posterior means; followed meiosis-bp).
     """
 
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
     contig: str = record_field("obs", axes=(), units="1", dtype="str")
     sample_ids: tuple[str, ...] = record_field("obs", axes=("N",), units="1", dtype="str")
     edge_parent: NDArray[np.int64] = record_field("call", axes=("E",), units="1", dtype="int64")
@@ -145,8 +145,6 @@ class Recombination:
     in_reversed_segment: NDArray[np.bool_] = record_field("call", axes=("Q",), units="1", dtype="bool")
     callable_offsets: NDArray[np.int64] = record_field("call", axes=("E+1",), units="1", dtype="int64")
     callable_spans: NDArray[np.float64] = record_field("call", axes=("R", "3"), units="bp,bp,index", dtype="float64")
-    informative_offsets: NDArray[np.int64] = record_field("call", axes=("E+1",), units="1", dtype="int64")
-    informative_spans: NDArray[np.float64] = record_field("call", axes=("M", "3"), units="bp,bp,index", dtype="float64")
     marker_counts: NDArray[np.int64] = record_field("report", axes=("E", "3"), units="1", dtype="int64")
     expected_crossovers: NDArray[np.float64] = record_field("report", axes=("E", "Bm"), units="1", dtype="float64")
     exposure: NDArray[np.float64] = record_field("report", axes=("E", "Bm"), units="meiosis-bp", dtype="float64")
@@ -165,9 +163,6 @@ class Recombination:
 
     def edge_callable_spans(self, edge: int) -> NDArray[np.float64]:
         return self.callable_spans[self.callable_offsets[edge] : self.callable_offsets[edge + 1]]
-
-    def edge_informative_spans(self, edge: int) -> NDArray[np.float64]:
-        return self.informative_spans[self.informative_offsets[edge] : self.informative_offsets[edge + 1]]
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)

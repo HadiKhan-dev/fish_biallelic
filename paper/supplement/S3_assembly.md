@@ -1,6 +1,6 @@
 # S3. Assembly, founder release and refinement
 
-Parenthesised identifiers are the software's method units; defaults are those of release 4.0 (none is a user setting). Notation: $T$ bins of a batch; $W$ units of a proposal window; $b_w$ surrogate bins of a window; $R$ the window's row-alphabet size.
+Parenthesised identifiers are the software's method units; defaults are those of release 4.3.0 (none is a user setting). Notation: $T$ bins of a batch; $W$ units of a proposal window; $b_w$ surrogate bins of a window; $R$ the window's row-alphabet size.
 
 ## Founder completion
 
@@ -52,7 +52,7 @@ Released fills publish the allele with posterior above 0.5.
 
 **Deaths and births (AJ21, AJ22).** Paths without novelty are deleted one by one, starting with the largest $\mathrm{LL}(\mathcal P\setminus f)$. Otherwise the best candidate is ranked by that value in wide tie classes, then by negative linkage, then by content, and is tested. A birth is scored only if it passes two necessary conditions on upper bounds $u_i\ge d_i\ge q_i$: the second-largest $u_i$ exceeds $c/(2\tilde N)$, and $\sum u-\max u>c/(2\tilde N)$. Survivors are scored exactly in decreasing bound order, until no bound can come within four quanta of the best accepted gain.
 
-**Duplicate seeds (AJ23; exemption 0b).** Pure-mosaic pool paths that pass the bound screen indicate a chimera trap. When $K\le$ `ranked_refits` (9), every path is a seed; otherwise the 27 strongest indicators by bound have their exact total gains tested, and the main coverers of passing indicators give up to nine seeds. Seeds are refitted concurrently by certified moves restricted to the seed and its copy, then settled (paths without novelty deleted, then a death test). A refit is accepted if it survives, is not smaller and raises LL (a seed swap if the size is unchanged).
+**Duplicate seeds (AJ23).** When ordinary births fail but a pure-mosaic pool path supplies a chimera indicator, every selected founder is duplicated in turn. Every seed is refitted by certified moves restricted to it and its copy, then settled (paths without novelty deleted, then a death test). A refit competes if it survives, is not smaller and raises LL; acceptance is a birth or a seed swap at unchanged count. Endpoint LL, its tie class and content order decide among survivors. Indicator and coverer ranks do not restrict seed admission.
 
 **Cycles (AJ24).** Born-path tags follow same-count edits; deleting a tagged path freezes births, and is marked undecided if ambiguous in a cycle that began with a decided deletion. Revisiting a canonical count state freezes births and seed swaps.
 
@@ -86,9 +86,7 @@ Exact ties prefer lower switch cost; a separate recursion counts switches (RS02)
 
 ## Refinement: count pass
 
-**Cleanup (RC14; retained accretion).** Before each deletion round, a founder is removed if its unrefitted deletion changes every informative score by at most $2^{-9}$; the panel is then refitted. Scores include $K$-dependent normalisers, so this rarely fires. It is not a general test of usage.
-
-**Rounds and shortlists (RC09–RC11; exemption 0b).** Deletion candidates are the founders without a private cell if any exist, otherwise all founders. Above nine candidates, deletions are ranked by $\min(m,m')$ of their exact unrefitted deletion, and addition seeds by copy best-response gain (RS13: duplicate the founder, solve fine windows for the copy, run one forward unguarded content pass). The top nine are kept with the cut's tie class, which is dropped if it would exceed 18 members unless it is the first class. The best-$F$ refit is decided. Additions stop at twice the incoming $K$.
+**Rounds and candidate refits (RC09–RC11).** Refit the incoming panel and run ordinary deletion rounds. Candidates are all founders without a private cell when any exist, otherwise all founders; every eligible candidate is refitted. At an addition-enabled level every founder is a duplicate seed, and every seed is refitted. Optimistic bounds may certify an entire round unneeded. Compare converged endpoint $F$ with the incumbent's scale, choose the content-smallest origin in its best tie class, then evaluate that class's verdicts. Deletion stops on the first rejection; additions stop on rejection or at twice the incoming $K$. Every refinement deletion uses the ordinary count rule.
 
 **Symmetric null and ties (RC12, RC13).** The death class is the top tie class of unrefitted $F(\mathcal P^+\setminus f)$, taken over founders without a private cell if any exist. Every member is evaluated with one bootstrap stream; disagreement or an unresolved member family yields $\mathcal P^-$ with ambiguity. Every member of the selected refit's tie class is also decided. Opposed verdicts keep the smaller-panel outcomes, which are ranked by margin, then by fewest switches.
 
@@ -121,7 +119,7 @@ Alleles that no painted carrier observes are withheld first. For each retained f
 |---|---|---|
 | Completion | $O(NLK^2)$ cross-fit; $O(NK^3)$ ball sites; $2^{10}$ cube | ≤ $K^3$ |
 | Linker | $O(NJK^2)$ scans ($J$ emission sites); $O(NK^3)$ propagation | ≤ $K^3$ |
-| Join search | $O(\tilde NT^2K^3)$ per structural query; query count quartic in $K$ on a finite grid | exception 0e (AJ17) |
-| Ranked refits and shadows | ≤ 9 refits; ≤ 2,048 shadow scores of $O(\tilde NTK^2)$ | exemption 0b |
+| Join search | Adaptive structural screen has a cubic analytic bound; direct query count has a quartic trend on a finite grid | cost register 0e (AJ17) |
+| Count refits and shadows | $O(K)$ fits, $O(NLK^3)$ per round; repeated deletion rounds $O(NLK^4)$ worst case; ≤2,048 shadow scores per member | Complete eligible candidate domain; other search factors separate |
 | Refinement search | $O(NLK^2)$ messages; $O(BNK^3)$ exchanges; window fixing bounded by the work account | exception 0e (RS05, RS07) |
 | Release | $O(Bn_{\mathrm{alt}}K\log K)$, $n_{\mathrm{alt}}$ alternatives | ≤ $K^3$ |

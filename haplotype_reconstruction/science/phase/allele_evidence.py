@@ -28,6 +28,8 @@ Evidence costs O(N m) per component and solve (chunked temporaries); a sample's 
 
 from __future__ import annotations
 
+from typing import Literal, overload
+
 import numpy as np
 
 from .diagnostics import DecisionTrace, PhaseTrace
@@ -61,7 +63,9 @@ def _terms(lab0, lab1, alleles_0, alleles_1, lg):
     return e0, valid0, e1, valid1
 
 
-def allele_evidence(X, site_bin, alleles, site_gl, excluded, eps):
+def allele_evidence(
+    X: np.ndarray, site_bin: np.ndarray, alleles: np.ndarray, site_gl: np.ndarray, excluded: np.ndarray, eps: float
+) -> np.ndarray:
     """float64 [S, m]: E(x, j), the summed carrier evidence for allele 1 of every state at the component's released
     sites. X int64 [N, 2, B] (the solve's MAP labels), site_bin int64 [m], alleles int8 [S, m], site_gl float32
     [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the robust mixture."""
@@ -88,7 +92,27 @@ def allele_evidence(X, site_bin, alleles, site_gl, excluded, eps):
     return out
 
 
-def flip_probabilities(evidence, alleles, logit_prior, *, trace=False):
+@overload
+def flip_probabilities(
+    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: Literal[False] = False
+) -> np.ndarray: ...
+
+
+@overload
+def flip_probabilities(
+    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: Literal[True]
+) -> PhaseTrace: ...
+
+
+@overload
+def flip_probabilities(
+    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: bool
+) -> np.ndarray | PhaseTrace: ...
+
+
+def flip_probabilities(
+    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: bool = False
+) -> np.ndarray | PhaseTrace:
     """float64 [S, m]: capped empirical-Bayes per-copy disagreement with the selected allele [S, m] (-1: 0).
     Evidence [S, m] may have the sample's direct term removed; carrier/panel selection stays conditioned upon."""
     p_one = 1.0 / (1.0 + np.exp(-np.clip(logit_prior + evidence, -LOGIT_LIMIT, LOGIT_LIMIT)))
@@ -102,10 +126,18 @@ def flip_probabilities(evidence, alleles, logit_prior, *, trace=False):
         audit.emit("cal2_unknown", alleles < 0, alleles)
     flips[(flips < FLIP_NEGLIGIBLE) | (alleles < 0)] = 0.0
     value = np.ascontiguousarray(flips)
-    return PhaseTrace(value, tuple(audit.rows)) if trace else value
+    return PhaseTrace(value, tuple(audit.rows)) if audit is not None else value
 
 
-def own_terms(labels, alleles, gl, eps, excluded, evidence, logit_prior):
+def own_terms(
+    labels: np.ndarray,
+    alleles: np.ndarray,
+    gl: np.ndarray,
+    eps: float,
+    excluded: bool,
+    evidence: np.ndarray,
+    logit_prior: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """One sample's own pair at the released sites: (own_state int64 [2, m] (-1: none), own_flip float64 [2, m]),
     the labels of its MAP pair (labels int64 [2, m]) whose evidence holds its reads, and their flip probabilities with
     its direct term removed, conditional on the fitted carriers and panel. A founder-excluded sample has none. ``gl``

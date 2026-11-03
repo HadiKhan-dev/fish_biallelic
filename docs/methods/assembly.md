@@ -101,7 +101,7 @@ Implementation: [science/assembly/alleles/site_posterior.py](../../haplotype_rec
 
 Parameters by name: `MAX_EXACT_BITS`, `SITE_CERTAIN_NATS`, `SITE_BALL_CONFIGURATIONS`, `SITE_BALL_MINIMUM_RADIUS`, `SITE_SHELL_GUARD`, `SITE_BP_DAMPING`, `SITE_BP_TOLERANCE`, `SITE_BP_ITERATIONS`, `SITE_ASCENT_BACKSTOP`, `SITE_RECENTRE_BACKSTOP`, `SITE_IMPROVEMENT`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(iterations N m²) for the bounded occupancy fit; m is the occupied-pattern dimension.
+Cost and scope: m is the number of free founder alleles. BP costs O(N m²) per iteration and ascent O(N m²) per step, under their named iteration/backstop limits. An exact uncertain-core cube costs O(N (m² + 2^c)) with c <= `MAX_EXACT_BITS` (default 10). A radius-r core ball has O(c^r) support; radius three costs O(N m³) per support evaluation and O(c³) support storage, with recentring bounded by `SITE_RECENTRE_BACKSTOP`.
 
 <a id="u10"></a>
 ## u10 Founder alleles: context-refit site posterior with background state
@@ -112,7 +112,7 @@ Implementation: [science/assembly/alleles/parameters.py](../../haplotype_reconst
 
 Parameters by name: `SITE_HALF_BAND`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N (K^2 + 2^K)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N (K² + 2^K)) only on the exact route, K <= `MAX_EXACT_BITS` (default 10). Above that ceiling, BP/ascent cost O(N K²) per iteration/step, followed by a bounded core cube or sparse ball as in u09. Support size, BP iterations, ascent steps and recentring limits determine the approximate route’s work; it does not enumerate an unrestricted founder cube.
 
 <a id="u11"></a>
 ## u11 Hierarchy partition: informative samples, phase breaks, symmetric batches, batch cohorts
@@ -187,7 +187,7 @@ Calculate completion, link and batch workspace/operation estimates from dimensio
 
 Implementation: [science/assembly/hierarchy/costs.py](../../haplotype_reconstruction/science/assembly/hierarchy/costs.py), [science/assembly/completion/run.py](../../haplotype_reconstruction/science/assembly/completion/run.py), [science/assembly/hierarchy/level.py](../../haplotype_reconstruction/science/assembly/hierarchy/level.py).
 
-Parameters by name: `BUNDLE_TASKS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters: supplied dimensions and stage parameter records determine the execution estimates; this unit has no independent bundle setting.
 
 Cost and scope: O(1). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -216,7 +216,7 @@ Cost and scope: O(S m K^2). These terms describe the unit’s work/storage dimen
 <a id="aj03"></a>
 ## aj03 Exact minimum-switch prior
 
-Count the exact minimum founder switches among maximum-score paths and use it as a secondary representative prior. It never changes the primary likelihood or turns a lower-likelihood panel into an equal one. Count is computed on the same complete path definition.
+Count the exact minimum changes of unordered founder-pair state among maximum-score paths (one state change can replace both homologues) and use it as a secondary representative prior. It never changes the primary likelihood or turns a lower-likelihood panel into an equal one. Count is computed on the same complete path definition.
 
 Implementation: [science/assembly/pairs.py](../../haplotype_reconstruction/science/assembly/pairs.py), [science/assembly/join/objective.py](../../haplotype_reconstruction/science/assembly/join/objective.py).
 
@@ -282,7 +282,7 @@ Cost and scope: O(n). These terms describe the unit’s work/storage dimensions;
 <a id="aj09"></a>
 ## aj09 Endpoint beam (forward pass, backward refinement, endpoint quotas, archive order)
 
-Extend paths forward in path-major/row-minor order, deduplicate by best score, and retain whole endpoint score classes within the quota. Apply backward refinement and the declared archive order. Reversal affects allowed content ties; endpoint quotas mean the beam is not exhaustive path enumeration.
+Extend paths forward in path-major/row-minor order, deduplicate by best score, and retain endpoint score classes in content order up to the quota, splitting the cut class in that order. Apply backward refinement and the declared archive order. Reversal affects allowed content ties; endpoint quotas mean the beam is not exhaustive path enumeration.
 
 Implementation: [science/assembly/join/beam.py](../../haplotype_reconstruction/science/assembly/join/beam.py).
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -28,6 +28,12 @@ from .design import PedigreeRow, ReadModel, SimulationConfig, observed_indices
 from .pedigree import PedigreeTable, materialise_founders, pair_founders, simulate_explicit_pedigree, simulate_pedigree
 from .reads import sample_reads
 from .truth import ContigTruth, TruthCrossovers, truth_crossovers, truth_painting
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    # ContigReads.__post_init__ accepts these int64 draws and freezes them as int32.
+    _ContigReadsFactory = Callable[[str, tuple[str, ...], NDArray[np.int64], NDArray[np.int64]], ContigReads]
 
 __all__ = ["FounderTemplate", "ContigSimulation", "SimulationPlan", "prepare_simulation", "generate_contig"]
 
@@ -173,4 +179,4 @@ def generate_contig(task: ContigSimulation) -> tuple[ContigReads, ContigTruth]:
         painting=truth_painting(task.ancestry),
         crossovers=task.crossovers,
     )
-    return ContigReads(task.contig, task.sample_ids, task.positions, counts), truth
+    return cast("_ContigReadsFactory", ContigReads)(task.contig, task.sample_ids, task.positions, counts), truth

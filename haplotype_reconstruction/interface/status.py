@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +120,9 @@ def _error_code(error: Exception) -> int:
     return 3 if isinstance(error, InputError) else 1
 
 
-def run_status(output: str | Path, *, checkpoints: str | Path | None = None, contigs=None) -> dict[str, Any]:
+def run_status(
+    output: str | Path, *, checkpoints: str | Path | None = None, contigs: Sequence[str] | None = None
+) -> dict[str, Any]:
     """Return layout, manifest, checked progress, invocation records and workflow marker paths.
 
     An unreadable or uninitialised run is represented in errors (CLI exit 1).
@@ -159,7 +162,7 @@ def run_status(output: str | Path, *, checkpoints: str | Path | None = None, con
             try:
                 row["complete"] = _completion(file)
                 for stage in _CONTIG_STAGES:
-                    prefix = {"selection": "local_selection", "refit": "founder_refit"}.get(stage, stage)
+                    prefix = {"refit": "founder_refit"}.get(stage, stage)
                     if file.keys(prefix + "/") or file.has(prefix):
                         row["stages"][stage] = _progress(stage, file)
             except (OSError, ValueError, RuntimeError, ImportError, AttributeError) as error:

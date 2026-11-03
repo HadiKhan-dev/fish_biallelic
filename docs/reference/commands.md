@@ -19,7 +19,7 @@ Initialize if needed, then run or resume the graph.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -45,7 +45,7 @@ Validate inputs and initialize the run manifest.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -71,7 +71,7 @@ Record one contig's evidence.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -98,7 +98,7 @@ Gather relatedness from every contig's evidence.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -124,7 +124,7 @@ Reconstruct and refit one contig.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -151,7 +151,7 @@ Gather the genome-wide pedigree.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -177,7 +177,7 @@ Phase, map and export one contig.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -204,7 +204,7 @@ Publish tables from available records.
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
 | `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
-| `--contigs` | + | `—` | — | Contigs in order ([input] contigs). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
@@ -263,7 +263,7 @@ Evaluate a simulation run against its truth.
 
 ## export
 
-Write a finished run's founder VCF and phased sample VCF (the files of the run's export stage, OUTPUT/export) to a new directory, optionally with per-component founder-track TSVs.
+Write a finished run's founder VCF and phased sample VCF (the files of the run's export stage, OUTPUT/export) to a new directory, optionally with per-contig founder-track CSVs.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|

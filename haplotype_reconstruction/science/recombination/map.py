@@ -40,7 +40,6 @@ _OVERLOADS = {
     "posterior_intervals": (
         (
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.bool, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -51,7 +50,6 @@ _OVERLOADS = {
         ),
         (
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.bool, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -62,7 +60,6 @@ _OVERLOADS = {
         ),
         (
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.int32, 1, "C", readonly=False, aligned=True),
             types.Array(types.bool, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -128,9 +125,9 @@ def add_genetic_interval(bins, totals, left, right, density, map_positions_bp, m
     cache=True,
 )
 def _posterior_intervals(
-    positions, components, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
+    positions, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
 ):
-    """Per bin expected crossovers and exposure of one meiosis, and its informative spans (left, right, component).
+    """Per bin expected crossovers and exposure between consecutive released markers of one meiosis.
 
     Between consecutive informative markers with genetic length lambda, Poisson/Haldane endpoint parity gives
     E[N | even] = lambda tanh(lambda) and E[N | odd] = lambda / tanh(lambda) (-> 1 as lambda -> 0); the interval's
@@ -140,7 +137,6 @@ def _posterior_intervals(
     """
     counts = np.zeros(len(bins) - 1)
     exposure = np.zeros_like(counts)
-    spans = [(0.0, 0.0, 0.0) for _ in range(0)]
     for i in range(1, len(positions)):
         if resets[i]:
             continue
@@ -164,21 +160,11 @@ def _posterior_intervals(
         else:
             add_genetic_interval(bins, counts, left, right, expected / lam, map_positions_bp, map_genetic_morgans)
         add_interval(bins, exposure, left, right, 1.0)
-        component = float(components[i])
-        if spans and spans[-1][1] == left and spans[-1][2] == component:
-            spans[-1] = (spans[-1][0], right, component)
-        else:
-            spans.append((left, right, component))
-    array = np.empty((len(spans), 3), dtype=np.float64)
-    for i in range(len(spans)):
-        for k in range(3):
-            array[i, k] = spans[i][k]
-    return counts, exposure, array
+    return counts, exposure
 
 
 def posterior_intervals(
     positions,
-    components,
     resets,
     switch,
     bins,
@@ -199,7 +185,7 @@ def posterior_intervals(
     audit = RecombinationTrace() if trace and audit is None else audit
     receipt = np.zeros((len(positions), 6)) if audit is not None else None
     value = _posterior_intervals(
-        positions, components, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
+        positions, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
     )
     if audit is not None:
         for row in receipt:
@@ -210,13 +196,13 @@ def posterior_intervals(
     return Traced(value, audit) if trace else value
 
 
-def aggregate_map(bins, crossovers, callable_spans, expected, exposure, informative_spans, knots, knot_genetic):
+def aggregate_map(bins, crossovers, callable_spans, expected, exposure, knots, knot_genetic):
     """RecombinationMap from the decoded meioses.
 
     ``crossovers`` (n, 5) and ``callable_spans`` (m, 3) of all edges (called events are spread over their flanking
     interval by genetic mass for binning only, uniformly in bp where it has none);
     ``expected``/``exposure`` float64 [E, B] per edge and map
-    bin; ``informative_spans`` (k, 3) of all edges (their union is the covered sequence).
+    bin; the union of ``callable_spans`` is the covered sequence.
     """
     counts = np.zeros(len(bins) - 1)
     called_exposure = np.zeros_like(counts)
@@ -234,7 +220,7 @@ def aggregate_map(bins, crossovers, callable_spans, expected, exposure, informat
     expected_total = expected.sum(axis=0)
     exposure_total = exposure.sum(axis=0)
     union = []
-    for left, right in sorted((left, right) for left, right, _ in informative_spans):
+    for left, right in sorted((left, right) for left, right, _ in callable_spans):
         if union and left <= union[-1][1]:
             union[-1] = (union[-1][0], max(right, union[-1][1]))
         else:

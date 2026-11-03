@@ -2,7 +2,7 @@
 
 ## Simulation settings and constants
 
-Table S1 lists every simulation setting with its default. Settings in `[simulation]` and `[simulation.reads]` describe the generating model only; inference keeps its own read model and map. The order of `[input] contigs` is part of the random streams, and every contig's template must hold the same even number $H$ of haplotypes.
+The following table lists every simulation setting with its default. Settings in `[simulation]` and `[simulation.reads]` describe the generating model only; inference keeps its own read model and map. The order of `[input] contigs` is part of the random streams, and every contig's template must hold the same even number $H$ of haplotypes.
 
 | Setting | Default | Allowed values | Meaning |
 |---|---|---|---|
@@ -25,7 +25,7 @@ Table S1 lists every simulation setting with its default. Settings in `[simulati
 | `reads.fragment_mean_bp` | 375.0 | $>0$ when $\ell>0$ | $\mu_{\mathrm{frag}}$ |
 | `reads.fragment_sd_bp` | 150.0 | $\ge0$ when $\ell>0$ | $\sigma_{\mathrm{frag}}$ |
 
-Table S2 lists the internal constants, which are not user settings.
+The next table lists the internal constants, which are not user settings.
 
 | Constant | Value | Role |
 |---|---|---|
@@ -42,7 +42,209 @@ Table S2 lists the internal constants, which are not user settings.
 | `BISECTION_STEPS` | 60 | Inversion of merged information |
 | `PATH_TOLERANCE`, `CANCELLATION_TOLERANCE` | $10^{-9}$ | Path reconstruction; exact information cancellation |
 
-The `haplotypes example` generator (OU22) writes three contigs of 1,200 evenly spaced sites over 12,000,000 bp with six independent Bernoulli haplotypes, cohorts (20, 30, 30) and depth 5.0; it demonstrates software wiring only. Two simulation configurations are shipped: `configs/simulation.toml` (22 contigs, chr1–chr20, chr22 and chr23; seed 400; cohorts [20, 100, 200]; depth 5.0; generating and inference fallback rates 5.0 cM/Mb) and `configs/simulation_backcross.toml` (the same contigs; seed 6202; cohorts [20, 30, 30]; `backcross_fraction` 0.5 from cohort 3). [TO FILL: list the configurations, seeds and read-model settings of the simulations reported in the Results.]{.todo}
+The validation configurations are summarised below. The example generator illustrates software
+wiring and is not an accuracy experiment.
+
+## Validation datasets and configurations
+
+The 4.2 release matrix contains 39 runnable entries; rows retained only as historical, non-runnable
+matrix entries are excluded. Fifteen distinct simulated datasets have truth: the thirteen design
+cases and the two references named `zero_std_n80_ref` and `zero_stress_n80_ref`. Their other
+variants repeat inference on the same generated data. `n80` and `stress` abbreviate those two
+reference names in the manuscript. Each table row is one configured seed, not a replicated
+factorial cell. `std` and `seed` repeat the same cohort design under different seeds.
+
+**Supplementary Table S3. Simulation matrix.** $N$ is observed samples; $H$ is true founder
+haplotypes, distinct from the inferred component count $K$; depth is mean read depth; $v$ is
+between-sample depth CV, $\varepsilon$ homozygous read-error probability, $b$ heterozygous ALT
+probability, $\phi$ dropout fraction, and BC is backcross probability from cohort 3. All inference
+fallback rates are 5 cM/Mb and marked unmeasured. “Knots” denotes the explicit map described below.
+
+**A. Cross design and observation.**
+
+| Scenario | Seed | $N$ | Chr. | $H$ | Generated cohorts | Observed cohorts | $\theta$ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| std | 9101 | 40 | 8 | 6 | 10,15,15 | all | 1.0 |
+| seed | 9217 | 40 | 8 | 6 | 10,15,15 | all | 1.0 |
+| n80 | 9101 | 80 | 8 | 6 | 20,30,30 | all | 1.0 |
+| backcross | 6202 | 80 | 3 | 6 | 20,30,30 | all | 1.0 |
+| bc8 | 6202 | 80 | 8 | 6 | 20,30,30 | all | 1.0 |
+| longbc | 32011 | 80 | 3 | 6 | 20,30,30 | all | 1.0 |
+| f3 | 9603 | 112 | 3 | 6 | 16,4,96 | 1,3 | 1.0 |
+| longf3 | 32012 | 112 | 3 | 6 | 16,4,96 | 1,3 | 1.0 |
+| f3x8 | 9608 | 112 | 8 | 6 | 16,4,96 | 1,3 | 1.0 |
+| sibrich | 32001 | 112 | 8 | 6 | 16,4,96 | 1,3 | 1.0 |
+| tl | 2171 | 115 | 8 | 6 | explicit: 3, 34, 96 | table flags | 1.0 |
+| famhs | 32002 | 60 | 8 | 6 | explicit: 3, 12, 38, 9 | table flags | 1.0 |
+| hsrand | 32003 | 66 | 8 | 6 | 6,60 | all | 1.0 |
+| stress | 9102 | 64 | 8 | 6 | 20,30,30 | all | 0.8 |
+| k30 | 9101 | 80 | 5 | 30 | 60,20 | all | 1.0 |
+
+**B. Read model, backcrossing and maps.**
+
+| Scenario | Depth | $v$ | $\varepsilon$ | $b$ | $\phi$ | Read bp | BC fraction | Generating cM/Mb | Inference map |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| std | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| seed | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| n80 | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| backcross | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.5 | 5.0 | fallback |
+| bc8 | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.5 | 5.0 | fallback |
+| longbc | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.5 | 5.0 | knots |
+| f3 | 10.5 | 0.25 | 6.7e-05 | 0.5 | 0.0 | 125 | 0.0 | 2.0 | fallback |
+| longf3 | 10.5 | 0.25 | 6.7e-05 | 0.5 | 0.0 | 125 | 0.0 | 5.0 | knots |
+| f3x8 | 10.5 | 0.25 | 6.7e-05 | 0.5 | 0.0 | 125 | 0.0 | 2.0 | fallback |
+| sibrich | 10.5 | 0.25 | 6.7e-05 | 0.5 | 0.0 | 125 | 0.0 | 2.0 | fallback |
+| tl | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| famhs | 5.0 | 0.25 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| hsrand | 5.0 | 0.25 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+| stress | 5.0 | 0.6 | 0.04 | 0.6 | 0.1 | 0 | 0.5 | 5.0 | fallback |
+| k30 | 5.0 | 0.0 | 0.02 | 0.5 | 0.0 | 0 | 0.0 | 5.0 | fallback |
+
+The eight-chromosome set for `std`, `seed`, `n80`, `stress`, `bc8`, `tl`, `famhs` and `hsrand`
+is chr1, chr2, chr8, chr10, chr13, chr18, chr19 and chr20. The eight-chromosome omitted-parent
+set (`sibrich`, `f3x8`) replaces chr18 by chr9. All three-chromosome designs use chr2, chr9 and
+chr19. The $H=30$ design uses five short template contigs m1–m5, each with 8,000 sites,
+with spans of 634,611, 468,400, 586,577, 627,850 and 511,719 bp. Its template-construction seed
+is 1, separate from the pedigree/read seed 9101.
+
+The empirical-template manifest records six haplotypes per chromosome, source discovery
+products and content hashes. It does not identify the original biological sampling or input VCF
+beyond those products. The $H=30$ manifest records crops sourced from chr19, chr8, chr13, chr20
+and chr10, respectively; these are a constructed count stress test rather than thirty documented
+biological founder sequences. Template probabilities enter the simulator as described above.
+
+For cohort designs, the listed cohort sizes exclude the unobserved template founders. The
+omitted-parent designs generate cohorts (16, 4, 96), sequence only cohorts 1 and 3, and therefore
+have no observable parent edges. The explicit `tl` table has 133 generated individuals (3, 34,
+96 by its descriptive generation groups), with 115 observed; `famhs` has 62 (3, 12, 38, 9), with
+60 observed. Those tables' observed flags replace random thinning. Sex and generation columns
+are simulation truth descriptions only. Every other row uses the cohort sampler and its
+configured observation fraction.
+
+Fragment simulations use 125 bp reads with insert mean 375 bp and SD 150 bp. Independent-site
+simulations set read length to zero. All rows not using fragments retain the same dormant insert
+settings. The stress reference combines $v=0.6$, $b=0.6$, $\phi=0.1$, $\varepsilon=0.04$,
+backcross fraction 0.5 and observation fraction 0.8; it does not isolate their effects.
+
+All generating maps are uniform fallbacks at the rates in Table S3, with no generating map file.
+`longbc` and `longf3` use an explicit inference map with first knots at position 1 and 0 cM,
+and last knots (bp, cM) of (39,628,896, 198.144480) on chr2, (37,982,278, 189.911390) on chr9,
+and (31,954,172, 159.770860) on chr19. Thus its interior slope is 5 cM/Mb and its knots provide
+map length to the release rules, unlike an unmeasured fallback. These experiments change map
+support, not just crossover rate; we use the recorded knots as a synthetic map-support input and
+make no claim of empirical provenance.
+
+**Supplementary Table S4. Phase by supported parent edges.** Rows group samples by the actual
+post-guard edge product used by phase, including marginal edges. They are not groups defined by
+true parents or cohorts. A zero denominator is undefined; the corresponding N50 is shown as a dash.
+Spans and ratios pool chromosomes within one run only.
+
+| Scenario | Supported parent edges | $N$ | Genotype errors / calls | Phased / correct true heterozygotes | Switches | Long switches | Released-set N50 (Mb) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| std | 0 | 10 | 8007/23167772 | 4912889/5179823 | 5 | 1 | 36.315 |
+| std | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| std | 2 | 30 | 8776/70806131 | 13213171/13464156 | 14 | 0 | 36.316 |
+| seed | 0 | 10 | 4342/23382342 | 4652196/4856587 | 8 | 0 | 32.399 |
+| seed | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| seed | 2 | 30 | 6263/70831948 | 12760682/12917017 | 14 | 0 | 36.295 |
+| n80 | 0 | 20 | 2787/47220303 | 10318693/10529198 | 4 | 0 | 36.310 |
+| n80 | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| n80 | 2 | 60 | 12983/141719342 | 27030210/27351284 | 10 | 2 | 36.316 |
+| backcross | 0 | 80 | 5792/77938894 | 14208601/14358269 | 1 | 1 | 4.716 |
+| backcross | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| backcross | 2 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| bc8 | 0 | 20 | 2268/47244076 | 10055605/10188412 | 0 | 0 | 35.621 |
+| bc8 | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| bc8 | 2 | 60 | 13160/141719151 | 25499544/25882411 | 3 | 0 | 36.298 |
+| longbc | 0 | 20 | 815/19480748 | 3930447/3960588 | 0 | 0 | 31.953 |
+| longbc | 1 | 2 | 146/1948346 | 267288/277657 | 0 | 0 | 31.953 |
+| longbc | 2 | 58 | 4312/56501244 | 9469672/9673075 | 1 | 1 | 37.599 |
+| f3 | 0 | 112 | 826/109152120 | 18652911/18797686 | 21 | 0 | 17.508 |
+| f3 | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| f3 | 2 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| longf3 | 0 | 112 | 1781/109084847 | 20064580/20251987 | 8 | 2 | 6.103 |
+| longf3 | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| longf3 | 2 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| f3x8 | 0 | 112 | 3078/270232710 | 50025591/50431364 | 127 | 2 | 11.523 |
+| f3x8 | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| f3x8 | 2 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| sibrich | 0 | 112 | 2551/270316348 | 50976343/51517801 | 23 | 2 | 15.518 |
+| sibrich | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| sibrich | 2 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| tl | 0 | 61 | 11112/144119947 | 27580738/27895961 | 3 | 1 | 7.299 |
+| tl | 1 | 28 | 5118/66146713 | 12242056/12588579 | 0 | 0 | 31.949 |
+| tl | 2 | 26 | 3474/61422994 | 11981561/12168306 | 2 | 0 | 35.620 |
+| famhs | 0 | 11 | 2987/25960612 | 5635031/5765681 | 226 | 6 | 10.328 |
+| famhs | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| famhs | 2 | 49 | 7435/115712051 | 22389628/22574200 | 8 | 0 | 36.316 |
+| hsrand | 0 | 6 | 303/14170639 | 3203486/3228751 | 0 | 0 | 36.319 |
+| hsrand | 1 | 0 | 0/0 | 0/0 | 0 | 0 | — |
+| hsrand | 2 | 60 | 7454/141724778 | 26911473/27259539 | 0 | 0 | 36.316 |
+| stress | 0 | 21 | 24939/49396786 | 9073845/10282058 | 3 | 3 | 28.334 |
+| stress | 1 | 18 | 40206/42196883 | 6540485/7344465 | 9 | 9 | 32.678 |
+| stress | 2 | 25 | 56854/58782098 | 9961245/10483334 | 21 | 11 | 35.492 |
+| k30 | 0 | 71 | 1285/2736202 | 335119/345872 | 31 | 0 | 0.586 |
+| k30 | 1 | 7 | 71/278664 | 30879/32574 | 0 | 0 | 0.586 |
+| k30 | 2 | 2 | 20/79206 | 9875/10059 | 0 | 0 | 0.587 |
+
+**Supplementary Table S5. Supported marginal-edge product against simulation truth.** Only named,
+supported edges in the partial Tier-B table count. True parents outside the sequenced sample set
+are excluded. This is the edge product used by phase and recombination, and can contain more edges
+than the exact-configuration call product scored in main-text Table 3.
+
+| Scenario | Supported edges | Correct supported edges | Extra supported edges | Missing supported edges |
+| --- | --- | --- | --- | --- |
+| std | 60 | 60 | 0 | 0 |
+| seed | 60 | 60 | 0 | 0 |
+| n80 | 120 | 120 | 0 | 0 |
+| backcross | 0 | 0 | 0 | 120 |
+| bc8 | 120 | 120 | 0 | 0 |
+| longbc | 118 | 118 | 0 | 2 |
+| f3 | 0 | 0 | 0 | 0 |
+| longf3 | 0 | 0 | 0 | 0 |
+| f3x8 | 0 | 0 | 0 | 0 |
+| sibrich | 0 | 0 | 0 | 0 |
+| tl | 80 | 80 | 0 | 0 |
+| famhs | 98 | 98 | 0 | 0 |
+| hsrand | 120 | 120 | 0 | 0 |
+| stress | 68 | 68 | 0 | 0 |
+| k30 | 11 | 11 | 0 | 29 |
+
+
+## TroMau chromosome summaries
+
+**Supplementary Table S6. TroMau QC and founder release.** SNP rows are those written by the
+full-length export, including rows removed by site filtering; kept sites are the inference set.
+Blocks are 200-site discovery blocks, including the final partial block. Sample QC flags affect
+founder construction and do not remove those samples from painting or pedigree inference.
+Release segments are counted from the export manifest; they need not equal the number of
+source assembly components. Founder labels reset between segments.
+
+| Chromosome | SNP rows | Kept sites | Blocks | Flagged samples | Release segments | Founder rows per segment |
+|---|---:|---:|---:|---:|---:|---|
+| chr1 | 233533 | 93460 | 468 | 1 | 1 | 8 |
+| chr2 | 254453 | 89047 | 446 | 1 | 1 | 8 |
+| chr3 | 749986 | 128257 | 642 | 1 | 1 | 8 |
+| chr4 | 248773 | 81564 | 408 | 1 | 1 | 8 |
+| chr5 | 232844 | 87364 | 437 | 1 | 1 | 9 |
+| chr6 | 269001 | 97524 | 488 | 1 | 1 | 8 |
+| chr7 | 422133 | 166616 | 834 | 1 | 1 | 8 |
+| chr8 | 145568 | 58101 | 291 | 1 | 1 | 9 |
+| chr9 | 286666 | 80058 | 401 | 1 | 1 | 8 |
+| chr10 | 210484 | 83637 | 419 | 1 | 1 | 9 |
+| chr11 | 233185 | 90287 | 452 | 1 | 1 | 7 |
+| chr12 | 253473 | 86871 | 435 | 1 | 1 | 8 |
+| chr13 | 195764 | 76025 | 381 | 1 | 1 | 9 |
+| chr14 | 246481 | 92774 | 464 | 1 | 1 | 9 |
+| chr15 | 229857 | 90025 | 451 | 1 | 1 | 7 |
+| chr16 | 218895 | 78525 | 393 | 1 | 1 | 8 |
+| chr17 | 236718 | 94486 | 473 | 1 | 1 | 8 |
+| chr18 | 255678 | 83141 | 416 | 1 | 1 | 8 |
+| chr19 | 210916 | 71342 | 357 | 1 | 1 | 8 |
+| chr20 | 204509 | 74372 | 372 | 1 | 1 | 8 |
+| chr22 | 261928 | 89376 | 447 | 1 | 1 | 8 |
+| chr23 | 318039 | 102315 | 512 | 1 | 3 | 8,8,8 |
+
 
 ## Generating-model details
 
@@ -101,15 +303,15 @@ Parent groups count released post-guard Tier-B edges into each sample, not true 
 | Decision | Retained behaviour | Cost | Meaning at $K=30$ |
 |---|---|---|---|
 | 0 | Rare context-coded local-selection screening | $O(K^5)$ per round | $K^5=24{,}300{,}000$, an algebraic factor, not a measured count or time |
-| 0b | Ranked assembly and refinement seed refits (`ranked_refits` cap) | Fixed admission cap | The cap does not grow with $K$, so candidates can be omitted at larger $K$; costed as 9 ranked refits and at most 2,048 shadow scores per member |
+| Count refits | Every eligible deletion and duplicate seed is fitted | $O(NLK^3)$ per round under quadratic fixed-$K$ work; $O(NLK^4)$ worst-case deletion pass | Up to 30 eligible fits per round; at most one more deletion round than accepted deletions; shadow budgets and continuation histories are separate |
 | 0c | Bounded discovery and local-selection searches | Discovery $O(NLK^4)$; selection backstop $O(NLK^3(K+L))$; context snaps $O((K+L)^2)$ passes | $K^4=810{,}000$, $K^3=27{,}000$; full cost depends on $N$, $L$ and the search path |
 | 0d | Optional pairwise IBD | $O(N^2L)$ | Independent of $K$; 3,123,750 unordered pairs at $N=2{,}500$; off by default |
-| 0e (AJ17) | Assembly joins' structural screening | Quartic trend in $K$ of the direct query count on a finite grid | Analytic worst case; emissions ≈18.6 GB at $N=2{,}500$, $m=2{,}000$ |
-| 0e (RS05, RS07) | Refinement window fixing | Bounded only by the work account | Analytic worst case; polish ≈3.7 GB at $N=2{,}500$; provisional |
+| 0e (AJ17) | Assembly joins' structural screening | Cubic analytic bound for the adaptive route; quartic direct-query trend on a finite grid | Separate from count-refit work; emissions ≈18.6 GB at $N=2{,}500$, $m=2{,}000$ |
+| 0e (RS05, RS07) | Refinement window fixing | Bounded only by the work account | Analytic work-account limit; polish ≈3.7 GB at $N=2{,}500$ |
 | 0e (PR17) | Painting label-continuity checks | $O(K^4)$ checks | ≈$10^{11}$ gain operations at $N=2{,}500$ with 2,000 links |
-| 0e (FR04) | Founder-refit ties | $O(K^4)$ flips and $O(K^5)$ swaps per phase; $O(K^4)$ over $K$ rounds via the direct two-row gain (L10) | $K^4=810{,}000$; $K^5=24{,}300{,}000$ per site and phase; observed at most 3 rounds and 2 tie members |
+| 0e (FR04) | Founder-refit ties | $O(K^4)$ flips and $O(K^5)$ swaps per phase; $O(K^4)$ over $K$ rounds via the direct two-row gain (L10) | $K^4=810{,}000$; $K^5=24{,}300{,}000$ per site and phase; these are analytic work factors, not measured iteration counts |
 
-None of the 0e worst cases binds on the validation inputs; all four are scheduled for review. The join size $m$ is as written in the cost table, whose symbol list does not define it.
+The kernel ladders do not certify these whole-search bounds. Painting continuity and founder-refit tie decisions do act on validation inputs; their observed small classes do not exercise their analytic worst cases. Refinement's work account bounds canonical window fixing. The join cost register distinguishes its cubic adaptive route from the direct-route finite-grid trend. Here $m$ is the join emission-axis size used by the cost model.
 
 ## Tie quanta and execution units
 

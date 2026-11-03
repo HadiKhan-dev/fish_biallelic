@@ -40,9 +40,9 @@ def select_representative(
     values = [float(value) for value in scores]
     result = convention.classes(values, scale=max(abs(v) for v in values), content=contents, descending=True)
     chosen = int(result.winner)
-    tied_panels = ()
-    tied_scores = ()
-    tied_switches = ()
+    tied_panels: tuple[tuple[tuple[int, ...], ...], ...] = ()
+    tied_scores: tuple[float, ...] = ()
+    tied_switches: tuple[int, ...] = ()
     fewest = None
     if result.tied_winner and contents[0] != contents[1]:
         tied_panels = tuple(sorted(contents))
