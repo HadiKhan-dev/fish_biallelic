@@ -4,6 +4,8 @@ Refinement optimises a maximum-path copying objective at fixed founder count, th
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
+Every deletion is decided by the ordinary count rule; there is no separate zero-gain cleanup, and addition seeds are not ranked before fitting. Count-rule settings and count-decision records are schema 2.
+
 <a id="rc01"></a>
 ## rc01 Component workspace: objective site mask, informative samples, coded leaves, map hazards, normalisers
 
@@ -99,13 +101,13 @@ Cost and scope: O(width_sites x affected samples x Q); O(width x K); O(E^2). The
 <a id="rc09"></a>
 ## rc09 Count pass skeleton: start fit, deletion rounds, addition rounds, stops and count limit
 
-Converge the start, then run cleanup and deletion rounds until a round retains the larger panel or the minimum count is reached. Only at the addition-enabled level, test successive additions until rejection, a bound skip or the count limit; do not rerun deletion after an accepted addition. Refit admitted candidates, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives.
+Converge the start, then run ordinary count-deletion rounds until a round retains the larger panel or the minimum count is reached. Only at the addition-enabled level, test successive additions until rejection, a bound skip or the count limit; do not rerun deletion after an accepted addition. Refit every eligible candidate, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
-Parameters by name: `COUNT_LIMIT_MULTIPLE`, `ranked_refits`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `COUNT_LIMIT_MULTIPLE`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N L K³) per round for O(K) quadratic candidate fits; at most (accepted deletions + 1) deletion rounds and O(N L K⁴) worst-case count-refit work per pass. Additional fixed-K search, shadows and continuation histories are separate factors. See [costs](../developer/costs.md#natural-domain-count-refits).
 
 <a id="rc10"></a>
 ## rc10 Optimistic count bounds and round skipping
@@ -119,15 +121,15 @@ Parameters by name: `bootstrap_resamples`, `bootstrap_level`. Values and provena
 Cost and scope: O(N L R_b^2 x (R_b if constrained)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rc11"></a>
-## rc11 Candidate shortlists and refit choice
+## rc11 Natural-domain admission and refit choice
 
-Rank excess deletion candidates by effective-carrier point margin and excess addition seeds by copy-response gain. Admit the target prefix with its whole cut class, dropping an oversized cut class unless it is the first class. Refit in supplied candidate order and compare endpoint F using the incumbent’s scale and origin content. The ranked-refit budget is exemption 0b and may omit a successful candidate; worker completion order cannot select one.
+Refit every eligible deletion candidate: founders without a private cell when present, otherwise every founder. For additions, refit every duplicate seed unless the existing optimistic bound proves the entire round unneeded. Compare converged endpoint F with the incumbent’s scale and origin content, taking the content-smallest member of the best tie class before the existing tied-verdict resolution. Direction endpoints, symmetric nulls, bootstrap streams, shadow families and decision tie census kinds are unchanged. No unrefitted margin or copy-response ranking limits admission; worker completion order cannot select a candidate.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
-Parameters by name: `ranked_refits`, `COUNT_FANOUT_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `COUNT_FANOUT_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(K) candidate fits, O(N L K³) per count round under the quadratic fixed-K work model. A pass has at most (accepted deletions + 1) deletion rounds, hence a quartic worst case; fit iterations, canonical programmes and continuation histories are additional factors. The 4.0 saved-output census found 25 deletion rounds in 25 k30 passes (one each), 1,268 in 1,157 TroMau passes (1,066 with one, 77 with two, 11 with three and three with five), and 1,359 in 1,347 std passes (1,335 with one and 12 with two). These are recorded component passes, not independent biological replicates or a bound on future inputs. See [costs](../developer/costs.md#natural-domain-count-refits).
 
 <a id="rc12"></a>
 ## rc12 Symmetric sequence null: death class, nearest-row shadow families, budget overflow and certificate
@@ -150,19 +152,6 @@ Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstru
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
 Cost and scope: Up to one extra symmetric decision per tied class member and a minimum-switch score per distinct tied panel.
-
-<a id="rc14"></a>
-## rc14 Zero-gain cleanup of unused founders
-
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
-
-Before a deletion round, visit founders in convention order and remove the first whose maximum absolute per-sample deletion loss is within the unscaled refinement quantum; repeat, then refit once. Include count-dependent normalisers in the loss. This retained cleanup rarely expresses its intended unused-founder rule because those normalisers can prevent it firing; it is not a general test of founder usage.
-
-Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
-
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
-
-Cost and scope: Up to K unrefitted scores per cleanup round, reused by deletion ranking where available.
 
 <a id="rc15"></a>
 ## rc15 Best-F panel restoration and restored adjacent-K comparisons
@@ -371,24 +360,13 @@ Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimen
 <a id="rs12"></a>
 ## rs12 Best-of-two fit selection, minimum-switch prior and canonical fit
 
-Reuse fits only for their full start identity. Run both direction starts, except the single-direction polish route, and compare their F values in the named tie policy. When distinct panels share the winning class, minimise switch count within that class and retain the other tied variant. Canonicalise founder rows after choosing. Branch replay can explicitly force a retained tied panel; it cannot invent an unrecorded alternative.
+Reuse fits only for their full start identity. Run both direction starts, except the single-direction polish route, and compare their F values in the named tie policy. When distinct panels share the winning class, minimise switch count within that class and retain the other tied variant. Canonicalise founder rows after choosing. Branch replay can explicitly force a retained tied panel; it cannot invent an unrecorded alternative. The named tie policy receives the run's reversal convention explicitly (L8).
 
 Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py), [science/assembly/refinement/selection.py](../../haplotype_reconstruction/science/assembly/refinement/selection.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
 Cost and scope: O(N L Q). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
-
-<a id="rs13"></a>
-## rs13 Copy best response (addition-seed ranking input)
-
-Append a duplicate founder, compute plain messages and solve fine templates for the copy alone. Apply one forward, unguarded content-only acceptance pass; return its accepted total as the copy-response gain. Exchanges and coarse templates are absent. L8 supplies the run convention explicitly to both proposal and acceptance policies.
-
-Implementation: [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
-
-Parameters by name: `frontier_bytes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(N L (K+1)^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rs14"></a>
 ## rs14 Polish schedule at ordinary fixed points (escape, long repair, bridge; verified)

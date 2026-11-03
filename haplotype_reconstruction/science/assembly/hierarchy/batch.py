@@ -103,7 +103,10 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
     ties = TieSettings(reverse=settings.reverse, keep=settings.tie_keep, census=settings.census)
     linker_parameters = LinkerParameters(**asdict(settings.linker))
     join_parameters = JoinParameters(**asdict(settings.join))
-    count_parameters = CountRuleParameters(**asdict(settings.count_rule))
+    from haplotype_reconstruction.contracts.roles import require_schema
+
+    require_schema(settings.count_rule, 2)
+    count_parameters = CountRuleParameters(**{k: v for k, v in asdict(settings.count_rule).items() if k != "schema"})
 
     def ordered_map(function, items, task_bytes=0):
         return budget.thread_map(function, items) if budget is not None else tuple(map(function, items))
@@ -192,8 +195,7 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
         index=task.index,
         rows=rows,
         log_likelihood=float(outcome.log_likelihood),
-        # The frozen JoinSummary is the view's implementation (as in the branch combination below).
-        summary=cast(JoinSummaryView, summary),
+        summary=summary,
         seconds=0.0,
         release_alternatives=tuple(ReleaseFamily.from_mapping(f) for f in release_alternatives),
         minimum_switches=outcome.minimum_switches,

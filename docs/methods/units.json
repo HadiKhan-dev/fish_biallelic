@@ -1601,10 +1601,10 @@
       ],
       "sources": [
         "science/assembly/count_rule/parameters.py",
-        "science/assembly/join/search.py"
+        "science/assembly/join/search.py",
+        "science/assembly/join/count_step.py"
       ],
       "parameters": [
-        "ranked_refits",
         "BIRTH_SETS"
       ]
     },
@@ -4657,8 +4657,7 @@
         "estimate_grid",
         "RATE_BOUNDS",
         "ENTRY_BOUNDS",
-        "EXIT_BOUNDS",
-        "MINIMUM_WORKING_MEMORY_BYTES"
+        "EXIT_BOUNDS"
       ]
     },
     {
@@ -4753,8 +4752,7 @@
         "science/painting/run.py"
       ],
       "parameters": [
-        "EMISSION_CACHE_MAX_BYTES",
-        "MINIMUM_WORKING_MEMORY_BYTES"
+        "EMISSION_CACHE_MAX_BYTES"
       ]
     },
     {
@@ -5634,8 +5632,7 @@
         "science/assembly/refinement/count.py"
       ],
       "parameters": [
-        "COUNT_LIMIT_MULTIPLE",
-        "ranked_refits"
+        "COUNT_LIMIT_MULTIPLE"
       ]
     },
     {
@@ -5668,7 +5665,6 @@
         "science/assembly/refinement/count.py"
       ],
       "parameters": [
-        "ranked_refits",
         "COUNT_FANOUT_BYTES"
       ]
     },
@@ -5700,20 +5696,6 @@
       "anchor": "rc13",
       "specs": [
         "WP_AS8 §4.7"
-      ],
-      "sources": [
-        "science/assembly/refinement/count.py"
-      ],
-      "parameters": []
-    },
-    {
-      "area": "refinement-count",
-      "unit": "RC14",
-      "classification": "Accretion",
-      "page": "methods/refinement.md",
-      "anchor": "rc14",
-      "specs": [
-        "WP_AS8 §4.6"
       ],
       "sources": [
         "science/assembly/refinement/count.py"
@@ -6042,22 +6024,6 @@
         "science/assembly/refinement/selection.py"
       ],
       "parameters": []
-    },
-    {
-      "area": "refinement-search",
-      "unit": "RS13",
-      "classification": "Core",
-      "page": "methods/refinement.md",
-      "anchor": "rs13",
-      "specs": [
-        "WP_AS7 §4.9"
-      ],
-      "sources": [
-        "science/assembly/refinement/search.py"
-      ],
-      "parameters": [
-        "frontier_bytes"
-      ]
     },
     {
       "area": "refinement-search",

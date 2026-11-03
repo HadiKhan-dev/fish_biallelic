@@ -1,0 +1,15 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##source=haplotype-reconstruction
+##contig=<ID=chr20,length=38813844>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown (withheld, or no painted carrier observes it) or outside the column's component; no imputation">
+##founder_columns="cC_Hk is founder row k of release segment C of this chromosome. Founder labels are segment-local: columns of different segments (c0_H1, c1_H1) are not implied to be one founder. A column has calls only inside its segment's span (first to last panel position; ##component lines) and . outside it; inside the span . marks an allele the panel withholds"
+##founder_stage=founder_refit
+##component=<ID=c0,Start=132,End=38813844,Founders=6,Sites=294976,UnobservedWithheld=16545,SourceComponent=0,SegmentIndex=0,AmbiguousWithheld=0>
+##founder_count_verification=<ID=c0u0,Status=count_unverified,SourceComponent=0,SegmentIndex=0,Start=132,End=38813844,Cause=nearest_shadow_budget,DomainSize=32768,Evaluated=1>
+##founder_count_verification=<ID=c0u1,Status=count_unverified,SourceComponent=0,SegmentIndex=0,Start=132,End=38813844,Cause=nearest_shadow_budget,DomainSize=32768,Evaluated=1>
+##founder_count_verification=<ID=c0u2,Status=count_unverified,SourceComponent=0,SegmentIndex=0,Start=23573362,End=38813844,Cause=nearest_shadow_budget,DomainSize=4096,Evaluated=1>
+##unobserved_founder_alleles=16545
+##unobserved_founder_alleles_rule="a founder allele is written as . when no sample whose released painting names that founder at the site has read depth there (release 2.2)"
+##synthetic_alleles="A/C encode abstract simulated 0/1; not reference-genome bases"
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c0_H0	c0_H1	c0_H2	c0_H3	c0_H4	c0_H5

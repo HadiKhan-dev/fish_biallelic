@@ -288,7 +288,7 @@ def refine_component(
                 alternative_starts=alternative_starts,
             )
     except WindowWorkLimit:
-        # No interrupted direction, copy response, count fit or replay may enter a
+        # No interrupted direction, count fit or replay may enter a
         # scientific comparison. Preserve the complete original component/families.
         stop = engine.windows.work.stop_record()
         domains, work = (stop.domain,), stop.work

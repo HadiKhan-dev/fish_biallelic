@@ -30,7 +30,6 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
 
 import numpy as np
 
@@ -186,7 +185,7 @@ def _constant_cut(
             if high - low > 1:
                 ties.census("assembly.beam_cut", f"{key}/e{founder}", [score] * (high - low), sink=tie_settings.census)
     # count_vector_classes never reads its classes argument (kept for the calling interface).
-    count_vector_classes(counter, "assembly.beam_cut", cast(np.ndarray, ()), 0, (), inside)
+    count_vector_classes(counter, "assembly.beam_cut", 0, (), inside)
 
 
 def _lookup(transitions: Transitions) -> list[list[np.ndarray | None]]:
@@ -365,7 +364,7 @@ def _endpoint_order(
         inside |= in_order[members[limit]] == cut
         kept[members[:limit]] = True
     boundary = _cut_boundaries(scores[ranked], in_order, cut_classes, q)
-    count_vector_classes(counter, "assembly.beam_cut", in_order, wide, boundary, inside)
+    count_vector_classes(counter, "assembly.beam_cut", wide, boundary, inside)
     return ranked[kept]
 
 

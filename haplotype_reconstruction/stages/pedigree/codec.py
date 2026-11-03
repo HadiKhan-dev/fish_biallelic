@@ -20,9 +20,9 @@ __all__ = ["PedigreeAdapter"]
 
 
 class PedigreeAdapter:
-    """Lossless schema-2 fields, decoded to read-only arrays by the shared D1 codec."""
+    """Lossless schema-3 fields, decoded to read-only arrays by the shared D1 codec."""
 
-    schema = 2
+    schema = 3
 
     def encode(self, product: records.Pedigree) -> Mapping[str, Any]:
         require_schema({"schema": product.schema}, self.schema)

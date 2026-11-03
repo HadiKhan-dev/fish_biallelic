@@ -194,7 +194,6 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [RC11](refinement.md#rc11) — Core
 - [RC12](refinement.md#rc12) — Core
 - [RC13](refinement.md#rc13) — Core
-- [RC14](refinement.md#rc14) — Accretion
 - [RC15](refinement.md#rc15) — Core
 - [RC16](refinement.md#rc16) — Core
 - [RC17](refinement.md#rc17) — Core
@@ -214,7 +213,6 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [RS10](refinement.md#rs10) — Core
 - [RS11](refinement.md#rs11) — Core
 - [RS12](refinement.md#rs12) — Core
-- [RS13](refinement.md#rs13) — Core
 - [RS14](refinement.md#rs14) — Core
 - [RS15](refinement.md#rs15) — Core
 - [RS16](refinement.md#rs16) — Core

@@ -204,7 +204,7 @@ class ScoredEdits:
             reverse=reverse,
         )
         inside = quota < len(order) and classes[order[quota - 1]] == classes[order[quota]]
-        ties.count_vector_classes(counter, "assembly.join_proposals", classes, wide, boundary, inside)
+        ties.count_vector_classes(counter, "assembly.join_proposals", wide, boundary, inside)
         if quota < len(order):
             cut_class = classes[order[quota - 1]]
             first = int(np.searchsorted(classes[order], cut_class, side="left"))

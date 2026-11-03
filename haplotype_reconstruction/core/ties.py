@@ -762,11 +762,11 @@ def add_decision(
 
 
 def count_vector_classes(
-    counter: TieCounter | None, kind: str, classes: np.ndarray, wide: int, boundary: Sequence, decided_inside: bool
+    counter: TieCounter | None, kind: str, wide: int, boundary: Sequence, decided_inside: bool
 ) -> None:
     """Add one vectorised tie-class decision (path_class_order) to a TieCounter.
 
-    Mutates only counter; classes is retained for the original calling interface. Count conversion errors propagate.
+    Mutates only counter. Count conversion errors propagate.
     """
     if counter is None:
         return

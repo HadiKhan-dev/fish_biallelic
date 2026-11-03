@@ -316,7 +316,6 @@ class PanelSearch:
         self.block_sizes = [int(k) for k in self.layout.founders]
         self.geometry = count_rule.RowGeometry.from_panels(inputs.blocks, reverse=self.tie_settings.reverse)
         self.near_identity = float(count_rule_config.near_identity)
-        self.seed_refits = int(count_rule_config.ranked_refits)
         self.release_families: list[dict[str, Any]] = []
         # Observed flat neighbours of the current panel: canonical panel -> (log likelihood, certify key).
         self._plateau_candidates: dict[PanelKey, tuple[float, str | None]] = {}

@@ -3512,7 +3512,7 @@ class WindowSolver:
         # _closed_start does for the start flank; proposals only (acceptance stays exact).
         end = np.maximum(end, end.max(axis=1, keepdims=True) - self.penalty)
         # Dimensions are those of this actual fine/coarse problem, including temporary
-        # copy-response founders and all distinct context paths. Python-int products
+        # duplicate-seed founders and all distinct context paths. Python-int products
         # precede scaled native accounting; there is no small-K cap or off mode.
         founders = int(cols.shape[1])
         samples = int(start.shape[0])

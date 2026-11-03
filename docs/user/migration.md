@@ -161,3 +161,5 @@ worst cases of decision 0e, remain scientific limitations in 4.0, not performanc
 fixes applied during migration. See [limitations](limitations.md)
 and the [cost table](../developer/costs.md), including K = 30. The optional pair
 output is the explicit 0d output-contract change.
+
+In 4.2, exemption 0b is removed: every eligible count hypothesis is refitted. CountRuleSettings and CountDecisionRecord use schema 2, without the old admission-rank fields; the decision record also drops RC14 cleanup history. Old count-decision payloads are rejected and code/parameter identities prevent their reuse. Recompute the affected assembly/refinement stages. The ordinary count rule replaces the zero-gain cleanup pre-pass. Preferred panels can change where the old admission screen omitted a better endpoint, even when the count verdict agrees.

@@ -15,7 +15,7 @@ import numpy as np
 from . import checkpoints
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
-__all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "copy_response_bytes", "component_task_bytes"]
+__all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "component_task_bytes"]
 
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
@@ -108,12 +108,6 @@ def traceback_bytes(samples: int, sites: int, founders: int, threads: int) -> in
     return int((373 * samples + 200) * sites + active * sites * (states + 2 * founders + 16) + 64 * samples * states)
 
 
-def copy_response_bytes(blocks: int, samples: int, founders: int) -> int:
-    """Native simultaneous copy messages, for K founders including the copy."""
-    states = founders * (founders + 1) // 2
-    return 24 * (blocks + 1) * samples * states + (32 << 20)
-
-
 def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin, context, cores, incoming=()) -> int:
     """Parent estimate including simultaneously live child work, from dimensions.
 
@@ -181,9 +175,7 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     beam_bins = max(maximum_total_bins, max(sum(bins[a : a + 64]) for a in range(blocks)))
     beam = 8 * samples * q * (6 * 64 + 12 + beam_bins) + 8 * samples * beam_bins * beam_bins
     score = 2 * maximum_k * sites + min(sites * q, 1 << 31) + 8 * samples
-    child = (
-        search + window + max(proposal, guard, beam, copy_response_bytes(blocks, samples, maximum_k), score + (1 << 30))
-    )
+    child = search + window + max(proposal, guard, beam, score + (1 << 30))
     return (
         component_bytes(panels, samples, min_sites_per_bin=min_sites_per_bin, max_bins=config.proposal_max_bins)
         + max(1, cores) * child

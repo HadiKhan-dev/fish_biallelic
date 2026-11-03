@@ -753,6 +753,7 @@ def _relabel_linked(
         flats = np.flatnonzero(total.ravel() >= minimum_gain * unit)
         values = total.ravel()[flats]
         candidates = []
+        candidate_class = []
         if len(flats):
             # Nats; descending gain. Flat link/pair indices are stable discrete content;
             # exact equal keys denote the same candidate. No secondary preference reverses.
@@ -769,6 +770,9 @@ def _relabel_linked(
             )
             candidates = [divmod(int(flats[index]), len(pairs)) for index in ranked.order]
             candidate_class = [int(ranked.classes[index]) for index in ranked.order]
+        class_members: dict[int, list[int]] = {}
+        for index, class_id in enumerate(candidate_class):
+            class_members.setdefault(class_id, []).append(index)
         leftmost: dict[tuple[int, int], int] = {}
         results: dict[tuple[int, int], tuple[bool, np.ndarray, np.ndarray, np.ndarray]] = {}
 
@@ -832,11 +836,7 @@ def _relabel_linked(
             if not evaluate(key)[0]:
                 index += 1
                 continue
-            members = [
-                other
-                for other in range(len(candidates))
-                if candidate_class[other] == candidate_class[index] and other != index
-            ]
+            members = [other for other in class_members[candidate_class[index]] if other != index]
             if any(canonical(other) != key and evaluate(canonical(other))[0] for other in members):
                 counter.note("painting.relabel_ambiguous", inside_tie=True)
                 index = max(members) + 1

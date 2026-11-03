@@ -170,14 +170,15 @@ def decode_component(
     model: fidelity.ChainModel | None,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     batch_samples: int = 1,
-    reverse: bool = False,
+    reverse: bool,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
 ) -> ComponentDecoding:
     """Decode every sample of one component (all samples of ``likelihoods``).
 
     ``evidence_sites`` int64[L] maps the panel's sites to the evidence site axis (``panel.site_indices()``).
     ``model``: the component's copying model (component_model; required for nonempty bins). The packed tempered label
-    emissions are kept when they fit ``emission_cache_bytes``.
+    emissions are kept when they fit ``emission_cache_bytes``. ``reverse``: the run's tie-convention reversal
+    (TieSettings.reverse), required so that no caller falls back to the forward convention by omission.
     """
     n_samples = likelihoods.shape[0]
     states = build_states(panel.positions, panel.inference, panel.kept)
@@ -365,7 +366,7 @@ def paint_chromosome(
     genetic_map: ChromosomeGeneticMap,
     *,
     batch_samples: int = 1,
-    reverse: bool = False,
+    reverse: bool,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
@@ -375,7 +376,8 @@ def paint_chromosome(
 
     ``panels``: the final assembly's ComponentPanels in genomic order;
     ``evidence``: the contig's evidence (all samples); ``genetic_map``: the
-    contig's ChromosomeGeneticMap. Numba kernels use the caller's thread team.
+    contig's ChromosomeGeneticMap; ``reverse``: the run's tie-convention reversal (TieSettings.reverse), required.
+    Numba kernels use the caller's thread team.
     """
     likelihoods = evidence.likelihoods
     observed = evidence.observed

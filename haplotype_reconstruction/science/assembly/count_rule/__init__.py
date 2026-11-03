@@ -3,7 +3,7 @@
 criterion: the effective-carrier test on the total gain and its sequence part, the bootstrap
 ambiguity band, count cycles, optimistic-bound tests and the per-founder cost.
 geometry: private cells, nearest rows, shadow paths and novelty (over the pre-fill inference calls).
-config: CountRuleConfig (bootstrap, ranked refits, the join's near-identity threshold).
+config: CountRuleConfig (bootstrap, shadow families, the join's near-identity threshold).
 
 Owns: the shared count-rule public API.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.

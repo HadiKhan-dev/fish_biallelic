@@ -508,17 +508,17 @@ def build(
         )
         for r in diagnostic
     )
-    exclusion = []
-    for i, (child, parent) in enumerate(release.dyads):
-        lower = float(release.log_e[i])
-        row = ExclusionEvidenceView(int(child), int(parent), lower, int(release.observed_sites[i]))
-        if release.log_e_upper is not None:
-            upper = float(release.log_e_upper[i])
-            exact = lower == upper
-            row = replace(
-                row, log_e=lower if exact else float("nan"), log_e_lower=lower, log_e_upper=upper, log_e_exact=exact
-            )
-        exclusion.append(row)
+    dyads = np.asarray(release.dyads, dtype=np.int64).reshape(-1, 2)
+    lower = np.array(release.log_e, dtype=np.float64)
+    observed = np.array(release.observed_sites, dtype=np.int64)
+    if release.log_e_upper is None:
+        exclusion = ExclusionEvidenceView(dyads[:, 0].copy(), dyads[:, 1].copy(), lower, observed)
+    else:
+        upper = np.array(release.log_e_upper, dtype=np.float64)
+        exact = lower == upper
+        exclusion = ExclusionEvidenceView(
+            dyads[:, 0].copy(), dyads[:, 1].copy(), np.where(exact, lower, np.nan), observed, lower, upper, exact
+        )
     scores = decision.scores
     mean_junctions = np.mean(scores.junctions, axis=1)
     mean_callable = np.mean(scores.callable_bins, axis=1)
@@ -538,7 +538,7 @@ def build(
         call_rows,
         alternative_rows,
         search,
-        tuple(exclusion),
+        exclusion,
         release.records,
         evidence_summary,
         chromosome_summary,

@@ -23,7 +23,6 @@ VITERBI_TIE = noise_quantum(1.9e-6)
 MAXIMUM_MASK_STATES = 63
 # Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions.
 EMISSION_CACHE_MAX_BYTES = 1 << 30
-MINIMUM_WORKING_MEMORY_BYTES = 512 << 20
 WINDOW_BYTES = 64 << 20
 LABEL_CONTINUITY_BASE_BYTES = 64 << 20
 
@@ -227,7 +226,6 @@ __all__ = [
     "VITERBI_TIE",
     "MAXIMUM_MASK_STATES",
     "EMISSION_CACHE_MAX_BYTES",
-    "MINIMUM_WORKING_MEMORY_BYTES",
     "WINDOW_BYTES",
     "LABEL_CONTINUITY_BASE_BYTES",
 ]

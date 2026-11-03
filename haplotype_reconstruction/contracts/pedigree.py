@@ -702,7 +702,8 @@ class PedigreeInput:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 2."""
+    """Complete released pedigree and retained numerical state, published atomically as schema 3 (4.2: columnar
+    exclusion evidence)."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -724,7 +725,7 @@ class Pedigree:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(2)
+    schema: int = schema_field(3)
 
 
 @dataclass(frozen=True)
@@ -1281,15 +1282,24 @@ class ChromosomeSummaryView:
 
 @dataclass(frozen=True)
 class ExclusionEvidenceView:
-    """Numeric PD25 row; sample/parent integers index the product sample axis (-1 missing)."""
+    """Numeric PD25 exclusion evidence, one entry per screened dyad D in construction order; arrays own their storage.
 
-    sample: int = record_field("report", units="1", dtype="int")
-    candidate_parent: int = record_field("report", units="1", dtype="int")
-    log_e: float = record_field("report", units="nats", dtype="float64")
-    observed_sites: int = record_field("report", units="1", dtype="int")
-    log_e_lower: float | None = record_field("report", units="nats", dtype="float64 | None", default=None)
-    log_e_upper: float | None = record_field("report", units="nats", dtype="float64 | None", default=None)
-    log_e_exact: bool | None = record_field("report", dtype="bool | None", default=None)
+    sample / candidate_parent index the product sample axis. With exclusion intervals (PedigreeViews.
+    exclusion_intervals), log_e is the exact value where the interval is a point and NaN otherwise, and
+    log_e_lower / log_e_upper / log_e_exact hold the interval; without them those three are None and log_e is exact.
+    One record per view rather than one object per dyad: N = 2,500 screens about 4 million dyads.
+    """
+
+    sample: np.ndarray = record_field("report", axes=("D",), units="1", dtype="int64")
+    candidate_parent: np.ndarray = record_field("report", axes=("D",), units="1", dtype="int64")
+    log_e: np.ndarray = record_field("report", axes=("D",), units="nats", dtype="float64")
+    observed_sites: np.ndarray = record_field("report", axes=("D",), units="1", dtype="int64")
+    log_e_lower: np.ndarray | None = record_field("report", axes=("D",), units="nats", dtype="float64", default=None)
+    log_e_upper: np.ndarray | None = record_field("report", axes=("D",), units="nats", dtype="float64", default=None)
+    log_e_exact: np.ndarray | None = record_field("report", axes=("D",), dtype="bool", default=None)
+
+    def __len__(self) -> int:
+        return len(self.sample)
 
 
 @dataclass(frozen=True)
@@ -1331,9 +1341,7 @@ class PedigreeViews:
     search_diagnostics: tuple[SearchDiagnosticView, ...] = record_field(
         "report", axes=(), dtype="tuple[SearchDiagnosticView, ...]"
     )
-    exclusion_evidence: tuple[ExclusionEvidenceView, ...] = record_field(
-        "report", axes=(), dtype="tuple[ExclusionEvidenceView, ...]"
-    )
+    exclusion_evidence: ExclusionEvidenceView = record_field("report", axes=(), dtype="ExclusionEvidenceView")
     exclusion_diagnostics: tuple[CountDiagnostic, ...] = record_field(
         "report", axes=(), dtype="tuple[CountDiagnostic, ...]"
     )

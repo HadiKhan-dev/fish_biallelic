@@ -112,7 +112,7 @@ def render() -> str:
         (
             "Science reads no environment variables. The application establishes the numerical policy "
             "before numerical imports. Runtime reads below choose process limits, cache paths or cache "
-            "identity; they are not scientific settings. Names are listed even when a caller never "
+            "identity. They do not select a scientific model. Names are listed even when a caller never "
             "supplies them."
         ),
         "",
@@ -126,8 +126,8 @@ def render() -> str:
         "XDG_CACHE_HOME": "Persistent user cache base when supplied.",
         "SLURM_TMPDIR": "Optional temporary cache directory when a run identifier is present.",
         "NUMBA_*": (
-            "Nonoperational code-generation values enter the compilation cache key; NUMBA_CACHE_DIR, "
-            "NUMBA_NUM_THREADS and NUMBA_THREADING_LAYER are excluded from that key."
+            "Inherited code-generation controls can change compiled code; the compilation cache keys their "
+            "values. NUMBA_CACHE_DIR, NUMBA_NUM_THREADS and NUMBA_THREADING_LAYER are excluded from that key."
         ),
     }
     grouped = {}
@@ -149,6 +149,26 @@ def render() -> str:
         ),
         "",
     ]
+    runtime = ast.parse((PACKAGE / "engine/runtime.py").read_text())
+    thread_variables = next(
+        ast.literal_eval(node.value)
+        for node in runtime.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_THREAD_VARIABLES" for target in node.targets)
+    )
+    missing = [name for name in thread_variables if name not in grouped]
+    if missing:
+        lines += [
+            "## Fixed numerical-library thread limits",
+            "",
+            "The runtime sets these variables to `1` before numerical imports and worker startup; "
+            "they do not select a scientific model or compiler option.",
+            "",
+            "| Variable | Runtime action |",
+            "|---|---|",
+            *(f"| `{name}` | Set to `1` by `engine/runtime.py`. |" for name in missing),
+            "",
+        ]
     return "\n".join(lines)
 
 

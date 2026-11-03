@@ -82,8 +82,8 @@ withheld-carrier count, source component, segment index and ambiguity-withheld
 count. Verification/ambiguity declarations give their uncertainty interval,
 cause, domain or alternative count and evaluation status; they do not supply
 missing alleles. The header's exact descriptions are visible in the captured
-[full founder header](../examples/full.founders.header.vcf) and
-[kept founder header](../examples/kept.founders.header.vcf).
+[full founder header](../examples/full.founders.header.vcf.txt) and
+[kept founder header](../examples/kept.founders.header.vcf.txt).
 
 ## D2: sample phase VCF
 
@@ -106,8 +106,8 @@ sex labels.
 
 Header order is file format, htslib PASS, source, contig, GT, PS, then full-length
 FILTER/site-set/omission lines, the simulation note when appropriate, and columns.
-Observed [full sample](../examples/full.samples.header.vcf) and
-[kept sample](../examples/kept.samples.header.vcf) headers are captured from real
+Observed [full sample](../examples/full.samples.header.vcf.txt) and
+[kept sample](../examples/kept.samples.header.vcf.txt) headers are captured from real
 produced files. In the kept sample file, htslib's VCFv4.2 line precedes the writer's
 VCFv4.3 line; both occur. The [header receipt](../examples/vcf_headers.json) hashes
 these captures and their produced source files. htslib's inserted line is

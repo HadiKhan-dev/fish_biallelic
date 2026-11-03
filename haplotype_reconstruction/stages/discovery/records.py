@@ -20,7 +20,7 @@ from ...science.discovery.release import _search_status
 from ...science.discovery.search import SearchSummary
 from ...store.container import CheckpointFile, CheckpointMismatch
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, is_complete, publication_metadata, read_items, resume
+from ...store.protocol import Derivation, NumericalPolicy, publication_metadata, read_items, resume
 from ...store.store import CheckpointStore
 
 
@@ -302,15 +302,17 @@ def result_reader(
     checked = (file.path, os.stat(file.path).st_ino, expected[PLAN])
     if checked in _CHECKED:
         return Reader(file, expected, product, count)
-    if not is_complete(file, expected):
-        return None
+    # One pass over the plan and every block: each record's envelope is checked once, with its small metadata. Every
+    # record is read before deciding, so a present record whose identity differs raises CheckpointMismatch even when
+    # another is missing; a missing record leaves the domain incomplete.
     plan = read_items(file, PLAN, expected[PLAN], ("schema", "blocks"))
-    if plan is None or PlanAdapter().decode(plan.payload).blocks != count:
+    blocks = [read_items(file, block_key(i), expected[block_key(i)], ("schema", "block", "kind")) for i in range(count)]
+    present = [block for block in blocks if block is not None]
+    if plan is None or len(present) < count:
+        return None
+    if PlanAdapter().decode(plan.payload).blocks != count:
         raise InvariantError("discovery plan block count differs from evidence")
-    for index in range(count):
-        block = read_items(file, block_key(index), expected[block_key(index)], ("schema", "block", "kind"))
-        if block is None:
-            return None
+    for index, block in enumerate(present):
         require_schema(block.payload, BlockAdapter.schema)
         if block.payload["block"] != index or block.payload["kind"] not in ("discovered", "uninformative"):
             raise InvariantError("discovery block completion has invalid metadata")

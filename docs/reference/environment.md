@@ -23,14 +23,14 @@ Install a supplied wheel or source distribution with these constraints; see [ins
 
 ## Environment reads
 
-Science reads no environment variables. The application establishes the numerical policy before numerical imports. Runtime reads below choose process limits, cache paths or cache identity; they are not scientific settings. Names are listed even when a caller never supplies them.
+Science reads no environment variables. The application establishes the numerical policy before numerical imports. Runtime reads below choose process limits, cache paths or cache identity. They do not select a scientific model. Names are listed even when a caller never supplies them.
 
 | Variable | Runtime use | Readers |
 |---|---|---|
 | `JOB_ID` | Optional external execution-scope identifier for private cache naming; no scientific effect. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
 | `LSB_JOBID` | Optional external execution-scope identifier for private cache naming; no scientific effect. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
 | `LSB_JOBINDEX` | Optional external execution-scope identifier for private cache naming; no scientific effect. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
-| `NUMBA_*` | Nonoperational code-generation values enter the compilation cache key; NUMBA_CACHE_DIR, NUMBA_NUM_THREADS and NUMBA_THREADING_LAYER are excluded from that key. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
+| `NUMBA_*` | Inherited code-generation controls can change compiled code; the compilation cache keys their values. NUMBA_CACHE_DIR, NUMBA_NUM_THREADS and NUMBA_THREADING_LAYER are excluded from that key. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
 | `NUMBA_CACHE_DIR` | Explicit/inherited private compilation cache directory. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py), [runtime.py](../../haplotype_reconstruction/engine/runtime.py) |
 | `NUMBA_NUM_THREADS` | Inherited runtime team capacity. | [runtime.py](../../haplotype_reconstruction/engine/runtime.py) |
 | `PBS_ARRAYID` | Optional external execution-scope identifier for private cache naming; no scientific effect. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
@@ -45,3 +45,15 @@ Science reads no environment variables. The application establishes the numerica
 | `XDG_CACHE_HOME` | Persistent user cache base when supplied. | [kernels.py](../../haplotype_reconstruction/engine/kernels.py) |
 
 The runtime sets numerical-library thread limits and fixes `NUMBA_DISABLE_INTEL_SVML`, `NUMBA_THREADING_LAYER` and `OMP_WAIT_POLICY`. These assignments are not additional user-controlled scientific options. Tie reversal and census use explicit settings described in [ties](../developer/ties.md).
+
+## Fixed numerical-library thread limits
+
+The runtime sets these variables to `1` before numerical imports and worker startup; they do not select a scientific model or compiler option.
+
+| Variable | Runtime action |
+|---|---|
+| `OMP_NUM_THREADS` | Set to `1` by `engine/runtime.py`. |
+| `OPENBLAS_NUM_THREADS` | Set to `1` by `engine/runtime.py`. |
+| `MKL_NUM_THREADS` | Set to `1` by `engine/runtime.py`. |
+| `VECLIB_MAXIMUM_THREADS` | Set to `1` by `engine/runtime.py`. |
+| `NUMEXPR_NUM_THREADS` | Set to `1` by `engine/runtime.py`. |

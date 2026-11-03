@@ -1667,11 +1667,6 @@
     },
     {
       "area": "refinement-count",
-      "unit": "RC14",
-      "classification": "Accretion"
-    },
-    {
-      "area": "refinement-count",
       "unit": "RC15",
       "classification": "Core"
     },
@@ -1763,11 +1758,6 @@
     {
       "area": "refinement-search",
       "unit": "RS12",
-      "classification": "Core"
-    },
-    {
-      "area": "refinement-search",
-      "unit": "RS13",
       "classification": "Core"
     },
     {

@@ -23,28 +23,22 @@ creating biological alternatives or withholding calls. Unlike the join,
 refinement takes no near-identity shortcut, because its last level is final and no later level can
 re-split a merged pair. Switch savings alone never justify a founder.
 
-Pass: X_K = C(start); deletion rounds (founders without a private cell are the round's candidates
-when there are any, otherwise every founder; with more than r = ranked_refits candidates the r
-best-ranked by the point margin of their exact unrefitted deletion are refitted, else every one;
-the best-F refit is decided; a rejection ends the deletions; K >= 2).
+Pass: X_K = C(start); deletion rounds refit every eligible candidate (founders without a
+private cell when present, otherwise every founder). The best-F refit is decided; a rejection
+ends deletions; K >= 2. There is no zero-gain cleanup before the ordinary count decision.
 
-Ties and cleanup (release 2.1, design 5.3; fits are in canonical founder order, so founder indices are
-content ranks): the refit decided is the content-smallest member (deleted founder's or copied seed's
-path) of the best tie class of the refits' F (quantum tie_rules.quantum("refine_F", F)); the decision is
-also evaluated for every other member of that class (complete shadow family when budgeted,
-otherwise its incumbent shadow only) and recorded
-(tied_candidates, tie_decisions, tie_decisions_agree; the point decision uses the canonical pick).
-Shortlists keep the tie class their cut falls in (at most 2r candidates). Before every deletion round of
-the main pass, founders that no sample uses are deleted as cleanup (declared model change, design A-9a):
-a founder whose unrefitted deletion leaves every informative sample's score unchanged within the
-per-sample quantum (tie_rules.quantum("refine_F")) is removed (content order, re-checked one at a time),
-the reduced panel is refitted, and a "cleanup" record is kept; it is not a count decision (2.0 kept such
-a founder whenever the best-F tie-break examined another founder first). The best-F keep and the restore
-compare F with max(TOL, quantum).
-At the final count step only (the last level), duplicate-seed addition rounds (seeds X plus a copy
-of founder f; with more than r founders the r seeds of largest exact copy best-response gain are
-refitted); with the symmetric null an accepted addition needs no check deletion round, so no count
-cycle arises (2.7 checked every addition and reported cycles). An optimistic bound (upper_bound) may skip a round
+Ties (fits are in canonical founder order, so founder indices are content ranks): the refit
+is the content-smallest member (deleted founder's or copied seed's path) of the best tie class
+of endpoint F, using tie_rules.quantum("refine_F", F). Evaluate the other members with the
+same symmetric null and bootstrap stream, retaining their endpoint and shadow families.
+The best-F keep and restore compare F with max(TOL, quantum).
+At the final count step only, addition rounds refit every duplicate seed. An accepted addition
+needs no check deletion round under the symmetric null, so no count cycle arises.
+Each count round fits O(K) candidates: O(N L K^3) for quadratic fixed-K scoring/fitting work.
+A pass has at most (accepted deletions + 1) deletion rounds, hence a quartic worst case in K;
+fixed-K search iterations, canonical window work and continuation histories are additional
+factors, not a whole-pass cubic guarantee. See docs/developer/costs.md for observed round counts.
+An optimistic bound (upper_bound) may skip a round
 only when it proves the decision and its non-ambiguity for every candidate (a deletion round's
 bootstrap band through count_rule.deletion_bound_excludes' replicate-wise bound). The count rule
 reads the informative samples only (workspace.count_samples, count_rule.founder_cost's S): every
@@ -74,7 +68,6 @@ from .. import orders as tie_rules
 from ..count_rule import shadow_bounds
 from ..count_rule.geometry import shadow_choices
 from .acceptance import TOL
-from .costs import copy_response_bytes
 from .objective import CENTER, forward_sites, pair_code7, row_max, selected_alleles, transition, unordered_pairs
 from .overloads import overloads_for
 from .parameters import (
@@ -1082,38 +1075,11 @@ def _count_choice(engine, kind, label, X, members, resolved, outcomes, refits, s
     return position, decision, flags
 
 
-def _shortlist(
-    candidates,
-    keys,
-    limit,
-    quantum,
-    contents,
-    *,
-    descending,
-    counter=None,
-    kind="",
-    census_key=None,
-    reverse,
-    sink=None,
-):
-    """The first ``limit`` candidates in tie-class order of their ranking keys (descending or not),
-    extended by the tie class the cut falls in (at most 2 x limit)."""
-    values = [float(keys[c]) for c in candidates]
-    result = ties.fixed_policy("assembly.refine_shortlist", quantum, reverse=reverse).classes(
-        values, content=contents, descending=descending
-    )
-    tie_rules.add_decision(counter, kind, result, values, quantum, None, descending=descending, cut=limit)
-    tie_rules.census(kind, census_key, [(-v if descending else v) for v in values], sink=sink)
-    return tie_rules.truncate(list(candidates), result, limit)
-
-
 def _decision(
     kind,
     label,
     founders,
     decision,
-    ranking,
-    scores,
     chosen,
     fits,
     pick,
@@ -1139,8 +1105,6 @@ def _decision(
         ambiguous=bool(decision.ambiguous or extra.get("ambiguous_k")),
         margin=float(decision.margin),
         band=tuple(float(x) for x in decision.band),
-        ranking=ranking,
-        candidate_scores=None if scores is None else tuple(None if v is None else float(v) for v in scores),
         refitted=tuple(dict.fromkeys(int(c) for c in chosen)),
         candidate_F=tuple(candidate_F),
         selected=int(chosen[pick]),
@@ -1409,7 +1373,6 @@ def _count_pass_point(
     counter: the component's tie-class counter (tie_rules.SharedCounter) or None; census_prefix: its
     valley-census key prefix or None. Returns a CountPass."""
     engine.ledger.start_count_pass()
-    ranked_refits = int(rule.ranked_refits)
     ws = engine.workspace
     # Per-sample vectors enter the count rule restricted to the informative samples (cost's S);
     # totals F stay sums over every evidence row (the other rows add exact zeros).
@@ -1459,10 +1422,8 @@ def _count_pass_point(
     adopt(fit)
     X = fit.rows
     scores = engine.fit_scores(fit.summary.label, X, budget)
-    samples = len(scores)
     count_samples = len(view(scores))
     round_index = 0
-    cleanup_index = 0
     upper = incoming + COUNT_LIMIT_MULTIPLE * incoming
     limit_reached = False
     # Best-F converged fit computed at each K: (F, panel, fit label, per-sample scores, fit).
@@ -1470,39 +1431,6 @@ def _count_pass_point(
 
     def key(*parts):
         return None if census_prefix is None else "/".join([census_prefix, *map(str, parts)])
-
-    # Exact unrefitted per-sample scores of the current panel's one-founder deletions (the cleanup test and a
-    # deletion round's ranking read the same panels): kept for one panel at a time.
-    unrefitted_cache = engine.ledger.unrefitted
-
-    def unrefitted(panel, founder):
-        reduced = np.ascontiguousarray(np.delete(panel, founder, axis=0))
-        token = (reduced.shape, reduced.tobytes())
-        found = unrefitted_cache.get(token)
-        if found is None:
-            if len(unrefitted_cache) > 4 * len(panel):
-                unrefitted_cache.clear()
-            found = unrefitted_cache[token] = engine.per_sample(reduced, budget)
-        return found
-
-    def prefetch(panel, founders):
-        """Fill unrefitted(panel, f) for several founders at once (concurrent scorings, the same values)."""
-        missing = {}
-        for founder in founders:
-            reduced = np.ascontiguousarray(np.delete(panel, founder, axis=0))
-            token = (reduced.shape, reduced.tobytes())
-            if token not in unrefitted_cache:
-                missing[token] = reduced
-        if len(missing) < 2:
-            return
-        if len(unrefitted_cache) + len(missing) > 4 * len(panel):
-            unrefitted_cache.clear()
-        for token, scores in zip(
-            missing,
-            _scores_many(engine, list(missing.values()), budget, "founder_refinement deletion scores"),
-            strict=False,
-        ):
-            unrefitted_cache[token] = scores
 
     def remember(panel, held_fit, per_sample):
         F_fit = panel_objective(per_sample)
@@ -1532,60 +1460,6 @@ def _count_pass_point(
             )
         agree = len({item["accept_larger"] for item in records}) == 1
         return tuple(int(chosen[p]) for p in members), tuple(records), bool(agree), outcomes
-
-    def cleanup(X, scores, larger_fit):
-        """Founders no sample uses, deleted before a deletion round (module docstring). Returns None or
-        (record, fit, rows, per-sample scores) of the refitted reduced panel."""
-        nonlocal cleanup_index
-        quantum = tie_rules.quantum("refine_F")
-        current, current_scores, removed = X, scores, []
-        while len(current) > 2:
-            found = None
-            losses = []
-            # canonical order = content order (reversed under ties.reverse_conventions())
-            order = ties.conv_order(len(current), reverse=engine.reverse).tolist()
-            prefetch(current, order)
-            for founder in order:
-                reduced = unrefitted(current, founder)
-                loss = float(np.max(np.abs(view(current_scores) - view(reduced))))
-                losses.append(loss)
-                if counter is not None:
-                    # The band at the exact zero of an unused founder's loss (owner rule A-7).
-                    counter.note("assembly.refine_zero_gain.band", inside_tie=loss <= quantum)
-                if loss <= quantum and found is None:
-                    found = (founder, reduced)
-            tie_rules.census(
-                "assembly.refine_zero_gain.band", key("clean", cleanup_index, len(removed)), losses, sink=engine.census
-            )
-            if found is None:
-                break
-            founder, reduced = found
-            removed.append(tie_rules.path_key(current[founder]))
-            current, current_scores = np.delete(current, founder, axis=0), reduced
-        if not removed:
-            return None
-        label = f"c{cleanup_index}"
-        cleanup_index += 1
-        refit = engine.converge(current, f"{label}.clean", budget)
-        capture(refit)
-        refit_scores = engine.fit_scores(refit.summary.label, refit.rows, budget)
-        if counter is not None:
-            counter.add_counts("assembly.refine_cleanup", decisions=1)
-        record = CountDecisionRecord(
-            kind="cleanup",
-            round=label,
-            founders=len(X),
-            skipped_by_bound=False,
-            accept_larger=False,
-            ambiguous=False,
-            refitted=(),
-            selected=None,
-            selected_F=float(refit.summary.F),
-            larger_fit=larger_fit,
-            smaller_fit=refit.summary.label,
-            cleanup_removed=tuple(removed),
-        )
-        return record, refit, refit.rows, refit_scores
 
     def deletion_round(X, scores, larger_fit):
         nonlocal round_index
@@ -1633,31 +1507,9 @@ def _count_pass_point(
                     None,
                     None,
                 )
-        candidates = list(without) or list(range(K))
-        if len(candidates) > ranked_refits:
-            # Exact unrefitted per-sample scores of every candidate's deletion, ranked by the point
-            # margin of the total gain (tie classes; the founder's path inside a class); the top r,
-            # with the tie class the cut falls in, are converged.
-            keys = [None] * K
-            prefetch(X, candidates)
-            for d in candidates:
-                keys[d] = min(_point_margins(view(scores), view(unrefitted(X, d)), cost))
-            chosen = _shortlist(
-                candidates,
-                keys,
-                ranked_refits,
-                tie_rules.quantum("count_margin"),
-                [tie_rules.path_key(X[d]) for d in candidates],
-                descending=False,
-                counter=counter,
-                kind="assembly.refine_shortlist",
-                census_key=key(label, "short"),
-                reverse=engine.reverse,
-                sink=engine.census,
-            )
-            ranking = "unrefitted_point_margin"
-        else:
-            keys, chosen, ranking = None, list(candidates), "all_candidates"
+        # The private-cell eligibility rule is unchanged; admission fits the entire domain.
+        # O(K) independent fits make the round cubic, and repeated deletion rounds quartic.
+        chosen = list(without) or list(range(K))
         refits = _fit_many(
             engine, [np.delete(X, d, axis=0) for d in chosen], [f"{label}.del{d}" for d in chosen], budget
         )
@@ -1752,8 +1604,6 @@ def _count_pass_point(
             label,
             K,
             decision,
-            ranking,
-            keys,
             chosen,
             refits,
             pick,
@@ -1868,42 +1718,8 @@ def _count_pass_point(
                 None,
             )
         starts = [np.vstack((X, X[f : f + 1])) for f in range(K)]
-        responses = gains = None
-        if K > ranked_refits:
-            # Seeds ranked by the exact F gain of their copy's best responses (tie classes; the
-            # seed's path inside a class); the top r, with the tie class the cut falls in, are
-            # converged.
-            per_task = copy_response_bytes(engine.blocks, samples, K + 1)
-            responses = [None] * K
-            ordinals = engine.bind_fits(
-                K, [(f"{label}.copy{index}", start, "copy_response") for index, start in enumerate(starts)]
-            )
-            for index, response in budget.concurrent(
-                [
-                    lambda child, start=start, ordinal=ordinal: engine.copy_response(start, child, ordinal=ordinal)
-                    for start, ordinal in zip(starts, ordinals, strict=False)
-                ],
-                per_task,
-                label="founder_refinement copy responses",
-            ):
-                responses[index] = response
-            gains = [response[0] for response in responses]
-            chosen = _shortlist(
-                list(range(K)),
-                gains,
-                ranked_refits,
-                tie_rules.quantum("refine_F", F),
-                [tie_rules.path_key(X[f]) for f in range(K)],
-                descending=True,
-                counter=counter,
-                kind="assembly.refine_shortlist",
-                census_key=key(label, "short"),
-                reverse=engine.reverse,
-                sink=engine.census,
-            )
-            ranking = "copy_best_response_gain"
-        else:
-            chosen, ranking = list(range(K)), "all_candidates"
+        # Every duplicate seed competes by its converged endpoint, without a proxy ranking.
+        chosen = list(range(K))
         refits = _fit_many(engine, [starts[f] for f in chosen], [f"{label}.add{f}" for f in chosen], budget)
         # Keep one work summary per actual convergence; the endpoint table
         # expands evidence already computed, not the number of searches run.
@@ -1996,8 +1812,6 @@ def _count_pass_point(
             label,
             K,
             decision,
-            ranking,
-            gains,
             chosen,
             refits,
             pick,
@@ -2034,7 +1848,6 @@ def _count_pass_point(
                 else ()
             ),
             selected_refit_panel=(tie_rules.panel_key(refits[pick].rows) if endpoint_family else ()),
-            copy_responses=None if responses is None else tuple(response[1] for response in responses),
             tied_candidates=tied,
             tie_decisions=tie_records,
             tie_decisions_agree=agree,
@@ -2044,24 +1857,9 @@ def _count_pass_point(
         return entry, larger, larger_scores, (larger.rows, X)
 
     final = fit
-    # Founder count at the start and after every accepted count change, and the deletions of a
-    # founder without a private cell or without a user (cleanup, not a decision): cycle diagnostics.
-    sizes = [incoming]
-    cleanup_steps = set()
-    # Deletion rounds until one is rejected; panels of two founders are not reduced. Founders no
-    # sample uses are cleaned up before every round.
+    # Ordinary count deletions only: no separate score-loss cleanup bypasses the rule.
+    # At most d + 1 deletion rounds for d accepted deletions (fewer on reaching K = 2).
     while len(X) > 2:
-        cleaned = cleanup(X, scores, final.summary.label)
-        if cleaned is not None:
-            entry, final, X, scores = cleaned
-            decisions.append(entry)
-            panels.append(None)
-            remember(X, final, scores)
-            adopt(final)
-            sizes.append(len(X))
-            cleanup_steps.add(len(sizes) - 1)
-            if len(X) <= 2:
-                break
         entry, smaller, smaller_scores, pair = deletion_round(X, scores, final.summary.label)
         decisions.append(entry)
         decided(entry)
@@ -2070,9 +1868,6 @@ def _count_pass_point(
             break
         final, X, scores = smaller, smaller.rows, smaller_scores
         adopt(final)
-        sizes.append(len(X))
-        if entry.selected in entry.without_sequence:
-            cleanup_steps.add(len(sizes) - 1)
     cycle = False
     cycle_undecided = False
     while additions:
@@ -2091,7 +1886,6 @@ def _count_pass_point(
         # (count_cycle and cycle_undecided stay False in the records).
         final, X, scores = larger, larger.rows, larger_scores
         adopt(final)
-        sizes.append(len(X))
     replaced = None
     held = best_at[len(X)]
     if held[0] > panel_objective(scores) + keep_margin(panel_objective(scores)):
@@ -2186,7 +1980,7 @@ def count_pass(
     """At most four joint input/fit-direction/count-choice continuations.
 
     Every branch replays the original input, reconstructing bootstrap labels,
-    round/cleanup counters, best-by-K records and cycle history before selecting
+    round counters, best-by-K records and cycle history before selecting
     its evaluated alternative. No intermediate panel is a fresh count-pass root.
     """
 

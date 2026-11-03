@@ -38,7 +38,7 @@ from ..painting.api import (
     unpack_emissions,
 )
 from .agreement import _agreement, _edge_chains, _set_start_bins
-from .allele_evidence import EVIDENCE_CHUNK, allele_evidence, allele_prior, flip_probabilities
+from .allele_evidence import allele_evidence, allele_prior, flip_probabilities
 from .inputs import _state_alleles, edge_rates
 from .junctions import JunctionInputs, junction_candidates, withheld_joins
 from .model import LabelModel
@@ -207,19 +207,11 @@ def _release_sites(inputs, bin_edges, bins):
     return indices, site_bins[indices], alleles[:, columns[indices]]
 
 
-def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, windowed):
+def _uncertainty(model, inputs, site_bins, site_alleles, site_gl):
     """CAL2 with the original chunk and carrier addition order (FP14)."""
     epsilon = inputs.painting.robustness_epsilon
     excluded = inputs.observations.excluded
-    if windowed:
-        evidence = np.zeros(site_alleles.shape)
-        for left in range(0, len(site_bins), EVIDENCE_CHUNK):
-            right = min(len(site_bins), left + EVIDENCE_CHUNK)
-            evidence[:, left:right] = allele_evidence(
-                model.X, site_bins[left:right], site_alleles[:, left:right], site_gl[:, left:right], excluded, epsilon
-            )
-    else:
-        evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon)
+    evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon)
     prior = allele_prior(inputs.refit.prior_ones, inputs.refit.prior_called)
     return AlleleUncertainty(evidence, flip_probabilities(evidence, site_alleles, prior), prior)
 
@@ -299,9 +291,7 @@ def phase_component(
         if workspace.prepare_likelihoods is None
         else workspace.prepare_likelihoods(inputs.observations, site_indices, site_bins)
     )
-    uncertainty = tuple(
-        _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, workspace.windowed) for solved in models
-    )
+    uncertainty = tuple(_uncertainty(solved, inputs, site_bins, site_alleles, site_gl) for solved in models)
     releases = _sample_releases(
         models,
         inputs,

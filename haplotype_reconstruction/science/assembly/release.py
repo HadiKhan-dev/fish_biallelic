@@ -9,6 +9,7 @@ Method: docs/methods/assembly.md#release; WP_AS6 §4.7 and WP_OU1 §5.
 from __future__ import annotations
 
 from collections import Counter
+from functools import cache
 
 import numpy as np
 
@@ -753,19 +754,21 @@ def identity_flags(identity_paths, segments=None) -> tuple[FounderIdentityFlag, 
             owners = [(source, first_block, first_block + len(offsets), tuple(range(len(rows))))]
         else:
             owners = [
-                (index, s.block_start, s.block_stop, s.source_founder_rows)
+                (index, s.block_start, s.block_stop, tuple(s.source_founder_rows))
                 for index, s in enumerate(segments)
                 if s.source_component == source
             ]
 
+        @cache
         def owner(block, *, owners=owners, first_block=first_block):
             return next((item for item in owners if item[1] <= first_block + block < item[2]), None)
 
+        @cache
         def columns(item, *, rows=rows):
             order = list(item[3])
             if sorted(order) != list(range(len(rows))):
                 raise InvariantError("release segment does not contain every source founder row once")
-            return {row: order.index(row) for row in range(len(rows))}
+            return {row: column for column, row in enumerate(order)}
 
         for flag in partner_changes(rows):
             right_owner = owner(flag.block)

@@ -399,6 +399,25 @@ def _count_row(value, names):
     return row
 
 
+def _exclusion_frame(view: records.ExclusionEvidenceView, names: Sequence[str], intervals: bool) -> pd.DataFrame:
+    """The exclusion evidence table, column by column from its columnar view (same columns and dtypes as row-wise:
+    names as text, LogE and the interval floats as float64, ObservedSites int64, LogEExact bool)."""
+    table = "exclusion_evidence"
+    columns: dict[str, object] = dict(
+        Sample=[_value("Sample", i, names, table) for i in view.sample.tolist()],
+        CandidateParent=[_value("CandidateParent", i, names, table) for i in view.candidate_parent.tolist()],
+        LogE=np.asarray(view.log_e, dtype=np.float64),
+        ObservedSites=np.asarray(view.observed_sites, dtype=np.int64),
+    )
+    if intervals:
+        columns.update(
+            LogELower=np.asarray(view.log_e_lower, dtype=np.float64),
+            LogEUpper=np.asarray(view.log_e_upper, dtype=np.float64),
+            LogEExact=np.asarray(view.log_e_exact, dtype=np.bool_),
+        )
+    return pd.DataFrame(columns)
+
+
 def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd.DataFrame | None]:
     """Render numeric rows and text only; never choose or recompute a scientific value."""
     result = {}
@@ -437,22 +456,9 @@ def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd
                 continue
             guard = values
             values = guard.rows
-        if table == "exclusion_evidence" and not values:
-            result[table] = pd.DataFrame(
-                dict(
-                    Sample=[],
-                    CandidateParent=[],
-                    LogE=np.empty(0, dtype=np.float64),
-                    ObservedSites=np.empty(0, dtype=np.int64),
-                )
-            )
-            if product.exclusion_intervals:
-                result[table]["LogELower"] = np.empty(0, dtype=np.float64)
-                result[table]["LogEUpper"] = np.empty(0, dtype=np.float64)
-                result[table]["LogEExact"] = np.empty(0, dtype=np.bool_)
+        if table == "exclusion_evidence":
+            result[table] = _exclusion_frame(values, names, product.exclusion_intervals)
             continue
-        if table == "exclusion_evidence" and product.exclusion_intervals:
-            columns += ["LogELower", "LogEUpper", "LogEExact"]
         if table == "exclusion_diagnostics":
             if product.exclusion_intervals:
                 columns += ["WeakestExclusionLogELower", "WeakestExclusionLogEUpper", "WeakestExclusionLogEExact"]

@@ -1,6 +1,6 @@
 # Assembly and founder release
 
-Assembly joins local panels into component paths, compares founder counts and releases conservative allele/identity claims. Its bounded seed, join and continuation searches are distinct from proof of a global optimum. N is evidence samples, S the selected scoring samples, L sites, B blocks, K founder rows, R prepared rows and Q unordered founder-pair states. Context and final assemblies have different stopping roles. Search-dependent costs and the ranked-refit exemption are explicit.
+Assembly joins local panels into component paths, compares founder counts and releases conservative allele/identity claims. Its bounded seed, join and continuation searches are distinct from proof of a global optimum. N is evidence samples, S the selected scoring samples, L sites, B blocks, K founder rows, R prepared rows and Q unordered founder-pair states. Context and final assemblies have different stopping roles. Search-dependent costs include natural-domain count refits and repeated count rounds; a complete pass is not guaranteed cubic.
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
@@ -378,7 +378,7 @@ Implementation: [science/assembly/join/certify.py](../../haplotype_reconstructio
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(S m K² + K² B log K) proposal work plus admitted exact scores. The direct finite-grid route can be quartic in K; this unresolved cost is not covered by exemption 0b or 0c.
+Cost and scope: O(S m K² + K² B log K) proposal work plus admitted exact scores. The direct finite-grid route can be quartic in K; this unresolved cost is documented separately from the natural-domain refit cost.
 
 <a id="aj18"></a>
 ## aj18 Sparse exact replacement scores
@@ -438,13 +438,13 @@ Cost and scope: O(shadow_combinations S m K²) when the complete shadow family i
 <a id="aj23"></a>
 ## aj23 Duplicate-seed births (seed choice, concurrent refits, settle, acceptance)
 
-Choose duplicate seeds from all small panels or the declared ranked indicator/coverer cap. Refit seed copies with restricted slot moves, settle pure-path cleanup/death tests, then compare surviving improvements. Preserve survivor alternatives and revisit checks; acceptance can be a count birth or same-count seed swap. The rank cap is an explicit cost exemption.
+When the ordinary birth search has no accepted birth and supplies a chimera indicator, duplicate every selected founder. Refit every seed copy with restricted slot moves, settle pure-path cleanup/death tests, then compare surviving improvements. Preserve survivor alternatives and revisit checks; acceptance can be a count birth or same-count seed swap. Seed admission is not restricted by indicator gains or coverer ranks. Endpoint selection, tie census kinds, symmetric nulls, bootstrap streams and shadow families retain their existing rules.
 
 Implementation: [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
 
-Parameters by name: `ranked_refits`, `BIRTH_SETS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `BIRTH_SETS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: At most the admitted ranked-refit candidates times their fixed-count refit work; candidate scratch grows with S times sites times K.
+Cost and scope: O(K) fitted seeds, O(N L K³) per count round under the quadratic fixed-K work model. Repeated count rounds can make a pass quartic; this is not a cubic bound for the complete join search. Fixed-K search iterations and shadow-family work are additional factors. Candidate scratch grows with samples times sites times K. Refinement round counts are reported in [costs](../developer/costs.md#natural-domain-count-refits).
 
 <a id="aj24"></a>
 ## aj24 Count cycles, born-path freeze and count-state revisits

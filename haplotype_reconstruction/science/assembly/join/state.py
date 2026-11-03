@@ -78,7 +78,6 @@ class SearchState(Protocol):
     count_steps: int
     count_backstop: int
     sweep_backstop: int
-    seed_refits: int
     birth_sets: int
     block_offsets: np.ndarray
     tie_counter: TieCounter

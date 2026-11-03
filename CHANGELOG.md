@@ -1,5 +1,93 @@
 # Changelog
 
+## 4.2.0 (3 November 2026)
+
+This release covers the K = 30 review that 4.0 deferred, and the smaller items left after 4.1. Science changes are
+listed first. Every other change leaves released outputs scientifically identical to 4.1.
+
+**Founder-count refits evaluate every hypothesis.**
+- The assembly joins' duplicate-seed births, and refinement's deletion and addition rounds, now refit every eligible
+  candidate. Before, they refit only the nine best by an unrefitted proxy (`ranked_refits`, cost exemption 0b).
+- On the 4.0 release matrix the cap left 1,597 deletion candidates and 111 addition seeds unfitted. Replays on saved
+  inputs found two rounds where an omitted candidate fitted better than every admitted one. In both, the count
+  verdict was unchanged:
+  - a TroMau deletion at K = 10, better by 54.9 nats;
+  - an addition in the K = 30 simulation, better by 103.1 nats.
+- The decision rule is unchanged: best endpoint F, its tie class and content-smallest member, the symmetric null,
+  the bootstrap streams and the shadow families.
+- Each count round now fits O(K) candidates, O(N L K³). A pass has at most one more deletion round than it accepts
+  deletions, so its worst case is quartic in K. Saved runs had one to five rounds per pass.
+- The zero-gain cleanup before refinement's deletion rounds is removed. It fired in none of 54,123 saved component
+  refinements, and the ordinary count rule now decides every deletion.
+- The tie census loses the shortlist and cleanup kinds.
+- Count-rule settings and count-decision records are schema 2.
+
+**Pedigree exclusion evidence is stored as columns.** It used to be one object per screened dyad, about 4 million
+at N = 2,500. On a saved N = 2,503 decision seam:
+- every rendered table is unchanged;
+- the decision step takes 395 s instead of 433 s;
+- the seam with its reports takes 405 s instead of 476 s;
+- peak memory is 9.7 GB instead of 12.6 GB.
+
+The pedigree product is schema 3.
+
+**Smaller changes.**
+- Painting's entry points require the tie-convention reversal explicitly.
+- Label continuity groups tie peers once per iteration, so peer lookup is linear in the candidate count.
+- Discovery's reader checks each block once on first read.
+- The serial re-export route is removed. `haplotypes export` already exported contigs in parallel.
+- Duplicated code is removed from phase CAL2, founder identity flags and the painting support tables. Their output
+  is byte-identical.
+- An unused painting memory setting is removed.
+- The example VCF header captures are now `docs/examples/*.header.vcf.txt` and ship with the repository.
+- Type declarations are corrected (`JoinSummaryView`, `count_vector_classes`).
+- The environment reference lists the thread-limit variables the runtime fixes.
+
+**Reviewed and not changed.**
+- **Discovery's bounded searches (exemption 0c):**
+  - the replacement starts (48/96) and the archive beam (6/12) bind at every K;
+  - they are part of the search's design and need a redesign, not a larger constant;
+  - exact gauge cuts certified by component structure are implemented and validated but held back. On their own
+    they move three TroMau blocks, two of them to panels the search's own criterion scores lower.
+- **Local selection's backstops, bank budgets, context snaps and the LS10/LS17 caps (exemption 0c):** each needs a
+  new search or stopping contract.
+- **The joins' structural screen (AJ17):** its adaptive route has a cubic analytic bound.
+- **Refinement's canonical window fixing (RS05/RS07):** no work stop in any saved run.
+- **Painting label continuity and founder-refit tie classes (PR17, FR04):**
+  - their worst cases remain above cubic;
+  - a refit reorganisation with identical decisions was prototyped, but it does not lower the bound, so it was not
+    adopted.
+
+The [cost page](docs/developer/costs.md) and [accretion register](docs/developer/accretions.md) record each finding.
+
+**4.1 validation, completed.** All 39 cases of the 4.1 release matrix finished. Every released output equals 4.0's,
+and the ties reports equal 4.0's corrected ones. Wall time, 4.1 over 4.0: median 0.64.
+
+**Validation.** The fast test tier passes (2,914 tests). An independent review of the candidate found no defect.
+The release matrix (39 runs: truth simulations, TroMau, references and perturbations) was compared with 4.1:
+- **Released outputs identical (32 runs, including TroMau under reversed tie conventions):** only the ties report
+  differs (the removed census kinds). In nine of them the assembly search tables and count diagnostics also list fewer
+  search events.
+- **K = 30 simulation, scored against truth:**
+  - Founders improve. One chromosome now releases the true 30 founder rows (4.1 released 32), with called-allele
+    errors falling from 1,431 to 603. Founder errors also fall on two other chromosomes.
+  - Genotype errors fall from 1,387 to 1,376 and the phased share rises from 0.966 to 0.967.
+  - Switch errors move from 30 to 31.
+  - Pedigree recovery stays weak in both releases: correct parent states 23 to 24, correct edges 6 to 4.
+- **TroMau, the reference run and its five perturbations:**
+  - chr3 assembles into one eight-founder component, like 20 of the other 21 chromosomes; 4.1 released three
+    components.
+  - chr3's recombination junction loci fall from 5 to 3 (none flagged).
+  - The primary (Tier B) pedigree is unchanged.
+  - Under reversed tie conventions chr3 keeps three components in both releases, so this structure is
+    convention-sensitive.
+  - Run time on the same node type is unchanged (6,278 s and 6,146 s).
+- **Cost of evaluating every count candidate at K = 30:** the K = 30 simulation takes 52.6 minutes against 36.2 for
+  4.1, measured on two identical 76-core nodes, with the same peak memory. Both runs reproduce their matrix results
+  exactly.
+
+Code identities change, so 4.2 cannot resume 4.1 checkpoints. Start a new checkpoint root.
+
 ## 4.1.0 (3 November 2026)
 
 A speed release: scheduling, transport and start-up change; no model, parameter,

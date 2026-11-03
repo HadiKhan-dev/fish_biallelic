@@ -216,13 +216,6 @@ def _details_bytes(details) -> int:
     return charge
 
 
-def main_coverer(panel, path, *, reverse: bool = False) -> int:
-    """The panel path sharing most cells with ``path`` (ties: lowest index; the panel is in canonical
-    order, so the lexicographically smallest path; the highest under self.tie_settings.reverse)."""
-    shared = [sum(int(a == b) for a, b in zip(row, path, strict=False)) for row in panel]
-    return ties.conv_argmax(shared, reverse=reverse)
-
-
 class CountStep:
     """One count decision at a panel certified for same-count moves (deaths first, then births).
 
@@ -657,22 +650,11 @@ class CountStep:
         else:
             passing = np.zeros(len(outside), dtype=bool)
         # Pure-mosaic pool births that could pass on their total gain: a panel path covers
-        # their cells (the chimera-trap indicator); their coverers seed duplicate births.
+        # their cells (the chimera-trap indicator); their presence triggers all selected seeds.
         trap = np.flatnonzero(passing & ~is_novel)
         record["trap_indicators"] = int(len(trap))
-        # Strongest first: tie classes of the bound gain, the path's content inside a class.
-        indicators = []
-        if len(trap):
-            scale = float(np.max(np.abs(totals_all[trap])))
-            result = ties.tie_classes(
-                [float(totals_all[i]) for i in trap.tolist()],
-                ties.quantum("join_proxy", scale),
-                content=[outside[i] for i in trap.tolist()],
-                descending=True,
-                motion=ties.motion("join_proxy", scale),
-                reverse=self.tie_settings.reverse,
-            )
-            indicators = [(float(totals_all[trap[j]]), outside[trap[j]]) for j in result.order.tolist()]
+        # Only presence/count steers AJ23 now; ranking these indicators has no consumer.
+        indicators = [(float(totals_all[i]), outside[i]) for i in trap.tolist()]
         novel_index = np.flatnonzero(is_novel)
         novel = [outside[i] for i in novel_index.tolist()]
         if not novel:
@@ -742,19 +724,6 @@ class CountStep:
             sequence=_test_record(decision.sequence),
         )
         return record, list(panel) + [novel[index]], larger, indicators
-
-    def total_gain(self, panel, path, forwards, base):
-        """Exact total gain of adding ``path`` (sparse), or None unless the effective-carrier
-        test passes on it (m > 0 and m' > 0): the strength of a chimera-trap indicator."""
-        bound = forwards.birth_values(self.rows([path]), self.offsets)[:, 0]
-        gain = self._sparse(list(panel) + [path], base, bound) - base
-        top = int(np.argmax(gain))
-        if (
-            count_rule.margin(gain, self.cost, self.samples) <= 0.0
-            or count_rule.margin(np.delete(gain, top), self.cost, self.samples) <= 0.0
-        ):
-            return None
-        return float(gain.sum())
 
     def settle(self, panel, scores, key=None):
         """A refitted seed panel: delete paths without private cells (best-F first), then the
@@ -980,58 +949,11 @@ def count_decision(search: SearchState, forwards, pool, seeds) -> bool:
     count["trap_indicators"] = max(count["trap_indicators"], record["trap_indicators"])
     best = None if larger_panel is None else (float(values.sum()), larger_panel, values, record, "pool")
     if seeds and best is None and indicators:
-        # Duplicate-seed births: pure-mosaic pool births that pass the rule on their total
-        # gain mark a panel path covering a founder's sequence (the chimera trap). Copy the
-        # main coverer of the strongest ones, refit the two copies, and keep the refit panel
-        # if it survives its own death test and LL rises.
-        if len(search.selected) <= search.seed_refits:
-            chosen = list(range(len(search.selected)))  # every seed when k <= r
-        else:
-            # The strongest indicators (tie classes of their bound gains, the class the budget
-            # cuts kept whole), then their exact gains in tie-class order (content inside).
-            screened = indicators[: 3 * search.seed_refits]
-            if len(indicators) > len(screened):
-                scale = max(abs(item[0]) for item in indicators)
-                bound_gains = [item[0] for item in indicators]
-                quantum = ties.quantum("join_proxy", scale)
-                result = ties.tie_classes(
-                    bound_gains,
-                    quantum,
-                    content=[item[1] for item in indicators],
-                    descending=True,
-                    reverse=search.tie_settings.reverse,
-                )
-                ties.add_decision(
-                    search.tie_counter,
-                    "assembly.join_seed_screen",
-                    result,
-                    bound_gains,
-                    quantum,
-                    ties.motion("join_proxy", scale),
-                    descending=True,
-                    cut=3 * search.seed_refits,
-                )
-                screened = ties.truncate(indicators, result, 3 * search.seed_refits)
-            strongest = []
-            for _, path in screened:
-                gain = search.counter.total_gain(search.selected, path, forwards, search.baseline_scores)
-                if gain is not None:
-                    strongest.append((gain, path))
-            if strongest:
-                strongest, _ = search.class_order(
-                    "assembly.join_seed_rank",
-                    strongest,
-                    lambda item: item[0],
-                    lambda item: item[1],
-                    link=lambda item: search.panel_link([item[1]]),
-                )
-            chosen = []
-            for _, path in strongest:
-                seed = main_coverer(search.selected, path, reverse=search.tie_settings.reverse)
-                if seed not in chosen:
-                    chosen.append(seed)
-                if len(chosen) >= search.seed_refits:
-                    break
+        # The chimera indicator triggers the same AJ23 route; every selected founder is
+        # a duplicate seed. No indicator ranking can exclude a converged endpoint.
+        # O(K) quadratic fits cost O(N L K^3) per round; repeated count rounds can
+        # make a pass quartic. This is not a whole-search cubic guarantee.
+        chosen = list(range(len(search.selected)))
 
         # Every refit starts from P plus a copy, so the refits of one count step reach many of
         # the same one-path moves (above all replace(seed, c) = P + c): each is scored once
@@ -1153,7 +1075,6 @@ def final_census(search: SearchState, forwards) -> int:
 __all__ = [
     "BIRTH_MEMO_BYTES",
     "PendingDecision",
-    "main_coverer",
     "CountStep",
     "record_count_family",
     "apply_same_count",

@@ -1291,7 +1291,7 @@ def decode_candidates(
     bin_stops,
     n_classes,
     *,
-    reverse=False,
+    reverse: bool,
     tie: float = VITERBI_TIE,
 ):
     """(paths int32[N, 2, B], candidate masks int64[N, 2, B], switch counts int64[N], the mirrored convention's

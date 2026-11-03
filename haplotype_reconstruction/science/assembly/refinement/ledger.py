@@ -36,7 +36,6 @@ class FitLedger:
         self.forced_count_choices: dict[str, PanelKey] = {}
         self.count_families: dict[str, dict[str, Any]] = {}
         self.chosen_count_panels: dict[str, PanelKey] = {}
-        self.unrefitted: dict[tuple[tuple[int, ...], bytes], NDArray[np.float64]] = {}
 
     def branch(self, choices: dict[FitToken, PanelKey]) -> FitLedger:
         """Share completed results; bind only the new branch's forced fit choices."""
@@ -49,7 +48,6 @@ class FitLedger:
         return child
 
     def start_count_pass(self) -> None:
-        """Reset the three pass-local caches, preserving forced branch decisions."""
+        """Reset the pass-local caches, preserving forced branch decisions."""
         self.count_families = {}
         self.chosen_count_panels = {}
-        self.unrefitted = {}

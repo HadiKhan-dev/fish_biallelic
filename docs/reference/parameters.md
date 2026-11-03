@@ -169,7 +169,6 @@ Source: [haplotype_reconstruction/science/assembly/count_rule/parameters.py](../
 |---|---|---|---|
 | `bootstrap_resamples` | `2000` | replicates | AJ31: 3.5 count_rule/config.py bootstrap_resamples |
 | `bootstrap_level` | `0.95` | probability | AJ31: 3.5 count_rule/config.py bootstrap_level |
-| `ranked_refits` | `9` | candidates | AJ23: owner decision 0b; ranked_refits = 9 is retained for 4.0 and reviewed for 4.1 |
 | `near_identity` | `0.01` | mismatch fraction | AJ32/AJ33: 3.5 count_rule/config.py near_identity |
 | `shadow_combinations` | `2048` | configurations | AJ32/AJ33: 3.5 count_rule/config.py shadow_combinations |
 ## science.assembly.count_rule.parameters
@@ -670,7 +669,6 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `VITERBI_TIE` | `noise_quantum(1.9e-06)` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 | `MAXIMUM_MASK_STATES` | `63` | See model | int64 interval-mask representation, 3.5 painting/hmm.py:50 (PR11); enforced at decode boundary. |
 | `EMISSION_CACHE_MAX_BYTES` | `1 << 30` | See model | Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions. |
-| `MINIMUM_WORKING_MEMORY_BYTES` | `512 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 | `WINDOW_BYTES` | `64 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 | `LABEL_CONTINUITY_BASE_BYTES` | `64 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 ## science.painting.parameters — PaintingParameters

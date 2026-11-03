@@ -807,6 +807,8 @@ def decode_fit_summary(value: Mapping[str, Any]) -> FitSummary:
 
 def decode_refinement(value: Mapping[str, Any]) -> ComponentRefinement:
     value = dict(value)
+    for item in value["decisions"]:
+        require_schema(item, 2)
     value["decisions"] = tuple(CountDecisionRecord(**item) for item in value["decisions"])
     value["fits"] = tuple(decode_fit_summary(item) for item in value["fits"])
     value["weak_label_junctions"] = tuple(WeakJunction(**item) for item in value["weak_label_junctions"])

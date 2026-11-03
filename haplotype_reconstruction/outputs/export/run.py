@@ -7,22 +7,20 @@ Method: docs/methods/export.md. The 3.5 formatting order and manifest text are r
 from __future__ import annotations
 
 import json
-from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from ...core.errors import InvariantError, SettingsError
+from ...core.errors import InvariantError
 from ..reports.tables import record_mapping, temporary_path
 from .founders import write_identity_flags
-from .records import FORMATS, PRODUCTS, project_sites
+from .records import project_sites
 
 if TYPE_CHECKING:
     from ...contracts.assembly import FounderRelease
     from ...contracts.phase import PhasedSamples
     from ...contracts.release import ReleasedSites
-    from ...results.reader import Results
 import numpy as np
 
 from ...contracts.samples import input_rows
@@ -345,83 +343,3 @@ def export_records(
             assembly_count_unverified_records=int(founders.assembly_count_unverified_records),
         )
     return entry
-
-
-def export_run(
-    results: Results,
-    destination: Path,
-    *,
-    contigs=None,
-    products=("founders", "samples"),
-    file_format: str = "vcf",
-    full_length: bool = True,
-    cores: int | None = None,
-) -> dict:
-    """Re-export a results reader to a new/empty directory, then write its manifest.
-
-    The interface can instead schedule task.make_task per contig through its engine.
-    This direct reader route is serial; cores is an interface resource declaration.
-    """
-    products = tuple(dict.fromkeys(products))
-    if not products or set(products) - set(PRODUCTS) or file_format not in FORMATS:
-        raise SettingsError("export needs supported products and VCF/BCF format")
-    if cores is not None and cores < 1:
-        raise SettingsError("export cores must be positive")
-    contigs = tuple(results.contigs if contigs is None else contigs)
-    if not contigs or len(set(contigs)) != len(contigs):
-        raise SettingsError("export requires unique contigs")
-    destination = Path(destination).resolve()
-    if destination.exists() and any(destination.iterdir()):
-        raise FileExistsError("export destination must be new or empty")
-    destination.mkdir(parents=True, exist_ok=True)
-    settings = ExportConfig(full_length=full_length, file_format=file_format, products=products)
-    metadata = results.manifest["source"]
-    synthetic = metadata["kind"] == "simulation"
-    reference = None
-    if not synthetic and {"founders", "samples"} & set(products):
-        reference = metadata.get("reference_vcf")
-        if reference is None:
-            raise InvariantError("run manifest source lacks the original reference_vcf display path")
-    entries = []
-    for contig in contigs:
-        entries.append(
-            export_records(
-                destination,
-                contig,
-                settings=settings,
-                sites=results.released_sites(contig) if {"founders", "samples"} & set(products) else None,
-                founders=results.founder_release(contig) if {"founders", "tracks"} & set(products) else None,
-                phase=results.phase(contig) if "samples" in products else None,
-                input_sample_ids=results.input_sample_ids,
-                synthetic=synthetic,
-            )
-        )
-    return write_manifest(
-        destination,
-        results.checkpoints,
-        synthetic=synthetic,
-        reference=reference,
-        contigs=entries,
-        settings=settings,
-    )
-
-
-def export_command(args: Namespace) -> int:
-    """Format a finished Results reader for the interface's parsed export command.
-
-    The interface owns CPU affinity validation and engine runtime initialization.
-    Original VCF override is absent: source-dependent values already exist in sites.
-    """
-    from ...results.reader import Results
-
-    results = Results(args.run_directory)
-    export_run(
-        results,
-        args.destination,
-        contigs=args.contigs,
-        products=tuple(args.products),
-        file_format=args.format,
-        full_length=args.full_length,
-        cores=args.cores,
-    )
-    return 0

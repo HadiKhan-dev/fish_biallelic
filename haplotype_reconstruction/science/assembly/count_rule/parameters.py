@@ -3,7 +3,7 @@
 Owns: count-rule constants with native provenance.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
 Method: WP_AS5 §7; AJ23, AJ25, AJ30–AJ35.
-Identity: Accretion (AJ23, owner 0b): ranked_refits remains nine; reconsideration belongs to 4.1.
+Identity: every eligible count hypothesis is refitted on its natural founder domain (4.2).
 """
 
 from __future__ import annotations
@@ -18,10 +18,6 @@ class CountRuleParameters:
     bootstrap_resamples, bootstrap_level: the sample bootstrap behind the ambiguity band of a
         count decision (percentile interval of min(m_d, m_q)); a call is ambiguous when the band
         contains zero in its interior. The point decision stands either way.
-    ranked_refits: at most this many count candidates are refitted per decision (founder
-        refinement's deletion and addition rounds, the join's duplicate-seed births); above it the
-        candidates are ranked by cheap screens. A K-sized budget: every candidate is refitted while
-        K <= 9.
     shadow_combinations: evaluate a complete nearest-row sequence-shadow family up to this
         many configurations. Larger families retain the incumbent evaluated decision and
         record count_unverified; this is separate from the shared sixteen-leaf
@@ -37,13 +33,6 @@ class CountRuleParameters:
     )
     bootstrap_level: float = field(
         default=0.95, metadata={"units": "probability", "provenance": "AJ31: 3.5 count_rule/config.py bootstrap_level"}
-    )
-    ranked_refits: int = field(
-        default=9,
-        metadata={
-            "units": "candidates",
-            "provenance": "AJ23: owner decision 0b; ranked_refits = 9 is retained for 4.0 and reviewed for 4.1",
-        },
     )
     near_identity: float = field(
         default=0.01,

@@ -315,9 +315,9 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 |---|---|---|---|---|---|---|---|
 | `bootstrap_resamples` | `int` | state | () | 1 | int64 | True | `required` |
 | `bootstrap_level` | `float` | state | () | 1 | float64 | True | `required` |
-| `ranked_refits` | `int` | state | () | 1 | int64 | True | `required` |
 | `near_identity` | `float` | state | () | 1 | float64 | True | `required` |
 | `shadow_combinations` | `int` | state | () | 1 | int64 | True | `required` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 
 ## assembly.JoinSettings
 
@@ -721,8 +721,6 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `band_bound` | `float &#124; None` | state | () | founder_cost | float64 | True | `None` |
 | `margin` | `float &#124; None` | state | () | founder_cost | float64 | True | `None` |
 | `band` | `tuple[float, float] &#124; None` | state | () | founder_cost | tuple[float, float] &#124; None | True | `None` |
-| `ranking` | `str &#124; None` | state | () | 1 | str | True | `None` |
-| `candidate_scores` | `tuple[float &#124; None, ...] &#124; None` | state | ('C',) | nats | float64 | True | `None` |
 | `refitted` | `tuple[int, ...]` | state | () | 1 | tuple[int, ...] | True | `()` |
 | `candidate_F` | `tuple &#124; None` | state | () | 1 | tuple &#124; None | True | `None` |
 | `selected` | `int &#124; None` | state | () | 1 | int | True | `None` |
@@ -734,7 +732,6 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `shadow_alternatives` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `count_unverified` | `tuple` | diagnostic | () | 1 | tuple | True | `()` |
 | `hidden_sequence_failures` | `tuple &#124; None` | state | () | 1 | tuple &#124; None | True | `None` |
-| `copy_responses` | `tuple &#124; None` | state | () | 1 | tuple &#124; None | True | `None` |
 | `after_addition` | `bool` | state | () | 1 | bool | True | `False` |
 | `count_cycle` | `bool` | call | () | 1 | bool | True | `False` |
 | `cycle_start_count` | `int &#124; None` | state | () | 1 | int | True | `None` |
@@ -747,13 +744,13 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `selected_refit_panel` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `tie_decisions` | `tuple &#124; None` | state | () | 1 | tuple &#124; None | True | `None` |
 | `tie_decisions_agree` | `bool &#124; None` | state | () | 1 | bool | True | `None` |
-| `cleanup_removed` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `ambiguous_k` | `bool` | state | () | 1 | bool | True | `False` |
 | `alternatives` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `unresolved_panels` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `prior` | `str &#124; None` | call | () | 1 | str | True | `None` |
 | `continuation_key` | `str &#124; None` | state | () | 1 | str | True | `None` |
 | `continuation_replayed` | `bool` | state | () | 1 | bool | True | `False` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 
 ## assembly.BestFReplacement
 
@@ -2240,7 +2237,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
 
 ## pedigree.PedigreeResult
 
@@ -2709,13 +2706,13 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `sample` | `int` | report | () | 1 | int | True | `required` |
-| `candidate_parent` | `int` | report | () | 1 | int | True | `required` |
-| `log_e` | `float` | report | () | nats | float64 | True | `required` |
-| `observed_sites` | `int` | report | () | 1 | int | True | `required` |
-| `log_e_lower` | `float &#124; None` | report | () | nats | float64 &#124; None | True | `None` |
-| `log_e_upper` | `float &#124; None` | report | () | nats | float64 &#124; None | True | `None` |
-| `log_e_exact` | `bool &#124; None` | report | () | 1 | bool &#124; None | True | `None` |
+| `sample` | `np.ndarray` | report | ('D',) | 1 | int64 | True | `required` |
+| `candidate_parent` | `np.ndarray` | report | ('D',) | 1 | int64 | True | `required` |
+| `log_e` | `np.ndarray` | report | ('D',) | nats | float64 | True | `required` |
+| `observed_sites` | `np.ndarray` | report | ('D',) | 1 | int64 | True | `required` |
+| `log_e_lower` | `np.ndarray &#124; None` | report | ('D',) | nats | float64 | True | `None` |
+| `log_e_upper` | `np.ndarray &#124; None` | report | ('D',) | nats | float64 | True | `None` |
+| `log_e_exact` | `np.ndarray &#124; None` | report | ('D',) | 1 | bool | True | `None` |
 
 ## pedigree.PedigreeViews
 
@@ -2734,7 +2731,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `call_explanations` | `tuple[CallExplanationView, ...]` | report | () | 1 | tuple[CallExplanationView, ...] | True | `required` |
 | `alternative_explanations` | `tuple[AlternativeExplanationView, ...]` | report | () | 1 | tuple[AlternativeExplanationView, ...] | True | `required` |
 | `search_diagnostics` | `tuple[SearchDiagnosticView, ...]` | report | () | 1 | tuple[SearchDiagnosticView, ...] | True | `required` |
-| `exclusion_evidence` | `tuple[ExclusionEvidenceView, ...]` | report | () | 1 | tuple[ExclusionEvidenceView, ...] | True | `required` |
+| `exclusion_evidence` | `ExclusionEvidenceView` | report | () | 1 | ExclusionEvidenceView | True | `required` |
 | `exclusion_diagnostics` | `tuple[CountDiagnostic, ...]` | report | () | 1 | tuple[CountDiagnostic, ...] | True | `required` |
 | `evidence_summary` | `tuple[EvidenceSummaryView, ...]` | report | () | 1 | tuple[EvidenceSummaryView, ...] | True | `required` |
 | `chromosome_summary` | `tuple[ChromosomeSummaryView, ...]` | report | () | 1 | tuple[ChromosomeSummaryView, ...] | True | `required` |

@@ -27,7 +27,7 @@ are tied; release 2.3 retains the family and uses the minimum exact-optimal swit
 as the representative prior, then a naming convention), so at a
 fixed start it never ends measurably below the forward-first search. The fit's panel is returned in
 canonical founder order (rows sorted lexicographically, design 5.1): founder indices of the count pass
-(candidates, shortlists, tie-breaks) are content ranks.
+(candidates and tie-breaks) are content ranks.
 """
 
 from __future__ import annotations
@@ -606,82 +606,6 @@ class SweepEngine:
                     stats["changed"] += 1
                     proposals.append((kind, a, c, k, np.asarray(rows, np.int64)))
         return proposals, stats
-
-    def copy_response(self, Y, budget, *, ordinal=None):
-        """Exact F gain of the copy's fine-window best responses (an addition round's seed).
-
-        Y is a duplicate-seed panel whose last row copies a founder. Every fine window's canonical
-        best response of the copy alone (the other rows fixed, messages of Y) is applied by one
-        copy-only acceptance pass in block order (exact gains above TOL, no exchanges, no guard).
-        Returns (gain, record)."""
-        ordinal = self.bind_fits(1, [("copy_response", Y, "copy_response")])[0] if ordinal is None else ordinal
-        self.windows.work.begin_fit(ordinal)
-        try:
-            with self.workspace.windows.lease(len(Y)):
-                return self._copy_response(Y, budget, ordinal)
-        finally:
-            self.windows.work.end_fit(ordinal)
-
-    def _copy_response(self, Y, budget, ordinal):
-        copy = len(Y) - 1
-        fwd, bwd, _, _, _, bscale = self._full_messages(Y, False, budget)
-        fine = [(a, c) for kind, a, c in self.windows.templates if kind == "fine"]
-        frontier_bytes = self.config.frontier_bytes
-        sizes = [self.windows.template_bytes("fine", a, c, self.workspace.samples, len(Y)) for a, c in fine]
-        with budget.scope(sample_threads(self.workspace.samples, budget)):
-            ff = fwd.flanks(a for a, _ in fine)
-            bb = bwd.flanks(c for _, c in fine)
-        ordinals = self.windows.work.bind((ordinal, 0, 0), range(len(fine)))
-        solved = budget.thread_map(
-            lambda i, ff=ff, bb=bb: self.windows.fine(
-                Y,
-                ff,
-                bb,
-                fine[i][0],
-                fine[i][1],
-                frontier_bytes,
-                convention=self.reverse,
-                focals=(copy,),
-                ordinal=ordinals[i],
-            ),
-            list(range(len(fine))),
-            item_bytes=sizes,
-            label="founder_refinement window solves",
-        )
-        del ff, bb
-        props, windows, truncations, fallbacks = {}, 0, 0, 0
-        for result in solved:
-            for _, a, c, _, rows, diagnostic in result:
-                windows += 1
-                # The programmes' approximation receipts (proposals.BEAM_CAP).
-                truncations += int(diagnostic.get("beam_truncations", 0))
-                fallbacks += int(diagnostic.get("beam_fallback", False))
-                if rows is not None:
-                    props.setdefault(a, []).append((MOVE_FINE, c, copy, np.asarray(rows, np.int64)))
-        acc, _, _ = accept_pass(
-            self.forward,
-            np.ascontiguousarray(Y, np.int64).copy(),
-            bwd,
-            None,
-            bscale,
-            props,
-            self.forward.window(len(Y)),
-            False,
-            budget,
-            exchanges=False,
-            start_fwd=fwd,
-            reverse=self.reverse,
-        )
-        return float(acc["fine_gain"]), dict(
-            windows=windows,
-            proposals=int(sum(map(len, props.values()))),
-            accepted=int(acc["fine"]),
-            gain=float(acc["fine_gain"]),
-            beam_truncations=truncations,
-            beam_fallbacks=fallbacks,
-            round_cap=int(acc["round_cap"]),
-            stale_evaluated=int(acc["stale_evaluated"]),
-        )
 
     def beam_escape(self, X, F, budget, convention):
         """Polish: one exact acceptance pass over the beam bank of panel X at an ordinary fixed point (forward

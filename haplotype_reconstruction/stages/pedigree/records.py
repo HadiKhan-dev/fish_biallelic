@@ -78,7 +78,7 @@ def derivation(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-2 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-3 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
     Exclusion is empty only for an empty request; otherwise it covers configured C.
@@ -130,7 +130,7 @@ def derivation(
             sample_ids=sample_ids,
             configured_contigs=contigs,
             informative_contigs=informative_contigs,
-            product_schema=2,
+            product_schema=3,
         ),
         numerical_policy or NumericalPolicy.current(),
         upstream,
@@ -306,7 +306,7 @@ class Reader:
     identity: str
     product: str = "pedigree"
     key: str = PRODUCT
-    schema: int = 2
+    schema: int = 3
 
     def decode(self, payload: Mapping[str, Any]) -> Pedigree | TieCounts:
         result = PedigreeAdapter().decode(payload)

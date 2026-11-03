@@ -905,7 +905,8 @@ class Checker:
                 self.errors.append(f"docs/examples/{entry['file']}: listed in vcf_headers.json but missing")
             elif hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
                 self.errors.append(f"docs/examples/{entry['file']}: differs from its recorded capture hash")
-        for path in sorted(receipt.parent.glob("*.header.vcf")):
+        # Plain-text names: the repository ignores *.vcf (no data files), and these header-only captures are docs.
+        for path in sorted(receipt.parent.glob("*.header.vcf.txt")):
             if path.name not in listed:
                 self.errors.append(f"docs/examples/{path.name}: header capture without a receipt entry")
 

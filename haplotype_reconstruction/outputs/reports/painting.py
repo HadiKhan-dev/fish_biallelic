@@ -64,6 +64,23 @@ def _count_calls(searches, first: int, last: int):
 
 
 # ------------------------------------------------------------------------------------- tables
+def _support_statistics(called, named, pooled, *, carriers=None, candidates=None):
+    """Shared support columns, with whole-founder sample counts in published column order."""
+    values, pooled_values = named[called], pooled[called]
+    result = dict(CalledAlleles=int(called.sum()), MissingAlleles=int((~called).sum()))
+    if carriers is not None:
+        result["ObservedCarrierSamples"] = int(carriers.sum())
+    result["CalledSitesWithoutObservedNamedCarrier"] = int(np.sum(values == 0))
+    if carriers is not None:
+        result["MinimumObservedCarriers"] = None if not len(values) else int(values.min())
+    result["MeanObservedCarriers"] = None if not len(values) else float(values.mean())
+    if candidates is not None:
+        result["ObservedPooledCandidateSamples"] = int(candidates.sum())
+    result["MeanObservedPooledCandidates"] = None if not len(values) else float(pooled_values.mean())
+    result["CalledSitesWithoutObservedNamedOrPooledCandidate"] = int(np.sum(values + pooled_values == 0))
+    return result
+
+
 def founder_support_tables(painting, sites, observed, searches, *, window_sites=WINDOW_SITES):
     """(founder_support, founder_support_windows, assembly_search) row lists of one chromosome.
 
@@ -101,8 +118,6 @@ def founder_support_tables(painting, sites, observed, searches, *, window_sites=
                         flags[founder, sample] |= np.any(usable)
         for founder in range(len(calls)):
             called = calls[founder] >= 0
-            selected = support[founder, called]
-            selected_pooled = pooled[founder, called]
             base = dict(
                 Component=component_index,
                 Founder=str(founder),
@@ -115,23 +130,18 @@ def founder_support_tables(painting, sites, observed, searches, *, window_sites=
                 dict(
                     **base,
                     MarkerCount=len(positions),
-                    CalledAlleles=int(called.sum()),
-                    MissingAlleles=int((~called).sum()),
-                    ObservedCarrierSamples=int(carriers[founder].sum()),
-                    CalledSitesWithoutObservedNamedCarrier=int(np.sum(selected == 0)),
-                    MinimumObservedCarriers=None if not len(selected) else int(selected.min()),
-                    MeanObservedCarriers=None if not len(selected) else float(selected.mean()),
-                    ObservedPooledCandidateSamples=int(candidates[founder].sum()),
-                    MeanObservedPooledCandidates=None if not len(selected) else float(selected_pooled.mean()),
-                    CalledSitesWithoutObservedNamedOrPooledCandidate=int(np.sum(selected + selected_pooled == 0)),
+                    **_support_statistics(
+                        called,
+                        support[founder],
+                        pooled[founder],
+                        carriers=carriers[founder],
+                        candidates=candidates[founder],
+                    ),
                     SupportBasis=SUPPORT_BASIS,
                 )
             )
             for start in range(0, len(positions), window_sites):
                 stop = min(len(positions), start + window_sites)
-                mask = called[start:stop]
-                values = support[founder, start:stop][mask]
-                pooled_values = pooled[founder, start:stop][mask]
                 windows.append(
                     dict(
                         Component=component_index,
@@ -139,12 +149,9 @@ def founder_support_tables(painting, sites, observed, searches, *, window_sites=
                         FirstVariant1Based=int(positions[start]),
                         LastVariant1Based=int(positions[stop - 1]),
                         MarkerCount=stop - start,
-                        CalledAlleles=int(mask.sum()),
-                        MissingAlleles=int((~mask).sum()),
-                        CalledSitesWithoutObservedNamedCarrier=int(np.sum(values == 0)),
-                        MeanObservedCarriers=None if not len(values) else float(values.mean()),
-                        MeanObservedPooledCandidates=(None if not len(values) else float(pooled_values.mean())),
-                        CalledSitesWithoutObservedNamedOrPooledCandidate=int(np.sum(values + pooled_values == 0)),
+                        **_support_statistics(
+                            called[start:stop], support[founder, start:stop], pooled[founder, start:stop]
+                        ),
                     )
                 )
     search_rows = [

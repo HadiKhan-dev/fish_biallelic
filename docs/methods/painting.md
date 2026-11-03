@@ -88,7 +88,7 @@ Start from the named copying/error parameters and execute the fixed number of EM
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`, `MINIMUM_WORKING_MEMORY_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S^2/2); O(N B S'^2); O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -156,7 +156,7 @@ Choose resident packed emissions or whole-bin windows using the supplied storage
 
 Implementation: [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `EMISSION_CACHE_MAX_BYTES`, `MINIMUM_WORKING_MEMORY_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `EMISSION_CACHE_MAX_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -185,13 +185,13 @@ Cost and scope: O(N B S^2); O(links N (S^2 log S + C^2 S)); O(links N S^3). Thes
 <a id="pr17"></a>
 ## pr17 Label continuity decision: ranking in tie classes, leftmost placement, painted-switch acceptance, competing repairs, iteration
 
-Admit candidates meeting the named switch-gain gate, rank gain tie classes, and move equivalent repairs to their leftmost placement. Test actual painted switch gains and the loser/winner criterion before acceptance. Re-evaluate competing repairs after an accepted change and retain the fixed iteration schedule.
+Admit candidates meeting the named switch-gain gate, rank gain tie classes, and move equivalent repairs to their leftmost placement. Test actual painted switch gains and the loser/winner criterion before acceptance. Group the ranked tie peers once per iteration without changing their order or ambiguity rule. Recompute scores and candidate checks after each accepted repair until none qualifies; there is no fixed iteration cap.
 
 Implementation: [science/painting/label_continuity.py](../../haplotype_reconstruction/science/painting/label_continuity.py), [core/ties.py](../../haplotype_reconstruction/core/ties.py).
 
 Parameters by name: `label_continuity_minimum_switch_gain`, `label_continuity_maximum_loser_ratio`, `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N B S'^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: With J links, Q <= J K(K-1)/2 candidates per iteration. Tie-peer lookup is O(Q) after ranking. Each actual candidate check constructs trial emissions and runs both full decoders, O(N (B + J) K^2); checking all candidates can therefore remain quartic in K. Accepted repairs strictly decrease the integer switch total; their number is bounded by that decrease, not by a founder-sized cap. A cubic whole-search bound has not been established.
 
 <a id="pr18"></a>
 ## pr18 Label continuity verification, row maps, outcome record, winner directions

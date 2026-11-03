@@ -20,7 +20,7 @@ from typing import Any, Literal, Protocol, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from ..core.ties import TieCensus
+from ..core.ties import TieCensus, TieCounts
 from .genetic_map import ChromosomeGeneticMap
 from .panels import ComponentPanel, FounderComponent, PreparedPanel
 from .roles import freeze_record_arrays, record_field, schema_field
@@ -404,9 +404,9 @@ class CountRuleSettings:
 
     bootstrap_resamples: int = record_field("state", dtype="int64")
     bootstrap_level: float = record_field("state", dtype="float64")
-    ranked_refits: int = record_field("state", dtype="int64")
     near_identity: float = record_field("state", dtype="float64")
     shadow_combinations: int = record_field("state", dtype="int64")
+    schema: int = schema_field(2)
 
 
 @dataclass(frozen=True)
@@ -616,16 +616,27 @@ class JoinTask:
 
 
 class JoinSummaryView(Protocol):
-    """Diagnostic/steering fields consumed when complete branch results combine."""
+    """Diagnostic/steering fields consumed when complete branch results combine (read-only: JoinSummary is frozen).
 
-    phase_seconds: Mapping[str, float]
-    work_counters: Mapping[str, int]
-    total_full_scores: int
-    count_exact_scores: int
-    count_exact_sample_scores: int
-    beam_seconds: float
-    events: tuple[Mapping[str, Any], ...]
-    tie_events: Mapping[str, Any]
+    ``tie_events``: a fresh search's TieCounter record (TieCounts); a decoded summary's plain mapping.
+    """
+
+    @property
+    def phase_seconds(self) -> Mapping[str, float]: ...
+    @property
+    def work_counters(self) -> Mapping[str, int]: ...
+    @property
+    def total_full_scores(self) -> int: ...
+    @property
+    def count_exact_scores(self) -> int: ...
+    @property
+    def count_exact_sample_scores(self) -> int: ...
+    @property
+    def beam_seconds(self) -> float: ...
+    @property
+    def events(self) -> tuple[Mapping[str, Any], ...]: ...
+    @property
+    def tie_events(self) -> TieCounts | Mapping[str, Any]: ...
 
     def record(self) -> Mapping[str, Any]: ...
 
@@ -974,10 +985,6 @@ class CountDecisionRecord:
     band: tuple[float, float] | None = record_field(
         "state", dtype="tuple[float, float] | None", units="founder_cost", default=None
     )
-    ranking: str | None = record_field("state", dtype="str", units="1", default=None)
-    candidate_scores: tuple[float | None, ...] | None = record_field(
-        "state", dtype="float64", axes=("C",), units="nats", default=None
-    )
     refitted: tuple[int, ...] = record_field("state", dtype="tuple[int, ...]", units="1", default=())
     candidate_F: tuple | None = record_field("state", dtype="tuple | None", units="1", default=None)
     selected: int | None = record_field("state", dtype="int", units="1", default=None)
@@ -991,7 +998,6 @@ class CountDecisionRecord:
     shadow_alternatives: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_unverified: tuple = record_field("diagnostic", dtype="tuple", units="1", default=())
     hidden_sequence_failures: tuple | None = record_field("state", dtype="tuple | None", units="1", default=None)
-    copy_responses: tuple | None = record_field("state", dtype="tuple | None", units="1", default=None)
     after_addition: bool = record_field("state", dtype="bool", units="1", default=False)
     count_cycle: bool = record_field("call", dtype="bool", units="1", default=False)
     cycle_start_count: int | None = record_field("state", dtype="int", units="1", default=None)
@@ -1004,13 +1010,13 @@ class CountDecisionRecord:
     selected_refit_panel: tuple = record_field("state", dtype="tuple", units="1", default=())
     tie_decisions: tuple | None = record_field("state", dtype="tuple | None", units="1", default=None)
     tie_decisions_agree: bool | None = record_field("state", dtype="bool", units="1", default=None)
-    cleanup_removed: tuple = record_field("state", dtype="tuple", units="1", default=())
     ambiguous_k: bool = record_field("state", dtype="bool", units="1", default=False)
     alternatives: tuple = record_field("state", dtype="tuple", units="1", default=())
     unresolved_panels: tuple = record_field("state", dtype="tuple", units="1", default=())
     prior: str | None = record_field("call", dtype="str", units="1", default=None)
     continuation_key: str | None = record_field("state", dtype="str", units="1", default=None)
     continuation_replayed: bool = record_field("state", dtype="bool", units="1", default=False)
+    schema: int = schema_field(2)
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,15 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##source=haplotype-reconstruction
+##contig=<ID=chr20,length=38813844>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Released genotype; no imputation">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the position of its first site; it restarts at every component boundary and after each of the sample's undetermined phase boundaries">
+##FILTER=<ID=r1,Description="Site quality r1: total depth outside the contig's clean depth core (either tail)">
+##FILTER=<ID=r2,Description="Site quality r2: per-sample depth heterogeneity above the contig's clean core">
+##FILTER=<ID=r3,Description="Site quality r3: wrong-allele reads in homozygous samples (a negative-binomial artefact class is more likely than the clean Poisson core)">
+##FILTER=<ID=r4,Description="Site quality r4: heterozygote allele balance (a beta-binomial artefact class is more likely than the clean binomial core)">
+##FILTER=<ID=r5,Description="Uninformative r5: fewer than two expected carriers of a non-major genotype">
+##site_set="full length: every input biallelic SNP that reached the site-quality filter; FILTER PASS = kept, else the applied rules that removed the site; site filter on this contig: off"
+##omitted_records="records the loader drops never reach the site filter and are not written: non-biallelic records (multiallelic, not a SNP) and biallelic SNPs sharing a position (none)"
+##synthetic_alleles="A/C encode abstract simulated 0/1; not reference-genome bases"
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	F1_0	F1_1	F1_2	F1_3	F1_4	F1_5	F1_6	F1_7	F1_8	F1_9	F2_0	F2_1	F2_2	F2_3	F2_4	F2_5	F2_6	F2_7	F2_8	F2_9	F2_10	F2_11	F2_12	F2_13	F2_14	F3_0	F3_1	F3_2	F3_3	F3_4	F3_5	F3_6	F3_7	F3_8	F3_9	F3_10	F3_11	F3_12	F3_13	F3_14
