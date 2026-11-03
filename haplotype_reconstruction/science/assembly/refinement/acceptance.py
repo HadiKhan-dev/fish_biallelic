@@ -64,7 +64,14 @@ from haplotype_reconstruction.core.ties import WIDE_CLASS_QUANTA, policy
 
 from ..orders import _exchange_winner, _move_cmp
 from .checkpoints import read as read_checkpoint
-from .gains import candidate_gains, candidate_gains_lex, exchange_gains, exchange_pairs, transposition
+from .gains import (
+    candidate_gains,
+    candidate_gains_lex,
+    exchange_gains,
+    exchange_pairs,
+    parallel_exchanges,
+    transposition,
+)
 from .guard import canonical_sites, path_switch_events, removed_events, shared_savings
 from .messages import advance, advance_lex, backward_chain, backward_chain_lex, forward_chain, forward_chain_lex
 from .objective import unordered_pairs
@@ -77,6 +84,7 @@ from .parameters import (
     GUARD_TOLERANCE,
 )
 from .window import cover
+from .workspace import sample_threads
 
 # A move is accepted while its exact F gain exceeds TOL (log units). Release 2.13: 2^-9, the noise_quantum of the
 # motion of refinement contrasts under 1e-6 relative GL noise (p99 9e-5 nats over ~4,300 fit contrasts of 1e-6 jitter
@@ -798,6 +806,7 @@ def pass_chunk(
     pb,
     guarded,
     exchanges,
+    exchanges_parallel,
     acc,
     ahead0,
     chain0,
@@ -821,8 +830,9 @@ def pass_chunk(
     recursion on the same panel) instead of being advanced. The candidates anchored at junction q
     are cand_start[q] .. cand_start[q + 1] - 1 in proposal order (kind, end block, founder label,
     rows cand_rows[cand_row_start[i]:] over [q, end)). Arrays of switch counts are one-element
-    placeholders without the guard. tie_q: the tie quantum of the gains (module docstring). reverse: the
-    convention reversal (maths.ties.reverse_conventions(); content orders inverted). optimistic
+    placeholders without the guard. exchanges_parallel: each junction's exchange gains run as one parallel
+    region on the caller's team (gains.parallel_exchanges). tie_q: the tie quantum of the gains (module
+    docstring). reverse: the convention reversal (maths.ties.reverse_conventions(); content orders inverted). optimistic
     (unguarded only): stop at the first coarse item whose gain exceeds TOL (the first
     point where a guarded pass reads switch costs) with acc[lex_abort] = 1; the caller discards the
     pass and runs it guarded.
@@ -860,7 +870,7 @@ def pass_chunk(
                 g, _, chain = _g_at(
                     chain, p, p, frontier, haps, win, offsets, stored, stored_cnt, gperm, permuted, guarded, acc
                 )
-                gains = exchange_gains(f, np.ascontiguousarray(g))
+                gains = exchange_gains(f, np.ascontiguousarray(g), exchanges_parallel)
                 for ei in range(len(gains)):
                     events.append(
                         (
@@ -1368,7 +1378,8 @@ def accept_pass(
     frontier, p = 0, 0
     while p < blocks:
         stop = min(blocks, p + JUNCTION_BATCH)
-        with budget.scope():
+        team = sample_threads(samples, budget)
+        with budget.scope(team):
             (jg, jp, gperm, f, fcnt, frontier, accepted, ahead, chain) = pass_chunk(
                 haps,
                 X,
@@ -1392,6 +1403,7 @@ def accept_pass(
                 pb,
                 bool(guarded),
                 bool(exchanges),
+                parallel_exchanges(samples, founders, team),
                 acc,
                 ahead,
                 chain,

@@ -9,14 +9,14 @@ the exact dependency set. Later combinations require validation.
 ```sh
 python3.14 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./dist/haplotype_reconstruction-4.0.1-py3-none-any.whl
+python -m pip install ./dist/haplotype_reconstruction-4.1.0-py3-none-any.whl
 haplotypes --help
 ```
 
 To install the source distribution instead, select its release archive:
 
 ```sh
-python -m pip install ./dist/haplotype_reconstruction-4.0.1.tar.gz
+python -m pip install ./dist/haplotype_reconstruction-4.1.0.tar.gz
 ```
 
 These commands install an existing release artifact; replace the filename with the

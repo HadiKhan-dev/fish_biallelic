@@ -8,9 +8,18 @@ import math
 from dataclasses import replace
 
 from haplotype_reconstruction.contracts.assembly import JoinTask
+from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD
 
 # Cost only, 3.5 join/search.py: Python beam/archive residence per path-pair.
 POOL_BYTES_PER_PATH_PAIR = 200
+
+
+def batch_threads(task: JoinTask) -> int:
+    """The most CPUs one batch's join can occupy: its kernels run in parallel over the batch's samples, at least
+    SAMPLES_PER_THREAD of them per thread (core.kernels.sample_team); its few regions over other axes (proposal
+    candidates, certificate pools, linker sites) run on the same team. Declared as the batch task's maximum, so the
+    engine never holds CPUs for a batch that its kernels would only wake idle: they go to peer batches."""
+    return max(1, len(task.samples) // SAMPLES_PER_THREAD)
 
 
 def batch_memory_bytes(task: JoinTask) -> int:

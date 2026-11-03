@@ -20,6 +20,7 @@ from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError, InvariantError
 from ...engine.runtime import task_team
+from ...engine.scheduler import claim_threads
 from ...science.pedigree import exclusion_bound
 from ...science.pedigree.parameters import ExclusionConfig
 from ...store.container import CheckpointFile
@@ -101,6 +102,7 @@ def run(
             parameters,
             configured_contigs,
             sample_count,
+            claim_threads,  # the science's kernel boundaries re-read this task's share
         )
     if file is not None:
         assert identity is not None

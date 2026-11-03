@@ -12,8 +12,8 @@ import os
 import tempfile
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -574,20 +574,62 @@ class SelectionInputs:
     contig: str
 
     def __call__(self) -> Any:
-        from ..contracts.evidence import ContigEvidence
-        from ..science.assembly.evidence import AssemblyEvidence
         from ..stages.discovery import records as discovery_records
-        from ..stages.evidence import records as evidence_records
 
         reader = _task_reader(self.output, self.root)
-        discovered, _ = _required_product(reader, discovery_records, "discovery", self.contig)
-        request = evidence_records.result_reader(
-            reader._store, reader.manifest, product="evidence", contig=self.contig, counts=True
+        request = discovery_records.result_reader(
+            reader._store, reader.manifest, product="discovery", contig=self.contig
         )
-        evidence = None if request is None else reader.read(request, self.contig)
-        if request is None or not isinstance(evidence, ContigEvidence):
-            raise SettingsError(f"{self.contig}: selection needs complete evidence")
-        return discovered, evidence.founder_view(), AssemblyEvidence.from_contig(evidence, request.identity)
+        if request is None:
+            raise SettingsError(f"{self.contig}: required discovery publication is missing")
+        discovered = _chain_input(f"discovery/{request.identity}", lambda: _decoded(reader, request, self.contig))
+        _, _, founder, view = _chain_evidence(reader, self.contig)
+        return discovered, founder, view
+
+
+# A contig's selection rounds and assembly entries run as separate actions on the contig's worker (its affinity) and
+# each needs the contig's discovery and evidence, decoded. They are kept there between those actions
+# (engine.workers.resident_or_load) under keys naming their store identities, so a kept value equals a fresh read and
+# any other worker reads the store; the final assembly's entry, their last consumer, releases them.
+_CHAIN_INPUTS = "chain-inputs"
+
+
+def _chain_input(key: str, load: Callable[[], Any]) -> Any:
+    from ..engine.workers import resident_or_load
+
+    return resident_or_load(f"{_CHAIN_INPUTS}/{key}", load)
+
+
+def _decoded(reader: Results, request: Any, contig: str) -> Any:
+    value = reader.read(request, contig)
+    if value is None:
+        raise SettingsError(f"{contig}: required {request.key} publication is missing")
+    return value
+
+
+def _chain_evidence(reader: Results, contig: str) -> tuple[Any, Any, Any, Any]:
+    """The contig's checked evidence request, evidence (with counts), founder view and an assembly view of its own."""
+    from ..contracts.evidence import ContigEvidence
+    from ..science.assembly.evidence import AssemblyEvidence
+    from ..stages.evidence import records as evidence_records
+
+    request = evidence_records.result_reader(
+        reader._store, reader.manifest, product="evidence", contig=contig, counts=True
+    )
+    if request is None:
+        raise SettingsError(f"{contig}: selection and assembly need complete evidence")
+
+    def load() -> tuple[Any, Any, Any]:
+        evidence = reader.read(request, contig)
+        if not isinstance(evidence, ContigEvidence):
+            raise SettingsError(f"{contig}: selection and assembly need complete evidence")
+        return evidence, evidence.founder_view(), AssemblyEvidence.from_contig(evidence, request.identity)
+
+    items = ",".join(getattr(request, "items", None) or ())
+    evidence, founder, view = _chain_input(f"evidence/{request.identity}/{items}", load)
+    # Each consumer gets its own assembly view over the shared immutable arrays: a final assembly releases its view's
+    # neutral evidence (AssemblyEvidence.release_neutral), which must not reach the kept one or another consumer's.
+    return request, evidence, founder, replace(view)
 
 
 @dataclass(frozen=True)
@@ -741,12 +783,9 @@ def _run_assembly(
     cores: int = 1,
 ) -> Expansion:
     """Expand one AS6 context/final role from checked selected panels and founder evidence."""
-    from ..contracts.evidence import ContigEvidence
     from ..engine.graph import Expansion, ResultRef, Task, TaskKey
-    from ..science.assembly.evidence import AssemblyEvidence
     from ..science.assembly.run import AssemblyInputs, Role
     from ..stages.assembly.final import assembly_task, bind_session
-    from ..stages.evidence import records as evidence_records
     from ..stages.selection import records as selection_records
     from ..store.protocol import NumericalPolicy
 
@@ -759,13 +798,11 @@ def _run_assembly(
     selected = None if request is None else reader.read(request, contig)
     if request is None or selected is None:
         raise SettingsError(f"{contig}: assembly needs published selection round {previous}")
-    evidence_request = evidence_records.result_reader(
-        reader._store, reader.manifest, product="evidence", contig=contig, counts=True
-    )
-    evidence = None if evidence_request is None else reader.read(evidence_request, contig)
-    if evidence_request is None or not isinstance(evidence, ContigEvidence):
-        raise SettingsError(f"{contig}: assembly needs complete evidence")
-    view = AssemblyEvidence.from_contig(evidence, evidence_request.identity)
+    evidence_request, evidence, _, view = _chain_evidence(reader, contig)
+    if context is None:
+        from ..engine.workers import release_resident_namespace
+
+        release_resident_namespace(_CHAIN_INPUTS)  # the final assembly is the chain inputs' last consumer
     child_key = TaskKey("assembly", "compute", contig, round_name)
     session = bind_session(
         AssemblyInputs(tuple(selected), view, maps.for_contig(contig)),
@@ -1277,6 +1314,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
             depends_on=tuple(key("export", c) for c in resolved.contigs),
         )
     dependencies["complete"] = tuple(dict.fromkeys(k for values in dependencies.values() for k in values))
+    dependencies["science"] = dependencies["complete"]
     if prepared.settings.export.enabled:
         dependencies["complete"] += (manifest_key,)
     for task in run_tasks(
@@ -1416,17 +1454,29 @@ def execute(
     if command == "run" and prepared.manifest is None:
         from ..engine.runtime import isolated
 
-        # Init may start a simulation worker pool. Its separate numerical runtime
-        # keeps the subsequent graph free to declare its own complete preload set.
-        isolated(
-            execute,
-            settings,
-            command="init",
-            tie_reverse=tie_reverse,
-            tie_keep=tie_keep,
-            tie_census=tie_census,
-            cores=prepared.cores,
-        )
+        if prepared.source is not None and prepared.source.kind == "simulation":
+            # Init materialises a simulation with its own worker pool. Its separate numerical runtime
+            # keeps the subsequent graph free to declare its own complete preload set.
+            isolated(
+                execute,
+                settings,
+                cores=prepared.cores,
+                command="init",
+                tie_reverse=tie_reverse,
+                tie_keep=tie_keep,
+                tie_census=tie_census,
+            )
+        else:
+            # An observation source's init reads its header and binds the manifest: no kernel, pool or worker, so
+            # it runs here, without a second interpreter's start-up and imports before every run.
+            execute(
+                settings,
+                command="init",
+                tie_reverse=tie_reverse,
+                tie_keep=tie_keep,
+                tie_census=tie_census,
+                in_process=in_process,
+            )
         prepared = check_run(settings, command=command, tie_reverse=tie_reverse, contigs=contigs)
     from ..engine.records import record_run, run_log
     from ..engine.runtime import kernel_run
@@ -1485,7 +1535,19 @@ def execute(
         preload = _task_preloads(tasks)
     else:
         preload = ()
-    _start_runtime(prepared, preload=preload)
+    # Init reads its source's header and binds the manifest; it runs kernels only when it simulates the source.
+    # Warming them in init's own runtime first (an isolated process, before the run's warm-up on every CPU) delayed
+    # every run's start by its compile pool.
+    warm = command != "init" or (prepared.source is not None and prepared.source.kind == "simulation")
+    if warm:
+        _start_runtime(prepared, preload=preload)
+    # else: an observation init (no kernel, pool or worker) installs no numerical runtime, so the run that follows in
+    # this interpreter starts the only one: its kernels bind to that runtime's cache directory, and a live
+    # forkserver's settings are never replaced by init's.
+    if command != "init" and not in_process:
+        from ..engine.runtime import start_forkserver
+
+        start_forkserver()  # its workers' imports run while the graph is planned
     prepared.paths.logs.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%f")
     log = prepared.paths.logs / f"{command}_{stamp}_{os.getpid()}.log"
@@ -1495,6 +1557,10 @@ def execute(
             tie_reverse=tie_reverse, tie_keep=list(tie_keep), tie_census=None if tie_census is None else str(tie_census)
         ),
     )
+    # A worker-pool graph compiles kernels as tasks of its own beside the stage tasks (_with_kernel_tasks: no stage
+    # waits for them; a worker that meets a kernel not yet compiled compiles it under that function's compile lock);
+    # init's simulation and in-process graphs warm every kernel first.
+    defer = command != "init" and not in_process
     with (
         run_log(log),
         record_run(
@@ -1505,7 +1571,7 @@ def execute(
             checkpoints=prepared.paths.checkpoints,
             source_descriptor=None if prepared.manifest is None else prepared.manifest.get("source"),
         ) as recorder,
-        kernel_run(store=_kernel_store(prepared)),
+        kernel_run(store=_kernel_store(prepared), defer=defer) if warm else nullcontext() as kernels,
     ):
         if command == "init":
             _initialise(prepared, tie_reverse=tie_reverse, tie_keep=tie_keep)
@@ -1513,6 +1579,8 @@ def execute(
         if command not in {"evidence", "reconstruct", "phase"}:
             _output_selection(CheckpointStore(prepared.paths.checkpoints), settings)
         assert cut is not None
+        if defer:
+            tasks, scheduling = _with_kernel_tasks(tasks, scheduling, kernels)
         values = run_graph(
             tasks,
             cores=prepared.cores,
@@ -1523,6 +1591,11 @@ def execute(
             contig_lanes=None if settings.execution.contig_lanes == "auto" else int(settings.execution.contig_lanes),
             preload=preload,
         )
+        if defer:
+            from ..engine.kernels import record_compiled
+
+            assert kernels is not None  # a deferring graph is a warm one
+            record_compiled(kernels, values)
         _complete_workflow(prepared, cut, tasks, values, recorder)
         if cut.clean_stop:
             recorder.clean_stop()
@@ -1875,68 +1948,133 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     return RunResult("complete", None, resolved.contigs)
 
 
+# The stage implementations behind the application's task wrappers (a wrapper names its stage, not its code): preloaded
+# for warm-up, and their import closures order the kernel compilations. Init only checks the run's bound configuration
+# (_check_initialized): no stage code. Relatedness depends on the unit.
+_STAGE_OWNERS: dict[str, tuple[str, ...]] = {
+    "init": (),
+    "evidence": ("stages.evidence.tasks",),
+    "discovery": ("stages.discovery.tasks",),
+    "selection": ("stages.selection.tasks",),
+    "assembly": ("stages.assembly.final",),
+    "painting": ("stages.painting.tasks",),
+    "refit": ("stages.refit.tasks",),
+    "pedigree": (
+        "stages.pedigree.prepare",
+        "stages.pedigree.screen",
+        "stages.pedigree.scores",
+        "stages.pedigree.decision",
+    ),
+    "phase": ("stages.phase.tasks",),
+    "recombination": ("stages.recombination.tasks",),
+    "sites": ("stages.inputs.sites",),
+    "release": ("stages.assembly.release",),
+    "export": ("outputs.export.task",),
+    "report": ("outputs.reports.tasks",),
+}
+# Kernel modules the assembly tasks import lazily inside functions: preloading them lets warm-up compile their declared
+# overloads (ARCHITECTURE_40 section 4.5) instead of each lane compiling them serially.
+_ASSEMBLY_KERNEL_MODULES = (
+    "join.certify",
+    "join.emissions",
+    "join.objective",
+    "join.pair_segments",
+    "join.proposals",
+    "join.splice",
+    "linker.emissions",
+    "linker.kernels",
+    "linker.scan",
+    "pairs",
+    "refinement.acceptance",
+    "refinement.beam",
+    "refinement.checkpoints",
+    "refinement.component_workspace",
+    "refinement.count",
+    "refinement.gains",
+    "refinement.guard",
+    "refinement.messages",
+    "refinement.objective",
+    "refinement.proposals",
+    "refinement.window",
+)
+
+
+def _stage_modules(task: Task) -> tuple[str, ...] | None:
+    """The stage implementation modules behind ``task`` (its stage's owners, with the kernel modules assembly imports
+    lazily); None for a stage outside the table."""
+    stage = task.key.stage
+    if stage == "relatedness":
+        modules: tuple[str, ...] = (
+            "stages.relatedness." + ("pairs_task" if task.key.unit == "pairs" else "families_task"),
+        )
+    elif stage in _STAGE_OWNERS:
+        modules = _STAGE_OWNERS[stage]
+    else:
+        return None
+    if stage == "assembly":
+        modules += tuple("science.assembly." + name for name in _ASSEMBLY_KERNEL_MODULES)
+    return tuple("haplotype_reconstruction." + module for module in modules)
+
+
 def _task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
     """Name the stage implementations behind application wrappers before C2 warms workers."""
     from ..stages.graph import preload_modules
 
-    owners = {
-        "evidence": "stages.evidence.tasks",
-        "discovery": "stages.discovery.tasks",
-        "selection": "stages.selection.tasks",
-        "assembly": "stages.assembly.final",
-        "painting": "stages.painting.tasks",
-        "refit": "stages.refit.tasks",
-        "pedigree": "stages.pedigree.decision",
-        "phase": "stages.phase.tasks",
-        "recombination": "stages.recombination.tasks",
-        "sites": "stages.inputs.sites",
-        "release": "stages.assembly.release",
-        "export": "outputs.export.task",
-        "report": "outputs.reports.tasks",
-    }
     modules = list(preload_modules(tasks))
-    module: str | None
     for task in tasks:
-        if task.key.stage == "pedigree":
-            modules.extend(
-                "haplotype_reconstruction.stages.pedigree." + name for name in ("prepare", "screen", "scores")
-            )
-        if task.key.stage == "relatedness":
-            module = "stages.relatedness." + ("pairs_task" if task.key.unit == "pairs" else "families_task")
-        else:
-            module = owners.get(task.key.stage)
-        if module is not None:
-            modules.append("haplotype_reconstruction." + module)
-        if task.key.stage == "assembly":
-            # Kernel modules the assembly tasks import lazily inside functions: preloading them lets warm-up compile
-            # their declared overloads (ARCHITECTURE_40 section 4.5) instead of each lane compiling them serially.
-            modules.extend(
-                "haplotype_reconstruction.science.assembly." + name
-                for name in (
-                    "join.certify",
-                    "join.emissions",
-                    "join.objective",
-                    "join.pair_segments",
-                    "join.proposals",
-                    "join.splice",
-                    "linker.emissions",
-                    "linker.kernels",
-                    "linker.scan",
-                    "pairs",
-                    "refinement.acceptance",
-                    "refinement.beam",
-                    "refinement.checkpoints",
-                    "refinement.component_workspace",
-                    "refinement.count",
-                    "refinement.gains",
-                    "refinement.guard",
-                    "refinement.messages",
-                    "refinement.objective",
-                    "refinement.proposals",
-                    "refinement.window",
-                )
-            )
+        modules.extend(_stage_modules(task) or ())
     return tuple(dict.fromkeys(modules))
+
+
+def _with_kernel_tasks(
+    tasks: tuple[Task, ...], scheduling: dict[str, Any], state: Any
+) -> tuple[tuple[Task, ...], dict[str, Any]]:
+    """Run the warm-up plan's compilations (engine.kernels.compile_tasks) as graph tasks beside the stages.
+
+    No stage task waits for them: a stage that calls a kernel still being compiled waits for that compilation, and one
+    not compiled yet compiles it itself (engine.kernels.install_compile_lock). So the stages start at once and wait
+    only for the kernels they actually call (a stage's static import closure reaches far more: selection's reaches
+    founder refinement, whose longest kernel takes about 175 s, and the one actm3 waited for is never called there).
+    Compile tasks come after every ready stage task (they fill the CPUs the stages leave: at the start, nearly all of
+    them), the kernels in the import closure of the shallowest stage tasks first and, among those, the longest to
+    compile (learned seconds, else overloads)."""
+    from ..engine.kernels import compile_tasks
+    from ..store.identity import code_dependency_identity
+
+    compiles = {task.args[0]: task for task in compile_tasks(state)}
+    if not compiles:
+        return tasks, scheduling
+    by_module: dict[str, list[tuple[str, str]]] = {}
+    for name in compiles:
+        by_module.setdefault(name[0], []).append(name)
+    indexed = {task.key: task for task in tasks}
+    levels: dict[TaskKey, int] = {}
+
+    def level(key: TaskKey) -> int:  # the longest dependency path to ``key`` within this graph
+        if key not in levels:
+            levels[key] = 1 + max((level(d) for d in indexed[key].depends_on if d in indexed), default=-1)
+        return levels[key]
+
+    first_use: dict[tuple[str, str], int] = {}
+    for task in tasks:
+        roots = _stage_modules(task)
+        for module in code_dependency_identity(roots).modules if roots else ():
+            for name in by_module.get(module, ()):
+                first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
+    unused = 1 + max(levels.values(), default=0)
+    order = sorted(
+        compiles,
+        key=lambda name: (
+            first_use.get(name, unused),
+            -state.seconds.get(name, 0.0),
+            -len(state.missing[name]),
+            name,
+        ),
+    )
+    priorities = dict(scheduling.get("priorities") or {})
+    floor = min(priorities.values(), default=0.0) - 1.0
+    priorities.update({compiles[name].key: floor - rank for rank, name in enumerate(order)})
+    return (*tasks, *compiles.values()), dict(scheduling, priorities=priorities)
 
 
 def _default_scratch(checkpoints: Path) -> Path:

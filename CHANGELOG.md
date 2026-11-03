@@ -1,5 +1,50 @@
 # Changelog
 
+## 4.1.0 (3 November 2026)
+
+A speed release: scheduling, transport and start-up change; no model, parameter,
+threshold, tie rule or output format does. Released outputs are meant to be
+scientifically identical to 4.0's. It includes 4.0.1's manuscript
+([paper/](paper/README.md)), whose methods are those of this release.
+
+**Start-up.** Kernels are compiled as tasks of the run's own graph, beside the
+stages, instead of all of them before the first stage; a stage that meets a kernel
+still being compiled waits for that kernel only, and one process at a time writes
+each kernel's cache entry. Initialising an observation (VCF/BCF) source runs in the
+calling process, without a numerical runtime of its own. The worker server starts
+while the graph is planned. On a cold cache the first stage starts within seconds
+of the command instead of after the whole warm-up.
+
+**Hand-offs.** A contig's decoded discovery and evidence inputs stay in the worker
+that runs its selection and assembly chain, and an expanding task's continuation
+stays in that worker instead of travelling through the coordinator. Record decoding
+and code-identity hashing are cached per process. A task's first CPU share no
+longer borrows from peers that have not taken theirs.
+
+**Tail.** Report tasks run on any free worker; each contig's tie reader follows the
+completed stages rather than the exports; recombination runs before export; the
+default and mirror phase solves release their samples as one batch; the phased-sample
+VCF writer formats a chunk of cells at once, chunks bounded by cells.
+
+**Performance.** On the same nodes (112-core Sapphire Rapids, cold cache, a
+116-sample, three-chromosome subset of a real cross), a whole run takes 562-589 s
+against 733-777 s for 3.5 (4.0 took 1,265 s where 3.5 took 780 s), and 791-817 s
+against 988-1,015 s on 76-core Ice Lake. Whole-run CPU occupancy is about 49% (3.5: 44-46%).
+The longest remaining serial stretches are the final refinement level's count pass
+on the largest chromosome and each chromosome's evidence reading.
+
+Run records gain each task's `finished_seconds`, and kernel compilations appear as
+operational tasks (`kernels/compile/run/<module>:<function>`). Code identities
+change with the engine sources, so a 4.1 run cannot resume 4.0 checkpoints: start a
+new checkpoint root.
+
+**Validation.** The fast test tier passes. Released outputs on the reference cross
+matched between successive candidates. The release matrix (truth simulations,
+TroMau, references and perturbations; the hardware-variant rows of 4.0 are dropped)
+compares this release with 4.0 and was running when the release was committed. The
+workflow receipt (`docs/examples/workflow_receipt.json`) still names the 4.0.0
+sources until the workflow integration test is rerun on 4.1.
+
 ## 4.0.1 (2 November 2026)
 
 Adds the manuscript describing release 4.0, rebuilt from scratch from the 4.0 methods

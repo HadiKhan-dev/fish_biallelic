@@ -13,6 +13,7 @@ from functools import partial
 
 from haplotype_reconstruction.contracts.assembly import (
     AssemblyProduct,
+    CompletionProduct,
     JoinedLevel,
     LevelRecord,
     RefinedLevel,
@@ -40,7 +41,7 @@ from haplotype_reconstruction.stages.framework import Expansion
 from haplotype_reconstruction.store.container import CheckpointFile
 from haplotype_reconstruction.store.protocol import NumericalPolicy
 
-from .completion import SharedEvidence, complete_stage
+from .completion import SharedEvidence, complete_stage, expand_completion
 from .levels import expand_level
 from .records import (
     FINAL,
@@ -85,14 +86,28 @@ class HierarchyState:
 
 
 def start_assembly(session: AssemblySession, *, cores: int = 1) -> AssemblyProduct | Expansion:
-    """Resume the product or enter completion and the first level expansion."""
+    """Resume the product or enter completion (its blocks as engine tasks) and then the first level expansion."""
     if session.role is Role.CONTEXT and session.levels not in (1, 2):
         raise SettingsError("a context assembly requires levels 1 or 2")
     if session.role is Role.FINAL and session.levels is not None:
         raise SettingsError("final assembly needs an AS8 refinement stage and no level cap")
-    completion = complete_stage(
-        session.inputs, session.parameters.completion, session.records, ties=session.ties, cores=cores
+    return expand_completion(
+        session.inputs,
+        session.parameters.completion,
+        session.records,
+        partial(completed, session),
+        ties=session.ties,
+        parent=session.parent,
+        max_cores=session.max_cores,
+        storage=session.storage,
+        cores=cores,
     )
+
+
+def completed(
+    session: AssemblySession, completion: CompletionProduct, *, cores: int = 1
+) -> AssemblyProduct | Expansion:
+    """Resume the product or enter the first level expansion of a completed contig."""
     stored = None if session.records is None or session.role is Role.CONTEXT else session.records.load(FINAL)
     if stored is not None:
         return decode_product(stored, prepared=completion.prepared)

@@ -119,7 +119,9 @@ def run_tasks(
 ) -> tuple[Task, ...]:
     """Declare available gather writers in baseline order; ties require the completed-run dependency.
 
-    Keys are truth, relatedness, pedigree, refit, phase, recombination, complete.
+    Keys are truth, relatedness, pedigree, refit, phase, recombination, complete, and optionally science: the
+    completed scientific stages without output formatting (exports), which the contigs' tie readers follow (they read
+    only stage records); without it they follow complete. The ties report itself always follows complete.
     The interface supplies dependencies only for available products, including reused
     ones; no reader probes or store traversal happens while constructing the graph.
     """
@@ -141,7 +143,13 @@ def run_tasks(
             # Each contig's tie sources are read by a task of its own (they are independent; read in turn they made
             # one serial step of the whole run); the report merges them in contig order.
             readers = tuple(
-                make_task("ties", contig_ties, (results, contig), contig=contig, depends_on=dependencies[name])
+                make_task(
+                    "ties",
+                    contig_ties,
+                    (results, contig),
+                    contig=contig,
+                    depends_on=dependencies.get("science", dependencies[name]),
+                )
                 for contig in results.contigs
             )
             tasks += readers

@@ -9,6 +9,7 @@ import numpy as np
 from ...contracts.pedigree import PreparedChromosome, RelativeContrasts
 from ...contracts.roles import record_field
 from ...engine.runtime import task_team
+from ...engine.scheduler import claim_threads
 from ...science.pedigree import relatives as science
 from ...science.pedigree.parameters import PedigreeConfig
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
@@ -37,7 +38,8 @@ def run(
     usable: np.ndarray = np.zeros(len(pairs), bool)
     with task_team(threads):
         for component in prepared.components:
-            a, b, use = science.component_contrasts(component, parameters, pairs, reverse=reverse)
+            # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
+            a, b, use = science.component_contrasts(component, parameters, pairs, claim_threads, reverse=reverse)
             second += a
             full += b
             usable |= use

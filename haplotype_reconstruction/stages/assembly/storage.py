@@ -16,6 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import RefinementProblem
+from haplotype_reconstruction.science.assembly.refinement.component_workspace import frozen
 from haplotype_reconstruction.science.assembly.refinement.window import (
     COST_ARRAYS,
     PARTIAL_SITE_BYTES,
@@ -88,6 +89,10 @@ class Windows:
     orientation, else the window of the calling thread's open lease of K (`lease`), else a fresh window that
     lives as long as the caller holds it. A consumer that runs many kernels (a search) holds a lease, so they
     share its window and refill it only where they move.
+
+    Every window tuple has one argument type, whichever route built the component (stage, sweep or replay): the
+    evidence frozen (C-contiguous, read-only, shared), the masks and hazards the windows' own C-contiguous writable
+    copies, then the windows' scratch. This is the type the refinement kernels declare and the warm-up compiles.
     """
 
     def __init__(
@@ -100,10 +105,10 @@ class Windows:
         resident: bool,
         capacity: int,
     ) -> None:
-        self.evidence = evidence
-        self.kept = np.ascontiguousarray(kept, np.bool_)
-        self.partial = np.ascontiguousarray(partial, np.bool_)
-        self.hazards = np.ascontiguousarray(hazards, np.float64)
+        self.evidence = frozen(evidence, np.float32)
+        self.kept = np.array(kept, np.bool_, order="C")
+        self.partial = np.array(partial, np.bool_, order="C")
+        self.hazards = np.array(hazards, np.float64, order="C")
         self.samples, self.sites = int(evidence.shape[0]), int(evidence.shape[1])
         self.resident = bool(resident)
         self.capacity = self.sites if self.resident else min(self.sites, int(capacity))

@@ -11,6 +11,7 @@ kernel_cache.py; the learned manifest and signature guard retain their semantics
 from __future__ import annotations
 
 import atexit
+import fcntl
 import hashlib
 import io
 import logging
@@ -355,6 +356,105 @@ def install_signature_guard() -> None:
     cast(Any, caching.Cache)._load_overload = load_checked
 
 
+def install_cache_path_check_once() -> None:
+    """Check each kernel cache directory once per process.
+
+    Numba checks a function's cache directory (it creates it and writes a test file there) whenever it creates that
+    function's cache, and enable_caches creates one per declared kernel: about 600 round trips to the filesystem, twice
+    before a run's first task (in the coordinator and in the forkserver), 12 s each where the cache is on a network
+    filesystem. A directory that passed stays writable for the process, so later calls (every save) only check that it
+    still exists and run the full check again, recreating it, if it was removed; one that failed is checked again, so
+    Numba still falls back to its next cache location."""
+    from numba.core import caching
+
+    ensure = caching._CacheLocator.ensure_cache_path
+    if getattr(ensure, "once", False):
+        return
+    checked: set[str] = set()
+
+    def ensure_once(self):
+        path = self.get_cache_path()
+        if path not in checked or not os.path.isdir(path):
+            ensure(self)
+            checked.add(path)
+
+    cast(Any, ensure_once).once = True
+    cast(Any, caching._CacheLocator).ensure_cache_path = ensure_once
+
+
+# Per-function compile locks this process holds: lock path -> [descriptor, depth]. Touched only under Numba's global
+# compiler lock, which serializes this process's compilations.
+_COMPILE_LOCKS: dict[str, list[int]] = {}
+
+
+def install_compile_lock() -> None:
+    """Compile each cached kernel overload once per cache, in whichever process needs it first.
+
+    Numba checks a function's disk cache, then compiles and saves on a miss. Processes that missed one function at the
+    same time each compiled it and rewrote its cache index (install_signature_guard's case). Here a process holds the
+    function's lock file (beside its cache index) from its cache check to its save: another process needing the
+    function meanwhile waits, then loads what the first saved. So warm-up's tasks and the stages that use a kernel
+    can run side by side, and each index has one writer at a time. The file lock is taken inside Numba's global
+    compiler lock (the order compile takes them), so this process's threads never wait on each other's file locks; a
+    compilation that compiles a callee takes the callee's lock in turn, and kernels never call one another in a cycle.
+    An overload already in this process takes no lock; where a lock cannot be taken, compilation proceeds unlocked.
+    """
+    from numba.core import sigutils
+    from numba.core.compiler_lock import global_compiler_lock
+    from numba.core.dispatcher import Dispatcher
+
+    compile = Dispatcher.compile
+    if getattr(compile, "locks_cache", False):
+        return
+
+    def compile_once(self, sig):
+        index = getattr(getattr(getattr(self, "_cache", None), "_cache_file", None), "_index_path", None)
+        if index is None:  # no disk cache: nothing is shared with other processes
+            return compile(self, sig)
+        with global_compiler_lock:
+            args, _ = sigutils.normalize_signature(sig)
+            if tuple(args) in self.overloads:
+                return compile(self, sig)
+            with _compile_lock(index + ".lock"):
+                return compile(self, sig)
+
+    cast(Any, compile_once).locks_cache = True
+    cast(Any, Dispatcher).compile = compile_once
+
+
+@contextmanager
+def _compile_lock(path: str):
+    """Hold ``path``'s exclusive file lock, re-entrantly within this process (a recursive kernel compiles itself)."""
+    held = _COMPILE_LOCKS.get(path)
+    if held is not None:
+        held[1] += 1
+        try:
+            yield
+        finally:
+            held[1] -= 1
+        return
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        descriptor = None
+    if descriptor is not None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError:  # a filesystem without locks
+            os.close(descriptor)
+            descriptor = None
+    if descriptor is None:
+        yield
+        return
+    _COMPILE_LOCKS[path] = [descriptor, 1]
+    try:
+        yield
+    finally:
+        del _COMPILE_LOCKS[path]
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 @dataclass
 class CacheState:
     """One run's disposable cache publication and warm-up accounting."""
@@ -371,6 +471,11 @@ class CacheState:
     skipped: int = 0
     verified: int = 0
     seeded: int = 0
+    # The plan (plan_warm_up): per function, its union of declared and learned overloads, its declared ones, and the
+    # overloads the cache does not hold yet.
+    union: dict = field(default_factory=dict)
+    required: dict = field(default_factory=dict)
+    missing: dict = field(default_factory=dict)
 
 
 def _compile_function(task, shared, budget):
@@ -384,6 +489,8 @@ def _compile_function(task, shared, budget):
         )
     signatures, declared = pickle.loads(encoded), pickle.loads(encoded_declared)
     install_signature_guard()
+    install_compile_lock()
+    install_cache_path_check_once()
     enable_caches()
     started = time.perf_counter()
     compiled = 0
@@ -423,24 +530,20 @@ def _compile_requests(requests: Mapping, required: Mapping, seconds: Mapping, te
     return count, timings
 
 
-def warm_up(
+def plan_warm_up(
     roots: Iterable[str],
     requests: Mapping,
-    team,
     *,
     cache: Path | None = None,
     store: Path | None = None,
     key: str | None = None,
     key_closure: CodeIdentity | None = None,
 ) -> CacheState:
-    """Seed and warm declarations plus learned signatures before scientific pools.
+    """Seed the cache and find what warm-up must compile: per function, the union of declared and learned overloads
+    and those the cache lacks (``state.missing``). Compiles nothing.
 
-    The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba.
-    One task per function uses the engine pool; a fresh pool, one task per
-    function, verifies the complete union after a cold compile. Learned failures are counted/skipped;
-    declared overload failures raise InvariantError. Store I/O failures only log.
-    Call publish(state) in a finally block, including after scientific failure.
-    """
+    The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba. Store I/O failures only log; a cache
+    that cannot be prepared leaves an empty plan (dispatch stays lazy)."""
     from numba.core.registry import cpu_target
 
     from ..core.kernels import declarations, enable_caches
@@ -449,6 +552,8 @@ def warm_up(
     closure = code_dependency_identity(roots) if key_closure is None else key_closure
     check_closure(roots, closure)
     install_signature_guard()
+    install_compile_lock()
+    install_cache_path_check_once()
     failures = enable_caches()
     if failures:
         _LOG.warning("some kernel caches unavailable; dispatch remains lazy: %s", failures)
@@ -471,27 +576,95 @@ def warm_up(
     declared = {(d.module, d.function): set(d.overloads) for d in declarations()}
     learned, state.seconds = ({}, {}) if storage is None else _read_manifest(storage / state.key)
     # Never omit an imported declaration just because a caller supplied a partial request set.
-    required = {name: set(sigs) for name, sigs in declared.items()}
-    union = {name: set(sigs) for name, sigs in learned.items()}
-    for source in (requests, required):
+    state.required = {name: set(sigs) for name, sigs in declared.items()}
+    state.union = {name: set(sigs) for name, sigs in learned.items()}
+    for source in (requests, state.required):
         for name, signatures in source.items():
-            union.setdefault(name, set()).update(signatures)
+            state.union.setdefault(name, set()).update(signatures)
     target = cpu_target.target_context.codegen().magic_tuple()
     present = _cached_overloads(directory, target)
-    missing = {name: set(sigs) - present.get(name, set()) for name, sigs in union.items()}
-    missing = {name: sigs for name, sigs in missing.items() if sigs}
-    state.requested = sum(map(len, missing.values()))
-    state.compiled, timings = _compile_requests(missing, required, state.seconds, team)
+    missing = {name: set(sigs) - present.get(name, set()) for name, sigs in state.union.items()}
+    state.missing = {name: sigs for name, sigs in missing.items() if sigs}
+    state.requested = sum(map(len, state.missing.values()))
+    return state
+
+
+def warm_up(
+    roots: Iterable[str],
+    requests: Mapping,
+    team,
+    *,
+    cache: Path | None = None,
+    store: Path | None = None,
+    key: str | None = None,
+    key_closure: CodeIdentity | None = None,
+) -> CacheState:
+    """Seed and warm declarations plus learned signatures before scientific pools.
+
+    The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba.
+    One task per function uses the engine pool; a fresh pool, one task per
+    function, verifies the complete union after a cold compile. Learned failures are counted/skipped;
+    declared overload failures raise InvariantError. Store I/O failures only log.
+    Call publish(state) in a finally block, including after scientific failure.
+    """
+    state = plan_warm_up(roots, requests, cache=cache, store=store, key=key, key_closure=key_closure)
+    state.compiled, timings = _compile_requests(state.missing, state.required, state.seconds, team)
     state.seconds.update(timings)
-    state.verified = sum(map(len, union.values()))
+    total = sum(map(len, state.union.values()))
+    state.verified = total
     if state.requested:
         # Verified by a fresh pool (processes that compiled nothing), one task per function as in the compile step,
         # so each function's cache index still has one writer if a load must recompile. A single process loaded
         # every kernel in turn: one busy CPU for a minute or more at the start of every cold run.
-        state.verified, _ = _compile_requests(union, required, state.seconds, team)
-    state.stale = state.compiled < state.requested or state.verified < sum(map(len, union.values()))
-    state.skipped = sum(map(len, union.values())) - state.verified
+        state.verified, _ = _compile_requests(state.union, state.required, state.seconds, team)
+    state.stale = state.compiled < state.requested or state.verified < total
+    state.skipped = total - state.verified
     return state
+
+
+def kernel_task_key(name: tuple[str, str]):
+    """The graph key of function ``name``'s compile task (compile_tasks)."""
+    from .graph import TaskKey
+
+    return TaskKey("kernels", "compile", "run", f"{name[0]}:{name[1]}")
+
+
+def compile_kernel(name: tuple[str, str], signatures: bytes, declared: bytes) -> tuple[tuple[str, str], int, float]:
+    """Graph task: compile one function's missing overloads into the run's kernel cache (warm-up's pool task)."""
+    return _compile_function((name, None, signatures, declared), None, None)
+
+
+def compile_tasks(state: CacheState) -> tuple:
+    """The plan's compilations as graph tasks, one per function, as warm-up's pool runs them, for a caller that
+    runs them beside its stages instead of before them (interface.run): a stage that calls a kernel still being
+    compiled waits for that compilation (install_compile_lock), and one not compiled yet compiles it itself. There is
+    no verify pass on this route: each index has one writer at a time."""
+    from numba.core.serialize import dumps
+
+    from .graph import ResourceRequest, Task
+
+    return tuple(
+        Task(
+            kernel_task_key(name),
+            compile_kernel,
+            args=(name, dumps(tuple(sorted(signatures, key=str))), dumps(set(state.required.get(name, ())))),
+            resources=ResourceRequest(1, 1),
+        )
+        for name, signatures in sorted(state.missing.items())
+    )
+
+
+def record_compiled(state: CacheState, values: Mapping) -> None:
+    """Fold compile_tasks' results into the warm-up accounting before publication."""
+    for name in state.missing:
+        value = values.get(kernel_task_key(name))
+        if value is not None:
+            _, compiled, elapsed = value
+            state.compiled += compiled
+            state.seconds[name] = elapsed
+    state.verified = sum(map(len, state.union.values())) - (state.requested - state.compiled)
+    state.stale = state.compiled < state.requested
+    state.skipped = state.requested - state.compiled
 
 
 def publish(state: CacheState | None) -> None:

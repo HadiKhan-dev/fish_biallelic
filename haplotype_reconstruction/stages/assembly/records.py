@@ -48,7 +48,7 @@ from haplotype_reconstruction.contracts.roles import require_schema
 from haplotype_reconstruction.core.digest import array_digest, json_digest
 from haplotype_reconstruction.core.ties import TieCount, TieCounts
 from haplotype_reconstruction.store.container import CheckpointFile, RecordInfo
-from haplotype_reconstruction.store.identity import code_dependency_identity
+from haplotype_reconstruction.store.identity import CodeIdentity, code_dependency_identity
 from haplotype_reconstruction.store.protocol import (
     Derivation,
     NumericalPolicy,
@@ -135,10 +135,12 @@ def operation_derivation(
     reverse: bool = False,
     roots: tuple[str, ...] = ("haplotype_reconstruction.stages.assembly.final",),
     numerical_policy: NumericalPolicy | None = None,
+    code: CodeIdentity | None = None,
 ) -> Derivation:
-    """Bind declared code closure, parameter values, upstream payloads and convention."""
+    """Bind declared code closure, parameter values, upstream payloads and convention. ``code``: the closure of
+    ``roots`` already hashed by a caller deriving many operations at once."""
     return Derivation(
-        code_dependency_identity(roots),
+        code_dependency_identity(roots) if code is None else code,
         identity_value(parameters),
         numerical_policy or NumericalPolicy.current(),
         dict(upstream),
@@ -174,13 +176,31 @@ def normalise_join(task: JoinTask, scoring: np.ndarray) -> tuple[JoinTask, np.nd
     ), local_scoring
 
 
+JOIN_CODE_ROOTS = (
+    "haplotype_reconstruction.science.assembly.hierarchy.batch",
+    "haplotype_reconstruction.stages.assembly.records",
+)
+
+
+def join_code() -> CodeIdentity:
+    """The code closure every join derivation binds: hash it once per level, not once per batch (reading and parsing
+    its sources dominated planning a level)."""
+    return code_dependency_identity(JOIN_CODE_ROOTS)
+
+
 def join_derivation(
-    task: JoinTask, scoring: np.ndarray, *, evidence_identity: str, numerical_policy: NumericalPolicy | None = None
+    task: JoinTask,
+    scoring: np.ndarray,
+    *,
+    evidence_identity: str,
+    numerical_policy: NumericalPolicy | None = None,
+    code: CodeIdentity | None = None,
 ) -> Derivation:
     """Identity of precisely the normalized batch data, masks, branches and sources.
 
     Cached PreparedPanel.digest is never read. Absolute bp positions, inference
     and release arrays are bound directly. L1 omits unused horizon controls.
+    ``code``: ``join_code()``, when the caller derives a level's batches together.
     """
     local, data = normalise_join(task, scoring)
     settings = identity_value(local.settings)
@@ -203,11 +223,9 @@ def join_derivation(
         parameters,
         dict(evidence=evidence_identity, scoring=array_digest(data)),
         reverse=local.settings.reverse,
-        roots=(
-            "haplotype_reconstruction.science.assembly.hierarchy.batch",
-            "haplotype_reconstruction.stages.assembly.records",
-        ),
+        roots=JOIN_CODE_ROOTS,
         numerical_policy=numerical_policy,
+        code=code,
     )
 
 

@@ -24,8 +24,10 @@ from .records import SiteTable
 from .vcf import FILEFORMAT, LEGACY_FILEFORMAT, contig_line, site_header_lines
 
 _ALLELES = (".", "0", "1")
-# Sites formatted at once (genotype codes int64 N x CHUNK_SITES).
+# Sites formatted at once: CHUNK_SITES, fewer with many samples so that a chunk holds at most CHUNK_CELLS cells (its
+# int64 codes, phase sets and their unique-inverse, and its cell texts are each 8 bytes per cell: 8 MiB at the limit).
 CHUNK_SITES = 4096
+CHUNK_CELLS = 1 << 20
 
 
 def _genotype_table(separator: str, phase_set: str) -> list[str]:
@@ -129,16 +131,17 @@ def write_sample_phase(
     filtered = "\t".join([unphased[0]] * len(names))  # "./.:." in every sample
     filters = sites.filters()
     kept_index: np.ndarray = np.cumsum(sites.kept) - 1  # row -> index among the kept sites
-    rows = sites.positions.tolist()
+    rows, refs, alts = sites.positions.tolist(), sites.ref.tolist(), sites.alt.tolist()
     writer = Writer.from_string(str(path), header, mode="wb" if file_format == "bcf" else "wz")
     try:
-        for start in range(0, len(rows), CHUNK_SITES):
-            stop = min(start + CHUNK_SITES, len(rows))
+        step = max(1, min(CHUNK_SITES, CHUNK_CELLS // max(1, len(names))))
+        for start in range(0, len(rows), step):
+            stop = min(start + step, len(rows))
             kept = sites.kept[start:stop]
             selected = kept_index[start:stop][kept]
-            # Genotype codes 3 * (a + 1) + (b + 1) of the chunk's kept sites, one list per site.
+            # Genotype codes 3 * (a + 1) + (b + 1) of the chunk's kept sites, int64 [N, sites] in written column order.
             chunk = calls[:, selected] if sample_rows is None else calls[:, selected][sample_rows]
-            codes = (3 * (chunk[:, :, 0].astype(np.int64) + 1) + chunk[:, :, 1].astype(np.int64) + 1).T.tolist()
+            codes = 3 * (chunk[:, :, 0].astype(np.int64) + 1) + chunk[:, :, 1].astype(np.int64) + 1
             # PS per call row and selected site (-1 = unphased), then in the written column order.
             phase_sets = np.full((calls.shape[0], len(selected)), -1, dtype=np.int64)
             if set_starts is not None and len(selected):
@@ -152,23 +155,20 @@ def write_sample_phase(
                 phase_sets[(np.asarray(frame_undetermined)[:, selected] & DISPLAYED_UNDETERMINED) != 0] = -1
             if sample_rows is not None:
                 phase_sets = phase_sets[sample_rows]
-            changed: np.ndarray = np.ones(len(selected), dtype=np.bool_)
-            changed[1:] = np.any(phase_sets[:, 1:] != phase_sets[:, :-1], axis=0)
-            site_phase_sets = phase_sets.T.tolist()  # one list of PS values per selected site
-            column_tables = None
+            # Every cell's text at once: the genotype table of its phase set (the unphased one for -1) at its code.
+            values, cell_sets = np.unique(phase_sets, return_inverse=True)
+            texts = np.empty((len(values), len(_ALLELES) ** 2), dtype=object)
+            for index, value in enumerate(values.tolist()):
+                texts[index] = table_of(value)
+            cells = texts[cell_sets.reshape(phase_sets.shape), codes].T.tolist()  # one list of cells per selected site
             k = 0
             for offset, row in enumerate(range(start, stop)):
                 if kept[offset]:
-                    if changed[k] or column_tables is None:
-                        column_tables = [table_of(value) for value in site_phase_sets[k]]
-                    genotypes = "\t".join([table[code] for table, code in zip(column_tables, codes[k], strict=False)])
+                    genotypes = "\t".join(cells[k])
                     k += 1
                 else:
                     genotypes = filtered
-                line = (
-                    f"{contig}\t{rows[row]}\t.\t{sites.ref[row]}\t{sites.alt[row]}\t.\t{filters[row]}\t.\t"
-                    "GT:PS\t" + genotypes
-                )
+                line = f"{contig}\t{rows[row]}\t.\t{refs[row]}\t{alts[row]}\t.\t{filters[row]}\t.\tGT:PS\t" + genotypes
                 writer.write_record(writer.variant_from_string(line))
     finally:
         writer.close()

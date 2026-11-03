@@ -19,6 +19,7 @@ from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError
 from ...engine.runtime import task_team
+from ...engine.scheduler import claim_threads
 from ...science.pedigree.parameters import PedigreeConfig
 from ...science.pedigree.scoring import score_chromosome_selective
 from ...store.container import CheckpointFile
@@ -87,7 +88,10 @@ def run(
             return previous
     one = compact.chromosome_reference(chromosome, eligibility)
     with task_team(threads):
-        product = score_chromosome_selective(prepared, one, panel.trios, eligibility, parameters, reverse=reverse)
+        # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
+        product = score_chromosome_selective(
+            prepared, one, panel.trios, eligibility, parameters, claim_threads, reverse=reverse
+        )
     if file is not None:
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)

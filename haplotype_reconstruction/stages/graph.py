@@ -272,13 +272,12 @@ def bind_tasks(
         if task.key != key:
             raise SettingsError(f"stage action key {task.key} does not match logical graph key {key}")
         dependencies = tuple(dict.fromkeys((*node.dependencies, *task.depends_on)))
-        tasks.append(
-            replace(
-                task,
-                depends_on=dependencies,
-                affinity=task.affinity if task.affinity is not None else (key.scope if key.scope != "run" else None),
-            )
-        )
+        # A contig's stage tasks share its pinned worker. Its report tasks only read published records and write
+        # report files: they run on any free worker rather than queue behind the contig's later stages there.
+        affinity = task.affinity
+        if affinity is None and key.scope != "run" and key.stage != "report":
+            affinity = key.scope
+        tasks.append(replace(task, depends_on=dependencies, affinity=affinity))
     return tuple(tasks)
 
 
@@ -368,7 +367,9 @@ def execution_options(graph: RunGraph, cut: Cut, *, contig_costs: Mapping[str, f
     """Translate ENG-03 early nodes and ENG-23 contig costs into executor policy.
 
     Costs come from scheduler.planning_cost(D,N,L), never measured pressure.
-    Early ready refits and the relatedness gather precede ordinary chain work.
+    Early ready refits and the relatedness gather precede ordinary chain work, and a contig's recombination (short)
+    precedes its export on the contig's worker: the run's recombination report waits for every contig's
+    recombination, an export only for the export manifest.
     These priorities/leases add no model edge or scientific identity input.
     """
     from ..engine.scheduler import ChainPlan
@@ -383,6 +384,8 @@ def execution_options(graph: RunGraph, cut: Cut, *, contig_costs: Mapping[str, f
             if key.stage == "refit"
             else 2 * scale
             if key.stage == "relatedness"
+            else scale
+            if key.stage == "recombination"
             else costs.get(key.scope, 0.0)
         )
         for key in cut.nodes

@@ -31,6 +31,7 @@ and are needed only at stationary points and for the reported allele probabiliti
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NotRequired, TypedDict
 
 import numpy as np
@@ -38,7 +39,7 @@ from numba import prange, types
 from numpy.typing import NDArray
 
 from ...core.errors import InvariantError
-from ...core.kernels import kernel
+from ...core.kernels import bounded_team, kernel
 from .parameters import COMBINE_TILE, LANE_ALIGN, LANE_WIDTH, LOG_RATIO_NEAR, RELEASE_SAMPLE_BATCH
 
 # Exact Numba argument types observed at the immutable public boundaries.
@@ -1468,12 +1469,14 @@ class PreparedBlock:
         redraw_rate: float,
         unknown_mass: float,
         *,
-        threads: int = 1,
+        threads: int | Callable[[], int] = 1,
         lane_width: int | None = None,
         block_id: str = "",
     ) -> None:
         self.block_id = block_id
-        self.threads = int(threads)
+        # An int, or the caller's live share re-read at each lane boundary (a block that started on one thread
+        # beside hundreds of siblings grows as they finish; lane results do not depend on the count).
+        self._threads = threads
         self.lane_width = lane_width
         self.gl = np.array(likelihoods, dtype=np.float64, order="C", copy=True)
         self.observed = np.array(observed, dtype=np.bool_, order="C", copy=True)
@@ -1485,6 +1488,11 @@ class PreparedBlock:
         self._lane_width = LANE_WIDTH
         self._lane_emissions: NDArray[np.float64] | None = None
         self._fit_lanes: tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]] | None = None
+
+    @property
+    def threads(self) -> int:
+        """This block's threads at this lane boundary."""
+        return max(1, int(self._threads() if callable(self._threads) else self._threads))
 
     @property
     def samples(self) -> int:
@@ -1526,14 +1534,15 @@ def log_likelihood(panel: NDArray[np.int64], frequencies: NDArray[np.float64], p
     """Forward log likelihood of a panel (no trajectories kept)."""
     et = prepared.lane_emissions()
     workers = min(len(et), prepared.threads)
-    values = _score_lanes(
-        np.ascontiguousarray(panel, dtype=np.int64),
-        et,
-        prepared.state_prior(frequencies),
-        prepared.rates,
-        prepared.samples,
-        workers,
-    )
+    with bounded_team(workers):
+        values = _score_lanes(
+            np.ascontiguousarray(panel, dtype=np.int64),
+            et,
+            prepared.state_prior(frequencies),
+            prepared.rates,
+            prepared.samples,
+            workers,
+        )
     return float(values.sum())
 
 
@@ -1613,9 +1622,10 @@ class PathWorkspace:
         workers = self._workers()
         priors, rows = self.buffers.views((workers, length, s * (s + 1) // 2, width), (workers, length, s, width))
         pi = self.prepared.state_prior(frequencies)
-        likelihoods, gains, occupancy, initial, destinations = _evaluate_lanes(
-            panel, et, rt, st, ot, pi, self.prepared.rates, priors, rows, level, self.n, workers
-        )
+        with bounded_team(workers):
+            likelihoods, gains, occupancy, initial, destinations = _evaluate_lanes(
+                panel, et, rt, st, ot, pi, self.prepared.rates, priors, rows, level, self.n, workers
+            )
         if np.any(~np.isfinite(likelihoods)):
             raise PathModelInvariantError(
                 "zero_panel_likelihood",

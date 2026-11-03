@@ -76,10 +76,68 @@ def transposition(founders, a, b):
     return perm
 
 
-@kernel(overloads=overloads_for(__name__, "exchange_gains"), cache=True, parallel=True, nogil=True)
-def exchange_gains(f, g):
+# A parallel region wakes and joins every thread of its team: tens of microseconds of CPU each, up to ~165 us on nodes
+# whose idle cores sleep deeply, whatever the thread computes. One junction's exchange work is about 4 ns per sample and
+# K**3 (measured 3-6 ns, K = 8-12), so a junction's exchanges open a parallel region only when every thread of the
+# pass's team gets at least EXCHANGE_THREAD_WORK of it (about 1 ms); otherwise they run in the pass's own thread (a
+# junction of 116 samples at K = 8 takes 0.2 ms). The pass's caller decides (parallel_exchanges): a kernel that reads or
+# sets its team cannot be cached (Numba binds the threading layer's functions as ctypes pointers), and neither can any
+# kernel that calls it.
+EXCHANGE_THREAD_WORK = 250_000
+
+
+def parallel_exchanges(samples: int, founders: int, team: int) -> bool:
+    """Whether a pass on ``team`` threads runs each junction's exchanges (``samples`` samples, K = ``founders``) as one
+    parallel region: when every thread of the team gets at least EXCHANGE_THREAD_WORK."""
+    return team > 1 and samples * founders**3 >= EXCHANGE_THREAD_WORK * team
+
+
+@kernel(overloads=(), cache=True, nogil=True)
+def _exchange_sample(f, g, s, first, second, index, founders, per):
+    """Sample s's row of exchange_gains (per[s, p] for every founder pair p in exchange_pairs' order). Compiled on its
+    own, without parallel transforms: inlined into exchange_gains, its array expressions would each open a parallel
+    region in the serial branch."""
+    states = f.shape[1]
+    terms = np.empty(states)
+    base = -np.inf
+    for q in range(states):
+        terms[q] = f[s, q] + g[s, q]
+        base = max(base, terms[q])
+    order = np.argsort(-terms)
+    p = 0
+    for a in range(founders):
+        for b in range(a + 1, founders):
+            best = -np.inf
+            for position in range(states):
+                q = order[position]
+                i = first[q]
+                j = second[q]
+                if (i != a and i != b and j != a and j != b) or (i == a and j == b):
+                    best = terms[q]
+                    break
+            best = max(best, f[s, index[a, a]] + g[s, index[b, b]])
+            best = max(best, f[s, index[b, b]] + g[s, index[a, a]])
+            for c in range(founders):
+                if c != a and c != b:
+                    best = max(best, f[s, index[a, c]] + g[s, index[b, c]])
+                    best = max(best, f[s, index[b, c]] + g[s, index[a, c]])
+            per[s, p] = best - base
+            p += 1
+
+
+@kernel(overloads=(), cache=True, parallel=True, nogil=True)
+def _exchange_samples(f, g, first, second, index, founders, per):
+    """Every sample's row of exchange_gains in one parallel region on the caller's team."""
+    for s in prange(f.shape[0]):
+        _exchange_sample(f, g, s, first, second, index, founders, per)
+
+
+@kernel(overloads=overloads_for(__name__, "exchange_gains"), cache=True, nogil=True)
+def exchange_gains(f, g, parallel):
     """Exact dF of every founder-pair suffix exchange at one junction (O(S K^3)), in
     exchange_pairs' order. f: carried forward, g: current stored backward messages (S x Q).
+    parallel: one parallel region over the samples on the caller's team (parallel_exchanges), else
+    the caller's thread; the gains are the same either way.
 
     The exchange of founders a < b relabels the suffix states; sample s's junction value is
     max_q f[q] + g[perm(q)]. A state touching neither a nor b, and the state (a, b) itself, is
@@ -97,32 +155,11 @@ def exchange_gains(f, g):
     first, second = unordered_pairs(founders)
     index = pair_index(founders)
     per = np.zeros((samples, npairs))
-    for s in prange(samples):
-        terms = np.empty(states)
-        base = -np.inf
-        for q in range(states):
-            terms[q] = f[s, q] + g[s, q]
-            base = max(base, terms[q])
-        order = np.argsort(-terms)
-        p = 0
-        for a in range(founders):
-            for b in range(a + 1, founders):
-                best = -np.inf
-                for position in range(states):
-                    q = order[position]
-                    i = first[q]
-                    j = second[q]
-                    if (i != a and i != b and j != a and j != b) or (i == a and j == b):
-                        best = terms[q]
-                        break
-                best = max(best, f[s, index[a, a]] + g[s, index[b, b]])
-                best = max(best, f[s, index[b, b]] + g[s, index[a, a]])
-                for c in range(founders):
-                    if c != a and c != b:
-                        best = max(best, f[s, index[a, c]] + g[s, index[b, c]])
-                        best = max(best, f[s, index[b, c]] + g[s, index[a, c]])
-                per[s, p] = best - base
-                p += 1
+    if parallel:
+        _exchange_samples(f, g, first, second, index, founders, per)
+    else:
+        for s in range(samples):
+            _exchange_sample(f, g, s, first, second, index, founders, per)
     out = np.zeros(npairs)
     for p in range(npairs):
         for s in range(samples):

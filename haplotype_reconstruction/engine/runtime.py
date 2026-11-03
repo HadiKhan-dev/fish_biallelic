@@ -38,6 +38,7 @@ __all__ = [
     "run_isolated",
     "warm_kernels",
     "kernel_run",
+    "start_forkserver",
     "signal_boundary",
     "available_memory_bytes",
     "resident_bytes",
@@ -293,6 +294,9 @@ def _hooks(settings: RunSettings) -> None:
 
 
 def _preload(settings: RunSettings, *, hooks: bool) -> None:
+    from ..store.identity import fix_installed_sources
+
+    fix_installed_sources()  # forkserver and workers: the code imported under this runtime, for their lifetime
     if settings.cache_directory is not None:
         os.environ["NUMBA_CACHE_DIR"] = settings.cache_directory
     configure_worker(settings.cores)
@@ -303,10 +307,12 @@ def _preload(settings: RunSettings, *, hooks: bool) -> None:
 
         cast(Any, numba.config).CACHE_DIR = settings.cache_directory
     from ..core.kernels import enable_caches
-    from .kernels import install_signature_guard
+    from .kernels import install_cache_path_check_once, install_compile_lock, install_signature_guard
 
     _check_declarations(settings)
     install_signature_guard()
+    install_compile_lock()
+    install_cache_path_check_once()
     enable_caches()
     if hooks:
         _hooks(settings)
@@ -348,10 +354,13 @@ def start(
             )
         )
     )
-    from ..store.identity import code_dependency_identity
+    from ..store.identity import code_dependency_identity, fix_installed_sources
     from .kernels import cache_directory as make_cache_directory
     from .kernels import cache_key
 
+    # From here this process runs one code snapshot (its forkserver keeps the modules imported now): its identities,
+    # this closure first, are computed once.
+    fix_installed_sources()
     closure = code_dependency_identity(package_roots) if package_roots else None
     if cache_directory is None and _RUN is not None and (_RUN.code_roots == package_roots):
         cache_directory = _RUN.cache_directory
@@ -415,6 +424,21 @@ def start(
     return settings
 
 
+def start_forkserver() -> None:
+    """Launch this runtime's forkserver now: it imports the run's preload modules and prepares its kernel caches (tens
+    of seconds on a cold filesystem) in its own process while the caller plans its graph, instead of when the graph
+    spawns its first worker. The runtime's settings must be final: a later start with other settings is refused
+    while the forkserver lives."""
+    if _RUN is None:
+        raise SettingsError("start the runtime before its forkserver")
+    import multiprocessing.forkserver
+
+    from .workers import main_module_guard
+
+    with main_module_guard():  # the socket directory and the parent's __main__, as for every engine process start
+        multiprocessing.forkserver.ensure_running()
+
+
 def start_run(cores: int, **options: Any) -> RunSettings:
     """The explicit run boundary used by the graph and kernel warm-up caller."""
     return start(cores, **options)
@@ -468,37 +492,37 @@ def task_boundary() -> None:
     enable_caches()
 
 
-def warm_kernels(requests: Any = None, *, store: str | Path | None = None) -> Any:
+def warm_kernels(requests: Any = None, *, store: str | Path | None = None, defer: bool = False) -> Any:
     """Warm the caller-declared closure before task execution; return C2 CacheState.
 
     start must have configured and preloaded the complete invocation. The caller
-    publishes this disposable state in finally, or uses kernel_run below.
+    publishes this disposable state in finally, or uses kernel_run below. With ``defer``
+    nothing is compiled here: the caller runs the plan's compilations as graph tasks
+    (kernels.compile_tasks) and folds their results in (kernels.record_compiled).
     """
     if _RUN is None:
         raise SettingsError("start the runtime before warming kernels")
-    from .kernels import cache_key, warm_up
+    from .kernels import cache_key, plan_warm_up, warm_up
 
     assert _RUN.cache_directory is not None
-
-    return warm_up(
-        _RUN.code_roots,
-        {} if requests is None else requests,
-        _RUN.cores,
-        cache=Path(_RUN.cache_directory),
-        store=None if store is None else Path(store),
-        key=cache_key(_RUN.code_roots),
-    )
+    cache, key = Path(_RUN.cache_directory), cache_key(_RUN.code_roots)
+    seeds = None if store is None else Path(store)
+    requests = {} if requests is None else requests
+    if defer:
+        return plan_warm_up(_RUN.code_roots, requests, cache=cache, store=seeds, key=key)
+    return warm_up(_RUN.code_roots, requests, _RUN.cores, cache=cache, store=seeds, key=key)
 
 
 @contextmanager
-def kernel_run(requests: Any = None, *, store: str | Path | None = None) -> Iterator[Any]:
-    """Warm first and publish learned signatures even if scientific tasks fail."""
+def kernel_run(requests: Any = None, *, store: str | Path | None = None, defer: bool = False) -> Iterator[Any]:
+    """Warm first (or, with ``defer``, plan: see warm_kernels) and publish learned signatures even if scientific tasks
+    fail."""
     from .kernels import publish
 
     state = None
     with signal_boundary(lambda: None):
         try:
-            state = warm_kernels(requests, store=store)
+            state = warm_kernels(requests, store=store, defer=defer)
             yield state
         finally:
             publish(state)

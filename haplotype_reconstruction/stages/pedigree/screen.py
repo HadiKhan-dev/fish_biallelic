@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import partial
 from typing import Any, Literal
 
 import numpy as np
@@ -25,8 +26,8 @@ from ...contracts.pedigree import (
 )
 from ...contracts.roles import require_schema
 from ...core.errors import InputError, InvariantError
-from ...engine.runtime import task_team, thread_team
-from ...engine.scheduler import TaskBudget, TaskSession, current_budget
+from ...engine.runtime import task_team
+from ...engine.scheduler import TaskSession, claim_threads, current_budget
 from ...engine.workers import ResidentRef, release_resident, resident_value, retain
 from ...science.pedigree import forward, m1, pair_bound, panel, selective_m1, selective_screen
 from ...science.pedigree.compact_m1 import CompactBuilder, CompactM1
@@ -94,6 +95,12 @@ class ContigState:
     batch: int
 
 
+def _reread_share() -> None:
+    """The screen's kernel boundaries: re-read this task's CPU share (engine claim_threads; it grows as peers
+    finish)."""
+    claim_threads()
+
+
 def setup(
     prepared: PreparedChromosome,
     eligibility: ParentEligibility,
@@ -102,7 +109,9 @@ def setup(
     reverse: bool | None = None,
 ) -> ContigState:
     """Build a contig once; source pair masses are unnecessary for M1 geometry."""
-    components = tuple(selective_screen.prepare(prepared, eligibility, parameters, reverse=reverse))
+    components = tuple(
+        selective_screen.prepare(prepared, eligibility, parameters, claim=_reread_share, reverse=reverse)
+    )
     if not components:
         raise InputError("selective screen requires an informative prepared contig")
     batch = min(
@@ -173,13 +182,17 @@ def query_resident(reference: ResidentRef, pairs: np.ndarray, first: int, stop: 
 class _ThreadPhases:
     """Share contig state inside an executing graph task under its engine budget.
 
-    The enclosing worker already owns an admission. Each phase uses the engine's
-    nested thread map, with one Numba thread per admitted contig. No worker pool or
-    second TaskSession is opened; returned batch arrays are discarded by the caller.
+    The enclosing worker already owns an admission. Each phase runs its contigs as the engine's nested concurrent
+    tasks, each on its live fair share of the task's CPUs (3.5's screen phases ran one worker per contig with a third
+    of the node each; one thread per contig left the run-level screen at three busy CPUs). No worker pool or second
+    TaskSession is opened; returned batch arrays are discarded by the caller.
     """
 
-    def __init__(self, threads: int):
-        self.budget = TaskBudget(current_budget(), 1, threads)
+    def __init__(self) -> None:
+        # The enclosing task's live allowance, its declared range included. (The thread count a task is called with
+        # is only the team it started with: as a cap it held the whole screen at one CPU when the task began beside
+        # busy peers.)
+        self.budget = current_budget()
 
     def __enter__(self) -> _ThreadPhases:
         return self
@@ -188,22 +201,23 @@ class _ThreadPhases:
         return False
 
     @staticmethod
-    def execute(task: Task) -> ResidentContig | np.ndarray | None:
-        with thread_team(1):
-            if task.function is setup_resident:
-                state = setup(*task.args, **task.kwargs)
-                return ResidentContig(state, state.zero, state.batch)
-            if task.function is bound_resident:
-                return bound(*task.args, **task.kwargs)[1]
-            if task.function is query_resident:
-                return query(*task.args, **task.kwargs)[1]
-            if task.function is release_resident:
-                return None
+    def execute(task: Task, share: Any) -> ResidentContig | np.ndarray | None:
+        """One contig's phase on its share (the engine has set the calling thread's kernel team to it)."""
+        if task.function is setup_resident:
+            state = setup(*task.args, **task.kwargs)
+            return ResidentContig(state, state.zero, state.batch)
+        if task.function is bound_resident:
+            return bound(*task.args, **task.kwargs)[1]
+        if task.function is query_resident:
+            return query(*task.args, **task.kwargs)[1]
+        if task.function is release_resident:
+            return None
         raise InvariantError("unexpected nested screen phase")
 
     def run(self, tasks: Sequence[Task]) -> dict[TaskKey, Any]:
-        values = self.budget.thread_map(self.execute, tasks, label="pedigree screen phase")
-        return {task.key: value for task, value in zip(tasks, values, strict=True)}
+        functions = [partial(self.execute, task) for task in tasks]
+        values = dict(self.budget.concurrent(functions, label="pedigree screen phase"))
+        return {task.key: values[index] for index, task in enumerate(tasks)}
 
 
 def run(
@@ -247,7 +261,7 @@ def run(
         )
         for p in informative
     )
-    phases = _ThreadPhases(threads) if nested else TaskSession(threads, in_process=in_process, preload=(__name__,))
+    phases = _ThreadPhases() if nested else TaskSession(threads, in_process=in_process, preload=(__name__,))
     with phases as session:
         results = session.run(tasks)
         states = [results[t.key] for t in tasks]
@@ -337,7 +351,7 @@ def bound_run(
             return previous
     with task_team(threads):
         product = PairBounds(
-            prepared.contig, pair_bound.chromosome_bounds(prepared, compact, parameters, reverse=reverse)
+            prepared.contig, pair_bound.chromosome_bounds(prepared, compact, parameters, claim_threads, reverse=reverse)
         )
     if file is not None:
         assert identity is not None

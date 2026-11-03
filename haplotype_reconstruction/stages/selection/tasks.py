@@ -9,6 +9,8 @@ Method: docs/methods/local_selection.md; WP_SE2 sections 4.10-4.14 and 8.
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -58,6 +60,27 @@ __all__ = [
 
 BlockSettings = tuple[SelectionParameters, DiscoveryParameters, float]
 CHUNK_BLOCKS = 8  # average blocks' cost per engine task in a selection round (execution only: results are per block)
+# A block re-reads its task's CPU share (an engine boundary) at most this often: its lane evaluations run thousands of
+# times, and a block that started on one thread beside hundreds of siblings grows as they finish.
+SHARE_REREAD_SECONDS = 0.1
+
+
+def live_share(interval: float = SHARE_REREAD_SECONDS) -> Callable[[], int]:
+    """The calling task's live CPU share, re-read (engine claim_threads: a boundary that also sets this thread's kernel
+    team) when ``interval`` seconds have passed since the last read."""
+    from ...engine.scheduler import claim_threads
+
+    read_at, share = [-math.inf], [1]
+
+    def read() -> int:
+        now = time.monotonic()
+        if now - read_at[0] >= interval:
+            read_at[0], share[0] = now, claim_threads()
+        return share[0]
+
+    return read
+
+
 RefitFinished = tuple[int, list[ContextProposal], int, int, int, int, dict[str, int]]
 
 
@@ -90,7 +113,7 @@ def _run_block(
                 settings,
                 reverse=reverse,
                 census_sink=census_sink,
-                threads=threads,
+                threads=live_share(),
             )
         return value
 
@@ -307,6 +330,7 @@ def _run_refit(
             census_key=None if task.census_key is None else f"{task.census_key}/c{task.index}",
             reverse=reverse,
             census_sink=census_sink,
+            claim_threads=live_share(),  # re-read the share between kernels (refits start together, one per CPU)
         )
     return finish_component(task, output, seen)
 
@@ -616,8 +640,20 @@ def _enter_contig(session: SelectionSession) -> tuple[LocalPanel, ...] | Expansi
     discovered, evidence, assembly_evidence = session.load_inputs()
     initial = initial_tasks(discovered, session.genetic_map, label=session.contig)
     previous = None if first == 0 else scopes[first - 1].load_selections()
-    earlier = tuple(tuple(panel.calls for panel in scope.load_panels()) for scope in scopes[:first])
+    earlier = _selected_calls(scopes[:first], previous)
     return _advance_round(RoundState(session, scopes, initial, evidence, assembly_evidence, first, previous, earlier))
+
+
+def _selected_calls(
+    earlier: Sequence[SelectionRecords], previous: tuple[BlockSelection, ...] | None
+) -> tuple[tuple[np.ndarray, ...], ...]:
+    """Each earlier round's selected calls in round order. The last earlier round's panels are those of its loaded
+    selections (``previous``, the same stored panels), so they are not read a second time."""
+    calls = [tuple(panel.calls for panel in scope.load_panels()) for scope in earlier[:-1]]
+    if earlier:
+        assert previous is not None
+        calls.append(tuple(item.panel.calls for item in previous))
+    return tuple(calls)
 
 
 def _advance_round(state: RoundState) -> Expansion:
@@ -769,9 +805,11 @@ def _enter_round(
     scope = scopes[index]
     if scope.selected() is not None:
         return scope.load_panels()
+    # Each earlier round's completion is verified here, once; the loads below then check only the records they read.
     if any(earlier.selected() is None for earlier in scopes[:index]):
         raise InvariantError(f"selection {round_name} requires all preceding selected rounds")
     discovered, evidence, assembly_evidence = session.load_inputs()
+    previous = None if index == 0 else scopes[index - 1].load_selections()
     state = RoundState(
         session,
         scopes,
@@ -779,8 +817,8 @@ def _enter_round(
         evidence,
         assembly_evidence,
         index,
-        None if index == 0 else scopes[index - 1].load_selections(),
-        tuple(tuple(panel.calls for panel in earlier.load_panels()) for earlier in scopes[:index]),
+        previous,
+        _selected_calls(scopes[:index], previous),
         stop_after_round=True,
     )
     if index == 0:

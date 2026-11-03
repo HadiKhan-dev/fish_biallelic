@@ -4,7 +4,9 @@ Canonical value digests are relocated unchanged to core.digest (P0 ENG-06). Sour
 walking retains the 3.5 path/NUL/bytes encoding. 4.0 code identities follow local
 imports, including package initializers; callers seed the graph with stage adapters,
 input construction and decoding modules as well as science. No module is imported
-while computing a closure, and no source digest is cached across edits.
+while computing a closure. Once a process has fixed its installed sources (the engine runtime
+does when it starts), each installed closure is hashed once; before that, and for any other
+root, closures are hashed on every call, so edits are seen.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ __all__ = [
     "json_digest",
     "array_digest",
     "add_sources",
+    "fix_installed_sources",
     "dependency_closure",
     "code_dependency_identity",
     "code_identity",
@@ -194,9 +197,40 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
     return tuple(sorted(found))
 
 
+# Whether this process's installed sources are fixed for its lifetime (fix_installed_sources).
+_SOURCES_FIXED = False
+
+
+def fix_installed_sources() -> None:
+    """Declare the installed package's sources fixed for the rest of this process's life.
+
+    The engine runtime calls this when it starts, and its forkserver and workers when they set up: from then on the
+    process (and the workers it forks) run the code imported under one runtime until it exits, and editing that
+    running snapshot is unsupported (runtime._check_declarations). Installed closures are then hashed once."""
+    global _SOURCES_FIXED
+    _SOURCES_FIXED = True
+
+
 def code_dependency_identity(modules: Iterable[str], *, package_root: Path = PACKAGE_ROOT) -> CodeIdentity:
-    """Hash a complete static dependency closure, retaining its module list for review."""
+    """Hash a complete static dependency closure, retaining its module list for review.
+
+    In a process with fixed installed sources (a run's coordinator, forkserver and workers), a closure of the
+    installed package is hashed once: every derivation of every stage task reads its code identity, and parsing and
+    hashing a closure's sources each time dominated planning steps and readers. Elsewhere (a reader or notebook with
+    no runtime, whose sources may be edited between calls) and for any other package root, such as a fixture tree,
+    the closure is hashed on every call."""
     root = Path(package_root)
+    if root == PACKAGE_ROOT and _SOURCES_FIXED:
+        return _installed_identity(frozenset(modules))
+    return _hashed_closure(modules, root)
+
+
+@functools.cache
+def _installed_identity(modules: frozenset[str]) -> CodeIdentity:
+    return _hashed_closure(modules, PACKAGE_ROOT)
+
+
+def _hashed_closure(modules: Iterable[str], root: Path) -> CodeIdentity:
     closure = dependency_closure(modules, package_root=root)
     digest = hashlib.sha256()
     for module in closure:

@@ -232,7 +232,9 @@ class SelectionRecords:
             dict(schema=SCHEMA, indices=indices, records=expected),
         )
 
-    def selected(self) -> dict[str, Any] | None:
+    def selected(self, *, verify: bool = True) -> dict[str, Any] | None:
+        """The round's completion payload once every record it promises is present with its identity; ``verify=False``
+        skips that record-by-record check, for readers that check each record's identity as they read it."""
         selected = resume(self.file, self.key("selected"), self.derivation("selected"))
         if selected is None:
             return None
@@ -246,30 +248,36 @@ class SelectionRecords:
             expected[self.key("proposals")] = self.derivation("proposals")
         if payload["records"] != expected:
             raise InvariantError("selection completion promises a different derivation")
-        if payload["records"] and not is_complete(self.file, payload["records"]):
+        if verify and payload["records"] and not is_complete(self.file, payload["records"]):
             raise InvariantError(f"selection {self.contig}/{self.round_name} completion has missing records")
         return payload
 
     def load_selections(self, *, memos: bool = True) -> tuple[BlockSelection, ...]:
-        selected = self.selected()
+        """The completed round's block selections (with their memos unless ``memos=False``), each checked against its
+        record identity as it is read. A projection: records the completion promises but this load does not read (the
+        proposals; the memos when not loaded) are not checked here; selected() checks the whole completion."""
+        selected = self.selected(verify=False)
         if selected is None:
             raise InvariantError(f"selection {self.contig}/{self.round_name} is incomplete")
         values = []
         for index in selected["indices"]:
             value = self.load_block(int(index), memos=memos)
-            assert value is not None
+            if value is None:
+                raise InvariantError(f"selection {self.contig}/{self.round_name} completion has missing records")
             values.append(value)
         return tuple(values)
 
     def load_panels(self) -> tuple[LocalPanel, ...]:
-        """Decode only panels from completed records: no fits, releases or memo arrays."""
-        selected = self.selected()
+        """Decode only panels from completed records: no fits, releases or memo arrays. A projection: each block record
+        read is checked against its identity; the completion's other records are not (selected() checks them)."""
+        selected = self.selected(verify=False)  # each panel read checks its record's identity
         if selected is None:
             raise InvariantError(f"selection {self.contig}/{self.round_name} is incomplete")
         result = []
         for index in selected["indices"]:
             saved = read_items(self.file, self.key("block", index), self.derivation("block", index), ("panel",))
-            assert saved is not None
+            if saved is None:
+                raise InvariantError(f"selection {self.contig}/{self.round_name} completion has missing records")
             result.append(decode_panel(saved.payload["panel"]))
         return tuple(result)
 

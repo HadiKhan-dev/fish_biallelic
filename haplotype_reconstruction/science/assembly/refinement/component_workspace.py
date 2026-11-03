@@ -38,26 +38,6 @@ from .window import (
     map_normalisers,
 )
 
-# A search's messages and per-sample scores run over consecutive sample ranges and re-read its
-# thread share before each range (sample_ranges), so a search whose share grows while it computes
-# them (its peers finished) takes the freed threads within the phase. At most SAMPLE_RANGES ranges
-# per phase (each range rebuilds the phase's shared pair-dosage tables) and at least
-# SAMPLES_PER_THREAD samples per thread of a range (the static OpenMP schedule gives every thread
-# one contiguous slice), so a wide share runs one range.
-SAMPLE_RANGES = 8
-SAMPLES_PER_THREAD = 8
-
-
-def sample_ranges(samples, budget):
-    """Consecutive ranges (s0, s1, n) covering samples 0 .. samples - 1; n is the budget's live
-    share read when the range starts."""
-    start = 0
-    while start < samples:
-        n = max(1, int(budget.threads()))
-        stop = min(samples, start + max(-(-samples // SAMPLE_RANGES), SAMPLES_PER_THREAD * n))
-        yield start, stop, n
-        start = stop
-
 
 @kernel(overloads=overloads_for(__name__, "binned_emissions"), cache=True, parallel=True, nogil=True)
 def binned_emissions(evidence, offsets, alleles, keeps, full, bin_size, outputs):
@@ -118,22 +98,32 @@ def map_hazards(positions, genetic_map, reset_rate, probability_floor):
 # The stage consumes dimension working-set models from costs.py.
 
 
+def frozen(array, dtype):
+    """``array`` as one C-contiguous, read-only ndarray of ``dtype``: a read-only view when it already is contiguous
+    (the caller's array keeps its own flags), else a copy. Refinement's shared inputs take this one representation,
+    the argument type the warm-up compiles: a strided or writable variant is a kernel type of its own, which every
+    worker would compile on first use."""
+    part = np.ascontiguousarray(array, dtype).view()
+    part.flags.writeable = False
+    return part
+
+
 def component_evidence(evidence, panels):
-    """The component's (S, L_c, 3) float32 evidence: a view of the chromosome's when its prepared
-    panels are adjacent on the site axis, else a gathered copy."""
+    """The component's (S, L_c, 3) float32 evidence, frozen: the chromosome's own array when the component spans it
+    (or a view of a contiguous span), else a copy of the component's sites."""
     starts = np.asarray([panel.site_start for panel in panels], np.int64)
     lengths = np.asarray([panel.sites for panel in panels], np.int64)
     if np.all(starts[1:] == starts[:-1] + lengths[:-1]):
-        return evidence[:, starts[0] : starts[-1] + lengths[-1]]
-    indices = np.concatenate([np.arange(start, start + length) for start, length in zip(starts, lengths, strict=False)])
-    return np.ascontiguousarray(evidence[:, indices])
+        return frozen(evidence[:, starts[0] : starts[-1] + lengths[-1]], np.float32)
+    sites = np.concatenate([np.arange(start, start + n) for start, n in zip(starts, lengths, strict=True)])
+    return frozen(evidence[:, sites], np.float32)
 
 
 class ComponentWorkspace:
     """One component's fixed inputs.
 
     panels: the prepared panels of the component's blocks (model.components.PreparedPanel).
-    evidence: float32 (S, L_c, 3) component evidence (component_evidence).
+    evidence: float32 (S, L_c, 3) component evidence (component_evidence), frozen (C-contiguous, read-only).
     leaves: typed List of the blocks' coded calls int16 (R_b, L_b): the called allele, or -2 - local
         row where uncalled (objective.pair_code7); every likelihood reads them. offsets: int64 (B + 1)
         block site offsets. kept: bool (L_c), the objective's sites: kept sites with at least one
@@ -168,6 +158,9 @@ class ComponentWorkspace:
         if genotype_error != DEFAULT_GENOTYPE_ERROR:
             raise ValueError("the robust emission's genotype error is fixed at 0.01")
         self.panels = tuple(panels)
+        # One frozen representation before the first consumer (setup kernels, windows, normalisers), whatever the
+        # caller passed (a direct replay's own array): a no-copy view of the stage's component_evidence.
+        evidence = frozen(evidence, np.float32)
         self.evidence = evidence
         # Coded leaves: the called allele or -2 - local row where uncalled (objective.pair_code7).
         self.leaves = List(
@@ -242,4 +235,4 @@ class ComponentWorkspace:
         return list(outputs)
 
 
-__all__ = ["sample_ranges", "binned_emissions", "map_hazards", "component_evidence", "ComponentWorkspace"]
+__all__ = ["binned_emissions", "map_hazards", "frozen", "component_evidence", "ComponentWorkspace"]

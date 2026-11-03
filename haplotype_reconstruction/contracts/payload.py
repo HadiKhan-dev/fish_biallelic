@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import functools
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import MISSING, fields, is_dataclass
 from enum import Enum
 from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
@@ -82,64 +82,130 @@ def _readonly(value: Any) -> Any:
 
 
 def _decode(annotation: Any, value: Any) -> Any:
+    return _decoder(annotation)(value)
+
+
+# Decoders by annotation object: id -> (annotation, decoder). Keyed by identity, not equality: typing's equality
+# ignores the order of Union and Literal arguments, while decoding tries union members in their declared order (the
+# first match wins and failures are reported in that order). Each entry keeps its annotation alive, so an id is never
+# reused while its entry exists. The annotations reaching here are those of _record_layout's cached hints and their
+# arguments: a fixed set per process.
+_DECODERS: dict[int, tuple[Any, Callable[[Any], Any]]] = {}
+
+
+def _decoder(annotation: Any) -> Callable[[Any], Any]:
+    """The decoding function of one annotation, built once: an annotation's structure never changes, and inspecting
+    it for every value (typing reflection per element) dominated loading records of many small items. Checks, their
+    order and their errors are those of decoding the value against the annotation directly."""
+    entry = _DECODERS.get(id(annotation))
+    if entry is None or entry[0] is not annotation:
+        entry = _DECODERS[id(annotation)] = (annotation, _build_decoder(annotation))
+    return entry[1]
+
+
+def _build_decoder(annotation: Any) -> Callable[[Any], Any]:
     origin, args = get_origin(annotation), get_args(annotation)
     if annotation is Any:
-        return _readonly(value)
+        return _readonly
     if origin in (Union, types.UnionType):
-        if value is None and type(None) in args:
-            return None
+        optional = type(None) in args
         choices = [arg for arg in args if arg is not type(None)]
-        failures = []
-        for choice in choices:
-            try:
-                return _decode(choice, value)
-            except (InputError, TypeError, ValueError) as error:
-                failures.append(str(error))
-        raise InputError(f"payload value matches no union member: {'; '.join(failures)}")
+
+        def decode_union(value: Any) -> Any:
+            if value is None and optional:
+                return None
+            failures = []
+            for choice in choices:
+                try:
+                    return _decoder(choice)(value)
+                except (InputError, TypeError, ValueError) as error:
+                    failures.append(str(error))
+            raise InputError(f"payload value matches no union member: {'; '.join(failures)}")
+
+        return decode_union
     if annotation is type(None):
-        if value is not None:
-            raise InputError("expected None")
-        return None
+
+        def decode_none(value: Any) -> None:
+            if value is not None:
+                raise InputError("expected None")
+            return None
+
+        return decode_none
     if isinstance(annotation, type) and is_dataclass(annotation):
-        if not isinstance(value, Mapping):
-            raise InputError(f"{annotation.__name__} needs a mapping")
-        return from_payload(annotation, value)
+
+        def decode_record(value: Any) -> Any:
+            if not isinstance(value, Mapping):
+                raise InputError(f"{annotation.__name__} needs a mapping")
+            return from_payload(annotation, value)
+
+        return decode_record
     if isinstance(annotation, type) and issubclass(annotation, Enum):
-        return annotation(value)
+        return annotation
     if annotation in (np.ndarray, NDArray) or origin in (np.ndarray, NDArray):
-        if not isinstance(value, np.ndarray):
-            raise InputError("array field needs an ndarray payload")
-        return _readonly(value)
+
+        def decode_array(value: Any) -> np.ndarray:
+            if not isinstance(value, np.ndarray):
+                raise InputError("array field needs an ndarray payload")
+            return _readonly(value)
+
+        return decode_array
     if origin in (tuple, list):
-        if not isinstance(value, (tuple, list)):
-            raise InputError("sequence field needs a sequence payload")
+        build = tuple if origin is tuple else list
         if not args:
-            result = [_readonly(item) for item in value]
+            items = None
         elif origin is tuple and len(args) > 1 and args[-1] is not Ellipsis:
-            if len(value) != len(args):
-                raise InputError(f"tuple has {len(value)} items, expected {len(args)}")
-            result = [_decode(typ, item) for typ, item in zip(args, value, strict=True)]
+            items = tuple(args)
         else:
-            result = [_decode(args[0], item) for item in value]
-        return tuple(result) if origin is tuple else result
+            items = args[0]
+
+        def decode_sequence(value: Any) -> Any:
+            if not isinstance(value, (tuple, list)):
+                raise InputError("sequence field needs a sequence payload")
+            if items is None:
+                return build([_readonly(item) for item in value])
+            if isinstance(items, tuple):
+                if len(value) != len(items):
+                    raise InputError(f"tuple has {len(value)} items, expected {len(items)}")
+                return build([_decoder(typ)(item) for typ, item in zip(items, value, strict=True)])
+            decode_item = _decoder(items)
+            return build([decode_item(item) for item in value])
+
+        return decode_sequence
     if origin in (dict, Mapping) or annotation in (dict, Mapping):
-        if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
-            raise InputError("mapping field needs string keys")
         item_type = args[1] if args else Any
-        return {key: _decode(item_type, item) for key, item in value.items()}
+
+        def decode_mapping(value: Any) -> dict[str, Any]:
+            if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+                raise InputError("mapping field needs string keys")
+            decode_item = _decoder(item_type)
+            return {key: decode_item(item) for key, item in value.items()}
+
+        return decode_mapping
     if origin is Literal:
-        if value not in args:
-            raise InputError(f"{value!r} is not in {args}")
-        return value
-    # Python's float annotation accepts integers. Preserve their exact stored
-    # representation; converting a large integer to float would lose bits.
-    if annotation is float and type(value) is int:
-        return value
+
+        def decode_literal(value: Any) -> Any:
+            if value not in args:
+                raise InputError(f"{value!r} is not in {args}")
+            return value
+
+        return decode_literal
     if annotation in (str, int, float, bool, bytes):
-        if type(value) is not annotation:
-            raise InputError(f"expected {annotation.__name__}, got {type(value).__name__}")
-        return value
-    raise InputError(f"no payload decoder for annotation {annotation!r}")
+
+        def decode_scalar(value: Any) -> Any:
+            # Python's float annotation accepts integers. Preserve their exact stored
+            # representation; converting a large integer to float would lose bits.
+            if annotation is float and type(value) is int:
+                return value
+            if type(value) is not annotation:
+                raise InputError(f"expected {annotation.__name__}, got {type(value).__name__}")
+            return value
+
+        return decode_scalar
+
+    def no_decoder(value: Any) -> Any:
+        raise InputError(f"no payload decoder for annotation {annotation!r}")
+
+    return no_decoder
 
 
 @functools.cache

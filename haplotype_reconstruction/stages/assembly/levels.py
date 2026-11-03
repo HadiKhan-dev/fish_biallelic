@@ -22,13 +22,13 @@ from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.batch import run_batch
-from haplotype_reconstruction.science.assembly.hierarchy.costs import batch_memory_bytes
+from haplotype_reconstruction.science.assembly.hierarchy.costs import batch_memory_bytes, batch_threads
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput, LevelPlan, compose_level, plan_level
 from haplotype_reconstruction.stages.framework import Expansion
 from haplotype_reconstruction.store.protocol import claim
 
 from .completion import attached_scoring
-from .records import JOINS, RecordCapability, join_derivation, load_join, save_join
+from .records import JOINS, RecordCapability, join_code, join_derivation, load_join, save_join
 
 T = TypeVar("T")
 
@@ -100,8 +100,9 @@ def expand_level(
             min_informative=min_informative,
             release_alternatives=release_alternatives,
         )
+    code = join_code()
     identities = {
-        t.index: join_derivation(t, evidence.scoring, evidence_identity=evidence.identity).identity
+        t.index: join_derivation(t, evidence.scoring, evidence_identity=evidence.identity, code=code).identity
         for t in planned.tasks
     }
     plan = [(a, b, identities.get(index)) for index, (a, b) in enumerate(planned.partition.ranges)]
@@ -122,7 +123,7 @@ def expand_level(
                 key,
                 execute_join,
                 args=(item, evidence.scoring if scoring_ref is None else scoring_ref, records, identities[item.index]),
-                resources=ResourceRequest(1, max_cores, batch_memory_bytes(item)),
+                resources=ResourceRequest(1, min(max_cores, batch_threads(item)), batch_memory_bytes(item)),
                 thread_argument="cores",
             )
         )
@@ -165,8 +166,9 @@ def run_level_stage(
             min_informative=min_informative,
             release_alternatives=release_alternatives,
         )
+    code = join_code()
     identities = {
-        t.index: join_derivation(t, evidence.scoring, evidence_identity=evidence.identity).identity
+        t.index: join_derivation(t, evidence.scoring, evidence_identity=evidence.identity, code=code).identity
         for t in planned.tasks
     }
     if records is not None and not records.has("plan"):

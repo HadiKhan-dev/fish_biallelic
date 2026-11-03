@@ -375,12 +375,18 @@ class RunRecorder:
             return RunRecord(self.data["schema"], self.data["state"], canonical_json(jsonable(self.data)))
 
     def task_finished(self, task, reply) -> None:
-        """Scheduler callback, emitted after every complete task/gather boundary; appends one task-log line."""
+        """Scheduler callback, emitted after every complete task/gather boundary; appends one task-log line.
+
+        ``finished_seconds`` is when the coordinator received the reply, in seconds since the run started; with
+        ``wall_seconds`` it places the task on the run's timeline (where wall time goes, stage by stage)."""
         with self.lock:
             entry = dict(
                 key=asdict(task.key),
+                finished_seconds=round(time.monotonic() - self.start, 3),
                 wall_seconds=reply.wall_seconds,
                 cpu_seconds=reply.cpu_seconds,
+                threads_start=reply.threads[0],
+                threads_peak=reply.threads[1],
                 peak_bytes=reply.peak_bytes,
                 working_set_bytes=task.resources.working_set_bytes,
                 scratch_bytes=task.resources.scratch_bytes,

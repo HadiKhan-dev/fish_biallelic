@@ -228,8 +228,25 @@ def _release_one(arguments):
     return release_sample(*arguments)
 
 
-def _sample_releases(model, inputs, sites, breaks, uncertainty, parameters, workspace, audit=None):
-    """Release independent samples in run order from one fixed solve (FP15-FP19)."""
+def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, workspace, audit=None):
+    """Release independent samples from the fixed solves (default, then mirror), each solve's samples in run order
+    (FP15-FP19); one release tuple per solve. The releases of both solves are independent and form one map, so the
+    mirror's releases do not wait for the default solve's slowest sample."""
+    jobs = [
+        _release_arguments(solved, inputs, sites, breaks, uncertainty, parameters, workspace, audit)
+        for solved, uncertainty in zip(solves, uncertainties, strict=True)
+    ]
+    work = [arguments for job in jobs for arguments in job]
+    if workspace.map_work is not None and audit is None:
+        released = workspace.map_work(_release_one, work)
+    else:
+        released = [_release_one(arguments) for arguments in work]
+    ends = np.cumsum([len(job) for job in jobs])
+    return tuple(released[end - len(job) : end] for job, end in zip(jobs, ends.tolist(), strict=True))
+
+
+def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, workspace, audit=None):
+    """Every sample's release inputs from one fixed solve, in run order."""
     site_bins, alleles, site_gl = sites
     break_bins, tie_cuts = breaks
     values = []
@@ -252,9 +269,7 @@ def _sample_releases(model, inputs, sites, breaks, uncertainty, parameters, work
             audit,
         )
         values.append((model, sample, context))
-    if workspace.map_work is not None and audit is None:
-        return workspace.map_work(_release_one, values)
-    return [_release_one(arguments) for arguments in values]
+    return values
 
 
 def phase_component(
@@ -287,18 +302,15 @@ def phase_component(
     uncertainty = tuple(
         _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, workspace.windowed) for solved in models
     )
-    releases = tuple(
-        _sample_releases(
-            solved,
-            inputs,
-            (site_bins, site_alleles, site_gl),
-            (break_bins, tie_cuts),
-            values,
-            parameters,
-            workspace,
-            audit,
-        )
-        for solved, values in zip(models, uncertainty, strict=False)
+    releases = _sample_releases(
+        models,
+        inputs,
+        (site_bins, site_alleles, site_gl),
+        (break_bins, tie_cuts),
+        uncertainty,
+        parameters,
+        workspace,
+        audit,
     )
     agreed = [_agreement(first, second, site_bins) for first, second in zip(*releases, strict=False)]
     starts = tuple(_set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)

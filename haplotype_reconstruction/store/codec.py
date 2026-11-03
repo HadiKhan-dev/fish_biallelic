@@ -607,9 +607,13 @@ def _buffer_group_headers(handle, metadata_offset, expected_buffers):
         (n_group_buffers,) = _U32.unpack(_read_exact(handle, _U32.size, "buffer group count"))
         if n_group_buffers == 0 or n_group_buffers > expected_buffers - buffer_count:
             raise ValueError("corrupt checkpoint: invalid buffer group count")
+        # A group's descriptors are contiguous: one read for all of them (a read per descriptor dominated loading
+        # records made of many small arrays), within the payload's buffer section.
+        if n_group_buffers * _BUFFER_DESC.size > metadata_offset - handle.tell():
+            raise ValueError("corrupt checkpoint: truncated buffer descriptor")
+        packed = _read_exact(handle, n_group_buffers * _BUFFER_DESC.size, "buffer descriptors")
         descriptors = []
-        for _ in range(n_group_buffers):
-            size, readonly = _BUFFER_DESC.unpack(_read_exact(handle, _BUFFER_DESC.size, "buffer descriptor"))
+        for size, readonly in _BUFFER_DESC.iter_unpack(packed):
             if readonly not in (0, 1):
                 raise ValueError("corrupt checkpoint: invalid buffer descriptor")
             descriptors.append((size, bool(readonly)))

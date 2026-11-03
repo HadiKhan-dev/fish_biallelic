@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import base64
 import pickle
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,9 @@ from numba.core.serialize import dumps
 
 __all__ = [
     "KernelDeclaration",
+    "SAMPLES_PER_THREAD",
+    "bounded_team",
+    "sample_team",
     "kernel",
     "enable_caches",
     "declarations",
@@ -70,6 +74,32 @@ def kernel(*, overloads: Iterable[tuple[Any, ...]], **options: Any) -> Callable:
         return dispatcher
 
     return decorate
+
+
+@contextmanager
+def bounded_team(items: int) -> Iterator[None]:
+    """Run the enclosed parallel kernels on at most ``items`` threads of the calling thread's current team, then
+    restore the team. A parallel region wakes and joins every thread of its team, tens of microseconds of CPU each,
+    whether or not the thread has a work item; a kernel with fewer items than threads should wake only its items."""
+    previous = numba.get_num_threads()
+    numba.set_num_threads(max(1, min(previous, int(items))))
+    try:
+        yield
+    finally:
+        numba.set_num_threads(previous)
+
+
+# A kernel parallel over samples gives every thread at least this many samples (the static OpenMP schedule gives each
+# thread one contiguous slice): a slice of fewer samples costs less than waking and joining its thread, tens of
+# microseconds of CPU per parallel region (over a hundred on nodes held at base clock), so a wider team only adds
+# wake-ups. Sample order and values never depend on the team.
+SAMPLES_PER_THREAD = 8
+
+
+def sample_team(samples: int, share: int) -> int:
+    """Threads for parallel regions over ``samples`` samples within a share of ``share`` CPUs: at most one thread per
+    SAMPLES_PER_THREAD samples, never fewer than one."""
+    return max(1, min(int(share), int(samples) // SAMPLES_PER_THREAD))
 
 
 def enable_caches() -> tuple[str, ...]:

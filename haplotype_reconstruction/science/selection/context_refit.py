@@ -15,7 +15,7 @@ The component's N x B x S x S workspace remains the approved 0c memory exemption
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -386,13 +386,17 @@ def refit_component(
     *,
     reverse: bool,
     census_sink: CensusSink | None = None,
+    claim_threads: Callable[[], object] = lambda: None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, int | float | dict[int, int]], np.ndarray]:
     """(refitted calls, ALT posterior, carrier support, per-bin MAP background-copy counts
     (N, B), site-posterior report, released) of one component's founders ``h`` over its blocks' sites; the refitted
     calls are the refit's releases where it released (``released``, bool) and ``h`` elsewhere.
     ``census_key``: the component's key for the valley census of its carrier probabilities near
-    1/2 (diagnostics only)."""
+    1/2 (diagnostics only). ``claim_threads``: the caller's kernel boundary, called before each kernel (the caller's
+    CPU share is re-read there; results do not depend on it)."""
+    claim_threads()
     cavity, background = _emission_grid(h, gl, observed, starts, stops, float(config.emission_mix))
+    claim_threads()
     slots = _carrier_weights(cavity, intervals_morgans, float(rate), float(unknown_mass), BACKGROUND_COUNT_BAND)
     if census_key is not None and census_enabled(census_sink):
         k = len(h)
@@ -418,6 +422,7 @@ def refit_component(
     site_bands = np.zeros((2, h.shape[1]), np.int64)
     settings = SitePosteriorParameters().vector(reverse)
     for b in range(len(starts)):
+        claim_threads()
         _refit_sites(
             result,
             probabilities,

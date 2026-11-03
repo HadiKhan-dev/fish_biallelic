@@ -74,7 +74,6 @@ from .. import orders as tie_rules
 from ..count_rule import shadow_bounds
 from ..count_rule.geometry import shadow_choices
 from .acceptance import TOL
-from .component_workspace import sample_ranges
 from .costs import copy_response_bytes
 from .objective import CENTER, forward_sites, pair_code7, row_max, selected_alleles, transition, unordered_pairs
 from .overloads import overloads_for
@@ -87,6 +86,7 @@ from .parameters import (
 )
 from .reductions import panel_objective
 from .window import capacity, cover, locate, samples_of, site_cost, site_logs, stretch
+from .workspace import sample_ranges, sample_threads
 
 # Additions stop at the incoming count plus COUNT_LIMIT_MULTIPLE times it (reported when reached).
 
@@ -168,7 +168,7 @@ def upper_bound(leaves, offsets, win, target):
     return bounds, constrained, per_sample
 
 
-@kernel(overloads=(), cache=True, nogil=True)
+@kernel(overloads=overloads_for(__name__, "_shadow_codes"), cache=True, nogil=True)
 def _shadow_codes(leaves, site_offsets, choices, starts):
     """shadow_bounds._dosages on coded leaves: pair codes (pair_code7) of every local row choice."""
     founders = choices.shape[1]
@@ -192,7 +192,7 @@ def _shadow_codes(leaves, site_offsets, choices, starts):
     return codes, offsets
 
 
-@kernel(overloads=(), cache=True, parallel=True, nogil=True)
+@kernel(overloads=overloads_for(__name__, "_full_site_costs"), cache=True, parallel=True, nogil=True)
 def _full_site_costs(win, site_offsets, dosages, dose_offsets, starts, founders):
     """shadow_bounds._full_site on the refinement objective (per-homologue transitions with the
     switch costs of K = founders, the window's): per sample the maximum over every block's local row
@@ -339,7 +339,7 @@ def _family_scores(engine, choices, shape, budget):
                 for i, pick in zip(cells, picks, strict=False):
                     rows[i // blocks] = choices[i][pick]
                 slabs[offsets[u] + c, :, : unit_stop[u] - unit_start[u]] = leaf[rows]
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(ws.samples, budget)):
             base = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(base_rows))
         raw = np.empty((ws.samples, members))
         for s0, s1, threads in sample_ranges(ws.samples, budget):
@@ -578,7 +578,7 @@ def _shadow_decision(
 
         def upper_scores(plan):
             founders = int(larger.shape[0])
-            with budget.scope(threads):
+            with budget.scope(sample_threads(ws.samples, budget)):
                 dosages, dose_offsets = _shadow_codes(ws.leaves, ws.offsets, plan.choices, plan.starts)
                 scores = _full_site_costs(
                     ws.windows.view(founders), ws.offsets, dosages, dose_offsets, plan.starts, founders
@@ -1601,7 +1601,7 @@ def _count_pass_point(
             # every shadow panel, so a bound that proves the total-gain test for every deletion
             # proves the sequence test too; the round is skipped only when the replicate-wise form
             # of the bound also proves the band (the decision's own bootstrap stream).
-            with budget.scope(max(1, int(budget.threads()))):
+            with budget.scope(sample_threads(ws.samples, budget)):
                 bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
             normalisers = ws.normalisers(K - 1)
             per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
@@ -1819,7 +1819,7 @@ def _count_pass_point(
         label = f"r{round_index}"
         round_index += 1
         F = panel_objective(scores)
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(ws.samples, budget)):
             bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K + 1), K + 1)
         normalisers = ws.normalisers(K + 1)
         optimistic = float(panel_objective(bounds) + panel_objective(normalisers))

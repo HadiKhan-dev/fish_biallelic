@@ -24,22 +24,22 @@ import threading
 import time
 import traceback
 import weakref
-from collections.abc import Container, Mapping
+from collections.abc import Callable, Container, Mapping
 from concurrent.futures import CancelledError
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from itertools import islice
+from itertools import count, islice
 from multiprocessing.connection import wait
 from multiprocessing.context import ForkServerContext, ForkServerProcess
 from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import numba
 import numpy as np
 
-from ..core.errors import InvariantError
+from ..core.errors import InvariantError, SettingsError
 from ..core.immutable import declared_immutable
 from ..core.kernels import kernel
 from . import runtime as bootstrap
@@ -88,6 +88,8 @@ __all__ = [
     "retain",
     "release_resident",
     "resident_value",
+    "resident_or_load",
+    "release_resident_namespace",
     "SharedValue",
     "share_value",
     "call_shared",
@@ -242,6 +244,38 @@ FORKSERVER = mp.get_context("forkserver")
 _GUARD_LOCK = threading.RLock()
 _GUARD_DEPTH = 0
 _GUARD_SAVED = None
+# A forkserver listens on <multiprocessing's temporary directory>/sock-<12 hex digits>, and a socket path holds at
+# most 107 bytes on Linux (103 on macOS and the BSDs). CPython 3.14 moves that directory off a long TMPDIR to /tmp,
+# but sizes the socket name as 8 characters: a TMPDIR of 76-79 characters passed its check and the first pool then
+# failed with "AF_UNIX path too long" (older Pythons never move it).
+_SOCKET_NAME_BYTES = len("/sock-") + 12
+_SOCKET_PATH_LIMIT = 107 if sys.platform.startswith("linux") else 103
+_SYSTEM_TEMPORARY_DIRECTORIES = ("/tmp", "/var/tmp", "/usr/tmp")
+
+
+def _short_socket_directory() -> None:
+    """Keep multiprocessing's per-process temporary directory, which holds only its sockets, short enough for a
+    forkserver's listener: when TMPDIR is too long, that one directory moves to the system temporary directory. TMPDIR
+    and every other temporary file stay where the user put them."""
+    if os.name == "nt":
+        return
+    import shutil
+    import tempfile
+    from multiprocessing import process, util
+
+    config = cast(Any, process.current_process())._config  # where multiprocessing.util.get_temp_dir() keeps it
+    directory = config.get("tempdir") or os.path.join(tempfile.gettempdir(), "pymp-XXXXXXXX")
+    if len(os.fsencode(directory)) + _SOCKET_NAME_BYTES <= _SOCKET_PATH_LIMIT:
+        return
+    base = next((d for d in _SYSTEM_TEMPORARY_DIRECTORIES if os.access(d, os.W_OK | os.X_OK)), None)
+    if base is None:
+        raise SettingsError(
+            f"TMPDIR {tempfile.gettempdir()} is too long for worker sockets and no system temporary directory "
+            "(/tmp) is writable: set TMPDIR to a shorter path"
+        )
+    directory = tempfile.mkdtemp(prefix="pymp-", dir=base)
+    util.Finalize(None, shutil.rmtree, args=(directory,), kwargs={"ignore_errors": True}, exitpriority=-100)
+    config["tempdir"] = directory
 
 
 @contextmanager
@@ -256,6 +290,8 @@ def main_module_guard():
     global _GUARD_DEPTH, _GUARD_SAVED
     with _GUARD_LOCK:
         if _GUARD_DEPTH == 0:
+            # Every engine process start passes here: its forkserver's socket path must fit (_short_socket_directory).
+            _short_socket_directory()
             main_module = sys.modules.get("__main__")
             _GUARD_SAVED = (main_module, getattr(main_module, "__file__", None), getattr(main_module, "__spec__", None))
             if main_module is not None:
@@ -1063,6 +1099,7 @@ class WorkerReply:
     resident_affinities: tuple[str, ...]
     retire: bool = False
     storage_routes: tuple[dict[str, Any], ...] = ()
+    threads: tuple[int, int] = (1, 1)  # CPUs the task held at its start and at most while it ran
 
 
 _RESIDENT: dict[tuple[str, str], Any] = {}
@@ -1097,6 +1134,35 @@ def resident_value(reference: ResidentRef) -> Any:
         return _RESIDENT[reference.affinity, reference.key]
     except KeyError as error:
         raise InvariantError(f"resident reference is absent or released: {reference}") from error
+
+
+_Loaded = TypeVar("_Loaded")
+
+
+def resident_or_load(key: str, load: Callable[[], _Loaded]) -> _Loaded:
+    """The value an earlier action of the running affinity retained under ``key``, else ``load()``, retained for the
+    affinity's later actions until released (release_resident_namespace) or until the graph ends.
+
+    ``key`` names what determines the value, such as the store record identities it is decoded from, so a retained
+    value equals a fresh load and a worker without it (another worker, a resumed run) simply loads it again. Every
+    later action receives the same object: values are immutable (frozen records, tuples, read-only arrays). Outside
+    an affinity action the value is only loaded."""
+    if _ACTIVE_AFFINITY is None:
+        return load()
+    identity = (_ACTIVE_AFFINITY, key)
+    if identity not in _RESIDENT:
+        _RESIDENT[identity] = load()
+    return _RESIDENT[identity]
+
+
+def release_resident_namespace(namespace: str) -> None:
+    """Release the running affinity's values retained under ``namespace/...`` keys, at their declared last consumer
+    (values never loaded on this worker have nothing to release)."""
+    if _ACTIVE_AFFINITY is None:
+        return
+    prefix = namespace + "/"
+    for identity in [item for item in _RESIDENT if item[0] == _ACTIVE_AFFINITY and item[1].startswith(prefix)]:
+        del _RESIDENT[identity]
 
 
 @dataclass(frozen=True)
@@ -1306,7 +1372,15 @@ class RecyclingPolicy:
         return True
 
 
-def _perform(task: Task, token: tuple[int, int], budget: CpuBudget) -> WorkerReply:
+def _task_peak_threads() -> int:
+    """The most CPUs this process's running task has held (its pool seat), 1 outside a pool."""
+    from . import scheduler
+
+    seat = scheduler._POOL_SEAT
+    return 1 if seat is None else max(1, int(seat.peak))
+
+
+def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gathers: bool = False) -> WorkerReply:
     global _ACTIVE_AFFINITY
     from .graph import _readonly
     from .runtime import task_boundary
@@ -1336,6 +1410,8 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget) -> WorkerRep
                 numba_threads(team),
             ):
                 value = _readonly(task.function(*args, **kwargs))
+                if keep_gathers and task.affinity is not None and isinstance(value, Expansion):
+                    value = replace(value, gather=_kept_gather(value.gather, task.affinity))
         except BaseException as error:
             raise bootstrap.task_failure(error) from error
         return WorkerReply(
@@ -1346,6 +1422,7 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget) -> WorkerRep
             task_peak_bytes(peak),
             tuple(sorted({key[0] for key in _RESIDENT})),
             storage_routes=tuple(routes),
+            threads=(int(team), max(int(team), _task_peak_threads())),
         )
     finally:
         _ACTIVE_AFFINITY = None
@@ -1378,11 +1455,11 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
             from . import scheduler
 
             seat = scheduler._POOL_SEAT = seats[lane]
-            seat.begin_task(task.resources.min_cores)
-            try:
-                reply = _perform(task, token, PoolShareBudget())
-            finally:
-                seat.end_task()
+            seat.begin_task(task.resources.min_cores, dispatched=True)
+            # Failed native descendants cannot be interrupted by Python unwind.
+            # The graph aborts and reaps this worker; keep its seat until then.
+            reply = _perform(task, token, PoolShareBudget(), keep_gathers=True)
+            seat.end_task()
             retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
             connection.send(("result", _pack_reply(replace(reply, retire=retire))))
             # Idle workers retain only explicitly registered affinity state.
@@ -1634,14 +1711,36 @@ def _pack_reply(reply: WorkerReply) -> _PackedReply:
 
 @dataclass(frozen=True)
 class _PackedCall:
-    """A child task's call (function, arguments) pickled once by the worker that expanded it, plus the transport
-    segments it refers to and the results it reads (``refs``, its gather's children). The coordinator forwards the
-    bytes unread (it neither unpickles nor re-pickles them, nor walks them for references), holds those segments
-    while the child is pending or running, and sends the referenced results beside the bytes."""
+    """A child task's call (function, arguments) pickled once by the worker that expanded it, or for an affinity
+    task's gather kept there (``kept``, _kept_gather), plus the transport segments it refers to and the results it
+    reads (``refs``, its gather's children). The coordinator forwards the bytes unread (it neither unpickles nor
+    re-pickles them, nor walks them for references), holds those segments while the child is pending or running, and
+    sends the referenced results beside the bytes."""
 
     payload: bytes
     names: tuple[str, ...]
     refs: tuple[TaskKey, ...] = ()
+    kept: str | None = None  # the call stayed in the worker that expanded it (_kept_gather): no payload
+
+
+_KEPT_NUMBERS = count()
+
+
+def _kept_gather(gather: Task, affinity: str) -> Task:
+    """An affinity task's expansion gather, its call kept in this worker (``_RESIDENT``) rather than pickled.
+
+    A gather shares its parent's affinity, so it runs on this worker, after the children; its arguments are the
+    chain's continuation state (a selection round's blocks, previous selections and evidence; an assembly session),
+    tens of megabytes that the coordinator never reads. Pickled into the reply, they crossed to the coordinator and
+    back to this same worker at every hand-off. Kept here, the coordinator carries only the results the call reads
+    (``refs``), sends them beside the call as for any packed call, and the worker cannot retire while it holds one."""
+    from .graph import _references
+
+    kwargs = dict(gather.kwargs)
+    name = f"continuation/{next(_KEPT_NUMBERS)}"
+    _RESIDENT[affinity, name] = (gather.function, gather.args, kwargs)
+    refs = tuple(dict.fromkeys(_references((gather.args, kwargs))))
+    return replace(gather, function=_call_packed, args=(_PackedCall(b"", (), refs, kept=name),), kwargs={})
 
 
 SHARED_CHILD_ARRAY_BYTES = 64 << 10  # smaller arrays several packed calls carry are copied into each
@@ -1704,7 +1803,15 @@ def _call_packed(packed: _PackedCall, values: tuple = (), /, **extra: Any) -> An
     ``extra`` the engine's per-run arguments (its thread team)."""
     from .scheduler import _resolve_graph
 
-    function, args, kwargs = _TransportUnpickler(io.BytesIO(packed.payload), _TASK_NUMBER).load()
+    if packed.kept is None:
+        function, args, kwargs = _TransportUnpickler(io.BytesIO(packed.payload), _TASK_NUMBER).load()
+    else:
+        try:
+            if _ACTIVE_AFFINITY is None:
+                raise KeyError(packed.kept)
+            function, args, kwargs = _RESIDENT.pop((_ACTIVE_AFFINITY, packed.kept))
+        except KeyError as error:
+            raise InvariantError(f"kept continuation {packed.kept} is not on this worker") from error
     # Always, as the coordinator resolved every task (references or not): it rebuilds tuples, lists and mappings.
     results = dict(zip(packed.refs, values, strict=True))
     args, kwargs = _resolve_graph(args, results), _resolve_graph(kwargs, results)
@@ -2042,11 +2149,18 @@ class WorkerGroup:
         if affinity is not None:
             self.affinities.setdefault(affinity, index)
 
-    def submit(self, index: int, task: Task, token: tuple[int, int], *, lane: int = 0) -> None:
+    def claim(self, index: int, key: TaskKey) -> None:
+        """Take idle worker ``index`` for ``key``, which send() then transmits: a pass decides all its tasks before
+        sending any (free_worker no longer offers a claimed worker)."""
         handle = self.handles[index]
         if handle.busy is not None or not handle.ready:
             raise InvariantError("worker already has a task or has not initialized")
-        handle.busy = task.key
+        handle.busy = key
+
+    def send(self, index: int, task: Task, token: tuple[int, int], *, lane: int = 0) -> None:
+        handle = self.handles[index]
+        if handle.busy != task.key:
+            raise InvariantError("a task is sent only to the worker claimed for it")
         began = time.perf_counter()
         packed = self.transport.pack(index, task)
         self._count("task", task.key.stage, len(packed.payload), time.perf_counter() - began, 0.0)

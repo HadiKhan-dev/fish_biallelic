@@ -29,7 +29,7 @@ from typing import cast
 import numpy as np
 from numba import prange, types
 
-from haplotype_reconstruction.core.kernels import kernel
+from haplotype_reconstruction.core.kernels import bounded_team, kernel
 
 from ..parameters import (
     LINKER_LANE_WIDTH as _LANE_WIDTH,
@@ -647,39 +647,41 @@ class BlockScans:
         rounds = threads is not None and self._rounds
         while first < blocks:
             stop = min(blocks, first + max(1, int(threads()))) if rounds else blocks
-            _scaled_scan(
-                first,
-                stop,
-                self.lane_weights,
-                self.lane_error_weights,
-                self.invalid_emission,
-                self.stay,
-                self.switch,
-                self.quality,
-                priors,
-                self.founders,
-                backward,
-                self.emission_indices,
-                self.error_fraction,
-                result,
-                unsafe,
-            )
+            with bounded_team(stop - first):  # one thread per lane block (116 samples are four blocks)
+                _scaled_scan(
+                    first,
+                    stop,
+                    self.lane_weights,
+                    self.lane_error_weights,
+                    self.invalid_emission,
+                    self.stay,
+                    self.switch,
+                    self.quality,
+                    priors,
+                    self.founders,
+                    backward,
+                    self.emission_indices,
+                    self.error_fraction,
+                    result,
+                    unsafe,
+                )
             first = stop
         count = int(np.count_nonzero(unsafe))
         if count:
             selected = slice(None) if count == len(unsafe) else unsafe
-            result[unsafe] = _log_scan(
-                self.log_emissions[selected],
-                self.error_logs[selected],
-                self.stay,
-                self.switch,
-                self.quality,
-                priors[selected],
-                self.founders,
-                backward,
-                self.emission_indices,
-                self.error_fraction,
-            )
+            with bounded_team(count):  # one thread per unsafe sample at most
+                result[unsafe] = _log_scan(
+                    self.log_emissions[selected],
+                    self.error_logs[selected],
+                    self.stay,
+                    self.switch,
+                    self.quality,
+                    priors[selected],
+                    self.founders,
+                    backward,
+                    self.emission_indices,
+                    self.error_fraction,
+                )
         return result
 
 

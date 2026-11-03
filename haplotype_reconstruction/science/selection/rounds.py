@@ -12,6 +12,7 @@ block_task_bytes is an execution estimate and never changes scientific budgets.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -168,9 +169,10 @@ def select_block(
     *,
     reverse: bool,
     census_sink=None,
-    threads: int = 1,
+    threads: int | Callable[[], int] = 1,
 ) -> BlockSelection:
-    """Select one block's panel (``likelihoods``/``observed``: its discovery-site columns)."""
+    """Select one block's panel (``likelihoods``/``observed``: its discovery-site columns). ``threads``: an int,
+    or the caller's live share re-read at the block's lane boundaries."""
     config, discovery_config, redraw_rate = settings
     prepared = PreparedBlock(
         likelihoods,
@@ -197,7 +199,7 @@ def select_block(
         alternatives=task.alternatives,
         reverse=reverse,
         census_sink=census_sink,
-        threads=threads,
+        threads=prepared.threads,
     )
     memo = LikelihoodMemo(task.memo)
     context = None if task.founders is None else ContextFounders(task.founders)
@@ -388,7 +390,7 @@ def select_task(
     *,
     reverse: bool,
     census_sink=None,
-    threads: int = 1,
+    threads: int | Callable[[], int] = 1,
 ) -> BlockSelection:
     """Select a block from immutable contig arrays, making the exact private 3.5 evidence copy.
 

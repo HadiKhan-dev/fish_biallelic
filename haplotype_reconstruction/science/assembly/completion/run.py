@@ -25,7 +25,7 @@ from haplotype_reconstruction.core.ties import TieCounts, TieSettings
 from ..alleles import site_posterior
 from ..alleles.parameters import SitePosteriorParameters
 from .cavity_fill import CavityFill, cavity_fill
-from .crossfit import CrossFit, content_fold_plan, crossfit_block
+from .crossfit import CrossFit, FoldPlan, content_fold_plan, crossfit_block
 from .links import BoundaryLink, link_boundary
 from .occupancy import occupancy_gate
 from .parameters import UNIFORM_TOLERANCE, CompletionParameters
@@ -247,30 +247,31 @@ def complete_boundary(boundary: CompletionBoundary) -> BoundaryLink:
     )
 
 
-def complete(
+@dataclass(frozen=True)
+class CompletionPlan:
+    """A contig's completion inputs shared by every block, computed once before the blocks run (U03).
+
+    fold_plan: the content fold plan of the observed axis; veto: bool (B) unknown-mass vetoes; inference:
+    per block int8 (R_b, L_b) calls with unkept sites unknown; offsets: int64 (B + 1) block site offsets;
+    focal: block-major focal-informative mask (_focal_mask); settings: the site-posterior parameter vector."""
+
+    fold_plan: FoldPlan
+    veto: np.ndarray
+    inference: tuple[np.ndarray, ...]
+    offsets: np.ndarray
+    focal: np.ndarray
+    settings: np.ndarray
+
+
+def plan_completion(
     panels: Sequence[LocalPanel],
     evidence: CompletionEvidence,
     parameters: CompletionParameters,
-    workspace: CompletionWorkspace | None = None,
-) -> tuple[tuple[PreparedPanel, ...], CompletionSummary]:
-    """Complete local panels in genomic order from full-contig founder evidence.
-
-    panels contain int8[R_b,L_b] calls. Evidence is float64[N,L,3], observed bool[N,L]
-    and full-contig depth hashes; folds must never be based on a block crop accidentally.
-    Inputs are unchanged. Returns newly owned calls and counters; position/support arrays
-    remain read-only shared views. An ELBO decrease raises InvariantError.
-    """
-    panels = tuple(panels)
-    workspace = CompletionWorkspace() if workspace is None else workspace
-    blocks = len(panels)
-    if blocks == 0:
-        empty: np.ndarray = np.zeros(0, dtype=np.int64)
-        return (), CompletionSummary(
-            empty, empty.copy(), np.zeros(0, dtype=np.bool_), (), 0, (0,) * len(site_posterior.SUMMARY_FIELDS), 0
-        )
+    workspace: CompletionWorkspace,
+) -> CompletionPlan:
+    """The shared inputs of complete() for non-empty ``panels``."""
     samples = evidence.samples
     fold_plan = content_fold_plan(evidence.observed, parameters.crossfit.fold_seed, evidence.depth_keys)
-    folds = fold_plan.folds
     veto = np.array(
         [_unknown_mass_veto(panel, parameters.maximum_discovery_unknown_mass) for panel in panels], dtype=np.bool_
     )
@@ -279,6 +280,7 @@ def complete(
         alleles = np.array(panel.calls, dtype=np.int8)
         alleles[:, ~panel.kept] = -1
         inference.append(alleles)
+    blocks = len(panels)
     offsets: np.ndarray = np.zeros(blocks + 1, dtype=np.int64)
     offsets[1:] = np.cumsum([panel.sites for panel in panels])
     starts = np.array([panel.site_start for panel in panels], dtype=np.int64)
@@ -287,19 +289,59 @@ def complete(
     assert evidence.neutral is not None  # released only after the final join (see CompletionEvidence)
     _focal_mask(evidence.neutral, evidence.observed, starts, offsets, kept, UNIFORM_TOLERANCE, focal)
     settings = workspace.site_parameters.vector(reverse=workspace.ties.reverse)
-    block_inputs = tuple(
+    return CompletionPlan(fold_plan, veto, tuple(inference), offsets, focal, settings)
+
+
+def completion_blocks(
+    panels: Sequence[LocalPanel],
+    inference: Sequence[np.ndarray],
+    neutral: np.ndarray,
+    observed: np.ndarray,
+    parameters: CompletionParameters,
+    folds: np.ndarray,
+    settings: np.ndarray,
+) -> tuple[CompletionBlock, ...]:
+    """The independent inputs of ``panels`` (any consecutive run of a plan's blocks, with their ``inference`` calls)
+    from the contig's evidence arrays; evidence is sliced, not copied."""
+    return tuple(
         CompletionBlock(
             alleles,
-            evidence.neutral[:, panel.site_start : panel.site_start + panel.sites],
-            evidence.observed[:, panel.site_start : panel.site_start + panel.sites] & panel.kept[None, :],
+            neutral[:, panel.site_start : panel.site_start + panel.sites],
+            observed[:, panel.site_start : panel.site_start + panel.sites] & panel.kept[None, :],
             folds,
             parameters,
             settings,
         )
-        for panel, alleles in zip(panels, inference, strict=False)
+        for panel, alleles in zip(panels, inference, strict=True)
     )
+
+
+def plan_blocks(
+    panels: Sequence[LocalPanel], evidence: CompletionEvidence, parameters: CompletionParameters, plan: CompletionPlan
+) -> tuple[CompletionBlock, ...]:
+    """Every block's inputs under ``plan``."""
+    assert evidence.neutral is not None
+    return completion_blocks(
+        panels, plan.inference, evidence.neutral, evidence.observed, parameters, plan.fold_plan.folds, plan.settings
+    )
+
+
+def finish_completion(
+    panels: Sequence[LocalPanel],
+    evidence: CompletionEvidence,
+    parameters: CompletionParameters,
+    workspace: CompletionWorkspace,
+    plan: CompletionPlan,
+    results: Sequence[CompletionBlockResult],
+) -> tuple[tuple[PreparedPanel, ...], CompletionSummary]:
+    """Link adjacent blocks, gate their candidate fills and release the prepared panels (U06-U08), from every
+    block's result in block order."""
+    panels = tuple(panels)
+    blocks = len(panels)
+    samples = evidence.samples
+    fold_plan, veto, inference, offsets, focal = plan.fold_plan, plan.veto, plan.inference, plan.offsets, plan.focal
+    block_inputs = plan_blocks(panels, evidence, parameters, plan)
     evaluate = workspace.map_tasks
-    results = tuple(map(complete_block, block_inputs) if evaluate is None else evaluate(complete_block, block_inputs))
     crossfits = tuple(result.crossfit for result in results)
     fills = tuple(result.fill for result in results)
     boundary_inputs = tuple(
@@ -363,6 +405,33 @@ def complete(
     return tuple(prepared), summary
 
 
+def complete(
+    panels: Sequence[LocalPanel],
+    evidence: CompletionEvidence,
+    parameters: CompletionParameters,
+    workspace: CompletionWorkspace | None = None,
+) -> tuple[tuple[PreparedPanel, ...], CompletionSummary]:
+    """Complete local panels in genomic order from full-contig founder evidence.
+
+    panels contain int8[R_b,L_b] calls. Evidence is float64[N,L,3], observed bool[N,L]
+    and full-contig depth hashes; folds must never be based on a block crop accidentally.
+    Inputs are unchanged. Returns newly owned calls and counters; position/support arrays
+    remain read-only shared views. An ELBO decrease raises InvariantError.
+    """
+    panels = tuple(panels)
+    workspace = CompletionWorkspace() if workspace is None else workspace
+    if not panels:
+        empty: np.ndarray = np.zeros(0, dtype=np.int64)
+        return (), CompletionSummary(
+            empty, empty.copy(), np.zeros(0, dtype=np.bool_), (), 0, (0,) * len(site_posterior.SUMMARY_FIELDS), 0
+        )
+    plan = plan_completion(panels, evidence, parameters, workspace)
+    block_inputs = plan_blocks(panels, evidence, parameters, plan)
+    evaluate = workspace.map_tasks
+    results = tuple(map(complete_block, block_inputs) if evaluate is None else evaluate(complete_block, block_inputs))
+    return finish_completion(panels, evidence, parameters, workspace, plan, results)
+
+
 __all__ = [
     "CompletionEvidence",
     "CompletionWorkspace",
@@ -371,6 +440,11 @@ __all__ = [
     "CompletionBlock",
     "CompletionBlockResult",
     "CompletionBoundary",
+    "CompletionPlan",
+    "plan_completion",
+    "completion_blocks",
+    "plan_blocks",
+    "finish_completion",
     "complete",
     "complete_block",
     "complete_boundary",

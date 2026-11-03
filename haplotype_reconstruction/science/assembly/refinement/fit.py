@@ -61,7 +61,6 @@ from .beam import WindowBeam
 from .cache import Orientation, ProposalCache
 from .cache import WindowMemo as _WindowMemo
 from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
-from .component_workspace import sample_ranges
 from .ledger import FitLedger
 from .objective import score_panel, score_switches_direct, selected_alleles
 from .parameters import (
@@ -79,6 +78,7 @@ from .parameters import (
 )
 from .proposals import WindowSolver
 from .reductions import panel_objective
+from .workspace import sample_ranges, sample_threads
 
 
 def accept_pass(*args, **kwargs):
@@ -372,7 +372,7 @@ class SweepEngine:
             return cached
         ws = self.workspace
         founders = len(panel)
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(panel, np.int64))
             scores = np.asarray(
                 score_panel(
@@ -389,7 +389,7 @@ class SweepEngine:
         if found is not None:
             return found
         ws = self.workspace
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.asarray(key, np.int64))
         total = 0
         win = ws.windows.view(len(alleles))
@@ -422,7 +422,7 @@ class SweepEngine:
         lex; over consecutive sample ranges at the budget's live share."""
         samples, offsets = self.workspace.samples, self.forward.offsets
         win = self.forward.window(len(X))
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             haps = self.forward.haps(X)
         step = self.workspace.message_step or checkpoints.stride(len(X), self.blocks, samples, self.guarded)
         arrays = checkpoints.allocate(len(X), self.blocks, samples, lex, haps, self.forward, step)
@@ -472,7 +472,7 @@ class SweepEngine:
             return self._full_messages(X, lex, budget), 0.0 - started
         samples, offsets = self.workspace.samples, self.forward.offsets
         win = self.forward.window(len(X))
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             haps = self.forward.haps(X)
         panel, (fwd, bwd, fcnt, bcnt, fscale, bscale) = held
         if not lex:
@@ -526,7 +526,7 @@ class SweepEngine:
         whose inputs equal the cached ones takes its cached result. The templates to solve run one
         Numba thread each, as many at once as the live share allows (budget.thread_map)."""
         frontier_bytes = self.config.frontier_bytes
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             fwd = fwd.flanks(a for a, _ in self.windows.spans)
             bwd = bwd.flanks(c for _, c in self.windows.spans)
 
@@ -628,7 +628,7 @@ class SweepEngine:
         fine = [(a, c) for kind, a, c in self.windows.templates if kind == "fine"]
         frontier_bytes = self.config.frontier_bytes
         sizes = [self.windows.template_bytes("fine", a, c, self.workspace.samples, len(Y)) for a, c in fine]
-        with budget.scope(max(1, int(budget.threads()))):
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
             ff = fwd.flanks(a for a, _ in fine)
             bb = bwd.flanks(c for _, c in fine)
         ordinals = self.windows.work.bind((ordinal, 0, 0), range(len(fine)))
@@ -862,7 +862,7 @@ class SweepEngine:
                     for b in range(a, c):
                         sums[m] += bscale[b]
                 # Each chunk re-reads the live share (a sample's gain is its own recursion).
-                with budget.scope(max(1, int(budget.threads()))):
+                with budget.scope(sample_threads(self.workspace.samples, budget)):
                     per = gains_kernels.candidate_gains(
                         haps,
                         orient.leaves,
@@ -1026,7 +1026,7 @@ class SweepEngine:
                 for b in range(a, c):
                     sums[m - m0] += bscale[b]
             ro = row_offsets[m0 : m1 + 1] - row_offsets[m0]
-            with budget.scope(max(1, int(budget.threads()))):  # the live share, per chunk
+            with budget.scope(sample_threads(self.workspace.samples, budget)):  # the live share, per chunk
                 per = gains_kernels.candidate_gains(
                     haps,
                     leaves,
@@ -1061,13 +1061,15 @@ class SweepEngine:
             r = rows[row_offsets[m] : row_offsets[m + 1]]
             Y = X.copy()
             Y[k, a:c] = r
-            with budget.scope(max(1, int(budget.threads()))):  # the live share, per window
+            team = sample_threads(self.workspace.samples, budget)
+            parallel = gains_kernels.parallel_exchanges(self.workspace.samples, founders, team)
+            with budget.scope(team):  # the live share, per window
                 haps_y = orient.haps(Y)
                 local_f = kernels.forward_boundaries(haps_y, win, offsets, np.ascontiguousarray(fwd[a]), a, c)
                 local_b, _ = kernels.backward_chain(haps_y, win, offsets, np.ascontiguousarray(bwd[c]), ident, a, c)
                 for cut in range(max(1, a), min(blocks - 1, c) + 1):
                     swap = gains_kernels.exchange_gains(
-                        np.ascontiguousarray(local_f[cut - a]), np.ascontiguousarray(local_b[cut - a])
+                        np.ascontiguousarray(local_f[cut - a]), np.ascontiguousarray(local_b[cut - a]), parallel
                     )
                     evaluated += len(swap)
                     # Exchanges within the quantum of the best are tied: the first pair in pair order (2.13).
@@ -1399,7 +1401,7 @@ class SweepEngine:
             pass_started = 0.0
             lex_aborts = 0
             while True:
-                with budget.scope(max(1, int(budget.threads()))):
+                with budget.scope(sample_threads(self.workspace.samples, budget)):
                     if reverse:
                         # The reversed pass stores the clamped forward messages; their per-block
                         # normalisers are the forward ones in reversed block order.
