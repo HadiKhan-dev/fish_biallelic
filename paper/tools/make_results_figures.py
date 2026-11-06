@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Draw results figures 3–12 from compact paper42/data/ CSV/JSON only.
+"""Draw results figures 3–13 from compact paper/data/ CSV/JSON only.
 
 Writes figures/fig<N>_<name>.svg and .pdf using matplotlib (no run-directory
 access, pipeline imports, or measurements). The CSVs are produced separately by
 figure_data.py. Captions and source/denominator definitions are in CAPTIONS.md.
 
-Run from anywhere: python -P paper42/tools/make_results_figures.py
+Run from anywhere: python -P paper/tools/make_results_figures.py
 Use --data-dir and --output-dir for an isolated regeneration check. SVG identifiers
 and PDF metadata are fixed so identical inputs give byte-identical artifacts.
 """
@@ -37,7 +37,7 @@ DESIGNS = ['std', 'std_n80', 'stress_n80', 'backcross', 'bc8', 'longbc', 'f3',
            'f3x8', 'longf3', 'famhs', 'hsrand', 'sibrich', 'seed', 'tl', 'k30']
 VARIANTS = ['ref', 'perm_s1', 'iid12_s1', 'iid9_s1', 'val12_s1', 'vcfperm_s1', 'rev']
 VNAME = {'ref': 'reference', 'perm_s1': 'sample order', 'iid12_s1': 'noise 10⁻¹²',
-         'iid9_s1': 'noise 10⁻⁹', 'val12_s1': 'validation subset',
+         'iid9_s1': 'noise 10⁻⁹', 'val12_s1': 'value-consistent noise',
          'vcfperm_s1': 'VCF order', 'rev': 'reverse ties'}
 DNAME = {'std_n80': 'std n80', 'stress_n80': 'stress n80 ◆', 'k30': 'K = 30 ★'}
 
@@ -81,8 +81,8 @@ def special(row):
 
 def save(fig, out, stem, *, raster_dpi=None):
     for ext in ['svg', 'pdf']:
-        metadata = {'Date': None, 'Creator': 'paper42/tools/make_results_figures.py'} if ext == 'svg' else {
-            'CreationDate': None, 'ModDate': None, 'Creator': 'paper42/tools/make_results_figures.py'}
+        metadata = {'Date': None, 'Creator': 'paper/tools/make_results_figures.py'} if ext == 'svg' else {
+            'CreationDate': None, 'ModDate': None, 'Creator': 'paper/tools/make_results_figures.py'}
         target = out / f'{stem}.{ext}'
         options = {} if raster_dpi is None else {'dpi': raster_dpi}
         fig.savefig(target, metadata=metadata, bbox_inches='tight', pad_inches=.05, **options)
@@ -558,6 +558,64 @@ def figure_k30(data, out):
     save(fig, out, 'fig12_k30_recovery')
 
 
+def figure_depth(data, out):
+    records = sorted(table(data, 'depth_series.csv'), key=lambda r: number(r['depth']))
+    x = [number(r['depth']) for r in records]
+    fig, axes = plt.subplots(3, 2, figsize=(7.5, 7.1), layout='constrained')
+    ax = axes[0, 0]
+    for key, label, color, marker in [('founder_wrong_ppm', 'Wrong (one-to-one)', BLUE, 'o'),
+                                       ('founder_missing_ppm', 'Missing', ORANGE, 's')]:
+        ax.plot(x, [number(r[key]) for r in records], marker=marker, color=color, label=label)
+    ax.set_yscale('log')
+    ax.set_ylabel('Founder alleles per million (log scale)')
+    ax.legend(frameon=False, fontsize=7)
+    panel(ax, 'a  Final founder-refit accuracy')
+    for ax, key, title, ylabel, color in [
+        (axes[0, 1], 'genotype_errors_ppm', 'b  Genotype accuracy', 'Errors / million called genotypes', BLUE),
+        (axes[1, 0], 'switch_errors', 'c  Phase switches', 'Switch errors (count)', PURPLE),
+        (axes[1, 1], 'set_errors_ppm', 'd  Phase within released sets', 'Site errors / million scored heterozygotes', GREEN)]:
+        ax.plot(x, [number(r[key]) for r in records], marker='o', color=color)
+        ax.set_ylim(bottom=0)
+        ax.set_ylabel(ylabel)
+        panel(ax, title)
+    ax = axes[2, 0]
+    positions = np.arange(len(records))
+    limits = [number(r['memory_limit_bytes']) / 2**30 for r in records]
+    peaks = [number(r['peak_live_bytes']) / 2**30 for r in records]
+    ax.bar(positions, limits, width=.65, facecolor='#F1F1F1', edgecolor=GREY, linewidth=.6, label='Governor limit')
+    ax.bar(positions, peaks, width=.42, color=BLUE, label='Sampled pressure peak')
+    for i, peak in enumerate(peaks):
+        ax.text(i, peak + 6, f'{peak:.1f}', ha='center', fontsize=7)
+    ax.set_xticks(positions, [f'{number(r["depth"]):g}' for r in records])
+    ax.set_ylim(0, max(limits) * 1.08)
+    ax.set_ylabel('Memory (GiB)')
+    ax.legend(frameon=False, loc='upper left', fontsize=6.5)
+    panel(ax, 'e  Live memory and recorded limit')
+    ax = axes[2, 1]
+    for position, r in enumerate(records):
+        ice = r['processor'] == 'Ice Lake'
+        depth, seconds = number(r['depth']), number(r['run_wall_seconds'])
+        ax.scatter(position, seconds / 3600, marker='s' if ice else 'o', color=ORANGE if ice else BLUE, s=27)
+        hours, remainder = divmod(int(seconds), 3600)
+        minutes, secs = divmod(remainder, 60)
+        ax.annotate(f'{hours}:{minutes:02d}:{secs:02d}', (position, seconds / 3600),
+                    xytext=(0, 7), textcoords='offset points', ha='center', fontsize=6.7)
+    ax.set_xticks(positions, [f'{number(r["depth"]):g}' for r in records])
+    ax.set_xlim(-.45, 3.45)
+    ax.set_ylim(0, 9.2)
+    ax.set_ylabel('Run wall time (h)')
+    ax.legend(handles=[Line2D([], [], ls='', marker='o', color=BLUE, label='Sapphire Rapids · 112 cores'),
+                       Line2D([], [], ls='', marker='s', color=ORANGE, label='Ice Lake · 76 cores')],
+              frameon=False, loc='lower right', fontsize=6.3)
+    panel(ax, 'f  Observed times on mixed hardware')
+    for i, ax in enumerate(axes.flat):
+        ax.set_xlabel('Mean sequencing depth')
+        if i not in (4, 5):
+            ax.set_xticks(x, [f'{v:g}' for v in x])
+            ax.set_xlim(.65, 5.4)
+    save(fig, out, 'fig13_depth_series')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, default=PAPER / 'data')
@@ -569,7 +627,7 @@ def main():
         raise ValueError('Unsupported summary table schema')
     for plot in [figure_accuracy, figure_founder_endpoint, figure_robustness, figure_mosaic,
                  figure_recombination, figure_founder_counts, figure_pedigree, figure_times,
-                 figure_paired, figure_k30]:
+                 figure_paired, figure_k30, figure_depth]:
         plot(args.data_dir, args.output_dir)
 
 

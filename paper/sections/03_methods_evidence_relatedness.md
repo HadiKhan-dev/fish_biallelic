@@ -42,6 +42,13 @@ $$
 
 and an unobserved cell is exactly neutral, with $P_{ij}(g)=1/3$. The reads of every sample, including libraries flagged by the check below, enter calibration and the genotype likelihoods.
 
+The evidence representation is exact: per sample and contig, repeated integer read-count pairs
+share a codebook entry containing that pair and its original float64 likelihood triple. Codes
+occupy 1, 2 or 4 bytes per site and sample, in addition to the codebook; samples remain dense
+when coding would not reduce their joint likelihood, count and mask storage. Consumers gather
+the same ordered dense values, bit for bit. This changes storage rather than the read model or
+observation mask (Supplementary Information, section S6).
+
 ### Site and library quality control
 
 The site filter calibrates itself on each contig's own depth and allele-count distributions, without sample labels, pedigree, benchmark or simulated truth. It is on by default for VCF input and applies to contigs with at least 1,000 admitted SNPs; on smaller contigs every site is kept.

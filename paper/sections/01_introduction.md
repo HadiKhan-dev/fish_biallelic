@@ -30,7 +30,7 @@ cohort or generation labels describe when an animal was sampled rather than who 
 A method that conditions on such labels, or on a declared design, risks reproducing errors in the
 records as apparent biological signal.
 
-Here we describe a method, released as version 4.3.0 of the software package
+Here we describe a method, released as version 4.4.0 of the software package
 `haplotype_reconstruction`, that addresses this setting jointly. It reads only a multi-sample
 VCF or BCF file with per-sample allele depths [@danecek2011; @danecek2021] and a genetic map;
 sample names are treated as identifiers and nothing else about a sample enters inference. From
@@ -64,4 +64,6 @@ We describe the models and decision rules of each stage, the simulation framewor
 accuracy against recorded truth, and the computational design. Validation on contrasting crosses
 separates local sequence accuracy from long-range founder identity and shows when pedigree
 inference abstains. The TroMau analysis illustrates supported relationships and explicit ambiguity
-in a real cross without individual parentage truth.
+in a real cross without individual parentage truth. A separate 320-sample depth series tests
+accuracy from mean depth 1 to 5 and records the resources used by release 4.4.0, whose changes
+to storage and execution preserve the scientific models and decisions.

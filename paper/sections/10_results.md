@@ -2,18 +2,24 @@
 
 ## Validation design and founder reconstruction
 
-The 4.2 release matrix supplies the validation evidence for the reconstruction and release rules
-described here; 4.3.0 retains that science and presents the tables in the output layout described
-in Methods. The 4.2 release matrix contained 39 completed runs: 15 simulated datasets with
-recorded truth,
-two real-data inputs (TroMau and its three-chromosome subset), and 22 perturbations of those
-inputs. Thirteen simulations were design cases and two were references for perturbation tests;
-the perturbations are repeated analyses of the same data, not biological replicates. Each design
-used one seed, with a second seed for the 40-sample cohort design. The matrix is a collection of
-contrasting designs rather than a balanced factorial experiment or a depth-response study.
+Release 4.4.0 was rerun on all 39 cases of the release matrix: 15 simulated datasets with
+recorded truth, two real-data inputs (TroMau and its three-chromosome AcTm subset), and 22
+perturbations of those inputs. Thirteen simulations were design cases and two were references
+for perturbation tests; the perturbations repeat analyses of the same data and are not biological
+replicates. Each design used one seed, with a second seed for the 40-sample cohort design.
+The matrix contrasts designs rather than forming a balanced factorial experiment; the separate
+320-sample depth series is described below.
 
-The 39-case 4.3.0 release matrix, comparing every output cell with its mapped 4.2 release matrix
-value, is pending [TO FILL: outcome of that comparison]{.todo}.
+All 39 cases completed. The 25 simulation analyses matched all 24 fields retained in
+`data/simulation_accuracy.csv`: sample and chromosome counts, founder stage and aggregate founder
+counts and errors, genotype calls and errors, allele callability, phased heterozygotes and their
+share, switch errors, released-set counts, and pedigree edges and parent states. The 4.3 baseline
+for these fields is established transitively: each archived 4.3 comparison had no scientific
+difference from its mapped 4.2 outputs. Full 4.3 matrix evaluations and raw outputs were deleted,
+so fields absent from the retained scalar table, including component, continuity, phase-stratum
+and recombination truth scores, have not been re-established equal by this comparison. We retain
+the earlier detailed results with their measured provenance. The 14 real-data analyses have no
+individual truth; their within-release perturbation comparisons are reported separately.
 
 Except for the $H=30$ stress test, simulations used six empirical founder haplotypes per
 chromosome. Eight-chromosome and three-chromosome designs varied cohort structure, backcrossing,
@@ -26,7 +32,7 @@ cannot be assigned to any one perturbation. Generating and inference maps were c
 independently, including map-length experiments. Supplementary Table S3 gives every design,
 seed and read setting.
 
-Only the final founder-refit product was scored in these saved evaluations. We therefore report
+The saved evaluations score only the final founder-refit product. We therefore report
 endpoint accuracy (Figures 3 and 4; Table 1); the outputs do not establish a trajectory of accuracy
 through discovery, selection and assembly. Founder errors were pooled as counts over chromosomes
 within each run. One-to-one errors use a single assignment of reconstructed rows to truth within
@@ -175,13 +181,25 @@ sample axis. Likelihood triples were renormalised, read counts were unchanged an
 cells remained exactly uniform. Each stochastic perturbation used one fixed seed. These are
 numerical and ordering tests, not independent sequencing or biological replicates.
 
-All available numerical-noise and sample-order variants agreed with their references in the
+In the retained 4.2 comparisons, numerical-noise and sample-order variants agreed in the
 compared product families after aligning sample identifiers and canonicalising display conventions.
 The numeric comparison used relative tolerance $10^{-9}$ and absolute tolerance $10^{-8}$;
 phase and genotype calls in the aligned VCF records were compared exactly. This agreement
 covers the tested perturbation scales and seeds, not arbitrary perturbations.
 
-Tie reversal exposed stronger sensitivity. The three-chromosome actm3 subset agreed throughout,
+The 4.4 rerun independently confirmed this agreement for both real inputs under all three noise
+perturbations and both sample permutations. The checks covered release-segment intervals and
+withheld counts, selected founder-count columns, painting segments, Tier-A and Tier-B relationship
+tables, relatedness tables, released phase-summary counts, recombination tables and the aligned
+founder and sample VCF header and records, excluding metadata headers. Numeric tables used the
+same tolerances; VCF values, including GT and PS, were exact. The declared noise hook materialised
+compact evidence exactly before applying the unchanged perturbation. Floating objectives and
+other diagnostics do differ in the raw strict comparisons; full-product equality is not claimed.
+Under tie reversal, the three-chromosome subset agreed in these tested families, while TroMau
+changed seven of the nine families; its relatedness and selected founder-count columns agreed.
+These comparisons concern numerical stability within 4.4, without real-data parentage truth.
+
+The historical tie-reversal comparisons exposed stronger sensitivity. The three-chromosome actm3 subset agreed throughout,
 but the n80 and stress designs differed in phase or recombination products, and TroMau differed
 in founder, painting, phase and recombination products. On TroMau chr3, reversal retained three
 release segments rather than the reference's single eight-founder segment. Its primary Tier-B
@@ -189,7 +207,7 @@ states and unordered parent sets were unchanged; parent-slot swaps carry no biol
 Figure 5's broader pedigree-family comparison includes other rendered tables. A convention-sensitive
 founder structure is not a uniquely determined biological result.
 
-![Agreement of perturbations with their own dataset's reference run, by output family. Samples,
+![Retained 4.1 and 4.2 perturbation comparisons with each dataset's reference, by output family. Samples,
 relatedness-family identifiers and unordered parent slots are aligned; painting track order is
 canonicalised within sample and component. Numeric cells use relative tolerance $10^{-9}$ and
 absolute tolerance $10^{-8}$. VCF comparisons align sample columns and retain founder labels,
@@ -308,7 +326,7 @@ of the Ice Lake matrix reference, with elapsed-time fields excluded from the com
 | $H=30$, 80 samples, five short contigs | Ice Lake / 76 | 54.32 | 17.13 | 1.45 | 104.42 |
 
 Table: Representative whole-run measurements from the 4.2 release matrix and the matching
-TroMau timing probe; these are validation measurements, not new 4.3.0 benchmarks. Time is elapsed
+TroMau timing probe, all measured with release 4.2. Time is elapsed
 wall time for `run`, with `init`
 separate and truth evaluation excluded. RSS is GNU time's `Maximum resident set size`, converted
 from KiB to decimal GB. The pressure peak is `memory.peak_live_use_bytes` in the completed run
@@ -326,6 +344,19 @@ of the final whole-genome release. This bounded
 decision-step comparison does not
 establish a whole-genome speedup at that sample count. The top-level GNU time user/system
 fields do not account for all forkserver work, so they are not reported as total pipeline CPU time.
+
+At $N=320$ and depth 2, release 4.3 first failed on a nominal 250 GB, 76-core Ice Lake node
+after about 3 h 34 min with “the memory ledger's request table is full”. A second attempt on
+that node stalled; resuming on a nominal 512 GB Ice Lake node completed, with a sampled pressure
+peak of 314.9 GiB. These were resumed attempts, not three independent full runs. Release 4.4.0
+completed in one attempt on the original 250 GB node, using 76 cores, in 7:34:09, at a sampled
+peak of 176.0 GiB under its recorded 249.9 GiB limit, with no memory wait or forced grant.
+The cross-release comparison found no scientific difference in 24,386,016 table cells and
+17,913,704 VCF records; 44 duration fields and two checkpoint-root fields differed. At depth 5,
+all values in the six archived evaluation CSV/JSON files also matched 4.3, excluding the
+checkpoint-root path. These comparisons establish resource changes with the same scientific
+outputs on the tested inputs; the failed and resumed 4.3 runs do not supply a paired cold-run
+speed comparison.
 
 ![Whole-run wall time from the 4.2 release matrix and its baseline, separated by processor
 architecture.
@@ -346,10 +377,77 @@ to 1,376 and the phased share rose from 96.57% to 96.75%, while switch errors ch
 to 31. Pedigree recovery remained weak. Across the release comparison, 32 of 39 runs retained
 the same released products; the scientific changes were confined to this simulation and six
 TroMau analyses, including its reference. TroMau's Tier-B pedigree was unchanged. These
-comparisons describe the 4.2 release matrix evidence used here; they are not a new 4.3.0
-validation or a competing-method accuracy benchmark.
+comparisons describe historical 4.1-to-4.2 changes. Release 4.4.0 preserves the scientific
+rules and the checked results of 4.3; these release comparisons do not benchmark accuracy
+against a competing method.
 
 ![K = 30 founder recovery and secondary accuracy measures from the 4.2 release matrix and
 its recorded baseline. Chromosome m2 releases
 the true number of founder rows with fewer called-allele errors; genotype, phase and pedigree
 panels show the accompanying trade-offs.](figures/fig12_k30_recovery.svg){#fig:k30_recovery width=100%}
+
+
+## Sequencing depth at $N=320$
+
+A separate series used the standard simulation configuration with seed 400, six true founder
+haplotypes, cohorts of 20, 100 and 200 animals, all 320 observed, and 22 contigs. Only mean
+sequencing depth changed in the generating configuration: 1, 1.5, 2 and 5, with one run at each
+depth. The two lowest depths also had an execution-only memory limit of 250 GiB. These are
+additional datasets, separate from the 15 simulated designs above (Table 6; Figure 13).
+
+Founder wrong and missing alleles decreased from 5.55 and 19.05 per million at depth 1 to 0.20
+and 0.02 at depth 5. Genotype errors decreased from 115 to 63 per million called genotypes.
+Every depth recovered all 600 observable pedigree edges with no extra or missing edge, all 320
+parent states and all 320 exact configurations. Switch errors decreased from 31 to 19, whereas
+within-set site errors were lowest at depth 2. The phased share was about 0.9975–0.9976 at depths
+1–2 and 0.9913 at depth 5; released phase-set N50 rounded to 39.8 Mb throughout. These four
+observations do not estimate between-replicate uncertainty or establish a minimum depth.
+
+::: {.depth-table}
+
+**A. Accuracy and release.**
+
+| Depth | Founder wrong / missing per $10^6$ | Genotype errors / $10^6$ | Switches | Set errors / $10^6$ | Phased share | Edges / states correct |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 5.55 / 19.05 | 115 | 31 | 68 | 0.9976 | 600/600; 320/320 |
+| 1.5 | 1.51 / 5.34 | 107 | 27 | 66 | 0.9976 | 600/600; 320/320 |
+| 2 | 0.54 / 2.20 | 98 | 20 | 50 | 0.9975 | 600/600; 320/320 |
+| 5 | 0.20 / 0.02 | 63 | 19 | 60 | 0.9913 | 600/600; 320/320 |
+
+Table: The 320-sample depth series in release 4.4.0. Panel A pools chromosome counts within each
+run. Founder wrong alleles use one-to-one matched calls; missing alleles use called plus missing
+founder alleles. Set errors are minority-orientation sites per million phased true heterozygotes.
+All released-set N50 values round to 39.8 Mb. Panel B reports the timed `run` command, excluding
+initialisation and evaluation. Peak live memory is the runtime's sampled pressure measure;
+GNU time maximum process RSS is separate. GiB means $2^{30}$ bytes. Full counts and definitions
+are in Supplementary Table S7.
+
+:::
+
+::: {.depth-table}
+
+**B. Computation.**
+
+| Depth | Run (h:mm:ss) | Peak live (GiB) | Limit (GiB) | GNU max. RSS (GiB) | Processor / cores |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 5:56:02 | 225.2 | 250.0 | 4.91 | Sapphire Rapids / 112 |
+| 1.5 | 5:46:27 | 225.9 | 250.0 | 5.81 | Sapphire Rapids / 112 |
+| 2 | 7:34:09 | 176.0 | 249.9 | 5.42 | Ice Lake / 76 |
+| 5 | 4:44:29 | 254.8 | 500.4 | 5.34 | Sapphire Rapids / 112 |
+
+:::
+
+Depth 2 used a nominal 250 GB, 76-core Ice Lake node. The other depths used 112-core Sapphire
+Rapids nodes; depths 1 and 1.5 ran on larger nodes under configured 250 GiB limits. No run
+recorded a memory wait or forced grant. The pressure peak is sampled during concurrent work,
+not summed worker RSS or a projected minimum memory requirement. Hardware and lane counts
+differ, so the memory differences cannot be attributed to depth and the wall times do not
+support speed comparisons across nodes.
+
+![The 320-sample depth series, with one replicate per depth. Founder wrong and missing alleles
+(a), genotype errors (b), switch counts (c) and within-set site errors (d) use the definitions in
+Table 6 and Supplementary Table S7. Lines join observations only. The computation panels show
+sampled memory pressure against the recorded governor limit (e) and run-command wall time on
+mixed hardware (f). Depths 1 and 1.5 used configured 250 GiB limits on larger nodes; depth 2 used
+76-core Ice Lake and the others 112-core Sapphire Rapids. No cross-node speedup or depth-only
+memory effect is inferred.](figures/fig13_depth_series.svg){#fig:depth_series width=100%}

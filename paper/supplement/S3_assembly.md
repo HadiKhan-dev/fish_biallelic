@@ -1,6 +1,6 @@
 # S3. Assembly, founder release and refinement
 
-Parenthesised identifiers are the software's method units; defaults are those of release 4.3.0 (none is a user setting). Notation: $T$ bins of a batch; $W$ units of a proposal window; $b_w$ surrogate bins of a window; $R$ the window's row-alphabet size.
+Parenthesised identifiers are the software's method units; defaults are those of release 4.4.0 (none is a user setting). Notation: $T$ bins of a batch; $W$ units of a proposal window; $b_w$ surrogate bins of a window; $R$ the window's row-alphabet size.
 
 ## Founder completion
 

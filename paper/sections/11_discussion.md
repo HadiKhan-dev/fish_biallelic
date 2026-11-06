@@ -39,6 +39,14 @@ dropout and partial observation changed together, these runs do not estimate sep
 a coverage threshold. Each design has only one seed, apart from the second seed of the small
 cohort design; broader replication is needed for uncertainty across simulated datasets.
 
+The separate $N=320$ series retains the same configuration and seed while changing mean depth
+from 1 to 5. Founder wrong and missing alleles and genotype errors decreased over these four
+observations, while all 600 observable parent edges and all 320 states were correct throughout.
+Phase was not uniformly improved by depth: switch counts fell, but the phased share was lower
+at depth 5 and the within-set site-error rate was not monotonic. One replicate per depth does
+not establish a coverage threshold or uncertainty across crosses. These are depth comparisons
+within 4.4, whose scientific rules and checked results retain 4.3's meaning.
+
 TroMau supplies an application without individual-level parentage truth. The supported edges,
 chromosome-resampling fractions and candidate margins describe inference, and the generation
 labels cannot validate it. Chr3's component structure changed under tie-convention reversal.
@@ -68,7 +76,12 @@ should not be confused with its direct-route query-count trend. Small measured k
 and small observed tie classes do not bound a whole adaptive search. Independently of $K$,
 all-candidate relatedness and pedigree comparisons are quadratic in sample count. The documented
 sample-scale envelope uses bounded genome crops and does not establish that any whole-genome
-cross of that size will fit a particular machine.
+cross of that size will fit a particular machine. The 4.4 depth-2 analysis did complete on the
+nominal 250 GB node that could not finish 4.3; depths 1 and 1.5 completed under configured
+250 GiB limits on larger nodes. These limits and sampled pressure peaks do not estimate a
+minimum memory requirement. Hardware, CPU counts and lane concurrency differ across the depth
+series, so its memory variation cannot be assigned to depth, and its wall times do not establish
+cross-node speedups.
 
 Future work should redesign discovery and selection around a clearer search and stopping
 contract, rather than increase fixed budgets. Promising directions are structural decomposition

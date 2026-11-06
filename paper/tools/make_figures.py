@@ -1,6 +1,6 @@
 """Generate the manuscript figures as SVG, using only the standard library.
 
-Figure 1 is the 4.0 stage graph (haplotype_reconstruction/stages/graph.py).
+Figure 1 is the stage graph (haplotype_reconstruction/stages/graph.py).
 Figure 2 is drawn from the "Kernel ladders" table of docs/developer/costs.md, so it
 always shows the slopes recorded there; nothing is measured or typed in here.
 
@@ -9,6 +9,7 @@ Run from anywhere: python3 paper/tools/make_figures.py
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -119,10 +120,10 @@ LADDER_ROW = re.compile(
 )
 
 
-def read_ladders() -> list[dict[str, object]]:
+def read_ladders(costs=COSTS) -> list[dict[str, object]]:
     rows = []
     in_table = False
-    for line in COSTS.read_text(encoding="utf-8").splitlines():
+    for line in costs.read_text(encoding="utf-8").splitlines():
         if line.startswith("## Kernel ladders"):
             in_table = True
             continue
@@ -134,7 +135,7 @@ def read_ladders() -> list[dict[str, object]]:
                              kse=float(match["kse"]), n=float(match["n"]), nse=float(match["nse"]),
                              exempt=match["kgate"] == "exempt"))
     if not rows:
-        raise SystemExit(f"no kernel-ladder rows parsed from {COSTS}")
+        raise SystemExit(f"no kernel-ladder rows parsed from {costs}")
     return rows
 
 
@@ -185,15 +186,18 @@ def figure_scaling(rows: list[dict[str, object]]) -> str:
     body.append(f'<circle cx="{label_w + 6}" cy="{legend_y - 3.5}" r="3.2" fill="{CUBIC}"/>')
     body.append(text(label_w + 14, legend_y, "kernel gated at most cubic in K", 9.5, anchor="start"))
     body.append(f'<circle cx="{label_w + 236}" cy="{legend_y - 3.5}" r="3.2" fill="{EXEMPT}"/>')
-    body.append(text(label_w + 244, legend_y, "kernel under a decided cost exemption (0, 0b, 0c, 0d)", 9.5,
+    body.append(text(label_w + 244, legend_y, "kernel under a decided cost exemption", 9.5,
                      anchor="start"))
     return svg(int(width), int(height), body)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--docs-dir', type=Path, default=REPO / 'docs')
+    args = parser.parse_args()
     FIGURES.mkdir(exist_ok=True)
     (FIGURES / "fig1_pipeline.svg").write_text(figure_pipeline(), encoding="utf-8")
-    rows = read_ladders()
+    rows = read_ladders(args.docs_dir / 'developer/costs.md')
     (FIGURES / "fig2_scaling.svg").write_text(figure_scaling(rows), encoding="utf-8")
     print(f"figures: fig1_pipeline.svg, fig2_scaling.svg ({len(rows)} probed kernels)")
 

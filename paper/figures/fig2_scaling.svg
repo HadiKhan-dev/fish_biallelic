@@ -113,14 +113,14 @@
 <circle cx="436.8" cy="271.5" r="3.2" fill="#2f5d9e"/>
 <line x1="424.8" y1="286.5" x2="431.7" y2="286.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="428.2" cy="286.5" r="3.2" fill="#2f5d9e"/>
-<line x1="384.9" y1="301.5" x2="386.1" y2="301.5" stroke="#c0571b" stroke-width="1.4"/>
-<circle cx="385.5" cy="301.5" r="3.2" fill="#c0571b"/>
+<line x1="384.9" y1="301.5" x2="386.1" y2="301.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="385.5" cy="301.5" r="3.2" fill="#2f5d9e"/>
 <line x1="333.6" y1="316.5" x2="334.8" y2="316.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="334.2" cy="316.5" r="3.2" fill="#2f5d9e"/>
 <line x1="422.6" y1="331.5" x2="429.4" y2="331.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="426.0" cy="331.5" r="3.2" fill="#2f5d9e"/>
-<line x1="427.1" y1="346.5" x2="440.8" y2="346.5" stroke="#c0571b" stroke-width="1.4"/>
-<circle cx="434.0" cy="346.5" r="3.2" fill="#c0571b"/>
+<line x1="427.1" y1="346.5" x2="440.8" y2="346.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="434.0" cy="346.5" r="3.2" fill="#2f5d9e"/>
 <line x1="461.9" y1="361.5" x2="467.6" y2="361.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="464.7" cy="361.5" r="3.2" fill="#2f5d9e"/>
 <line x1="438.5" y1="376.5" x2="439.6" y2="376.5" stroke="#2f5d9e" stroke-width="1.4"/>
@@ -207,14 +207,14 @@
 <circle cx="775.6" cy="271.5" r="3.2" fill="#2f5d9e"/>
 <line x1="777.5" y1="286.5" x2="781.3" y2="286.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="779.4" cy="286.5" r="3.2" fill="#2f5d9e"/>
-<line x1="796.5" y1="301.5" x2="811.7" y2="301.5" stroke="#c0571b" stroke-width="1.4"/>
-<circle cx="804.1" cy="301.5" r="3.2" fill="#c0571b"/>
+<line x1="796.5" y1="301.5" x2="811.7" y2="301.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="804.1" cy="301.5" r="3.2" fill="#2f5d9e"/>
 <line x1="677.8" y1="316.5" x2="685.4" y2="316.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="681.5" cy="316.5" r="3.2" fill="#2f5d9e"/>
 <line x1="777.5" y1="331.5" x2="777.5" y2="331.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="777.5" cy="331.5" r="3.2" fill="#2f5d9e"/>
-<line x1="777.5" y1="346.5" x2="777.5" y2="346.5" stroke="#c0571b" stroke-width="1.4"/>
-<circle cx="777.5" cy="346.5" r="3.2" fill="#c0571b"/>
+<line x1="777.5" y1="346.5" x2="777.5" y2="346.5" stroke="#2f5d9e" stroke-width="1.4"/>
+<circle cx="777.5" cy="346.5" r="3.2" fill="#2f5d9e"/>
 <line x1="777.5" y1="361.5" x2="777.5" y2="361.5" stroke="#2f5d9e" stroke-width="1.4"/>
 <circle cx="777.5" cy="361.5" r="3.2" fill="#2f5d9e"/>
 <line x1="777.5" y1="376.5" x2="777.5" y2="376.5" stroke="#2f5d9e" stroke-width="1.4"/>
@@ -252,5 +252,5 @@
 <circle cx="306" cy="653.5" r="3.2" fill="#2f5d9e"/>
 <text x="314.0" y="657.0" font-size="9.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#1a1a1a">kernel gated at most cubic in K</text>
 <circle cx="536" cy="653.5" r="3.2" fill="#c0571b"/>
-<text x="544.0" y="657.0" font-size="9.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#1a1a1a">kernel under a decided cost exemption (0, 0b, 0c, 0d)</text>
+<text x="544.0" y="657.0" font-size="9.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#1a1a1a">kernel under a decided cost exemption</text>
 </svg>

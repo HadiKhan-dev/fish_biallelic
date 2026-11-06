@@ -3,15 +3,16 @@
 
 Reads only published tables/VCFs, evaluation reports, configs and timing receipts;
 never imports or runs the pipeline. All input locations are command-line arguments.
-Use --costs-only to refresh cost evidence without rescanning released VCFs.
+Use --costs-only to refresh historical costs; --depth-run and --matrix44 preserve
+legacy summaries while extracting new depth evidence and checking retained scores.
 The plotting script reads only the compact output directory. See figures/CAPTIONS.md
 for denominators, aggregation rules and the deliberately limited stage coverage.
 
 Example (paths supplied by the caller):
-  python -P paper42/tools/figure_data.py --matrix42 MATRIX42 --matrix41 MATRIX41 \
+  python -P paper/tools/figure_data.py --matrix42 MATRIX42 --matrix41 MATRIX41 \
       --probes PROBES --node-logs NODE_LOGS \
       --processor 'PREFIX_A=Sapphire Rapids:112' \
-      --processor 'PREFIX_B=Ice Lake:76' --mosaic-chromosome chr1 --out paper42/data
+      --processor 'PREFIX_B=Ice Lake:76' --mosaic-chromosome chr1 --out paper/data
 
 Replace the path and prefix placeholders with the caller's input locations and
 receipt host prefixes. Processor mappings are required; none are built in or
@@ -454,8 +455,7 @@ def tromau_processor_costs(matrix42, probes, node_logs, processors):
 
 
 def cost_context():
-    return dict(manuscript_target_release='4.3',
-                release43_validation='39-case matrix pending; cost measurements retain their measured versions',
+    return dict(manuscript_target_release='4.4.0',
                 tromau_processor_comparison=dict(
                     measured_version='4.2', plotted_time='run command only',
                     additional_retained_times='init and init plus run',
@@ -499,19 +499,373 @@ def paired_costs(probes, node_logs, matrix42, processors):
     return result
 
 
+def canonical_table44(path, columns):
+    """Align the snake_case 4.3/4.4 layout without rematching founder identities."""
+    records = rows(path)
+    family_ids = {}
+    if path.parent.name == 'relatedness':
+        members = defaultdict(list)
+        for r in rows(path.parent / 'families.csv'):
+            members[r['family']].append(r['sample'])
+        family_ids = {key: ';'.join(sorted(value)) for key, value in members.items()}
+    for r in records:
+        r.pop('elapsed_seconds', None)
+        r.pop('parent_slot', None)
+        for key in ['family', 'family_a', 'family_b']:
+            if key in r:
+                r[key] = family_ids[r[key]]
+        for a, b in [('sample_a', 'sample_b'), ('family_a', 'family_b')]:
+            if a in r and r[a] > r[b]:
+                r[a], r[b] = r[b], r[a]
+        if 'parent1' in r and (not r['parent1'] or (r['parent2'] and r['parent1'] > r['parent2'])):
+            for a in list(r):
+                if a.startswith('parent1'):
+                    b = a.replace('parent1', 'parent2', 1)
+                    if b in r:
+                        r[a], r[b] = r[b], r[a]
+        for key in ['parents', 'children']:
+            if key in r:
+                r[key] = ';'.join(sorted(r[key].split(';')))
+    if path.name == 'sample_segments.csv':
+        groups = defaultdict(list)
+        for r in records:
+            groups[(r['contig'], r['sample'], r['component'])].append(r)
+        for group in groups.values():
+            tracks = {t: sorted((int(r['start']), int(r['end']), r['status'], r['label'], r['rows'])
+                                for r in group if r['track'] == t) for t in ['0', '1']}
+            if tracks['1'] < tracks['0']:
+                for r in group:
+                    r['track'] = str(1 - int(r['track']))
+    if columns:
+        records = [{key: r[key] for key in columns} for r in records]
+    return sorted(records, key=lambda r: tuple(r.values()))
+
+
+def robustness44(matrix, out):
+    """Direct selected-product agreement within 4.4; no real-data truth claim."""
+    scope = {
+ 'release_segments':('export/manifest.json',None),
+ 'founder_counts':('painting/founder_counts.csv',['contig','component','first_variant_1based','last_variant_1based','founder_rows','founder_count_ambiguous']),
+ 'paintings':('painting/sample_segments.csv',None),
+ 'pedigree':('pedigree/tier_*relationships.csv',None),
+ 'relatedness':('relatedness/*.csv',None),
+ 'phase_summary':('family_phase/summary.csv',['contig','samples','sites','components','called_alleles','phased_heterozygotes','unphased_heterozygotes','phase_sets']),
+ 'recombination':('recombination/*.csv',None),
+ 'founder_alleles':('export/*.founders.vcf.gz',None),
+ 'sample_GT_PS':('export/*.samples.vcf.gz',None)}
+    digest_cache, results = {}, []
+    for design, reference in [('tromau', 'tromau'), ('actm3', 'zero_actm3_ref')]:
+        base = matrix / 'runs' / ('e2e44_' + reference)
+        for variant in ['iid12_s1', 'iid9_s1', 'val12_s1', 'perm_s1', 'vcfperm_s1', 'rev']:
+            case = 'zero_' + design + '_' + variant
+            run = base.parent / ('e2e44_' + case)
+            for family, (pattern, columns) in scope.items():
+                aa = {str(p.relative_to(base)): p for p in base.glob(pattern)}
+                bb = {str(p.relative_to(run)): p for p in run.glob(pattern)}
+                if not aa or not bb:
+                    raise ValueError('Missing 4.4 agreement products')
+                differences = sorted(aa.keys() ^ bb.keys())
+                for name in sorted(aa.keys() & bb.keys()):
+                    a, b = aa[name], bb[name]
+                    if family == 'release_segments':
+                        same = release_segments(a) == release_segments(b)
+                    elif name.endswith('.vcf.gz'):
+                        header = vcf_header(a)
+                        for p in (a, b):
+                            key = (p, header)
+                            if key not in digest_cache:
+                                digest_cache[key] = vcf_digest(p, header)
+                        same = digest_cache[(a, header)] == digest_cache[(b, header)]
+                    else:
+                        x, y = canonical_table44(a, columns), canonical_table44(b, columns)
+                        same = len(x) == len(y) and all(
+                            u.keys() == v.keys() and all(equal_cell(u[k], v[k]) for k in u)
+                            for u, v in zip(x, y))
+                        if not x and not y:
+                            same = a.read_text().splitlines()[0] == b.read_text().splitlines()[0]
+                    if not same:
+                        differences.append(name)
+                results.append(dict(version='4.4.0', design=design, variant=variant, family=family,
+                                    files=len(aa), equal=int(not differences), differing_files=';'.join(differences),
+                                    source='matrix44/runs/{e2e44_' + reference + ',e2e44_' + case + '}/' + pattern))
+            print(f'Agreement 4.4 {case}', flush=True)
+    write_csv(out, 'robustness44.csv', results)
+    return dict(source='matrix44/runs/e2e44_*/',
+                scope={k: dict(pattern=v[0], columns=v[1]) for k, v in scope.items()},
+                numeric_table_relative_tolerance=1e-9, numeric_table_absolute_tolerance=1e-8,
+                vcf='Exact SHA-256 of aligned #CHROM header and records, excluding ## metadata; founder labels, missingness, GT and PS retained',
+                alignment='Sample IDs; families by membership; unordered parents; undirected endpoints; whole painting-track exchange per sample/component; elapsed_seconds and parent_slot excluded',
+                summary='Both real datasets match in all nine selected families under iid12, iid9, val12, perm and vcfperm; actm3 also under reversal. TroMau reversal changes seven families.',
+                limitations=['No real-data truth or cross-release identity verdict.',
+                             'Exact raw comparisons in depth-comparison/realdata/*.json include numerical diagnostic differences and sample order; their full-product passed flags are false.',
+                             'Selected founder-count and phase-summary columns exclude search and floating objective diagnostics.'])
+
+
+def depth_argument(value):
+    try:
+        depth, path = value.split('=', 1)
+        depth = float(depth)
+        if not math.isfinite(depth) or depth <= 0 or not path:
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError('Expected positive DEPTH=PATH') from None
+    return depth, Path(path)
+
+
+def final_truth(summary):
+    """Pool founder counts using the manuscript's matched-call denominator."""
+    founders = [r for r in summary['founders'] if r['stage'] == 'founder_refit']
+    if not founders:
+        raise ValueError('Final founder-refit evaluation required')
+    total = lambda key: sum(int(r[key]) for r in founders)
+    t, p = summary['totals'], summary['pedigree']
+    for key in ['called_genotypes', 'genotype_errors', 'switch_errors', 'set_aligned_errors',
+                'phased_true_heterozygotes', 'correct_true_heterozygotes']:
+        if t[key] != sum(r[key] for r in summary['chromosomes']):
+            raise ValueError(f'Chromosome totals disagree for {key}')
+    return dict(samples=summary['samples'], chromosomes=len(summary['chromosomes']), seed=summary['seed'],
+                founder_stage='founder_refit', founder_called_alleles=total('called_alleles'),
+                founder_matched_called_alleles=total('matched_called_alleles'),
+                founder_wrong=total('one_to_one_called_allele_errors'),
+                founder_missing=total('missing_alleles'), founder_truth_alleles=total('truth_alleles'),
+                founder_wrong_ppm=ratio(1e6 * total('one_to_one_called_allele_errors'), total('matched_called_alleles')),
+                founder_missing_ppm=ratio(1e6 * total('missing_alleles'), total('called_alleles') + total('missing_alleles')),
+                called_genotypes=t['called_genotypes'], genotype_errors=t['genotype_errors'],
+                genotype_errors_ppm=ratio(1e6 * t['genotype_errors'], t['called_genotypes']),
+                phased_true_heterozygotes=t['phased_true_heterozygotes'],
+                correct_true_heterozygotes=t['correct_true_heterozygotes'],
+                phased_share=ratio(t['phased_true_heterozygotes'], t['correct_true_heterozygotes']),
+                switch_errors=t['switch_errors'], long_switches=t['long_switches'],
+                set_aligned_errors=t['set_aligned_errors'],
+                set_errors_ppm=ratio(1e6 * t['set_aligned_errors'], t['phased_true_heterozygotes']),
+                released_phase_sets=t['released_phase_sets'],
+                released_phase_set_n50_bp=t['released_phase_set_n50_bp'],
+                true_edges=p['true_edges'], correct_edges=p['correct_edges'],
+                missing_edges=p['missing_edges'], extra_edges=p['extra_edges'],
+                correct_parent_states=p['correct_parent_states'], exact_configurations=p['exact_configurations'])
+
+
+def evaluation_root(root):
+    for path in [root / 'run/evaluation', root / 'evaluation', root]:
+        if (path / 'summary.json').is_file():
+            return path
+    raise ValueError('No evaluation summary in supplied depth source')
+
+
+def file_hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def evaluation_comparison(a, b):
+    """Exact evaluation values, allowing numeric CSV spelling and checkpoint roots."""
+    aa = {p.name: p for p in a.iterdir() if p.suffix in ('.csv', '.json')}
+    bb = {p.name: p for p in b.iterdir() if p.suffix in ('.csv', '.json')}
+    differences = sorted(aa.keys() ^ bb.keys())
+    for name in sorted(aa.keys() & bb.keys()):
+        if name.endswith('.json'):
+            x, y = read_json(aa[name]), read_json(bb[name])
+            x.pop('checkpoint_root', None)
+            y.pop('checkpoint_root', None)
+            same = x == y
+        else:
+            x, y = rows(aa[name]), rows(bb[name])
+            def exact(u, v):
+                if u == v:
+                    return True
+                try:
+                    from decimal import Decimal
+                    a, b = Decimal(u), Decimal(v)
+                    return (a.is_nan() and b.is_nan()) or a == b
+                except (ValueError, ArithmeticError):
+                    return False
+            same = len(x) == len(y) and all(
+                u.keys() == v.keys() and all(exact(u[k], v[k]) for k in u) for u, v in zip(x, y))
+        if not same:
+            differences.append(name)
+    return dict(files=len(aa), equal=not differences, differing_files=differences,
+                scope='All evaluation CSV/JSON values and order; checkpoint_root excluded; numeric CSV spelling equivalent; no tolerance')
+
+
+def depth_data(args, metadata):
+    depths = dict(args.depth_run)
+    if len(depths) != len(args.depth_run):
+        raise ValueError('Duplicate --depth-run depth')
+    baselines = dict(args.depth_baseline43 or [])
+    if len(baselines) != len(args.depth_baseline43 or []):
+        raise ValueError('Duplicate --depth-baseline43 depth')
+    if baselines.keys() - depths.keys():
+        raise ValueError('Every baseline depth requires a corresponding --depth-run')
+    records, receipts, provenance = [], [], {}
+    for depth, base in sorted(depths.items()):
+        label = f'depth44/d{depth:g}'
+        eroot = evaluation_root(base)
+        summary = read_json(eroot / 'summary.json')
+        config = tomllib.loads((base / 'config.toml').read_text())
+        if config['simulation']['depth'] != depth:
+            raise ValueError('Depth argument disagrees with config')
+        if not re.search(r'\brc=0\s+eval_rc=0\b', (base / 'RESULT.txt').read_text()):
+            raise ValueError('Depth run did not complete successfully')
+        commands = [read_json(p) for p in sorted((base / 'run/run_records').glob('*.json'))]
+        run = [r for r in commands if r['command'] == 'run']
+        if len(run) != 1 or any(r['state'] != 'complete' for r in commands):
+            raise ValueError('Depth series requires one completed run attempt')
+        run = run[0]
+        architecture, cores = node_type(run['host'], args.processor)
+        if run['cpu_affinity'] != cores:
+            raise ValueError('Depth run does not use the stated full-node affinity')
+        timing = time_receipt(base / 'run.time.log')
+        if timing is None:
+            raise ValueError('Missing successful depth run timing')
+        memory = run['memory']
+        last = [line for line in (base / 'run.log').read_text().splitlines() if '[memory]' in line][-1]
+        admission = re.search(r'(\d+) admissions, (\d+) waits, (\d+) forced grants', last)
+        if not admission or tuple(map(int, admission.groups())) != tuple(memory[k] for k in ('admissions', 'waits', 'forced')):
+            raise ValueError('Memory log and run record disagree')
+        counts = final_truth(summary)
+        records.append(dict(depth=depth, version='4.4.0', **counts,
+                            processor=architecture, node_cores=cores,
+                            run_wall_seconds=timing['wall_seconds'], run_peak_rss_kib=timing['peak_rss_kib'],
+                            peak_live_bytes=memory['peak_live_use_bytes'], memory_limit_bytes=memory['limit_bytes'],
+                            configured_limit_bytes=memory['configured_bytes'] or '',
+                            admissions=memory['admissions'], waits=memory['waits'], forced_grants=memory['forced'],
+                            source=label + '/{config.toml,run.time.log,run.log,run/evaluation/summary.json,run/run_records/*.json}'))
+        provenance[f'{depth:g}'] = dict(source=label, config_sha256=file_hash(base / 'config.toml'),
+                                       evaluation_sha256=file_hash(eroot / 'summary.json'),
+                                       run_time_sha256=file_hash(base / 'run.time.log'))
+        if depth in baselines:
+            old = evaluation_root(baselines[depth])
+            comparison = evaluation_comparison(old, eroot)
+            comparison['source'] = f'depth43/d{depth:g}/evaluation'
+            provenance[f'{depth:g}']['baseline43'] = comparison
+            if not comparison['equal']:
+                raise ValueError(f'4.3/4.4 evaluation differences at depth {depth:g}: {comparison["differing_files"]}')
+    # Keep old attempts separate: a successful resumed command is not a cold whole run.
+    for depth, base in sorted(baselines.items()):
+        if not (base / 'run/run_records').is_dir():
+            continue
+        attempt = 0
+        for p in sorted((base / 'run/run_records').glob('*.json')):
+            r = read_json(p)
+            if r['command'] != 'run':
+                continue
+            attempt += 1
+            architecture, cores = node_type(r['host'], args.processor)
+            m = r['memory']
+            receipts.append(dict(depth=depth, version='4.3.0', attempt=attempt, state=r['state'],
+                                 processor=architecture, node_cores=cores,
+                                 runtime_wall_seconds=r['wall_seconds'],
+                                 peak_live_bytes=m['peak_live_use_bytes'], memory_limit_bytes=m['limit_bytes'],
+                                 waits=m['waits'], forced_grants=m['forced'],
+                                 source=f'depth43/d{depth:g}/run/run_records/{p.name}'))
+    write_csv(args.out, 'depth_series.csv', records)
+    if receipts:
+        write_csv(args.out, 'depth_baselines.csv', receipts)
+    metadata['depth_series44'] = dict(
+        release='4.4.0', commit='867f163', replicates_per_depth=1, sources=provenance,
+        definitions=dict(founder_wrong_ppm='One-to-one errors / matched called founder alleles * 1e6; all rows matched in this series, so identical to compare/metrics.py all-call denominator',
+                         founder_missing_ppm='Missing founder alleles / (called + missing founder alleles) * 1e6',
+                         genotype_errors_ppm='Genotype errors / called genotypes * 1e6',
+                         set_errors_ppm='Minority-orientation sites within each released set / phased true heterozygotes * 1e6',
+                         phased_share='Phased true heterozygotes / correctly called true heterozygotes',
+                         released_phase_set_n50_bp='Pooled released-set span N50, not mean chromosome N50',
+                         peak_live_bytes='Run record sampled memory pressure; includes concurrent work and node pressure; not summed RSS',
+                         run_peak_rss_kib='GNU time maximum process RSS of run command only; separate init/evaluate excluded',
+                         run_wall_seconds='GNU time elapsed run command, one successful attempt; runtime timer excludes some command overhead'),
+        limitations=['One replicate per depth; no uncertainty across simulated datasets.',
+                     'Mixed processor architectures, CPU counts and concurrent lane counts; no cross-node speedup or depth-only memory effect.',
+                     'Depths 1 and 1.5 use configured 250 GiB governor limits on larger nodes.',
+                     'Limits are recorded bytes, not nominal node labels.'])
+
+
+def matrix44_provenance(root, out, metadata):
+    """Recheck retained scalar evidence without running the matrix's writing tools."""
+    reference = {(r['case'], r['version']): r for r in rows(out / 'simulation_accuracy.csv')}
+    baseline = {(r['case'], r['version']): r for r in rows(root / 'baseline43/simulation_accuracy.csv')}
+    results, fields = [], None
+    for p in sorted((root / 'scores').glob('*.json')):
+        if p.name == 'summary.json':
+            continue
+        r = read_json(p)
+        old = read_json(root / 'baseline43' / p.name)
+        if not old['passed'] or old['counts']['scientific_differences']:
+            raise ValueError('Archived baseline does not establish 4.3/4.2 equality')
+        commands = ['init', 'run', 'eval'] if r['status'] == 'PASS_PROJECTED_TRUTH' else ['init', 'run']
+        execution = read_json(root / 'runs' / ('e2e44_' + r['case']) / 'RESULT.json')
+        if any(execution[k] != 0 for k in ['rc', 'eval_rc', 'compare_rc']) or not all(r['performance44'][k + '_complete'] for k in commands):
+            raise ValueError('Incomplete matrix case')
+        if r['status'] == 'PASS_PROJECTED_TRUTH':
+            current_fields = [c['metric'] for c in r['comparisons']]
+            fields = current_fields if fields is None else fields
+            if fields != current_fields or not all(c['equal'] for c in r['comparisons']):
+                raise ValueError('Matrix scalar comparisons disagree')
+            key = (r['case'], '4.2')
+            if reference[key] != baseline[key]:
+                raise ValueError('Tracked scalar summary differs from archived baseline')
+            for c in r['comparisons']:
+                if not equal_cell(reference[key][c['metric']], c['actual']):
+                    raise ValueError('Matrix score differs from tracked scalar summary')
+        elif r['status'] != 'NO_TRUTH':
+            raise ValueError('Unexpected matrix status')
+        results.append(dict(case=r['case'], status=r['status']))
+    metadata['release44_validation'] = dict(
+        source='matrix44/{scores,baseline43}/*.json', cases=len(results),
+        simulation_cases=sum(r['status'] == 'PASS_PROJECTED_TRUTH' for r in results),
+        real_data_cases=sum(r['status'] == 'NO_TRUTH' for r in results),
+        matched_fields=fields, results=results,
+        baseline='Retained 4.2 scalar truth fields carried to 4.3 by each case archived zero-scientific-difference comparison; checked against unchanged data/simulation_accuracy.csv',
+        limitations=['Full 4.3 matrix evaluations and raw outputs were deleted; only retained scalar fields checked transitively.',
+                     'Founder component, continuity, phase-stratum and recombination truth fields absent from the scalar summary are not newly established equal.',
+                     'Real-data cases have no individual truth; within-4.4 released-product tests are separate.'],
+        noise_hook='Declared compact-evidence materialisation before unchanged frozen noise draws; matrix44/HOOKS.md and prepare.py')
+    metadata['manuscript_target_release'] = '4.4.0'
+    metadata['release43_validation'] = 'Archived 39-case comparisons passed against mapped 4.2 outputs; raw 4.3 matrix outputs no longer retained'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--matrix42', type=Path, required=True)
-    parser.add_argument('--matrix41', type=Path, required=True)
-    parser.add_argument('--probes', type=Path, required=True)
-    parser.add_argument('--node-logs', type=Path, required=True, help='Node queue log directory for processor identification and receipt checks')
+    parser.add_argument('--matrix42', type=Path)
+    parser.add_argument('--matrix41', type=Path)
+    parser.add_argument('--probes', type=Path)
+    parser.add_argument('--node-logs', type=Path, help='Node queue log directory for processor identification and receipt checks')
     parser.add_argument('--processor', action='append', type=processor_argument, required=True,
                         metavar='PREFIX=NAME:CORES', help='Repeat for every host prefix in the receipts; no built-in mappings')
     parser.add_argument('--out', type=Path, default=PAPER / 'data')
     parser.add_argument('--mosaic-chromosome', default='chr1')
     parser.add_argument('--costs-only', action='store_true', help='Refresh paired costs and cost provenance in an existing summary directory')
+    parser.add_argument('--depth-run', action='append', type=depth_argument, metavar='DEPTH=PATH')
+    parser.add_argument('--depth-baseline43', action='append', type=depth_argument, metavar='DEPTH=PATH')
+    parser.add_argument('--realdata44', action='store_true', help='Compare selected released products within --matrix44, including streamed VCFs')
+    parser.add_argument('--depth-comparison43', type=Path, help='Saved exact depth-2 cross-release comparison JSON')
+    parser.add_argument('--matrix44', type=Path, help='Audit saved scores and baseline without running matrix tools')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.realdata44 and not args.matrix44:
+        parser.error('--realdata44 requires --matrix44')
+    if args.depth_baseline43 and not args.depth_run:
+        parser.error('--depth-baseline43 requires --depth-run')
+    if args.depth_run or args.matrix44:
+        if args.costs_only:
+            parser.error('--costs-only cannot be combined with depth/matrix44 extraction')
+        metadata = read_json(args.out / 'provenance.json')
+        if args.depth_run:
+            depth_data(args, metadata)
+        elif args.depth_baseline43:
+            parser.error('--depth-baseline43 requires --depth-run')
+        if args.matrix44:
+            matrix44_provenance(args.matrix44, args.out, metadata)
+        if args.realdata44:
+            metadata['realdata44_validation'] = robustness44(args.matrix44, args.out)
+        if args.depth_comparison43:
+            comparison = read_json(args.depth_comparison43)
+            if not comparison['passed'] or comparison['counts']['scientific_differences']:
+                raise ValueError('Depth-2 exact output comparison failed')
+            metadata['depth2_output_comparison43'] = dict(source='depth-comparison/d2_43_vs_44_final.json',
+                                                         sha256=file_hash(args.depth_comparison43),
+                                                         counts=comparison['counts'], policy=comparison['policy'])
+        (args.out / 'provenance.json').write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
+        return
+    if not all([args.matrix42, args.matrix41, args.probes, args.node_logs]):
+        parser.error('Legacy extraction requires --matrix42, --matrix41, --probes and --node-logs; use depth/matrix44 mode to retain existing summaries')
     if args.costs_only:
         metadata = read_json(args.out / 'provenance.json')
         write_csv(args.out, 'paired_costs.csv', paired_costs(args.probes, args.node_logs, args.matrix42, args.processor))

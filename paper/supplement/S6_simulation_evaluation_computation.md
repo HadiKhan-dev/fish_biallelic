@@ -47,7 +47,7 @@ wiring and is not an accuracy experiment.
 
 ## Validation datasets and configurations
 
-The 4.2 release matrix contains 39 runnable entries; rows retained only as historical, non-runnable
+The matrix introduced for 4.2 and rerun for 4.4 contains 39 runnable entries; rows retained only as historical, non-runnable
 matrix entries are excluded. Fifteen distinct simulated datasets have truth: the thirteen design
 cases and the two references named `zero_std_n80_ref` and `zero_stress_n80_ref`. Their other
 variants repeat inference on the same generated data. `n80` and `stress` abbreviate those two
@@ -246,6 +246,101 @@ source assembly components. Founder labels reset between segments.
 | chr23 | 318039 | 102315 | 512 | 1 | 3 | 8,8,8 |
 
 
+## The 320-sample depth series
+
+The separate series uses `configs/simulation.toml` at release 4.4.0 (commit `867f163`), seed
+400 and the empirical six-haplotype templates. All 320 animals in cohorts [20, 100, 200] are
+observed; their template founders are unobserved. There are 22 contigs: chr1–chr20, chr22 and
+chr23, in that order. Read depth is the only changed generating parameter (1, 1.5, 2 or 5).
+Reads use the default independent-site Poisson model, error probability 0.02, heterozygous ALT
+probability 0.5, no depth variation and no dropout. Generating and inference fallback rates are
+both 5 cM/Mb, with no map files and the inference fallback marked unmeasured. Backcrossing is
+off. Depths 1 and 1.5 additionally set the execution-only `memory_limit` to `250G`, which the
+runtime interprets as 250 GiB. The runs use one seed and one replicate per depth; no cross-depth
+hardware or lane-count matching was performed.
+
+**Supplementary Table S7. The full depth series.** Panel A gives rates; panel B gives exact final
+founder-refit and genotype counts; panel C gives phase and pedigree; panel D gives computation. Main-text
+Table 6 reports the corresponding rates. All founder rows are matched, so using matched called
+alleles (the manuscript definition) or all called alleles (the comparison script's definition)
+gives the same one-to-one error rate here. Founder missing rates divide missing by called plus
+missing alleles; the sum is 53,741,112 at every depth. Genotype rates divide errors by called
+genotypes. Set-aligned site errors count minority-orientation sites within each released set
+and divide by phased true heterozygotes; they are not switch events. Phased share divides those
+heterozygotes by correctly called true heterozygotes. N50 is the global released-set span N50
+from evaluation totals, recomputed from pooled spans by the evaluator, not averaged over
+chromosome N50s.
+
+::: {.depth-table}
+
+**A. Rates and release.**
+
+| Depth | Founder wrong / missing per $10^6$ | Genotype errors per $10^6$ | Set errors per $10^6$ | Phased share |
+| --- | --- | --- | --- | --- |
+| 1 | 5.55 / 19.05 | 115 | 68 | 0.9976 |
+| 1.5 | 1.51 / 5.34 | 107 | 66 | 0.9976 |
+| 2 | 0.54 / 2.20 | 98 | 50 | 0.9975 |
+| 5 | 0.20 / 0.02 | 63 | 60 | 0.9913 |
+
+:::
+
+::: {.depth-table}
+
+**B. Founder and genotype counts.**
+
+| Depth | Called founder alleles | Wrong | Missing | Called genotypes | Genotype errors |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 53,740,088 | 298 | 1024 | 2,864,927,399 | 330,862 |
+| 1.5 | 53,740,825 | 81 | 287 | 2,864,738,842 | 305,481 |
+| 2 | 53,740,994 | 29 | 118 | 2,864,497,726 | 280,489 |
+| 5 | 53,741,111 | 11 | 1 | 2,864,012,489 | 179,900 |
+
+:::
+
+::: {.depth-table}
+
+**C. Phase and pedigree counts.**
+
+| Depth | Phased / correct true het. | Set site errors | Switches / long | Released sets | Released-set N50 (bp) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 487,466,845 / 488,652,509 | 32,979 | 31 / 13 | 7,101 | 39,779,055 |
+| 1.5 | 487,541,151 / 488,701,752 | 32,028 | 27 / 7 | 7,118 | 39,779,037 |
+| 2 | 487,471,374 / 488,707,602 | 24,468 | 20 / 6 | 7,114 | 39,779,055 |
+| 5 | 484,309,497 / 488,570,031 | 29,210 | 19 / 7 | 7,143 | 39,759,093 |
+
+:::
+
+Every row has 600/600 true edges correct, no extra or missing edge, 320/320 states correct
+and 320/320 exact configurations. The expected states are 20 zero-observed-parent and 300
+two-observed-parent states; no sample has exactly one observed parent.
+
+::: {.depth-table}
+
+**D. Run-command computation.**
+
+| Depth | Run (h:mm:ss) | Peak live (GiB) | Limit (GiB) | GNU max. RSS (GiB) | Processor / cores |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 5:56:02 | 225.2 | 250.0 | 4.91 | Sapphire Rapids / 112 |
+| 1.5 | 5:46:27 | 225.9 | 250.0 | 5.81 | Sapphire Rapids / 112 |
+| 2 | 7:34:09 | 176.0 | 249.9 | 5.42 | Ice Lake / 76 |
+| 5 | 4:44:29 | 254.8 | 500.4 | 5.34 | Sapphire Rapids / 112 |
+
+:::
+
+Peak live and limit columns convert `memory.peak_live_use_bytes` and `memory.limit_bytes` from
+the completed `run` record using $2^{30}$ bytes/GiB. The peak is sampled job memory pressure,
+including concurrent workers and possible node pressure, excluding reclaimable inactive file
+cache. It is neither a sum of worker RSS nor a minimum required capacity. The limit is the
+recorded governor bound, which need not equal a nominal node label. The two configured 250 GiB
+limits were applied on larger nodes; depth 2 used the nominal 250 GB node. GNU time's maximum
+process RSS converts KiB using $2^{20}$ KiB/GiB and covers `run` only. Its value is distinct
+from the maximum over the separate init, run and evaluate commands in the campaign comparison
+helper. Wall time is GNU time's elapsed `run` command, including command overhead, with init and
+evaluation excluded; the runtime's narrower internal wall timer is not substituted. All four
+runs completed in one attempt, with zero memory waits and zero forced grants. Run admissions
+were 422,645, 402,551, 380,994 and 301,699 in increasing depth order. No timing or memory
+uncertainty can be estimated from these single observations on mixed hardware.
+
 ## Generating-model details
 
 **Templates (OU20, OU21).** Windows start every 50,000 bp from 0 to the contig length and cover $[\text{start},\text{start}+100{,}000)$. For rows $k$ and $k'$ of consecutive windows, the mismatch percentage $\Delta$ is 100 times their expected allele mismatches, $\sum_j P_k(0)P_{k'}(1)+P_k(1)P_{k'}(0)$, divided by the number of shared discovery sites; the similarity $\sigma=0$ if $\Delta>50$, otherwise $2(50-\Delta)$, and the junction score is $100(\sigma/100)^2$. Paths are found by reverse dynamic programming, the first candidate winning exact ties. After each path, every row's node score in a used window falls by 10 times its similarity to the used row, with similarity $1-\min(1,2\delta/n)$ for $\delta$ expected mismatches over the window's $n$ discovery sites, normalised by the square roots of the diagonal, and each internal used edge falls by 10. Overlaps are merged with signed information $I(p)=\mathrm{sign}(p-\tfrac{1}{2})\,(1-H_2(p))$, where $H_2$ is the binary entropy, combined as $(I_1+I_2)/(1+I_1I_2)$ and inverted by bisection. A contig with fewer than two informative windows gets no template. The linker is compiled without fast-math reassociation (ledger L14), which matters only when templates are rebuilt.
@@ -312,6 +407,30 @@ Parent groups count released post-guard Tier-B edges into each sample, not true 
 | 0e (FR04) | Founder-refit ties | $O(K^4)$ flips and $O(K^5)$ swaps per phase; $O(K^4)$ over $K$ rounds via the direct two-row gain (L10) | $K^4=810{,}000$; $K^5=24{,}300{,}000$ per site and phase; these are analytic work factors, not measured iteration counts |
 
 The kernel ladders do not certify these whole-search bounds. Painting continuity and founder-refit tie decisions do act on validation inputs; their observed small classes do not exercise their analytic worst cases. Refinement's work account bounds canonical window fixing. The join cost register distinguishes its cubic adaptive route from the direct-route finite-grid trend. Here $m$ is the join emission-axis size used by the cost model.
+
+## Exact evidence storage and execution
+
+For one sample and contig with $L$ sites and $D$ distinct integer REF/ALT pairs, use the smallest
+unsigned code width $w$ that represents $D-1$: 1 byte through 256 pairs, 2 through 65,536, and
+4 through 4,294,967,296. Each dictionary entry stores the two int32 counts and three float64
+likelihoods (32 bytes); a dense cell uses 33 bytes, including its observation flag. Coding
+requires $32D+wL+17<33L$ for that row and a strictly smaller aggregate container after all
+fallback rows, 17 bytes of metadata per sample and the final eight-byte contig offset are
+included. A repeated pair with different likelihood bits forces dense storage. The observation
+mask follows exactly from the pair; founder exclusions are additional row flags. The original
+dense kernels provide the triples and every proposed codebook is checked against all source
+bits in bounded windows. This introduces no likelihood approximation, depth cap or new setting.
+Encoding costs $O(NL\log L+\sum_i L\log D_i)$, with one sample's $O(L+D_i)$ planning scratch
+at a time, independently of $K$. Consumer-local dense workspaces still contribute to peak memory.
+
+Checkpoint windows decompress each required whole chunk into a bounded decoded cache before
+NumPy slices it. The cache normally holds at most 1 GiB, with one oversized chunk allowed alone;
+a miss additionally holds its transient compressed input. Requests that exceed the cache can
+repeat whole-chunk decoding. CPU claims refresh at kernel and independent-section boundaries,
+within the task ceiling, rather than inside a running native kernel. The memory request tables
+grow under the interprocess lock, preserve slot indices, and do not impose a fixed request cap.
+Starts are paced only above 90% measured use; idle reloadable state can be released under
+pressure. Resource decisions do not select scientific candidates or alter update order.
 
 ## Tie quanta and execution units
 

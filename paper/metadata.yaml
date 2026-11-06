@@ -3,25 +3,24 @@ title: "Reconstructing founder haplotypes, pedigrees and recombination from low-
 author:
   - "Hadi Khan [ORCID 0000-0001-6222-2088]"
   - "[TO FILL: co-authors and affiliations]{.todo}"
-date: "Draft for release 4.3.0 of the software, 3 November 2026"
+date: "Draft for release 4.4.0 of the software, 6 November 2026"
 abstract: |
-  Low-coverage whole-genome sequencing makes it affordable to sequence every member of an
-  experimental cross, but leaves each individual's genotypes uncertain, and in many crosses
-  the founder haplotypes, the number of founders and the pedigree are themselves unknown. We
-  describe a method that starts from nothing more than per-sample allele depths and a genetic
-  map. It reconstructs the founder haplotypes of the cross locally in marker blocks, without
-  imputing missing data, and assembles them along each chromosome with an explicit rule for the
-  number of founders. It then paints every sample as a diploid mosaic of those founders, infers
-  the pedigree with every sequenced sample a candidate parent of every other, refines phase
-  conditional on the inferred pedigree and estimates recombination maps from the resulting
-  meiosis chains. No sample metadata, sex, cohort or known parent enters inference; parents
-  that were not sequenced and relationships that the data cannot resolve are reported as such
-  rather than forced. Work and storage are documented up to K = 30, including above-cubic search
-  costs and explicit candidate budgets. Across 15 simulated datasets, genotype errors ranged from
-  7.6 to 811.3 per million called genotypes; pedigree recovery depended strongly on chromosome
-  support and parental observation. In 116 TroMau samples on 22 chromosomes, the method inferred
-  70 supported parent edges, while founder structure on chr3 was sensitive to the tie convention.
-  These real-data outputs are inference without individual parentage truth. The software is open
-  source (MIT licence).
+  Low-coverage sequencing of experimental crosses leaves genotypes uncertain, often with unknown
+  founder haplotypes, founder number and pedigree. We describe a method that starts from
+  per-sample allele depths and a genetic map. It reconstructs founder haplotypes locally without
+  imputing missing data, assembles them along chromosomes with an explicit founder-count rule,
+  paints each sample as a diploid mosaic, infers the pedigree, refines phase and estimates
+  recombination from the resulting meiosis chains. No sample metadata, sex, cohort or known
+  parent enters inference; unsequenced parents and unresolved relationships remain explicit.
+  Work and storage are documented up to K = 30, including above-cubic search costs and candidate
+  budgets. Across 15 simulated datasets, genotype errors ranged from 7.6 to 811.3 per million
+  called genotypes; pedigree recovery depended on chromosome support and parental observation.
+  A separate 320-sample series at depths 1, 1.5, 2 and 5 recovered all 600 observable parent edges
+  at each depth, with genotype errors falling from 115 to 63 per million calls. Release 4.4.0 completed depth
+  2 on a nominal 250 GB node at a sampled memory-pressure peak of 176 GiB, with outputs identical
+  to 4.3.0, which required a larger node. In 116 TroMau samples on 22 chromosomes, the method
+  inferred 70 supported parent edges; chr3 founder structure depended on the tie convention.
+  These real-data outputs have no individual parentage truth. The software is open source
+  (MIT licence).
 link-citations: true
 ---

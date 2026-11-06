@@ -9,6 +9,7 @@ Run from anywhere: python3 paper/tools/make_tables.py
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -44,14 +45,18 @@ def slope(cell: str) -> str:
 
 
 def main() -> None:
-    ladders = section_rows(DOCS / "costs.md", "## Kernel ladders")
-    ledger = section_rows(DOCS / "ties.md", "## Numerical ledger")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--docs-dir', type=Path, default=PAPER.parent / 'docs')
+    args = parser.parse_args()
+    docs = args.docs_dir / 'developer'
+    ladders = section_rows(docs / "costs.md", "## Kernel ladders")
+    ledger = section_rows(docs / "ties.md", "## Numerical ledger")
     s1 = table(
         ["Stage", "Probe", "What the probe covers", "K slope (K = 5–30, N = 200)", "N slope (N = 250–2,500, K = 15)"],
         [[r[0], r[1].strip("`"), r[2], slope(r[3]), slope(r[4])] for r in ladders],
-        "Kernel ladders of release 4.0. Each probe times one kernel on direct synthetic inputs, on one "
+        "Kernel ladders for the method in release 4.4.0. Each probe times one kernel on direct synthetic inputs, on one "
         "thread, after a discarded first call; slopes are fitted log–log exponents with standard errors. "
-        "A K slope at or below 3.3 is accepted as at most cubic; “exempt” marks a stage under a decided "
+        "A K slope at or below 3.3 is accepted as at most cubic; kernel-only rows do not bound complete count-refit passes; “exempt” marks a stage under a decided "
         "cost exemption, and “size proxy” an operational kernel whose size stands in for K and N. "
         "Source: docs/developer/costs.md.",
         [13, 19, 38, 15, 15],
@@ -59,7 +64,7 @@ def main() -> None:
     s2 = table(
         ["Entry", "Category", "Form", "Where it acts"],
         ledger,
-        "The numerical ledger of release 4.0: declared normalisations in which one arithmetic form "
+        "The numerical ledger for release 4.4.0: declared normalisations in which one arithmetic form "
         "replaces several, or a declared order replaces one chosen by workers, memory, object identity or "
         "the environment. No entry changes a model, objective, threshold, candidate set, search order or "
         "budget. Source: docs/developer/ties.md.",

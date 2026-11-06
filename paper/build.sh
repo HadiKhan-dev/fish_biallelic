@@ -13,12 +13,13 @@ cd "$(dirname "$0")"
 command -v pandoc >/dev/null || { echo "build.sh: pandoc not found" >&2; exit 1; }
 mkdir -p build/png
 
-python3 tools/make_figures.py
-python3 tools/make_tables.py
+python3 tools/make_figures.py "$@"
+python3 tools/make_tables.py "$@"
+python3 tools/make_results_figures.py
 
 chrome=${CHROME:-}
 if [[ -z $chrome ]]; then
-    for candidate in chromium chromium-browser google-chrome google-chrome-stable \
+    for candidate in chromium chromium-browser chrome google-chrome google-chrome-stable \
                      /opt/pw-browsers/chromium-*/chrome-linux64/chrome; do
         if command -v "$candidate" >/dev/null 2>&1; then chrome=$(command -v "$candidate"); break; fi
     done

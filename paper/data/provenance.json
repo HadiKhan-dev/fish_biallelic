@@ -1,5 +1,85 @@
 {
   "cases": 39,
+  "depth2_output_comparison43": {
+    "counts": {
+      "cells": 24386016,
+      "files": 138,
+      "json_values": 77248,
+      "pdf_pages": 22,
+      "root_differences": 2,
+      "rows": 794286,
+      "runtime_differences": 44,
+      "same_file_proofs": 0,
+      "scientific_differences": 0,
+      "tables": 43,
+      "vcf_records": 17913704
+    },
+    "policy": "Exact scientific values and order; numeric CSV spellings equivalent; only explicitly enumerated duration fields and checkpoint_root reported separately. PDF page count, VCF record/header content, index presence. No numerical tolerance.",
+    "sha256": "f117ddbc8d4c898f834c404c366d8d64a60b7b6e3dd5f751ec3de5c30158142e",
+    "source": "depth-comparison/d2_43_vs_44_final.json"
+  },
+  "depth_series44": {
+    "commit": "867f163",
+    "definitions": {
+      "founder_missing_ppm": "Missing founder alleles / (called + missing founder alleles) * 1e6",
+      "founder_wrong_ppm": "One-to-one errors / matched called founder alleles * 1e6; all rows matched in this series, so identical to compare/metrics.py all-call denominator",
+      "genotype_errors_ppm": "Genotype errors / called genotypes * 1e6",
+      "peak_live_bytes": "Run record sampled memory pressure; includes concurrent work and node pressure; not summed RSS",
+      "phased_share": "Phased true heterozygotes / correctly called true heterozygotes",
+      "released_phase_set_n50_bp": "Pooled released-set span N50, not mean chromosome N50",
+      "run_peak_rss_kib": "GNU time maximum process RSS of run command only; separate init/evaluate excluded",
+      "run_wall_seconds": "GNU time elapsed run command, one successful attempt; runtime timer excludes some command overhead",
+      "set_errors_ppm": "Minority-orientation sites within each released set / phased true heterozygotes * 1e6"
+    },
+    "limitations": [
+      "One replicate per depth; no uncertainty across simulated datasets.",
+      "Mixed processor architectures, CPU counts and concurrent lane counts; no cross-node speedup or depth-only memory effect.",
+      "Depths 1 and 1.5 use configured 250 GiB governor limits on larger nodes.",
+      "Limits are recorded bytes, not nominal node labels."
+    ],
+    "release": "4.4.0",
+    "replicates_per_depth": 1,
+    "sources": {
+      "1": {
+        "config_sha256": "21504260d4bc47cb64d3a184e590abd6c3023dccfc07a5e40173808902683ae6",
+        "evaluation_sha256": "353dc94dd9f541231e1b6fab9657cad50f2ab159279ee971679b89cab558b51d",
+        "run_time_sha256": "96b4324adf1f165b151a3239f8ea4fb3961cedcdc1b2f4ba19233768eb533c9c",
+        "source": "depth44/d1"
+      },
+      "1.5": {
+        "config_sha256": "0405cd4d9ee49cf82b22f69d205e26056119a2ddfab4969d7a48774c8fcf546f",
+        "evaluation_sha256": "106315f1b93a9d6f43313057a8ce5ac3283b33d106e48c8859efcaa91bf4a2bb",
+        "run_time_sha256": "fd2570f29af82ec5f79b1c7064efdd5cf0e2682fd6a81c37ff16fbeb49deb142",
+        "source": "depth44/d1.5"
+      },
+      "2": {
+        "baseline43": {
+          "differing_files": [],
+          "equal": true,
+          "files": 6,
+          "scope": "All evaluation CSV/JSON values and order; checkpoint_root excluded; numeric CSV spelling equivalent; no tolerance",
+          "source": "depth43/d2/evaluation"
+        },
+        "config_sha256": "28c218c55ac42d7dcc2a7c8ea7aa942d5deea961e0742eb2ac31f203d4ab0cab",
+        "evaluation_sha256": "309c95de02efdd8ebeee10386342d4b2e49d93aeda42d28e270fd2d74025ea82",
+        "run_time_sha256": "755c13ce8321ee610d335cc2c828376350893b412f1e8333ccd5c8bf239144bb",
+        "source": "depth44/d2"
+      },
+      "5": {
+        "baseline43": {
+          "differing_files": [],
+          "equal": true,
+          "files": 6,
+          "scope": "All evaluation CSV/JSON values and order; checkpoint_root excluded; numeric CSV spelling equivalent; no tolerance",
+          "source": "depth43/d5/evaluation"
+        },
+        "config_sha256": "28fb754565407d292fadcc9f520bfbce34a594f6157d2325578696a6097c6ca9",
+        "evaluation_sha256": "2bfbbe73d9156c33126f9fe945909be7c4e1ab865114e7f0c9500a6091f910fe",
+        "run_time_sha256": "29532f5d5349d5a12b34fc8ebab12c19a8381cfb984b67c0ca66f971a2f46a93",
+        "source": "depth44/d5"
+      }
+    }
+  },
   "evaluation_stages": {
     "4.1/backcross": [
       "founder_refit"
@@ -156,14 +236,278 @@
     "Only founder_refit truth scores are present; no stage-by-stage trajectory.",
     "Perturbations are repeated analyses of the same data, not independent simulations.",
     "TroMau and actm3 have no individual-level ground truth.",
-    "Stress changes several conditions simultaneously; no depth-only sensitivity curve."
+    "Stress changes several conditions simultaneously; its separate effects are not identified."
   ],
-  "manuscript_target_release": "4.3",
+  "manuscript_target_release": "4.4.0",
   "mosaic_chromosome": "chr1",
   "numeric_table_absolute_tolerance": 1e-08,
   "numeric_table_relative_tolerance": 1e-09,
   "peak_rss_scope": "GNU time maximum resident set size; not a sum of worker RSS",
-  "release43_validation": "39-case matrix pending; cost measurements retain their measured versions",
+  "realdata44_validation": {
+    "alignment": "Sample IDs; families by membership; unordered parents; undirected endpoints; whole painting-track exchange per sample/component; elapsed_seconds and parent_slot excluded",
+    "limitations": [
+      "No real-data truth or cross-release identity verdict.",
+      "Exact raw comparisons in depth-comparison/realdata/*.json include numerical diagnostic differences and sample order; their full-product passed flags are false.",
+      "Selected founder-count and phase-summary columns exclude search and floating objective diagnostics."
+    ],
+    "numeric_table_absolute_tolerance": 1e-08,
+    "numeric_table_relative_tolerance": 1e-09,
+    "scope": {
+      "founder_alleles": {
+        "columns": null,
+        "pattern": "export/*.founders.vcf.gz"
+      },
+      "founder_counts": {
+        "columns": [
+          "contig",
+          "component",
+          "first_variant_1based",
+          "last_variant_1based",
+          "founder_rows",
+          "founder_count_ambiguous"
+        ],
+        "pattern": "painting/founder_counts.csv"
+      },
+      "paintings": {
+        "columns": null,
+        "pattern": "painting/sample_segments.csv"
+      },
+      "pedigree": {
+        "columns": null,
+        "pattern": "pedigree/tier_*relationships.csv"
+      },
+      "phase_summary": {
+        "columns": [
+          "contig",
+          "samples",
+          "sites",
+          "components",
+          "called_alleles",
+          "phased_heterozygotes",
+          "unphased_heterozygotes",
+          "phase_sets"
+        ],
+        "pattern": "family_phase/summary.csv"
+      },
+      "recombination": {
+        "columns": null,
+        "pattern": "recombination/*.csv"
+      },
+      "relatedness": {
+        "columns": null,
+        "pattern": "relatedness/*.csv"
+      },
+      "release_segments": {
+        "columns": null,
+        "pattern": "export/manifest.json"
+      },
+      "sample_GT_PS": {
+        "columns": null,
+        "pattern": "export/*.samples.vcf.gz"
+      }
+    },
+    "source": "matrix44/runs/e2e44_*/",
+    "summary": "Both real datasets match in all nine selected families under iid12, iid9, val12, perm and vcfperm; actm3 also under reversal. TroMau reversal changes seven families.",
+    "vcf": "Exact SHA-256 of aligned #CHROM header and records, excluding ## metadata; founder labels, missingness, GT and PS retained"
+  },
+  "release43_validation": "Archived 39-case comparisons passed against mapped 4.2 outputs; raw 4.3 matrix outputs no longer retained",
+  "release44_validation": {
+    "baseline": "Retained 4.2 scalar truth fields carried to 4.3 by each case archived zero-scientific-difference comparison; checked against unchanged data/simulation_accuracy.csv",
+    "cases": 39,
+    "limitations": [
+      "Full 4.3 matrix evaluations and raw outputs were deleted; only retained scalar fields checked transitively.",
+      "Founder component, continuity, phase-stratum and recombination truth fields absent from the scalar summary are not newly established equal.",
+      "Real-data cases have no individual truth; within-4.4 released-product tests are separate."
+    ],
+    "matched_fields": [
+      "samples",
+      "chromosomes",
+      "founder_stage",
+      "founder_called_alleles",
+      "founder_one_to_one_errors",
+      "founder_errors_per_million",
+      "founder_missing_alleles",
+      "called_genotypes",
+      "genotype_errors",
+      "genotype_error_rate",
+      "sample_called_alleles",
+      "sample_total_alleles",
+      "called_share",
+      "switch_errors",
+      "phased_true_heterozygotes",
+      "correct_true_heterozygotes",
+      "switches_per_phased_heterozygote",
+      "phased_share",
+      "released_phase_sets",
+      "true_edges",
+      "correct_edges",
+      "missed_edges",
+      "extra_edges",
+      "correct_parent_states"
+    ],
+    "noise_hook": "Declared compact-evidence materialisation before unchanged frozen noise draws; matrix44/HOOKS.md and prepare.py",
+    "real_data_cases": 14,
+    "results": [
+      {
+        "case": "backcross",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "bc8",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "f3",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "f3x8",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "famhs",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "hsrand",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "k30",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "longbc",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "longf3",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "seed",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "sibrich",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "std",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "tl",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "tromau",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_iid12_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_iid9_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_perm_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_ref",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_rev",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_val12_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_actm3_vcfperm_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_iid12_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_iid9_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_perm_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_ref",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_rev",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_std_n80_val12_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_iid12_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_iid9_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_perm_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_ref",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_rev",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_stress_n80_val12_s1",
+        "status": "PASS_PROJECTED_TRUTH"
+      },
+      {
+        "case": "zero_tromau_iid12_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_tromau_iid9_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_tromau_perm_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_tromau_rev",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_tromau_val12_s1",
+        "status": "NO_TRUTH"
+      },
+      {
+        "case": "zero_tromau_vcfperm_s1",
+        "status": "NO_TRUTH"
+      }
+    ],
+    "simulation_cases": 25,
+    "source": "matrix44/{scores,baseline43}/*.json"
+  },
   "releases": [
     "4.1",
     "4.2"

@@ -2,7 +2,7 @@
 
 ## Painting
 
-Parameter names follow the generated reference; values are 4.3.0 defaults; method units are in parentheses.
+Parameter names follow the generated reference; values are 4.4.0 defaults; method units are in parentheses.
 
 **Alphabet, bins and local keys.** Classes are exact call signatures, numbered by first appearance; unanchored classes and BACKGROUND share one public UNKNOWN identifier (PR01). Bins split the $L_s$ selected sites into $\max(1,\lfloor L_s/\texttt{snps\_per\_bin}\rfloor)$ runs, with `snps_per_bin` = 100; the first $L_s \bmod B$ runs are one site longer, independently of task windows or sample batches (PR02). In each bin, anchored classes called there with identical $\{-1,0,1\}$ vectors share their smallest index as a key; other anchored classes key to themselves, and the rest to UNKNOWN. Local equality does not imply chromosome-wide row identity (PR03).
 

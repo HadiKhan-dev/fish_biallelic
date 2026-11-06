@@ -2,7 +2,7 @@
 
 ## Family phase
 
-Notation follows the main text. Parameter names are those of the generated parameter reference; values are 4.3.0 defaults.
+Notation follows the main text. Parameter names are those of the generated parameter reference; values are 4.4.0 defaults.
 
 **Emissions, released sites and state alleles (FP01, FP13).** The pair emissions $e_{ib}(x,y)$ are the painting's binned emissions, read from its cache or recomputed identically with its `robustness_epsilon` (0.01), `emission_log_floor` (−50 nats) and design effect $1+(n_{ib}-1)\rho_s$. Here $n_{ib}$ counts informative sites of sample $i$ in bin $b$ and $\rho_s$ is `emission_site_correlation` (0.1). Both solves share these pre-refit emissions. Released sites are refit panel positions inside a painting bin; other sites keep missing calls. A named state's allele $\hat h_{xj}$ exists only where every row of its class has a called refit allele and all agree; BACKGROUND has none. Components without painting bins are not solved. They keep their geometry (fallback bins of `EMPTY_COMPONENT_BIN_SITES` = 100 panel sites), but their calls and chain sources stay missing.
 

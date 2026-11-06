@@ -51,3 +51,6 @@ div.todo { display: block; padding: 4pt 6pt; margin: .6em 0; border-left: 3pt so
 #refs { font-size: 9pt; line-height: 1.35; }
 #refs .csl-entry { margin-bottom: .45em; padding-left: 1.5em; text-indent: -1.5em; text-align: left; }
 .pagebreak { break-before: page; page-break-before: always; }
+
+/* Keep each compact depth-series panel with its heading and caption. */
+.depth-table, .depth-table table { break-inside: avoid; page-break-inside: avoid; }
