@@ -11,6 +11,7 @@ import csv
 import json
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from collections.abc import Sequence
@@ -95,11 +96,16 @@ def contig_part(output, family, contig, frames):
 
 
 def write_contig_tables(output, family, parts):
-    """Concatenate private CSV cells in supplied contig order and publish each table atomically."""
+    """Concatenate private CSV cells in supplied contig order and publish each table atomically.
+
+    The parts are this module's own files, so their cells are read without the csv module's default 128 KiB
+    field guard, which is meant for untrusted input: a JSON cell grows with the data.
+    """
     directory = Path(output) / family
     directory.mkdir(parents=True, exist_ok=True)
     names = dict.fromkeys(name for _, paths in parts for name in paths)
     written = []
+    field_limit = csv.field_size_limit(sys.maxsize)
     try:
         for name in names:
             paths = [paths[name] for _, paths in parts if name in paths]
@@ -118,6 +124,7 @@ def write_contig_tables(output, family, parts):
             temporary.replace(path)
             written.append(path)
     finally:
+        csv.field_size_limit(field_limit)
         for parent in {Path(path).parent for _, paths in parts for path in paths.values()}:
             shutil.rmtree(parent)
     return written

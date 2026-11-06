@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.4.1 (6 November 2026)
+
+This patch release fixes a failure in publishing run-level tables. Scientific models, decisions and every published
+value are unchanged from 4.4.0.
+
+**Long table cells.** Run-level tables are assembled from per-chromosome parts written by the report stage. The
+parts were read back with Python's `csv` module under its default limit of 131,072 characters per field, a guard
+meant for untrusted input. A painting-table cell longer than that stopped the run with `field larger than field
+limit (131072)` after every scientific stage had finished. This happened in an N = 320 simulation with 150 bp
+paired-end reads at depth 1. The parts are now read without that limit, and the limit is restored afterwards.
+Cells under the limit parse and publish exactly as before. Releases 4.3.0 and 4.4.0 have the same limit.
+
+**Migration.** As in every release, checkpoint identities bind the package version, so 4.4.1 needs a new
+checkpoint root ([instructions](docs/user/migration.md#migrating-from-440-to-441)). A 4.4.0 run that stopped with
+this error must be rerun under 4.4.1.
+
+**Validation.** The test suite passes (3,586 tests, including a new regression test that fails on 4.4.0), as do
+the documented workflow example, the strict documentation check and the clean-install packaging gate. The N = 320
+run that failed resumed from its checkpoints with this fix alone and published every table and its evaluation.
+
 ## 4.4.0 (6 November 2026)
 
 This release reduces retained evidence and execution overhead, and gives idle CPUs to running work. Scientific

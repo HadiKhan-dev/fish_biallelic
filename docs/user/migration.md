@@ -1,5 +1,14 @@
 # Migration guides
 
+## Migrating from 4.4.0 to 4.4.1
+
+Start a new run with a new output and checkpoint root using the same inputs,
+configuration and seed, as for any release: checkpoint identities bind the
+package version. The models, settings, record schemas and table layouts are
+those of 4.4.0, and the published values are the same. A 4.4.0 run that stopped
+with `field larger than field limit (131072)` while publishing tables has to be
+rerun under 4.4.1; its 4.4.0 checkpoints cannot be resumed by 4.4.1.
+
 ## Migrating from 4.3 to 4.4
 
 Start a new run with a new output and checkpoint root using the same inputs,
