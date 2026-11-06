@@ -980,28 +980,37 @@ class SweepEngine:
         ident = np.arange(fwd.shape[2], dtype=np.int64)
         offers = []
         evaluated = 0
-        for (a, c), (_, m) in sorted(best.items()):
+
+        def evaluate(item, child):
+            (a, c), (_, m), left, right = item
             k = int(focal[m])
             r = rows[row_offsets[m] : row_offsets[m + 1]]
             Y = X.copy()
             Y[k, a:c] = r
-            team = sample_threads(self.workspace.samples, budget)
-            parallel = gains_kernels.parallel_exchanges(self.workspace.samples, founders, team)
-            with budget.scope(team):  # the live share, per window
-                haps_y = orient.haps(Y)
-                local_f = kernels.forward_boundaries(haps_y, win, offsets, np.ascontiguousarray(fwd[a]), a, c)
-                local_b, _ = kernels.backward_chain(haps_y, win, offsets, np.ascontiguousarray(bwd[c]), ident, a, c)
+            found = []
+            count = 0
+            # A streaming window is private to this child. Resident log tables
+            # are immutable and shared, as in independent fixed-K refits.
+            with ws.windows.lease(founders):
+                local_win = orient.window(founders)
+                team = sample_threads(ws.samples, child)
+                with child.scope(team):
+                    haps_y = orient.haps(Y)
+                    local_f = kernels.forward_boundaries(haps_y, local_win, offsets, left, a, c)
+                    local_b, _ = kernels.backward_chain(haps_y, local_win, offsets, right, ident, a, c)
                 for cut in range(max(1, a), min(blocks - 1, c) + 1):
-                    swap = gains_kernels.exchange_gains(
-                        np.ascontiguousarray(local_f[cut - a]), np.ascontiguousarray(local_b[cut - a]), parallel
-                    )
-                    evaluated += len(swap)
-                    # Exchanges within the quantum of the best are tied: the first pair in pair order (2.13).
+                    team = sample_threads(ws.samples, child)
+                    parallel = gains_kernels.parallel_exchanges(ws.samples, founders, team)
+                    with child.scope(team):
+                        swap = gains_kernels.exchange_gains(
+                            np.ascontiguousarray(local_f[cut - a]), np.ascontiguousarray(local_b[cut - a]), parallel
+                        )
+                    count += len(swap)
+                    # Pair and offer selection still use the original content convention.
                     p = int(_top_class(swap)[0])
                     gain = content[m] + float(swap[p])
                     if gain > TOL:
-                        # Keys and indices only: the precursor panel is rebuilt for the chosen offer below.
-                        offers.append(
+                        found.append(
                             (
                                 (cut, int(pa[p]), int(pb[p]), a, c, k, tuple(int(x) for x in r)),
                                 cut,
@@ -1011,6 +1020,39 @@ class SweepEngine:
                                 m,
                             )
                         )
+            return found, count
+
+        # Windows have no accepted edits in common: every trial starts from X.
+        # Bound their aggregate scratch, and copy checkpoint flanks on the parent
+        # thread before dispatch (MessageSet's reconstruction cache is mutable).
+        pending = list(sorted(best.items()))
+        per_window = [
+            2 * founders * int(ws.offsets[-1])
+            + 16 * (c - a + 2) * ws.samples * fwd.shape[2]
+            + ws.windows.window_bytes()
+            for (a, c), _ in pending
+        ]
+        first = 0
+        while first < len(pending):
+            stop, total = first, 0
+            while stop < len(pending) and (stop == first or total + per_window[stop] <= BRIDGE_BATCH_BYTES):
+                total += per_window[stop]
+                stop += 1
+            wave = [
+                (unit, choice, np.ascontiguousarray(fwd[unit[0]]), np.ascontiguousarray(bwd[unit[1]]))
+                for unit, choice in pending[first:stop]
+            ]
+            values = [None] * len(wave)
+            for index, result in budget.concurrent(
+                [lambda child, item=item: evaluate(item, child) for item in wave],
+                per_window[first:stop],
+                label="founder_refinement bridge windows",
+            ):
+                values[index] = result
+            for found, count in values:
+                offers.extend(found)
+                evaluated += count
+            first = stop
         if not offers:
             return None
         # Offers within the quantum of the largest gain are tied: content order of (cut, pair, window, founder, rows).

@@ -2,7 +2,7 @@
 
 Owns masking, float32 casting and depth-row content keys (P0 U01).
 Memory allocation/attachment and record decoding belong to the stage adapter.
-Method: docs/methods/assembly.md#evidence. Inputs are borrowed; outputs are owned.
+Method: docs/methods/assembly.md#evidence. Exact neutral inputs may be borrowed; scoring is owned.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import numpy as np
 from numba import prange, types
 from numpy.typing import NDArray
 
+from haplotype_reconstruction.contracts.likelihoods import CodedLikelihoods
+from haplotype_reconstruction.contracts.observations import PairArray, dense_observed
 from haplotype_reconstruction.contracts.roles import freeze_record_arrays
 from haplotype_reconstruction.core.immutable import declare_immutable
 from haplotype_reconstruction.core.kernels import kernel
@@ -64,8 +66,8 @@ class SelectionEvidence:
     """Borrowed founder evidence: positions[L], float64 GL[N,L,3], observed[N,L]."""
 
     positions: NDArray[np.int64]
-    likelihoods: NDArray[np.float64]
-    observed: NDArray[np.bool_]
+    likelihoods: CodedLikelihoods | NDArray[np.float64]
+    observed: NDArray[np.bool_] | PairArray
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -112,28 +114,115 @@ class AssemblyEvidence:
 
     @classmethod
     def from_likelihoods(
-        cls, positions, likelihoods, observed, kept, identity: str, *, counts=None, depth_keys=None
+        cls,
+        positions,
+        likelihoods,
+        observed,
+        kept,
+        identity: str,
+        *,
+        counts=None,
+        depth_keys=None,
+        borrow_neutral: bool = False,
     ) -> AssemblyEvidence:
-        """Build owned arrays; observed discovery cells retain the exact input GL."""
+        """Build the exact views; borrow_neutral certifies already neutral raw evidence.
+
+        Only the ContigEvidence producer can establish that missing raw cells are
+        exactly 1/3, every site is kept, and no founder row was excluded. Generic
+        likelihood callers retain the owned/masked route by default.
+        """
+        if isinstance(likelihoods, CodedLikelihoods):
+            neutral = np.empty(likelihoods.shape, dtype=np.float64)
+            scoring = np.empty(likelihoods.shape, dtype=np.float32)
+            borrow_mask = borrow_neutral and isinstance(observed, np.ndarray)
+            seen = observed.view() if borrow_mask else np.empty(observed.shape, dtype=np.bool_)
+            if borrow_mask:
+                seen.flags.writeable = False
+            if depth_keys is None and counts is not None:
+                depth_keys = _depth_keys(counts, observed, kept)
+            for sample in range(likelihoods.shape[0]):
+                values = likelihoods.gather(slice(sample, sample + 1), slice(None))
+                flags = (
+                    np.empty((1, likelihoods.shape[1]), dtype=np.bool_) if borrow_mask else seen[sample : sample + 1]
+                )
+                _fill_views(
+                    values,
+                    np.ascontiguousarray(observed[sample : sample + 1]),
+                    np.ascontiguousarray(kept),
+                    neutral[sample : sample + 1],
+                    scoring[sample : sample + 1],
+                    flags,
+                )
+                del values
+            for array in (neutral, scoring):
+                declare_immutable(array)
+            if not borrow_mask:
+                declare_immutable(seen)
+            return cls(np.asarray(positions), neutral, scoring, seen, np.asarray(kept), str(identity), depth_keys)
+        observed = dense_observed(observed)
         likelihoods = np.ascontiguousarray(likelihoods, dtype=np.float64)
         kept = np.ascontiguousarray(kept, dtype=np.bool_)
         observed = np.ascontiguousarray(observed, dtype=np.bool_)
         if depth_keys is None and counts is not None:
             depth_keys = _depth_keys(counts, observed, kept)
-        neutral = np.empty(likelihoods.shape, dtype=np.float64)
-        scoring = np.empty(likelihoods.shape, dtype=np.float32)
-        seen = np.empty(observed.shape, dtype=np.bool_)
-        _fill_views(likelihoods, observed, kept, neutral, scoring, seen)
-        for array in (neutral, scoring, seen):
-            declare_immutable(array)  # owned, filled once and never changed: tasks may share it (core.immutable)
+        if borrow_neutral:
+            neutral, seen = likelihoods.view(), observed.view()
+            neutral.flags.writeable = seen.flags.writeable = False
+            scoring = np.array(likelihoods, dtype=np.float32, order="C", copy=True)
+            declare_immutable(scoring)
+        else:
+            neutral = np.empty(likelihoods.shape, dtype=np.float64)
+            scoring = np.empty(likelihoods.shape, dtype=np.float32)
+            seen = np.empty(observed.shape, dtype=np.bool_)
+            _fill_views(likelihoods, observed, kept, neutral, scoring, seen)
+            for array in (neutral, scoring, seen):
+                declare_immutable(array)  # owned and filled once; borrowed views are never declared owned
         return cls(np.asarray(positions), neutral, scoring, seen, kept, str(identity), depth_keys)
 
     @classmethod
-    def from_contig(cls, evidence, identity: str, *, counts=None) -> AssemblyEvidence:
+    def from_contig(cls, evidence, identity: str, *, counts=None, depth_keys=None) -> AssemblyEvidence:
         """Mask founder-excluded samples before hashing exact observed total depths."""
         counts = evidence.counts if counts is None else counts
         source = replace(evidence, counts=None) if evidence.counts is not None else evidence
         founder = source.founder_view()
         return cls.from_likelihoods(
-            founder.positions, founder.likelihoods, founder.observed, founder.discovery_sites, identity, counts=counts
+            founder.positions,
+            founder.likelihoods,
+            founder.observed,
+            founder.discovery_sites,
+            identity,
+            counts=counts,
+            depth_keys=depth_keys,
+            borrow_neutral=bool(evidence.discovery_sites.all() and not evidence.founder_excluded.any()),
+        )
+
+
+@dataclass(frozen=True)
+class AssemblyEvidenceSource:
+    """Borrowed inputs for an assembly consumer; constructing this does not build its views.
+
+    Each call owns its scoring/masked arrays and release_neutral lifetime. The
+    source never caches a materialised view across selection/assembly actions.
+    """
+
+    positions: NDArray[np.int64]
+    likelihoods: CodedLikelihoods | NDArray[np.float64]
+    observed: NDArray[np.bool_] | PairArray
+    kept: NDArray[np.bool_]
+    identity: str
+    depth_keys: tuple[bytes, ...] | None
+    borrow_neutral: bool
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
+
+    def __call__(self) -> AssemblyEvidence:
+        return AssemblyEvidence.from_likelihoods(
+            self.positions,
+            self.likelihoods,
+            self.observed,
+            self.kept,
+            self.identity,
+            depth_keys=self.depth_keys,
+            borrow_neutral=self.borrow_neutral,
         )

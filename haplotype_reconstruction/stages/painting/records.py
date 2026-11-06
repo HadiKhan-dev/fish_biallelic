@@ -238,9 +238,8 @@ def result_reader(
             require_schema(cache.payload, SCHEMA)
             packed = tuple(cache.payload["packed_emissions"])
     if product == "painting_report":
-        arrays = read_items(file, evidence.key, evidence.identity, ("schema", "positions", "observed"))
-        if arrays is None:
-            raise InvariantError("painting report requires published evidence")
+        arrays = evidence_records.load_arrays(file, ("positions", "observed"), expected_identity=evidence.identity)
+        arrays["observed"].flags.writeable = False
         histories: list[tuple[tuple[int, int, int, JoinSummaryView], ...]] = []
         for round_name in (None, "l1", "l2"):
             request = assembly_records.result_reader(
@@ -260,8 +259,8 @@ def result_reader(
             expected,
             product,
             assembly,
-            positions=arrays.payload["positions"],
-            observed=arrays.payload["observed"],
+            positions=arrays["positions"],
+            observed=arrays["observed"],
             searches=histories[0],
             feedback_searches=histories[1] + histories[2],
         )

@@ -7,12 +7,16 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from haplotype_reconstruction.contracts.evidence import ContigEvidence, EvidenceDecisions
+from haplotype_reconstruction.contracts.likelihoods import CodedLikelihoods
+from haplotype_reconstruction.contracts.observations import PairArray, pair_views
 from haplotype_reconstruction.contracts.roles import record_field
 from haplotype_reconstruction.contracts.source import ContigReads
-from haplotype_reconstruction.core.errors import InputError, InvariantError
+from haplotype_reconstruction.core.errors import InputError
 
 from .blocks import _block_spans
-from .likelihoods import _ROW_SUM_TOLERANCE, _invalid_likelihood_cells, _observation_mask, likelihoods_by_sample
+from .compact import build_likelihoods
+from .likelihoods import _observation_mask
+from .likelihoods import likelihoods_by_sample as likelihoods_by_sample
 from .parameters import EvidenceParameters
 from .quality.site_quality import filter_sites
 from .read_model import calibrate as calibration
@@ -54,25 +58,24 @@ def prepare_contig(
     fitted, report = calibration.calibrate(counts, positions, config.read_model, team=team)
     model = fitted if fitted is not None else fixed_model(config.read_model.fixed_error, kept.n_samples)
     error, heterozygote = model.error_and_heterozygote()
-    likelihoods = likelihoods_by_sample(
+    likelihoods = build_likelihoods(
         counts, error, heterozygote, model.heterozygote_inverse_concentration, config.read_model.lookup_depth
     )
-    invalid = _invalid_likelihood_cells(likelihoods, counts, _ROW_SUM_TOLERANCE)
-    if invalid:
-        raise InvariantError(
-            f"{contig}: {invalid} genotype-likelihood cells are not normalised probabilities "
-            "(zero depth must be exactly 1/3)"
-        )
-    observed = _observation_mask(counts)
     total_depth = counts.sum(axis=(0, 2), dtype=np.int64)
     discovery_sites = total_depth >= config.discovery_sites.threshold()
     founder_excluded = np.zeros(kept.n_samples, bool) if samples is None else np.asarray(samples.flagged, bool)
+    evidence_counts: np.ndarray | PairArray
+    observed: np.ndarray | PairArray
+    if isinstance(likelihoods, CodedLikelihoods):
+        evidence_counts, observed = pair_views(likelihoods, counts)
+    else:
+        evidence_counts, observed = counts, _observation_mask(counts)
     evidence = ContigEvidence(
         payload_identity="",
         contig=contig,
         sample_ids=kept.sample_ids,
         positions=positions,
-        counts=counts,
+        counts=evidence_counts,
         likelihoods=likelihoods,
         observed=observed,
         discovery_sites=discovery_sites,

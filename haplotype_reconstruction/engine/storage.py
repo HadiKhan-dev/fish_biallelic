@@ -208,6 +208,8 @@ def open_array(
             mapped = np.memmap(temporary.name, dtype=array.dtype, mode="w+", shape=array.shape)
             np.copyto(mapped, array)
             mapped.flush()
+            cast(Any, mapped)._mmap.close()
+            mapped = np.memmap(temporary.name, dtype=array.dtype, mode="r", shape=array.shape)
             value = mapped
         else:
             value = array

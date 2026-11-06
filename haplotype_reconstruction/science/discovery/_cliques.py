@@ -79,32 +79,70 @@ def _edge_cover(adjacent, edges):
     """One packed maximal clique per edge; vertices already in content order.
 
     E seeds, at most A additions each, ceil(A/64) words per intersection.
-    All edges seed a group, including already covered edges: this retains more
-    larger groups without introducing a Cartesian or recursive search.
+    Every edge retains its greedy extension, including already covered edges.
+    Equal closed common neighbourhoods share their deterministic extension;
+    work still reports the original per-edge intersection count.
     """
     n, words = adjacent.shape
     output = np.zeros((edges, words), dtype=np.uint64)
+    # The closed common neighbourhood determines the extension, independently
+    # of which of its universal vertices supplied the seed edge. Cache that
+    # exact bitset, rather than repeating a large clique for every seed pair.
+    keys = np.empty((edges, words), dtype=np.uint64)
+    table_size = 1
+    while table_size <= 2 * edges:
+        table_size *= 2
+    slots = np.full(table_size, -1, dtype=np.int64)
+    key_work = np.empty(edges, dtype=np.int64)
     candidates = np.empty(words, dtype=np.uint64)
+    common = np.empty(words, dtype=np.uint64)
     emitted, work = 0, 0
     for first in range(n):
         for second in range(first + 1, n):
             if not (adjacent[first, second // 64] & (np.uint64(1) << np.uint64(second % 64))):
                 continue
+            for word in range(words):
+                common[word] = adjacent[first, word] & adjacent[second, word]
+            common[first // 64] |= np.uint64(1) << np.uint64(first % 64)
+            common[second // 64] |= np.uint64(1) << np.uint64(second % 64)
+            digest = np.uint64(0x9E3779B97F4A7C15)
+            for word in range(words):
+                digest = _mix_word(digest ^ common[word])
+            slot = np.int64(digest & np.uint64(table_size - 1))
+            duplicate = False
+            while slots[slot] >= 0:
+                existing = slots[slot]
+                equal = True
+                for word in range(words):
+                    if common[word] != keys[existing, word]:
+                        equal = False
+                        break
+                if equal:
+                    duplicate = True
+                    work += key_work[existing]
+                    break
+                slot = (slot + 1) & (table_size - 1)
+            if duplicate:
+                continue
+            slots[slot] = emitted
             row = output[emitted]
             row[first // 64] |= np.uint64(1) << np.uint64(first % 64)
             row[second // 64] |= np.uint64(1) << np.uint64(second % 64)
             for word in range(words):
+                keys[emitted, word] = common[word]
                 candidates[word] = adjacent[first, word] & adjacent[second, word]
-            work += words
+            calls = words
             for word in range(words):
                 while candidates[word]:
                     vertex = 64 * word + _low_index(candidates[word])
                     row[word] |= np.uint64(1) << np.uint64(vertex % 64)
                     for other in range(words):
                         candidates[other] &= adjacent[vertex, other]
-                    work += words
+                    calls += words
+            key_work[emitted] = calls
+            work += calls
             emitted += 1
-    return output, work
+    return output[:emitted], work
 
 
 def edge_clique_cover(
@@ -293,10 +331,7 @@ def _decode_members(row):
 
 def lift_groups(groups: Iterable[Sequence[int]], memberships: np.ndarray) -> list[tuple[int, ...]]:
     """Small hierarchy/core families, outside the alternative-group budget."""
-    # NumPy's ufunc.reduce stubs reject this (array, axis) call; the runtime call is the documented reduce.
-    return sorted(
-        {_decode_members(np.bitwise_or.reduce(memberships[list(group)], axis=0)) for group in groups}  # type: ignore[call-overload]
-    )
+    return sorted({_decode_members(np.bitwise_or.reduce(memberships[list(group)], axis=0)) for group in groups})
 
 
 def screened_components(

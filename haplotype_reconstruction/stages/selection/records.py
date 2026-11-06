@@ -195,6 +195,13 @@ class SelectionRecords:
         )
         publish(self.file, self.key("block", index), self.derivation("block", index), payload)
 
+    def load_memo(self, index: int) -> SelectionMemo:
+        """Read one prior block's exact state at its consumer, without the other blocks' memos."""
+        stored = resume(self.file, self.key("memo", index), self.derivation("memo", index))
+        if stored is None:
+            raise InvariantError(f"selection block {index} exists without its {self.round_name} memo")
+        return from_payload(SelectionMemo, stored.payload)
+
     def load_block(self, index: int, *, memos: bool = True) -> BlockSelection | None:
         saved = resume(self.file, self.key("block", index), self.derivation("block", index))
         if saved is None:
@@ -204,10 +211,7 @@ class SelectionRecords:
             raise InvariantError(f"selection block schema {payload['schema']} != {SCHEMA}")
         memo = None
         if memos and self.round_name != "l2":
-            stored = resume(self.file, self.key("memo", index), self.derivation("memo", index))
-            if stored is None:
-                raise InvariantError(f"selection block {index} exists without its {self.round_name} memo")
-            memo = from_payload(SelectionMemo, stored.payload)
+            memo = self.load_memo(index)
         return BlockSelection(
             index=index,
             panel=decode_panel(payload["panel"]),

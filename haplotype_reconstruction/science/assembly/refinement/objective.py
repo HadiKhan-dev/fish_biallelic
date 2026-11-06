@@ -86,7 +86,7 @@ def pair_code7(x, y):
     return 6 if x == y else 5
 
 
-@kernel(overloads=overloads_for(__name__, "unordered_pairs"), inline="always")
+@kernel(overloads=overloads_for(__name__, "unordered_pairs"), cache=True, inline="always")
 def unordered_pairs(founders):
     """The Q = K(K+1)/2 unordered states (first[q] <= second[q]) in upper-triangle order."""
     first = np.empty(founders * (founders + 1) // 2, np.int64)

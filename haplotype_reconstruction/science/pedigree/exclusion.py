@@ -86,6 +86,6 @@ def _encode_patterns(gl, observed, cap):
 def combine(evidence: list[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray]:
     """(log E [D] averaged over all configured chromosomes, jointly observed sites [D])."""
     # NumPy 2.5's reduce stub omits the ordinary allocating out=None overload.
-    log_e = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))  # type: ignore[call-overload]
+    log_e = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))
     observed = np.sum([value.observed_sites for value in evidence], axis=0).astype(np.int64)
     return log_e, observed

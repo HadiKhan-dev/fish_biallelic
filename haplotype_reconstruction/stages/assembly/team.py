@@ -107,7 +107,7 @@ class RefinementTeam:
         # solver prunes only later work) and the failure of the lowest ordinal is raised after all have finished.
         outcomes: list[Any] = [None] * len(items)
         failed: dict[int, BaseException] = {}
-        if len(items) <= 1:
+        if len(items) <= 1 or (not self.live and self.declared == 1):
             for index, item in enumerate(items):
                 try:
                     outcomes[index] = run(item)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.refit import ComponentRefit, FounderRefit
 from ...contracts.roles import record_field
 from ...core.errors import InvariantError
@@ -34,13 +35,18 @@ def refit_chromosome(
             raise InvariantError("refit requires the painted component panel")
         sites = panel.site_indices()
         labels = component.site_labels(panel.positions)
+        likelihoods, observed, kernel_sites = founder.likelihoods, founder.observed, sites
+        if not isinstance(likelihoods, np.ndarray) or not isinstance(observed, np.ndarray):
+            likelihoods = gather_likelihoods(likelihoods, sites)
+            observed = np.ascontiguousarray(observed[:, sites])
+            kernel_sites = np.arange(len(sites), dtype=np.int64)
         refit_calls, gain = refit_alleles(
             panel.released,
             labels[:, 0],
             labels[:, 1],
-            founder.likelihoods,
-            founder.observed,
-            sites,
+            likelihoods,
+            observed,
+            kernel_sites,
             robustness_epsilon=painting.parameters.robustness_epsilon,
             minimum_gain_nats=config.minimum_gain_nats,
             coordinate_sweeps=config.coordinate_sweeps,

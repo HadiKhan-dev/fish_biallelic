@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haplotype-reconstruction"
-version = "4.3.0"
+version = "4.4.0"
 description = "Founder-haplotype reconstruction, pedigree, phase and recombination maps for experimental crosses"
 readme = "README.md"
 license = "MIT"
@@ -74,7 +74,7 @@ ignore = ["E741"]
 "haplotype_reconstruction/interface/**" = ["T20"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 ignore_missing_imports = true
 warn_unused_ignores = true
 files = ["haplotype_reconstruction/contracts", "haplotype_reconstruction/stages", "haplotype_reconstruction/interface"]

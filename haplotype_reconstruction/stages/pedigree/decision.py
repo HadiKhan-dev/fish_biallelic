@@ -525,7 +525,7 @@ def _exclusion_stored(
     file: CheckpointFile | None = None,
     identity: str | None = None,
 ) -> ExclusionEvidence:
-    evidence = evidence_records.load(reference.file, expected_identity=reference.identity)
+    evidence = evidence_records.load_dense(reference.file, expected_identity=reference.identity)
     return exclusion.run(
         contig,
         evidence,
@@ -651,11 +651,10 @@ def run_stored(
     relatedness = GuardRelatedness(bound.sample_ids, family.family, family.member_support)
     observed_counts = np.empty((len(bound.contigs), len(bound.sample_ids)), dtype=np.int64)
     for k, (c, identity) in enumerate(bound.dependencies.evidence):
-        observed = evidence_records.load_arrays(store.contig(c), ("observed",), expected_identity=identity)["observed"]
-        if observed.shape[0] != len(bound.sample_ids):
+        counts = evidence_records.load_observed_counts(store.contig(c), expected_identity=identity)
+        if counts.shape != (len(bound.sample_ids),):
             raise InputError("observed-count sample axis differs from the pedigree")
-        observed_counts[k] = np.count_nonzero(observed, axis=1)
-        del observed
+        observed_counts[k] = counts
     prepared = tuple(
         StoredPrepared(store.contig(c), identity, summary)
         for (c, identity), summary in zip(bound.dependencies.prepared, bound.summary, strict=True)

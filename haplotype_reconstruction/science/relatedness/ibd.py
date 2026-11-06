@@ -13,6 +13,8 @@ from typing import Protocol
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
+from ...contracts.observations import PairArray
 from ...contracts.relatedness import RelatednessPairs
 from .frequency import allele_frequency
 from .ibd_kernels import IBD_MASKS, pair_ibd, pair_indices
@@ -36,10 +38,10 @@ class PairwiseEvidence(Protocol):
     def positions(self) -> np.ndarray: ...
 
     @property
-    def likelihoods(self) -> np.ndarray: ...
+    def likelihoods(self) -> np.ndarray | CodedLikelihoods: ...
 
     @property
-    def observed(self) -> np.ndarray: ...
+    def observed(self) -> np.ndarray | PairArray: ...
 
 
 @dataclass
@@ -77,7 +79,7 @@ def accumulate_pairwise_ibd(
     stay = np.ones(len(morgans))
     stay[1:] = np.exp(-ibd_parameters.ibd_switch_rate * np.diff(morgans))
     pair_ibd(
-        np.ascontiguousarray(gl[:, ::step]),
+        gather_likelihoods(gl, slice(None, None, step)),
         np.ascontiguousarray(observed[:, ::step]),
         np.ascontiguousarray(p[::step]),
         stay,

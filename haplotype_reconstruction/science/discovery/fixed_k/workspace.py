@@ -517,10 +517,9 @@ class FixedKWorkspace:
         self.h_term_bound = 2.0 * max(
             float(np.max(np.abs(genotype_cost), initial=0.0)), float(np.max(np.abs(unknown_cost), initial=0.0))
         )
-        # The same capped costs in two layouts: (L, N, c) for the site-parallel H sweep and
-        # site-contiguous (N, c, L) for the one-thread founder-outer sweep.
-        self.genotype_cost_by_site = np.ascontiguousarray(genotype_cost.transpose(1, 0, 2))
-        self.unknown_cost_by_site = np.ascontiguousarray(unknown_cost.transpose(1, 0, 2))
+        # Every frontier and fractional sweep uses (N, c, L). The (L, N, c) layout
+        # is needed only by a site-parallel singleton sweep; build it on demand.
+        self._costs_by_site = None
         self.genotype_cost_by_sample = np.ascontiguousarray(genotype_cost.transpose(0, 2, 1))
         self.unknown_cost_by_sample = np.ascontiguousarray(unknown_cost.transpose(0, 2, 1))
         self.snps_per_bin, self.n_bins = bin_layout(length, int(model.snps_per_bin))
@@ -539,8 +538,6 @@ class FixedKWorkspace:
             self.log_probs,
             self.cost_ww,
             self.ww_total_cost,
-            self.genotype_cost_by_site,
-            self.unknown_cost_by_site,
             self.genotype_cost_by_sample,
             self.unknown_cost_by_sample,
             self.ww_bin_emissions,
@@ -575,6 +572,25 @@ class FixedKWorkspace:
     @property
     def sites(self) -> int:
         return int(self.observed.shape[1])
+
+    def _site_costs(self):
+        if self._costs_by_site is None:
+            costs = tuple(
+                np.ascontiguousarray(value.transpose(2, 0, 1))
+                for value in (self.genotype_cost_by_sample, self.unknown_cost_by_sample)
+            )
+            for value in costs:
+                value.flags.writeable = False
+            self._costs_by_site = costs
+        return self._costs_by_site
+
+    @property
+    def genotype_cost_by_site(self):
+        return self._site_costs()[0]
+
+    @property
+    def unknown_cost_by_site(self):
+        return self._site_costs()[1]
 
     # -- ordered-panel state keys (founder order matters: the Gauss-Seidel schedule is ordered)
     @staticmethod

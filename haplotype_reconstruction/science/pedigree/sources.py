@@ -211,12 +211,18 @@ def _marginal_kernel(initial, right, same, one, two):
 
 
 def infer_factors(
-    log_emissions: np.ndarray, transition: HammingTransition, available: np.ndarray, *, component_index: int = -1
+    log_emissions: np.ndarray,
+    transition: HammingTransition,
+    available: np.ndarray,
+    *,
+    component_index: int = -1,
+    sample_offset: int = 0,
 ) -> SourceFactors:
     """Source factors from the painting's binned log emissions float64 [N, S*S, B].
 
     ``available`` bool [N]: samples with an informative painting site; the others keep a uniform
     initial law. Every available sample must keep supported mass (else FloatingPointError).
+    ``sample_offset`` preserves original sample indices when preparation supplies a batch.
     """
     candidates, diplotypes, bins = log_emissions.shape
     states = int(round(math.sqrt(diplotypes)))
@@ -234,7 +240,7 @@ def infer_factors(
         sample = int(np.flatnonzero(available & ~valid)[0])
         raise SourceInferenceError(
             "candidate source factor inference lost all supported mass",
-            sample,
+            sample + sample_offset,
             component_index,
             int(failed_boundary[sample]),
         )

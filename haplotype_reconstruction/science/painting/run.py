@@ -428,6 +428,8 @@ def paint_chromosome(
             cache_remaining -= decoding.packed_emissions.nbytes
         components.append(release_component(painted, decoding, config, census_sink=census_sink))
         continuity.append(outcome)
+        # Release-only paths, masks and posterior gates end here, before the next component.
+        del decoding
     return Painting(
         contig=evidence.contig,
         sample_ids=tuple(evidence.sample_ids),

@@ -32,7 +32,7 @@ and are needed only at stationary points and for the reported allele probabiliti
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NotRequired, TypedDict
+from typing import NotRequired, TypedDict, cast
 
 import numpy as np
 from numba import prange, types
@@ -1478,8 +1478,10 @@ class PreparedBlock:
         # beside hundreds of siblings grows as they finish; lane results do not depend on the count).
         self._threads = threads
         self.lane_width = lane_width
-        self.gl = np.array(likelihoods, dtype=np.float64, order="C", copy=True)
-        self.observed = np.array(observed, dtype=np.bool_, order="C", copy=True)
+        # Borrow the block's already private, neutralised evidence. Freeze our
+        # views, preserving the caller's flags; no copying-model kernel writes it.
+        self.gl = np.asarray(likelihoods, dtype=np.float64, order="C").view()
+        self.observed = np.asarray(observed, dtype=np.bool_, order="C").view()
         self.unknown_mass = float(unknown_mass)
         self.rates = -np.expm1(-float(redraw_rate) * np.asarray(intervals_morgans, dtype=np.float64))
         self.emissions = _emission_tables(self.gl, self.observed)
@@ -1609,8 +1611,8 @@ class PathWorkspace:
         if (
             self.cached is not None
             and self.cached_level >= level
-            and np.array_equal(panel, self.panel)
-            and np.array_equal(frequencies, self.frequencies)
+            and np.array_equal(panel, cast(NDArray[np.int64], self.panel))
+            and np.array_equal(frequencies, cast(NDArray[np.float64], self.frequencies))
         ):
             return self.cached
         # This prepared block carries an explicit team; cached statistics

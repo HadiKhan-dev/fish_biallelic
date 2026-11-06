@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from ...contracts.evidence import ContigEvidence
+from ...contracts.likelihoods import LikelihoodSlice, gather_likelihoods, slice_likelihoods
+from ...contracts.observations import PairArray, dense_observed, slice_observed
 from ...contracts.roles import record_field
 from ...core.errors import InvariantError
 from ...core.ties import inverse_permutation, run_sample_order
@@ -33,8 +35,10 @@ class BlockEvidence:
     site_start: int = record_field("obs", axes=(), units="site", dtype="int")
     positions: np.ndarray = record_field("obs", axes=("L",), units="bp", dtype="int64")
     kept: np.ndarray = record_field("obs", axes=("L",), units="flag", dtype="bool")
-    likelihoods: np.ndarray = record_field("evidence", axes=("N", "L", "3"), units="probability", dtype="float64")
-    observed: np.ndarray = record_field("obs", axes=("N", "L"), units="flag", dtype="bool")
+    likelihoods: np.ndarray | LikelihoodSlice = record_field(
+        "evidence", axes=("N", "L", "3"), units="probability", dtype="float64"
+    )
+    observed: np.ndarray | PairArray = record_field("obs", axes=("N", "L"), units="flag", dtype="bool")
     sample_ids: tuple[str, ...] | None = record_field(
         "obs", axes=("N",), units="identity", dtype="tuple[str]|None", default=None
     )
@@ -53,8 +57,8 @@ def block_evidence(evidence: ContigEvidence, block: int) -> BlockEvidence:
         site_start=start,
         positions=evidence.positions[start:stop],
         kept=evidence.discovery_sites[start:stop],
-        likelihoods=evidence.likelihoods[:, start:stop],
-        observed=evidence.observed[:, start:stop],
+        likelihoods=slice_likelihoods(evidence.likelihoods, start, stop),
+        observed=slice_observed(evidence.observed, start, stop),
         sample_ids=tuple(evidence.sample_ids),
     )
 
@@ -121,10 +125,16 @@ def discover_block(
     """
     if not evidence.informative:
         return None
+    likelihoods = (
+        evidence.likelihoods
+        if isinstance(evidence.likelihoods, np.ndarray)
+        else gather_likelihoods(evidence.likelihoods, slice(None))
+    )
     kept = evidence.kept
+    observed = dense_observed(evidence.observed)
     result = search_block(
-        np.ascontiguousarray(evidence.likelihoods[:, kept]),
-        np.ascontiguousarray(evidence.observed[:, kept]),
+        np.ascontiguousarray(likelihoods[:, kept]),
+        np.ascontiguousarray(observed[:, kept]),
         config,
         sample_ids=evidence.sample_ids,
         reverse=reverse,
@@ -137,8 +147,8 @@ def discover_block(
         evidence.site_start,
         evidence.positions,
         kept,
-        evidence.likelihoods,
-        evidence.observed,
+        likelihoods,
+        observed,
         result,
         config,
         diagnostics,

@@ -17,6 +17,7 @@ from .read_model.emission import cell_probabilities, prefix
             types.Array(types.float64, 1, "C", readonly=False),
             types.float64,
             types.int64,
+            types.Array(types.float64, 3, "C", readonly=False),
         ),
         (
             types.Array(types.int32, 3, "C", readonly=True),
@@ -24,21 +25,21 @@ from .read_model.emission import cell_probabilities, prefix
             types.Array(types.float64, 1, "C", readonly=False),
             types.float64,
             types.int64,
+            types.Array(types.float64, 3, "C", readonly=False),
         ),
     ),
     cache=True,
     nogil=True,
     parallel=True,
 )
-def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth):
+def likelihoods_into(counts, error, heterozygote, het_inverse, lookup_depth, out):
     """Apply the same lookup/direct kernels with one lookup table per active sample.
 
     Prefix sums and cell normalisation have the same evaluation order as
-    ``calibrate.likelihoods``. Only table lifetime changes: O(team * cap**2)
+    the evidence read model. Only table lifetime changes: O(team * cap**2)
     scratch instead of O(samples * cap**2), with no second contig-sized output.
     """
     n, length = counts.shape[:2]
-    out = np.empty((n, length, 3), np.float64)
     for sample in prange(n):
         deepest = 0
         for site in range(length):
@@ -65,6 +66,33 @@ def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth
                 out[sample, site, 0], out[sample, site, 1], out[sample, site, 2] = cell_probabilities(
                     hom, het, alt, ref, depth
                 )
+
+
+@kernel(
+    overloads=(
+        (
+            types.Array(types.int32, 3, "C", readonly=False),
+            types.Array(types.float64, 1, "C", readonly=False),
+            types.Array(types.float64, 1, "C", readonly=False),
+            types.float64,
+            types.int64,
+        ),
+        (
+            types.Array(types.int32, 3, "C", readonly=True),
+            types.Array(types.float64, 1, "C", readonly=False),
+            types.Array(types.float64, 1, "C", readonly=False),
+            types.float64,
+            types.int64,
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth):
+    """Allocate the original dense result, then fill it with likelihoods_into."""
+    n, length = counts.shape[:2]
+    out = np.empty((n, length, 3), np.float64)
+    likelihoods_into(counts, error, heterozygote, het_inverse, lookup_depth, out)
     return out
 
 

@@ -82,8 +82,8 @@ def edges(
 def combine_exclusion(evidence: Sequence[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Average log exclusion endpoints in configured contig order; sum observed sites."""
     # NumPy 2.5's reduce stub omits the ordinary allocating out=None overload.
-    lower = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))  # type: ignore[call-overload]
-    upper = np.logaddexp.reduce(  # type: ignore[call-overload]
+    lower = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))
+    upper = np.logaddexp.reduce(
         np.stack([value.log_e if value.log_e_upper is None else value.log_e_upper for value in evidence]), axis=0
     )
     upper -= np.log(len(evidence))

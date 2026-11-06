@@ -14,6 +14,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..core.ties import TieCounts
+from .likelihoods import CodedLikelihoods
+from .observations import PairArray
 from .roles import freeze_record_arrays, frozen_array, record_field, schema_field
 
 
@@ -24,13 +26,19 @@ class ContigEvidence:
     contig, sample_ids: as in :class:`ContigReads` (N samples).
     positions: int64[L] sites kept by the site-quality filter (all input sites when the filter is
         off or not applied), strictly increasing.
-    counts: int32[N, L, 2] (REF, ALT) read depths at these sites, or None when the record was
+    counts: dense int32[N, L, 2] or a pair-backed source of the same exact REF/ALT
+        read depths at these sites, or None when the record was
         loaded without them (``evidence.records.load(..., counts=False)``; most stages need only
         likelihoods and the observation mask).
-    likelihoods: float64[N, L, 3] P(reads | genotype g) under the contig's fitted read model (the
-        fixed binomial model when calibration falls back), normalised over g for every cell; a
-        zero-depth cell is exactly (1/3, 1/3, 1/3). No genotype prior is applied.
-    observed: bool[N, L] positive read depth (REF + ALT > 0).
+    likelihoods: dense float64[N, L, 3] or CodedLikelihoods with that logical shape.
+        Explicit gathers return identical float64 P(reads | genotype g) under the contig's
+        fitted read model (fixed binomial when calibration falls back), normalised over g;
+        zero depth is exactly (1/3, 1/3, 1/3). No genotype prior or implicit ndarray
+        conversion is applied. Evidence-v2 stores automatic per-sample codebooks only
+        when exact table + codes and maps beat the joint 33-byte dense cell; other samples remain dense.
+    observed: dense bool[N, L] or a pair-backed positive-depth source (REF + ALT > 0).
+        Coded samples reconstruct counts and flags from the same pairs/codes as GL;
+        only dense fallback rows retain separate count and mask arrays.
     discovery_sites: bool[L] sites the discovery search uses: total depth over all N samples at
         least ``DiscoverySiteRule.minimum_total_depth`` (5) reads, whatever the cohort size
         (``evidence.config.DiscoverySiteRule``; base loader ``keep_flags``).
@@ -42,16 +50,18 @@ class ContigEvidence:
         block may be shorter).
     """
 
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
     payload_identity: str = record_field("obs", dtype="str", kw_only=True)
     contig: str = record_field("obs", axes=(), units="1", dtype="str")
     sample_ids: tuple[str, ...] = record_field("obs", axes=("N",), units="1", dtype="str")
     positions: NDArray[np.int64] = record_field("obs", axes=("L",), units="bp", dtype="int64")
-    counts: NDArray[np.int32] | None = record_field("obs", axes=("N", "L", "2"), units="reads", dtype="int32")
-    likelihoods: NDArray[np.float64] = record_field(
+    counts: NDArray[np.int32] | PairArray | None = record_field(
+        "obs", axes=("N", "L", "2"), units="reads", dtype="int32"
+    )
+    likelihoods: NDArray[np.float64] | CodedLikelihoods = record_field(
         "evidence", axes=("N", "L", "3"), units="probability", dtype="float64"
     )
-    observed: NDArray[np.bool_] = record_field("evidence", axes=("N", "L"), units="1", dtype="bool")
+    observed: NDArray[np.bool_] | PairArray = record_field("evidence", axes=("N", "L"), units="1", dtype="bool")
     discovery_sites: NDArray[np.bool_] = record_field("state", axes=("L",), units="1", dtype="bool")
     founder_excluded: NDArray[np.bool_] = record_field("state", axes=("N",), units="1", dtype="bool")
     block_spans: NDArray[np.int64] = record_field("state", axes=("B", "2"), units="site", dtype="int64")
@@ -59,10 +69,12 @@ class ContigEvidence:
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample_ids", tuple(map(str, self.sample_ids)))
         object.__setattr__(self, "positions", frozen_array(self.positions, np.int64))
-        if self.counts is not None:
+        if self.counts is not None and not isinstance(self.counts, PairArray):
             object.__setattr__(self, "counts", frozen_array(self.counts, np.int32))
-        object.__setattr__(self, "likelihoods", frozen_array(self.likelihoods, np.float64))
-        object.__setattr__(self, "observed", frozen_array(self.observed, np.bool_))
+        if not isinstance(self.likelihoods, CodedLikelihoods):
+            object.__setattr__(self, "likelihoods", frozen_array(self.likelihoods, np.float64))
+        if not isinstance(self.observed, PairArray):
+            object.__setattr__(self, "observed", frozen_array(self.observed, np.bool_))
         object.__setattr__(self, "discovery_sites", frozen_array(self.discovery_sites, np.bool_))
         object.__setattr__(self, "founder_excluded", frozen_array(self.founder_excluded, np.bool_))
         spans = np.asarray(self.block_spans, np.int64)
@@ -97,6 +109,11 @@ class ContigEvidence:
         """
         if not self.founder_excluded.any():
             return self
+        if isinstance(self.observed, PairArray):
+            excluded = self.founder_excluded
+            if self.observed.excluded is not None:
+                excluded = excluded | self.observed.excluded
+            return replace(self, observed=replace(self.observed, excluded=excluded))
         observed = np.array(self.observed, copy=True)
         observed[self.founder_excluded] = False
         return replace(self, observed=observed)

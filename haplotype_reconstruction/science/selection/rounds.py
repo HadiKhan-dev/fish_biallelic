@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
+from ...contracts.observations import PairArray
 from ...contracts.panels import unknown_copy_mass
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...contracts.selection import BlockSelection, MemoHits, SelectionMemo, SelectionSummary
@@ -384,8 +386,8 @@ def block_task_bytes(task: BlockTask, samples: int) -> int:
 
 def select_task(
     block: BlockTask,
-    likelihoods: np.ndarray,
-    observed: np.ndarray,
+    likelihoods: np.ndarray | CodedLikelihoods,
+    observed: np.ndarray | PairArray,
     settings: tuple[SelectionParameters, DiscoveryParameters, float],
     *,
     reverse: bool,
@@ -398,7 +400,7 @@ def select_task(
     are read. Missing cells become the literal uniform value before both fitting and
     input-key construction. Mutates no input; shape/index failures propagate.
     """
-    local_gl = np.array(likelihoods[:, block.columns], dtype=np.float64, order="C", copy=True)
+    local_gl = gather_likelihoods(likelihoods, block.columns)
     local_observed = np.asarray(observed[:, block.columns], dtype=bool, order="C")
     local_gl[~local_observed] = 1.0 / 3.0
     return select_block(

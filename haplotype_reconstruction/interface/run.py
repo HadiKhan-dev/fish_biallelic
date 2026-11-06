@@ -609,14 +609,14 @@ def _decoded(reader: Results, request: Any, contig: str) -> Any:
 
 
 def _chain_evidence(reader: Results, contig: str) -> tuple[Any, Any, Any, Any]:
-    """The contig's checked evidence request, evidence (with counts), founder view and an assembly view of its own."""
+    """Cache count-free evidence and depth keys; defer assembly arrays to their consumer."""
+    import numpy as np
+
     from ..contracts.evidence import ContigEvidence
-    from ..science.assembly.evidence import AssemblyEvidence
+    from ..science.assembly.evidence import AssemblyEvidenceSource, _depth_keys
     from ..stages.evidence import records as evidence_records
 
-    request = evidence_records.result_reader(
-        reader._store, reader.manifest, product="evidence", contig=contig, counts=True
-    )
+    request = evidence_records.result_reader(reader._store, reader.manifest, product="evidence", contig=contig)
     if request is None:
         raise SettingsError(f"{contig}: selection and assembly need complete evidence")
 
@@ -624,13 +624,34 @@ def _chain_evidence(reader: Results, contig: str) -> tuple[Any, Any, Any, Any]:
         evidence = reader.read(request, contig)
         if not isinstance(evidence, ContigEvidence):
             raise SettingsError(f"{contig}: selection and assembly need complete evidence")
-        return evidence, evidence.founder_view(), AssemblyEvidence.from_contig(evidence, request.identity)
+        founder = evidence.founder_view()
+        # The keys consume counts once. Decode one sample row at a time rather
+        # than retaining an N x L x 2 count buffer for the rest of the chain.
+        columns = np.arange(evidence.n_sites, dtype=np.int64)
+        keys = []
+        with evidence_records.open_arrays(
+            reader._store.contig(contig), ("counts",), expected_identity=request.identity
+        ) as arrays:
+            if arrays is None:
+                raise SettingsError(f"{contig}: assembly depth keys need evidence counts")
+            for sample in range(evidence.n_samples):
+                row = arrays["counts"].gather(slice(sample, sample + 1), columns)
+                keys.extend(_depth_keys(row, founder.observed[sample : sample + 1], founder.discovery_sites))
+                del row
+        return evidence, founder, tuple(keys)
 
     items = ",".join(getattr(request, "items", None) or ())
-    evidence, founder, view = _chain_input(f"evidence/{request.identity}/{items}", load)
-    # Each consumer gets its own assembly view over the shared immutable arrays: a final assembly releases its view's
-    # neutral evidence (AssemblyEvidence.release_neutral), which must not reach the kept one or another consumer's.
-    return request, evidence, founder, replace(view)
+    evidence, founder, depth_keys = _chain_input(f"evidence/{request.identity}/{items}", load)
+    source = AssemblyEvidenceSource(
+        founder.positions,
+        founder.likelihoods,
+        founder.observed,
+        founder.discovery_sites,
+        request.identity,
+        depth_keys,
+        bool(evidence.discovery_sites.all() and not evidence.founder_excluded.any()),
+    )
+    return request, evidence, founder, source
 
 
 @dataclass(frozen=True)
@@ -799,7 +820,8 @@ def _run_assembly(
     selected = None if request is None else reader.read(request, contig)
     if request is None or selected is None:
         raise SettingsError(f"{contig}: assembly needs published selection round {previous}")
-    evidence_request, evidence, _, view = _chain_evidence(reader, contig)
+    evidence_request, evidence, _, source = _chain_evidence(reader, contig)
+    view = source()  # no assembly arrays live in the cached chain tuple
     if context is None:
         from ..engine.workers import release_resident_namespace
 
@@ -884,18 +906,27 @@ def _run_painting(
     return expected
 
 
+def _required_dense_evidence(reader: Results, contig: str) -> tuple[Any, str]:
+    """Read one checked dense view for a whole-contig consumer, without a source twin."""
+    from ..stages.evidence import records
+
+    request = records.result_reader(reader._store, reader.manifest, product="evidence", contig=contig)
+    if request is None:
+        raise SettingsError(f"{contig}: required evidence publication is missing")
+    return records.load_dense(reader._store.contig(contig), expected_identity=request.identity), request.identity
+
+
 def _run_refit(
     root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, team: int = 1
 ) -> str:
     """Pass the checked immutable painting and evidence to RF1's one contig action."""
-    from ..stages.evidence import records as evidence_records
     from ..stages.painting import records as painting_records
     from ..stages.refit.tasks import identity, run_contig
     from ..store.protocol import NumericalPolicy
 
     reader = _task_reader(output, root)
     painting, painted = _required_product(reader, painting_records, "painting", contig)
-    evidence, evidence_id = _required_product(reader, evidence_records, "evidence", contig)
+    evidence, evidence_id = _required_dense_evidence(reader, contig)
     expected = identity(
         resolved.parameters.founder_refit,
         contig=contig,
@@ -925,7 +956,6 @@ def _run_phase(
     """Bind the canonical typed upstream products to PH1's complete-contig publisher."""
     from ..contracts.phase import PhaseInputIdentities
     from ..core.digest import json_digest
-    from ..stages.evidence import records as evidence_records
     from ..stages.painting import records as painting_records
     from ..stages.pedigree import records as pedigree_records
     from ..stages.phase import records
@@ -934,7 +964,7 @@ def _run_phase(
     from ..store.protocol import NumericalPolicy
 
     reader = _task_reader(output, root)
-    evidence, evidence_id = _required_product(reader, evidence_records, "evidence", contig)
+    evidence, evidence_id = _required_dense_evidence(reader, contig)
     painting, painting_id = _required_product(reader, painting_records, "painting", contig)
     refit, refit_id = _required_product(reader, refit_records, "refit", contig)
     pedigree, _ = _required_product(reader, pedigree_records, "pedigree", None)
@@ -1149,7 +1179,6 @@ def _complete_workflow(
     prepared: PreparedRun, cut: Cut, tasks: Sequence[Task], values: Mapping[TaskKey, object], recorder: RunRecorder
 ) -> None:
     """Write workflow markers only after verifying the records declared by executed tasks."""
-    from dataclasses import replace
 
     from ..core.errors import InvariantError
     from ..engine.graph import RecordKey
@@ -1252,7 +1281,6 @@ def _phase_report(output: Path, reader: Results) -> Path:
 
 def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[TaskKey, Task]:
     """Declare output dependencies before cuts, preserving separate scientific release records."""
-    from dataclasses import replace
 
     from ..engine.graph import RecordKey, ResourceRequest, Task, TaskKey
     from ..outputs.reports.tasks import run_tasks
@@ -1332,7 +1360,6 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
 
 def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
     """Attach writers whose science is in this cut, retaining the checked external prerequisites."""
-    from dataclasses import replace
 
     from ..engine.graph import TaskKey
 
@@ -1572,9 +1599,8 @@ def execute(
             tie_reverse=tie_reverse, tie_keep=list(tie_keep), tie_census=None if tie_census is None else str(tie_census)
         ),
     )
-    # A worker-pool graph compiles kernels as tasks of its own beside the stage tasks (_with_kernel_tasks: no stage
-    # waits for them; a worker that meets a kernel not yet compiled compiles it under that function's compile lock);
-    # init's simulation and in-process graphs warm every kernel first.
+    # Worker-pool graphs compile missing kernels beside unrelated work. Each scientific root waits for its own
+    # numerical modules before it can expand into workers; init's simulation and in-process graphs warm eagerly.
     defer = command != "init" and not in_process
     with (
         run_log(log),
@@ -1673,7 +1699,6 @@ def _recorded_run(
     settings: Settings, directory: str | Path, *, recombination: bool = False
 ) -> tuple[PreparedRun, ResolvedConfiguration]:
     """Check settings against an initialized run without reopening its observation source."""
-    from dataclasses import replace
 
     from ..engine.runtime import configure_worker
 
@@ -1988,31 +2013,6 @@ _STAGE_OWNERS: dict[str, tuple[str, ...]] = {
     "export": ("outputs.export.task",),
     "report": ("outputs.reports.tasks",),
 }
-# Kernel modules the assembly tasks import lazily inside functions: preloading them lets warm-up compile their declared
-# overloads (ARCHITECTURE_40 section 4.5) instead of each lane compiling them serially.
-_ASSEMBLY_KERNEL_MODULES = (
-    "join.certify",
-    "join.emissions",
-    "join.objective",
-    "join.pair_segments",
-    "join.proposals",
-    "join.splice",
-    "linker.emissions",
-    "linker.kernels",
-    "linker.scan",
-    "pairs",
-    "refinement.acceptance",
-    "refinement.beam",
-    "refinement.checkpoints",
-    "refinement.component_workspace",
-    "refinement.count",
-    "refinement.gains",
-    "refinement.guard",
-    "refinement.messages",
-    "refinement.objective",
-    "refinement.proposals",
-    "refinement.window",
-)
 
 
 def _stage_modules(task: Task) -> tuple[str, ...] | None:
@@ -2027,9 +2027,12 @@ def _stage_modules(task: Task) -> tuple[str, ...] | None:
         modules = _STAGE_OWNERS[stage]
     else:
         return None
+    result = tuple("haplotype_reconstruction." + module for module in modules)
     if stage == "assembly":
-        modules += tuple("science.assembly." + name for name in _ASSEMBLY_KERNEL_MODULES)
-    return tuple("haplotype_reconstruction." + module for module in modules)
+        from ..science.assembly.kernel_inventory import MODULES
+
+        result += tuple(module.__name__ for module in MODULES)
+    return result
 
 
 def _task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
@@ -2042,20 +2045,66 @@ def _task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(modules))
 
 
+# Source identities also traverse readers, codecs and type-only imports into other stages. Those producers are
+# not numerical work performed by this task. Bound first-use waits to the stage's scientific operations, plus
+# shared/core/contract kernels in its source closure. General selection tasks can expand context assembly;
+# application round tasks consume separate context nodes instead. Pedigree and phase can recompute painting
+# emissions. Keep these real cross-stage consumers in their respective groups.
+_STAGE_KERNEL_SCIENCE: dict[str, tuple[str, ...]] = {
+    "evidence": ("evidence",),
+    "relatedness": ("relatedness",),
+    "discovery": ("discovery",),
+    "selection": ("selection", "assembly"),
+    "assembly": ("assembly",),
+    "painting": ("painting",),
+    "refit": ("refit",),
+    "pedigree": ("pedigree", "painting"),
+    "phase": ("phase", "painting"),
+    "recombination": ("recombination",),
+}
+
+
+def _stage_kernel_modules(task: Task) -> tuple[str, ...]:
+    """Numerical ownership within the stage's static closure, including dynamically expanded work."""
+    from ..store.identity import code_dependency_identity
+
+    roots = _stage_modules(task)
+    if not roots:
+        return ()
+    modules = code_dependency_identity(roots).modules
+    science = _STAGE_KERNEL_SCIENCE.get(task.key.stage)
+    if science is None:  # output adapters retain their complete closure
+        return modules
+    if task.key.stage == "selection" and task.key.round in {"initial", "l1", "l2"}:
+        science = ("selection", "assembly.evidence")
+        if task.key.round != "initial":
+            science += ("assembly.alleles",)
+        else:
+            modules = tuple(m for m in modules if m != "haplotype_reconstruction.science.selection.context_refit")
+    if task.key.stage == "assembly" and task.key.round.startswith("context."):
+        # CONTEXT returns after the join; only FINAL expands AS8 refinement.
+        modules = tuple(m for m in modules if not m.startswith("haplotype_reconstruction.science.assembly.refinement."))
+    prefixes = tuple(
+        "haplotype_reconstruction." + name + "."
+        for name in ("core", "contracts", "science.shared", *("science." + name for name in science))
+    )
+    return tuple(
+        module
+        for module in modules
+        if (module + ".").startswith(prefixes) or module == "haplotype_reconstruction.science.evidence.likelihoods"
+    )
+
+
 def _with_kernel_tasks(
     tasks: tuple[Task, ...], scheduling: dict[str, Any], state: Any
 ) -> tuple[tuple[Task, ...], dict[str, Any]]:
-    """Run the warm-up plan's compilations (engine.kernels.compile_tasks) as graph tasks beside the stages.
+    """Gate each scientific root on its own missing compiles, leaving unrelated work runnable.
 
-    No stage task waits for them: a stage that calls a kernel still being compiled waits for that compilation, and one
-    not compiled yet compiles it itself (engine.kernels.install_compile_lock). So the stages start at once and wait
-    only for the kernels they actually call (a stage's static import closure reaches far more: selection's reaches
-    founder refinement, whose longest kernel takes about 175 s, and the one actm3 waited for is never called there).
-    Compile tasks come after every ready stage task (they fill the CPUs the stages leave: at the start, nearly all of
-    them), the kernels in the import closure of the shallowest stage tasks first and, among those, the longest to
-    compile (learned seconds, else overloads)."""
+    A root's dependency also protects its dynamic expansions: no child can use a tail signature before its module
+    has been warmed in the shared run cache. Only state.missing emits tasks or edges. Compilation retains the
+    earliest-consumer/learned-cost order; independent stages keep their existing priority over spare warm-up work.
+    """
     from ..engine.kernels import compile_tasks
-    from ..store.identity import code_dependency_identity
 
     compiles = {task.args[0]: task for task in compile_tasks(state)}
     if not compiles:
@@ -2072,11 +2121,14 @@ def _with_kernel_tasks(
         return levels[key]
 
     first_use: dict[tuple[str, str], int] = {}
+    gated = []
     for task in tasks:
-        roots = _stage_modules(task)
-        for module in code_dependency_identity(roots).modules if roots else ():
+        dependencies = list(task.depends_on)
+        for module in _stage_kernel_modules(task):
             for name in by_module.get(module, ()):
                 first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
+                dependencies.append(compiles[name].key)
+        gated.append(replace(task, depends_on=tuple(dict.fromkeys(dependencies))))
     unused = 1 + max(levels.values(), default=0)
     order = sorted(
         compiles,
@@ -2090,7 +2142,7 @@ def _with_kernel_tasks(
     priorities = dict(scheduling.get("priorities") or {})
     floor = min(priorities.values(), default=0.0) - 1.0
     priorities.update({compiles[name].key: floor - rank for rank, name in enumerate(order)})
-    return (*tasks, *compiles.values()), dict(scheduling, priorities=priorities)
+    return (*gated, *compiles.values()), dict(scheduling, priorities=priorities)
 
 
 def _default_scratch(checkpoints: Path) -> Path:

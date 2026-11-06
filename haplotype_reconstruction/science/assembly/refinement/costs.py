@@ -13,6 +13,7 @@ import math
 import numpy as np
 
 from . import checkpoints
+from .parameters import COUNT_FANOUT_BYTES, FAMILY_BYTES
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
 __all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "component_task_bytes"]
@@ -173,9 +174,15 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     beam_bins = max(maximum_total_bins, max(sum(bins[a : a + 64]) for a in range(blocks)))
     beam = 8 * samples * q * (6 * 64 + 12 + beam_bins) + 8 * samples * beam_bins * beam_bins
     score = 2 * maximum_k * sites + min(sites * q, 1 << 31) + 8 * samples
-    child = search + window + max(proposal, guard, beam, score + (1 << 30))
+    child = search + window + max(proposal, guard, beam, score)
+    # The count driver evaluates shadow families in waves whose TOTAL scratch is
+    # bounded by COUNT_FANOUT_BYTES. Charging a full FAMILY_BYTES to every CPU
+    # made small components reserve tens of GiB for scratch that cannot coexist.
+    # One oversized score is already covered by the per-child score estimate.
+    families = min(COUNT_FANOUT_BYTES, max(1, cores) * FAMILY_BYTES)
     return (
         component_bytes(panels, samples, min_sites_per_bin=min_sites_per_bin, max_bins=config.proposal_max_bins)
         + max(1, cores) * child
+        + families
         + (256 << 20)
     )

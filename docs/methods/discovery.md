@@ -13,7 +13,7 @@ Implementation: [science/discovery/__init__.py](../../haplotype_reconstruction/s
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above. The sample-oriented capped-cost tables are retained for frontier and fractional sweeps. The equivalent site-oriented tables are allocated only if a site-parallel singleton sweep uses them; a one-thread block avoids an additional 40 N L bytes. This changes storage lifetime only, preserving every float64 cost and reduction.
 
 <a id="di02"></a>
 ## di02 Block tie quanta and class/budget primitives (BlockQuanta, tie_classes, whole_class_cut, improves)
@@ -334,3 +334,6 @@ Cost and scope: Constant work for a disabled event; enabled recording grows with
 <a id="search-status"></a>
 
 **Search status:** see [DI25](#di25).
+
+
+Pair-backed evidence-v2 observation masks use the same lazy block intervals as GL declarations. A task gathers its original bool block before the unchanged discovery kernels; declaring all blocks does not recreate a resident whole-contig mask.

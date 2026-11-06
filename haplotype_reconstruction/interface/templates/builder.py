@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from ...contracts.likelihoods import slice_likelihoods
+from ...contracts.observations import slice_observed
 from ...contracts.source import ContigReads
 from ...core.errors import InputError, ResourceError
 from ...engine.graph import ResourceRequest, Task, TaskKey, run_graph
@@ -72,8 +74,10 @@ def _discover_window(index: int, evidence: Any, config: Any, reverse: bool) -> t
 
 def window_bytes(window: Any) -> int:
     """Report the carried discovery working-set estimate; it never changes search budgets."""
-    arrays = (window.positions, window.kept, window.likelihoods, window.observed)
-    return WINDOW_EVIDENCE_FACTOR * sum(int(np.asarray(a).nbytes) for a in arrays) + WINDOW_ALLOWANCE_BYTES
+    # Kernels materialise these dense logical windows, even when declarations
+    # borrow codes/pairs. Preserve the original dense working-set estimate.
+    dense = int(np.prod(window.likelihoods.shape)) * 8 + int(np.prod(window.observed.shape))
+    return WINDOW_EVIDENCE_FACTOR * (window.positions.nbytes + window.kept.nbytes + dense) + WINDOW_ALLOWANCE_BYTES
 
 
 def discover_windows(
@@ -93,8 +97,8 @@ def discover_windows(
             site_start=first,
             positions=evidence.positions[first:stop],
             kept=evidence.discovery_sites[first:stop],
-            likelihoods=evidence.likelihoods[:, first:stop],
-            observed=evidence.observed[:, first:stop],
+            likelihoods=slice_likelihoods(evidence.likelihoods, first, stop),
+            observed=slice_observed(evidence.observed, first, stop),
         )
         if window.informative:
             tasks.append(

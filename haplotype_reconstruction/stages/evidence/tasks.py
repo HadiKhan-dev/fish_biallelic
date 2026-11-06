@@ -51,10 +51,14 @@ def run_contig(
     elif source.kind == "vcf":
         reads, payload = source.read_with_payload(contig, team)
         bind_payload_identity(file, payload_identity(payload))
+        del payload
     else:
         reads = source.reads(contig, team)
     with task_team(team):
         prepared = prepare_contig(reads, parameters, team, reverse=source.reverse)
+    # Pair-backed output no longer owns coded raw count rows. Release the input
+    # before publication; dense fallback rows remain alive through prepared.
+    del reads
     records.write(file, prepared, derivation, payload_identity=consumed)
     return derivation
 

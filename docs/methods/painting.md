@@ -40,7 +40,7 @@ Cost and scope: O(C L_s); O(B S). These terms describe the unit’s work/storage
 <a id="pr04"></a>
 ## pr04 Tempered binned emissions (robust site emission, informative sites and eligibility, design effect, windowed construction, packing)
 
-For each sample/pair/bin, sum robust centred site logs in site order and divide once by the informative-site design effect. Whole-bin windows and sample tiles preserve the values. Treat the site-correlation parameter as a fixed working adjustment, not an estimated correlation.
+For each sample/pair/bin, sum robust centred site logs in site order and divide once by the informative-site design effect. Whole-bin windows and sample tiles preserve the values. Informative-site counts accumulate in int64. NumPy’s internal int64 input conversion belongs to the sample/window workspace and is bounded by that window. Treat the site-correlation parameter as a fixed working adjustment, not an estimated correlation.
 
 Implementation: [science/painting/emissions.py](../../haplotype_reconstruction/science/painting/emissions.py), [science/painting/hmm.py](../../haplotype_reconstruction/science/painting/hmm.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py).
 
@@ -152,7 +152,7 @@ Cost and scope: O(N B); O(N B + B C). These terms describe the unit’s work/sto
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Choose resident packed emissions or whole-bin windows using the supplied storage capability and dimension-based workspace plan. Decode each sample with identical kernels and site order. Cache presence and batch size affect work only; packed arrays are reconstructible from the recorded model/evidence.
+Choose resident packed emissions or whole-bin windows using the supplied storage capability and dimension-based workspace plan. Decode each sample with identical kernels and site order. Cache presence and batch size affect work only; packed arrays are reconstructible from the recorded model/evidence. Release-only decoding arrays end at the component release boundary; the next component retains only the published product and its original cache entry.
 
 Implementation: [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 

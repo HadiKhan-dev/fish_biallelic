@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 
 from ...contracts.evidence import ContigEvidence
+from ...contracts.likelihoods import gather_likelihoods
+from ...contracts.observations import dense_observed
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import ExclusionEvidence, ExclusionRequest
 from ...contracts.roles import require_schema
@@ -95,8 +97,8 @@ def run(
     with task_team(threads):
         product, _ = exclusion_bound.score_contig(
             contig,
-            evidence.likelihoods,
-            evidence.observed,
+            gather_likelihoods(evidence.likelihoods, slice(None)),
+            dense_observed(evidence.observed),
             evidence.positions,
             rows,
             parameters,

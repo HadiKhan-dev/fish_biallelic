@@ -1,5 +1,53 @@
 # Changelog
 
+## 4.4.0 (6 November 2026)
+
+This release reduces retained evidence and execution overhead, and gives idle CPUs to running work. Scientific
+models, founder-count decisions, update order, search bounds and released outputs retain 4.3's meaning.
+
+**Memory follows live work.**
+- The governor uses a growable request ledger, reclaims idle resident workers under pressure and reports live
+  workers after reaping. Waiting work no longer exhausts a fixed request table.
+- Shared transport reuses the same backing across aliases, shapes and returned views; mapped inputs retain their
+  mappings. This removes duplicate physical copies without merging independent arrays that merely have equal values.
+- Evidence schema 2 stores repeated read-count pairs and their exact likelihood triples as per-sample codebooks,
+  with checked integer widths and a dense fallback when encoding costs more. Consumers gather their original
+  dense numerical windows. Schema-1 format decoding remains supported under its original explicit derivation;
+  public 4.4 readers require current derivations. Start a new run/checkpoint root for 4.3-to-4.4 migration
+  ([instructions](docs/user/migration.md#migrating-from-43-to-44)). Likelihood precision and masks are unchanged.
+
+**Running work can borrow idle CPUs.**
+- Kernel and independent-section boundaries refresh the engine's live CPU authority while preserving a task's
+  declared ceiling. Assembly join refits share that authority and retain each kernel's useful-width limit.
+- Larger ready assembly joins and components start first. Polish dispatches independent templates dynamically and
+  evaluates private bridge trials in byte-bounded waves, restoring logical order before selection.
+- Scientific roots wait for their own missing kernel compilations, including assembly's join and refinement tail,
+  while unrelated stages proceed. Assembly's stage preload registers its full lazy numerical closure, and the
+  supported immutable join signature and Python-called pair helper use the run cache.
+
+**Exact discovery reuse.** Edges with identical intersections of their endpoints' closed neighbourhoods reuse the
+same greedy clique extension, with full packed-key equality and the original work receipts. Compatibility tests,
+content order, deduplication and whole-size-class admission are unchanged. Repeated dense neighbourhoods avoid
+rebuilding the same clique; distinct neighbourhoods retain the original worst-case cost.
+
+**Worker failures.** Error reporting briefly reaps a worker whose pipe has closed, so its known exit status appears
+in the failure message; an unavailable status is reported as unknown.
+
+**Checkpoint windows decode whole chunks.** Windowed reads of checkpoint arrays no longer use Blosc2's
+partial-range decoding (`SChunk.get_slice`), which in python-blosc2 4.14.1 (c-blosc2 3.3.5) returns wrong bytes
+for a range of exactly one internal block that starts inside a block. The store now decompresses whole chunks into
+a bounded cache and slices them with NumPy. Releases up to 4.3 used the same call; an audit of every window
+actually read by saved 4.3 runs (30 contigs, including the N = 320 simulation) found no wrong value, and full-row
+reads, which those releases used for most products, are unaffected. Window reads are faster (median 1.2x for
+dense, 2.1x for coded evidence) at a cost of a few hundred MiB of decoded cache.
+
+**Validation.** The 39-case release matrix was rerun with 4.4: every case completes, and all 25 simulations match
+4.3's truth scores on every metric (founders, genotypes, phase and pedigree). On the real TroMau and AcTm crosses, the
+released outputs are identical under all three noise perturbations and, up to sample order, under both sample
+permutations. The standard N = 320 simulation at depth 2, which 4.3 could not complete on a 250 GB node, runs there
+in one attempt with a peak of 176 GiB and no memory pacing, and its 24,386,016 table cells and 17,913,704 VCF records
+equal 4.3's. At depth 5 every evaluation metric equals 4.3's. Depths 1 and 1.5 complete under a 250 GiB limit.
+
 ## 4.3.0 (3 November 2026)
 
 This release tidies the outputs and the code before the analysis freeze. The science is 4.2's: every change leaves

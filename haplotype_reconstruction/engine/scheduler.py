@@ -2,9 +2,9 @@
 
 Owns admission states, native fair shares/leases, expansion and the stall watchdog.
 No science, stage names or predicted-memory admission belong here. P0 ENG-20/23/25/26;
-methods: WP_E1 sections 4.1-4.6. Scheduling constants below carry unchanged values
-from execution/config.py and memory.py (engine.parameters.csv), in seconds/bytes
-or dimensionless fractions as named. These are operational, never science identity.
+methods: WP_E1 sections 4.1-4.6. Scheduling constants below are operational seconds/bytes or dimensionless
+fractions as named. The 4.4 near-limit pacing replaces the earlier soft/hard gate.
+These are operational, never science identity.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ __all__ = [
     "capped_threads",
     "authority_threads",
     "claim_threads",
+    "kernel_team",
     "SlotBudget",
     "process_tree",
     "LedgerWatchdog",
@@ -97,12 +98,12 @@ __all__ = [
     "partition_chains",
 ]
 
-MEMORY_SOFT_FRACTION = 0.8
-MEMORY_HARD_FRACTION = 0.9
+MEMORY_SOFT_FRACTION = 0.9
+MEMORY_HARD_FRACTION = 1.0
 MEMORY_SAMPLE_SECONDS = 0.5
 MEMORY_STALL_MINUTES = 30.0
 MEMORY_STALL_POLL_SECONDS = 60.0
-MEMORY_STALL_CPU_CORES = 1.0
+MEMORY_STALL_CPU_CORES = 0.05
 GIB = 1 << 30
 POLL_SECONDS = 0.5
 WAKE_SECONDS = 0.02
@@ -134,6 +135,13 @@ _FIELDS = (
     "starts",
     "available_bytes",
     "outer_start_ns",
+    "token_capacity",
+    "waiter_capacity",
+    "label_capacity",
+    "tokens_at",
+    "waiters_at",
+    "labels_at",
+    "recovery_request_ns",
 )
 (
     _MAGIC_AT,
@@ -156,6 +164,13 @@ _FIELDS = (
     _STARTS,
     _AVAILABLE_BYTES,
     _OUTER_START_NS,
+    _TOKEN_CAPACITY,
+    _WAITER_CAPACITY,
+    _LABEL_CAPACITY,
+    _TOKEN_OFFSET,
+    _WAITER_OFFSET,
+    _LABEL_OFFSET,
+    _RECOVERY_REQUEST_NS,
 ) = range(len(_FIELDS))
 _HEADER_SLOTS = 32
 _TOKEN = np.dtype(
@@ -173,7 +188,15 @@ _TOKEN = np.dtype(
     ]
 )
 _WAITER = np.dtype(
-    [("id", "<i8"), ("pid", "<i8"), ("started", "<i8"), ("since", "<i8"), ("depth", "<i8"), ("label", "<i8")]
+    [
+        ("id", "<i8"),
+        ("pid", "<i8"),
+        ("started", "<i8"),
+        ("since", "<i8"),
+        ("depth", "<i8"),
+        ("label", "<i8"),
+        ("polled", "<i8"),
+    ]
 )
 _LABEL = np.dtype(
     [
@@ -393,42 +416,91 @@ class _Ledger:
     """The mapped ledger file: header, admission tokens (tokens), queued requests (waiters), per-label statistics.
     Fields are exposed as views (``t_*`` tokens, ``w_*`` waiters, ``l_*`` labels) so access stays cheap."""
 
+    # Views rebound by _refresh through the structured table field names.
+    t_id: np.ndarray
+    t_pid: np.ndarray
+    t_started: np.ndarray
+    t_granted: np.ndarray
+    t_depth: np.ndarray
+    t_state: np.ndarray
+    t_label: np.ndarray
+    t_forced: np.ndarray
+    t_parent: np.ndarray
+    t_outer: np.ndarray
+    w_id: np.ndarray
+    w_pid: np.ndarray
+    w_started: np.ndarray
+    w_since: np.ndarray
+    w_depth: np.ndarray
+    w_label: np.ndarray
+    w_polled: np.ndarray
+
     def __init__(self, path: Path, *, create: bool):
         self.path = Path(path)
         self.pid = os.getpid()
         flags = os.O_RDWR | (os.O_CREAT | os.O_EXCL if create else 0)
         self.fd = os.open(self.path, flags, 384)
         mark_in_use(self.fd)
+        self.thread_lock = threading.Lock()
         try:
             if create:
                 os.ftruncate(self.fd, _SIZE)
-            elif os.fstat(self.fd).st_size != _SIZE:
+            elif os.fstat(self.fd).st_size < 8 * _HEADER_SLOTS:
                 raise RuntimeError(f"{self.path} is not a memory ledger of this package version")
-            self.map = mmap.mmap(self.fd, _SIZE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+            # The header never moves. Tables grow by appending a doubled copy under
+            # flock; slot numbers stay stable in every process. Old ndarray views
+            # keep their old mapping alive until the reader lets them go.
+            self.header_map = mmap.mmap(self.fd, 8 * _HEADER_SLOTS, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+            self.h = np.ndarray((_HEADER_SLOTS,), dtype="<i8", buffer=self.header_map)
+            if create:
+                self.h[
+                    [_TOKEN_CAPACITY, _WAITER_CAPACITY, _LABEL_CAPACITY, _TOKEN_OFFSET, _WAITER_OFFSET, _LABEL_OFFSET]
+                ] = (TOKENS, WAITERS, LABELS, _TOKENS_AT, _WAITERS_AT, _LABELS_AT)
+            self._layout = ()
+            with self.locked():
+                pass
         except BaseException:
             os.close(self.fd)
             raise
-        self.h = np.ndarray((_HEADER_SLOTS,), dtype="<i8", buffer=self.map, offset=0)
-        tokens = np.ndarray((TOKENS,), dtype=_TOKEN, buffer=self.map, offset=_TOKENS_AT)
-        waiters = np.ndarray((WAITERS,), dtype=_WAITER, buffer=self.map, offset=_WAITERS_AT)
-        self.labels = np.ndarray((LABELS,), dtype=_LABEL, buffer=self.map, offset=_LABELS_AT)
-        (
-            self.t_id,
-            self.t_pid,
-            self.t_started,
-            self.t_granted,
-            self.t_depth,
-            self.t_state,
-            self.t_label,
-            self.t_forced,
-            self.t_parent,
-            self.t_outer,
-        ) = (tokens[name] for name in _TOKEN.names or ())
-        self.w_id, self.w_pid, self.w_started, self.w_since, self.w_depth, self.w_label = (
-            waiters[name] for name in _WAITER.names or ()
+
+    def _refresh(self):
+        """Reattach tables after another process grew one; caller holds flock."""
+        layout = tuple(
+            int(self.h[i])
+            for i in (_TOKEN_CAPACITY, _WAITER_CAPACITY, _LABEL_CAPACITY, _TOKEN_OFFSET, _WAITER_OFFSET, _LABEL_OFFSET)
         )
-        self.l = {name: self.labels[name] for name in _LABEL.names or ()}
-        self.thread_lock = threading.Lock()
+        if layout == self._layout:
+            return
+        nt, nw, nl, at, aw, al = layout
+        self.map = mmap.mmap(self.fd, 0, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+        self.tokens = np.ndarray((nt,), dtype=_TOKEN, buffer=self.map, offset=at)
+        self.waiters = np.ndarray((nw,), dtype=_WAITER, buffer=self.map, offset=aw)
+        self.labels = np.ndarray((nl,), dtype=_LABEL, buffer=self.map, offset=al)
+        for prefix, table in (("t", self.tokens), ("w", self.waiters)):
+            for name in table.dtype.names:
+                setattr(self, f"{prefix}_{name}", table[name])
+        self.l = {name: self.labels[name] for name in _LABEL.names}
+        self._layout = layout
+
+    def grow(self, table: str) -> None:
+        """Append a doubled table, preserving every index. Call with the ledger locked.
+
+        Capacities are initial sizes, never execution limits. Growth metadata is
+        published only after the copy; attached processes refresh on their next lock.
+        """
+        cap, offset, values = {
+            "tokens": (_TOKEN_CAPACITY, _TOKEN_OFFSET, self.tokens),
+            "waiters": (_WAITER_CAPACITY, _WAITER_OFFSET, self.waiters),
+            "labels": (_LABEL_CAPACITY, _LABEL_OFFSET, self.labels),
+        }[table]
+        start = os.fstat(self.fd).st_size
+        count = 2 * len(values)
+        os.ftruncate(self.fd, start + count * values.dtype.itemsize)
+        mapped = mmap.mmap(self.fd, 0, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+        grown = np.ndarray((count,), dtype=values.dtype, buffer=mapped, offset=start)
+        grown[: len(values)] = values
+        self.h[cap], self.h[offset] = count, start
+        self._refresh()
 
     @contextmanager
     def locked(self):
@@ -443,6 +515,7 @@ class _Ledger:
             if _FLOCK is None or _FLOCK(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB) != 0:
                 fcntl.flock(self.fd, fcntl.LOCK_EX)
             try:
+                self._refresh()
                 yield self.h
             finally:
                 if _FLOCK is None or _FLOCK(self.fd, fcntl.LOCK_UN) != 0:
@@ -564,6 +637,7 @@ class MemoryGovernor:
         self._sample_stop = threading.Event()
         self._sampler: threading.Thread | None = None
         self._watchdog: LedgerWatchdog | None = None
+        self._recovery_seen = 0
 
     @classmethod
     def create(cls, memory_limit: int | None = None, *, diagnostic_directory=None) -> MemoryGovernor:
@@ -740,9 +814,12 @@ class MemoryGovernor:
                 index = int(found[0])
             else:
                 free = np.flatnonzero(names == b"")
-                index = int(free[0]) if free.size else LABELS - 1
-                if free.size:
-                    names[index] = name
+                if not free.size:
+                    index = len(names)
+                    ledger.grow("labels")
+                else:
+                    index = int(free[0])
+                ledger.l["name"][index] = name
         self._labels[label] = index
         return index
 
@@ -760,7 +837,7 @@ class MemoryGovernor:
         return slot
 
     def _admit(self, request: AdmissionToken, fresh: bool) -> bool:
-        """Only measured pressure and a fresh observation gate outer starts; nested work continues."""
+        """Only sampled working-set pressure paces outer starts; nested work continues."""
         self._sample_pressure()
         if fresh:
             self._purge()
@@ -771,9 +848,12 @@ class MemoryGovernor:
         forced = False
         with ledger.locked() as h:
             limit, used = (int(h[_LIMIT]), int(h[_LIVE_BYTES]))
-            soft, hard = (int(MEMORY_SOFT_FRACTION * limit), int(MEMORY_HARD_FRACTION * limit))
-            observed = int(h[_SAMPLE_NS]) - int(h[_OUTER_START_NS]) >= _SAMPLE_NS_INTERVAL
-            fits = not request.outer or (used < hard and (used < soft or observed))
+            soft = int(MEMORY_SOFT_FRACTION * limit)
+            # Unrestricted below real pressure, then continuously increase spacing
+            # between outer starts as measured headroom vanishes. No planned peaks.
+            pressure = max(0.0, (used - soft) / max(1, limit - soft))
+            interval = int(_SAMPLE_NS_INTERVAL * pressure / max(0.001, 1.0 - pressure))
+            fits = not request.outer or (used < limit and (used <= soft or now - int(h[_OUTER_START_NS]) >= interval))
             if fits and (not request.outer or used < soft or (not h[_WAITING])):
                 admit = True
                 since = int(ledger.w_since[request._waiter]) if request._waiter >= 0 else now
@@ -781,7 +861,8 @@ class MemoryGovernor:
                 if request._waiter < 0:
                     slot = int(ledger.w_id.argmin(axis=0))
                     if ledger.w_id[slot]:
-                        raise RuntimeError("the memory ledger's request table is full")
+                        slot = len(ledger.w_id)
+                        ledger.grow("waiters")
                     request.id = int(h[_NEXT_ID]) + 1
                     h[_NEXT_ID] = request.id
                     pid, started = _identity()
@@ -795,7 +876,10 @@ class MemoryGovernor:
                     ) = (request.id, pid, started, now, request.depth, request._label)
                     request._waiter = slot
                     h[_WAITING] += 1
-                queued = np.flatnonzero(ledger.w_id)
+                ledger.w_polled[request._waiter] = now
+                # Only recent contenders can hold the head: a graph request whose
+                # affinity/CPU seat is no longer available must not deadlock peers.
+                queued = np.flatnonzero((ledger.w_id != 0) & (ledger.w_polled >= now - int(2 * POLL_SECONDS * 1e9)))
                 head = int(queued[np.lexsort((ledger.w_id[queued], -ledger.w_depth[queued]))[0]])
                 is_head = head == request._waiter
                 admit = fits and (not request.outer or is_head)
@@ -816,7 +900,8 @@ class MemoryGovernor:
                     h[_NEXT_ID] = request.id
                 slot = int(ledger.t_id.argmin(axis=0))
                 if ledger.t_id[slot]:
-                    raise RuntimeError("the memory ledger's admission token table is full")
+                    slot = len(ledger.t_id)
+                    ledger.grow("tokens")
                 pid, started = _identity()
                 (
                     ledger.t_id[slot],
@@ -867,6 +952,17 @@ class MemoryGovernor:
             self._log_wait(request, limit, used, int(h[_WAITING]))
         return False
 
+    def recovery_requested(self) -> bool:
+        """Consume a watchdog recovery request on the executor's own thread."""
+        requested = int(self._ledger.h[_RECOVERY_REQUEST_NS])
+        changed = requested > self._recovery_seen
+        self._recovery_seen = requested
+        return changed
+
+    def under_pressure(self) -> bool:
+        """Idle caches may be released near the measured limit, never from estimates."""
+        return int(self._ledger.h[_LIVE_BYTES]) > MEMORY_SOFT_FRACTION * self.limit
+
     def _first_in_a_while(self, key) -> bool:
         """Whether this process last logged ``key`` more than LOG_SECONDS ago (then it logs it now)."""
         now = time.monotonic()
@@ -880,7 +976,7 @@ class MemoryGovernor:
             return
         _LOG.info(
             f"[memory] pacing {request.label}: live {_gib(live)} of {_gib(limit)}, "
-            f"{('hard pressure' if live >= MEMORY_HARD_FRACTION * limit else 'awaiting next measured sample')}; "
+            f"{('hard pressure' if live >= MEMORY_HARD_FRACTION * limit else 'spacing outer starts')}; "
             f"{waiting} waiting"
         )
 
@@ -2210,6 +2306,23 @@ def claim_threads(*, max_threads: int | None = None) -> int:
     return _set_team(threads)
 
 
+@contextmanager
+def kernel_team(*, max_threads: int | None = None):
+    """Refresh and hold the live CPU claim for one native kernel (or independent section).
+
+    Finished peers' CPUs are available immediately at this call, even in a task
+    that began with a smaller team. Never resize a team inside a native kernel.
+    The cap describes useful parallel width, not an earlier allowance snapshot.
+    """
+    old = _numba().get_num_threads()
+    team = claim_threads(max_threads=max_threads)
+    try:
+        yield team
+    finally:
+        ceiling = _team_ceiling()
+        _set_team(old if ceiling is None else min(old, ceiling))
+
+
 class _Slots:
     """Reusable thread slots of concurrent in-process tasks under one live budget."""
 
@@ -2531,6 +2644,11 @@ def process_tree(root: int) -> dict:
                 state=fields[0],
                 cpu_seconds=(int(fields[11]) + int(fields[12])) / ticks,
             )
+            try:
+                io = dict(line.split(": ", 1) for line in Path(f"/proc/{pid}/io").read_text().splitlines())
+                row["io_bytes"] = int(io["read_bytes"]) + int(io["write_bytes"])
+            except (OSError, ValueError, KeyError):
+                row["io_bytes"] = 0
             found[pid, row["started"]] = row
             for task in Path(f"/proc/{pid}/task").iterdir():
                 try:
@@ -2583,7 +2701,7 @@ class LedgerWatchdog:
                 continue
             now = time.monotonic()
             if not processes or baseline is None or counters != baseline[0] or (processes.keys() != baseline[2].keys()):
-                baseline = (counters, now, processes)
+                baseline = (counters, now, processes, False)
                 continue
             elapsed = now - baseline[1]
             if elapsed < self.stall_seconds:
@@ -2592,12 +2710,28 @@ class LedgerWatchdog:
             for key, row in processes.items():
                 seconds = max(0.0, row["cpu_seconds"] - baseline[2][key]["cpu_seconds"])
                 cpu.append(dict(row, window_cpu_seconds=seconds, window_cores=seconds / elapsed))
-            cores = sum(row["window_cores"] for row in cpu)
-            if cores >= MEMORY_STALL_CPU_CORES:
-                baseline = (counters, now, processes)
+            # The owner polls admissions even when no worker can make progress.
+            # Its CPU is useful only while it is itself executing an in-process
+            # task. Worker CPU still protects slow serial/fractional-core work.
+            cores = sum(
+                row["window_cores"]
+                for key, row in zip(processes, cpu, strict=True)
+                if key[0] != self.pid or _TASK_OWNERS
+            )
+            io_progress = any(
+                row.get("io_bytes", 0) > baseline[2][key].get("io_bytes", 0) for key, row in processes.items()
+            )
+            if cores >= MEMORY_STALL_CPU_CORES or io_progress:
+                baseline = (counters, now, processes, False)
                 continue
             if tuple(int(h[i]) for i in progress_indices) != counters or int(h[_WAITING]) <= 0 or self.stop.is_set():
                 baseline = None
+                continue
+            if not baseline[3]:
+                # Ask the executor to drain idle caches before diagnosing a hang.
+                # This aligned write cannot wait on a possibly stuck ledger lock.
+                h[_RECOVERY_REQUEST_NS] = time.monotonic_ns()
+                baseline = (counters, now, processes, True)
                 continue
             try:
                 self._fail(elapsed, cores, cpu, processes)
@@ -2642,8 +2776,8 @@ class LedgerWatchdog:
             cpu_cores=cores,
             processes=cpu,
             header={name: int(ledger.h[i]) for i, name in enumerate(_FIELDS)},
-            tokens=records(_TOKEN, TOKENS, _TOKENS_AT),
-            waiters=records(_WAITER, WAITERS, _WAITERS_AT),
+            tokens=records(_TOKEN, len(ledger.t_id), ledger._layout[3]),
+            waiters=records(_WAITER, len(ledger.w_id), ledger._layout[4]),
         )
         path = self.diagnostic_directory / f"memory-stall-{self.pid}-{time.time_ns()}.json"
         data = json.dumps(report, indent=2) + "\n"
@@ -2747,9 +2881,15 @@ def planning_cost(decoded_discovery_bytes: int, samples: int, sites: int) -> int
     return d + 63 * n * length + 200 * (-(-d // 13) + 8 * length) + 8 * n * length + 9 * length + 32 * n
 
 
+_RELEASED_RESULT = object()
+
+
 def _resolve_graph(value: Any, results: Mapping[TaskKey, Any]) -> Any:
     if isinstance(value, ResultRef):
-        return results[value.task]
+        result = results[value.task]
+        if result is _RELEASED_RESULT:
+            raise SettingsError(f"{value.task}: expansion-local result already consumed; use retain_intermediates=True")
+        return result
     if isinstance(value, tuple):
         return tuple(_resolve_graph(item, results) for item in value)
     if isinstance(value, list):
@@ -2771,7 +2911,11 @@ def _resolved_task(task: Task, results: Mapping[TaskKey, Any]) -> Task:
     if len(task.args) == 1 and type(task.args[0]) is _PackedCall:
         # Packed by the worker that expanded it: its references were recorded there; their values go beside it.
         packed = task.args[0]
-        return replace(task, args=(packed, tuple(results[key] for key in packed.refs))) if packed.refs else task
+        return (
+            replace(task, args=(packed, tuple(_resolve_graph(ResultRef(key), results) for key in packed.refs)))
+            if packed.refs
+            else task
+        )
     return replace(task, args=_resolve_graph(task.args, results), kwargs=_resolve_graph(task.kwargs, results))
 
 
@@ -2827,6 +2971,7 @@ class TaskSession:
         priorities: Mapping[TaskKey, float] | None = None,
         serial_order: Sequence[str] = (),
         on_task: Callable[[Task, Any], None] | None = None,
+        retain_intermediates: bool = False,
     ) -> dict[TaskKey, Any]:
         """Run one bounded batch; no implicit results survive from earlier batches."""
         if not self.active or self.closed or self.running:
@@ -2848,6 +2993,7 @@ class TaskSession:
                 priorities=priorities,
                 serial_order=serial_order,
                 on_task=on_task,
+                retain_intermediates=retain_intermediates,
                 _session=self,
             )
         except BaseException:
@@ -2893,6 +3039,7 @@ def run_graph(
     chains: Sequence[ChainPlan] = (),
     dynamic: bool = True,
     _session: TaskSession | None = None,
+    retain_intermediates: bool = False,
 ) -> dict[TaskKey, Any]:
     """Execute static and expanded tasks under one pressure/CPU authority.
 
@@ -2914,6 +3061,7 @@ def run_graph(
     results = dict(initial_results or {})
     if set(results) & {task.key for task in tasks}:
         raise SettingsError("initial results and scheduled task keys overlap")
+    public_keys = set(results) | {task.key for task in tasks}
     original_order = dependency_order((*tasks, *(Task(key, _precompleted) for key in results)))
     if cores < 1 or cores > affinity_cpus():
         raise ResourceError(f"requested {cores} CPUs; available affinity is {affinity_cpus()}")
@@ -2972,6 +3120,7 @@ def run_graph(
     )
     group: WorkerGroup | None = None if _session is None else _session.group
     stopped = False
+    learned_cost: dict[tuple[str, str, str], tuple[float, int]] = {}
 
     def cancel() -> None:
         nonlocal stopped
@@ -2979,13 +3128,21 @@ def run_graph(
 
     def task_order(key: TaskKey) -> tuple:
         task = indexed[key]
-        return (-depths.get(key, 0), rank.get(task.affinity, len(rank)), -priorities.get(key, 0.0), key)
+        measured, count_cost = learned_cost.get(
+            (key.stage, task.function.__module__, task.function.__qualname__), (0.0, 0)
+        )
+        cost = task.resources.cost or (measured / count_cost if count_cost else 0.0)
+        return (-depths.get(key, 0), rank.get(task.affinity, len(rank)), -priorities.get(key, 0.0), -cost, key)
 
     def completed(worker: int, reply: Any) -> None:
         from .records import record_storage_routes
+        from .workers import _PackedCall
 
         record_storage_routes(reply.storage_routes)
         task = indexed[reply.key]
+        kind = (task.key.stage, task.function.__module__, task.function.__qualname__)
+        seconds, samples = learned_cost.get(kind, (0.0, 0))
+        learned_cost[kind] = (seconds + reply.wall_seconds, samples + 1)
         token = requests.pop(reply.key)
         running.pop(reply.key, None)
         for identity, resident in tuple(residents.items()):
@@ -3079,7 +3236,27 @@ def run_graph(
         while finished in gathers:
             parent, _ = gathers.pop(finished)
             results[parent] = reply.value
-            expansions.pop(parent)
+            children, continuation, _ = expansions.pop(parent)
+            if not retain_intermediates:
+                # Every child is consumed by this gather. Preserve any values
+                # another already-declared task still reads. Child task keys are
+                # private to Expansion; normal caller-supplied results stay public.
+                candidates = {*children, continuation.key} - public_keys
+                referenced = set()
+                for key in pending:
+                    referenced.update(_references((indexed[key].args, indexed[key].kwargs)))
+                    from .workers import _PackedCall
+
+                    for arg in indexed[key].args:
+                        if isinstance(arg, _PackedCall):
+                            referenced.update(arg.refs)
+                for _, waiting_gather, _ in expansions.values():
+                    referenced.update(_references((waiting_gather.args, waiting_gather.kwargs)))
+                    for arg in waiting_gather.args:
+                        if isinstance(arg, _PackedCall):
+                            referenced.update(arg.refs)
+                for key in candidates - referenced:
+                    results[key] = _RELEASED_RESULT
             finished = parent
         if (
             task.affinity is not None
@@ -3154,6 +3331,8 @@ def run_graph(
                     group.authority.limit(demand)
                     group.authority.announce(dict.fromkeys(owners[k] for k in ready))
                     group.authority.refresh()  # every lane's total, once per pass
+                if group is not None and (governor.under_pressure() or governor.recovery_requested()):
+                    group.release_idle()
                 active_affinities = {indexed[k].affinity for k in running if indexed[k].affinity is not None}
                 dispatched = False
                 running_cores = sum(indexed[k].resources.min_cores for k in running)
@@ -3330,12 +3509,25 @@ def run_graph(
                     expected = {key: lane for key, lane in counted.items() if key not in sent}
                     for _, worker, action, token_held, lane in sends:
                         group.send(worker, action, token_held, lane=lane)
+                    if sends:
+                        # The resolved gather carries all child values. Once sent,
+                        # the transport's in-flight holds protect the segments;
+                        # keeping this local action retained the entire last wave.
+                        sends.clear()
+                        del action
                 if group is not None:
                     if ready and all(k not in pending for k in ready):
                         for counters in group.authority.groups:
                             counters.open_gate()
                     for worker, reply in group.receive(timeout=0.0 if dispatched else CPU_POLL_SECONDS):
                         completed(worker, reply)
+                    for worker, released_affinities in group.released:
+                        for identity, resident in tuple(residents.items()):
+                            if identity[0] == worker and identity[1] not in released_affinities:
+                                resident.release(record=False)
+                                del residents[identity]
+                    group.released.clear()
+                    group.reclaim_attachments()
                 elif not dispatched:
                     if not ready and (not running):
                         raise InvariantError("graph has pending work but no executable dependency")
@@ -3362,7 +3554,7 @@ def run_graph(
         if injected_governor:
             _GOVERNOR = previous_governor
     order = (*original_order, *sorted(results.keys() - set(original_order)))
-    return {key: results[key] for key in order}
+    return {key: results[key] for key in order if retain_intermediates or key in public_keys}
 
 
 class TaskBudget(CpuBudget):

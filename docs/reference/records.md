@@ -1041,14 +1041,14 @@ Source: [haplotype_reconstruction/contracts/evidence.py](../../haplotype_reconst
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 | `payload_identity` | `str` | obs | () | 1 | str | True | `required` |
 | `contig` | `str` | obs | () | 1 | str | True | `required` |
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
 | `positions` | `NDArray[np.int64]` | obs | ('L',) | bp | int64 | True | `required` |
-| `counts` | `NDArray[np.int32] &#124; None` | obs | ('N', 'L', '2') | reads | int32 | True | `required` |
-| `likelihoods` | `NDArray[np.float64]` | evidence | ('N', 'L', '3') | probability | float64 | True | `required` |
-| `observed` | `NDArray[np.bool_]` | evidence | ('N', 'L') | 1 | bool | True | `required` |
+| `counts` | `NDArray[np.int32] &#124; PairArray &#124; None` | obs | ('N', 'L', '2') | reads | int32 | True | `required` |
+| `likelihoods` | `NDArray[np.float64] &#124; CodedLikelihoods` | evidence | ('N', 'L', '3') | probability | float64 | True | `required` |
+| `observed` | `NDArray[np.bool_] &#124; PairArray` | evidence | ('N', 'L') | 1 | bool | True | `required` |
 | `discovery_sites` | `NDArray[np.bool_]` | state | ('L',) | 1 | bool | True | `required` |
 | `founder_excluded` | `NDArray[np.bool_]` | state | ('N',) | 1 | bool | True | `required` |
 | `block_spans` | `NDArray[np.int64]` | state | ('B', '2') | site | int64 | True | `required` |
@@ -1472,6 +1472,46 @@ Source: [haplotype_reconstruction/contracts/genetic_map.py](../../haplotype_reco
 |---|---|---|---|---|---|---|---|
 | `maps` | `Mapping[str, ChromosomeGeneticMap]` | state | () | 1 | Mapping[str, ChromosomeGeneticMap] | True | `dict()` |
 | `default_rate_cm_per_mb` | `float` | state | () | cM/Mb | float64 | True | `DEFAULT_RATE_CM_PER_MB` |
+
+## likelihoods.CodedLikelihoods
+
+Source: [haplotype_reconstruction/contracts/likelihoods.py](../../haplotype_reconstruction/contracts/likelihoods.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `sites` | `int` | state | () | 1 | int | True | `required` |
+| `widths` | `np.ndarray` | state | ('N',) | 1 | uint8 | True | `required` |
+| `rows` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
+| `offsets` | `np.ndarray` | state | ('N+1',) | 1 | int64 | True | `required` |
+| `pairs` | `np.ndarray` | obs | ('D', '2') | reads | int32 | True | `required` |
+| `values` | `np.ndarray` | evidence | ('D', '3') | probability | float64 | True | `required` |
+| `codes8` | `np.ndarray` | state | ('N8', 'L') | 1 | uint8 | True | `required` |
+| `codes16` | `np.ndarray` | state | ('N16', 'L') | 1 | uint16 | True | `required` |
+| `codes32` | `np.ndarray` | state | ('N32', 'L') | 1 | uint32 | True | `required` |
+| `dense` | `np.ndarray` | evidence | ('Ndense', 'L', '3') | probability | float64 | True | `required` |
+
+## likelihoods.LikelihoodSlice
+
+Source: [haplotype_reconstruction/contracts/likelihoods.py](../../haplotype_reconstruction/contracts/likelihoods.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `source` | `CodedLikelihoods` | — | () | 1 | See type | True | `required` |
+| `start` | `int` | — | () | 1 | See type | True | `required` |
+| `stop` | `int` | — | () | 1 | See type | True | `required` |
+
+## observations.PairArray
+
+Source: [haplotype_reconstruction/contracts/observations.py](../../haplotype_reconstruction/contracts/observations.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `source` | `CodedLikelihoods` | evidence | () | 1 | CodedLikelihoods | True | `required` |
+| `dense` | `np.ndarray` | obs | () | 1 | ndarray | True | `required` |
+| `kind` | `ObservationKind` | state | () | 1 | str | True | `required` |
+| `excluded` | `np.ndarray &#124; None` | state | () | 1 | bool | True | `None` |
+| `start` | `int` | state | () | 1 | int | True | `0` |
+| `stop` | `int &#124; None` | state | () | 1 | int &#124; None | True | `None` |
 
 ## painting.PaintedChunk
 

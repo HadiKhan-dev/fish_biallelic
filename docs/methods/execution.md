@@ -174,13 +174,13 @@ Cost and scope: O(bytes). These terms describe the unit’s work/storage dimensi
 <a id="eng-16"></a>
 ## eng-16 Checked array windows (store/slices.py)
 
-Expose checked sample/site windows whose bytes equal the corresponding decoded array slices. Validate requested axes, range and stride, and define whether a returned view remains valid across the next read. Consumers must copy or finish using leased views before reuse. A window route is accepted only after forced comparison with its resident route.
+Expose checked sample/site windows whose bytes equal the corresponding decoded array slices. Each needed physical chunk is fully decompressed with the ordinary codec reader and cached by decoded byte size; NumPy performs all range slicing. The shared LRU retains at most 1 GiB (one oversized chunk alone), with one transient compressed input on a miss. This avoids relying on Blosc2 partial-range arithmetic. Validate requested axes, range and stride, and define whether a returned view remains valid across the next read. Consumers must copy or finish using leased views before reuse. A window route is accepted only after forced comparison with its resident route.
 
 Implementation: [store/container.py](../../haplotype_reconstruction/store/container.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(rows × span). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(rows × span) copying plus full decoding of physical chunks on cache misses. Dense painting reads its output flags once and traverses sample tiles sharing a GL chunk, within the existing sample/team and whole-bin workspace bounds. Repeated misses can repeat full decompression; logical requested bytes alone do not bound this cost.
 
 <a id="eng-17"></a>
 ## eng-17 Temporary mapped arrays (store/mapped.py)
@@ -207,7 +207,7 @@ Cost and scope: Directory/layout inspection and incremental record-index reads.
 <a id="eng-19"></a>
 ## eng-19 Process bootstrap and numerical-library set-up
 
-Validate affinity and establish numerical-library policy before starting the forkserver. Preload the declared import closure before workers begin, initialise their threading runtime safely and enforce declared signatures. Ordinary worker graphs compile missing kernels alongside ready scientific tasks, synchronizing only at the compile lock of a kernel in use. Simulation init and in-process graphs warm the required kernels before scientific tasks start. One application boundary owns these process-wide effects; importing science must perform none.
+Validate affinity and establish numerical-library policy before starting the forkserver. Preload the declared import closure before workers begin, initialise their threading runtime safely and enforce declared signatures. Ordinary worker graphs compile missing kernels alongside unrelated ready scientific tasks. Each scientific root waits for the missing compile tasks in its numerical ownership group before entering or expanding, as specified in ENG-27; shared callees retain their compile locks. There is no whole-graph compilation barrier. Simulation init and in-process graphs warm the required kernels before scientific tasks start. One application boundary owns these process-wide effects; importing science must perform none.
 
 Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py), [engine/runtime.py](../../haplotype_reconstruction/engine/runtime.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
@@ -218,7 +218,7 @@ Cost and scope: Process/bootstrap and code-closure overhead; compilation runs be
 <a id="eng-20"></a>
 ## eng-20 CPU budget tree and the fair-share rule
 
-Allocate claimed teams within one total core budget. Open the startup gate under its declared worker/admission conditions, split contenders fairly and distribute remainders by the prescribed rules. Rebalance only at task-owned boundaries, never during a kernel. Contig leases may borrow free cores when peers are satisfied and lend while waiting. Resources cannot select scientific candidates.
+Allocate claimed teams within one total core budget. Open the startup gate under its declared worker/admission conditions, split contenders fairly and distribute remainders by the prescribed rules. Rebalance at each task-owned kernel call or independent section, never inside a running native kernel. `engine.scheduler.kernel_team(max_threads=useful_width)` refreshes and applies the live authority; its cap describes useful parallel work rather than the task’s initial integer thread count. Claims protect running teams until the next boundary, so completed peers’ CPUs can be lent to work already executing without oversubscription. Contig leases may borrow free cores when peers are satisfied and lend while waiting. Resources cannot select scientific candidates.
 
 Implementation: [engine/graph.py](../../haplotype_reconstruction/engine/graph.py), [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
 
@@ -240,7 +240,7 @@ Cost and scope: Process startup, task dispatch and one shared-input copy per poo
 <a id="eng-22"></a>
 ## eng-22 ChromosomeExecutor (persistent per-chromosome workers)
 
-Retain contig state on its affinity worker across consecutive tasks. Partition by declared weights or use the longest-first queue, placing results by key. A worker with live retained state cannot recycle; an announced retirement returns its continuation position before replacement. Unexpected exit is a failure, including an unannounced successful process exit.
+Retain contig state on its affinity worker across consecutive tasks. Partition by declared weights or use the longest-first queue, placing results by key. Reloadable identity-keyed caches may be evicted on an idle worker under measured pressure; explicit retained references and expansion continuations remain pinned. A worker with pinned live state cannot recycle; an announced retirement returns its continuation position before replacement. Unexpected exit is a failure, including an unannounced successful process exit.
 
 Implementation: [engine/workers.py](../../haplotype_reconstruction/engine/workers.py).
 
@@ -251,7 +251,7 @@ Cost and scope: O(tasks). These terms describe the unit’s work/storage dimensi
 <a id="eng-23"></a>
 ## eng-23 Contig lanes and the straggler floor
 
-Plan concurrent contig lanes from pending work and the configured lane limit. Use the declared cost order and straggler floor with the upper median of positive weights; update remaining work only when whole tasks finish. Borrow unused cores at safe boundaries. On a contig failure cancel sibling work and preserve already committed records. These scheduling heuristics affect latency, not graph semantics.
+Plan concurrent contig lanes from pending work and the configured lane limit. Use declared task costs (or learned per-kind wall cost), the contig cost order and straggler floor with the upper median of positive weights; update remaining work only when whole tasks finish. Borrow unused cores at safe boundaries. On a contig failure cancel sibling work and preserve already committed records. These scheduling heuristics affect latency, not graph semantics.
 
 Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
 
@@ -262,7 +262,7 @@ Cost and scope: O(contigs). These terms describe the unit’s work/storage dimen
 <a id="eng-24"></a>
 ## eng-24 Shared arrays
 
-Share immutable arrays with explicit ownership and attach/detach lifetimes. Copy exact bytes and avoid object-identity scientific cache keys. Clean abandoned shared segments only after verifying the owning process identity and lack of use. A task cannot mutate another task’s shared input.
+Share immutable arrays with explicit ownership and attach/detach lifetimes. Copy exact bytes and avoid object-identity scientific cache keys. Clean abandoned shared segments only after verifying the owning process identity and lack of use. A task cannot mutate another task’s shared input. Identical immutable contiguous backing is copied once across live shared bundles and view shapes. Read-only file/shared mappings are borrowed without a second segment, with an independent descriptor pin per live backing. Each bundle owns a reference; releasing the original owner, closing its mapping or unlinking its path cannot revoke another bundle. Writable and private copy-on-write sources retain snapshot copies. Borrowed inputs remain immutable through their last consumer. Expansion-local result values leave after their gather consumes them; original caller task results remain public. `retain_intermediates=True` retains private expansion results for diagnostics. In-flight holds protect sent arrays, dead attachments are unmapped after messages are consumed, and each unpickler clears its memo at payload completion so its bound loader cannot cyclically retain decoded arrays. Explicit transport ownership, rather than attachment resource trackers, owns unlinking.
 
 Implementation: [engine/workers.py](../../haplotype_reconstruction/engine/workers.py).
 
@@ -273,7 +273,7 @@ Cost and scope: O(D) copying/attachment for shared bytes plus process-liveness c
 <a id="eng-25"></a>
 ## eng-25 Memory governor (pressure admission, ledger, trimming)
 
-Admit outer work from measured process-group memory pressure, maintaining queued, running, waiting, suspended and resident states. Nested continuations retain progress guarantees; only running/queued work blocks a forced progress grant. Working-set estimates are diagnostics, not planned-peak reservations. Flexible buffers may change batch shape only on a proven value-equivalent route; scientific budgets never depend on free memory.
+Admit outer work from measured process-group memory pressure, maintaining queued, running, waiting, suspended and resident states. Nested continuations retain progress guarantees; only running/queued work blocks a forced progress grant. The token, waiter and label tables double under the interprocess lock when full; attached processes remap before their next ledger operation, preserving slot indices and statistics. Initial table sizes are not execution caps. Working-set estimates are diagnostics, not planned-peak reservations. Outer starts are unrestricted through 90% measured use. Above that point their spacing increases continuously as headroom vanishes: with p = (used − 0.9 limit)/(0.1 limit), delay = sample interval × p/(1 − p). Pressure is refreshed at most every half second; paced starts may share a sample, avoiding a second throughput cliff at the onset of pressure. At the measured limit, only a forced drain can start. Recently polled deeper/older waiters have precedence; an ineligible queue head expires after two poll periods, so a request awaiting its affinity or CPU cannot deadlock other ready work. Idle workers release reloadable caches and trim their heaps before replacement; pinned continuations continue to have a progress grant. Flexible buffers may change batch shape only on a proven value-equivalent route; scientific budgets never depend on free memory.
 
 Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
 
@@ -284,7 +284,7 @@ Cost and scope: O(tokens). These terms describe the unit’s work/storage dimens
 <a id="eng-26"></a>
 ## eng-26 Memory stall watchdog
 
-Watch admission progress with the declared polling and stall interval. Reset the baseline when progress counters, process membership or observable activity changes, or measurements become unavailable. Fail only after the sustained low-activity condition is rechecked. This watchdog diagnoses stalled execution; it is not a scientific timeout that returns partial calls.
+Watch admission progress with the declared polling and stall interval. Reset the baseline when grants/starts/releases, process membership, sustained worker CPU activity (at least 0.05 core) or physical I/O changes, or measurements become unavailable. Coordinator admission polling is excluded from CPU activity; owner CPU counts only while an in-process task is executing. A useful serial or fractional-core worker and physical I/O still reset the baseline. Samples and launch-delay expiry are not progress. At the first sustained idle interval, request executor-side idle-state recovery and allow one further interval; only a second idle interval with no progress can fail. Recovery is requested without taking a potentially stuck ledger lock. Idle-worker maintenance is issued once per task boundary, so pressure alone cannot create a replacement loop that masks a hang. Fail only after the sustained low-activity condition is rechecked. This watchdog diagnoses stalled execution; it is not a scientific timeout that returns partial calls.
 
 Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
 
@@ -295,7 +295,7 @@ Cost and scope: One bounded process-accounting scan per configured poll while re
 <a id="eng-27"></a>
 ## eng-27 Kernel cache and warm-up
 
-Derive the kernel cache namespace from the declared code/numerical closure and publish valid cache state even after a later scientific failure. Ordinary worker graphs schedule missing-signature compilation beside ready stages with stage priority; a stage waits only on a compile lock for the kernel it uses. Simulation init, in-process graphs and explicit warm_up callers compile missing signatures eagerly in the specified cost order before scientific execution. Cache presence may save compilation but cannot change the declared supported signatures or numerical policy. Do not fork after activating an incompatible numerical runtime.
+Derive the kernel cache namespace from the declared code/numerical closure and publish valid cache state even after a later scientific failure. Ordinary worker graphs schedule missing-signature compilation beside unrelated ready work. Each scientific root depends on the missing compile tasks for its numerical modules before it enters or expands; shared callees retain their compile locks. Dependencies cover only the missing functions in that stage’s numerical ownership group, including a general selection task’s context assembly and pedigree/phase painting emissions, rather than every producer reached through record readers or type imports. Application selection rounds consume their separately scheduled context assemblies and wait only for selection, evidence projection and (after the initial round) founder-allele kernels. Context assemblies do not wait for final-role refinement. A warm cache adds no tasks or edges. Existing stage dependencies and scientific order are unchanged; there is no whole-graph warm-up barrier. Simulation init, in-process graphs and explicit warm_up callers compile missing signatures eagerly in the specified cost order before scientific execution. Cache presence may save compilation but cannot change the declared supported signatures or numerical policy. Do not fork after activating an incompatible numerical runtime.
 
 Implementation: [engine/kernels.py](../../haplotype_reconstruction/engine/kernels.py), [engine/runtime.py](../../haplotype_reconstruction/engine/runtime.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 

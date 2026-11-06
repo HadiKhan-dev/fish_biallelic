@@ -18,16 +18,16 @@ from haplotype_reconstruction.contracts.assembly import JoinRecord, JoinSettings
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
 from haplotype_reconstruction.engine.graph import ResourceRequest, ResultRef, Task, TaskKey
 from haplotype_reconstruction.engine.runtime import task_team
-from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.batch import run_batch
-from haplotype_reconstruction.science.assembly.hierarchy.costs import batch_memory_bytes, batch_threads
+from haplotype_reconstruction.science.assembly.hierarchy.costs import batch_memory_bytes, batch_threads, batch_work
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput, LevelPlan, compose_level, plan_level
 from haplotype_reconstruction.stages.framework import Expansion
 from haplotype_reconstruction.store.protocol import claim
 
 from .completion import attached_scoring
+from .join_team import JoinTeam
 from .records import JOINS, RecordCapability, join_code, join_derivation, load_join, save_join
 
 T = TypeVar("T")
@@ -55,7 +55,7 @@ def execute_join(
     with attached_scoring(scoring) as data, task_team(cores):
         # The task's live allowance: the join search re-reads it at its boundaries, so a long batch grows into CPUs
         # its finished peers left (a fixed budget kept a tail batch on the cores it started with).
-        result = run_batch(task, data, current_budget())
+        result = run_batch(task, data, JoinTeam(batch_threads(task)))
     return replace(result, seconds=perf_counter() - began)
 
 
@@ -123,7 +123,7 @@ def expand_level(
                 key,
                 execute_join,
                 args=(item, evidence.scoring if scoring_ref is None else scoring_ref, records, identities[item.index]),
-                resources=ResourceRequest(1, min(max_cores, batch_threads(item)), batch_memory_bytes(item)),
+                resources=ResourceRequest(1, max_cores, batch_memory_bytes(item), cost=batch_work(item)),
                 thread_argument="cores",
             )
         )
@@ -177,7 +177,7 @@ def run_level_stage(
             dict(schema=1, batches=[(a, b, identities.get(i)) for i, (a, b) in enumerate(planned.partition.ranges)]),
         )
     results, reused = {}, 0
-    for task in planned.tasks:
+    for task in sorted(planned.tasks, key=lambda item: (-batch_work(item), item.index)):
         found = None if records is None else load_join(records.file, identities[task.index], index=task.index)
         if found is not None:
             reused += 1

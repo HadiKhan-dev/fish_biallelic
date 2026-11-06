@@ -1253,6 +1253,32 @@ SIGNATURES: dict[str, tuple[dict[str, str], ...]] = {
 }
 
 
+# Saved depth-2 chr3 tail: noncontiguous shared GL and immutable local row codes.
+# This is an additional supported storage signature, not a numerical route.
+SIGNATURES["haplotype_reconstruction.science.assembly.join.emissions._binned_log_emissions"] += (
+    {
+        "text": (
+            "(Array(float64, 1, 'C', False, aligned=True), int64, Array(float32, 3, 'A', True, aligned=True),"
+            " int64, Array(int8, 2, 'C', True, aligned=True), Array(int32, 2, 'C', False, aligned=True), Arra"
+            "y(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), int64)"
+        ),
+        "pickle": (
+            "fCQB!0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+            "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+            "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+            "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj8%6pR&Na&lpLC}wPLVRSY$EFdvtEFeQ"
+            "ElxP=CgaLJjlv0#v0%!$j4~z#%Zggd5Wpb30lxPc1hm?JkC}<Rn1!-<{HZ+uI7E3^k26Jg=Ze?VYh-eo}8g+-1Qj}-{Xa#5p"
+            "XbVn<lzo&aj0bIXbYWs_Wt53%4rl^s1!xgy3r>fWeUvC@6pROEY;R$7GcuHD7E2&#7fTy;hm=y3Xc|icXd8?HL6m3|j2?1jV"
+            "PtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeKClxP=CVFGoBlv0#vCujm_1!xFp3r>fWeUvC@Dv4+gXaZ;jXd!3|PKT6zlqhHvj0"
+            "9<JbU2h~7E1_dC5UJjOBZ#Alv0#v8cPCb8)zJ86pR~kWnpA*ZftoVVRCX|c_?XabT}*^GGr_uLn)MK7foyeb%&HvlxPBI1!x"
+            "Fp3r>fWeUvC@4rl^s1!y5?3r>fWeUvC@6pRIFZgev;lxP-9AZR6sXctQvb%&HvlxP}D0%#j(9B34b6Jc_4VR<NNZgev;EFdy"
+            "uEFeQElxP=CYXWtLlv0#v0%!$j2xtpVhm?JkC}<970%!$j4~z#wZ*Od6VQ!R@lxPc1hm?JkC}<Rn1Y&P*Y?NphOA>X5lv0#v"
+            "8cP9a8)zJ86pRvKa&lpLC}MAKY%Cx#WGo;<DU@gzO^g9`hm=y3Xj5n>bd)X"
+        ),
+    },
+)
+
+
 def overloads_for(module: str, name: str) -> tuple:
     """Return exact argument tuples for a canonical science dispatcher."""
     canonical = module.replace("haplotype_reconstruction.assembly.", "haplotype_reconstruction.science.assembly.")

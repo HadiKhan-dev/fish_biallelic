@@ -14,14 +14,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 from numba import prange
 
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
+from ...contracts.likelihoods import gather_likelihoods, likelihood_window_sites
 from ...contracts.painting import ComponentPainting, Painting, PaintingSettings, TrackStatus
-from ...contracts.pedigree import HammingTransition, PreparedChromosome, PreparedComponent
+from ...contracts.pedigree import HammingTransition, PreparedChromosome, PreparedComponent, SourceFactors
 from ...core.errors import InputError
 from ...core.kernels import kernel
 from ..painting import api as painting_hmm
@@ -127,6 +129,59 @@ def _evidence_sites(evidence_positions: np.ndarray, positions: np.ndarray, *, co
     return indices.astype(np.int64)
 
 
+def _source_factors(
+    painted: ComponentPainting,
+    evidence: ContigEvidence,
+    sites: np.ndarray,
+    painting_config: PaintingSettings,
+    transition: HammingTransition,
+    available: np.ndarray,
+    claim_threads: Callable[[], None],
+    component_index: int,
+) -> SourceFactors:
+    """Fill the original dense factors while keeping only one sample batch's emissions/GL live.
+
+    Every candidate's backward recurrence is independent. Cached emissions are unpacked
+    by the same batch boundary as uncached emissions; neither route retains an all-sample
+    emission array or its bin-major transpose beside the final right weights.
+    """
+    states, bins = painted.states, painted.bins
+    samples, n_states = evidence.n_samples, states.n_states
+    initial = np.empty((samples, n_states, n_states), dtype=np.float64)
+    right = np.empty((samples, max(0, bins.n_bins - 1), n_states, n_states), dtype=np.float64)
+    alt_probability = states.alt_probability() if painted.packed_emissions is None else None
+    for first in range(0, samples, _EMISSION_SAMPLE_BLOCK):
+        last = min(samples, first + _EMISSION_SAMPLE_BLOCK)
+        claim_threads()
+        if painted.packed_emissions is not None:
+            emissions = painting_hmm.unpack_emissions(painted.packed_emissions[first:last], n_states)
+        else:
+            selected_gl, selected_observed = painting_hmm.gather_sites(
+                evidence.likelihoods, evidence.observed, sites, slice(first, last)
+            )
+            emissions = painting_hmm.binned_emissions(
+                selected_gl,
+                selected_observed,
+                cast(np.ndarray, alt_probability),
+                states.background_frequency,
+                bins.starts,
+                bins.stops,
+                robustness_epsilon=painting_config.robustness_epsilon,
+                log_floor=painting_config.emission_log_floor,
+            )
+            emissions /= painting_hmm.design_effect(
+                selected_gl, selected_observed, bins.starts, painted.transitions.site_correlation
+            )[:, None, :]
+            del selected_gl, selected_observed
+        factors = sources.infer_factors(
+            emissions, transition, available[first:last], component_index=component_index, sample_offset=first
+        )
+        initial[first:last] = factors.initial
+        right[first:last] = factors.right_weight
+        del factors, emissions
+    return SourceFactors(initial, right, available)
+
+
 def _prepare_component(
     index: int,
     painted: ComponentPainting,
@@ -146,41 +201,28 @@ def _prepare_component(
     if not len(chosen):
         return None
     marker_sites = sites[chosen]
-    gl = np.ascontiguousarray(evidence.likelihoods[:, marker_sites])
+    gl = gather_likelihoods(evidence.likelihoods, marker_sites)
     observed = np.ascontiguousarray(evidence.observed[:, marker_sites])
     if not np.any((gl[..., 0] != gl[..., 1]) | (gl[..., 1] != gl[..., 2])):
         return None
     claim_threads()
-    available = _informative_counts(evidence.likelihoods, evidence.observed, sites, INFORMATIVE_GL_SPREAD) >= 1
-    n_states = states.n_states
-    if painted.packed_emissions is not None:
-        emissions = painting_hmm.unpack_emissions(painted.packed_emissions, n_states)
+    if isinstance(evidence.likelihoods, np.ndarray) and isinstance(evidence.observed, np.ndarray):
+        available = _informative_counts(evidence.likelihoods, evidence.observed, sites, INFORMATIVE_GL_SPREAD) >= 1
     else:
-        # Components beyond the painting's emission cache: recompute in sample blocks so the
-        # lease can grow (values are identical).
-        selected_gl, selected_observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites)
-        emissions = painting_hmm.binned_emissions(
-            selected_gl,
-            selected_observed,
-            states.alt_probability(),
-            states.background_frequency,
-            bins.starts,
-            bins.stops,
-            robustness_epsilon=painting_config.robustness_epsilon,
-            log_floor=painting_config.emission_log_floor,
-            sample_block=_EMISSION_SAMPLE_BLOCK,
-            before_block=claim_threads,
+        # Availability is an integer count; sum bounded projections in site order.
+        counts = np.zeros(evidence.n_samples, np.int64)
+        size = (
+            likelihood_window_sites(evidence.likelihoods) if not isinstance(evidence.likelihoods, np.ndarray) else 2048
         )
-        # Tempered as the painting's decoder and its packed emissions (release 2.14): each sample's bin divided by its
-        # design effect.
-        emissions /= painting_hmm.design_effect(
-            selected_gl, selected_observed, bins.starts, painted.transitions.site_correlation
-        )[:, None, :]
-        del selected_gl, selected_observed
+        for left in range(0, len(sites), size):
+            selected = sites[left : left + size]
+            values = gather_likelihoods(evidence.likelihoods, selected)
+            seen = np.ascontiguousarray(evidence.observed[:, selected])
+            counts += _informative_counts(values, seen, np.arange(len(selected), dtype=np.int64), INFORMATIVE_GL_SPREAD)
+            del values, seen
+        available = counts >= 1
     transition = HammingTransition(*painted.transitions.probabilities())
-    claim_threads()
-    factors = sources.infer_factors(emissions, transition, available, component_index=index)
-    del emissions
+    factors = _source_factors(painted, evidence, sites, painting_config, transition, available, claim_threads, index)
     unknown = (painted.status == _BACKGROUND_STATUS) | (painted.status == _UNANCHORED_STATUS)
     state_classes = np.where(unknown, -1, painted.classes).astype(np.int16)
     # Which parental homologue is transmitted changes between adjacent bin centres when an odd number of
@@ -208,6 +250,29 @@ def _prepare_component(
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
         information_exponent=np.empty((gl.shape[0], 0)),
     )
+
+
+def _information_exponents(
+    prepared: list[PreparedComponent], config: PreparationConfig, claim_threads: Callable[[], None]
+) -> np.ndarray:
+    """Chromosome-wide marker groups with only one sample batch's concatenated GL live."""
+    samples = prepared[0].genotype_likelihoods.shape[0]
+    bin_sizes = np.concatenate([c.bin_sizes for c in prepared])
+    exponent = np.empty((samples, len(bin_sizes)), dtype=np.float64)
+    # Information groups cross component boundaries. Keep that complete bin/marker axis,
+    # but concatenate only one independent sample batch rather than all N marker GL rows.
+    for first in range(0, samples, _EMISSION_SAMPLE_BLOCK):
+        last = min(samples, first + _EMISSION_SAMPLE_BLOCK)
+        claim_threads()
+        selected_gl = np.concatenate([c.genotype_likelihoods[first:last] for c in prepared], axis=1)
+        exponent[first:last] = _information_exponent(
+            selected_gl,
+            bin_sizes,
+            config.markers_per_information_block,
+            float(config.effective_markers_per_information_block),
+        )
+        del selected_gl
+    return exponent
 
 
 def prepare_chromosome(
@@ -242,12 +307,7 @@ def prepare_chromosome(
     if not prepared:
         return PreparedChromosome(painting.contig, len(painting.components), (), OMITTED)
     claim_threads()
-    exponent = _information_exponent(
-        np.ascontiguousarray(np.concatenate([c.genotype_likelihoods for c in prepared], axis=1)),
-        np.concatenate([c.bin_sizes for c in prepared]),
-        config.markers_per_information_block,
-        float(config.effective_markers_per_information_block),
-    )
+    exponent = _information_exponents(prepared, config, claim_threads)
     components = []
     offset = 0
     for component in prepared:

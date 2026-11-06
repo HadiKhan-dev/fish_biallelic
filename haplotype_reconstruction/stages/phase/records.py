@@ -15,6 +15,7 @@ import numpy as np
 
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.painting import Painting
 from ...contracts.pedigree import ParentEdges
 from ...contracts.phase import (
@@ -243,7 +244,9 @@ def canonical_component_inputs(
         sample_ids,
         evidence.positions[left:right],
         np.arange(left, right, dtype=np.int64),
-        evidence.likelihoods[:, left:right],
+        evidence.likelihoods[:, left:right]
+        if isinstance(evidence.likelihoods, np.ndarray)
+        else gather_likelihoods(evidence.likelihoods, slice(left, right)),
         evidence.observed[:, left:right],
         evidence.founder_excluded,
     )

@@ -20,13 +20,15 @@ import numpy as np
 from ...contracts.assembly import AssemblyProduct
 from ...contracts.discovery import DiscoveredBlock
 from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
+from ...contracts.observations import PairArray, dense_observed
 from ...contracts.panels import ComponentPanel, LocalPanel, materialise
 from ...contracts.selection import ContextProposal, RefitSummary
 from ...core.errors import InvariantError
 from ...core.ties import TieCount, TieCounts
 from ...engine.graph import run_graph
 from ...engine.runtime import task_team
-from ...science.assembly.evidence import AssemblyEvidence
+from ...science.assembly.evidence import AssemblyEvidence, AssemblyEvidenceSource
 from ...science.assembly.parameters import AssemblyParameters
 from ...science.assembly.run import AssemblyResult
 from ...science.discovery.parameters import DiscoveryParameters
@@ -86,8 +88,8 @@ class FounderEvidence(Protocol):
     """Immutable contig founder-view evidence, shared by rounds and context assembly."""
 
     positions: np.ndarray
-    likelihoods: np.ndarray
-    observed: np.ndarray
+    likelihoods: np.ndarray | CodedLikelihoods
+    observed: np.ndarray | PairArray
 
 
 def _run_block(
@@ -99,13 +101,20 @@ def _run_block(
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
+    memo_scope: SelectionRecords | None = None,
+    retain_memo: bool = True,
 ) -> BlockSelection:
     """Execute one block with its allocated team; publish memo before block when recording."""
 
     def compute() -> BlockSelection:
+        # Recorded graph rounds carry only the previous outcomes/releases. The
+        # exact memo belongs to this block's consumer, not every round continuation.
+        current = block
+        if memo_scope is not None and current.memo is None:
+            current = replace(current, memo=memo_scope.load_memo(current.index))
         with task_team(threads):
             value = select_task(
-                block,
+                current,
                 evidence.likelihoods,
                 evidence.observed,
                 settings,
@@ -119,12 +128,14 @@ def _run_block(
         return compute()
     with claim(scope.file, scope.key("block", block.index), scope.derivation("block", block.index)) as needed:
         if not needed:
-            saved = scope.load_block(block.index)
+            saved = scope.load_block(block.index, memos=retain_memo)
             assert saved is not None
             return saved
         result = compute()
         scope.save_block(result)
-        return result
+        # Publication retains the complete memo for resume and the next round.
+        # The gather needs the outcome/release, and can drop the memo immediately.
+        return result if retain_memo else replace(result, memo=None)
 
 
 def _run_blocks(
@@ -136,6 +147,8 @@ def _run_blocks(
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
+    memo_scope: SelectionRecords | None = None,
+    retain_memos: bool = True,
 ) -> tuple[BlockSelection, ...]:
     """Several blocks of one round in one engine task, in turn; each claims and publishes its own records exactly as
     a task of its own did, and re-reads the task's CPU share first (it grows into CPUs its peers free)."""
@@ -152,6 +165,8 @@ def _run_blocks(
                 reverse=reverse,
                 census_sink=census_sink,
                 threads=max(1, int(current_budget().threads())),
+                memo_scope=memo_scope,
+                retain_memo=retain_memos,
             )
         )
     return tuple(results)
@@ -183,16 +198,20 @@ def round_expansion(
     reverse: bool = False,
     census_sink: CensusSink | None = None,
     max_threads: int = 1,
+    memo_scope: SelectionRecords | None = None,
+    retain_memos: bool = True,
 ) -> Expansion:
     """Declare only missing block tasks and a gather, in deterministic scientific order.
 
     This is the G1 entry for an expanding selection round. It performs no fitting.
-    Complete blocks are resumed with their exact persisted memos. Tasks declare
-    working sets and outputs; the scheduler owns concurrency and CPU allocation.
+    Complete blocks resume from their persisted records. Recorded graph rounds
+    load the previous memo only at its block consumer and omit it from gathered
+    results; direct callers retain the historical in-memory memo route by default.
+    Tasks declare working sets; the scheduler owns concurrency and CPU allocation.
     """
     saved, pending = [], []
     for block in blocks:
-        prior = None if scope is None else scope.load_block(block.index)
+        prior = None if scope is None else scope.load_block(block.index, memos=retain_memos)
         if prior is not None:
             saved.append(prior)
             continue
@@ -241,7 +260,7 @@ def round_expansion(
                 TaskKey("selection", f"blocks:{chunk[0].index:06d}", contig, round_name),
                 _run_blocks,
                 args=(tuple(chunk), settings, evidence, scope),
-                kwargs=dict(reverse=reverse, census_sink=census_sink),
+                kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
                 # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
                 # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task is a
                 # heavy one (K = 30): its path-model kernels spread its samples' lanes over the task's threads.
@@ -304,7 +323,7 @@ def run_round(
 
 def _run_refit(
     task: ContextRefitTask,
-    likelihoods: np.ndarray,
+    likelihoods: np.ndarray | CodedLikelihoods,
     observed: np.ndarray,
     *,
     reverse: bool,
@@ -312,7 +331,7 @@ def _run_refit(
     threads: int = 1,
 ) -> RefitFinished:
     """Gather one component's private evidence and finish it on its allocated team."""
-    gl = np.ascontiguousarray(likelihoods[:, task.columns], dtype=np.float64)
+    gl = gather_likelihoods(likelihoods, task.columns)
     seen = np.ascontiguousarray(observed[:, task.columns])
     with task_team(threads):
         output = refit_component(
@@ -404,7 +423,11 @@ def context_expansion(
     private copy; every member panel's kept mask is applied exactly as in 3.5.
     Partial component coverage is counted by pure refit_tasks, never completed here.
     """
-    observed = np.array(evidence.observed, copy=True)
+    observed = (
+        np.array(evidence.observed, copy=True)
+        if isinstance(evidence.observed, np.ndarray)
+        else dense_observed(evidence.observed)
+    )
     for panel in panels:
         observed[:, panel.site_start : panel.site_start + panel.sites] &= panel.kept
     specs, skipped = refit_tasks(
@@ -532,7 +555,7 @@ def run_contig(
             if proposals is None:
                 result = assemble_context(
                     panels,
-                    assembly_evidence,
+                    assembly_evidence() if isinstance(assembly_evidence, AssemblyEvidenceSource) else assembly_evidence,
                     genetic_map,
                     assembly_parameters,
                     level=parameters.context_levels[index - 1],
@@ -587,7 +610,9 @@ class SelectionSession:
     assembly_parameters: AssemblyParameters
     genetic_map: ChromosomeGeneticMap
     upstream: dict[str, str]
-    load_inputs: Callable[[], tuple[Sequence[DiscoveredBlock | None], FounderEvidence, AssemblyEvidence]]
+    load_inputs: Callable[
+        [], tuple[Sequence[DiscoveredBlock | None], FounderEvidence, AssemblyEvidence | AssemblyEvidenceSource]
+    ]
     reverse: bool = False
     tie_keep: tuple[str, ...] = ()
     max_threads: int = 1
@@ -603,7 +628,7 @@ class RoundState:
     scopes: tuple[SelectionRecords, ...]
     initial: tuple[BlockTask, ...]
     evidence: FounderEvidence
-    assembly_evidence: AssemblyEvidence
+    assembly_evidence: AssemblyEvidence | AssemblyEvidenceSource
     index: int
     previous: tuple[BlockSelection, ...] | None
     selected_calls: tuple[tuple[np.ndarray, ...], ...]
@@ -637,7 +662,7 @@ def _enter_contig(session: SelectionSession) -> tuple[LocalPanel, ...] | Expansi
         return scopes[-1].load_panels()
     discovered, evidence, assembly_evidence = session.load_inputs()
     initial = initial_tasks(discovered, session.genetic_map, label=session.contig)
-    previous = None if first == 0 else scopes[first - 1].load_selections()
+    previous = None if first == 0 else scopes[first - 1].load_selections(memos=False)
     earlier = _selected_calls(scopes[:first], previous)
     return _advance_round(RoundState(session, scopes, initial, evidence, assembly_evidence, first, previous, earlier))
 
@@ -678,7 +703,13 @@ def _advance_round(state: RoundState) -> Expansion:
     )
     key = TaskKey("selection", "context_assembly", session.contig, scope.round_name)
     assembly = bind_session(
-        AssemblyInputs(panels, state.assembly_evidence, session.genetic_map),
+        AssemblyInputs(
+            panels,
+            state.assembly_evidence()
+            if isinstance(state.assembly_evidence, AssemblyEvidenceSource)
+            else state.assembly_evidence,
+            session.genetic_map,
+        ),
         session.assembly_parameters,
         file=scope.file,
         upstream=upstream,
@@ -748,6 +779,8 @@ def _expand_blocks(state: RoundState, proposals: Sequence[ContextProposal] | Non
         reverse=session.reverse,
         census_sink=session.census_sink,
         max_threads=session.max_threads,
+        memo_scope=None if state.index == 0 else state.scopes[state.index - 1],
+        retain_memos=False,
     )
     gather = Task(
         TaskKey("selection", "round_ready", session.contig, scope.round_name),
@@ -807,7 +840,7 @@ def _enter_round(
     if any(earlier.selected() is None for earlier in scopes[:index]):
         raise InvariantError(f"selection {round_name} requires all preceding selected rounds")
     discovered, evidence, assembly_evidence = session.load_inputs()
-    previous = None if index == 0 else scopes[index - 1].load_selections()
+    previous = None if index == 0 else scopes[index - 1].load_selections(memos=False)
     state = RoundState(
         session,
         scopes,

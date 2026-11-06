@@ -156,12 +156,19 @@ class BoundInputs:
         return tuple(c for c, _ in self.dependencies.floored_scores)
 
 
-def _header(file: CheckpointFile, key: str, identity: str, names: tuple[str, ...] = ()) -> Mapping[str, Any]:
+def _header(
+    file: CheckpointFile,
+    key: str,
+    identity: str,
+    names: tuple[str, ...] = (),
+    *,
+    schemas: int | tuple[int, ...] = 1,
+) -> Mapping[str, Any]:
     """Check identity before decoding even a scalar header."""
     found = read_items(file, key, identity, ("schema", *names))
     if found is None:
         raise InvariantError(f"pedigree requires complete upstream {file.label}:{key}")
-    require_schema(found.payload, 1)
+    require_schema(found.payload, schemas)
     return found.payload
 
 
@@ -189,7 +196,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         )
         if evidence is None or painting is None:
             raise InvariantError(f"pedigree requires evidence and painting for {c}")
-        _header(file, evidence.key, evidence.identity)
+        _header(file, evidence.key, evidence.identity, schemas=evidence_records.SUPPORTED_SCHEMAS)
         _header(file, painting.key, painting.identity)
         prepared_identity = prepare.derivation(
             parameters.preparation,

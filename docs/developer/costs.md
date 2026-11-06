@@ -40,7 +40,7 @@ The R1 replay evidence establishes a TroMau K10 deletion whose omitted founder 1
 
 | Stage | Work | Storage (bytes) | K class | At K = 30 | K gate |
 |---|---|---|---|---|---|
-| [evidence](../methods/evidence.md) | O(N L); calibration O(N C) times fixed budgets | 33 N L retained; 16 N L permutation | no K term | K-independent | ≤ cubic: largest probed K slope -0.00 |
+| [evidence](../methods/evidence.md) | GL O(N L); encoding O(N L log L); calibration O(N C) times fixed budgets | joint storage < 33 N L when coded; one-sample O(L + D) planning | no K term | K-independent | ≤ cubic: largest probed K slope -0.00 |
 | [relatedness.families](../methods/relatedness.md) | O(N² M) screen; O(N² F) per sweep; O(F N M) support | 192 N M concatenate; 64 N M screens | no K term | F is families, not founders | ≤ cubic: largest probed K slope -0.01 |
 | [relatedness.pairs](../methods/relatedness.md) | O(P L/10), P=N(N-1)/2; optional | 72 P | exemption 0d | N2500:3123750 pairs,224910000 bytes; off by default | exempt (0d); measured and costed |
 | [discovery.fit](../methods/discovery.md) | O(N L K²) trajectory; O(N L K⁴) whole fitting term | 32 N×16384 transition cache; 24 B×1024 N patterns | exemption 0c | K⁴=810000; 50 iterations; ≤2 trajectories/start | exempt (0c); measured and costed |
@@ -75,7 +75,7 @@ The R1 replay evidence establishes a TroMau K10 deletion whose omitted founder 1
 | [core.ties_numerics](../methods/core.md) | O(n log n) sort; O(C n) sum; O(n) expansion | O(n) scratch | no intrinsic K/N | array-size proxy only | no intrinsic K (operational size proxy) |
 | [kernel_warmup](../methods/execution.md) | O(reachable signatures) compilation; worker parallel | compiler/cache dependent | no intrinsic K/N | compilation of reachable signatures; no intrinsic K | no intrinsic K (operational size proxy) |
 | [store](../methods/execution.md) | O(bytes) encode/decode; selective items | bounded in-flight payload | no intrinsic K/N | payload-size proxy only | no intrinsic K (operational size proxy) |
-| [engine_graph](../methods/execution.md) | O(tasks)/boundary; O(contigs nodes) graph | O(tasks+resident outputs) | no intrinsic K/N | task-count proxy; overhead separate | no intrinsic K (operational size proxy) |
+| [engine_graph](../methods/execution.md) | O(tasks)/boundary; O(contigs nodes) graph | O(tasks + live expansion results + public outputs); geometric ledger growth | no intrinsic K/N | task-count proxy; overhead separate | no intrinsic K (operational size proxy) |
 | [interface](../methods/execution.md) | Parsing/validation; negligible | O(configuration) | no intrinsic K/N | settings-resolution proxy only (interface.settings); no scientific K ladder | no intrinsic K (operational size proxy) |
 
 ## Kernel ladders
@@ -130,3 +130,107 @@ One row per probed kernel. Stages without a row have no ladder result yet.
 | interface | `interface.settings` | settings resolution proxy: TOML load, merge, typed build, validation and settings_text of a simulation configuration with cohorts (K, N) negligible; no intrinsic N or K | 0.00 ± 0.00 over 5–30 (size proxy) | -0.00 ± 0.01 over 250–2,500 (size proxy) |
 
 All stages have a ladder.
+
+
+Execution memory and CPU boundaries (4.4): `ResourceRequest.cost` orders ready
+work; measured wall cost per stage/callable is its fallback. Neither changes a
+scientific work allowance. Admission uses measured working set and physical
+availability, with gradually spaced starts only above 90% use. The ledger's
+initial 4,096 token/request and 256 label slots double independently; growth copies
+one table and preserves slot indices across processes. Old appended table space
+is less than twice the latest capacity per table and is removed with the run ledger.
+
+Expansion children are private intermediate results by default. Their completed
+values are released after the gather's last declared read, while completion keys
+remain for dependencies. Caller-supplied task results remain returned;
+`retain_intermediates=True` is the diagnostic retention route. A later dynamic
+consumer of an already-released private result must request that route explicitly.
+Resident input caches loaded by `resident_or_load` can be evicted while idle;
+explicit `retain` state and kept gathers cannot. Clearing a cache reference does
+not invalidate the same value held by a live continuation. Idle pressure cleanup
+trims and, when no pinned/shared owned state remains, replaces the worker once.
+
+Use `engine.scheduler.kernel_team(max_threads=width)` at each parallel kernel or
+independent section. A task can grow beyond its initial team as peers finish, but
+cannot revoke a peer's running kernel claim. The sum of protected process claims
+stays within the CPU authority. The parallel width, ordered placement, sample
+traversal, reductions and random streams must preserve the scientific computation.
+
+
+Shared-value transport also reuses backing across independent bundles. Immutable
+private views with the same address and byte extent share one copied segment;
+weak source views prevent address reuse from selecting stale bytes without keeping
+the private twin alive. Read-only mapped/shared arrays pin the exact device/inode
+through a read-only descriptor and carry byte offset, shape and dtype separately.
+A bundle reference count keeps the backing until its last consumer. Existing file
+and shared mappings incur no new data segment. Linux proc-fd paths preserve access
+after the source mapping closes or its pathname disappears. Writable file maps and
+private copy-on-write mappings are copied because their current bytes may differ
+from the underlying file. The engine's mapped storage route remaps read-only after
+filling, so it can participate in this transport without another copy.
+
+## Residual discovery clique reuse (4.4)
+
+Residual alternative groups retain the content-ordered maximal greedy extension of
+**every compatible edge**. The implementation memoizes extensions by the exact
+closed common neighbourhood of the two seed vertices. Both endpoints are universal
+within that neighbourhood: inserting them at the start or at their content-order
+positions cannot exclude another candidate. Consequently, the greedy extension is
+a function of the neighbourhood alone. Equal bitsets reuse the extension; hash
+collisions compare all words. This changes neither the groups offered for size-class
+screening nor any omission or decision. The intersection receipt still counts the
+original work for every seed edge, including reused extensions.
+
+For A vertices, E edges and W = ceil(A/64) packed words, key construction costs
+O(E W). Only distinct closed common neighbourhoods run the O(A W) extension.
+Worst-case work and storage remain polynomial with the existing bounds; the memo
+adds O(E W + E) temporary storage. Dense graphs with repeated neighbourhoods avoid
+rebuilding and sorting thousands of identical large cliques. Sparse graphs retain
+the same domain. This is execution reuse within DI18, not a change to exemption
+0c's replacement, beam, convergence or stopping contracts.
+
+## Discovery timing comparisons
+
+The block diagnostic timer surrounds `discover_block`. Its CPU and wall values
+exclude the contig reader, task transport, result encoding and checkpoint
+publication. Whole-task timing includes additional work; the 4.3 driver reads
+one evidence product per contig before expanding it into block tasks.
+
+CPU seconds count scheduled processor time, not a frequency-normalised amount of
+work. CPU/wall near one therefore establishes neither equal clock rates nor equal
+hardware throughput. Compare matched blocks on the same host, inspect effective
+clock rates, separate first-use kernel loading/compilation from warm execution,
+and check one versus many workers before attributing a cross-host depth ratio to
+the scientific search. Keep all of those measurements separate from the search's
+candidate, iteration and logical-work receipts.
+
+## Evidence dictionary windows (4.4)
+
+Encoding sorts one sample's L pair keys and repeats bounded searchsorted passes
+against D distinct keys: O(N L log L + sum_n L log D_n), independent of K.
+The actual strict joint-byte admission rule includes codes, pair/GL tables,
+metadata and all dense fallback observation fields. It never compares GL bytes alone.
+
+Resident GL/mask tiles target 8 MiB of projection and lookup workspace, at most
+2048 sites; one site is always processed for arbitrarily large sample axes.
+Checkpoint windows select/deduplicate only the codes they need and decode
+consecutive dictionary-row runs. A W-site sample window costs O(W log W) lookup
+work, O(W) scratch and at most min(D, W) decoded rows per dictionary field.
+An interleaved N-sample pass therefore requests O(N L) dictionary bytes rather
+than O(N D ceil(L/W)); physical I/O also depends on compression chunks and the
+store's bounded shared decoded-chunk cache. A cache miss fully decompresses its
+physical chunk before NumPy selects the requested bytes; library partial-range
+decoding is not used. The cache holds at most 1 GiB of decoded data, evicting
+before allocation (one oversized chunk may stand alone), plus the transient
+compressed input of one miss. Scattered requests spanning more chunks than fit
+can repeat whole-chunk decompression; requested dictionary-row bytes therefore
+do not bound decompression work. No scientific work is omitted.
+
+Dense painting fills its already-required output flags before reading GLs, then
+walks sample tiles whose full rows share a physical GL chunk. A row crossing a
+chunk boundary stands alone and walks forward through site windows. Tiles never
+exceed the existing sample/team bound; whole-bin GL/mask scratch retains its
+64 MiB target. This avoids alternating large GL and mask chunks or revisiting
+many GL chunks on every small site window. Per-sample/bin accumulation and the
+emission formula are unchanged. The decoded cache may still increase peak RSS
+relative to caching compressed chunks; it is charged to the existing byte bound.

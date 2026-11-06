@@ -5,11 +5,12 @@ team through the runtime. Site sums retain ascending order inside whole bins.
 """
 
 import math
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 from numba import prange, types
 
+from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.painting import state_alt_probabilities
 from ...core.kernels import kernel
 from .parameters import INFORMATIVE_SPREAD, PaintingParameters
@@ -160,13 +161,16 @@ def design_effect(
     log emission: under that assumption the bin counts as n / (1 + (n - 1) r) variance-equivalent sites. Not an
     estimated dependence correction; the weight tends to 1 as n -> 1, and a bin without informative sites has 1."""
     counts = np.add.reduceat(
-        informative_sites(likelihoods, observed).astype(np.int64), np.asarray(bin_starts, dtype=np.int64), axis=1
+        informative_sites(likelihoods, observed),
+        np.asarray(bin_starts, dtype=np.int64),
+        axis=1,
+        dtype=np.int64,
     )
     return 1.0 + np.maximum(counts - 1, 0) * float(correlation)
 
 
 def gather_sites(
-    likelihoods: np.ndarray, observed: np.ndarray, sites: np.ndarray, samples: slice = slice(None)
+    likelihoods: Any, observed: Any, sites: np.ndarray, samples: slice = slice(None)
 ) -> tuple[np.ndarray, np.ndarray]:
     """C-contiguous float64[n, len(sites), 3] GL rows and bool[n, len(sites)] flags of ``samples``.
 
@@ -174,6 +178,14 @@ def gather_sites(
     copied as one slice, other selections with a parallel gather.
     """
     sites = np.asarray(sites, dtype=np.int64)
+    if not isinstance(likelihoods, np.ndarray) or not isinstance(observed, np.ndarray):
+        values = gather_likelihoods(likelihoods, sites, samples)
+        flags = (
+            np.ascontiguousarray(observed[samples][:, sites], dtype=np.bool_)
+            if isinstance(observed, np.ndarray)
+            else observed.gather(samples, sites)
+        )
+        return values, flags
     if len(sites) == 0 or int(sites[-1]) - int(sites[0]) + 1 == len(sites):
         window = slice(int(sites[0]), int(sites[-1]) + 1) if len(sites) else slice(0, 0)
         return (

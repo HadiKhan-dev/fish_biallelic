@@ -830,12 +830,15 @@ def _cluster(
     overflow = False
     if len(pool) >= 2:
         vertices = sorted(pool)
-        adjacent: dict[int, set[int]] = {vertex: set() for vertex in vertices}
-        for position, first in enumerate(vertices):
-            for second in vertices[position + 1 :]:
-                if float(distance[first, second]) <= bound:
-                    adjacent[first].add(second)
-                    adjacent[second].add(first)
+        # The same upper-triangle comparisons, batched before graph traversal.
+        # Python scalar indexing dominated construction of large residual pools.
+        vertex_array = np.asarray(vertices, dtype=np.int64)
+        compatible = np.triu(distance[np.ix_(vertex_array, vertex_array)] <= bound, 1)
+        compatible |= compatible.T
+        adjacent = {
+            vertex: vertex_array[np.flatnonzero(compatible[position])].tolist()
+            for position, vertex in enumerate(vertices)
+        }
         components, seen = [], set()
         for vertex in vertices:
             if vertex in seen:

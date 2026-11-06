@@ -340,7 +340,11 @@ Implementation: [stages/selection/records.py](../../haplotype_reconstruction/sta
 
 Parameters by name: `TASK_WORKSPACE_BASE_BYTES`, `SEARCH_GROWTH`, `context_refit`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: Storage proportional to fits and retained round memos; block results assemble in index order.
+Cost and scope: Storage proportional to fits and persisted round memos; block results assemble in index order. In the recorded graph, round continuations and gathers retain outcomes and releases without memo dictionaries. A feedback block loads its predecessor's identity-checked memo immediately before fitting, preserving every cache entry and the original hit/completion order. Its complete new memo is published before its block record, then omitted from the result returned to the gather. Partial-round resume reads existing block records without decoding unused memos; completion still checks every promised memo record. Direct in-memory round callers retain their existing memo-carrying interface.
+
+The copying-model preparation borrows read-only views of the task's private block likelihood and observation arrays instead of making another evidence copy. Neutralisation remains in the block task, and preparation never changes the caller's flags or values. Emission tables, likelihood precision, trajectories and all scientific comparisons are unchanged.
+
+A session may carry an `AssemblyEvidenceSource` instead of an already materialised assembly view. Initial selection and rounds with published context proposals do not construct assembly scoring/neutral copies. A missing context assembly materialises the source at that consumer, while the selection block tasks continue to use their original founder-view float64 evidence.
 
 <a id="ls31"></a>
 ## ls31 Diagnostics: tie counters, valley census, summaries and reports

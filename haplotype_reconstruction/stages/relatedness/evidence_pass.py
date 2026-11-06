@@ -16,17 +16,19 @@ from typing import Any, TypeVar
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.likelihoods import CodedLikelihoods
+from ...contracts.observations import PairArray
 from ...contracts.roles import freeze_record_arrays, require_schema
 from ...core.digest import json_digest
 from ...core.errors import InputError
 from ...store.protocol import read_items
 from ...store.store import CheckpointStore
+from ..evidence.records import SUPPORTED_SCHEMAS, load_likelihoods, load_observed
 from ..evidence.records import result_reader as evidence_reader
 
 __all__ = ["EvidenceInput", "EvidenceArrays", "evidence_pass", "upstream_identities", "bound_upstream"]
 T = TypeVar("T")
 _EVIDENCE_KEY = "evidence"  # EV3/D1 published record. Adapter is an explicit code-identity root.
-_EVIDENCE_SCHEMA = 1
 
 
 @dataclass(frozen=True)
@@ -48,8 +50,8 @@ class EvidenceArrays:
 
     sample_ids: tuple[str, ...]
     positions: np.ndarray
-    likelihoods: np.ndarray
-    observed: np.ndarray
+    likelihoods: np.ndarray | CodedLikelihoods
+    observed: np.ndarray | PairArray
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -68,19 +70,17 @@ def upstream_identities(inputs: tuple[EvidenceInput, ...]) -> dict[str, str]:
 
 
 def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ...]) -> EvidenceArrays:
-    record = read_items(
-        store.contig(item.contig),
-        _EVIDENCE_KEY,
-        item.evidence_identity,
-        ("schema", "sample_ids", "positions", "likelihoods", "observed"),
-    )
+    file = store.contig(item.contig)
+    record = read_items(file, _EVIDENCE_KEY, item.evidence_identity, ("schema", "sample_ids", "positions"))
     if record is None:
         raise InputError(f"relatedness needs evidence for {item.contig}")
-    require_schema(record.payload, _EVIDENCE_SCHEMA)
+    require_schema(record.payload, SUPPORTED_SCHEMAS)
     names = tuple(record.payload["sample_ids"])
     if names != sample_ids:
         raise InputError(f"relatedness sample axis differs on {item.contig}")
-    return EvidenceArrays(names, record.payload["positions"], record.payload["likelihoods"], record.payload["observed"])
+    gl = load_likelihoods(file, expected_identity=item.evidence_identity)
+    observed = load_observed(file, expected_identity=item.evidence_identity, likelihoods=gl)
+    return EvidenceArrays(names, record.payload["positions"], gl, observed)
 
 
 def evidence_pass(

@@ -636,9 +636,10 @@ def compile_kernel(name: tuple[str, str], signatures: bytes, declared: bytes) ->
 
 def compile_tasks(state: CacheState) -> tuple:
     """The plan's compilations as graph tasks, one per function, as warm-up's pool runs them, for a caller that
-    runs them beside its stages instead of before them (interface.run): a stage that calls a kernel still being
-    compiled waits for that compilation (install_compile_lock), and one not compiled yet compiles it itself. There is
-    no verify pass on this route: each index has one writer at a time."""
+    runs them beside its stages instead of before them (interface.run). The caller attaches each consumer's
+    missing compile keys as dependencies before admitting that stage; unrelated work can proceed. Compile locks
+    still protect shared callees and lazy callers. There is no verify pass on this route: each index has one writer
+    at a time."""
     from numba.core.serialize import dumps
 
     from .graph import ResourceRequest, Task

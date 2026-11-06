@@ -457,27 +457,6 @@ def beam_template(
     return chosen, best - incumbent, counts, cert
 
 
-@kernel(overloads=overloads_for(__name__, "beam_batch"), cache=True, parallel=True, nogil=True)
-def beam_batch(logs, costs, states, cols, candidates, first, second, groups, fwd, bwd, tasks, width, current, quantum):
-    max_width = 1
-    for t in range(len(tasks)):
-        max_width = max(max_width, tasks[t, 1] - tasks[t, 0])
-    paths = np.full((len(tasks), max_width), -1, np.int64)
-    gains = np.full(len(tasks), -np.inf)
-    counts = np.zeros((len(tasks), 5), np.int64)
-    cert = np.empty((len(tasks), 5))
-    for t in prange(len(tasks)):
-        a, c, f = tasks[t]
-        choice, gain, ct, receipt = beam_template(
-            logs, costs, states, cols, candidates, first, second, f, groups, fwd, bwd, a, c, width, current, quantum
-        )
-        paths[t, : c - a] = choice
-        gains[t] = gain
-        counts[t] = ct
-        cert[t] = receipt
-    return paths, gains, counts, cert
-
-
 class WindowBeam:
     """The component's beam proposer (fixed binned inputs, templates and coarse context)."""
 
@@ -637,9 +616,55 @@ class WindowBeam:
                     if not len(tasks):
                         continue
 
-                    paths, values, counts, cert = beam_batch(
-                        logs, cc, states, cols, choices, first, second, groups_arr, ff, gg, tasks, width, cur, quantum
+                    # Each (window, founder) beam is independent. Dynamic template
+                    # mapping lends freed CPUs while the bank runs and avoids a
+                    # static prange chunk waiting behind its most expensive beam.
+                    # Only dispatch is cost-ordered; restore task order below.
+                    unit_work = np.r_[
+                        0,
+                        np.cumsum(
+                            [
+                                len(p) * int(self.bin_offsets[c] - self.bin_offsets[a])
+                                for (a, c), p in zip(groups, alphabets, strict=True)
+                            ]
+                        ),
+                    ]
+                    order = sorted(
+                        range(len(tasks)),
+                        key=lambda t: (-int(unit_work[tasks[t, 1]] - unit_work[tasks[t, 0]]), t),
                     )
+
+                    def solve(t, problem=(tasks, logs, cc, cols, choices, groups_arr, cur)):
+                        tasks, logs, cc, cols, choices, groups, current = problem
+                        a, c, f = tasks[t]
+                        return beam_template(
+                            logs,
+                            cc,
+                            states,
+                            cols,
+                            choices,
+                            first,
+                            second,
+                            f,
+                            groups,
+                            ff,
+                            gg,
+                            a,
+                            c,
+                            width,
+                            current,
+                            quantum,
+                        )
+
+                    solved = budget.map(solve, order)
+                    results = [None] * len(tasks)
+                    for t, result in zip(order, solved, strict=True):
+                        results[t] = result
+                    paths = [result[0] for result in results]
+                    values = np.asarray([result[1] for result in results])
+                    counts = np.asarray([result[2] for result in results])
+                    cert = np.asarray([result[3] for result in results])
+                    del solved, results
                     stats["max_frontier"] = max(stats["max_frontier"], int(counts[:, 0].max(initial=0)))
                     stats["children"] += int(counts[:, 1].sum())
                     stats["beam_cut"] += int(counts[:, 2].sum())
@@ -650,7 +675,7 @@ class WindowBeam:
                     for t, (i, j, f) in enumerate(tasks):
                         a, c = groups[i][0], groups[j - 1][1]
                         stats["certified"] += int(cert[t, 2] <= quantum)
-                        path = paths[t, : j - i]
+                        path = paths[t][: j - i]
                         if np.any(path < 0):
                             continue
                         # b1 gating: offer only a surrogate improvement (2.6's offer rule).
@@ -684,6 +709,5 @@ __all__ = [
     "normalized",
     "dominates",
     "beam_template",
-    "beam_batch",
     "WindowBeam",
 ]

@@ -424,3 +424,49 @@ Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruct
 Parameters by name: `WEAK_JUNCTION_MARGIN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+### Parallel evaluation with ordered selection
+
+Independent count refits retain their logical fit ordinals and are evaluated on
+child CPU shares before the original ordered count selection. The polish beam
+bank likewise evaluates each unchanged `(window, founder)` beam problem through
+the existing template team. Dimension-based cost ordering affects dispatch only;
+proposal collection and all beam-bound receipts return to original task order.
+Dynamic dispatch lets expensive windows use CPUs released by other work and avoids
+waiting for a statically assigned chunk of unusually costly beam problems.
+
+Fine-window/suffix bridge trials each start from the same current panel. Their
+private panels, forward/backward chains and streaming evidence windows are
+independent. Checkpoint flanks are copied by the coordinating thread before
+parallel evaluation; byte-bounded waves limit simultaneous scratch. Offers are
+collected in the original window/cut/pair order before the existing global gain
+and content selection. The accepted panel is still rescored by the original path.
+
+Beam-escape width hits count window/founder problems whose approximate surrogate
+search discarded children at the existing width. They measure repeated bounded
+proposal work, rather than accepted edits or failed exact acceptance. Parallel
+execution preserves every width, work account, offer rule and acceptance bound.
+
+### Initial-fit execution and compilation
+
+The initial fixed-K fit keeps the same best-of-two directional searches and
+Gauss–Seidel acceptance schedule described above. Its searches run concurrently;
+independent proposal templates and per-sample recursions use their existing
+teams. An accepted update still feeds the next update in the original order.
+Sample kernels retain their useful-width policy and acquire the current child
+share at their boundaries. Compilation is not an optimisation step and does not
+change convergence, the objective, fit ordinals or any count decision.
+
+The assembly preload declares the refinement entry points before runtime warm-up,
+including the acceptance pass, template solver, lexicographic messages and exact
+score kernels. Init compiles their supported signatures in the engine's process
+pool. A fresh scientific worker then loads the compiled implementations from the
+same run cache. Cached implementations retain their exact argument-type checks,
+including layout and read-only flags. First-use compilation and warm numerical
+execution are measured separately; compiler-lock waits among proposal workers
+must not be interpreted as serial Gauss–Seidel work.
+
+The unordered-state pair constructor is used both as an inlined numerical helper
+and directly from Python. Its declared Python entry point is cacheable too;
+inlining its native callers does not require recompiling that Python entry point
+in each worker. This changes cache persistence only, not state ordering.

@@ -9,6 +9,8 @@ from __future__ import annotations
 import numba
 import numpy as np
 
+from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods, likelihood_window_sites
+from ...contracts.observations import PairArray
 from ...core.kernels import kernel
 from .parameters import AlleleFrequencyParameters
 
@@ -16,7 +18,9 @@ _DEFAULT_FREQUENCY = AlleleFrequencyParameters()
 
 
 def allele_frequency(
-    gl: np.ndarray, observed: np.ndarray, parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY
+    gl: np.ndarray | CodedLikelihoods,
+    observed: np.ndarray | PairArray,
+    parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
 ) -> np.ndarray:
     """float64 [L]: the alternative allele frequency under Hardy-Weinberg (EM over the samples' genotype likelihoods
     gl [N, L, 3]; unobserved cells carry the prior), clipped to [clip, 1 - clip].
@@ -26,6 +30,14 @@ def allele_frequency(
     production replays checked (all contigs of the validation runs); other array shapes can differ in the last bit,
     as numpy's own reductions may associate differently."""
     out = np.empty(gl.shape[1])
+    if not isinstance(gl, np.ndarray) or not isinstance(observed, np.ndarray):
+        size = likelihood_window_sites(gl) if isinstance(gl, CodedLikelihoods) else 2048
+        for left in range(0, gl.shape[1], size):
+            right = min(gl.shape[1], left + size)
+            out[left:right] = allele_frequency(
+                gather_likelihoods(gl, slice(left, right)), observed[:, left:right], parameters
+            )
+        return out
     allele_frequency_sites(
         np.ascontiguousarray(gl, dtype=np.float64),
         np.ascontiguousarray(observed, dtype=np.bool_),

@@ -25,6 +25,7 @@ from haplotype_reconstruction.contracts.panels import LocalPanel
 from haplotype_reconstruction.core.errors import SettingsError
 from haplotype_reconstruction.core.ties import TieSettings
 from haplotype_reconstruction.engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
+from haplotype_reconstruction.science.assembly import kernel_inventory
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput
 from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
@@ -42,6 +43,7 @@ from haplotype_reconstruction.store.container import CheckpointFile
 from haplotype_reconstruction.store.protocol import NumericalPolicy
 
 from .completion import SharedEvidence, complete_stage, expand_completion
+from .join_team import task_cpu_ceiling
 from .levels import expand_level
 from .records import (
     FINAL,
@@ -55,6 +57,9 @@ from .records import (
     level_key,
     refined_key,
 )
+
+# Importing this stage registers its full numerical closure before engine warm-up.
+KERNEL_MODULES = kernel_inventory.MODULES
 
 
 @dataclass(frozen=True)
@@ -293,7 +298,9 @@ def bind_session(
     records = None if file is None else RecordCapability(file, records_prefix, expected)
     if storage is not None:
         inputs = replace(inputs, evidence=storage.view)
-    return AssemblySession(inputs, parameters, role, levels, records, ties, parent, max_cores, storage=storage)
+    return AssemblySession(
+        inputs, parameters, role, levels, records, ties, parent, task_cpu_ceiling(max_cores), storage=storage
+    )
 
 
 def assemble_context(

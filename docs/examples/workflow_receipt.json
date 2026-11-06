@@ -3,7 +3,7 @@
   "test": "tests/cli/test_workflow_mode.py::test_shell_workflow_equals_run_record_for_record",
   "outcome": "passed",
   "snakefile_sha256": "fbc51d5fc8534b37aafb9dd57689207a2fde59032367b245cede2c8ff84d9198",
-  "candidate_sha256": "fd8bd931c24cbcc7b31e1952f37597c6f98e305027ca8c9e9669333824662be3",
+  "candidate_sha256": "451bc7f1381434117487a195f0e7d744cb973510725a427398215ee1434891ae",
   "commands": [
     [
       "haplotypes",

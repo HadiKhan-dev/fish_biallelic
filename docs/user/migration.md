@@ -1,5 +1,25 @@
 # Migration guides
 
+## Migrating from 4.3 to 4.4
+
+Start a new run with a new output and checkpoint root using the same inputs,
+configuration and seed. Keep the original 4.3 run and its outputs; finish or
+inspect that run with its matching 4.3 code. Do not point a 4.4 resume at a 4.3
+checkpoint root or rename old records into the new root. There is no automatic
+in-place derivation upgrade.
+
+Evidence publications now use schema 2 and may store exact joint read-pair/GL
+codebooks. Low-level evidence adapters can still decode schema 1 when explicitly
+supplied its original expected derivation. The public results reader instead
+rebuilds the current derivation from code, schema and bound inputs, so format
+support does not make an old 4.3 derivation compatible with 4.4. Downstream
+identities also bind their evidence inputs and must be regenerated in the new run.
+
+Scientific models, thresholds and released table layouts retain 4.3's meaning.
+No new memory or evidence-encoding setting is required: storage admission uses
+actual joint bytes and projections use bounded workspaces. Full-pipeline release
+validation remains subject to the 4.4 release gate recorded in the changelog.
+
 ## Migrating from 4.2 to 4.3
 
 Start a new run and checkpoint root. Recombination records are schema 2 and

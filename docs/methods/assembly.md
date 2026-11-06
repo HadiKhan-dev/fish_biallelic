@@ -9,6 +9,10 @@ The sections below identify semantic units, not separately configurable pipeline
 
 Construct neutral founder-visible evidence in float64 and the declared scoring view in float32, preserving positions, observation masks and exact depth-content keys. Decoding into shared storage and copying a supplied evidence record must agree. Release the larger neutral view only at its declared lifetime boundary.
 
+When every discovery site is kept and no founder sample is excluded, the evidence contract already makes every unobserved raw GL triple exactly 1/3. For dense raw inputs the contig adapter borrows read-only GL and observation views in this case, and owns only the float32 scoring copy. Coded inputs expand directly to the active consumer's neutral, scoring and observation arrays. Other inputs use the original masking/copy route; generic likelihood callers keep that route by default. A consumer's release of its neutral field cannot invalidate another view or the raw evidence.
+
+The application chain caches count-free raw/founder evidence and exact depth keys. It hashes identity-checked count windows one sample at a time, discarding each row after use. An `AssemblyEvidenceSource` carries only immutable inputs and keys through selection; the assembly consumer constructs its own view on demand. Scoring and masked-neutral arrays are not kept in the chain cache between consumers. The paired evidence-v2 checkpoint reconstructs coded counts and masks from its GL pair table/code stream; only fallback rows retain those dense fields. Exact reconstructed count rows and founder-mask rows enter the original depth-key hash unchanged.
+
 Implementation: [science/assembly/evidence.py](../../haplotype_reconstruction/science/assembly/evidence.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
@@ -624,3 +628,42 @@ Cost and scope: O(sites x K). These terms describe the unit’s work/storage dim
 <a id="release"></a>
 
 **Release:** see [U16](#u16).
+
+
+Evidence-v2 inputs remain compact in the chain cache. `AssemblyEvidenceSource` expands a coded source directly into its final neutral float64 and scoring float32 arrays one sample at a time; it never creates another whole-contig raw float64 buffer. The coded mask is reconstructed one sample at a time into the active assembly mask; no full mask is held in its cached source. Mask values, the literal missing-cell value and the float32 cast point are unchanged. Fully dense, already neutral inputs retain the read-only borrowing route. The compact raw source can remain cached for subsequent selection without retaining assembly's dense views.
+
+### Execution order and CPU lending
+
+Independent joined batches and refinement components carry dimension-only work
+estimates (samples, sites and founder-state/refit work). The engine starts larger
+ready units first; dependencies still separate hierarchy levels and result gathers
+still visit genomic component order. Synchronous context joins use the same batch
+cost ordering and keyed composition.
+
+Stage expansion preserves the enclosing graph task's declared CPU maximum,
+rather than freezing the share passed when its parent first started. A join's
+CPU ceiling covers its independent count refits. Each sample kernel is
+separately capped at the useful sample width (`SAMPLES_PER_THREAD`), so that width
+does not restrict the entire refit family. Engine child budgets split the current
+task allowance and lend finished children's CPUs at later kernel boundaries.
+Refit results return to their original indices before the existing count, tie and
+acceptance rules run. Neither completion order nor team size chooses a founder
+count, search history or released panel.
+
+### Kernel registration and warm-up
+
+Preloading the assembly stage registers its numerical kernel closure, including
+join, linker, refinement-proposal and polish modules that ordinary execution may
+import only on first use. Registration declares argument types and compiles
+nothing. It lets the engine's initial warm-up plan include these kernels before
+an assembly worker reaches them. Supported storage signatures include immutable,
+noncontiguous shared GL and immutable local row codes; storage layout does not
+select a different objective or search.
+
+Parallel warm-up and scientific workers must use the same explicit run cache,
+code identity and compilation target. A separate consumer process verifies disk
+cache use; same-process reuse alone cannot establish it. Completing the relevant
+compile tasks before first scientific use is an application scheduling policy.
+A run that allows scientific tasks to race those tasks can still pay compilation
+cost in a worker, even with complete declarations. Init and scientific wall time
+are reported separately so a moved cost remains visible.

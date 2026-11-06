@@ -183,7 +183,12 @@ def refine(
                 bound,
                 incoming,
             ),
-            resources=ResourceRequest(1, session.max_cores, working_set_bytes=working),
+            resources=ResourceRequest(
+                1,
+                session.max_cores,
+                working_set_bytes=working,
+                cost=session.inputs.evidence.samples * sum(panel.sites for panel in panels) * component.founders**3,
+            ),
             # Components are independent (each records its own scope): not pinned, so they run side by side across
             # the contig's lane rather than one at a time on the parent's worker.
             thread_argument="cores",

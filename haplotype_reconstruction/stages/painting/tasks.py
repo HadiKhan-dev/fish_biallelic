@@ -17,6 +17,7 @@ import numpy as np
 
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap
+from ...contracts.observations import gather_observed
 from ...contracts.painting import Painting
 from ...contracts.panels import materialise
 from ...contracts.payload import to_payload
@@ -31,8 +32,10 @@ from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTE
 from ...science.painting.run import paint_chromosome
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, open_windows, publish, read_items
+from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish, read_items
 from ...store.slices import WindowArray
+from ..evidence.records import SUPPORTED_SCHEMAS
+from ..evidence.records import open_arrays as evidence_windows
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
 from . import records
 
@@ -59,8 +62,8 @@ def read_evidence(file: CheckpointFile, expected: str) -> Iterator[WindowEvidenc
     if found is None:
         raise InvariantError("painting requires the evidence record")
     payload = found.payload
-    require_schema(payload, 1)
-    with open_windows(file, "evidence", expected, ("likelihoods", "observed")) as arrays:
+    require_schema(payload, SUPPORTED_SCHEMAS)
+    with evidence_windows(file, ("likelihoods", "observed"), expected_identity=expected) as arrays:
         if arrays is None:
             raise InvariantError("evidence disappeared before painting windows opened")
         yield WindowEvidence(
@@ -105,8 +108,24 @@ def windowed_emissions(
     if not len(bin_starts):
         return raw, flags, informative
     largest = int(np.max(bin_stops - bin_starts))
-    for first_sample in range(0, count, max(1, sample_tile)):
-        last_sample = min(count, first_sample + max(1, sample_tile))
+    if isinstance(likelihoods, WindowArray):
+        # Flags are already a returned output. Fill them once before GL work so
+        # a large mask chunk cannot evict the GL chunk between every site window.
+        flag_sites = max(1, window_bytes)  # One byte per flag; keep its temporary within the existing workspace.
+        for sample in range(count):
+            for left in range(0, len(sites), flag_sites):
+                right = min(len(sites), left + flag_sites)
+                flags[sample, left:right] = gather_observed(
+                    observed, sites[left:right], slice(start + sample, start + sample + 1)
+                )[0]
+        sample_windows = likelihoods.sample_tiles(samples, sample_tile)
+    else:
+        sample_windows = (
+            slice(start + first, start + min(count, first + max(1, sample_tile)))
+            for first in range(0, count, max(1, sample_tile))
+        )
+    for sample_window in sample_windows:
+        first_sample, last_sample = sample_window.start - start, sample_window.stop - start
         width = max(1, window_bytes // max(1, 25 * (last_sample - first_sample) * largest))
         for first_bin in range(0, len(bin_starts), width):
             last_bin = min(len(bin_starts), first_bin + width)
@@ -117,15 +136,11 @@ def windowed_emissions(
                 else (int(np.searchsorted(parts[2], first_bin)), int(np.searchsorted(parts[2], last_bin)))
             )
             selection = slice(start + first_sample, start + last_sample)
-            if isinstance(likelihoods, np.ndarray):
-                if not isinstance(observed, np.ndarray):
-                    raise InvariantError("painting evidence sources must use the same storage route")
-                values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
-            else:
-                if isinstance(observed, np.ndarray):
-                    raise InvariantError("painting evidence sources must use the same storage route")
+            if isinstance(likelihoods, WindowArray):
                 values = likelihoods.gather(selection, sites[left:right])
-                seen = observed.gather(selection, sites[left:right])
+                seen = np.ascontiguousarray(flags[first_sample:last_sample, left:right])
+            else:
+                values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
             emissions, info = tempered_window(
                 values,
                 seen,

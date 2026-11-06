@@ -13,6 +13,8 @@ from typing import Protocol
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
+from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
+from ...contracts.observations import PairArray
 from ...contracts.relatedness import RelatednessFamilies
 from ...core.errors import InputError
 from .frequency import allele_frequency
@@ -45,10 +47,10 @@ class Evidence(Protocol):
     def positions(self) -> np.ndarray: ...
 
     @property
-    def likelihoods(self) -> np.ndarray: ...
+    def likelihoods(self) -> np.ndarray | CodedLikelihoods: ...
 
     @property
-    def observed(self) -> np.ndarray: ...
+    def observed(self) -> np.ndarray | PairArray: ...
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ def contig_terms(
         observed.mean(axis=0) >= family_parameters.minimum_observed
     )
     sites = np.flatnonzero(keep)[:: family_parameters.family_site_step]
-    child, prior, post = family_terms(gl[:, sites], observed[:, sites], p[sites], family_parameters)
+    child, prior, post = family_terms(gather_likelihoods(gl, sites), observed[:, sites], p[sites], family_parameters)
     units = support_units(
         measured_coordinates(genetic_map, positions[sites], family_parameters.rate_is_measured),
         family_parameters.support_unit_morgans,

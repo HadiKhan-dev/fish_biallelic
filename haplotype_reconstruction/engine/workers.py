@@ -14,6 +14,7 @@ import functools
 import io
 import logging
 import math
+import mmap
 import multiprocessing as mp
 import multiprocessing.pool as mp_pool
 import os
@@ -34,6 +35,7 @@ from multiprocessing.connection import wait
 from multiprocessing.context import ForkServerContext, ForkServerProcess
 from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import numba
@@ -73,6 +75,7 @@ from .scheduler import (
 _LOG = logging.getLogger(__name__)
 __all__ = [
     "SharedArrayRef",
+    "MappedArrayRef",
     "new_segment",
     "create_shared_array",
     "empty_shared_array",
@@ -112,6 +115,122 @@ class SharedArrayRef:
     dtype: str
 
 
+@dataclass(frozen=True)
+class MappedArrayRef:
+    """Read-only file bytes pinned by the publishing process until the last consumer.
+
+    The proc-fd path remains open even after the source mapping closes or its file
+    is unlinked. Shape/order are view metadata; no scientific array is copied.
+    """
+
+    name: str
+    offset: int
+    shape: tuple[int, ...]
+    dtype: str
+
+
+class _FilePin:
+    """One independent read-only descriptor for an existing mapped backing."""
+
+    def __init__(self, fd: int):
+        self.fd = fd
+        self.name = f"/proc/{os.getpid()}/fd/{fd}"
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def _read_only_mapping(array: np.ndarray) -> bool:
+    """Cheap candidate check; actual mapping permissions are checked before reuse."""
+    if not array.nbytes or not _plain_dtype(array.dtype):
+        return False
+    item: Any = array
+    while isinstance(item, np.ndarray):
+        if item.flags.writeable:
+            return False
+        item = item.base
+    if isinstance(item, memoryview):
+        item = item.obj
+    return isinstance(item, mmap.mmap)
+
+
+def _mapped_source(array: np.ndarray) -> tuple[int, int, int, str] | None:
+    """Device, inode, byte offset and path of a contiguous immutable file region.
+
+    A private copy-on-write mapping may differ from the file and must be copied.
+    Writable file maps are also copied. Read-only views of engine/shared tmpfs
+    inputs follow SharedValue's immutable-input lifetime contract.
+    """
+    if not _read_only_mapping(array):
+        return None
+    address = int(array.__array_interface__["data"][0])
+    try:
+        lines = Path("/proc/self/maps").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split(None, 5)
+        if len(parts) != 6:
+            continue
+        span, permissions, offset, device, inode, path = parts
+        first, last = (int(value, 16) for value in span.split("-"))
+        if first <= address and address + array.nbytes <= last:
+            shared_tmpfs = path.startswith("/dev/shm/") and permissions.endswith("s")
+            if not int(inode) or ("w" in permissions and not shared_tmpfs):
+                return None
+            major, minor = (int(value, 16) for value in device.split(":"))
+            return os.makedev(major, minor), int(inode), int(offset, 16) + address - first, path
+    return None
+
+
+def _pin_file(source: tuple[int, int, int, str]) -> _FilePin | None:
+    """Pin the exact inode when reopenable; otherwise leave the snapshot-copy route."""
+    device, inode, _, path = source
+    paths = [path] if not path.endswith(" (deleted)") else []
+    try:
+        paths.extend(str(entry) for entry in Path("/proc/self/fd").iterdir())
+    except OSError:
+        return None
+    for candidate in paths:
+        try:
+            stat = os.stat(candidate)
+            if (stat.st_dev, stat.st_ino) != (device, inode):
+                continue  # do not open unrelated pipes/sockets while finding the mapping
+            fd = os.open(candidate, os.O_RDONLY)
+        except OSError:
+            continue
+        stat = os.fstat(fd)
+        if (stat.st_dev, stat.st_ino) == (device, inode):
+            return _FilePin(fd)
+        os.close(fd)
+    return None  # anonymous mappings and deleted trackfd=False maps have no reopenable fd
+
+
+def _attach_array(reference: SharedArrayRef | MappedArrayRef) -> tuple[Any, np.ndarray]:
+    if isinstance(reference, SharedArrayRef):
+        return attach_shared_array(reference, track=False)
+    fd = os.open(reference.name, os.O_RDONLY)
+    try:
+        start = reference.offset - reference.offset % mmap.ALLOCATIONGRANULARITY
+        delta = reference.offset - start
+        size = math.prod(reference.shape) * np.dtype(reference.dtype).itemsize
+        handle = mmap.mmap(fd, size + delta, access=mmap.ACCESS_READ, offset=start)
+    finally:
+        os.close(fd)
+    try:
+        return handle, np.ndarray(reference.shape, dtype=reference.dtype, buffer=handle, offset=delta)
+    except BaseException:
+        handle.close()
+        raise
+
+
+def _array_reference(reference: SharedArrayRef | MappedArrayRef, array: np.ndarray):
+    """Another shape/dtype over the same contiguous bytes (Fortran already transposed)."""
+    if isinstance(reference, MappedArrayRef):
+        return MappedArrayRef(reference.name, reference.offset, tuple(array.shape), array.dtype.str)
+    return SharedArrayRef(reference.name, tuple(array.shape), array.dtype.str)
+
+
 def new_segment(size: int, *, name: str | None = None, track: bool = True) -> SharedMemory:
     """A new segment of ``size`` bytes (at least one) named after the run (see the module docstring), or ``name``
     (FileExistsError if it exists). ``track=False`` leaves it out of this process's resource tracker: a segment a
@@ -120,8 +239,8 @@ def new_segment(size: int, *, name: str | None = None, track: bool = True) -> Sh
 
     for _ in range(1 if name is not None else 64):
         try:
-            # ``track`` is Python 3.13's (typeshed does not have it yet).
-            handle = SharedMemory(name=name or segment_name(), create=True, size=max(int(size), 1), track=track)  # type: ignore[call-arg]
+            # Python 3.13+ lets the creator control resource-tracker ownership.
+            handle = SharedMemory(name=name or segment_name(), create=True, size=max(int(size), 1), track=track)
         except FileExistsError:
             if name is not None:
                 raise
@@ -173,7 +292,7 @@ def _fill_shared(contiguous: np.ndarray, handle: SharedMemory, copy_threads: int
         with numba_threads(authority_threads(threads)):
             _copy_shared_bytes(
                 np.frombuffer(memoryview(contiguous), dtype=np.uint8),
-                np.frombuffer(handle.buf, dtype=np.uint8, count=contiguous.nbytes),
+                np.frombuffer(cast(memoryview, handle.buf), dtype=np.uint8, count=contiguous.nbytes),
             )
     else:
         np.copyto(np.ndarray(contiguous.shape, dtype=contiguous.dtype, buffer=handle.buf), contiguous)
@@ -203,12 +322,12 @@ def empty_shared_array(shape, dtype) -> tuple[SharedMemory, SharedArrayRef, np.n
         raise
 
 
-def attach_shared_array(ref: SharedArrayRef) -> tuple[SharedMemory, np.ndarray]:
+def attach_shared_array(ref: SharedArrayRef, *, track: bool = True) -> tuple[SharedMemory, np.ndarray]:
     """Attach to a segment created by create_shared_array; return (handle, array view)."""
     from .scheduler import mark_in_use
 
     dtype = np.dtype(ref.dtype)
-    handle = SharedMemory(name=ref.name, create=False)
+    handle = SharedMemory(name=ref.name, create=False, track=track)
     mark_in_use(getattr(handle, "_fd", -1))
     try:
         buffer = handle.buf
@@ -1103,6 +1222,7 @@ class WorkerReply:
 
 
 _RESIDENT: dict[tuple[str, str], Any] = {}
+_RELOADABLE: set[tuple[str, str]] = set()  # Cache entries only; explicit ResidentRefs stay pinned.
 _ACTIVE_AFFINITY: str | None = None
 
 
@@ -1126,6 +1246,7 @@ def release_resident(reference: ResidentRef) -> None:
     if reference.affinity != _ACTIVE_AFFINITY:
         raise InvariantError("resident state may only be released by its affinity")
     del _RESIDENT[reference.affinity, reference.key]
+    _RELOADABLE.discard((reference.affinity, reference.key))
 
 
 def resident_value(reference: ResidentRef) -> Any:
@@ -1152,6 +1273,7 @@ def resident_or_load(key: str, load: Callable[[], _Loaded]) -> _Loaded:
     identity = (_ACTIVE_AFFINITY, key)
     if identity not in _RESIDENT:
         _RESIDENT[identity] = load()
+        _RELOADABLE.add(identity)
     return _RESIDENT[identity]
 
 
@@ -1163,11 +1285,29 @@ def release_resident_namespace(namespace: str) -> None:
     prefix = namespace + "/"
     for identity in [item for item in _RESIDENT if item[0] == _ACTIVE_AFFINITY and item[1].startswith(prefix)]:
         del _RESIDENT[identity]
+        _RELOADABLE.discard(identity)
+
+
+def _release_idle_cache() -> int:
+    """Drop only reloadable state, at an idle task boundary; live continuations stay.
+
+    A cache loader is identity-keyed and recreates the same immutable value. A
+    continuation may still refer to that value; Python then keeps it alive until
+    the continuation finishes. Attached segments close only after their last view.
+    """
+    global _SHARED_UNCLOSED
+    count = sum(identity in _RESIDENT for identity in _RELOADABLE)
+    for identity in _RELOADABLE:
+        _RESIDENT.pop(identity, None)
+    _RELOADABLE.clear()
+    release_memory()
+    _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
+    return count
 
 
 @dataclass(frozen=True)
 class SharedValue:
-    """A read-only value whose arrays one affinity action placed in shared memory once (ENG-24 transport).
+    """A read-only value over copied or pinned immutable backing (ENG-24 transport).
 
     The independent subtasks of that action's Expansion receive this small reference instead of the
     arrays and attach them without copying (call_shared). The owner releases the segments at its
@@ -1179,11 +1319,33 @@ class SharedValue:
     affinity: str
     key: str
     plan: Any
-    arrays: tuple[tuple[str, SharedArrayRef], ...]
+    arrays: tuple[tuple[str, SharedArrayRef | MappedArrayRef], ...]
 
 
-_SHARED_OWNED: dict[tuple[str, str], list[SharedMemory]] = {}
-_SHARED_UNCLOSED: list[tuple[SharedMemory, Any]] = []
+class _SharedBacking:
+    """A copied segment or pinned file shared by independent SharedValue lifetimes."""
+
+    def __init__(self, key: tuple | None, handle: SharedMemory | _FilePin):
+        self.key, self.handle, self.users = key, handle, 0
+        # Weak source views validate address reuse without retaining the private twin.
+        self.sources: dict[int, weakref.ref] = {}
+
+    def release(self) -> None:
+        self.users -= 1
+        if self.users:
+            return
+        if self.key is not None and _SHARED_BACKINGS.get(self.key) is self:
+            del _SHARED_BACKINGS[self.key]
+        if isinstance(self.handle, SharedMemory):
+            close_shared_memory([self.handle], unlink=True)
+            _announce_shared("shared-", (self.handle.name,))
+        else:
+            self.handle.close()
+
+
+_SHARED_BACKINGS: dict[tuple, _SharedBacking] = {}
+_SHARED_OWNED: dict[tuple[str, str], list[_SharedBacking]] = {}
+_SHARED_UNCLOSED: list[tuple[SharedMemory | mmap.mmap, Any]] = []
 # A graph worker's connection to its coordinator (None elsewhere). Each owned segment's name is announced on it as
 # soon as the segment is allocated (before it is filled), and its release afterwards, so the coordinator unlinks
 # whatever remains when it aborts or closes the group, even if this worker is terminated or killed mid-copy.
@@ -1242,10 +1404,12 @@ def _shared_build(plan: Any, attached: dict[str, np.ndarray]) -> Any:
 
 
 def share_value(value: Any, key: str, *, copy_threads: int = 1) -> SharedValue:
-    """Copy ``value``'s arrays into shared memory once; called by an affinity action, which owns the segments.
+    """Publish arrays once per immutable backing; the affinity owns independent lifetime holds.
 
     Exact transport: every array keeps its values, shape, dtype and memory order. Any failure after
-    allocation closes and unlinks the segments created so far.
+    allocation releases every acquired hold. Private mutable inputs are copied;
+    read-only mapped/shared inputs borrow their pinned backing and must remain immutable
+    until their last SharedValue releases it. Private copy-on-write data is copied.
     """
     if _ACTIVE_AFFINITY is None:
         raise InvariantError("a shared value requires task affinity")
@@ -1256,25 +1420,68 @@ def share_value(value: Any, key: str, *, copy_threads: int = 1) -> SharedValue:
     plan = _share_plan(value, key, arrays)
     # Ownership is registered (and announced to a coordinator) at each allocation, before the copy into it:
     # a worker stopped mid-construction leaves no segment its coordinator does not know about.
-    handles: list[SharedMemory] = []
+    handles: list[_SharedBacking] = []
     _SHARED_OWNED[identity] = handles
     references = []
+    copied: dict[tuple[int, int], SharedArrayRef | MappedArrayRef] = {}
+    reference: SharedArrayRef | MappedArrayRef
+    pinned: set[_SharedBacking] = set()
     try:
         for name, array in arrays.items():
-            contiguous = _shareable(array)
-            handle = new_segment(contiguous.nbytes)
-            handles.append(handle)
-            _announce_shared("shared+", (handle.name,))
-            references.append((name, _fill_shared(contiguous, handle, copy_threads)))
+            descriptor = (array.__array_interface__["data"][0], array.nbytes)
+            if descriptor in copied:
+                references.append((name, _array_reference(copied[descriptor], array)))
+                continue
+            source = _mapped_source(array)
+            cache_key = (
+                ("file", *source[:2]) if source is not None else (("copy", *descriptor) if _fixed(array) else None)
+            )
+            backing = _SHARED_BACKINGS.get(cache_key) if cache_key is not None else None
+            if (
+                backing is not None
+                and source is None
+                and not any(ref() is not None for ref in backing.sources.values())
+            ):
+                backing = None  # the old address can now belong to different bytes
+            if backing is None:
+                file = _pin_file(source) if source is not None else None
+                if source is not None and file is None:
+                    source, cache_key = None, None
+                if source is not None:
+                    backing = _SharedBacking(cache_key, cast(_FilePin, file))
+                else:
+                    contiguous = _shareable(array)
+                    handle = new_segment(contiguous.nbytes)
+                    _announce_shared("shared+", (handle.name,))
+                    try:
+                        _fill_shared(contiguous, handle, copy_threads)
+                    except BaseException:
+                        close_shared_memory([handle], unlink=True)
+                        _announce_shared("shared-", (handle.name,))
+                        raise
+                    backing = _SharedBacking(cache_key, handle)
+                if cache_key is not None:
+                    _SHARED_BACKINGS[cache_key] = backing
+            if backing not in pinned:
+                backing.users += 1
+                pinned.add(backing)
+                handles.append(backing)
+            if source is not None:
+                reference = MappedArrayRef(backing.handle.name, source[2], tuple(array.shape), array.dtype.str)
+            else:
+                backing.sources[id(array)] = weakref.ref(array)
+                reference = SharedArrayRef(backing.handle.name, tuple(array.shape), array.dtype.str)
+            copied[descriptor] = reference
+            references.append((name, reference))
     except BaseException:
         _SHARED_OWNED.pop(identity, None)
-        close_shared_memory(handles, unlink=True)
-        _announce_shared("shared-", tuple(handle.name for handle in handles))
+        for backing in handles:
+            backing.release()
         raise
     return SharedValue(identity[0], identity[1], plan, tuple(references))
 
 
-def _close_unreferenced(entries: list[tuple[SharedMemory, Any]]) -> list[tuple[SharedMemory, Any]]:
+def _close_unreferenced(entries: list[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
     """Unmap attachments whose attached array no longer exists; return the others, to be retried later.
 
     NumPy keeps no buffer export on a shared segment (closing one under a live array would leave that
@@ -1299,17 +1506,19 @@ def call_shared(reference: SharedValue, function: Any, *args: Any, **kwargs: Any
     """
     global _SHARED_UNCLOSED
     _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
-    entries: list[tuple[SharedMemory, Any]] = []
+    entries: list[tuple[Any, Any]] = []
     try:
-        attached = {}
+        attached, unique = {}, {}
         for name, array_reference in reference.arrays:
-            handle, array = attach_shared_array(array_reference)
-            array.flags.writeable = False
-            entries.append((handle, weakref.ref(array)))
-            attached[name] = array
-            del array
+            if array_reference not in unique:
+                handle, array = _attach_array(array_reference)
+                array.flags.writeable = False
+                entries.append((handle, weakref.ref(array)))
+                unique[array_reference] = array
+                del array
+            attached[name] = unique[array_reference]
         value = _shared_build(reference.plan, attached)
-        del attached
+        del attached, unique
         try:
             return function(value, *args, **kwargs)
         finally:
@@ -1323,15 +1532,16 @@ def release_shared_value(reference: SharedValue) -> None:
     if reference.affinity != _ACTIVE_AFFINITY:
         raise InvariantError("a shared value may only be released by its affinity")
     handles = _SHARED_OWNED.pop((reference.affinity, reference.key))
-    close_shared_memory(handles, unlink=True)
-    _announce_shared("shared-", tuple(handle.name for handle in handles))
+    for backing in handles:
+        backing.release()
 
 
 def _release_all_shared() -> None:
     """Unlink every segment this process still owns (process exit or an aborted in-process graph)."""
     while _SHARED_OWNED:
         _, handles = _SHARED_OWNED.popitem()
-        close_shared_memory(handles, unlink=True)
+        for backing in handles:
+            backing.release()
 
 
 atexit.register(_release_all_shared)
@@ -1434,7 +1644,7 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
     Owned shared values are unlinked whenever this loop ends (multiprocessing children skip atexit); a worker
     that is terminated instead leaves them to its coordinator, which knows their names (_announce_shared).
     """
-    global _OWNER_CHANNEL
+    global _OWNER_CHANNEL, _SHARED_UNCLOSED
     from dataclasses import replace
 
     _OWNER_CHANNEL = connection
@@ -1449,6 +1659,14 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
             message = connection.recv()
             if message is None:
                 return
+            if message == "release-idle":
+                _release_idle_cache()
+                affinities = tuple(sorted({key[0] for key in _RESIDENT}))
+                retire = not (_RESIDENT or _SHARED_OWNED)
+                connection.send(("idle-released", (affinities, retire)))
+                if retire:
+                    return
+                continue
             task, token, lane = message
             if isinstance(task, _PackedTask):
                 task = task.load()
@@ -1464,6 +1682,7 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
             connection.send(("result", _pack_reply(replace(reply, retire=retire))))
             # Idle workers retain only explicitly registered affinity state.
             del reply, task, token, message
+            _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
             if retire:
                 return
     except BaseException as error:
@@ -1517,58 +1736,67 @@ def _fixed(array: np.ndarray) -> bool:
     return type(item) is bytes
 
 
-# Arrays attached from a transport segment in this process: id -> (weak reference, reference, owner, descriptor at
+# Arrays attached from a transport segment in this process: id -> (weak reference, reference, owner, byte address at
 # attachment). Sending one
 # again passes the same reference on without a copy, in either direction, while its segment is known to live: in the
 # coordinator, ``owner`` is the transport that holds the segment (and must still be open); in a worker it is the task
 # number during which the array was attached (its coordinator keeps that task's segments until the reply is in).
-_ATTACHED: dict[int, tuple[weakref.ref, tuple, Any, tuple]] = {}
+_ATTACHED: dict[int, tuple[weakref.ref, tuple, Any, int]] = {}
 _TASK_NUMBER = 0  # in a graph worker, the number of the task it is running
 # In a graph worker, the current task's attachments by reference (weak: a finished task's arrays are not kept).
 _TASK_ATTACHED: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
 
-def _attach(reference: SharedArrayRef, transposed: bool, owner: Any) -> np.ndarray:
+def _attach(reference: SharedArrayRef | MappedArrayRef, transposed: bool, owner: Any) -> np.ndarray:
     """Attach a transport segment read-only, register the array for pass-through and return it."""
     global _SHARED_UNCLOSED
     _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
-    handle, array = attach_shared_array(reference)
+    handle, array = _attach_array(reference)
     array.flags.writeable = False
     _SHARED_UNCLOSED.append((handle, weakref.ref(array)))  # unmapped once no array refers to it
     result = array.T if transposed else array
-    key = id(result)
+    _register_attached(array, _pid(reference, False), owner)
+    if result is not array:
+        _register_attached(result, _pid(reference, transposed), owner)
+    if isinstance(owner, _ArrayTransport):
+        # Every derived view keeps this actual base alive, including Fortran
+        # views whose .base skips the originally returned transposed object.
+        owner.hold(reference.name, array)
+    return result
+
+
+def _register_attached(array: np.ndarray, reference: tuple, owner: Any) -> None:
+    key = id(array)
 
     def forget(_: weakref.ref, key: int = key) -> None:
         _ATTACHED.pop(key, None)
 
-    _ATTACHED[key] = (
-        weakref.ref(result, forget),
-        _pid(reference, transposed),
-        owner,
-        _descriptor(result),
-    )
-    return result
+    _ATTACHED[key] = (weakref.ref(array, forget), reference, owner, int(array.__array_interface__["data"][0]))
 
 
-def _descriptor(array: np.ndarray) -> tuple:
-    """What a reference fixes besides the data: an attached array reshaped or retyped in place (``.shape =``,
-    ``.dtype =``) keeps its identity but no longer matches its reference."""
-    return array.shape, array.strides, array.dtype
-
-
-def _pid(reference: SharedArrayRef, transposed: bool) -> tuple:
+def _pid(reference: SharedArrayRef | MappedArrayRef, transposed: bool) -> tuple:
     return ("shared-array", reference, transposed)
 
 
 def _passed_through(array: np.ndarray, owner: Any) -> tuple | None:
     """The reference ``array`` was attached from, if it may be passed on: attached in this coordinator's transport
     (``owner``, still open) or, in a worker (``owner`` None), during the current task."""
-    entry = _ATTACHED.get(id(array))
-    if entry is None or entry[0]() is not array or entry[3] != _descriptor(array):
+    if not _plain_dtype(array.dtype) or not (array.flags.c_contiguous or array.flags.f_contiguous):
         return None
-    if owner is None:
-        return entry[1] if entry[2] == _TASK_NUMBER else None
-    return entry[1] if entry[2] is owner and not owner.closed else None
+    address = int(array.__array_interface__["data"][0])
+    item: Any = array
+    while isinstance(item, np.ndarray):
+        entry = _ATTACHED.get(id(item))
+        if entry is not None and entry[0]() is item:
+            reference = entry[1][1]
+            extent = math.prod(reference.shape) * np.dtype(reference.dtype).itemsize
+            live = entry[2] == _TASK_NUMBER if owner is None else entry[2] is owner and not owner.closed
+            if live and address == entry[3] and array.nbytes == extent:
+                transposed = not array.flags.c_contiguous
+                contiguous = array.T if transposed else array
+                return _pid(_array_reference(reference, contiguous), transposed)
+        item = item.base
+    return None
 
 
 @dataclass(frozen=True)
@@ -1606,9 +1834,9 @@ class _TransportPickler(ForkingPickler):
     def reducer_override(self, obj: Any) -> Any:
         # reducer_override, unlike persistent_id, is not called for atoms, strings or builtin containers: pickling
         # an object-heavy task costs about a third less (persistent_id ran Python code for every int and float).
-        if type(obj) is np.ndarray and obj.nbytes >= TRANSPORT_SHARE_BYTES:
+        if isinstance(obj, np.ndarray) and obj.nbytes >= TRANSPORT_SHARE_BYTES:
             reference = _passed_through(obj, self.transport)
-            if reference is None and _fixed(obj):
+            if reference is None and (_fixed(obj) or _read_only_mapping(obj)):
                 reference = self.transport.reference(obj)
             if reference is not None:
                 self.names.add(reference[1].name)
@@ -1635,7 +1863,7 @@ class _ReplyPickler(ForkingPickler):
     def __init__(
         self,
         file: Any,
-        made: dict[int, tuple] | None = None,
+        made: dict[tuple, tuple] | None = None,
         kept: list[np.ndarray] | None = None,
         *,
         child: bool = False,
@@ -1643,7 +1871,7 @@ class _ReplyPickler(ForkingPickler):
     ):
         super().__init__(file, pickle.HIGHEST_PROTOCOL)
         # Shared by every pickler of one reply, so an array its children all carry is copied into one segment.
-        self.made: dict[int, tuple] = {} if made is None else made
+        self.made: dict[tuple, tuple] = {} if made is None else made
         self.kept: list[np.ndarray] = [] if kept is None else kept  # the arrays keyed in ``made`` stay alive
         self.references: list[tuple] = []
         self.child = child
@@ -1654,7 +1882,7 @@ class _ReplyPickler(ForkingPickler):
         if self.child and type(obj) is ResultRef:
             self.refs.setdefault(obj.task, len(self.refs))
             return NotImplemented
-        if type(obj) is np.ndarray and (obj.nbytes >= TRANSPORT_SHARE_BYTES or id(obj) in self.shared):
+        if isinstance(obj, np.ndarray) and (obj.nbytes >= TRANSPORT_SHARE_BYTES or id(obj) in self.shared):
             reference = _passed_through(obj, None)
             if (
                 reference is None
@@ -1662,10 +1890,15 @@ class _ReplyPickler(ForkingPickler):
                 and _plain_dtype(obj.dtype)
                 and (obj.flags.c_contiguous or obj.flags.f_contiguous)
             ):
-                reference = self.made.get(id(obj))
+                span = (int(obj.__array_interface__["data"][0]), obj.nbytes)
+                reference = self.made.get(span)
                 if reference is None:
-                    reference = self.made[id(obj)] = _reply_segment(obj)
+                    reference = self.made[span] = _reply_segment(obj)
+                    # Retain the source for this whole reply, including all packed
+                    # children: its address cannot be reused for unrelated bytes.
                     self.kept.append(obj)
+                transposed = not obj.flags.c_contiguous
+                reference = _pid(_array_reference(reference[1], obj.T if transposed else obj), transposed)
             if reference is None:
                 if self.child:
                     raise _ByValue
@@ -1696,7 +1929,7 @@ def _reply_segment(array: np.ndarray) -> tuple:
 
 
 def _pack_reply(reply: WorkerReply) -> _PackedReply:
-    made: dict[int, tuple] = {}
+    made: dict[tuple, tuple] = {}
     kept: list[np.ndarray] = []
     if isinstance(reply.value, Expansion):
         expansion = reply.value
@@ -1778,7 +2011,7 @@ def _shared_arrays(tasks: tuple[Task, ...]) -> frozenset[int]:
 
 
 def _packed_child(
-    task: Task, made: dict[int, tuple], kept: list[np.ndarray], shared: frozenset[int] = frozenset()
+    task: Task, made: dict[tuple, tuple], kept: list[np.ndarray], shared: frozenset[int] = frozenset()
 ) -> Task:
     """An expansion child or gather with its call pickled here once (_call_packed unpacks it in the worker that runs
     it and resolves its result references there, with the coordinator's own resolver). A task that would carry a
@@ -1819,7 +2052,7 @@ def _call_packed(packed: _PackedCall, values: tuple = (), /, **extra: Any) -> An
     return function(*args, **kwargs)
 
 
-def _shared_array(kind: str, reference: SharedArrayRef, transposed: bool) -> np.ndarray:
+def _shared_array(kind: str, reference: SharedArrayRef | MappedArrayRef, transposed: bool) -> np.ndarray:
     """A transport reference in a pickle: only _TransportUnpickler loads one (its find_class binds this name to the
     payload's own loader); any other unpickler reaching it is outside the transport."""
     raise pickle.UnpicklingError("a task-transport array reference can only be loaded by the task transport")
@@ -1836,20 +2069,30 @@ class _TransportUnpickler(pickle.Unpickler):
         # array both carried and referenced stays one object, as when the coordinator pickled the whole task).
         self.attached: Any = _TASK_ATTACHED if type(owner) is int and owner == _TASK_NUMBER else {}
 
+    def load(self) -> Any:
+        """Load one complete payload and release its temporary object graph now.
+
+        The pickle memo contains our bound shared-array loader, which points back
+        to this unpickler. Without clearing it, that cycle also keeps every decoded
+        array alive until cyclic GC, despite the transport's weak lifetime holds.
+        """
+        try:
+            return super().load()
+        finally:
+            self.memo.clear()
+
     def find_class(self, module: str, name: str) -> Any:
         if module == __name__ and name == "_shared_array":
             return self._shared_array
         return super().find_class(module, name)
 
-    def _shared_array(self, kind: str, reference: SharedArrayRef, transposed: bool) -> np.ndarray:
+    def _shared_array(self, kind: str, reference: SharedArrayRef | MappedArrayRef, transposed: bool) -> np.ndarray:
         if kind != "shared-array":
             raise pickle.UnpicklingError(f"unknown task transport reference {kind!r}")
         key = (reference, transposed)
         if key in self.attached:
             return self.attached[key]
         result = _attach(reference, transposed, self.owner)
-        if isinstance(self.owner, _ArrayTransport):
-            self.owner.hold(reference.name, result)
         self.attached[key] = result
         return result
 
@@ -1860,7 +2103,7 @@ class _Segment:
 
     __slots__ = ("flight", "handle", "holders")
 
-    def __init__(self, handle: SharedMemory | None):
+    def __init__(self, handle: SharedMemory | _FilePin | None):
         self.handle = handle
         self.holders: dict[int, weakref.ref] = {}  # by the reference's id (arrays are not hashable)
         self.flight = 0
@@ -1869,8 +2112,8 @@ class _Segment:
 class _ArrayTransport:
     """The coordinator's shared copies of large immutable task arrays (TRANSPORT_SHARE_BYTES, _fixed).
 
-    A segment is either created here (once per source array descriptor: data address, shape, strides, dtype; a
-    reshaped array is copied anew) or adopted from a worker's reply. It lives while an array here refers to it (a
+    A segment is either created here (compatible contiguous source views reuse
+    that backing) or adopted from a worker's reply. It lives while an array here refers to it (a
     source, or an array attached from it) or a task in flight carries it, and is unlinked when neither remains, so
     each round's inputs leave memory with the round. A segment created here is registered before it is filled, so
     close() unlinks it whatever interrupts the copy.
@@ -1879,7 +2122,7 @@ class _ArrayTransport:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.closed = False
-        self.sources: dict[tuple, tuple[weakref.ref, tuple]] = {}
+        self.sources: dict[tuple, tuple[dict[int, weakref.ref], tuple]] = {}
         self.segments: dict[str, _Segment] = {}
         self.filling: dict[str, SharedMemory | None] = {}  # by name, from before its creation until its entry
         self.in_flight: dict[int, set[str]] = {}
@@ -1938,26 +2181,45 @@ class _ArrayTransport:
     def reference(self, array: np.ndarray) -> tuple | None:
         if not (array.flags.c_contiguous or array.flags.f_contiguous):
             return None
-        key = (id(array), array.__array_interface__["data"][0], array.shape, array.strides, array.dtype.str)
+        key = (int(array.__array_interface__["data"][0]), array.nbytes)
         with self.lock:
             entry = self.sources.get(key)
-            if entry is not None and entry[0]() is array:
-                return entry[1]
             transposed = not array.flags.c_contiguous
-            handle = self._new_segment(array.nbytes)
+            contiguous = array.T if transposed else array
+            if entry is not None:
+                reference = _array_reference(entry[1][1], contiguous)
+                self._source_hold(key, entry[0], array, reference.name)
+                return _pid(reference, transposed)
+            source = _mapped_source(array)
+            if source is None and not _fixed(array):
+                return None
+            handle = self._new_segment(array.nbytes) if source is None else _pin_file(source)
+            if handle is None:
+                return None  # the ordinary by-value route still supports non-reopenable mappings
             try:
-                pid = _pid(_fill_shared(array.T if transposed else array, handle, 1), transposed)
+                if source is None:
+                    reference = _fill_shared(contiguous, cast(SharedMemory, handle), 1)
+                else:
+                    reference = MappedArrayRef(handle.name, source[2], tuple(contiguous.shape), array.dtype.str)
+                pid = _pid(reference, transposed)
                 self.segments[handle.name] = _Segment(handle)
-                self.hold(handle.name, array)
-                self.sources[key] = (weakref.ref(array, functools.partial(self._source_dropped, key)), pid)
+                sources: dict[int, weakref.ref] = {}
+                self.sources[key] = (sources, pid)
+                self._source_hold(key, sources, array, handle.name)
             except BaseException:
                 self.sources.pop(key, None)
                 self.segments.pop(handle.name, None)
-                close_shared_memory([handle], unlink=True)
+                _unlink_segment(handle.name, handle)
                 raise
             finally:
                 self.filling.pop(handle.name, None)
             return pid
+
+    def _source_hold(self, key: tuple, sources: dict, array: np.ndarray, name: str) -> None:
+        if id(array) in sources:
+            return
+        sources[id(array)] = weakref.ref(array, functools.partial(self._source_dropped, key, id(array)))
+        self.hold(name, array)
 
     def _new_segment(self, size: int) -> SharedMemory:
         """A new segment, its name recorded before it exists: whatever interrupts its creation, close() unlinks it."""
@@ -1975,9 +2237,13 @@ class _ArrayTransport:
             return handle
         raise FileExistsError("no free shared-memory segment name")
 
-    def _source_dropped(self, key: tuple, _: Any) -> None:
+    def _source_dropped(self, key: tuple, identity: int, _: Any) -> None:
         with self.lock:
-            self.sources.pop(key, None)
+            entry = self.sources.get(key)
+            if entry is not None:
+                entry[0].pop(identity, None)
+                if not entry[0]:
+                    del self.sources[key]
 
     def _released(self, name: str, holder: weakref.ref) -> None:
         with self.lock:
@@ -2019,12 +2285,15 @@ class _ArrayTransport:
             )
 
 
-def _unlink_segment(name: str, handle: SharedMemory | None) -> None:
+def _unlink_segment(name: str, handle: SharedMemory | _FilePin | None) -> None:
     """Close and unlink a transport segment by handle, or by name when it was adopted (best effort)."""
     if handle is None:
         _unlink_name(name)
         return
-    close_shared_memory([handle], unlink=True)
+    if isinstance(handle, _FilePin):
+        handle.close()
+    else:
+        close_shared_memory([handle], unlink=True)
 
 
 def _unlink_name(name: str) -> None:
@@ -2034,7 +2303,7 @@ def _unlink_name(name: str) -> None:
         import _posixshmem
     except ImportError:  # no POSIX shared memory: only a mapped handle unlinks
         try:
-            close_shared_memory([SharedMemory(name=name, create=False, track=False)], unlink=True)  # type: ignore[call-arg]
+            close_shared_memory([SharedMemory(name=name, create=False, track=False)], unlink=True)
         except (OSError, ValueError):
             pass
         return
@@ -2052,6 +2321,7 @@ class _WorkerHandle:
     busy: TaskKey | None = None
     ready: bool = False
     announced: bool = False
+    idle_released: bool = False
 
 
 class WorkerGroup:
@@ -2081,6 +2351,7 @@ class WorkerGroup:
         self.handles: list[_WorkerHandle] = []
         # Each worker's announced shared-value segments, unlinked by close() whatever became of the worker.
         self.shared: dict[int, set[str]] = {}
+        self.released: list[tuple[int, tuple[str, ...]]] = []
         self.transport = _ArrayTransport()
         # Coordinator traffic by (direction, stage): [messages, payload bytes, pickling or unpickling seconds, pipe
         # receive seconds], logged when the group closes (where the coordinator's time goes).
@@ -2166,6 +2437,39 @@ class WorkerGroup:
         self._count("task", task.key.stage, len(packed.payload), time.perf_counter() - began, 0.0)
         handle.connection.send((packed, token, lane))
 
+    def reclaim_attachments(self) -> None:
+        """Unmap dead coordinator views after consuming a reply, not at a future attach.
+
+        Unlinking a segment frees its name; the pages stay charged until the final
+        mapping closes. Live arrays are protected by the weak-view lifetime check.
+        """
+        global _SHARED_UNCLOSED
+        _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
+
+    def release_idle(self) -> None:
+        """Pressure recovery: release reloadable caches and native heaps on idle workers.
+
+        One request per task boundary, so permanent pressure cannot cause a respawn
+        loop or fake watchdog progress. Workers holding explicit state trim but do
+        not retire. A maintenance worker is unavailable until its acknowledgement.
+        """
+        for handle in self.handles:
+            if handle.ready and handle.busy is None and not handle.idle_released:
+                handle.ready = False
+                handle.idle_released = True
+                handle.connection.send("release-idle")
+
+    def _retired(self, index: int, *, idle: bool = False) -> None:
+        handle = self.handles[index]
+        handle.announced = True
+        handle.process.join(timeout=1.0)
+        if handle.process.is_alive() or handle.process.exitcode != 0:
+            raise RuntimeError("announced worker retirement did not finish cleanly")
+        handle.connection.close()
+        self.shared.pop(index, None)
+        self._spawn(index)
+        self.handles[index].idle_released = idle
+
     def _count(self, direction: str, stage: str, size: int, seconds: float, receiving: float) -> None:
         row = self.traffic.get((direction, stage))
         if row is None:
@@ -2184,9 +2488,13 @@ class WorkerGroup:
                 try:
                     kind, value = handle.connection.recv()
                 except (EOFError, OSError) as error:
-                    handle.process.join(timeout=0)
+                    # Pipe EOF can precede the forkserver's exit-status notification.
+                    # Bound this diagnostic wait even if the worker only closed its pipe.
+                    handle.process.join(timeout=0.2)
+                    status = handle.process.exitcode
                     raise BrokenProcessPool(
-                        f"worker {handle.process.pid} exited unexpectedly with status {handle.process.exitcode}"
+                        f"worker {handle.process.pid} exited unexpectedly with status "
+                        f"{status if status is not None else 'unknown'}"
                     ) from error
                 if kind == "ready":
                     handle.ready = True
@@ -2197,6 +2505,12 @@ class WorkerGroup:
                     if hasattr(task_error, "add_note"):
                         task_error.add_note(trace)
                     raise bootstrap.task_failure(task_error)
+                elif kind == "idle-released":
+                    affinities, retire = value
+                    handle.ready = True
+                    self.released.append((index, affinities))
+                    if retire:
+                        self._retired(index, idle=True)
                 elif kind == "result":
                     received = time.perf_counter()
                     size = len(value.payload) if isinstance(value, _PackedReply) else 0
@@ -2205,18 +2519,13 @@ class WorkerGroup:
                     if value.key != handle.busy:
                         raise InvariantError("worker replied for a different task")
                     handle.busy = None
+                    handle.idle_released = False
                     self.transport.done(index)
                     replies.append((index, value))
                     if value.retire:
                         if value.resident_affinities:
                             raise InvariantError("worker attempted to recycle live resident state")
-                        handle.announced = True
-                        handle.process.join(timeout=1.0)
-                        if handle.process.is_alive() or handle.process.exitcode != 0:
-                            raise RuntimeError("announced worker retirement did not finish cleanly")
-                        handle.connection.close()
-                        self.shared.pop(index, None)
-                        self._spawn(index)
+                        self._retired(index)
                 else:
                     raise InvariantError(f"unknown worker message: {kind}")
             current = self.handles[index]

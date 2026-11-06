@@ -67,6 +67,7 @@ class ResourceRequest:
     max_cores: int = 1
     working_set_bytes: int = 0
     scratch_bytes: int = 0
+    cost: float = 0.0  # Estimated work for longest-first dispatch; never a scientific budget.
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,8 @@ def dependency_order(tasks: Sequence[Task]) -> tuple[TaskKey, ...]:
         request = task.resources
         if request.min_cores < 1 or request.max_cores < request.min_cores:
             raise SettingsError(f"{task.key}: invalid CPU range {request.min_cores}..{request.max_cores}")
+        if request.cost < 0:
+            raise SettingsError(f"{task.key}: task cost must be nonnegative")
         missing = set(task.depends_on) - indexed.keys()
         if missing:
             raise SettingsError(f"{task.key}: unknown dependencies {sorted(missing)}")

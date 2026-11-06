@@ -15,11 +15,19 @@ POOL_BYTES_PER_PATH_PAIR = 200
 
 
 def batch_threads(task: JoinTask) -> int:
-    """The most CPUs one batch's join can occupy: its kernels run in parallel over the batch's samples, at least
-    SAMPLES_PER_THREAD of them per thread (core.kernels.sample_team); its few regions over other axes (proposal
-    candidates, certificate pools, linker sites) run on the same team. Declared as the batch task's maximum, so the
-    engine never holds CPUs for a batch that its kernels would only wake idle: they go to peer batches."""
+    """Useful width of one sample kernel, not the whole join's independent refits."""
     return max(1, len(task.samples) // SAMPLES_PER_THREAD)
+
+
+def batch_work(task: JoinTask) -> int:
+    """Dimension-only ready priority; composition still visits genomic batch order.
+
+    Sample/site work scales with the pair-state recursion and its O(K) refits.
+    Incoming alternatives are separate executions on the same evidence domain.
+    """
+    branches = task.branches or (task.components,)
+    sites = sum(panel.sites for panel in task.prepared)
+    return len(task.samples) * sites * sum(max(c.founders for c in branch) ** 3 for branch in branches)
 
 
 def batch_memory_bytes(task: JoinTask) -> int:

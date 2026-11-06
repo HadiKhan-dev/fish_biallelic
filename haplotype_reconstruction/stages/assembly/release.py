@@ -15,6 +15,7 @@ import numpy as np
 
 from haplotype_reconstruction.contracts.assembly import AssemblyProduct, FounderRelease, ReleaseAxes
 from haplotype_reconstruction.contracts.evidence import ContigEvidence
+from haplotype_reconstruction.contracts.observations import dense_observed
 from haplotype_reconstruction.contracts.painting import Painting
 from haplotype_reconstruction.contracts.payload import from_payload, to_payload
 from haplotype_reconstruction.contracts.refit import FounderRefit
@@ -66,7 +67,7 @@ def compute_release(
     if len(panels) != len(painting):
         raise InvariantError("founder panels and painting components differ")
     sites = np.asarray(inputs.evidence.positions)
-    observed = np.asarray(inputs.evidence.observed, dtype=bool)
+    observed = dense_observed(inputs.evidence.observed)
     original, seen = [], []
     with task_team(cores):
         for component, panel in zip(painting, panels, strict=False):

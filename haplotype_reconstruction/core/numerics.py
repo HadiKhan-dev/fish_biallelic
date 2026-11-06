@@ -188,8 +188,7 @@ def contiguous_axis_sum(values: np.ndarray) -> np.ndarray:
     pairwise rounding. It is dimension-fixed, not a left fold (WP_PE2 §4). The
     numerical-policy identity binds NumPy's version. Inputs are never mutated.
     """
-    # NumPy 2.5 stubs omit the ordinary keepdims=False, out=None overload.
-    return np.add.reduce(np.asfortranarray(values, dtype=np.float64), axis=0)  # type: ignore[call-overload]
+    return np.add.reduce(np.asfortranarray(values, dtype=np.float64), axis=0)
 
 
 @kernel(

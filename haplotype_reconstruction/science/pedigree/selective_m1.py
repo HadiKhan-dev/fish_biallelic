@@ -127,7 +127,7 @@ def search_batch(
         SELECTIVE_FRONTIER_ULPS
         * np.finfo(float).eps
         * contigs
-        * np.maximum.reduce([np.ones(batch), np.abs(best), np.full(batch, abs(shift))])  # type: ignore[call-overload]
+        * np.maximum.reduce([np.ones(batch), np.abs(best), np.full(batch, abs(shift))])
     )
     frontier = eligible & ~known.all(0) & (total_upper >= cutoff[:, None] - guard[:, None])
     query(genome_rows(frontier), "global_queries")

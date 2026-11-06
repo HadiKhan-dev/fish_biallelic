@@ -10726,52 +10726,6 @@ _COMPONENT_SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.beam.beam_batch": (
-        {
-            "pickle": (
-                "fCQC10{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfN"
-                "XOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9"
-                "ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Lt"
-                "lay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%"
-                "Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzHM5j1^&Wa$$KW"
-                "W^8X^bT%|BATwkvAVVpXXdO*B0(FO!Qj};EXeEpUZeeX@l#CxtX>)W`d2nT0VRCX|c_?OVZ((#cG%O%9WGo;<DP5F|"
-                "1z%%tWM!01&H{CZlv0#v0%!$j2xtpVhm?JkC}<970%!$j5oilehm?JkC}<RDA7~&;0%##<B4`?n6=8C6VR<NKY;R$7"
-                "HZ&|CGGr_uLn)MK9Zi1$b%&HvlxP%aF=!@?A53X;bX0k8Wm{o#a$$KWW^8X^bT%|BATneuAVVo#lxQeT|ATdhlv0#v"
-                "0%!$j6^sW-Zggd5Wpb30lxPc1hm?JkC}<jt1!-<{HZ+uI97{lq26Jg=Ze?VYh-e*48g+-1Qj}-{Xa#5pXbVn<lzo&a"
-                "XbxxsXa#5yXbVn<lzo&aXcTBXXdp`hXd!4KXc~+YVRCX|c_?XabT%|BATneuAVVpXXdO*b0(FO!Qj};EXhUcwj2%pA"
-                "b97XBaAjLza&lpLC~0nVHZ&|CGGr_uLn&R9Xednw19gX#Qj};$XaZ;jXc1@&PKT6zlqhHvXgp{jO95yhXd-ADj1ysU"
-                "a$$KWX>N2jG%O%7WGo;<DU@g(O@#q<hm=y3XiI2AXeDSRXhUc`XhUcpbd)X"
-            ),
-            "text": "(ListType(Array(float64, "
-            "3, 'C', False, "
-            "aligned=True)), "
-            "ListType(Array(float64, "
-            "2, 'C', False, "
-            "aligned=True)), int64, "
-            "ListType(Array(int64, 2, "
-            "'C', False, "
-            "aligned=True)), "
-            "ListType(Array(int64, 2, "
-            "'C', False, "
-            "aligned=True)), "
-            "Array(int64, 1, 'C', "
-            "False, aligned=True), "
-            "Array(int64, 1, 'C', "
-            "False, aligned=True), "
-            "Array(int64, 2, 'C', "
-            "False, aligned=True), "
-            "Array(float64, 3, 'C', "
-            "False, aligned=True), "
-            "Array(float64, 3, 'C', "
-            "False, aligned=True), "
-            "Array(int64, 2, 'C', "
-            "False, aligned=True), "
-            "int64, Array(int64, 2, "
-            "'C', False, "
-            "aligned=True), "
-            "float64)",
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.beam.beam_template": (
         {
             "pickle": (
