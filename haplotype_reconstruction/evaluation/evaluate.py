@@ -32,6 +32,7 @@ import numpy as np
 from ..contracts.pedigree import ParentEdges, PedigreeCalls
 from ..contracts.recombination import Recombination
 from ..core.errors import InputError
+from ..core.files import atomic_path
 from ..results.panels import FOUNDER_STAGES, StagePanel
 from ..simulation.truth import ContigTruth, PedigreeTable, TruthCrossovers
 from .metrics import SAMPLE_COLUMNS
@@ -202,10 +203,8 @@ def _write_table(destination: Path, filename: str, rows) -> None:
 
     from ..core.columns import column_name
 
-    temporary = destination / f".{filename}.tmp"
-
-    pd.DataFrame(rows).rename(columns=column_name).to_csv(temporary, index=False)
-    temporary.replace(destination / filename)
+    with atomic_path(destination / filename) as temporary:
+        pd.DataFrame(rows).rename(columns=column_name).to_csv(temporary, index=False)
 
 
 def new_report(
@@ -283,9 +282,8 @@ def write_evaluation(
     """Write summary.json and the five tables atomically into ``destination``."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    temporary = destination / "summary.json.tmp"
-    temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    temporary.replace(destination / "summary.json")
+    with atomic_path(destination / "summary.json") as temporary:
+        temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     for filename, rows in (
         ("chromosomes.csv", report["chromosomes"]),
         ("phase_groups.csv", report["phase_groups"]),

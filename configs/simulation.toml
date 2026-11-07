@@ -17,11 +17,17 @@ generating_rate_cm_per_mb = 5.0
 # observe_cohorts = [4, 5, 6]
 # observed_fraction = 0.8
 
+# Realistic reads (opt in; explicit read keys override the preset).
+# See docs/user/quickstart.md for rationale and limitations. The preset leaves depth above unchanged.
 # [simulation.reads]
-# error_rate = 0.04
-# depth_cv = 0.6
-# heterozygote_alt_probability = 0.6
-# dropout_fraction = 0.1
+# preset = "realistic"
+# Expands to 150 bp paired-end reads, fragment mean/sd 375/150 bp,
+# depth_cv = 0.3, site_depth_cv = 0.5, site_depth_window_bp = 1000,
+# count_dispersion = 0.1 (Var = mean + 0.1 * mean^2),
+# heterozygote_alt_probability = 0.48, error_rate = 0.01, dropout_fraction = 0.0.
+# Example overrides:
+# site_depth_window_bp = 0   # independent site factors instead of physical windows
+# count_dispersion = 0.0    # Poisson conditional on sample/site factors
 
 # [execution]
 # process_contigs = ["chr1", "chr2"]   # shard: these contigs through painting only

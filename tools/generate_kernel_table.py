@@ -10,6 +10,7 @@ from pathlib import Path
 
 def generate(roots: tuple[str, ...], destination: Path) -> None:
     """Import the declared plan roots and write their overload table without compiling."""
+    from haplotype_reconstruction.core.files import atomic_path
     from haplotype_reconstruction.core.kernels import declarations
 
     for root in roots:
@@ -34,9 +35,8 @@ def generate(roots: tuple[str, ...], destination: Path) -> None:
             f"| {declaration.module} | {declaration.function} | {signatures} | {parallel} | {scope.replace('|', '/')} |"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
-    temporary.write_text("\n".join(rows) + "\n")
-    temporary.replace(destination)
+    with atomic_path(destination) as temporary:
+        temporary.write_text("\n".join(rows) + "\n")
 
 
 def main() -> None:

@@ -98,15 +98,19 @@ def _calibrated(
     return Expansion(subtasks, gather)
 
 
-def _release(reference: ResidentRef, fitted: tuple[FitResult, ...]) -> PedigreeResult:
-    """Reduce the fits in the plan's order on the affinity worker, then release the supplied evidence."""
+def _release(reference: ResidentRef, fitted: tuple[tuple[FitResult, ...], ...]) -> PedigreeResult:
+    """Reduce the fits in the plan's order on the affinity worker, then release the supplied evidence.
+
+    ``fitted`` holds one tuple of results per work-sized batch (execution.fit_batches), in plan order.
+    """
     inputs, parameters, state, planned, shared = resident_value(reference)
     try:
         release_shared_value(shared)
         previous = numba.get_num_threads()
         numba.set_num_threads(1)
         try:
-            decided = science.complete_decision(state, resampling.combine(state.inputs, planned, fitted), parameters)
+            results = (result for batch in fitted for result in batch)
+            decided = science.complete_decision(state, resampling.combine(state.inputs, planned, results), parameters)
             return api.release_supplied(decided, inputs, parameters)
         finally:
             numba.set_num_threads(previous)

@@ -22,7 +22,8 @@ from pathlib import Path
 import numpy as np
 
 from ...core.errors import InvariantError
-from ..reports.tables import temporary_path, write_text_table
+from ...core.files import atomic_path
+from ..reports.tables import write_text_table
 from .records import SiteTable
 from .vcf import FILEFORMAT, common_allele_line, contig_line, site_header_lines
 
@@ -36,9 +37,8 @@ VCF_CHUNK_SITES = 4096
 def write_founder_tracks(path: Path, contig: str, panels) -> None:
     """One wide CSV per contig; component distinguishes the segment-local founder rows."""
     path = Path(path)
-    temporary = temporary_path(path)
     width = max((len(calls) for _, calls in panels), default=0)
-    with gzip.open(temporary, "wt", compresslevel=6, newline="") as handle:
+    with atomic_path(path) as temporary, gzip.open(temporary, "wt", compresslevel=6, newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(["contig", "component", "pos", *(f"h{row}" for row in range(width))])
         for component, (positions, calls) in enumerate(panels):
@@ -46,7 +46,6 @@ def write_founder_tracks(path: Path, contig: str, panels) -> None:
                 text = _TEXT[calls[:, start : start + CHUNK_SITES].astype(np.int64) + 1]
                 for site, position in enumerate(positions[start : start + CHUNK_SITES].tolist()):
                     writer.writerow([contig, component, int(position), *text[:, site], *([""] * (width - len(calls)))])
-    temporary.replace(path)
 
 
 def vcf_column(component: int, row: int) -> str:

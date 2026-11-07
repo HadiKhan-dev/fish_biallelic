@@ -527,7 +527,8 @@ def segment_rows(painting: Painting, input_ids: Sequence[str] | None = None) -> 
 
 
 @kernel(
-    overloads=(
+    # The observed mask is a frozen dense record, or a writable dense projection of pair-coded evidence.
+    overloads=tuple(
         (
             types.Array(types.int32, 3, "C", readonly=True),
             types.int64[::1],
@@ -535,9 +536,10 @@ def segment_rows(painting: Painting, input_ids: Sequence[str] | None = None) -> 
             types.Array(types.boolean, 1, "C", readonly=True),
             types.int64[::1],
             types.int64[::1],
-            types.Array(types.boolean, 2, "C", readonly=True),
+            types.Array(types.boolean, 2, "C", readonly=readonly),
             types.int64,
-        ),
+        )
+        for readonly in (True, False)
     ),
     cache=True,
     parallel=True,

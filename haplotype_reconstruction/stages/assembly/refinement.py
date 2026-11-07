@@ -96,9 +96,6 @@ def refine_component(
             incoming=incoming,
             workspace=workspace,
         )
-    from .refinement_diagnostics import report_refinement
-
-    report_refinement(result)
     return component, replace(result, elapsed_seconds=perf_counter() - started)
 
 
@@ -276,7 +273,10 @@ def _gather_level(
     summary = summarise(
         settings.level, settings.additions, settings.min_sites_per_bin, refinements, perf_counter() - started
     )
+    from .refinement_diagnostics import refinement_diagnostics
+
+    census = dict(asdict(summary), cap_diagnostics=refinement_diagnostics(refinements))
     if records is not None:
-        records.save("level", asdict(summary))
+        records.save("level", census)
     families = tuple(ReleaseFamily.from_mapping(family) for item in refinements for family in item.release_alternatives)
-    return RefinedLevel(components, asdict(summary), families)
+    return RefinedLevel(components, census, families)

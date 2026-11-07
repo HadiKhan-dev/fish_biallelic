@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import IO, Any, TypedDict
 
 from ..core.digest import canonical_json, jsonable
+from ..core.files import atomic_path
 from .runtime import affinity_cpus
 
 _LOG = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ __all__ = [
     "stage_timer",
     "timed_stage",
     "record_product",
+    "record_diagnostic",
     "TeeOutput",
     "run_log",
 ]
@@ -58,6 +60,29 @@ DEPENDENCIES = (
 _ACTIVE = None
 _ROUTE_CAPTURE: tuple[int, list[dict[str, Any]]] | None = None
 _ROUTE_LOCK = threading.RLock()
+_DIAGNOSTIC_CAPTURE: tuple[int, list[str]] | None = None
+
+
+@contextmanager
+def capture_diagnostics():
+    """Collect a task's small human summaries for its coordinator's run log."""
+    global _DIAGNOSTIC_CAPTURE
+    previous = _DIAGNOSTIC_CAPTURE
+    messages: list[str] = []
+    _DIAGNOSTIC_CAPTURE = (os.getpid(), messages)
+    try:
+        yield messages
+    finally:
+        _DIAGNOSTIC_CAPTURE = previous
+
+
+def record_diagnostic(message: str) -> None:
+    """Emit a stage summary here, or return it with a worker's existing reply."""
+    with _ROUTE_LOCK:
+        if _DIAGNOSTIC_CAPTURE is not None and _DIAGNOSTIC_CAPTURE[0] == os.getpid():
+            _DIAGNOSTIC_CAPTURE[1].append(message)
+            return
+    _LOG.info("%s", message)
 
 
 @contextmanager
@@ -158,16 +183,19 @@ def task_log_path(record: Path) -> Path:
 
 
 def record_tasks(record: Path, data: dict | None = None) -> list[dict]:
-    """The finished tasks of one run record: its task list once final, else its task log (a partly written last
-    line, from a command still running, is skipped)."""
+    """Read detailed tasks from a retained JSONL log or a legacy embedded task list.
+
+    A partly written final line from a running or interrupted invocation is skipped.
+    Status uses task_summaries instead and never opens this log.
+    """
     data = json.loads(record.read_text()) if data is None else data
     if "tasks" in data:
         return list(data["tasks"])
     try:
         lines = task_log_path(record).read_text().splitlines()
     except FileNotFoundError:
-        # No task yet, or the command finished meanwhile: its final record holds the list (written before the log
-        # is deleted).
+        # A legacy writer can finish between the header and log reads, moving
+        # its task list into the record and deleting the log. New records keep it.
         return list(json.loads(record.read_text()).get("tasks", ()))
     rows = []
     for number, line in enumerate(lines):
@@ -177,6 +205,36 @@ def record_tasks(record: Path, data: dict | None = None) -> list[dict]:
             if number != len(lines) - 1:
                 raise
     return rows
+
+
+def _add_task_summary(summaries: dict, entry: dict) -> None:
+    """One constant-size resource total per stage, including failed task outcomes."""
+    row = summaries.setdefault(
+        entry["key"]["stage"],
+        dict(tasks=0, wall_seconds=0.0, cpu_seconds=0.0, peak_bytes=None, threads_start=0, threads_peak=0, failures=0),
+    )
+    row["tasks"] += 1
+    row["failures"] += int(entry.get("state") == "failed")
+    for name in ("wall_seconds", "cpu_seconds"):
+        row[name] += entry.get(name, 0.0)
+    for name in ("peak_bytes", "threads_start", "threads_peak"):
+        value = entry.get(name)
+        if value is not None:
+            row[name] = value if row[name] is None else max(row[name], value)
+
+
+def task_summaries(data: dict) -> dict[str, dict]:
+    """Stage aggregates, or one linear pass through a legacy embedded task list.
+
+    Legacy running records without aggregates retain their recorded task_count;
+    their unbounded task log is deliberately not read by status.
+    """
+    if "task_summaries" in data:
+        return data["task_summaries"]
+    summaries: dict[str, dict] = {}
+    for entry in data.get("tasks", ()):
+        _add_task_summary(summaries, entry)
+    return summaries
 
 
 @dataclass(frozen=True)
@@ -202,12 +260,11 @@ class _StageFrame(TypedDict):
 class RunRecorder:
     """The run record of one invocation (see the module docstring).
 
-    Finished tasks are appended, one compact JSON line each, to the task log beside the record (``*.tasks.jsonl``):
-    a constant cost per task. The main record omits the task list while the command runs and is rewritten at
-    most every ``PUBLISH_SECONDS`` (a timer writes the last change of a burst); the final record, written when the
-    command ends, holds the complete task list, and the task log is then deleted (it survives only a command that
-    was killed before finishing). Rewriting the whole record after every task cost time quadratic in the number of
-    tasks (bc8: 15,000 tasks, an 8 MB record, about 50 minutes of a 53-minute run).
+    Task detail stays in the append-only ``*.tasks.jsonl`` log after completion.
+    The main record retains only per-stage resource aggregates and is rewritten at
+    most every ``PUBLISH_SECONDS`` (a timer writes the last change of a burst).
+    Both accumulation and task-log append cost a constant amount per task; status
+    never reads the task log. Stage timers and products remain invocation summaries.
     """
 
     PUBLISH_SECONDS = 5.0
@@ -228,7 +285,7 @@ class RunRecorder:
         self.checkpoints = None if checkpoints is None else str(checkpoints)
         self._clean_stop = False
         self.data = dict(
-            schema="run-record-v4",
+            schema="run-record-v5",
             command=command,
             state="running",
             started_utc=datetime.now(UTC).isoformat(),
@@ -246,7 +303,8 @@ class RunRecorder:
         from ..store.protocol import NumericalPolicy
 
         self.data["numerical_policy"] = jsonable(NumericalPolicy.current())
-        self.data["tasks"] = []
+        self.data["task_count"] = 0
+        self.data["task_summaries"] = {}
         self.data["storage_routes"] = []
         self.data["published_identities"] = {}
         from .scheduler import _GOVERNOR
@@ -283,12 +341,9 @@ class RunRecorder:
                 for stack in self.stacks.values()
                 for frame in stack
             ]
-            document = dict(self.data, task_log=self.tasks_path.name, task_count=len(self.data["tasks"]))
-            if document["state"] == "running":
-                del document["tasks"]  # read the task log while the command runs (record_tasks)
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(document, indent=2) + "\n")
-            temporary.replace(self.path)
+            document = dict(self.data, task_log=self.tasks_path.name)
+            with atomic_path(self.path) as temporary:
+                temporary.write_text(json.dumps(document, indent=2) + "\n")
 
     def _publish_due(self, timer: threading.Timer) -> None:
         with self.lock:
@@ -306,9 +361,14 @@ class RunRecorder:
         with self.lock:
             self.stacks.setdefault(ident, []).append(frame)
         self.publish()
+        from .runtime import RunInterrupted
+
         outcome = "complete"
         try:
             yield
+        except (KeyboardInterrupt, RunInterrupted):
+            outcome = "interrupted"
+            raise
         except BaseException:
             outcome = "failed"
             raise
@@ -348,8 +408,15 @@ class RunRecorder:
         self._clean_stop = True
 
     def finish(self, error=None, *, clean_stop: bool = False):
+        from .runtime import RunInterrupted
+
         with self.lock:
-            self.data["state"] = "failed" if error else "clean_stop" if clean_stop else "complete"
+            if isinstance(error, (KeyboardInterrupt, RunInterrupted)):
+                self.data["state"] = "interrupted"
+            elif error is not None:
+                self.data["state"] = "failed"
+            else:
+                self.data["state"] = "clean_stop" if clean_stop else "complete"
             self.data["finished_utc"] = datetime.now(UTC).isoformat()
             if error is not None:
                 self.data["error"] = f"{type(error).__name__}: {error}"
@@ -360,8 +427,6 @@ class RunRecorder:
                 self._tasks_log.close()
                 self._tasks_log = None
         self.publish(force=True)
-        # The final record now holds every task; the log is kept only by a command that never reached here.
-        self.tasks_path.unlink(missing_ok=True)
 
     def snapshot(self) -> RunRecord:
         with self.lock:
@@ -386,13 +451,23 @@ class RunRecorder:
                 outputs=[asdict(key) for key in task.outputs],
                 retired=reply.retire,
             )
-            self.data["tasks"].append(entry)
-            if self._tasks_log is None:
-                self._tasks_log = self.tasks_path.open("a", buffering=1)  # line-buffered: each line lands whole
-            self._tasks_log.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            self._append_task(entry)
             from .scheduler import memory_statistics
 
-            self.data["memory"] = memory_statistics()
+            self.data["memory"] = memory_statistics() or {}
+        self.publish()
+
+    def _append_task(self, entry: dict) -> None:
+        if self._tasks_log is None:
+            self._tasks_log = self.tasks_path.open("a", buffering=1)
+        self._tasks_log.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        self.data["task_count"] += 1
+        _add_task_summary(self.data["task_summaries"], entry)
+
+    def task_failed(self, key, error: BaseException) -> None:
+        """Record an attributed scheduler failure; no resource measurement is invented."""
+        with self.lock:
+            self._append_task(dict(key=asdict(key), state="failed", error=f"{type(error).__name__}: {error}"))
         self.publish()
 
     def published(self, identities: dict[str, str]) -> None:
@@ -469,6 +544,13 @@ def worker_stages():
 def _active():
     record = _ACTIVE
     return record if record is not None and record.pid == os.getpid() else None
+
+
+def record_task_failure(key, error: BaseException) -> None:
+    """Attach a known failed task to the coordinator's operational record."""
+    record = _active()
+    if record is not None and not isinstance(record, _WorkerStages):
+        record.task_failed(key, error)
 
 
 def stage_timer(name: str, contig=None):

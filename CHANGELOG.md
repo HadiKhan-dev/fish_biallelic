@@ -1,5 +1,99 @@
 # Changelog
 
+## 4.5.0 (7 November 2026)
+
+This release bounds published table cells, makes runs observable and interruptible, gives the simulator a realistic
+read model, and shortens the end of a run. Scientific models, decisions, record schemas and released values are
+those of 4.4.1. Table layouts change where noted.
+
+**Bounded table cells.**
+- Collections whose size grows with the data are published one item per row:
+  - painting shadow alternatives: `painting/assembly_search_shadow_alternatives.csv`;
+  - symmetric and plateau lists: `painting/assembly_search_items.csv`;
+  - cohort-sized pedigree candidate lists: `pedigree/cell_items.csv`;
+  - recombination junction members: `recombination/junction_members.csv`;
+  - founder-refit excluded samples: `founder_refit/excluded_samples.csv`.
+- Parent cells keep counts, and `assembly_search.csv` gains the key `assembly_search_row`.
+- Every original collection can be rebuilt exactly; the output guide gives the rules.
+- In the N = 320 simulation with 150 bp paired-end reads at depth 1, the largest published cell falls from 161,058
+  to 3,938 characters.
+
+**Failed publications leave nothing behind.** Tables, exports and indexes, maps, evaluations, configuration files,
+templates, error reports and invocation receipts remove their private temporaries on any exception. Placement remains
+atomic.
+
+**Simulation read model.**
+- `[simulation.reads]` gains two opt-in settings:
+  - `site_depth_cv`: a mean-one site depth factor shared by all samples, optionally constant within
+    `site_depth_window_bp`;
+  - `count_dispersion`: gamma-Poisson read counts.
+- Both work with independent-site and paired-end fragment sampling. Fragment thinning uses local envelopes, so
+  candidate fragments scale with local rather than contig-wide maxima.
+- `preset = "realistic"` expands to documented values: 150 bp paired-end reads, depth CV 0.3, site CV 0.5 within
+  1 kb windows, dispersion 0.1, a 48:52 reference bias and 1% error. Any explicit key wins.
+- Existing configurations simulate bit for bit as before.
+
+**Checkpoints survive release-label changes.** The release label moves to a lazily loaded module outside scientific
+dependency closures. A release that changes no scientific code keeps every checkpoint identity. Code changes still
+change identities, as before.
+
+**Runs are observable.**
+- `status` reads per-stage aggregates and cached container indexes; on an N = 320 run it takes seconds instead of
+  minutes.
+- Run records keep per-stage aggregates; per-task detail stays in the retained `*.tasks.jsonl` log.
+- Refinement search-cap diagnostics are logged once per chromosome and stage, not as one warning per component. All
+  counts are kept in the level records.
+- A progress line reports completed work, running tasks, CPU and memory every 10 minutes and at stage boundaries.
+
+**Runs are interruptible.**
+- SIGTERM and SIGINT unwind workers and the coordinator, release shared memory and semaphores, and record the attempt
+  as `interrupted` (exit 130).
+- Terminated workers get a 5 s grace before a forced kill.
+- `report` no longer writes into the checkpoint root: output choices live in `output_selection.json` and its
+  completion marker is `OUTPUT/report.done`.
+
+**A shorter end of run.**
+- Pedigree resampling runs in work-sized batches.
+- Phase starts the largest chromosomes first.
+- Recombination and export run on any free worker.
+- Per-chromosome export manifests are checked in parallel.
+- Export and pedigree writers write independent files concurrently.
+- Measured on a whole-node replay of an N = 320 run's tail (pedigree onwards): every published file and
+  scientific record is identical, and the tail is 124 s (4%) shorter. Resampling and the longest phase
+  chromosome dominate the tail and are unchanged. More concurrent work raised that tail's peak live memory
+  from 166 to 198 GB, below the run's earlier-stage peak and within the memory governor's admission.
+
+**Documented evidence, no scientific change.**
+- Selection's growth in cost at low depth is diagnosed in `docs/developer/selection_performance.md`: longer exact
+  optimisation trajectories, not more candidates.
+- Refinement's polish beam widths (64 and 16) hit their bound in thousands of components per run, so they were
+  tested. Replays at 2x and 4x width gave identical founders in every component tested, at depths 5, 1 and
+  0.5 and in K = 30, except one simulated component where the wider beam was slightly worse. The widths stay,
+  and `docs/methods/refinement.md` records the evidence and what a width hit does and does not mean.
+- The workflow guide adds the shared-root multi-node recipe.
+
+**Review fixes before release.**
+- The pedigree adapter path now gathers resampling batches correctly with more than one worker.
+- Per-chromosome tie collectors wait for founder refit as well as painting, so refit tie events are never omitted.
+- Progress and failure bookkeeping can no longer fail a run or mask its error.
+- Warm-up now covers every kernel overload a run dispatches. Results are unchanged.
+  - The refinement exchange-gain sample loops compile on their own and now declare their overloads.
+  - The carrier-observation kernel also declares the writable observed mask of pair-coded evidence; a cold run
+    had compiled it inside a task, after warm-up.
+
+**Migration.** 4.5.0 changes code and needs a new checkpoint root
+([instructions](docs/user/migration.md#migrating-from-44-to-450)). Table consumers must follow the new collection
+tables; workflow rules must use `OUTPUT/report.done`.
+
+**Validation.** The 39 cases of the release matrix were rerun with 4.5, and each case's 4.5 collection tables,
+converted back to the 4.4 layout, were compared cell by cell with 4.4's: 161,024,422 cells in 1,660 tables and
+193,226,256 VCF records, with no scientific difference (only durations and the recorded checkpoint root differ). The
+standard N = 320 simulation at depth 2 equals 4.4's in all 24,386,016 table cells and 17,913,704 VCF records. The test
+suite (3,693 tests and the thread-team receipt), the whole stage tier, the documented workflow example, the strict
+documentation check and the clean-install packaging gate pass. The stage tier had not been run as a whole since 4.0:
+its stale tests were brought up to date, external fixture corpora now resolve through one configurable root
+(`HR_TEST_CORPORA`), and the 4.0 composition oracle, which tested a frozen 4.0 tree, was removed.
+
 ## 4.4.1 (6 November 2026)
 
 This patch release fixes a failure in publishing run-level tables. Scientific models, decisions and every published

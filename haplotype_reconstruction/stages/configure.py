@@ -206,6 +206,9 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
             read_length_bp=reads.read_length_bp,
             fragment_mean_bp=reads.fragment_mean_bp,
             fragment_sd_bp=reads.fragment_sd_bp,
+            site_depth_cv=reads.site_depth_cv,
+            site_depth_window_bp=reads.site_depth_window_bp,
+            count_dispersion=reads.count_dispersion,
         ),
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 
-from ..reports.tables import temporary_path
+from ...core.files import atomic_path
 from .records import COMMON_ALLELE_RULE, RULE_DESCRIPTIONS, SiteTable
 
 # Tabix (TBI) indexes address positions below 2^29; longer contigs get a CSI index.
@@ -75,17 +75,20 @@ def build_index(data: Path, index: Path, *, csi: bool) -> None:
 def place(temporary: Path, final: Path, *, file_format: str, last_position: int, index: bool) -> list[str]:
     """Index ``temporary`` when asked, then move it (and its index) to ``final``; returns the file names placed."""
     names = [final.name]
-    if index:
-        target = index_path(final, file_format, last_position)
-        staged = temporary_path(target)
-        build_index(temporary, staged, csi=target.suffix == ".csi")
-        for stale in (Path(str(final) + ".csi"), Path(str(final) + ".tbi")):
-            stale.unlink(missing_ok=True)  # never leave an index of earlier contents beside the new file
-        temporary.replace(final)
-        staged.replace(target)
-        names.append(target.name)
-    else:
-        temporary.replace(final)
+    # Own a caller's staged data even when indexing or placement fails.
+    try:
+        if index:
+            target = index_path(final, file_format, last_position)
+            with atomic_path(target) as staged:
+                build_index(temporary, staged, csi=target.suffix == ".csi")
+                for stale in (Path(str(final) + ".csi"), Path(str(final) + ".tbi")):
+                    stale.unlink(missing_ok=True)
+                temporary.replace(final)
+            names.append(target.name)
+        else:
+            temporary.replace(final)
+    finally:
+        temporary.unlink(missing_ok=True)
     return names
 
 

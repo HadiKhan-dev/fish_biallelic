@@ -386,9 +386,28 @@ Canonicalise founder order, construct the map-aware binned surrogate and apply t
 
 Implementation: [science/assembly/refinement/beam.py](../../haplotype_reconstruction/science/assembly/refinement/beam.py).
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Parameters by name: `POLISH_BEAM_WIDTH`. Values and provenance are in the [generated parameter reference](../reference/parameters.md); conventions are explicit [tie policies](../developer/ties.md).
 
 Cost and scope: O(W N (b^2 Q + h b (Q + R(K + b)) + h^2 Q)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+A width hit counts a window/founder problem in which the beam discarded at least
+one child. It does not count an accepted move or establish that a better panel
+was lost. The beam also retains the largest discarded upper bound and its gap
+above the best retained surrogate value. A gap within the offer quantum certifies
+that surrogate comparison despite a width hit. A positive gap leaves that
+comparison uncertified; it does not measure a loss in the exact refinement
+objective. The surrogate uses binned evidence and selects proposals, while
+acceptance and the verification of accepted gains use every objective site.
+
+Measured evidence: saved refinement inputs were replayed with both polish widths at 1x (64 and 16),
+2x and 4x. The replays covered terminal components and sampled level-1 and level-2 components of chr1, chr3 and
+chr8 of the N = 320 simulation at depths 5, 1 and 0.5, and three matrix designs, including K = 30. Founder rows
+were identical to the control in every component of every case except one: in the std design's terminal
+component, both wider settings reached a different endpoint that was worse on the refinement objective (11.2
+nats) and on truth (562 and 567 more one-to-one founder-allele errors in 1.97 million). Wider beams used 0.8x
+to 1.4x the CPU. Width hits are therefore not evidence of lost accuracy, and the widths stay unchanged. The
+largest replays (chr3 at depth 0.5 at all widths, and depth 1 at 2x) did not finish within their lab
+time limit and are not part of this evidence.
 
 <a id="rs16"></a>
 ## rs16 Long repair (long one-founder moves with one private correction)

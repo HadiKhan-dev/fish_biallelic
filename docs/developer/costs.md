@@ -80,6 +80,15 @@ The R1 replay evidence establishes a TroMau K10 deletion whose omitted founder 1
 
 ## Kernel ladders
 
+The polish beam width is a scientific search limit, separate from memory
+admission. For width h, each concurrent window/founder problem holds
+8 N Q (6h + 12 + b) + 8 N b² bytes in the beam scratch estimate, where
+Q = K(K + 1)/2. Increasing h grows this scratch linearly and can grow the
+pairwise dominance work quadratically. Width hits flag window/founder problems that discarded children;
+they cannot by themselves justify paying for a wider search. The ordinary
+window programme has separate frontier, work and beam limits. Varying the
+polish widths does not vary those limits or certify its fallback results.
+
 One row per probed kernel. Stages without a row have no ladder result yet.
 
 | Stage | Probe | What it covers | K slope | N slope |
@@ -234,3 +243,11 @@ exceed the existing sample/team bound; whole-bin GL/mask scratch retains its
 many GL chunks on every small site window. Per-sample/bin accumulation and the
 emission formula are unchanged. The decoded cache may still increase peak RSS
 relative to caching compressed chunks; it is charged to the existing byte bound.
+
+## Selection at low depth
+
+The [selection performance analysis](selection_performance.md) separates candidate-bank
+construction, copying-model fits and context matching. Small selected K does not
+imply cheap selection: feedback banks can fit many temporary panels, and one
+fixed-K fit can require many frequency updates and context snaps. Measure all
+trial fits and all searched starts; the selected endpoint alone hides this work.

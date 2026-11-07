@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import shutil
 import sys
 import tempfile
-import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -22,16 +20,8 @@ from typing import Any, cast
 import numpy as np
 
 from ...core.columns import column_name
-
-
-def temporary_path(path: Path) -> Path:
-    """A hidden temporary beside ``path``, unique per writer and call, for every published table and export file.
-
-    Duplicate workflow steps (two scatter jobs for one contig) may write the same file at once; a shared temporary
-    name would let one writer rename the other's file away (ARCHITECTURE_40 3.3). Final names, contents and the
-    atomic rename are unchanged.
-    """
-    return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+from ...core.files import atomic_path
+from ...core.files import temporary_path as temporary_path  # temporary_path remains available to callers
 
 
 def json_cells(frame):
@@ -49,9 +39,8 @@ def write_frame(path, frame, *, sep: str = ",") -> Path:
     """Write a DataFrame (no index) atomically."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = temporary_path(path)
-    frame.rename(columns=column_name).to_csv(temporary, sep=sep, index=False)
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        frame.rename(columns=column_name).to_csv(temporary, sep=sep, index=False)
     return path
 
 
@@ -68,12 +57,11 @@ def write_text_table(path, header, rows, *, sep: str = ",") -> Path:
     """Write a table whose cells are already text (header + rows of strings), one line per row."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = temporary_path(path)
-    with temporary.open("w", newline="") as handle:
-        writer = csv.writer(handle, delimiter=sep, lineterminator="\n")
-        writer.writerow([column_name(name) for name in header])
-        writer.writerows(rows)
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        with temporary.open("w", newline="") as handle:
+            writer = csv.writer(handle, delimiter=sep, lineterminator="\n")
+            writer.writerow([column_name(name) for name in header])
+            writer.writerows(rows)
     return path
 
 
@@ -85,13 +73,17 @@ def contig_part(output, family, contig, frames):
     output.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix=f".{family}-", dir=output))
     paths = {}
-    for name, frame in frames.items():
-        frame = frame.copy()
-        if "contig" not in frame:
-            frame.insert(0, "contig", contig)
-        else:
-            frame = frame[["contig", *(name for name in frame if name != "contig")]]
-        paths[name] = write_frame(directory / f"{name}.csv", json_cells(frame))
+    try:
+        for name, frame in frames.items():
+            frame = frame.copy()
+            if "contig" not in frame:
+                frame.insert(0, "contig", contig)
+            else:
+                frame = frame[["contig", *(name for name in frame if name != "contig")]]
+            paths[name] = write_frame(directory / f"{name}.csv", json_cells(frame))
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
     return contig, paths
 
 
@@ -99,7 +91,7 @@ def write_contig_tables(output, family, parts):
     """Concatenate private CSV cells in supplied contig order and publish each table atomically.
 
     The parts are this module's own files, so their cells are read without the csv module's default 128 KiB
-    field guard, which is meant for untrusted input: a JSON cell grows with the data.
+    field guard, which is meant for untrusted input. Keep this compatibility with trusted older parts.
     """
     directory = Path(output) / family
     directory.mkdir(parents=True, exist_ok=True)
@@ -114,14 +106,13 @@ def write_contig_tables(output, family, parts):
                 with Path(path).open(newline="") as handle:
                     columns.update(dict.fromkeys(next(csv.reader(handle), ())))
             path = directory / f"{name}.csv"
-            temporary = temporary_path(path)
-            with temporary.open("w", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(columns), lineterminator="\n")
-                writer.writeheader()
-                for part in paths:
-                    with Path(part).open(newline="") as source:
-                        writer.writerows(csv.DictReader(source))
-            temporary.replace(path)
+            with atomic_path(path) as temporary:
+                with temporary.open("w", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(columns), lineterminator="\n")
+                    writer.writeheader()
+                    for part in paths:
+                        with Path(part).open(newline="") as source:
+                            writer.writerows(csv.DictReader(source))
             written.append(path)
     finally:
         csv.field_size_limit(field_limit)
@@ -133,16 +124,25 @@ def write_contig_tables(output, family, parts):
 def write_json(path, value) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = temporary_path(path)
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        temporary.write_text(json.dumps(value, indent=2) + "\n")
     return path
 
 
 # --------------------------------------------------------------------------------------- stage summary tables
 def write_founder_refit(output, summaries) -> Path:
     """OUTPUT/founder_refit/summary.csv: one row per contig (founder_refit.run's summaries, contig order)."""
-    return write_rows(Path(output) / "founder_refit" / "summary.csv", summaries)
+    rows, excluded = [], []
+    for summary in summaries:
+        row = asdict(cast(Any, summary)) if is_dataclass(summary) else dict(summary)
+        values = row.get("excluded_samples")
+        if values is not None:
+            row["excluded_samples"] = len(values)
+            excluded.extend(dict(contig=row["contig"], item=i, sample=sample) for i, sample in enumerate(values))
+        rows.append(row)
+    directory = Path(output) / "founder_refit"
+    write_rows(directory / "excluded_samples.csv", excluded, columns=REFIT_EXCLUDED_COLUMNS)
+    return write_rows(directory / "summary.csv", rows)
 
 
 def write_family_phase(output, summaries) -> Path:
@@ -236,7 +236,7 @@ REFIT_SUMMARY_COLUMNS = (
     changed_inference_alleles: changed inference alleles (1).
     changed_sites: changed sites (site).
     median_changed_gain_nats: median changed gain nats (nats).
-    excluded_samples: excluded samples (1).
+    excluded_samples: number of ordered samples in founder_refit/excluded_samples.csv (count).
 """
 
 PHASE_SUMMARY_COLUMNS = (
@@ -273,4 +273,13 @@ PHASE_SUMMARY_COLUMNS = (
     unphased_heterozygotes: unphased heterozygotes (count).
     phase_sets: phase sets (count).
     elapsed_seconds: recorded runtime, empty when the run record does not supply it (s).
+"""
+
+
+REFIT_EXCLUDED_COLUMNS = ("contig", "item", "sample")
+"""Columns in published order.
+
+    contig: parent summary contig identifier (text).
+    item: zero-based position in the original excluded_samples list (1).
+    sample: excluded sample identifier, preserving recorded order (text).
 """

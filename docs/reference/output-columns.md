@@ -41,6 +41,32 @@ Source: [`SEGMENT_COLUMNS`](../../haplotype_reconstruction/outputs/reports/evide
 | 8 | `minor_read_fraction` | minor read fraction (1). |
 | 9 | `partner_minor_read_fraction` | partner minor read fraction (1). |
 
+## painting/assembly_search_items.csv
+
+Source: [`SEARCH_ITEM_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig identifier (text). |
+| 2 | `assembly_search_row` | zero-based parent assembly-search row within the contig (1). |
+| 3 | `column` | original collection column name (text). |
+| 4 | `item` | zero-based position within the original collection (1). |
+| 5 | `value` | one original alternative, panel, score or source as JSON; panel shape at most K by batch_size (text). |
+
+## painting/assembly_search_shadow_alternatives.csv
+
+Source: [`SHADOW_ALTERNATIVE_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig identifier (text). |
+| 2 | `assembly_search_row` | zero-based parent row within the contig's assembly_search table (1). |
+| 3 | `level` | parent's assembly level (1). |
+| 4 | `first_variant_1based` | parent's first variant coordinate, inclusive (bp). |
+| 5 | `last_variant_1based` | parent's last variant coordinate, inclusive (bp). |
+| 6 | `alternative` | zero-based index in the original shadow_alternatives list (1). |
+| 7 | `value` | original alternative dictionary as sorted-key JSON; bounded by batch size, K and shadow_combinations (text). |
+
 ## painting/sample_segments.csv
 
 Source: [`SEGMENT_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
@@ -151,6 +177,7 @@ Source: [`ASSEMBLY_SEARCH_PREFIX_COLUMNS`](../../haplotype_reconstruction/output
 | 2 | `level` | level (1). |
 | 3 | `first_variant_1based` | first variant coordinate, inclusive (bp). |
 | 4 | `last_variant_1based` | last variant coordinate, inclusive (bp). |
+| 5 | `assembly_search_row` | zero-based assembly-search row within this contig, including closing records (1). |
 
 ## painting/founder_counts.csv
 
@@ -289,9 +316,9 @@ Source: [`TIER_B_CANDIDATE_SETS_COLUMNS`](../../haplotype_reconstruction/outputs
 | 3 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 4 | `parent1` | first parent identifier; empty for an unobserved parent (text). |
 | 5 | `parent2` | second parent identifier; empty for an unobserved parent (text). |
-| 6 | `parent1_candidates` | first-parent candidate tuple, rendered using Python tuple text (text). |
-| 7 | `parent2_candidates` | second-parent candidate tuple, rendered using Python tuple text (text). |
-| 8 | `configuration_candidates` | nested parent-configuration tuples, rendered using Python tuple text (text). |
+| 6 | `parent1_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 7 | `parent2_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 8 | `configuration_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
 | 9 | `exact_configuration_resolved` | exact configuration resolved (1). |
 | 10 | `inference_status` | inference status (1). |
 | 11 | `parent1_supported` | parent1 supported (1). |
@@ -416,10 +443,10 @@ Source: [`DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | 83 | `tier_a_parent2` | tier a parent2 (1). |
 | 84 | `tier_b_parent1` | tier b parent1 (1). |
 | 85 | `tier_b_parent2` | tier b parent2 (1). |
-| 86 | `configuration_support_set` | configuration support set (1). |
-| 87 | `parent1_candidate_set` | parent1 candidate set (1). |
-| 88 | `parent2_candidate_set` | parent2 candidate set (1). |
-| 89 | `evidence_configuration_set` | evidence configuration set (1). |
+| 86 | `configuration_support_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 87 | `parent1_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 88 | `parent2_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 89 | `evidence_configuration_set` | number of ordered items in pedigree/cell_items.csv (count). |
 | 90 | `tier_b_final_state_call` | tier b final state call (1). |
 | 91 | `tier_b_release_evidence` | tier b release evidence (1). |
 
@@ -434,9 +461,9 @@ Source: [`CALL_EXPLANATIONS_COLUMNS`](../../haplotype_reconstruction/outputs/rep
 | 3 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 4 | `parent1` | first parent identifier; empty for an unobserved parent (text). |
 | 5 | `parent2` | second parent identifier; empty for an unobserved parent (text). |
-| 6 | `parent1_candidates` | first-parent candidate tuple, rendered using Python tuple text (text). |
-| 7 | `parent2_candidates` | second-parent candidate tuple, rendered using Python tuple text (text). |
-| 8 | `configuration_candidates` | nested parent-configuration tuples, rendered using Python tuple text (text). |
+| 6 | `parent1_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 7 | `parent2_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 8 | `configuration_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
 | 9 | `exact_configuration_resolved` | exact configuration resolved (1). |
 | 10 | `inference_status` | inference status (1). |
 | 11 | `parent1_supported` | parent1 supported (1). |
@@ -525,9 +552,9 @@ Source: [`EXCLUSION_DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs
 |---|---|---|
 | 1 | `sample` | sample identifier (text). |
 | 2 | `eligible_candidates` | eligible candidates (count). |
-| 3 | `compatible_candidates` | compatible candidates (1). |
-| 4 | `supported_reverse_candidates` | supported reverse candidates (1). |
-| 5 | `remaining_candidates` | remaining candidates (1). |
+| 3 | `compatible_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 4 | `supported_reverse_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
+| 5 | `remaining_candidates` | number of ordered items in pedigree/cell_items.csv (count). |
 | 6 | `weakest_exclusion_log_e` | weakest exclusion log-evidence used for the released count (nats). |
 | 7 | `threshold_log_e` | required exclusion log-evidence threshold (nats). |
 | 8 | `complete_candidate_evidence` | complete candidate evidence (1). |
@@ -587,7 +614,7 @@ Source: [`SIBLING_GUARD_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 3 | `supported_members` | supported members (1). |
 | 4 | `dropped_linked` | dropped linked (1). |
 | 5 | `dropped_half_sib` | dropped half sib (1). |
-| 6 | `dropped_members` | dropped members (1). |
+| 6 | `dropped_members` | number of ordered items in pedigree/cell_items.csv (count). |
 | 7 | `tested_members` | tested members (1). |
 | 8 | `excluded_members` | excluded members (1). |
 | 9 | `call` | call (1). |
@@ -622,6 +649,20 @@ Source: [`PARENT_SLOT_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | Position | Column | Meaning and unit |
 |---|---|---|
 | 1 | `parent_slot_basis` | recorded unordered-parent orientation basis; no sex inference (text). |
+
+## pedigree/cell_items.csv
+
+Source: [`CELL_ITEM_COLUMNS`](../../haplotype_reconstruction/outputs/reports/pedigree.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `source_table` | parent pedigree table basename, without .csv (text). |
+| 2 | `sample` | parent row's sample key; empty for sibling_guard (text). |
+| 3 | `parent` | sibling_guard parent key; empty for per-sample tables (text). |
+| 4 | `child` | sibling_guard child key; empty for per-sample tables (text). |
+| 5 | `column` | original collection column in snake_case (text). |
+| 6 | `item` | zero-based item position in the original collection (1). |
+| 7 | `value` | JSON string or parent-configuration list of at most two sample names (text). |
 
 ## recombination/coverage.csv
 
@@ -678,8 +719,8 @@ Source: [`JUNCTION_COLUMNS`](../../haplotype_reconstruction/outputs/reports/reco
 | 13 | `hotspot_ceiling` | hotspot ceiling (1). |
 | 14 | `mixed_parents` | mixed parents (1). |
 | 15 | `all_or_none_parents` | all or none parents (1). |
-| 16 | `parents` | parents (1). |
-| 17 | `children` | children (1). |
+| 16 | `parents` | number of parent text entries in junction_members (count). |
+| 17 | `children` | number of child text entries in junction_members (count). |
 | 18 | `mixing_log_lr` | mixing log lr (nats). |
 | 19 | `paired_locus` | paired locus (1). |
 | 20 | `paired_odd_meioses` | paired odd meioses (1). |
@@ -751,6 +792,18 @@ Source: [`SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/reports/recom
 | 15 | `family_phase_converged` | family phase converged (1). |
 | 16 | `elapsed_seconds` | recorded runtime, empty when the run record does not supply it (s). |
 
+## recombination/junction_members.csv
+
+Source: [`JUNCTION_MEMBER_COLUMNS`](../../haplotype_reconstruction/outputs/reports/recombination.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig identifier (text). |
+| 2 | `locus` | parent junction locus key (text). |
+| 3 | `column` | parents or children, the original junction-table column (text). |
+| 4 | `item` | zero-based semicolon-delimited item position (1). |
+| 5 | `value` | original parent k/n entry or child identifier; join with semicolons to recover the cell (text). |
+
 ## relatedness/families.csv
 
 Source: [`FAMILY_COLUMNS`](../../haplotype_reconstruction/outputs/reports/relatedness.py).
@@ -818,7 +871,7 @@ Source: [`REFIT_SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 9 | `changed_inference_alleles` | changed inference alleles (1). |
 | 10 | `changed_sites` | changed sites (site). |
 | 11 | `median_changed_gain_nats` | median changed gain nats (nats). |
-| 12 | `excluded_samples` | excluded samples (1). |
+| 12 | `excluded_samples` | number of ordered samples in founder_refit/excluded_samples.csv (count). |
 
 ## family_phase/summary.csv
 
@@ -841,6 +894,16 @@ Source: [`PHASE_SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 13 | `unphased_heterozygotes` | unphased heterozygotes (count). |
 | 14 | `phase_sets` | phase sets (count). |
 | 15 | `elapsed_seconds` | recorded runtime, empty when the run record does not supply it (s). |
+
+## founder_refit/excluded_samples.csv
+
+Source: [`REFIT_EXCLUDED_COLUMNS`](../../haplotype_reconstruction/outputs/reports/tables.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | parent summary contig identifier (text). |
+| 2 | `item` | zero-based position in the original excluded_samples list (1). |
+| 3 | `sample` | excluded sample identifier, preserving recorded order (text). |
 
 ## ties/decisions.csv
 

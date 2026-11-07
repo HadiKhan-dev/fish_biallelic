@@ -6,14 +6,14 @@ Method: docs/methods/export.md. The 3.5 formatting order and manifest text are r
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from ...core.errors import InvariantError
-from ..reports.tables import record_mapping, temporary_path
+from ...core.files import staged_path
+from ..reports.tables import record_mapping, write_json
 from .founders import write_identity_flags
 from .records import project_sites
 
@@ -53,6 +53,7 @@ def export_contig(
     withheld=None,
     phase_ambiguity=None,
     founder_release=None,
+    map_work=None,
 ) -> dict:
     """Write one chromosome's files; returns its manifest entry.
 
@@ -84,34 +85,33 @@ def export_contig(
             if calls.ndim != 2 or calls.shape[1] != len(positions) or not _released_alleles(calls):
                 raise InvariantError(f"{contig}: founder call/position axes are inconsistent")
             panels.append((positions, calls))
-    vcf_name = None
-    if "founders" in products:
-        vcf_name = stem + ".founders" + suffix(file_format)
-        temporary = temporary_path(destination / vcf_name)
-        write_founder_vcf(
-            temporary,
-            sites,
-            panels,
-            stage,
-            synthetic=synthetic,
-            file_format=file_format,
-            withheld=withheld,
-            release_segments=founder_release,
-        )
-        files.extend(
-            place(
+    vcf_name = stem + ".founders" + suffix(file_format) if "founders" in products else None
+    track_name = f"{stem}.tracks.csv.gz" if "tracks" in products else None
+
+    def write_founders():
+        with staged_path(destination / vcf_name) as temporary:
+            write_founder_vcf(
+                temporary,
+                sites,
+                panels,
+                stage,
+                synthetic=synthetic,
+                file_format=file_format,
+                withheld=withheld,
+                release_segments=founder_release,
+            )
+            return place(
                 temporary,
                 destination / vcf_name,
                 file_format=file_format,
                 last_position=int(sites.positions[-1]),
                 index=index,
             )
-        )
-    track_name = None
-    if "tracks" in products:
-        track_name = f"{stem}.tracks.csv.gz"
+
+    def write_tracks():
         write_founder_tracks(destination / track_name, contig, panels)
-        files.append(track_name)
+        return [track_name]
+
     for component, (positions, calls) in enumerate(panels or ()):
         filename = track_name
         components.append(
@@ -127,38 +127,50 @@ def export_contig(
                 None if founder_release is None else founder_release[component],
             )
         )
-    if "samples" in products:
+
+    def write_samples():
         sample_ids, positions, component_ids, calls = phase
         calls = np.asarray(calls)
         if not _released_alleles(calls):
             raise InvariantError("unexpected final allele encoding")
         filename = stem + ".samples" + suffix(file_format)
-        temporary = temporary_path(destination / filename)
-        rows = input_rows(sample_ids, input_sample_ids)
-        names = tuple(sample_ids) if rows is None else tuple(map(str, input_sample_ids))
-        breaks, undetermined = (None, None) if phase_ambiguity is None else phase_ambiguity
-        write_sample_phase(
-            temporary,
-            sites,
-            np.asarray(positions),
-            calls,
-            np.asarray(component_ids),
-            names,
-            synthetic=synthetic,
-            file_format=file_format,
-            sample_rows=rows,
-            phase_breaks=breaks,
-            frame_undetermined=undetermined,
-        )
-        files.extend(
-            place(
+        with staged_path(destination / filename) as temporary:
+            rows = input_rows(sample_ids, input_sample_ids)
+            names = tuple(sample_ids) if rows is None else tuple(map(str, input_sample_ids))
+            breaks, undetermined = (None, None) if phase_ambiguity is None else phase_ambiguity
+            write_sample_phase(
+                temporary,
+                sites,
+                np.asarray(positions),
+                calls,
+                np.asarray(component_ids),
+                names,
+                synthetic=synthetic,
+                file_format=file_format,
+                sample_rows=rows,
+                phase_breaks=breaks,
+                frame_undetermined=undetermined,
+            )
+            return place(
                 temporary,
                 destination / filename,
                 file_format=file_format,
                 last_position=int(sites.positions[-1]),
                 index=index,
             )
-        )
+
+    # Each callback owns a distinct data/index pair. The engine bounds their
+    # combined CPU use; the ordered map preserves manifest file order.
+    writers = [
+        writer
+        for product, writer in (("founders", write_founders), ("tracks", write_tracks), ("samples", write_samples))
+        if product in products
+    ]
+    if map_work is None:
+        parts = [writer() for writer in writers]
+    else:
+        parts = map_work(lambda writer: writer(), writers)
+    files = [name for names in parts for name in names]
     entry: dict = dict(contig=contig, files=files, founder_components=components)
     if withheld is not None:
         entry["unobserved_founder_alleles"] = int(sum(withheld))
@@ -241,9 +253,7 @@ def write_manifest(
                 COMMON_ALLELE_RULE + "; assembly ambiguity additionally withholds "
                 "unmatched rows and unexplored source spans, including r5 sites"
             )
-    temporary = temporary_path(Path(destination) / "manifest.json")
-    temporary.write_text(json.dumps(manifest, indent=2) + "\n")
-    temporary.replace(Path(destination) / "manifest.json")
+    write_json(Path(destination) / "manifest.json", manifest)
     return manifest
 
 
@@ -273,6 +283,7 @@ def export_records(
     synthetic: bool = False,
     index: bool = True,
     release_phase_seconds: Mapping[str, float] | None = None,
+    map_work=None,
 ) -> dict:
     """Render contract records and the product-dependent manifest entry.
 
@@ -326,6 +337,7 @@ def export_records(
         withheld=withheld,
         phase_ambiguity=ambiguity,
         founder_release=metadata,
+        map_work=map_work,
     )
     if need_founders:
         assert founders is not None
@@ -344,16 +356,17 @@ def export_records(
     return entry
 
 
-def write_founder_identity(destination: Path, results, contigs, products) -> Path | None:
+def write_founder_identity(destination: Path, results, contigs, products, *, collected=None) -> Path | None:
     """Gather the checked release flags for both pipeline export and standalone re-export."""
     if not {"founders", "tracks"}.intersection(products):
         return None
 
-    def records():
-        for contig in contigs:
-            release = results.founder_release(contig)
-            if release is None:
-                raise InvariantError(f"{contig}: missing released founder identity flags")
-            yield contig, "founder_refit", release.identity_flags
+    def record(contig):
+        release = results.founder_release(contig)
+        if release is None:
+            raise InvariantError(f"{contig}: missing released founder identity flags")
+        return contig, "founder_refit", release.identity_flags
 
-    return write_identity_flags(Path(destination) / "founder_identity.csv", records())
+    records = collected if collected is not None else map(record, contigs)
+
+    return write_identity_flags(Path(destination) / "founder_identity.csv", records)

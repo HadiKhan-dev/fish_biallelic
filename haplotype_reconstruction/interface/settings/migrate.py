@@ -8,13 +8,13 @@ metadata sections remain a refusal because inference reads no sample metadata.
 from __future__ import annotations
 
 import copy
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ...core.errors import SettingsError
+from ...core.files import atomic_path
 from .load import _check_removed, _convert, _toml_value, load_settings
 from .schema import Settings
 
@@ -117,7 +117,6 @@ def migrate_config(
     if output is not None:
         destination = Path(output)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-        temporary.write_text(report.text)
-        temporary.replace(destination)
+        with atomic_path(destination) as temporary:
+            temporary.write_text(report.text)
     return report

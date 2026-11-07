@@ -90,24 +90,69 @@ Cost and scope: O(L); O(crossovers); O(generated individuals · L). These terms 
 <a id="ou27"></a>
 ## ou27 Independent-site read sampler
 
-Draw optional normalised depth factors, then the full sample-by-site Poisson depth array, optional dropout starts and genotype-class binomial ALT counts in class/row-major order. Skip a genotype-class draw when its mask is empty. Emit REF/ALT counts after dropout. Splitting a contig into new sample chunks changes draw layout and is not a valid execution-only optimisation.
+Let d be configured depth, A_s the existing sample lognormal factor (normalised to sample mean one),
+B_i the shared site factor, and G_si an independent cell factor. When enabled,
+B_i = exp(Z_i - sigma²/2), Z_i ~ Normal(0, sigma²), sigma² = log(1 + site_depth_cv²),
+so E[B_i] = 1 and CV(B_i) = site_depth_cv. With positive site_depth_window_bp,
+one B is drawn per occupied fixed physical window floor(position_bp / window_bp), in ascending
+window order; otherwise one per site. The population mean is one; no finite-site renormalisation is
+applied. Fixed windows supply interpretable local correlation without sequence GC/mappability
+covariates or an unsupported smooth covariance law. Hard edges and a common surface across libraries
+are approximations; library-specific GC responses are not simulated.
+
+For alpha = count_dispersion > 0, G_si ~ Gamma(shape = 1/alpha, scale = alpha), with
+E[G_si] = 1 and Var(G_si) = alpha. Conditional on A_s, B_i and before forced dropout,
+D_si ~ Poisson(mu_si G_si), mu_si = d A_s B_i / (1 - w/L), w = floor(L dropout_fraction).
+Integrating G gives a negative-binomial marginal with E[D] = mu and Var(D) = mu + alpha mu².
+Alpha zero sets G = 1 without draws. Site CV zero sets B = 1 without draws, regardless of window width.
+Depth remains d in expectation over factors and dropout; a finite contig need not have exactly that mean.
+
+Draw optional normalised sample factors, optional site factors, optional full sample-by-site gamma
+factors, then the full sample-by-site Poisson depth array, optional dropout starts and genotype-class
+binomial ALT counts in class/row-major order. Skip a genotype-class draw when its mask is empty. Emit REF/ALT counts after dropout. Splitting a contig into new sample chunks changes draw layout and is not a valid execution-only optimisation.
 
 Implementation: [simulation/reads.py](../../haplotype_reconstruction/simulation/reads.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+The opt-in `[simulation.reads] preset = "realistic"` is expanded by the settings loader before mapping
+to ReadModel. Explicit TOML/CLI read keys win, including explicit zero values. The resolved config
+records the expanded values; see the [user read-model table](../user/quickstart.md#simulation-read-model)
+for values, rationale and sources. It sets no inference parameters or target mean depth. With both
+new effects off, historical array shapes, arithmetic and RNG consumption are preserved; recorded
+small-simulation digests cover defaults and existing paired-end settings.
 
 Cost and scope: O(N L) draws and storage; full-contig array draw shapes prevent sample-chunk substitution.
 
 <a id="ou28"></a>
 ## ou28 Paired-end fragment read sampler
 
-Draw depth factors once, then each sample’s fragment count, starts, lengths and chosen homologues. Pack first-mate bases before second-mate bases, avoiding double-counted overlap. A sample with no covered base skips later base draws. Apply optional heterozygote bias, then the declared homozygous error mask, accumulating counts by site. Draw dropout starts only after all samples. Fragment correlation is part of the generating model.
+Draw sample factors, then optional shared site factors once. For each sample draw optional gamma cell
+factors, then its fragment count, starts, lengths and chosen homologues. If either new effect is on,
+let T_i = B_i G_si. Cut the start axis into windows of the maximum fragment length f_max; a fragment
+starting in window k reaches only sites in windows k and k + 1, so M_k = max T_i over those two
+windows bounds every target it can cover. Candidate starts in window k form a Poisson process at
+M_k times the ordinary rate. Give each fragment one independent Uniform(0,1) mark U; retain its hit
+at site i when U < T_i/M_k. Site i's retained intensity is the ordinary rate times T_i whichever window
+a covering fragment started in, and candidates scale with local rather than contig-wide maxima of T.
+The same mark applies to both mates and all sites, preserving
+homologue sharing and nested retention. Conditional depth at site i is therefore Poisson(mu_i G_si),
+so integrating gamma factors yields the same negative-binomial count marginal as OU27. The intensity
+of hits shared by i and j scales with min(T_i, T_j); it does not depend on an unrelated site's
+maximum factor. No independent read top-up or duplication of existing counts is used.
+Cost: candidates exceed retained hits by the ratio of local envelope to target, not by the contig maximum.
+
+With the new effects off, skip gamma, envelope and retention draws entirely and use the historical
+fragment sampler draw order. Pack first-mate bases before second-mate bases, avoiding double-counted overlap. A sample with no covered base skips later base draws. Apply optional heterozygote bias, then the declared homozygous error mask, accumulating counts by site. Draw dropout starts only after all samples. Fragment correlation is part of the generating model.
 
 Implementation: [simulation/reads.py](../../haplotype_reconstruction/simulation/reads.py).
 
 Parameters by name: `FRAGMENT_QUANTILES`, `MINIMUM_FRAGMENT_BP`, `FRAGMENT_SD_LIMIT`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N · fragments); O(bases per sample). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N L + candidate fragments + candidate site hits), with per-sample temporary
+storage for candidate fragments/hits. With new effects enabled, the maximum propensity M multiplies
+candidate intensity; extreme site CV or dispersion can increase time/memory substantially. The
+sampler has no truncation cap on these factors. The default path retains its previous costs.
 
 <a id="ou29"></a>
 ## ou29 Truth records: alleles, painting chunks, crossovers, manifest, truth pedigree

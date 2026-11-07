@@ -19,6 +19,7 @@ from ...contracts.likelihoods import slice_likelihoods
 from ...contracts.observations import slice_observed
 from ...contracts.source import ContigReads
 from ...core.errors import InputError, ResourceError
+from ...core.files import atomic_path
 from ...engine.graph import ResourceRequest, Task, TaskKey, run_graph
 from ...engine.runtime import affinity_cpus
 from .parameters import (
@@ -168,10 +169,9 @@ def build_templates(
         )
         if len(probabilities) == 0:
             continue
-        temporary = output / f".{contig}.npz.tmp"
-        with temporary.open("wb") as handle:
-            np.savez_compressed(handle, positions=positions, allele_probabilities=probabilities)
-        temporary.replace(output / f"{contig}.npz")
+        with atomic_path(output / f"{contig}.npz") as temporary:
+            with temporary.open("wb") as handle:
+                np.savez_compressed(handle, positions=positions, allele_probabilities=probabilities)
     return output
 
 

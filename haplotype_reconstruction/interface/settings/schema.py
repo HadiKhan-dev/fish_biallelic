@@ -219,6 +219,9 @@ class ExportSection:
 
 @dataclass(frozen=True)
 class SimulationReadsSection:
+    preset: str = setting(
+        "", "str", "Generating read preset; explicit read keys override its values.", ("", "realistic")
+    )
     error_rate: float = setting(0.02, "float", "Generating sequencing error rate.")
     depth_cv: float = setting(0.0, "float", "Between-sample depth coefficient of variation.")
     heterozygote_alt_probability: float = setting(0.5, "float", "Alternate-read probability in heterozygotes.")
@@ -228,6 +231,13 @@ class SimulationReadsSection:
     )
     fragment_mean_bp: float = setting(375.0, "float", "Mean fragment length (read_length_bp > 0).")
     fragment_sd_bp: float = setting(150.0, "float", "Fragment length standard deviation.")
+    site_depth_cv: float = setting(0.0, "float", "Shared site-depth lognormal CV (population mean one); 0 = off.")
+    site_depth_window_bp: int = setting(
+        0, "int", "Share site factors within physical windows of this width; 0 = independent sites."
+    )
+    count_dispersion: float = setting(
+        0.0, "float", "Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson."
+    )
 
 
 @dataclass(frozen=True)

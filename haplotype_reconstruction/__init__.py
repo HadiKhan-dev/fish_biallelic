@@ -4,11 +4,14 @@ Importing the package loads no numerical libraries and changes no runtime policy
 The public functions are resolved from interface.api only when first requested.
 """
 
-__version__ = "4.4.1"
 __all__ = ["run", "load_settings", "open_results", "errors", "__version__"]
 
 
 def __getattr__(name: str):
+    if name == "__version__":
+        from ._version import __version__
+
+        return __version__
     if name in {"run", "load_settings", "open_results", "errors"}:
         from .interface import api
 

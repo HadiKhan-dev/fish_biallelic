@@ -18,9 +18,9 @@ from ...science.discovery.diagnostics import DiscoveryDiagnostics
 from ...science.discovery.parameters import DiscoveryParameters
 from ...science.discovery.release import _search_status
 from ...science.discovery.search import SearchSummary
-from ...store.container import CheckpointFile, CheckpointMismatch
+from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, publication_metadata, read_items, resume
+from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
 from ...store.store import CheckpointStore
 
 
@@ -321,18 +321,9 @@ def result_reader(
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:
-    """Report checked small metadata; compatibility with settings belongs to readers."""
-    records = []
-    for key in (PLAN, *file.keys(BLOCK_PREFIX)):
-        names = ("schema", "blocks") if key == PLAN else ("schema", "block", "kind")
-        # The checked status boundary: one committed snapshot, publication header validated, arrays refused.
-        try:
-            metadata = publication_metadata(file, key, names)
-        except CheckpointMismatch as error:
-            raise InvariantError("malformed discovery publication header") from error
-        if metadata is None:
-            continue
-        payload = dict(metadata.fields)
-        require_schema(payload, 1)
-        records.append(dict(key=key, derivation=metadata.recorded_derivation, **payload))
-    return dict(published=tuple(records), completed_blocks=sum(row["key"] != PLAN for row in records))
+    """Count committed block headers without opening every block's payload metadata.
+
+    Schema and scientific compatibility are checked by result_reader, not status.
+    """
+    keys = file.keys(BLOCK_PREFIX)
+    return dict(published=keys, completed_blocks=len(keys), plan_published=file.has(PLAN))

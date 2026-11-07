@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 REPORTS = ROOT / "haplotype_reconstruction/outputs/reports"
 TARGET = ROOT / "docs/reference/output-columns.md"
 sys.path.insert(0, str(ROOT))
@@ -24,16 +26,20 @@ FILES = {
     "painting.FOUNDER_SUPPORT_COLUMNS": "painting/founder_support.csv",
     "painting.FOUNDER_SUPPORT_WINDOW_COLUMNS": "painting/founder_support_windows.csv",
     "painting.ASSEMBLY_SEARCH_PREFIX_COLUMNS": "painting/assembly_search.csv (prefix)",
+    "painting.SEARCH_ITEM_COLUMNS": "painting/assembly_search_items.csv",
+    "painting.SHADOW_ALTERNATIVE_COLUMNS": "painting/assembly_search_shadow_alternatives.csv",
     "painting.FOUNDER_COUNT_COLUMNS": "painting/founder_counts.csv",
     "painting.SAMPLE_SWITCH_COLUMNS": "painting/sample_switches.csv",
     "painting.SEGMENT_COLUMNS": "painting/sample_segments.csv",
     "painting.CONTINUITY_COLUMNS": "painting/label_continuity.csv",
     "painting.MODEL_COLUMNS": "painting/painting_model.csv",
     "tables.TRUTH_PEDIGREE_COLUMNS": "simulation/truth_pedigree.csv",
+    "tables.REFIT_EXCLUDED_COLUMNS": "founder_refit/excluded_samples.csv",
     "tables.REFIT_SUMMARY_COLUMNS": "founder_refit/summary.csv",
     "tables.PHASE_SUMMARY_COLUMNS": "family_phase/summary.csv",
     "recombination.SPAN_COLUMNS": "recombination/coverage.csv",
     "recombination.CROSSOVER_COLUMNS": "recombination/crossovers.csv",
+    "recombination.JUNCTION_MEMBER_COLUMNS": "recombination/junction_members.csv",
     "recombination.JUNCTION_COLUMNS": "recombination/junctions.csv",
     "recombination.MAP_COLUMNS": "recombination/map.csv",
     "recombination.MEIOSIS_COLUMNS": "recombination/meioses.csv",
@@ -93,7 +99,7 @@ def render() -> str:
     for path, constant, names, meanings in columns():
         key = path.stem + "." + constant
         if path.stem == "pedigree":
-            title = "pedigree/" + constant.removesuffix("_COLUMNS").lower() + ".csv"
+            title = "pedigree/" + ("cell_items" if constant == "CELL_ITEM_COLUMNS" else constant.removesuffix("_COLUMNS").lower()) + ".csv"
             if constant in ("EXCLUSION_INTERVAL_COLUMNS", "COUNT_INTERVAL_COLUMNS", "PARENT_SLOT_COLUMNS"):
                 title = constant.lower().replace("_", " ")
         else:
@@ -158,9 +164,8 @@ def main(argv=None) -> int:
             sys.stdout.write("Stale docs/reference/output-columns.md\n")
         return int(stale)
     TARGET.parent.mkdir(parents=True, exist_ok=True)
-    tmp = TARGET.with_suffix(".tmp")
-    tmp.write_text(text)
-    tmp.replace(TARGET)
+    with atomic_path(TARGET) as tmp:
+        tmp.write_text(text)
     return 0
 
 

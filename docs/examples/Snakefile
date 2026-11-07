@@ -9,11 +9,12 @@ CONTIGS = SETTINGS["input"]["contigs"]
 RUN = Path(SETTINGS.get("run", {}).get("output", "run"))
 CHECKPOINTS = str(SETTINGS.get("run", {}).get("checkpoints") or RUN / "checkpoints")
 M = str(Path(CHECKPOINTS) / "markers")
+REPORT = str(RUN / "report.done")
 
 rule all:
     input:
         expand(f"{M}/phase.{{c}}.done", c=CONTIGS),
-        f"{M}/report.done"
+        REPORT
 
 rule init:
     output: f"{M}/init.done"
@@ -54,6 +55,6 @@ rule phase:
 
 rule report:
     input: expand(f"{M}/phase.{{c}}.done", c=CONTIGS)
-    output: f"{M}/report.done"
+    output: REPORT
     threads: 1
     shell: "haplotypes report {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"

@@ -26,6 +26,8 @@ import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 SNAKEFILE = ROOT / "docs/examples/Snakefile"
 RECEIPT = ROOT / "docs/examples/workflow_receipt.json"
 WORKFLOW_TEST = "tests/cli/test_workflow_mode.py::test_shell_workflow_equals_run_record_for_record"
@@ -179,9 +181,8 @@ def main(argv=None) -> int:
         receipt = project(raw, passed)
         problems = validate(receipt)
         if not problems:
-            temporary = RECEIPT.with_suffix(".tmp")
-            temporary.write_text(json.dumps(receipt, indent=2) + "\n")
-            temporary.replace(RECEIPT)
+            with atomic_path(RECEIPT) as temporary:
+                temporary.write_text(json.dumps(receipt, indent=2) + "\n")
     for problem in problems:
         sys.stdout.write(f"workflow receipt: {problem}\n")
     return int(bool(problems))

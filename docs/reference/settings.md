@@ -96,6 +96,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
+| `preset` | str | `""` | realistic | yes | Generating read preset; explicit read keys override its values. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 | `error_rate` | float | `0.02` | — | yes | Generating sequencing error rate. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 | `depth_cv` | float | `0.0` | — | yes | Between-sample depth coefficient of variation. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 | `heterozygote_alt_probability` | float | `0.5` | — | yes | Alternate-read probability in heterozygotes. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
@@ -103,6 +104,9 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `read_length_bp` | int | `0` | — | yes | Read length; > 0 samples paired-end fragments shared by neighbouring sites. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 | `fragment_mean_bp` | float | `375.0` | — | yes | Mean fragment length (read_length_bp > 0). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 | `fragment_sd_bp` | float | `150.0` | — | yes | Fragment length standard deviation. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `site_depth_cv` | float | `0.0` | — | yes | Shared site-depth lognormal CV (population mean one); 0 = off. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `site_depth_window_bp` | int | `0` | — | yes | Share site factors within physical windows of this width; 0 = independent sites. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `count_dispersion` | float | `0.0` | — | yes | Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
 
 ## Presets
 

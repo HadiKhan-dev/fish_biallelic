@@ -4,14 +4,14 @@ Precedence (later wins): schema defaults < preset (config/presets/<name>.toml) <
 options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones (a section removed
 from the schema names its removal: REMOVED_SECTIONS); values are type-checked by their field kind; relative paths
 resolve against the working directory. The resolved configuration is written back as TOML (`settings_text`) to
-OUTPUT/config.toml and into the run record.
+OUTPUT/config.toml and into the run record. The nested simulation.reads preset is expanded after
+merging these layers, with every explicit read key taking precedence over its values.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import tomllib
 from collections.abc import Sequence, Set
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.errors import SettingsError
+from ...core.files import atomic_path
 from .schema import Settings, schema_fields
 
 PRESETS = ("tromau", "generic")
@@ -205,6 +206,15 @@ def _check_removed(mapping: dict) -> None:
 def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     """A typed Settings from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
     _check_removed(mapping)
+    simulation = mapping.get("simulation", {})
+    reads = simulation.get("reads", {}) if isinstance(simulation, dict) else {}
+    if isinstance(reads, dict) and reads.get("preset") == "realistic":
+        text = resources.files("haplotype_reconstruction.interface.settings").joinpath(
+            "presets", "realistic_reads.toml"
+        ).read_text()
+        # Expand after all user/CLI layers have merged, so every explicit key wins,
+        # including values equal to schema defaults. Resolved TOML records all values.
+        mapping = _merge(tomllib.loads(text), mapping)
     settings = _build(Settings, mapping, (), Path.cwd() if cwd is None else Path(cwd))
     if settings.version != 4:
         raise SettingsError(f"settings version {settings.version!r} is not 4; use haplotypes migrate-config")
@@ -287,6 +297,10 @@ def validate(config: Settings, given: Set[tuple[str, ...]] = frozenset()) -> Non
             )
     if not config.simulation.cohorts or min(config.simulation.cohorts) < 1:
         raise SettingsError("[simulation] cohorts must be positive sizes")
+    for name in ("site_depth_cv", "count_dispersion"):
+        value = getattr(config.simulation.reads, name)
+        if not math.isfinite(value) or value < 0:
+            raise SettingsError(f"[simulation.reads] {name} must be finite and nonnegative")
 
 
 def _value(config, path):
@@ -351,9 +365,8 @@ def write_settings(config: Settings, path: str | Path) -> Path:
     """Write the resolved configuration atomically; return the path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(settings_text(config))
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        temporary.write_text(settings_text(config))
     return path
 
 

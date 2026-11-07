@@ -3,7 +3,7 @@
 Resampling (PD16): one weighted fit is GIL-bound Python over the N children (selection, family
 messages, ties), so threads of one process cannot run fits side by side (at N = 1,003, 16 nested
 threads realised about 4.5 CPUs; ped40c PERF_FOUND). The decision task therefore returns the
-planned fits as an engine Expansion: one subtask per planned fit task, run in the engine's
+planned fits as an engine Expansion: work-sized batches of planned fit tasks, run in the engine's
 forkserver worker processes under its CPU and memory authority, as 3.5 ran them in a process pool.
 The read-only DecisionInputs arrays go to shared memory once (engine.workers.share_value); each
 subtask attaches them without copying. The gather receives the results in the plan's fixed order
@@ -47,7 +47,7 @@ from ...science.pedigree import calibration
 from ...science.pedigree.calibration import CalibrationProblem
 from ...science.pedigree.resampling import FitResult, FitTask, ResamplingPlan, evaluate_task
 
-__all__ = ["calibrate", "calibration_chunk", "calibration_round", "child_ranges", "fit_subtasks", "fit_task"]
+__all__ = ["calibrate", "calibration_chunk", "calibration_round", "child_ranges", "fit_subtasks", "fit_task", "fit_batch", "fit_batches"]
 
 # Calibration chunks (3.5's pool cut; execution only, values never depend on them): contiguous child ranges of
 # about equal cost, a child's cost being its term count plus this overhead, and one chunk per worker.
@@ -74,24 +74,71 @@ def fit_task(inputs: SharedValue, task: FitTask) -> FitResult:
     return call_shared(inputs, _fit_attached, task)
 
 
+# Selection scans per batch; two waves per worker retain load balancing. This is
+# an execution grain only: the complete seeded science plan is evaluated unchanged.
+RESAMPLING_BATCH_WORK = 250_000
+RESAMPLING_BATCHES_PER_WORKER = 2
+
+
+def fit_batches(planned: ResamplingPlan, alternatives: int) -> tuple[tuple[FitTask, ...], ...]:
+    """Group whole planned tasks by row scans, retaining their order and draw counts.
+
+    A scan visits the alternatives once per fitted multiplicity vector. Limit the
+    grain by both work and two waves per planned worker; expensive fits stay alone.
+    No fit is dropped or divided, and no seed or arithmetic depends on these cuts.
+    """
+    costs = [max(1, alternatives) * len(task[1]) for task in planned.tasks]
+    target = min(
+        RESAMPLING_BATCH_WORK,
+        max(
+            1,
+            (sum(costs) + planned.worker_count * RESAMPLING_BATCHES_PER_WORKER - 1)
+            // (planned.worker_count * RESAMPLING_BATCHES_PER_WORKER),
+        ),
+    )
+    batches: list[tuple[FitTask, ...]] = []
+    batch: list[FitTask] = []
+    work = 0
+    for task, cost in zip(planned.tasks, costs, strict=True):
+        if batch and work + cost > target:
+            batches.append(tuple(batch))
+            batch, work = [], 0
+        batch.append(task)
+        work += cost
+    if batch:
+        batches.append(tuple(batch))
+    return tuple(batches)
+
+
+def _fit_batch_attached(inputs: DecisionInputs, tasks: tuple[FitTask, ...]) -> tuple[FitResult, ...]:
+    with thread_team(1):
+        return tuple(evaluate_task(inputs, task) for task in tasks)
+
+
+def fit_batch(inputs: SharedValue, tasks: tuple[FitTask, ...]) -> tuple[FitResult, ...]:
+    """Attach the shared decision inputs once and evaluate one batch serially."""
+    return call_shared(inputs, _fit_batch_attached, tasks)
+
+
 def fit_subtasks(
     inputs: DecisionInputs, planned: ResamplingPlan, stage: str, *, copy_threads: int = 1
 ) -> tuple[SharedValue, tuple[Task, ...]]:
-    """Share ``inputs`` once (called by the affinity action that will gather) and declare one subtask per task.
+    """Share inputs once and declare work-sized batches in the science plan's order.
 
-    Subtask keys follow the plan's fixed task order; the gather lists their results in that order.
-    The caller releases the shared value in its gather (engine.workers.release_shared_value).
+    The gather flattens batch results back to the original plan. Each worker owns
+    one CPU; the caller releases the shared value in its affinity gather.
     """
+    batches = fit_batches(planned, len(inputs.alternatives.rows))
     shared = share_value(inputs, "resampling-inputs", copy_threads=copy_threads)
-    width = len(str(max(0, len(planned.tasks) - 1)))
+    width = len(str(max(0, len(batches) - 1)))
     subtasks = tuple(
         Task(
             TaskKey(stage, "resampling", round=f"{index:0{width}d}"),
-            fit_task,
-            args=(shared, task),
+            fit_batch,
+            args=(shared, batch),
             resources=ResourceRequest(min_cores=1, max_cores=1),
         )
-        for index, task in enumerate(planned.tasks)
+        for index, batch in enumerate(batches)
     )
     return shared, subtasks
 

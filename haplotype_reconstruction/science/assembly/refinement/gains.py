@@ -92,7 +92,7 @@ def parallel_exchanges(samples: int, founders: int, team: int) -> bool:
     return team > 1 and samples * founders**3 >= EXCHANGE_THREAD_WORK * team
 
 
-@kernel(overloads=(), cache=True, nogil=True)
+@kernel(overloads=overloads_for(__name__, "_exchange_sample"), cache=True, nogil=True)
 def _exchange_sample(f, g, s, first, second, index, founders, per):
     """Sample s's row of exchange_gains (per[s, p] for every founder pair p in exchange_pairs' order). Compiled on its
     own, without parallel transforms: inlined into exchange_gains, its array expressions would each open a parallel
@@ -125,7 +125,7 @@ def _exchange_sample(f, g, s, first, second, index, founders, per):
             p += 1
 
 
-@kernel(overloads=(), cache=True, parallel=True, nogil=True)
+@kernel(overloads=overloads_for(__name__, "_exchange_samples"), cache=True, parallel=True, nogil=True)
 def _exchange_samples(f, g, first, second, index, founders, per):
     """Every sample's row of exchange_gains in one parallel region on the caller's team."""
     for s in prange(f.shape[0]):

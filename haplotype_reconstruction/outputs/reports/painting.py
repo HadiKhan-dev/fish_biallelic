@@ -6,6 +6,8 @@ and sample-switch tables of one painted chromosome.
                                pooled candidates (tracks the reads cannot separate between identical rows)
   founder_support_windows.csv  the same per 200-site window
   assembly_search.csv          every record of the final assembly's join searches (level, span, record fields)
+  assembly_search_shadow_alternatives.csv  ordered shadow alternatives keyed by contig and assembly_search_row
+  assembly_search_items.csv    unbudgeted symmetric/plateau collection items with parent, column and ordinal
   founder_counts.csv           per component: how firmly its founder count is determined (final count step,
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.csv          painted switches per sample relative to the cohort median
@@ -24,6 +26,7 @@ here is filtered, reweighted or fed back.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,6 +64,90 @@ def _count_calls(searches, first: int, last: int):
         undecided += summary.count.cycles_undecided
         ambiguous += summary.ambiguous_count_calls
     return (cycles, undecided, ambiguous) if recorded else (None, None, None)
+
+
+def assembly_search_tables(rows):
+    """Separate alternatives without changing records or the other event fields.
+
+    A span/level can occur more than once, so the contig-local row ordinal is the
+    join key. The alternative ordinal preserves list order. Each value is one
+    original dict, including absent keys and JSON nulls; batch_size, K and the
+    shadow_combinations budget bound its internal arrays (see the output guide).
+    """
+    parents, alternatives, items = [], [], []
+    for index, original in enumerate(rows):
+        row = {name: original[name] for name in ("Level", "FirstVariant1Based", "LastVariant1Based")}
+        row["assembly_search_row"] = index
+        row.update(original)
+        values = row.get("shadow_alternatives")
+        if values is not None:
+            row["shadow_alternatives"] = len(values)
+            for alternative, value in enumerate(values):
+                alternatives.append(
+                    dict(
+                        assembly_search_row=index,
+                        Level=row["Level"],
+                        FirstVariant1Based=row["FirstVariant1Based"],
+                        LastVariant1Based=row["LastVariant1Based"],
+                        alternative=alternative,
+                        value=value,
+                    )
+                )
+        for column in SEARCH_COLLECTION_FIELDS:
+            value = row.get(column)
+            if isinstance(value, (list, tuple)):
+                # observed_panels is a scalar census in some events and a list
+                # in others. The fixed-size descriptor keeps that distinction,
+                # including for an empty list with no item rows.
+                row[column] = {"items": len(value)}
+                items.extend(
+                    dict(assembly_search_row=index, column=column, item=i, value=json.dumps(item, sort_keys=True))
+                    for i, item in enumerate(value)
+                )
+        parents.append(row)
+    return parents, alternatives, items
+
+
+# Symmetric/plateau families retain all observed alternatives, not just the
+# bounded number of executed continuations. They have no cardinality budget.
+SEARCH_COLLECTION_FIELDS = (
+    "panels",
+    "alternatives",
+    "observed_panels",
+    "replay_panels",
+    "cycle_excluded_panels",
+    "values",
+    "minimum_switches",
+    "source_passes",
+)
+
+SEARCH_ITEM_COLUMNS = ("assembly_search_row", "column", "item", "value")
+"""Columns in published order.
+
+    assembly_search_row: zero-based parent assembly-search row within the contig (1).
+    column: original collection column name (text).
+    item: zero-based position within the original collection (1).
+    value: one original alternative, panel, score or source as JSON; panel shape at most K by batch_size (text).
+"""
+
+
+SHADOW_ALTERNATIVE_COLUMNS = (
+    "assembly_search_row",
+    "Level",
+    "FirstVariant1Based",
+    "LastVariant1Based",
+    "alternative",
+    "value",
+)
+"""Columns in published order.
+
+    assembly_search_row: zero-based parent row within the contig's assembly_search table (1).
+    Level: parent's assembly level (1).
+    FirstVariant1Based: parent's first variant coordinate, inclusive (bp).
+    LastVariant1Based: parent's last variant coordinate, inclusive (bp).
+    alternative: zero-based index in the original shadow_alternatives list (1).
+    value: original alternative dictionary as sorted-key JSON; bounded by batch size, K and shadow_combinations (text).
+"""
 
 
 # ------------------------------------------------------------------------------------- tables
@@ -292,6 +379,7 @@ def painting_frames(painting, positions, observed, searches=(), feedback=(), inp
     support, windows, search_rows = founder_support_tables(painting, positions, observed, searches)
     switches = sample_switch_table(painting, input_ids)
     counts = founder_count_table(painting, searches, feedback)
+    search_rows, alternatives, search_items = assembly_search_tables(search_rows)
     frames = dict(
         zip(
             TABLES,
@@ -305,6 +393,8 @@ def painting_frames(painting, positions, observed, searches=(), feedback=(), inp
             strict=True,
         )
     )
+    frames["assembly_search_shadow_alternatives"] = pd.DataFrame(alternatives, columns=SHADOW_ALTERNATIVE_COLUMNS)
+    frames["assembly_search_items"] = pd.DataFrame(search_items, columns=SEARCH_ITEM_COLUMNS)
     frames["sample_segments"] = pd.DataFrame(segment_rows(painting, input_ids), columns=SEGMENT_COLUMNS)
     frames["label_continuity"] = pd.DataFrame(label_continuity_rows(painting), columns=CONTINUITY_COLUMNS)
     frames["painting_model"] = pd.DataFrame(painting_model_rows(painting), columns=MODEL_COLUMNS)
@@ -312,7 +402,7 @@ def painting_frames(painting, positions, observed, searches=(), feedback=(), inp
 
 
 def write_painting(output, parts) -> list[Path]:
-    """Publish all eight run-level painting tables in configured contig order."""
+    """Publish all run-level painting tables in configured contig order."""
     return write_contig_tables(output, "painting", parts)
 
 
@@ -566,9 +656,10 @@ FOUNDER_SUPPORT_WINDOW_COLUMNS = (
     CalledSitesWithoutObservedNamedOrPooledCandidate: called sites without observed named or pooled candidate (1).
 """
 
-ASSEMBLY_SEARCH_PREFIX_COLUMNS = ("Level", "FirstVariant1Based", "LastVariant1Based")
+ASSEMBLY_SEARCH_PREFIX_COLUMNS = ("Level", "FirstVariant1Based", "LastVariant1Based", "assembly_search_row")
 """Columns in published order.
 
+    assembly_search_row: zero-based assembly-search row within this contig, including closing records (1).
     Level: level (1).
     FirstVariant1Based: first variant coordinate, inclusive (bp).
     LastVariant1Based: last variant coordinate, inclusive (bp).

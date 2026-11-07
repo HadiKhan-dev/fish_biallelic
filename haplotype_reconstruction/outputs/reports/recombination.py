@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-from .tables import contig_part, record_mapping, temporary_path, write_contig_tables
+from ...core.files import atomic_path
+from .tables import contig_part, record_mapping, write_contig_tables
 
 SPAN_COLUMNS = ("parent", "child", "parent_slot", "left_bp", "right_bp", "component_id")
 """Columns in published order.
@@ -147,29 +148,30 @@ def contig_recombination(output: str | Path, results: Results, contig: str, *, e
     product = results.recombination(contig)
     assert product is not None
     crossovers, coverage, meioses = meiosis_tables(product)
+    junctions, members = junction_tables(product.junctions)
     frames = {
         "map": pd.DataFrame(map_table(product.map)),
         "crossovers": pd.DataFrame(crossovers, columns=CROSSOVER_COLUMNS),
         "meioses": pd.DataFrame(meioses, columns=MEIOSIS_COLUMNS),
         "coverage": pd.DataFrame(coverage, columns=SPAN_COLUMNS),
-        "junctions": pd.DataFrame([record_mapping(locus) for locus in product.junctions], columns=JUNCTION_COLUMNS),
+        "junctions": pd.DataFrame(junctions, columns=JUNCTION_COLUMNS),
+        "junction_members": pd.DataFrame(members, columns=JUNCTION_MEMBER_COLUMNS),
         "summary": pd.DataFrame([{**record_mapping(product.summary), "elapsed_seconds": elapsed_seconds}]),
     }
     return contig_part(output, "recombination", contig, frames), product.map
 
 
 def write_recombination(output, parts) -> list[Path]:
-    """Publish six run-level CSVs and one PDF page per contig, in configured order."""
+    """Publish seven run-level CSVs and one PDF page per contig, in configured order."""
     from matplotlib.backends.backend_pdf import PdfPages
 
     written = write_contig_tables(output, "recombination", [part for part, _ in parts])
     if parts:
         path = Path(output) / "recombination" / "maps.pdf"
-        temporary = temporary_path(path)
-        with PdfPages(temporary, metadata={"CreationDate": None}) as pages:
-            for (contig, _), curve in parts:
-                pages.savefig(map_figure(contig, curve), dpi=150)
-        temporary.replace(path)
+        with atomic_path(path) as temporary:
+            with PdfPages(temporary, metadata={"CreationDate": None}) as pages:
+                for (contig, _), curve in parts:
+                    pages.savefig(map_figure(contig, curve), dpi=150)
         written.append(path)
     return written
 
@@ -220,8 +222,8 @@ JUNCTION_COLUMNS = (
     hotspot_ceiling: hotspot ceiling (1).
     mixed_parents: mixed parents (1).
     all_or_none_parents: all or none parents (1).
-    parents: parents (1).
-    children: children (1).
+    parents: number of parent text entries in junction_members (count).
+    children: number of child text entries in junction_members (count).
     mixing_log_lr: mixing log lr (nats).
     paired_locus: paired locus (1).
     paired_odd_meioses: paired odd meioses (1).
@@ -328,3 +330,30 @@ SUMMARY_COLUMNS = (
     family_phase_converged: family phase converged (1).
     elapsed_seconds: recorded runtime, empty when the run record does not supply it (s).
 """
+
+
+JUNCTION_MEMBER_COLUMNS = ("contig", "locus", "column", "item", "value")
+"""Columns in published order.
+
+    contig: contig identifier (text).
+    locus: parent junction locus key (text).
+    column: parents or children, the original junction-table column (text).
+    item: zero-based semicolon-delimited item position (1).
+    value: original parent k/n entry or child identifier; join with semicolons to recover the cell (text).
+"""
+
+
+def junction_tables(loci):
+    """Separate the two cohort-sized text lists; retain their exact order and text."""
+    rows, members = [], []
+    for locus in loci:
+        row = record_mapping(locus)
+        for column in ("parents", "children"):
+            values = row[column].split(";") if row[column] else []
+            row[column] = len(values)
+            members.extend(
+                dict(contig=row["contig"], locus=row["locus"], column=column, item=i, value=value)
+                for i, value in enumerate(values)
+            )
+        rows.append(row)
+    return rows, members

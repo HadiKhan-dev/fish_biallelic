@@ -51,9 +51,9 @@ def _relatedness(output: Path, results: Results):
     return [] if product is None else write_relatedness(output, product, results.input_sample_ids)
 
 
-def _pedigree(output: Path, results: Results):
+def _pedigree(output: Path, results: Results, *, map_work=None):
     product = results.pedigree()
-    return [] if product is None else write_pedigree(output, product, results.input_sample_ids)
+    return [] if product is None else write_pedigree(output, product, results.input_sample_ids, map_work=map_work)
 
 
 def _refit(output: Path, results: Results):
@@ -127,13 +127,18 @@ def run_tasks(
         kwargs = {}
         after = tuple(dependencies[name])
         if name == "complete":
+            # A contig's tie sources run through painting and founder refit (results.tie_sources reads both, and
+            # skips a stage not yet published). Refit depends on painting, so waiting for painting alone could
+            # collect before refit publishes and silently drop its tie events.
+            sources = (*dependencies.get("painting", ()), *dependencies.get("refit", ()))
+            sources = sources or dependencies.get("science", after)
             readers = tuple(
                 make_task(
                     "ties",
                     contig_ties,
                     (results, contig),
                     contig=contig,
-                    depends_on=dependencies.get("science", after),
+                    depends_on=tuple(dict.fromkeys(key for key in sources if key.scope in {contig, "run"})),
                 )
                 for contig in results.contigs
             )

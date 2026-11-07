@@ -64,6 +64,10 @@ class ReadModel:
     and ALT reads ~ Binomial(depth, p_g) with p = (error_rate, heterozygote_alt_probability,
     1 - error_rate). read_length_bp > 0 draws paired-end fragments instead (insert length
     Normal(fragment_mean_bp, fragment_sd_bp)), so sites closer than a fragment share reads.
+    site_depth_cv adds a mean-one lognormal site factor shared by samples; a positive
+    site_depth_window_bp shares that factor within fixed physical windows instead. Independent
+    mean-one gamma cell factors give count variance mu + count_dispersion * mu**2 conditional
+    on sample/site factors. Zero CV/dispersion consumes no extra random draws.
     """
 
     error_rate: float = 0.02
@@ -73,12 +77,23 @@ class ReadModel:
     read_length_bp: int = 0
     fragment_mean_bp: float = 375.0
     fragment_sd_bp: float = 150.0
+    site_depth_cv: float = 0.0
+    site_depth_window_bp: int = 0
+    count_dispersion: float = 0.0
 
     def __post_init__(self):
         if not 0 < self.error_rate < 0.5:
             raise SettingsError("generating error_rate must be between zero and 0.5")
         if not math.isfinite(self.depth_cv) or self.depth_cv < 0:
             raise SettingsError("depth_cv must be finite and nonnegative")
+        if not math.isfinite(self.site_depth_cv) or self.site_depth_cv < 0:
+            raise SettingsError("site_depth_cv must be finite and nonnegative")
+        if not math.isfinite(self.site_depth_window_bp) or (
+            int(self.site_depth_window_bp) != self.site_depth_window_bp or self.site_depth_window_bp < 0
+        ):
+            raise SettingsError("site_depth_window_bp must be a nonnegative integer")
+        if not math.isfinite(self.count_dispersion) or self.count_dispersion < 0:
+            raise SettingsError("count_dispersion must be finite and nonnegative")
         if not 0 < self.heterozygote_alt_probability < 1:
             raise SettingsError("heterozygote_alt_probability must be in (0, 1)")
         if not 0 <= self.dropout_fraction < 1:

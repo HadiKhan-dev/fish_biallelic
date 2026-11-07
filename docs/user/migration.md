@@ -1,5 +1,65 @@
 # Migration guides
 
+## Migrating from 4.4 to 4.5.0
+
+Start a new output and checkpoint root with the same inputs, configuration and
+seed. **4.5.0 changes code and requires a new root.** Keep existing runs with their
+matching code; this release does not convert their checkpoints.
+
+From 4.5 onward, a release-label-only change preserves stage identities. The
+release value lives in a lazily loaded module outside scientific dependency
+closures. Identities still bind scientific code and its transitive dependencies,
+consumed inputs, parameters, tie settings, codecs and numerical policy. A changed
+scientific dependency still invalidates its products and their downstream
+consumers. The full source digest remains in invocation provenance;
+distribution metadata still exposes the release label. A version label alone is neither a compatibility test nor a reason
+to discard checkpoints.
+
+Output choices now live in `output_selection.json` beside published tables.
+`report` reads checkpoint roots without writing into them; its completion marker
+is `OUTPUT/report.done`. See the [workflow guide](workflow.md) for republishing
+from an archive and the shared-root multi-node recipe.
+
+Run records (`run_records/*.json`, schema `run-record-v5`) keep per-stage task aggregates; the per-task
+detail stays in the `*.tasks.jsonl` log beside each record, which is now retained after completion.
+`status` reads the aggregates. Readers of the old embedded `tasks` list should read that log.
+A run interrupted by SIGTERM or SIGINT is recorded as `interrupted` (exit status 130), not `failed`.
+
+Simulation configurations simulate exactly as before. `[simulation.reads]` gains opt-in
+`site_depth_cv`, `site_depth_window_bp`, `count_dispersion` and `preset = "realistic"`.
+
+The published table layout changes explicitly (4.5.0 includes the table changes prepared as 4.4.2,
+which was not released separately):
+
+- `painting/assembly_search.csv` gains `assembly_search_row`, a zero-based ordinal
+  within each contig, and `shadow_alternatives` contains a count instead of a JSON
+  list. Join `painting/assembly_search_shadow_alternatives.csv` on `contig` and
+  `assembly_search_row`, sort by `alternative`, and JSON-decode `value` to recover
+  every original alternative dictionary in order. Empty lists have count zero;
+  absent fields keep empty cells. Level/span alone do not uniquely identify rows.
+- Symmetric and plateau alternative lists in assembly search move to
+  `painting/assembly_search_items.csv`; parent list cells become `{"items": COUNT}`.
+  Scalar census cells in the same columns remain scalar. Reconstruct lists by
+  parent key and column, ordering by `item` and JSON-decoding `value`.
+- Cohort-sized collection cells in `tier_b_candidate_sets`, `call_explanations`,
+  `diagnostics`, `exclusion_diagnostics` and `sibling_guard` become counts.
+  `pedigree/cell_items.csv` carries the parent table, sample (or parent/child),
+  column, item index and JSON value. The [output guide](outputs.md#collection-tables)
+  lists the fields and their reconstruction rules.
+- `recombination/junctions.csv` parent/child lists become counts.
+  `recombination/junction_members.csv` preserves every ordered text item, keyed
+  by contig, locus and column. Join values with semicolons to recover the cell.
+
+- `founder_refit/summary.csv:excluded_samples` becomes a count.
+  `founder_refit/excluded_samples.csv` carries each sample, keyed by contig and
+  zero-based item index, preserving the original list order.
+
+All other published cells keep their existing values. These are report-layout
+changes; the scientific records retain their full collections. The CSV field-limit
+fix remains for trusted per-contig parts. Failed writes remove their private
+staging files without replacing an existing complete destination.
+
+
 ## Migrating from 4.4.0 to 4.4.1
 
 Start a new run with a new output and checkpoint root using the same inputs,
@@ -205,7 +265,7 @@ explains that change in its audit. Read that note before assuming that all forme
 files will be emitted.
 
 The pair chain costs O(N² L); family fitting does not require it. Selection is
-persisted per invocation in `outputs/selection` and stays outside every scientific
+persisted per invocation in `output_selection.json` in the output directory and stays outside every scientific
 identity. Switching the flag does not recompute families. When reports are written
 with it off, a stale pairs CSV is removed even if the pair record remains in the
 checkpoint store. Use the desired selection on the report invocation as well.

@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 PACKAGE = ROOT / "haplotype_reconstruction"
 TARGET = ROOT / "docs/reference/conventions.md"
 
@@ -109,9 +112,8 @@ def main(argv=None) -> int:
     expected = render()
     if args.check:
         return int(not TARGET.exists() or TARGET.read_text() != expected)
-    temp = TARGET.with_suffix(".tmp")
-    temp.write_text(expected)
-    temp.replace(TARGET)
+    with atomic_path(TARGET) as temp:
+        temp.write_text(expected)
     return 0
 
 

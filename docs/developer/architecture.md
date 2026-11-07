@@ -20,6 +20,10 @@ results readers expose checked products to exports, reports and evaluation.
 | `evaluation` | Metrics against recorded simulation truth | Core, contracts, results, simulation truth types |
 | `interface` | CLI, settings, API, status and tools | Public interfaces of the other packages |
 
+The package root resolves its public API lazily through `interface`. Its private
+`_version` module contains only the release label and is also loaded lazily by
+the root. Scientific layers cannot import that module.
+
 The repository's layer tests (the unit-test tier) enforce the exact allowed edges.
 Results may import stage record decoders, including the explicitly separated
 `*_records` modules, but not publication or source-reading orchestration. Output
@@ -64,6 +68,18 @@ and optional contig affinity. An expansion returns independent subtasks and a
 gather operation under the same resource authority. Results are placed by key;
 completion order does not determine array or report order.
 
+Phase chromosomes start in decreasing estimated size: sample count times retained
+site count when evidence is present, initial simulation site count before evidence,
+and declared VCF contig length when no retained site axis exists. These hints
+change dispatch priority only. Recombination, export and report tasks read published
+products without inheriting a chromosome worker's affinity. Recombination and
+export may overlap once that chromosome's phase is complete; they do not wait for
+another chromosome's phase. Tie collectors consume only their own painting chain.
+Export manifest checks and founder identity collection run per chromosome, then
+publish in configured order. Independent export files and pedigree report tables
+use the same live CPU authority as their enclosing tasks; each writer owns a
+separate destination and keeps its rows and cells in their established order.
+
 The runtime bounds all teams by the verified core budget. It admits outer work
 from measured memory pressure; predicted working-set sizes are diagnostics, not
 reserved peaks. A task waiting for its children is suspended, while retained
@@ -76,6 +92,19 @@ dense/checkpointed routes use the same arithmetic and are tested against each
 other. Scientific retry schedules, candidate caps and work accounts remain fixed
 parameters even when their names include bytes.
 
+Run records retain per-stage task resource aggregates; detailed task rows remain
+in their append-only JSONL files. The scheduler observes its existing counters
+for ten-minute progress and stage completion lines. Small stage diagnostic
+messages travel in the worker's ordinary reply and are printed by the
+coordinator, so forkserver workers need no separate log writer.
+
+Status can prime its process-local header indexes from disposable container
+snapshots saved at checked stage publication. The immutable container identity
+and committed prefix length bind each snapshot; later appends are scanned by the
+ordinary container reader. Missing or unusable caches require a normal header
+scan. Scientific readers derive and check expected publication identities;
+these operational caches and progress counts never enter those identities.
+
 ## Identities and publication
 
 A derivation binds source payload content, upstream identities, explicit
@@ -83,7 +112,9 @@ parameters, tie settings, relevant code closure, adapters/codec and numerical
 policy. Execution resources and output destinations are operational. Source
 provenance can include a path or timestamp, but changing only a timestamp does not
 change consumed evidence. A changed payload or incompatible derivation refuses
-reuse.
+reuse. The release label stays outside scientific dependency closures, while
+the full source digest retains it for provenance. See the
+[migration rules](../user/migration.md) before changing code on an existing run.
 
 The append-only store commits each product atomically. Its envelope separates
 scientific products from replaceable output snapshots. Scatter processes write

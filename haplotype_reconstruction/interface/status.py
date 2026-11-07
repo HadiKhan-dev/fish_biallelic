@@ -1,8 +1,8 @@
 """Report run progress by checking record headers without decoding scientific arrays.
 
-Owns status formatting and run-record inspection (ENG-30). Completion hints and
-workflow marker files are never sufficient: each hinted record is checked through
-the store publication protocol. Stage progress adapters supply their small summaries.
+Owns status formatting and run-record inspection (ENG-30). Completion certificates
+are checked against committed container headers; workflow markers alone never
+certify completion. Stage progress adapters supply index-only summaries.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import InputError, SettingsError
-from ..engine.records import record_tasks
+from ..engine.records import task_summaries
 from ..results.paths import RunPaths
 
 __all__ = ["run_status", "format_status"]
@@ -32,7 +32,7 @@ def _records(directory: Path) -> list[dict[str, Any]]:
     for path in sorted((directory / "run_records").glob("*.json")):
         data = json.loads(path.read_text())
         stages = data.get("stages", [])
-        tasks = record_tasks(path, data)
+        summaries = task_summaries(data)
         rows.append(
             dict(
                 record=str(path),
@@ -44,10 +44,9 @@ def _records(directory: Path) -> list[dict[str, Any]]:
                 peak_memory_bytes=data.get("peak_memory_bytes", data.get("peak_rss_bytes")),
                 memory=data.get("memory", {}),
                 peak_live_use_bytes=data.get("memory", {}).get("peak_live_use_bytes"),
-                task_wall_seconds={
-                    name: sum(row.get("wall_seconds", 0) for row in tasks if row["key"]["stage"] == name)
-                    for name in sorted({row["key"]["stage"] for row in tasks})
-                },
+                task_count=data.get("task_count", sum(row["tasks"] for row in summaries.values())),
+                task_summaries=summaries,
+                task_wall_seconds={name: row["wall_seconds"] for name, row in sorted(summaries.items())},
                 updated_utc=data.get("updated_utc"),
                 active_stages=data.get("active_stages", []),
                 error=data.get("error"),
@@ -61,13 +60,19 @@ def _records(directory: Path) -> list[dict[str, Any]]:
 
 
 def _completion(file: Any) -> list[str]:
-    from ..store.protocol import is_complete
-
+    # mark_complete validates the derivations before appending its certificate.
+    # In an append-only container, referenced records at or before that sequence
+    # are the same committed versions it checked. A later replacement invalidates
+    # this status certificate conservatively; scientific resume still checks the
+    # independently expected derivations. Snapshot once, avoiding a stat per key.
+    index = file._records()
     complete = []
-    for key in file.keys("complete/"):
-        hint = file.get(key, items=("records",))
+    for key, info in sorted(index.items()):
+        if not key.startswith("complete/"):
+            continue
+        hint = file._read(info, 1, items=("records",))
         records = hint.get("records", {})
-        if records and is_complete(file, records):
+        if records and all(name in index and index[name].seq <= info.seq for name in records):
             complete.append(key)
     return complete
 
@@ -143,6 +148,11 @@ def run_status(
         if not directory.is_dir() or not root.is_dir():
             raise OSError(f"{directory}: no initialized run directory")
         store = CheckpointStore(root)
+        from ..store.status_index import load_index
+
+        load_index(store.run)
+        for name in store.contig_names():
+            load_index(store.contig(name))
         store.check_layout()
         manifest = store.manifest("run")
         if manifest is None:

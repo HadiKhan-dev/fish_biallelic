@@ -3022,6 +3022,120 @@ class TaskSession:
         self.close(abort=error is not None)
 
 
+class _GraphProgress:
+    """Low-volume observation of existing accounting, never a scheduling input.
+
+    Counts are executor calls (including expansion and gather calls). Totals grow
+    as expansions reveal work. CPU slots are claims, not an OS utilisation sample;
+    memory is the governor's existing sampled live value. The timer also covers a
+    long in-process call, where the coordinator cannot poll.
+    """
+
+    INTERVAL_SECONDS = 600.0
+
+    def __init__(self, tasks, running, expansions, cores, governor):
+        self.enabled = _LOG.isEnabledFor(logging.INFO)
+        self.running, self.expansions = running, expansions
+        self.cores, self.governor, self.group = cores, governor, None
+        self.rows: dict[tuple[str, str], list[int]] = {}
+        self.candidates: set[tuple[str, str]] = set()
+        self.lock = threading.RLock()
+        self.closed = False
+        self.timer: threading.Timer | None = None
+        self.add(tasks)
+
+    def add(self, tasks):
+        if not self.enabled:
+            return
+        with self.lock:
+            for task in tasks:
+                key = (task.key.stage, task.key.scope)
+                self.rows.setdefault(key, [0, 0])[1] += 1
+
+    def finished(self, key):
+        if not self.enabled:
+            return
+        with self.lock:
+            stage = (key.stage, key.scope)
+            # A call this observer was never shown still counts; progress must never fail a run.
+            row = self.rows.setdefault(stage, [0, 0])
+            row[0] += 1
+            row[1] = max(row[1], row[0])
+            if row[0] == row[1]:
+                self.candidates.add(stage)
+
+    def start(self, group, cpu_slots):
+        self.group = group
+        self.cpu_slots = cpu_slots
+        if self.enabled:
+            self._arm()
+
+    def _arm(self):
+        self.timer = threading.Timer(self.INTERVAL_SECONDS, self._tick)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def _tick(self):
+        with self.lock:
+            if self.closed:
+                return
+            self.emit(periodic=True)
+            self._arm()
+
+    def emit(self, *, periodic=False):
+        if not self.enabled:
+            return
+        try:
+            self._emit(periodic)
+        except Exception:  # a progress line is diagnostics: it must never fail or stall a run
+            _LOG.debug("progress line failed", exc_info=True)
+
+    def _emit(self, periodic):
+        with self.lock:
+            if self.closed or (not periodic and not self.candidates):
+                return
+            suspended = {(key.stage, key.scope) for key in self.expansions.copy()}
+            done = {key for key in self.candidates - suspended if self.rows[key][0] == self.rows[key][1]}
+            if not periodic and not done:
+                return
+            running = tuple(self.running.copy())
+            parts = [
+                f"{stage} {scope} {self.rows[stage, scope][0]}/{self.rows[stage, scope][1]} done"
+                for stage, scope in sorted(done)
+            ]
+            if periodic:
+                stages: dict[str, list[int]] = {}
+                for (stage, _), (completed, total) in self.rows.items():
+                    row = stages.setdefault(stage, [0, 0])
+                    row[0] += completed
+                    row[1] += total
+                parts.extend(
+                    f"{stage} {completed}/{total} known ({sum(k.stage == stage for k in running)} running)"
+                    for stage, (completed, total) in sorted(stages.items()) if completed < total
+                )
+            self.candidates.difference_update(done)
+            if not parts:
+                return
+            cpu = (
+                sum(c.claimed.get_obj().value for c in self.group.authority.groups)
+                if self.group is not None else self.cpu_slots()
+            )
+            # Aligned reads of the existing sample; no process traversal, new
+            # sample, admission lock, task-log read or CPU rebalance.
+            header = self.governor._ledger.h
+            live, limit = int(header[_LIVE_BYTES]), int(header[_LIMIT])
+            _LOG.info(
+                "[progress] %s; running %d tasks; CPU %d/%d slots claimed; memory %.2f/%.2f GiB",
+                "; ".join(parts), len(running), cpu, self.cores, live / GIB, limit / GIB,
+            )
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            if self.timer is not None:
+                self.timer.cancel()
+
+
 def run_graph(
     tasks: Sequence[Task],
     *,
@@ -3048,7 +3162,7 @@ def run_graph(
     Supplied initial_results must have been checked against published identities;
     G1's test-only oracle hook performs that same check for fixed-token fixtures.
     """
-    from .runtime import affinity_cpus, configure_worker, signal_boundary
+    from .runtime import RunInterrupted, affinity_cpus, configure_worker, signal_boundary
 
     # A failed in-process task can leave a native child thread unwinding. Python
     # cannot interrupt that call; refuse a second authority until it has exited.
@@ -3122,6 +3236,8 @@ def run_graph(
     stopped = False
     learned_cost: dict[tuple[str, str, str], tuple[float, int]] = {}
 
+    progress = _GraphProgress(tasks, running, expansions, cores, governor)
+
     def cancel() -> None:
         nonlocal stopped
         stopped = True
@@ -3139,6 +3255,8 @@ def run_graph(
         from .workers import _PackedCall
 
         record_storage_routes(reply.storage_routes)
+        for message in reply.diagnostics:
+            _LOG.info("%s", message)
         task = indexed[reply.key]
         kind = (task.key.stage, task.function.__module__, task.function.__qualname__)
         seconds, samples = learned_cost.get(kind, (0.0, 0))
@@ -3227,6 +3345,9 @@ def run_graph(
                 pending.add(child.key)
                 parents[child.key] = task.key
                 depths[child.key] = depths[task.key] + 1
+            progress.add((*expansion.subtasks, gather))
+            progress.finished(reply.key)
+            progress.emit()
             # Its gather completes it; its arguments (a round's evidence, a session) are never needed again.
             if task.args or task.kwargs:
                 indexed[task.key] = replace(task, args=(), kwargs={})
@@ -3269,6 +3390,8 @@ def run_graph(
             token.release(reply.peak_bytes)
         if on_task is not None:
             on_task(task, reply)
+        progress.finished(reply.key)
+        progress.emit()
         # A task that has run never needs its arguments again (its value is in results; an expansion's parent is
         # completed by its gather). Keeping them held every round's inputs for the whole graph: each expansion
         # brought a copy of its contig's evidence back from the worker, kept alive with its shared-memory twin.
@@ -3298,9 +3421,12 @@ def run_graph(
             )
             if _session is not None:
                 _session.group = group
+            progress.start(
+                group, lambda: sum(min(cores, indexed[key].resources.max_cores) for key in running.copy())
+            )
             while pending or running or expansions:
                 if stopped:
-                    raise SystemExit(130)
+                    raise RunInterrupted(signal.SIGINT)
                 for parent, (children, gather, worker) in tuple(expansions.items()):
                     if gather.key not in indexed and all(key in results for key in children):
                         indexed[gather.key] = gather
@@ -3536,13 +3662,22 @@ def run_graph(
                 _session.completed.update(results.keys() & _session.chain_keys)
                 if group is not None:
                     group.authority.reconcile(set(), _session.completed)
-    except BaseException:
+    except BaseException as error:
+        from .records import record_task_failure
+
+        try:
+            failed = group.failed_task if group is not None else next(iter(running), None)
+            if failed is not None and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+                record_task_failure(failed, error)
+        except Exception:  # attribution is bookkeeping: it must never replace the run's own error
+            _LOG.debug("could not attribute the failed task", exc_info=True)
         if _session is not None:
             _session.close(abort=True)
         elif group is not None:
             group.close(abort=True)
         raise
     finally:
+        progress.close()
         retained = residents.values() if _session is None else ()
         for token in (*requests.values(), *retained):
             token.release()

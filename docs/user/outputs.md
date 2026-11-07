@@ -30,16 +30,16 @@ CSV uses standard quoting, including for JSON cells containing commas or quotes.
 CSV files have no pandas index column. Ordinary floats use shortest round-trip
 text; `NaN` and `None` become empty cells, and booleans become `True` or `False`.
 Row-dictionary and painting writers encode list, tuple and dictionary cells as
-JSON with sorted dictionary keys. **Pedigree tables use Python tuple reprs**:
-`('sample_a', 'sample_b')`, `()`, and nested tuples for `configuration_candidates`.
-Do not parse these cells as JSON. Quality tables have their own fixed decimal
-formats and `NA` spelling, described below.
+JSON with sorted dictionary keys. Cohort-sized pedigree collections use counts
+and ordered JSON values in `pedigree/cell_items.csv`; see [collection tables](#collection-tables).
+Quality tables have their own fixed decimal formats and `NA` spelling, described below.
 
 An integer column containing a missing floating value can contain `1.0`; an
 integer-only column contains `1`. This is intentional column-wise text inference.
 No rounding or integer cast is applied to make unresolved pedigree rows look like
 resolved rows. Each output file is written through a neighbouring temporary file
-and atomically placed; the export manifest is written last.
+and atomically placed; the export manifest is written last. Failed writes remove
+their private temporary files and preserve any existing complete destination.
 
 ## D1: founder VCF
 
@@ -185,7 +185,7 @@ base column, position, meaning and unit, including all 17 pedigree tables.
 |---|---|
 | `quality/samples.csv`, `quality/segments.csv` | Samples in input order; inherited-segment rows in recorded order; written only where sample QC ran |
 | `painting/founder_support.csv`, `founder_support_windows.csv` | component, founder row, then window in genomic order |
-| `painting/assembly_search.csv`, `founder_counts.csv` | Recorded final assembly join searches; components in order |
+| `painting/assembly_search.csv`, `founder_counts.csv`, `assembly_search_shadow_alternatives.csv` | Recorded final assembly join searches; components in order |
 | `painting/sample_switches.csv` | Input sample order |
 | `painting/sample_segments.csv` | Input sample, component, track, maximal run of one status/label/member set |
 | `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component |
@@ -194,7 +194,7 @@ base column, position, meaning and unit, including all 17 pedigree tables.
 | `relatedness/pairs.csv` | Recorded sample-pair order; **optional and off by default** |
 | `pedigree/*.csv` | Stable input order where a `sample` column exists; otherwise recorded order |
 | `founder_refit/summary.csv`, `family_phase/summary.csv` | One recorded summary per contig |
-| `recombination/map.csv`, `recombination/crossovers.csv`, `recombination/meioses.csv`, `recombination/coverage.csv`, `recombination/junctions.csv`, `recombination/summary.csv` | bins, edges, calls or loci in recorded order; genome-wide tables concatenate contigs in configuration order |
+| `recombination/map.csv`, `recombination/crossovers.csv`, `recombination/meioses.csv`, `recombination/coverage.csv`, `recombination/junctions.csv`, `recombination/junction_members.csv`, `recombination/summary.csv` | bins, edges, calls or loci in recorded order; genome-wide tables concatenate contigs in configuration order |
 | `ties/decisions.csv` | Contigs, stage order, record-group string, kind string; run-level pedigree last |
 | `simulation/truth_pedigree.csv` | Analysed samples in pedigree order; parent names may identify unsequenced individuals |
 
@@ -245,10 +245,93 @@ The search and count rules are described from [AJ14](../methods/assembly.md#aj14
 to [AJ25](../methods/assembly.md#aj25). List and dictionary values are JSON. Times and work counters are diagnostics. Feedback
 searches belong to selection's context assemblies.
 
+Task resource detail is retained in `run_records/*.tasks.jsonl`, including after
+success or failure. The matching invocation JSON holds `task_count` and
+`task_summaries`, one aggregate per stage: task outcomes, summed measured task
+wall and CPU seconds, maximum measured task peak bytes, maximum starting and
+peak thread counts, and known task failures. Missing measurements for failed
+tasks are not estimated. Nested stage timers retain inclusive and exclusive
+wall time separately; summed task wall time can exceed invocation wall time.
+Readers also accept legacy invocation JSON containing an embedded `tasks` list.
+Status does not read legacy live task logs without aggregates; it reports their
+published task count and stage timers.
+
+### Collection tables
+
+`painting/assembly_search_shadow_alternatives.csv` contains one row per shadow
+alternative. The parent key is `contig, assembly_search_row`; the latter is a
+zero-based ordinal across all search events and closing records within a contig.
+Level and span can repeat and are not a unique key. `alternative` is the
+zero-based list position; `value` is the original alternative dictionary as
+sorted-key JSON, preserving nulls and absent keys. The parent's
+`shadow_alternatives` cell is the number of alternatives: zero for an empty list,
+empty when the field is absent. Group on the parent key, order by `alternative`
+and JSON-decode `value` to recover the recorded list exactly.
+
+`painting/assembly_search_items.csv` separates symmetric and plateau families:
+`panels`, `alternatives`, `observed_panels`, `replay_panels`,
+`cycle_excluded_panels`, `values`, `minimum_switches` and `source_passes`.
+Each parent list becomes the bounded JSON descriptor `{"items": COUNT}`.
+Scalar census values in the same column remain scalar. Child rows carry
+`contig, assembly_search_row, column, item, value`; `value` is a JSON element.
+Order items by index and JSON-decode them to reconstruct each list, including
+empty lists. The replay budget bounds executed continuations, not all recorded
+alternatives, which is why these lists also use child rows.
+
+`pedigree/cell_items.csv` separates the following cohort-sized collections. Its
+key is `source_table, sample, column, item` for sample tables and
+`source_table, parent, child, column, item` for `sibling_guard`. Unused sample or
+parent/child keys are empty. `source_table` omits `.csv`, `column` is snake_case,
+`item` is zero-based and `value` is JSON. Parent cells give item counts. Empty
+collections have count zero and no item rows. Items retain record order; they
+are grouped by table and column, then parent-row input order (recorded order for
+the sibling guard).
+
+| Parent table | Collection columns | Decoded item |
+|---|---|---|
+| `tier_b_candidate_sets`, `call_explanations` | `parent1_candidates`, `parent2_candidates` | Sample name |
+| `tier_b_candidate_sets`, `call_explanations` | `configuration_candidates` | List of zero, one or two parent names |
+| `diagnostics` | `parent1_candidate_set`, `parent2_candidate_set` | Sample name |
+| `diagnostics` | `configuration_support_set`, `evidence_configuration_set` | Original formatted configuration item, including its recorded decimal text |
+| `exclusion_diagnostics` | `compatible_candidates`, `supported_reverse_candidates`, `remaining_candidates` | Sample name |
+| `sibling_guard` | `dropped_members` | Original sample/reason item |
+
+To reconstruct tuple text for a candidate or exclusion cell, form a tuple of
+decoded items and use Python `repr`; configuration items become inner tuples.
+Brace-set cells join decoded names with commas inside braces. Support,
+evidence-configuration and dropped-member cells join decoded items with
+semicolons. This recovers their complete former cell text, including item order
+and formatting, without parsing delimiters inside sample identifiers.
+
+`recombination/junction_members.csv` has `contig, locus, column, item, value`.
+`column` is `parents` or `children`; values are the original semicolon-delimited
+text entries. Joining them with semicolons in item order recovers the original
+junction cell exactly. The corresponding cells in `junctions.csv` contain item
+counts. Repeated child names remain repeated.
+
+`founder_refit/excluded_samples.csv` contains `contig, item, sample`: one row
+per excluded sample, with a zero-based item index in recorded order. Its parent
+is the contig row in `founder_refit/summary.csv`, where `excluded_samples` is a
+count. Group child rows by contig and order by item to recover the complete
+original JSON list. An empty list has count zero and no child rows.
+
+Other collection cells have explicit producer bounds: assembly joins use at
+most `AssemblyParameters.batch_size` input components (default 10); nearest
+shadow arrays use `CountRuleParameters.shadow_combinations` evaluations (default
+2048); refit histories use `100 + 20 K` sweeps and count decisions use the
+incoming-count domain up to twice K. Join replay work arrays use at most four executions; refinement continuations
+use 16 leaves. Their unbudgeted source families use child rows.
+Painting candidate rows and export partner sets use at most K founder labels.
+Proposal, census, timer and work-counter dictionaries have fixed key vocabularies;
+leading evaluated alternatives contain at most two entries. These are bounds on
+collection cardinality, not a universal character limit for arbitrary sample
+names or custom parameter values. JSON summary documents may grow in rows or
+keys; they are documents rather than table cells.
+
 ### Relatedness selection and JSON
 
 `[relatedness] pairwise_ibd = true` enables the optional O(N² L) pair calculation.
-It is stored per invocation in `outputs/selection`, outside every scientific
+It is stored per invocation in `output_selection.json` in the output directory, outside every scientific
 identity. Families are unaffected. The results reader exposes pair fields only
 when selection is on **and** the checked `relatedness/pairs` publication exists.
 When off, report publication removes a stale pairs CSV while retaining the stored
@@ -274,22 +357,24 @@ no pair-selection key.
 
 ### Pedigree tables and JSON
 
-The 17 CSV names, in publication order, are `tier_b_relationships`,
+The 17 parent CSV names, in publication order, are `tier_b_relationships`,
 `tier_b_partial_relationships`, `tier_a_relationships`,
 `tier_a_partial_relationships`, `complete_relationships`, `tier_b_candidate_sets`,
 `parent_state_calls`, `diagnostics`, `call_explanations`, `alternative_explanations`,
 `search_diagnostics`, `exclusion_evidence`, `exclusion_diagnostics`,
 `evidence_summary`, `chromosome_summary`, `relative_contrasts`, `sibling_guard`.
-Optional views can be absent; absence is distinct from an empty available table.
+`cell_items.csv` follows these parent tables. Optional views can be absent;
+absence is distinct from an empty available table.
 
 The first six relationship/candidate views insert `parent_slot_basis` after `parent2`
 when slot assignment is available: `unordered`, `single`, `none`. Slots do not
 encode maternal/paternal labels. Diagnostic configurations retain their internal
 order. `parent_state` is `zero_observed_parents`, `one_observed_parent`,
 `two_observed_parents` or `unresolved`; an unresolved count is empty.
-`configuration_support_set` is `state:parents:prob` text, with semicolon-separated
-configurations and three-decimal probability. M0 uses `external+external`.
-Nested `configuration_candidates` retain tuple reprs. Alternatives list the retained
+`configuration_support_set` items use `state:parents:prob` text with
+three-decimal probability. M0 uses `external+external`. These items and the
+parent-name configuration lists are stored in `cell_items.csv`, with counts in
+the parent cells. Alternatives list the retained
 local/graph and finite identity-score alternatives in ascending configuration row.
 
 Interval-bearing exclusion tables append the lower, upper and exactness columns
@@ -654,3 +739,9 @@ Absent optional products return the documented optional result; incompatible
 schema or derivation is an error. `stage_panels` supplies original component/row
 axes for evaluation, including founder refit; the export release is a distinct
 view with carrier/ambiguity withholding and segment-local row names.
+
+
+Collection-file schemas are generated alongside the parent columns:
+`painting/assembly_search_shadow_alternatives.csv`, `painting/assembly_search_items.csv`,
+`pedigree/cell_items.csv`
+and `recombination/junction_members.csv`. Each has its header even with no items.

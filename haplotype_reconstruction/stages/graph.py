@@ -272,10 +272,10 @@ def bind_tasks(
         if task.key != key:
             raise SettingsError(f"stage action key {task.key} does not match logical graph key {key}")
         dependencies = tuple(dict.fromkeys((*node.dependencies, *task.depends_on)))
-        # A contig's stage tasks share its pinned worker. Its report tasks only read published records and write
-        # report files: they run on any free worker rather than queue behind the contig's later stages there.
+        # A contig's inference chain shares its pinned worker. Recombination, export and reports consume
+        # published records and retain no chain state, so any free worker may run them.
         affinity = task.affinity
-        if affinity is None and key.scope != "run" and key.stage != "report":
+        if affinity is None and key.scope != "run" and key.stage not in {"report", "recombination", "export"}:
             affinity = key.scope
         tasks.append(replace(task, depends_on=dependencies, affinity=affinity))
     return tuple(tasks)
@@ -363,13 +363,19 @@ def run_checks(
     return ()
 
 
-def execution_options(graph: RunGraph, cut: Cut, *, contig_costs: Mapping[str, float] | None = None) -> dict[str, Any]:
+def execution_options(
+    graph: RunGraph,
+    cut: Cut,
+    *,
+    contig_costs: Mapping[str, float] | None = None,
+    phase_costs: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
     """Translate ENG-03 early nodes and ENG-23 contig costs into executor policy.
 
-    Costs come from scheduler.planning_cost(D,N,L), never measured pressure.
-    Early ready refits and the relatedness gather precede ordinary chain work, and a contig's recombination (short)
-    precedes its export on the contig's worker: the run's recombination report waits for every contig's
-    recombination, an export only for the export manifest.
+    Chain costs come from scheduler.planning_cost(D,N,L), never measured pressure.
+    The application supplies phase size estimates separately. Early ready refits
+    and the relatedness gather precede ordinary chain work. Ready recombination
+    precedes export; both consume immutable phase products on any free worker.
     These priorities/leases add no model edge or scientific identity input.
     """
     from ..engine.scheduler import ChainPlan
@@ -378,6 +384,12 @@ def execution_options(graph: RunGraph, cut: Cut, *, contig_costs: Mapping[str, f
     if any(value < 0 for value in costs.values()):
         raise SettingsError("contig planning costs must be nonnegative")
     scale = 1.0 + sum(costs.values())
+    # Preserve the early-refit/relatedness/recombination priority classes while
+    # ordering phase contigs by size within their own class.
+    phase_priorities = costs
+    if phase_costs is not None:
+        phase_total = max(1.0, sum(phase_costs.values()))
+        phase_priorities = {c: (scale - 1.0) * value / phase_total for c, value in phase_costs.items()}
     priorities = {
         key: (
             3 * scale
@@ -386,6 +398,8 @@ def execution_options(graph: RunGraph, cut: Cut, *, contig_costs: Mapping[str, f
             if key.stage == "relatedness"
             else scale
             if key.stage == "recombination"
+            else phase_priorities.get(key.scope, 0.0)
+            if key.stage == "phase"
             else costs.get(key.scope, 0.0)
         )
         for key in cut.nodes

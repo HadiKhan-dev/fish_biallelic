@@ -418,7 +418,7 @@ Cost and scope: O(C A); O(C E). These terms describe the unit’s work/storage d
 <a id="pd16"></a>
 ## pd16 Chromosome bootstrap and LOCO resampling
 
-Draw all chromosome bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule leave-one-contig-out fits first and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector’s multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions.
+Draw all chromosome bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule leave-one-contig-out fits first and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector’s multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions. The stage groups consecutive planned fits into batches by estimated alternative-row scans, with a work ceiling and a target of two waves per planned worker when the fit count allows. Each process attaches the read-only inputs once per batch and evaluates its fits serially. The gather restores the complete original plan before reducing integer counts; batching neither redraws multiplicities nor changes denominators.
 
 Implementation: [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
 

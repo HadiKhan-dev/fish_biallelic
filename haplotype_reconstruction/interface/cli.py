@@ -294,10 +294,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     from ..core.errors import InputError, ResourceError, SettingsError
+    from ..engine.runtime import RunInterrupted, signal_boundary
 
     try:
-        return _dispatch(args)
-    except KeyboardInterrupt:
+        with signal_boundary(lambda: None):
+            return _dispatch(args)
+    except (KeyboardInterrupt, RunInterrupted):
         print("haplotypes: interrupted; recorded state is resumable", file=sys.stderr)
         return 130
     except SettingsError as error:

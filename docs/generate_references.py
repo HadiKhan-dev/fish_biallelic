@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 DOCS = ROOT / "docs"
 PACKAGE = ROOT / "haplotype_reconstruction"
 if str(ROOT) not in sys.path:
@@ -258,9 +260,8 @@ def main(argv=None) -> int:
                 stale.append(str(path.relative_to(ROOT)))
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(text)
-            temporary.replace(path)
+            with atomic_path(path) as temporary:
+                temporary.write_text(text)
     if stale:
         sys.stdout.write("Stale references: " + ", ".join(stale) + "\n")
     return int(bool(stale))

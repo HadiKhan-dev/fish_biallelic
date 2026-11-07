@@ -274,7 +274,7 @@ def _calibrated(
 
 def _resampled_retained(
     reference: ResidentRef,
-    fitted: tuple[FitResult, ...],
+    fitted: tuple[tuple[FitResult, ...], ...],
     *,
     workers: int = 1,
     file: CheckpointFile | None = None,
@@ -286,7 +286,7 @@ def _resampled_retained(
     inputs, parameters, state, planned, shared = resident_value(reference)
     try:
         release_shared_value(shared)
-        decided = science.complete_decision(state, resampling.combine(state.inputs, planned, fitted), parameters)
+        decided = science.complete_decision(state, resampling.combine(state.inputs, planned, (result for batch in fitted for result in batch)), parameters)
     finally:
         release_resident(reference)
     return _requested(

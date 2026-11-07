@@ -46,6 +46,7 @@ def write(
     previous: ExportRecord | None = None,
     *,
     release_phase_seconds: Mapping[str, float] | None = None,
+    map_work=None,
 ) -> ExportRecord:
     """Return the matching record or render and remove files superseded by this export.
 
@@ -66,6 +67,7 @@ def write(
         input_sample_ids=results.input_sample_ids,
         synthetic=results.manifest["source"]["kind"] == "simulation",
         release_phase_seconds=release_phase_seconds,
+        map_work=map_work,
     )
     if previous is not None:
         for name in set(previous.entry["files"]) - set(entry["files"]):
@@ -83,9 +85,11 @@ def make_task(
     previous: ExportRecord | None = None,
     depends_on: tuple[TaskKey, ...] = (),
     working_set_bytes: int = 0,
+    max_cores: int = 1,
     release_phase_seconds: Mapping[str, float] | None = None,
+    map_work=None,
 ) -> Task:
-    """Declare a serial contig writer; the interface supplies release/sites/phase dependencies."""
+    """Declare a contig writer with bounded parallel files; the interface supplies release/sites/phase dependencies."""
     products = set(settings.products)
     inputs = []
     if products & {"founders", "samples"}:
@@ -98,9 +102,9 @@ def make_task(
         TaskKey("export", "contig", scope=contig),
         write,
         args=(results, destination, contig, settings, identity, previous),
-        kwargs={"release_phase_seconds": release_phase_seconds},
+        kwargs={"release_phase_seconds": release_phase_seconds, "map_work": map_work},
         depends_on=depends_on,
         inputs=tuple(inputs),
         outputs=(RecordKey(contig, "export"),),
-        resources=ResourceRequest(working_set_bytes=working_set_bytes),
+        resources=ResourceRequest(max_cores=max_cores, working_set_bytes=working_set_bytes),
     )

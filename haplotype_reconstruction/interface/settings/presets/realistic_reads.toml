@@ -1,0 +1,13 @@
+# Plausible short-read sensitivity scenario, not an empirical fit; see docs/user/quickstart.md.
+# The generating model is independent of inference calibration. Explicit read keys win.
+[simulation.reads]
+read_length_bp = 150
+fragment_mean_bp = 375.0
+fragment_sd_bp = 150.0
+depth_cv = 0.3
+site_depth_cv = 0.5
+site_depth_window_bp = 1000
+count_dispersion = 0.1
+heterozygote_alt_probability = 0.48
+error_rate = 0.01
+dropout_fraction = 0.0

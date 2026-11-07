@@ -16,6 +16,14 @@ Two samplers, chosen by ``ReadModel.read_length_bp``:
   p = heterozygote_alt_probability != 1/2 is applied per read at heterozygous sites (a read of the
   disfavoured allele reports the other one with probability |2p - 1|); the error rate acts on
   homozygous cells only.
+
+Optional site factors are mean-one lognormal draws shared by all samples (one per site,
+or per occupied physical window). Optional independent gamma cell factors have mean one
+and variance count_dispersion. Conditional depth is Poisson in both samplers, hence gamma
+mixing gives negative-binomial marginals, Var(D | sample, site) = mu + alpha * mu**2.
+Fragments are drawn at the maximum target factor per sample and site-hits thinned to their
+target intensity, retaining the shared fragment's homologue. No extra draws or arithmetic
+on the historical rates occur when these options are off.
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ def sample_reads(
     """REF/ALT read counts int64[N, L, 2] of individuals with haplotypes hap0, hap1 (int8[N, L])."""
     if model.read_length_bp:
         return _fragment_reads(hap0, hap1, positions, depth, model, rng)
-    return _site_reads(hap0, hap1, depth, model, rng)
+    return _site_reads(hap0, hap1, positions, depth, model, rng)
 
 
 def _sample_factors(samples, model, rng):
@@ -56,11 +64,52 @@ def _sample_factors(samples, model, rng):
     return factor
 
 
-def _site_reads(hap0, hap1, depth, model, rng):
+def _site_factors(positions, model, rng):
+    """Population mean one, without finite-contig renormalisation (which changes the law).
+
+    Physical windows are anchored at bp zero; only occupied windows consume draws.
+    Window zero uses independent sites. Spatial sharing is separate from fragment sharing.
+    """
+    if not model.site_depth_cv:
+        return np.ones(len(positions))
+    sigma = np.sqrt(np.log1p(model.site_depth_cv**2))
+    if model.site_depth_window_bp:
+        windows, inverse = np.unique(np.asarray(positions) // model.site_depth_window_bp, return_inverse=True)
+        return rng.lognormal(-sigma * sigma / 2, sigma, size=len(windows))[inverse]
+    return rng.lognormal(-sigma * sigma / 2, sigma, size=len(positions))
+
+
+def _fragment_envelopes(positions, target, lo, span, f_max):
+    """Start windows of ``f_max`` bp over [lo, lo + span), with each window's thinning envelope.
+
+    A fragment starting in window k covers sites only in [start, start + f_max), inside windows
+    k and k + 1, so max(block maximum k, block maximum k + 1) bounds every target such a
+    fragment can reach. Returns window starts, widths (the last may be shorter) and envelopes;
+    a window that reaches no site has envelope zero and draws no fragment.
+    """
+    edges = lo + np.arange(0, span, f_max, dtype=np.int64)
+    widths = np.minimum(f_max, lo + span - edges)
+    first = np.searchsorted(positions, edges)
+    stop = np.searchsorted(positions, edges + widths)
+    block = np.zeros(len(edges))
+    nonempty = stop > first
+    if np.any(nonempty):
+        # Blocks are disjoint and contiguous: each nonempty block runs to the next one's first site.
+        block[nonempty] = np.maximum.reduceat(target, first[nonempty])
+    local = block.copy()
+    local[:-1] = np.maximum(block[:-1], block[1:])
+    return edges, widths, local
+
+
+def _site_reads(hap0, hap1, positions, depth, model, rng):
     samples, sites = hap0.shape
     factor = _sample_factors(samples, model, rng)
     width = int(sites * model.dropout_fraction)
     lam = depth * factor[:, None] / (1 - width / sites)
+    if model.site_depth_cv:
+        lam = lam * _site_factors(positions, model, rng)[None, :]
+    if model.count_dispersion:
+        lam = lam * rng.gamma(1 / model.count_dispersion, model.count_dispersion, size=(samples, sites))
     counts = rng.poisson(lam=lam, size=(samples, sites))
     if width:
         starts = rng.integers(0, sites - width + 1, size=samples)
@@ -91,6 +140,7 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
     lengths = np.clip(np.rint(mean + sd * ndtri(quantiles)), f_min, f_max)
     covered_per_fragment = float(np.mean(np.minimum(lengths, 2 * r)))
     factor = _sample_factors(samples, model, rng)
+    site_factor = _site_factors(positions, model, rng) if model.site_depth_cv else None
     width = int(sites * model.dropout_fraction)
     lo = int(positions[0]) - f_max
     span = int(positions[-1]) + 1 - lo
@@ -100,8 +150,26 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
     bias = model.heterozygote_alt_probability - 0.5
     for sample in range(samples):
         rate = depth * factor[sample] / (1 - width / sites) / covered_per_fragment
-        n = int(rng.poisson(rate * span))
-        start = lo + rng.integers(0, span, size=n)
+        target = site_factor
+        if model.count_dispersion:
+            target = rng.gamma(1 / model.count_dispersion, model.count_dispersion, size=sites)
+            if site_factor is not None:
+                target *= site_factor
+        if target is None:
+            n = int(rng.poisson(rate * span))
+            start = lo + rng.integers(0, span, size=n)
+        else:
+            # Conditional Poisson thinning gives each cell its target rate while retaining
+            # common fragment starts/lengths/homologues across sites. Gamma mixing then
+            # gives exact NB marginals, unlike duplicating already sampled read counts.
+            # Starts are drawn per window of f_max bp at the window's own envelope (the
+            # largest target any fragment starting there can reach), so candidate
+            # fragments scale with local, not contig-wide, maxima of the target.
+            edges, widths, local = _fragment_envelopes(positions, target, lo, span, f_max)
+            per_window = rng.poisson(rate * local * widths)
+            n = int(per_window.sum())
+            start = np.repeat(edges, per_window) + rng.integers(0, np.repeat(widths, per_window))
+            envelope = np.repeat(local, per_window)
         length = np.clip(np.rint(rng.normal(mean, sd, size=n)), f_min, f_max).astype(np.int64)
         which = rng.integers(0, 2, size=n)
         first_end = start + np.minimum(length, r)
@@ -111,7 +179,7 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
             (np.searchsorted(positions, start), np.searchsorted(positions, first_end)),
             (np.searchsorted(positions, second_start), np.searchsorted(positions, second_end)),
         )
-        site_parts, hap_parts = [], []
+        site_parts, hap_parts, fragment_parts = [], [], []
         for first, stop in intervals:
             size = stop - first
             keep = size > 0
@@ -121,10 +189,20 @@ def _fragment_reads(hap0, hap1, positions, depth, model, rng):
             offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
             site_parts.append(np.repeat(first, size) + offsets)
             hap_parts.append(np.repeat(owner, size))
+            if target is not None:
+                fragment_parts.append(np.repeat(np.flatnonzero(keep), size))
         if not site_parts:
             continue
         site = np.concatenate(site_parts)
         owner = np.concatenate(hap_parts)
+        if target is not None:
+            # One uniform mark per fragment couples retention across all its hits.
+            # Shared-hit intensity is proportional to min(target_i, target_j), so an
+            # unrelated high-depth site cannot change local dependence via the envelope.
+            mark = rng.random(n)
+            fragment = np.concatenate(fragment_parts)
+            keep = mark[fragment] < target[site] / envelope[fragment]
+            site, owner = site[keep], owner[keep]
         allele = np.where(owner == 0, haplotypes[0][sample, site], haplotypes[1][sample, site]).astype(np.int64)
         het = haplotypes[0][sample, site] != haplotypes[1][sample, site]
         if bias:

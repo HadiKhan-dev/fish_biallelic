@@ -121,7 +121,8 @@ For parallel jobs on shared storage, use the [workflow commands](workflow.md).
 ## Resume and source identity
 
 Resume checks each publication's derivation: consumed inputs, scientific parameters,
-upstream identities, code dependencies and numerical policy. It does not trust a
+upstream identities, code dependencies and numerical policy. A release label
+alone does not enter these identities. It does not trust a
 completion marker alone. A changed consumed input payload is refused; touching a
 file without changing consumed content does not change that identity. The source
 binding includes alleles, relevant read counts, fallback GT classes where AD is
@@ -134,10 +135,35 @@ invalidate the binding; use a fresh run/checkpoint root for a different analysis
 A 4.0 command never resumes a 3.5 checkpoint root. Resume is at published-product
 boundaries, not at an unrecorded intermediate family-phase iteration.
 
-`status` reports available checked products and recorded progress without decoding
-large scientific payloads. A clean stop is distinct from completion. CLI exit codes
-are 0 for success/clean stop, 2 for settings or checkpoint mismatch, 3 for input
-errors, 4 for resource errors, 130 for interruption, and 1 for an unexpected failure
+`status` reports durable products and recorded progress without decoding large
+scientific payloads or reading the task log. It checks completion certificates
+against committed container headers: every referenced record must still be the
+version present when completion was checked and published. A later replacement
+makes the certificate stale. Scientific resume independently checks derivations.
+
+Stage publications save disposable `*.ckpt.index.json` header snapshots beside
+the checkpoint containers. Status reads those snapshots and scans subsequent
+appends; a missing, truncated or stale snapshot falls back to scanning headers.
+It writes nothing, so archived and read-only checkpoint roots remain usable.
+The status latency target is ten seconds for an N = 320 run with saved indexes.
+A long unpublished tail, missing indexes or slow storage can require a full
+header scan; legacy embedded task lists add a linear JSON read.
+
+The run log prints progress every ten minutes and at each chromosome/stage
+completion. It reports completed/known executor calls, running tasks, claimed CPU
+slots and the memory governor's sampled live memory. Known totals grow when a
+task expands into components or blocks; claims describe scheduler occupancy, not
+measured operating-system CPU utilisation. These observations never control
+scientific work. Refinement cap summaries appear once per chromosome and stage
+(count or polish), with totals and affected component-level unit counts. The full
+fit labels, individual counts and limits stay in component checkpoint records.
+
+A clean stop is distinct from completion. SIGTERM and SIGINT stop workers,
+release run-owned resources and record the attempt as `interrupted`, distinct
+from `failed`. Resume the same command to reuse committed products. Allow the
+process time to clean up before forcing a kill; SIGKILL cannot unwind cleanup. CLI exit codes are 0 for
+success/clean stop, 2 for settings or checkpoint mismatch, 3 for input errors,
+4 for resource errors, 130 for interruption, and 1 for an unexpected failure
 with an error report.
 
 ## Optional pair reports and re-export

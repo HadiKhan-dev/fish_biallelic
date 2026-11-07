@@ -40,6 +40,7 @@ __all__ = [
     "kernel_run",
     "start_forkserver",
     "signal_boundary",
+    "RunInterrupted",
     "available_memory_bytes",
     "resident_bytes",
     "memory_pressure",
@@ -532,6 +533,17 @@ def profiling() -> bool:
     return _RUN is not None and _RUN.profile
 
 
+class RunInterrupted(SystemExit):
+    """A coordinator received a termination request; committed products remain resumable."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
+        super().__init__(130)
+
+    def __str__(self) -> str:
+        return signal.Signals(self.signum).name
+
+
 @contextmanager
 def signal_boundary(cancel: Callable[[], None]) -> Iterator[None]:
     """Stop scheduling and unwind verified-worker cleanup on SIGINT or SIGTERM."""
@@ -543,7 +555,7 @@ def signal_boundary(cancel: Callable[[], None]) -> Iterator[None]:
 
     def stop(signum: int, frame: Any) -> None:
         cancel()
-        raise SystemExit(130)
+        raise RunInterrupted(signum)
 
     saved = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
@@ -558,6 +570,14 @@ def task_failure(error: BaseException) -> Exception:
     if isinstance(error, Exception):
         return error
     return RuntimeError(f"task aborted with {type(error).__name__}: {error}")
+
+
+# After forwarding a termination request, the parent waits this long for the isolated coordinator before
+# killing its process group. It must exceed the coordinator's own bounded cleanup (terminated workers get
+# workers.TERMINATE_GRACE_SECONDS, then a forced kill and join, then pool and transport close): a group kill
+# during that cleanup leaves the coordinator's named semaphores to the resource tracker. It stays inside a
+# batch system's usual SIGTERM-to-SIGKILL window (30 s by default in Slurm).
+COORDINATOR_GRACE_SECONDS = 20.0
 
 
 def isolated(
@@ -593,17 +613,18 @@ def isolated(
             with signal_boundary(lambda: None):
                 code = process.wait()
         except BaseException:
-            os.killpg(process.pid, signal.SIGTERM)
+            # Let the coordinator unwind pools and unlink their semaphores first. Signalling its whole
+            # session also kills the forkserver/resource tracker before owners can release their resources.
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
             try:
-                process.wait(timeout=3)
+                process.wait(timeout=COORDINATOR_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            finally:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                process.wait()
             raise
         if result.exists():
             kind, value = pickle.loads(result.read_bytes())
@@ -615,7 +636,7 @@ def isolated(
                 return value
         if code:
             if code in (130, -signal.SIGTERM, -signal.SIGINT):
-                raise SystemExit(130)
+                raise RunInterrupted(signal.SIGTERM if code == -signal.SIGTERM else signal.SIGINT)
             raise RuntimeError(f"isolated runtime {process.pid} exited with status {code}")
         raise RuntimeError(f"isolated runtime {process.pid} exited without a successful result")
 
@@ -628,6 +649,8 @@ def _isolated_entry() -> None:
         function, args, kwargs = pickle.loads(payload)
         task_boundary()
         value = function(*args, **kwargs)
+    except (KeyboardInterrupt, RunInterrupted):
+        raise SystemExit(130) from None
     except BaseException as error:
         failure = task_failure(error)
         result.write_bytes(pickle.dumps(("error", failure)))

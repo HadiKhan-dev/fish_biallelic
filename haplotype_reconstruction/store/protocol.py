@@ -461,6 +461,9 @@ def mark_complete(
     if not records or not is_complete(file, records):
         raise InvariantError(f"{file.label}: cannot mark {step} complete before its records exist")
     file.put_once(f"complete/{step}", dict(records=records))
+    from .status_index import save_index
+
+    save_index(file)
     if marker_path is not None:
         marker_path = Path(marker_path)
         marker_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,7 @@ values. Method: docs/methods/pedigree.md; baseline pedigree/tables.py:58-458.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import fields
@@ -16,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from ...contracts import pedigree as records
-from .tables import record_mapping, write_frame, write_json
+from .tables import record_mapping, write_frame, write_json, write_rows
 
 __all__ = ["render", "write_pedigree", "COLUMNS"]
 
@@ -513,7 +514,9 @@ EXCLUSION_SUMMARY_FIELDS = (
 )
 
 
-def write_pedigree(output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None) -> list[Path]:
+def write_pedigree(
+    output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None, *, map_work=None
+) -> list[Path]:
     """Write every table of ``product.views``, the calibration and the run summary; returns the paths written.
     ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
     per-sample tables list their rows in it (the records keep the canonical order, release 2.1)."""
@@ -522,11 +525,15 @@ def write_pedigree(output: str | Path, product: records.Pedigree, input_ids: Seq
     frames = render(product.views, product.sample_ids)
     exclusion = record_mapping(product.exclusion)
     directory = Path(output) / "pedigree"
-    written = [
-        write_frame(directory / f"{field.name}.csv", frame_in_input_order(frames[field.name], input_ids))
-        for field in fields(product.views)
-        if field.name in frames and frames[field.name] is not None
+    items = separate_collections(frames, product.views, product.sample_ids, input_ids)
+    def write_table(name):
+        return write_frame(directory / f"{name}.csv", frame_in_input_order(frames[name], input_ids))
+
+    names = [
+        field.name for field in fields(product.views) if field.name in frames and frames[field.name] is not None
     ]
+    written = list(map(write_table, names)) if map_work is None else map_work(write_table, names)
+    written.append(write_rows(directory / "cell_items.csv", items, columns=CELL_ITEM_COLUMNS))
     written.append(write_json(directory / "evidence_calibration.json", record_mapping(product.calibration)))
     written.append(
         write_json(
@@ -680,9 +687,9 @@ TIER_B_CANDIDATE_SETS_COLUMNS = (
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     Parent1: first parent identifier; empty for an unobserved parent (text).
     Parent2: second parent identifier; empty for an unobserved parent (text).
-    Parent1Candidates: first-parent candidate tuple, rendered using Python tuple text (text).
-    Parent2Candidates: second-parent candidate tuple, rendered using Python tuple text (text).
-    ConfigurationCandidates: nested parent-configuration tuples, rendered using Python tuple text (text).
+    Parent1Candidates: number of ordered items in pedigree/cell_items.csv (count).
+    Parent2Candidates: number of ordered items in pedigree/cell_items.csv (count).
+    ConfigurationCandidates: number of ordered items in pedigree/cell_items.csv (count).
     ExactConfigurationResolved: exact configuration resolved (1).
     InferenceStatus: inference status (1).
     Parent1Supported: parent1 supported (1).
@@ -909,10 +916,10 @@ DIAGNOSTICS_COLUMNS = (
     TierAParent2: tier a parent2 (1).
     TierBParent1: tier b parent1 (1).
     TierBParent2: tier b parent2 (1).
-    ConfigurationSupportSet: configuration support set (1).
-    Parent1CandidateSet: parent1 candidate set (1).
-    Parent2CandidateSet: parent2 candidate set (1).
-    EvidenceConfigurationSet: evidence configuration set (1).
+    ConfigurationSupportSet: number of ordered items in pedigree/cell_items.csv (count).
+    Parent1CandidateSet: number of ordered items in pedigree/cell_items.csv (count).
+    Parent2CandidateSet: number of ordered items in pedigree/cell_items.csv (count).
+    EvidenceConfigurationSet: number of ordered items in pedigree/cell_items.csv (count).
     TierBFinalStateCall: tier b final state call (1).
     TierBReleaseEvidence: tier b release evidence (1).
 """
@@ -956,9 +963,9 @@ CALL_EXPLANATIONS_COLUMNS = (
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     Parent1: first parent identifier; empty for an unobserved parent (text).
     Parent2: second parent identifier; empty for an unobserved parent (text).
-    Parent1Candidates: first-parent candidate tuple, rendered using Python tuple text (text).
-    Parent2Candidates: second-parent candidate tuple, rendered using Python tuple text (text).
-    ConfigurationCandidates: nested parent-configuration tuples, rendered using Python tuple text (text).
+    Parent1Candidates: number of ordered items in pedigree/cell_items.csv (count).
+    Parent2Candidates: number of ordered items in pedigree/cell_items.csv (count).
+    ConfigurationCandidates: number of ordered items in pedigree/cell_items.csv (count).
     ExactConfigurationResolved: exact configuration resolved (1).
     InferenceStatus: inference status (1).
     Parent1Supported: parent1 supported (1).
@@ -1080,9 +1087,9 @@ EXCLUSION_DIAGNOSTICS_COLUMNS = (
 
     Sample: sample identifier (text).
     EligibleCandidates: eligible candidates (count).
-    CompatibleCandidates: compatible candidates (1).
-    SupportedReverseCandidates: supported reverse candidates (1).
-    RemainingCandidates: remaining candidates (1).
+    CompatibleCandidates: number of ordered items in pedigree/cell_items.csv (count).
+    SupportedReverseCandidates: number of ordered items in pedigree/cell_items.csv (count).
+    RemainingCandidates: number of ordered items in pedigree/cell_items.csv (count).
     WeakestExclusionLogE: weakest exclusion log-evidence used for the released count (nats).
     ThresholdLogE: required exclusion log-evidence threshold (nats).
     CompleteCandidateEvidence: complete candidate evidence (1).
@@ -1156,7 +1163,7 @@ SIBLING_GUARD_COLUMNS = (
     SupportedMembers: supported members (1).
     DroppedLinked: dropped linked (1).
     DroppedHalfSib: dropped half sib (1).
-    DroppedMembers: dropped members (1).
+    DroppedMembers: number of ordered items in pedigree/cell_items.csv (count).
     TestedMembers: tested members (1).
     ExcludedMembers: excluded members (1).
     Call: call (1).
@@ -1186,3 +1193,92 @@ PARENT_SLOT_COLUMNS = ("ParentSlotBasis",)
 
     ParentSlotBasis: recorded unordered-parent orientation basis; no sex inference (text).
 """
+
+
+# These sets grow with the cohort, including under diffuse support. Probability
+# coverage is not a cardinality bound. Keep render()'s record-facing view intact;
+# only publication separates the cells.
+COLLECTION_COLUMNS = {
+    "tier_b_candidate_sets": ("Parent1Candidates", "Parent2Candidates", "ConfigurationCandidates"),
+    "call_explanations": ("Parent1Candidates", "Parent2Candidates", "ConfigurationCandidates"),
+    "diagnostics": (
+        "ConfigurationSupportSet",
+        "Parent1CandidateSet",
+        "Parent2CandidateSet",
+        "EvidenceConfigurationSet",
+    ),
+    "exclusion_diagnostics": ("CompatibleCandidates", "SupportedReverseCandidates", "RemainingCandidates"),
+    "sibling_guard": ("DroppedMembers",),
+}
+
+CELL_ITEM_COLUMNS = ("source_table", "sample", "parent", "child", "column", "item", "value")
+"""Columns in published order.
+
+    source_table: parent pedigree table basename, without .csv (text).
+    sample: parent row's sample key; empty for sibling_guard (text).
+    parent: sibling_guard parent key; empty for per-sample tables (text).
+    child: sibling_guard child key; empty for per-sample tables (text).
+    column: original collection column in snake_case (text).
+    item: zero-based item position in the original collection (1).
+    value: JSON string or parent-configuration list of at most two sample names (text).
+"""
+
+
+def separate_collections(frames, views, names, input_ids=None):
+    """Replace cohort-sized cells by counts and return their ordered lossless items.
+
+    Tuple cells use one JSON value per tuple element. The custom brace/semicolon
+    cells use their original formatted item text, preserving rounding and names.
+    Empty collections have count zero and no child rows.
+    """
+    from ...core.columns import column_name
+
+    items = []
+    exclusion_fields = {
+        "CompatibleCandidates": "compatible",
+        "SupportedReverseCandidates": "reverse",
+        "RemainingCandidates": "remaining",
+    }
+    for table, columns in COLLECTION_COLUMNS.items():
+        frame = frames[table]
+        if frame is None or frame.empty:
+            continue
+        rows = getattr(views, table)
+        if table == "sibling_guard":
+            rows = rows.rows
+        order = list(range(len(rows)))
+        if input_ids is not None and table != "sibling_guard":
+            position = {name: index for index, name in enumerate(input_ids)}
+            order.sort(key=lambda i: position.get(frame.iloc[i]["Sample"], len(position)))
+        for column in columns:
+            counts = [0] * len(rows)
+            for index in order:
+                row = rows[index]
+                field = exclusion_fields.get(column, snake(column))
+                value = getattr(row, field)
+                if column in SET_FIELDS or column == "ConfigurationCandidates":
+                    values = _value(column, value, names, table)
+                elif column in {"Parent1CandidateSet", "Parent2CandidateSet"}:
+                    values = tuple(str(names[i]) for i in value)
+                else:
+                    # Each item has at most two parent names (support/configuration)
+                    # or one sample/reason pair (the sibling guard).
+                    values = tuple(_value(column, (item,), names, table) for item in value)
+                counts[index] = len(values)
+                keys = (
+                    dict(sample=None, parent=frame.iloc[index]["Parent"], child=frame.iloc[index]["Child"])
+                    if table == "sibling_guard"
+                    else dict(sample=frame.iloc[index]["Sample"], parent=None, child=None)
+                )
+                for ordinal, item in enumerate(values):
+                    items.append(
+                        dict(
+                            source_table=table,
+                            **keys,
+                            column=column_name(column),
+                            item=ordinal,
+                            value=json.dumps(item, sort_keys=True),
+                        )
+                    )
+            frame[column] = counts
+    return items

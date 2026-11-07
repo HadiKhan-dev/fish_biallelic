@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 PACKAGE = ROOT / "haplotype_reconstruction"
 TARGET = ROOT / "docs/reference/records.md"
 
@@ -117,9 +119,8 @@ def main(argv=None):
             sys.stdout.write("Stale docs/reference/records.md\n")
         return int(stale)
     TARGET.parent.mkdir(parents=True, exist_ok=True)
-    tmp = TARGET.with_suffix(".tmp")
-    tmp.write_text(content)
-    tmp.replace(TARGET)
+    with atomic_path(TARGET) as tmp:
+        tmp.write_text(content)
     return 0
 
 

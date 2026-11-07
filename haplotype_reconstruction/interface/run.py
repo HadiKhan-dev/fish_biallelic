@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..core.errors import ResourceError, SettingsError
+from ..core.files import atomic_path
 from ..results.paths import RunPaths
 from .settings.load import default_output
 from .settings.schema import Settings
@@ -82,9 +83,8 @@ def error_report(error: BaseException, args: argparse.Namespace) -> Path:
         "message": str(error),
         "traceback": "".join(traceback.format_exception(error)),
     }
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n")
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
     return path
 
 
@@ -270,13 +270,11 @@ def _match_bound_configuration(
     _check_recombination_bindings(store, manifest, resolved)
 
 
-def _output_selection(store: CheckpointStore, settings: Settings) -> None:
-    """Publish invocation-local choices through the store's replaceable output capability."""
-    from ..core.digest import json_digest
-    from ..store.protocol import publish_output
-
+def _output_selection(output: Path, settings: Settings) -> None:
+    """Keep formatting choices beside their outputs, outside the checkpoint root."""
     payload = dict(schema=1, export_enabled=settings.export.enabled, pairwise_ibd=settings.relatedness.pairwise_ibd)
-    publish_output(store.run, "outputs/selection", json_digest(payload), payload, supersede=True)
+    with atomic_path(output / "output_selection.json") as temporary:
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
 
 
 def _initialise(prepared: PreparedRun, *, tie_reverse: bool, tie_keep: tuple[str, ...]) -> ResolvedConfiguration:
@@ -325,7 +323,7 @@ def _initialise(prepared: PreparedRun, *, tie_reverse: bool, tie_keep: tuple[str
                 manifest["source"]["reference_vcf"] = existing["source"].get("reference_vcf")
             store.bind_run_manifest(manifest)
             bind_resolved(store.run, resolved)
-            _output_selection(store, prepared.settings)
+            _output_selection(prepared.paths.output, prepared.settings)
             write_settings(prepared.settings, prepared.paths.output / "config.toml")
             mark_complete(
                 store.run,
@@ -383,6 +381,37 @@ def _check_initialized(root: str, identity: str) -> str:
     if resume(CheckpointStore(root).run, "configuration/resolved", identity) is None:
         raise SettingsError("run has not been initialized; use haplotypes init")
     return identity
+
+
+def _map_output(function, items):
+    """Supply formatters an ordered map bounded by this task's live CPU claim."""
+    from ..engine.scheduler import current_budget
+
+    return current_budget().thread_map(function, items, label="independent output writers")
+
+
+def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[str, float]:
+    """Plan longest contigs first from site positions, without decoding genotypes.
+
+    Evidence (or initial simulation reads) already carries the site-axis length.
+    A fresh VCF uses declared contig lengths when available. Missing sizes get
+    a neutral cost. These are scheduling hints only.
+    """
+    from ..store.store import CheckpointStore
+
+    store = CheckpointStore(prepared.paths.checkpoints)
+    costs = {}
+    lengths = {}
+    if prepared.source is not None and prepared.source.kind == "vcf":
+        lengths = prepared.source.inner.header.lengths
+    for contig in resolved.contigs:
+        file = store.contig(contig)
+        costs[contig] = float(max(1, lengths.get(contig, 1)))
+        key = "evidence" if file.has("evidence") else "simulation/reads"
+        if file.has(key):
+            positions = file.get(key, items=("positions",), path=("payload",))["positions"]
+            costs[contig] = float(max(1, len(positions)) * len(resolved.sample_ids))
+    return costs
 
 
 def _model_actions(
@@ -1135,6 +1164,7 @@ def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
         config,
         identity,
         None if previous is None else ExportRecord(**previous.payload),
+        map_work=_map_output,
     )
     publish_output(
         file,
@@ -1146,31 +1176,46 @@ def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
     return identity
 
 
-def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], full_length: bool) -> None:
-    """Publish the export manifest after every selected contig's durable output record."""
+def _export_manifest_part(root: str, output: str, contig: str, full_length: bool):
+    """Check one published export and collect its released identity flags."""
     from ..contracts.roles import require_schema
     from ..outputs.export.records import SCHEMA, ExportConfig
-    from ..outputs.export.run import write_founder_identity, write_manifest
     from ..store.protocol import read_output
 
     reader = _task_reader(output, root)
-    entries = []
-    for contig in contigs:
-        record = read_output(reader._store.contig(contig), "outputs/export", identity=lambda p: p["identity"])
-        if record is None:
-            raise SettingsError(f"{contig}: export record is missing")
-        expected = _export_identity(reader, contig, ExportConfig(full_length=full_length))
-        if record.identity != expected:
-            raise SettingsError(f"{contig}: export differs from current published products or options")
-        require_schema(record.payload, SCHEMA)
-        entries.append(dict(record.payload["entry"]))
-    write_founder_identity(Path(output) / "export", reader, contigs, ExportConfig(full_length=full_length).products)
+    record = read_output(reader._store.contig(contig), "outputs/export", identity=lambda p: p["identity"])
+    if record is None:
+        raise SettingsError(f"{contig}: export record is missing")
+    expected = _export_identity(reader, contig, ExportConfig(full_length=full_length))
+    if record.identity != expected:
+        raise SettingsError(f"{contig}: export differs from current published products or options")
+    require_schema(record.payload, SCHEMA)
+    release = reader.founder_release(contig)
+    if release is None:
+        raise SettingsError(f"{contig}: released founder identity flags are missing")
+    return dict(record.payload["entry"]), (contig, "founder_refit", release.identity_flags)
+
+
+def _write_export_manifest(
+    root: str, output: str, contigs: tuple[str, ...], full_length: bool, parts=None
+) -> None:
+    """Publish the manifest after ordered, independently checked chromosome parts."""
+    from ..outputs.export.records import ExportConfig
+    from ..outputs.export.run import write_founder_identity, write_manifest
+
+    reader = _task_reader(output, root)
+    if parts is None:
+        parts = tuple(_export_manifest_part(root, output, contig, full_length) for contig in contigs)
+    entries, flags = zip(*parts, strict=True)
+    write_founder_identity(
+        Path(output) / "export", reader, contigs, ExportConfig(full_length=full_length).products, collected=flags
+    )
     write_manifest(
         Path(output) / "export",
         Path(root),
         synthetic=reader.synthetic,
         reference=reader.manifest["source"].get("reference_vcf"),
-        contigs=entries,
+        contigs=list(entries),
         settings=ExportConfig(full_length=full_length),
     )
 
@@ -1234,6 +1279,9 @@ def _complete_workflow(
         else:
             raise InvariantError(f"{task.key}: stage did not return its declared publication identities")
     if not nodes:
+        if cut.step == "report":
+            with atomic_path(prepared.paths.output / "report.done") as temporary:
+                temporary.write_text("complete\n")
         return
     scopes = tuple(dict.fromkeys(key.scope for key in nodes if key.scope != "run"))
     name = cut.step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
@@ -1244,6 +1292,9 @@ def _complete_workflow(
     recorder.published(
         {key.container + "/" + key.key: identity for records in outputs.values() for key, identity in records.items()}
     )
+    if cut.step == "run" and not cut.clean_stop:
+        with atomic_path(prepared.paths.output / "report.done") as temporary:
+            temporary.write_text("complete\n")
 
 
 def _task_seconds(output: Path, stage: str) -> dict[str, float]:
@@ -1282,7 +1333,7 @@ def _phase_report(output: Path, reader: Results) -> Path:
 def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[TaskKey, Task]:
     """Declare output dependencies before cuts, preserving separate scientific release records."""
 
-    from ..engine.graph import RecordKey, ResourceRequest, Task, TaskKey
+    from ..engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
     from ..outputs.reports.tasks import run_tasks
     from ..results.reader import Results
 
@@ -1321,6 +1372,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
                 (root, output, c, prepared.settings.export.full_length),
                 depends_on=tuple(key(stage, c) for stage in ("sites", "release", "phase")),
                 outputs=(RecordKey(c, "outputs/export"),),
+                resources=ResourceRequest(1, min(3, prepared.cores)),
             )
     dependencies = {
         "quality": tuple(key("evidence", c) for c in resolved.contigs),
@@ -1336,12 +1388,25 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     if reader.synthetic:
         dependencies["truth"] = (key("init"),)
     if prepared.settings.export.enabled:
+        parts = tuple(
+            Task(
+                TaskKey("report", "contig", c, "export_manifest"),
+                _export_manifest_part,
+                (root, output, c, prepared.settings.export.full_length),
+                depends_on=(key("export", c),),
+            )
+            for c in resolved.contigs
+        )
+        actions.update((task.key, task) for task in parts)
         manifest_key = TaskKey("report", "run", "run", "export_manifest")
         actions[manifest_key] = Task(
             manifest_key,
             _write_export_manifest,
-            (root, output, resolved.contigs, prepared.settings.export.full_length),
-            depends_on=tuple(key("export", c) for c in resolved.contigs),
+            (
+                root, output, resolved.contigs, prepared.settings.export.full_length,
+                tuple(ResultRef(task.key) for task in parts),
+            ),
+            depends_on=tuple(task.key for task in parts),
         )
     dependencies["complete"] = tuple(dict.fromkeys(k for values in dependencies.values() for k in values))
     dependencies["science"] = dependencies["complete"]
@@ -1354,6 +1419,10 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
             task = replace(task, function=_recombination_contig, kwargs={})
         elif task.key.round == "phase":
             task = replace(task, function=_phase_report, kwargs={})
+        if task.key.round == "pedigree":
+            task = replace(
+                task, resources=ResourceRequest(1, prepared.cores), kwargs={**task.kwargs, "map_work": _map_output}
+            )
         actions[task.key] = task
     return actions
 
@@ -1376,7 +1445,7 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
         if not (
             key.stage == "report"
             and key.unit == "contig"
-            and key.round in {"quality", "painting", "recombination"}
+            and key.round in {"quality", "painting", "recombination", "ties", "export_manifest"}
             and TaskKey("report", "run", "run", key.round) not in selected
         )
     }
@@ -1522,7 +1591,6 @@ def execute(
         prepared = check_run(settings, command=command, tie_reverse=tie_reverse, contigs=contigs)
     from ..engine.records import record_run, run_log
     from ..engine.runtime import kernel_run
-    from ..store.store import CheckpointStore
     from .settings.schema import to_dict
 
     resolved = (
@@ -1573,7 +1641,7 @@ def execute(
         tasks = bind_tasks(
             graph, cut, _model_actions(prepared, resolved, cut, outputs=output_actions, ties=ties), completed=completed
         )
-        scheduling = execution_options(graph, cut)
+        scheduling = execution_options(graph, cut, phase_costs=_phase_costs(prepared, resolved))
         preload = _task_preloads(tasks)
     else:
         preload = ()
@@ -1618,7 +1686,7 @@ def execute(
             _initialise(prepared, tie_reverse=tie_reverse, tie_keep=tie_keep)
             return RunResult("complete", "init", settings.input.contigs)
         if command not in {"evidence", "reconstruct", "phase"}:
-            _output_selection(CheckpointStore(prepared.paths.checkpoints), settings)
+            _output_selection(prepared.paths.output, settings)
         assert cut is not None
         if defer:
             tasks, scheduling = _with_kernel_tasks(tasks, scheduling, kernels)
@@ -1878,7 +1946,11 @@ def export_command(args: argparse.Namespace) -> int:
         full_length=args.full_length, file_format=args.format, products=tuple(dict.fromkeys(args.products))
     )
     tasks = [
-        make_task(reader, destination, contig, config, _export_identity(reader, contig, config)) for contig in contigs
+        make_task(
+            reader, destination, contig, config, _export_identity(reader, contig, config),
+            max_cores=min(3, prepared.cores), map_work=_map_output,
+        )
+        for contig in contigs
     ]
     _start_runtime(prepared, preload=("haplotype_reconstruction.outputs.export.task",))
     with _command_record(prepared, "export") as recorder:

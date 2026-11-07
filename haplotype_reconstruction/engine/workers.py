@@ -358,6 +358,13 @@ LIVE_TOTAL_SECONDS = 0.25
 TRIM_AFTER_BYTES = 64 << 20
 RECYCLE_MIN_BYTES = 256 << 20
 RECYCLE_MAX_BYTES = 1 << 30
+# Graces on an abort are strictly nested, so each level can finish its own bounded cleanup before the level
+# above escalates: a forced kill leaves the killed process's named semaphores to the resource tracker.
+# Children of a task's nested pool get POOL_TERMINATE_GRACE_SECONDS; the graph's workers, which may themselves
+# be closing such a pool, get GROUP_TERMINATE_GRACE_SECONDS (runtime.COORDINATOR_GRACE_SECONDS exceeds both).
+# A process inside a long native kernel cannot run its handler before the grace ends.
+POOL_TERMINATE_GRACE_SECONDS = 5.0
+GROUP_TERMINATE_GRACE_SECONDS = POOL_TERMINATE_GRACE_SECONDS + 5.0
 RECYCLE_CHECK_SECONDS = 0.2
 FORKSERVER = mp.get_context("forkserver")
 _GUARD_LOCK = threading.RLock()
@@ -463,6 +470,11 @@ class _NonDaemonicProcess(ForkServerProcess):
     @daemon.setter
     def daemon(self, value):
         pass
+
+    def run(self):
+        # A pool child must unwind its own resource owners before multiprocessing runs its finalizers.
+        with bootstrap.signal_boundary(lambda: None):
+            super().run()
 
     def start(self):
         args = getattr(self, "_args", ())
@@ -1131,13 +1143,18 @@ class BudgetedPool:
         for process in processes:
             if alive(process):
                 process.terminate()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + POOL_TERMINATE_GRACE_SECONDS
         for process in processes:
             process.join(timeout=max(0.0, deadline - time.monotonic()))
+        forced = 0
         for process in processes:
             if alive(process):
                 process.kill()
+                forced += 1
             process.join(timeout=0.5)
+        if forced:
+            _LOG.warning("%s: %d pool process(es) did not stop within %.0f s and were killed", self.label, forced,
+                         POOL_TERMINATE_GRACE_SECONDS)
         for pool in pools:
             pool._inqueue.close()
             pool._outqueue.close()
@@ -1219,6 +1236,7 @@ class WorkerReply:
     retire: bool = False
     storage_routes: tuple[dict[str, Any], ...] = ()
     threads: tuple[int, int] = (1, 1)  # CPUs the task held at its start and at most while it ran
+    diagnostics: tuple[str, ...] = ()
 
 
 _RESIDENT: dict[tuple[str, str], Any] = {}
@@ -1609,11 +1627,12 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gath
         if task.thread_argument is not None:
             kwargs[task.thread_argument] = team
         _readonly((args, kwargs))
-        from .records import capture_storage_routes
+        from .records import capture_diagnostics, capture_storage_routes
 
         try:
             with (
                 capture_storage_routes() as routes,
+                capture_diagnostics() as diagnostics,
                 executing_task(task.key),
                 adopted(token),
                 budget_context(budget),
@@ -1622,6 +1641,8 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gath
                 value = _readonly(task.function(*args, **kwargs))
                 if keep_gathers and task.affinity is not None and isinstance(value, Expansion):
                     value = replace(value, gather=_kept_gather(value.gather, task.affinity))
+        except bootstrap.RunInterrupted:
+            raise
         except BaseException as error:
             raise bootstrap.task_failure(error) from error
         return WorkerReply(
@@ -1632,6 +1653,7 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gath
             task_peak_bytes(peak),
             tuple(sorted({key[0] for key in _RESIDENT})),
             storage_routes=tuple(routes),
+            diagnostics=tuple(diagnostics),
             threads=(int(team), max(int(team), _task_peak_threads())),
         )
     finally:
@@ -1649,42 +1671,43 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
 
     _OWNER_CHANNEL = connection
     try:
-        bootstrap.apply_worker_settings(settings)
-        from .scheduler import _PoolSeat
+        with bootstrap.signal_boundary(lambda: None):
+            bootstrap.apply_worker_settings(settings)
+            from .scheduler import _PoolSeat
 
-        seats = [_PoolSeat(counters) for counters in groups]
-        policy = RecyclingPolicy(threshold)
-        connection.send(("ready", os.getpid()))
-        while True:
-            message = connection.recv()
-            if message is None:
-                return
-            if message == "release-idle":
-                _release_idle_cache()
-                affinities = tuple(sorted({key[0] for key in _RESIDENT}))
-                retire = not (_RESIDENT or _SHARED_OWNED)
-                connection.send(("idle-released", (affinities, retire)))
+            seats = [_PoolSeat(counters) for counters in groups]
+            policy = RecyclingPolicy(threshold)
+            connection.send(("ready", os.getpid()))
+            while True:
+                message = connection.recv()
+                if message is None:
+                    return
+                if message == "release-idle":
+                    _release_idle_cache()
+                    affinities = tuple(sorted({key[0] for key in _RESIDENT}))
+                    retire = not (_RESIDENT or _SHARED_OWNED)
+                    connection.send(("idle-released", (affinities, retire)))
+                    if retire:
+                        return
+                    continue
+                task, token, lane = message
+                if isinstance(task, _PackedTask):
+                    task = task.load()
+                from . import scheduler
+
+                seat = scheduler._POOL_SEAT = seats[lane]
+                seat.begin_task(task.resources.min_cores, dispatched=True)
+                # Failed native descendants cannot be interrupted by Python unwind.
+                # The graph aborts and reaps this worker; keep its seat until then.
+                reply = _perform(task, token, PoolShareBudget(), keep_gathers=True)
+                seat.end_task()
+                retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
+                connection.send(("result", _pack_reply(replace(reply, retire=retire))))
+                # Idle workers retain only explicitly registered affinity state.
+                del reply, task, token, message
+                _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
                 if retire:
                     return
-                continue
-            task, token, lane = message
-            if isinstance(task, _PackedTask):
-                task = task.load()
-            from . import scheduler
-
-            seat = scheduler._POOL_SEAT = seats[lane]
-            seat.begin_task(task.resources.min_cores, dispatched=True)
-            # Failed native descendants cannot be interrupted by Python unwind.
-            # The graph aborts and reaps this worker; keep its seat until then.
-            reply = _perform(task, token, PoolShareBudget(), keep_gathers=True)
-            seat.end_task()
-            retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
-            connection.send(("result", _pack_reply(replace(reply, retire=retire))))
-            # Idle workers retain only explicitly registered affinity state.
-            del reply, task, token, message
-            _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
-            if retire:
-                return
     except BaseException as error:
         # A failed task fails its graph: release this worker's shared values before reporting.
         _release_all_shared()
@@ -2349,6 +2372,7 @@ class WorkerGroup:
         self.settings = bootstrap.worker_settings()
         self.threshold = recycle_threshold(processes, recycle_bytes)
         self.handles: list[_WorkerHandle] = []
+        self.failed_task: TaskKey | None = None  # attributed only while receive processes this worker
         # Each worker's announced shared-value segments, unlinked by close() whatever became of the worker.
         self.shared: dict[int, set[str]] = {}
         self.released: list[tuple[int, tuple[str, ...]]] = []
@@ -2483,6 +2507,7 @@ class WorkerGroup:
         ready = wait([h.connection for h in self.handles], timeout)
         replies = []
         for index, handle in enumerate(self.handles):
+            self.failed_task = handle.busy
             if handle.connection in ready:
                 began = time.perf_counter()
                 try:
@@ -2535,6 +2560,7 @@ class WorkerGroup:
                 raise BrokenProcessPool(
                     f"worker {current.process.pid} exited unexpectedly with status {current.process.exitcode}"
                 )
+        self.failed_task = None
         return replies
 
     def close(self, *, abort: bool = False) -> None:
@@ -2555,13 +2581,18 @@ class WorkerGroup:
             process = handle.process
             if abort and handle.started is not None and _alive(process.pid, handle.started):
                 process.terminate()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + GROUP_TERMINATE_GRACE_SECONDS
         for handle in self.handles:
             handle.process.join(timeout=max(0.0, deadline - time.monotonic()))
+        forced = 0
         for handle in self.handles:
             if handle.started is not None and _alive(handle.process.pid, handle.started):
                 handle.process.kill()
+                forced += 1
             handle.process.join(timeout=1.0)
+        if forced and abort:
+            _LOG.warning("%d worker(s) did not stop within %.0f s and were killed; the resource tracker reclaims "
+                         "anything they still owned", forced, GROUP_TERMINATE_GRACE_SECONDS)
         try:
             for index, handle in enumerate(self.handles):
                 self._drain_shared(index, handle)

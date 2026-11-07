@@ -218,6 +218,10 @@ def finish_level(
         product = AssemblyProduct(tuple(components), records, tuple(alternatives), state.prepared)
         if session.records is not None and session.role is Role.FINAL:
             session.records.save(FINAL, encode_product(product))
+        if session.role is Role.FINAL:
+            from .refinement_diagnostics import report_refinement
+
+            report_refinement(session.parent.scope, (level.refinement or {} for level in records))
         return product
     following = HierarchyState(
         state.prepared, tuple(components), state.level + 1, records, tuple(alternatives), context

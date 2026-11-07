@@ -131,7 +131,8 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
     The root initializer is always hashed. When reached only as an ancestor, its
     lazy public-export function bodies are not executed by importing a stage and
     are not followed. Otherwise every scientific key would include interface.run
-    and every unrelated stage. An explicit root import or root request follows
+    and every unrelated stage. The release label lives in the root
+    initializer's lazy _version import, outside scientific closures. An explicit root import or root request follows
     those bodies normally. All non-root modules retain full static traversal.
     """
     root = Path(package_root)

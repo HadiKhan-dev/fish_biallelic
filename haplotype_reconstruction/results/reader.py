@@ -9,6 +9,7 @@ I/O here (WP_I1 section 4.5; WP_OU1 section 6.1; WP_EVA1 section 4.5).
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,7 +148,7 @@ class Results:
     Construction reads layout and the small manifest only. Product methods return
     None for absent products; unsupported schemas and changed derivations raise.
     The original input files are never opened. Each call refreshes publications,
-    including outputs/selection, so an off/on/off change is visible immediately.
+    including output_selection.json, so an off/on/off change is visible immediately.
     """
 
     def __init__(self, path: str | Path, *, checkpoints: str | Path | None = None, nthreads: Any = 1) -> None:
@@ -387,6 +388,12 @@ class Results:
         """Refresh the latest output-only choice; it is never a scientific binding."""
         from ..store.protocol import read_output
 
+        path = self.root / "output_selection.json"
+        if path.is_file():
+            payload = json.loads(path.read_text())
+            require_schema(payload, 1)
+            return payload
+        # Read older output directories without changing their archived checkpoint root.
         record = read_output(self._store.run, "outputs/selection", identity=json_digest)
         if record is None:
             return None
