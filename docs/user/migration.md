@@ -1,5 +1,26 @@
 # Migration guides
 
+## Migrating from 4.5 to 4.6.0
+
+Start a new output and checkpoint root with the same inputs, configuration and
+seed. **4.6.0 changes selection code and requires a new root.** Keep existing runs
+with their matching code; this release does not convert their checkpoints.
+Configurations, commands, record schemas and table layouts are those of 4.5.
+
+Local selection is faster, mostly at low depth, and takes a different optimisation
+path to its panels. Its fixed points, objective and decisions are unchanged:
+- one likelihood pass per GEM update instead of two (frequencies and allele flips from
+  one E-step), and several improving one-bit flips at once at stationary points and in
+  context snaps;
+- accelerated frequency refits at a fixed panel, and short probes that rank many
+  candidate-bank starts before the full fits;
+- exact one-bit gains computed with one logarithm per founder and site.
+
+Selections are therefore not bit-identical to 4.5. In replays of recorded blocks,
+they are identical at 1x and above. Below 1x, a growing share of block rounds changes
+(3 of 84 at 0.5x, most at 0.1x), more often for the better under the selection
+objective. Downstream stages consume the new selections as before.
+
 ## Migrating from 4.4 to 4.5.0
 
 Start a new output and checkpoint root with the same inputs, configuration and

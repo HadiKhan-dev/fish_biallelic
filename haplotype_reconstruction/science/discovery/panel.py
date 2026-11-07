@@ -649,9 +649,11 @@ def panel_key(haplotypes: np.ndarray) -> bytes:
 _LOG_TWO = math.log(2.0)
 
 
+@lru_cache(maxsize=4096)
 def log_haplotype_set_count(n_sites: int, k: int) -> float:
     """log C(2^L, K): the code length (nats) of an unordered set of K distinct binary rows of
-    length L, as K stable log-ratio terms (no 2^L integer is formed)."""
+    length L, as K stable log-ratio terms (no 2^L integer is formed). Memoised: a pure function of two
+    integers, evaluated for every objective of a block search."""
     universe_log = n_sites * _LOG_TWO
     terms = [universe_log + math.log1p(-math.ldexp(float(index), -n_sites)) - math.log(index + 1) for index in range(k)]
     result = math.fsum(terms)

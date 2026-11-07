@@ -83,7 +83,11 @@ def bounded_team(items: int) -> Iterator[None]:
     restore the team. A parallel region wakes and joins every thread of its team, tens of microseconds of CPU each,
     whether or not the thread has a work item; a kernel with fewer items than threads should wake only its items."""
     previous = numba.get_num_threads()
-    numba.set_num_threads(max(1, min(previous, int(items))))
+    bounded = max(1, min(previous, int(items)))
+    if bounded == previous:
+        yield  # already within the bound (always on one thread): no team change to make or undo
+        return
+    numba.set_num_threads(bounded)
     try:
         yield
     finally:

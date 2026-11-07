@@ -1,5 +1,75 @@
 # Changelog
 
+## 4.6.0 (7 November 2026)
+
+This release makes local selection faster, most at low depth. Configurations, commands, record schemas and table
+layouts are those of 4.5.0. Selection objectives, decision rules and fixed points are unchanged, but the optimiser
+takes a different path, so selections are not bit-identical to 4.5 below 1x depth. A new output root is required.
+
+**Faster local selection.** On 28 recorded chr1 blocks of the N = 320 simulation, each replayed through its three
+selection rounds on one thread, selection wall time per block falls:
+
+| Depth | 4.5.0 | 4.6.0 | Ratio |
+|---|---|---|---|
+| 5x | 5.5 s | 4.4 s | 0.79 |
+| 1x | 14.1 s | 8.8 s | 0.63 |
+| 0.5x | 29.7 s | 16.7 s | 0.56 |
+| 0.25x | 44.2 s | 23.5 s | 0.53 |
+| 0.1x | 67.0 s | 26.7 s | 0.40 |
+
+The changes:
+- **One E-step per GEM update.** After a fit's first update (a frequency step), the frequency M-step and the allele
+  flips come from one E-step. At each site the founder with the largest expected gain flips; a tied site keeps its
+  alleles. The objective splits into a frequency part and an allele part at fixed K, so EM's bound still guarantees
+  every rise. 4.5 needed two likelihood passes per update.
+- **Batched exact escapes.** At a stationary point, every improving one-bit flip is taken at once, at most one
+  founder per site. The batch is kept only if it gains at least as much as the best single flip; otherwise half the
+  batch is tried, then the single flip.
+- **Batched context snaps.** Snaps are taken together in the same way, with one frequency refit after a run of
+  snaps instead of one after each.
+- **Accelerated frequency refits.** The fixed-panel refits (trajectory-best and after context snaps) use squared
+  extrapolation (SQUAREM), keeping EM's stopping rule.
+- **Ranked bank starts.** When a candidate-bank neighbour round has more than 24 new starts, each gets three fit
+  iterations, and the best 16 (with ties) are fitted in full.
+- **Cheaper exact one-bit gains.** Per-sample likelihood ratios are multiplied in sample order, taking one log per
+  founder and site instead of one per sample. The pass costs 0.69-0.84 of 4.5's for K up to 12. The gains agree
+  with 4.5's to about 1e-13 nats and do not depend on the thread count.
+- **Smaller Python costs.** The set-count code is cached, description costs are read from per-founder tables, and
+  thread-team changes are skipped when they would do nothing. These results are bit-identical.
+
+**Effect on selections.** In the same replays (84 block rounds per depth), selections are identical to 4.5 at 5x
+and 1x. Below that, rounds that change are more often better than worse under the selection objective:
+- 0.5x: 6 better, none worse;
+- 0.25x: 20 better, 8 worse (mean +1.1 nats per round);
+- 0.1x: 38 better, 29 worse (mean +1.1 nats per round).
+
+Measured and not adopted:
+- skipping read-free sites, which pays only below about 0.3x;
+- 512-bit vectors, which are bit-identical but 5-20% slower;
+- checking exact escapes only at frequency convergence;
+- fusing the per-site normalisation sweeps (6-7% of a pass, against the audited normalisation rules).
+
+Fastmath and Intel SVML stay off: results remain the same on every machine and thread count.
+
+**Packaging gate.** `tools/package_clean_environment.sh` runs its install and run cases concurrently, so the gate
+takes about 20 minutes instead of 42-53.
+
+**Validation.** Whole-genome N = 320 simulations against 4.4 (whose science 4.5 equals), with the same seed:
+
+| Measure | Depth 1, 4.4 | Depth 1, 4.6 | Depth 0.5, 4.4 | Depth 0.5, 4.6 |
+|---|---|---|---|---|
+| Founder alleles wrong (per million called) | 5.55 | 5.49 | 79.75 | 78.93 |
+| Founder alleles missing (per million) | 19.05 | 19.07 | 235.28 | 237.99 |
+| Genotype errors (per million called) | 115.49 | 115.49 | 136.04 | 135.66 |
+| Phase switch errors | 31 | 31 | 32 | 32 |
+| Pedigree edges correct | 600/600 | 600/600 | 600/600 | 600/600 |
+| Parent states correct | 320/320 | 320/320 | 320/320 | 320/320 |
+| Core-hours, whole run | 486 | 439 | 760 | 591 |
+| Core-hours, selection | 150 | 98 | 386 | 210 |
+
+The test suite (3,708 tests and the thread-team receipt), the whole stage tier (301 passed; two opt-in corpus batches
+skipped), the documented workflow example, the strict documentation check and the clean-install packaging gate pass.
+
 ## 4.5.0 (7 November 2026)
 
 This release bounds published table cells, makes runs observable and interruptible, gives the simulator a realistic

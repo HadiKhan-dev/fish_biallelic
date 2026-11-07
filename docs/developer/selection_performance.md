@@ -93,3 +93,32 @@ panel, context rows, called masks and matching convention. Its possible gain is
 limited by the measured matching fraction. It does not resolve the copying-fit
 or candidate-bank costs. Preserve the incumbent/memo completion precedence,
 whole-class admissions, conditional one-bit checks and context rescue witnesses.
+
+## Release 4.6 outcomes
+
+Measured with the lab replay of 28 recorded chr1 blocks (three rounds each, one thread, warm kernels), N = 320:
+- Selection wall time per block against 4.5: 0.79 (5x), 0.63 (1x), 0.56 (0.5x), 0.53 (0.25x), 0.40 (0.1x).
+- Where the time goes now (warm profile): the E-step kernel is 81% at 1x and 83% at 0.1x. Candidate-bank kernels
+  take 8-12%, release statistics 1-4%, and Python 3-4%. Python-to-Numba work therefore has at most a few percent left.
+- Pass cost grows as K^2 (about 4.4 ns per pair state, sample and site for a counts pass). After 4.6 an exact pass
+  costs about 1.3 flips passes (2.5 before).
+
+Adopted, with their trajectory effects stated in the changelog:
+- the joint GEM step (after a first frequency step: flips chosen at a start's guessed frequencies sent one block's
+  K = 5 refit to a fixed point 265 nats worse);
+- batched exact escapes and context snaps;
+- SQUAREM fixed-panel refits;
+- ranked bank starts;
+- the exact-gain ratio chain.
+
+Measured and rejected:
+- **Read-free-site skipping:** exact, but 0.62x speed at 1x and 0.92x at 0.5x; it wins only below about 0.3x.
+- **512-bit vectors:** bit-identical, 5-20% slower.
+- **Exact escapes only at frequency convergence:** after the ratio chain it saves about 3.7 ms per tail iterate but
+  costs a full pass per converging update.
+- **Fusing the forward normalisation sweep into the next site:** the sweep is 11-14% of a forward pass at K = 4-6,
+  and the audited per-lane reciprocal rule would change.
+- **Joint steps without a first frequency step:** the 265-nat miss above, with one-founder and multi-founder flips.
+- **Single-founder joint steps:** closest to 3.5 on the A35 fixtures, but worse on average on the replays.
+
+Fastmath and SVML stay off, for cross-machine reproducibility.

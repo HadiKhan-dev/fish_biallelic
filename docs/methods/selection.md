@@ -20,6 +20,8 @@ Cost and scope: O(N L S^2); O(N L K^2). These terms describe the unit’s work/s
 
 Compute COUNTS, FLIPS or EXACT statistics with identical arithmetic for common quantities. Combine lane contributions in ascending sample order independently of worker count. Skip zero-posterior ratio terms. Reuse a cached level only for the same panel/frequencies and when it contains all requested statistics.
 
+An exact one-bit gain is the log of the product of the observed samples' likelihood ratios. Since 4.6 the ratios are multiplied in ascending sample order, and a product (or ratio) leaving [2^-300, 2^300] moves into a running log total, so the pass takes one log per founder and site instead of one per sample. The chain is the same for any worker count or lane width. The gains agree with the per-sample log sum of 4.5 to rounding (about 1e-13 nats).
+
 Implementation: [science/selection/path_model.py](../../haplotype_reconstruction/science/selection/path_model.py).
 
 Parameters by name: `LANE_WIDTH`, `LANE_ALIGN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
@@ -51,7 +53,11 @@ Cost and scope: O(F K); O(F L); O(min(F, K) (F + K)^2). These terms describe the
 <a id="ls05"></a>
 ## ls05 Fixed-K GEM fit (frequency step, GEM flip, exact one-bit escape, ties, stops, canonical output)
 
-Canonicalise the start and alternate a frequency step with allele updates. Accept frequency trials within the allowed objective tolerance; choose the declared statistics level for the current update. Apply positive GEM flips, then exact single-bit escape when required. Preserve the update backstop, stationary test and canonical endpoint.
+Canonicalise the start and alternate a frequency step with allele updates. Accept frequency trials within the allowed objective tolerance; choose the declared statistics level for the current update. Apply positive GEM flips, then an exact escape when required. Preserve the update backstop, stationary test and canonical endpoint.
+
+After the first update, which is always a frequency step (a start's frequencies are a guess, and flips chosen at them can lead the ascent to a worse fixed point), while the current E-step has positive expected flip gains an update is one joint GEM step from that E-step (4.6): the frequency M-step together with, at each site, the flip of the founder with the largest gain. At fixed K the objective is a frequency part plus an allele part, and complete-data gains add over sites (not over founders at one site), so EM's bound guarantees a rise of at least the chosen gains without a separate frequency trial: one likelihood pass per update instead of two. A site whose two largest gains tie (`FLIP_TIE`) keeps its alleles; when every gaining site is tied, or the flips would make two rows equal, the single-founder step with its tie rule applies at fixed frequencies. A state without positive expected gains takes a frequency step and then the flip check below.
+
+At a stationary point the exact one-bit gains are computed for every founder and site. All improving flips are applied together, at most one founder per site (the largest gain; a site whose top gains tie keeps its alleles), and the batch is kept only when its exact objective gain reaches the largest single gain; otherwise the half with the larger gains is tried, and finally the single best flip with its tie rule. A frequency-only tail keeps one frequency step per update, each followed by the flip check. The stopping rule (no improving one-bit flip, no frequency gain above the tolerance) is unchanged.
 
 Implementation: [science/selection/fit.py](../../haplotype_reconstruction/science/selection/fit.py).
 
@@ -62,7 +68,9 @@ Cost and scope: O(N L K^2); O(N L K^2 (K + L)). These terms describe the unit’
 <a id="ls06"></a>
 ## ls06 Trajectory-best selection with frequency-only refit (context rounds)
 
-Track the earliest strictly best selection state along the fit trajectory. Adopt it only if it clears the endpoint’s decision tolerance. Refit frequencies with the panel fixed, stopping at the first insufficient gain or update cap. The returned model objective and context selection objective remain separate.
+Track the earliest strictly best selection state along the fit trajectory. Adopt it only if it clears the endpoint’s decision tolerance. Refit frequencies with the panel fixed, stopping where one EM step would not rise by more than the tolerance, or at the update cap. The returned model objective and context selection objective remain separate.
+
+The two refits at a fixed panel, this one and the refit after a run of context snaps ([ls07](#ls07)), are accelerated by squared extrapolation (SQUAREM, Varadhan and Roland 2008, steplength S3): an extrapolated step is stabilised by one EM step and kept only when it is at least as good as the plain EM step. The fixed points are EM's; at low depth, where EM converges slowly, one cycle of three likelihood passes replaces many single steps.
 
 Implementation: [science/selection/fit.py](../../haplotype_reconstruction/science/selection/fit.py).
 
@@ -74,6 +82,8 @@ Cost and scope: O(K^3). These terms describe the unit’s work/storage dimension
 ## ls07 Context snaps (selection-aware one-bit steps after the GEM)
 
 Build exact one-bit gains, exclude flips that would collide rows, and examine matched context pairs in order. Stop if the largest bound does not clear the decision tolerance. Choose content within the top bound band, score the actual trial, and accept only the required selection improvement.
+
+Since 4.6 the proposals are first taken together, at most one per site (the largest bound; a site whose two largest bounds lie within the decision tolerance keeps its alleles). The edit-code parts of the bounds add (one matched pair's saving grows as its distance falls) but the likelihood parts do not, so the batch is kept only when its recomputed selection gain reaches the largest single bound; otherwise the half with the larger bounds is tried, down to two flips, and then the single step. The frequencies are refitted once a run of steps leaves no proposal (the bounds hold at any fixed frequencies), not after every flip, and the steps resume if the refit creates proposals.
 
 Implementation: [science/selection/fit.py](../../haplotype_reconstruction/science/selection/fit.py).
 
@@ -208,6 +218,8 @@ Cost and scope: Fixed-count discovery fits and cavity scores for every admitted 
 ## ls19 Bank BIC neighbourhood search and the add-row bank
 
 Fit the completed bank as an initial source, select its best admitted entries, then visit deletion, addition and replacement neighbours in the declared order. Reselect after each round. Stop at insufficient improvement or the count-dependent round/score budget, retaining explicit budget diagnostics.
+
+A neighbour round proposes every drop, every add of a bank row and every single-row replacement, so its size grows with the bank, which grows at low depth. A round with more than `RACE_MIN_STARTS` (24) novel starts races them: each is fitted for `RACE_PROBE_ITERATIONS` (3) fixed-K iterations, and only the `RACE_KEEP` (16) starts whose short fits reach the best BIC selection score (ties at the cut kept whole) are fitted to convergence. The short fits share the workspace's cached transitions with the full fits that follow. This is a stated approximation: a start whose short fit ranks low is not fitted further.
 
 Implementation: [science/selection/bank.py](../../haplotype_reconstruction/science/selection/bank.py).
 

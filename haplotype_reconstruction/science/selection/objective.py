@@ -148,10 +148,9 @@ class ContextFounders:
         claimers (release 2.12), so a call making two founders' rows equal keeps that bound."""
         f_count = len(self.founders)
         n_called = self.n_called if n_called is None else n_called
-        cost = np.array(
-            [[edit_ball_code(int(n_called[f]), int(distance[f, r])) for r in range(k)] for f in range(f_count)],
-            dtype=np.float64,
-        )
+        cost = np.empty((f_count, k))
+        for f in range(f_count):
+            cost[f] = _edit_codes(int(n_called[f]))[np.asarray(distance[f], dtype=np.int64)]
         sizes = matching_costs(cost)
         totals = [
             code + (float(log_haplotype_set_count(length, k - m)) if k - m else 0.0)
@@ -181,6 +180,14 @@ def edit_ball_code(n: int, d: int) -> float:
     top = max(terms)
     # Never above the whole space's exact code (rounding of the sum near d = n - 1).
     return min(top + math.log(math.fsum(math.exp(x - top) for x in terms)), n * math.log(2.0))
+
+
+@functools.cache
+def _edit_codes(n: int) -> NDArray[np.float64]:
+    """edit_ball_code(n, d) for d = 0..n (a founder's distance to a row never exceeds its called sites), read-only."""
+    codes = np.array([edit_ball_code(n, d) for d in range(n + 1)], dtype=np.float64)
+    codes.flags.writeable = False
+    return codes
 
 
 def matching_costs(cost: NDArray[np.float64]) -> list[tuple[float, NDArray[np.int64]]]:

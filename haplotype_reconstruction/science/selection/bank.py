@@ -103,6 +103,42 @@ def complete_proposals(original_latent, proposal_panels, variant_cap: int = 8):
     return tuple(sources), unique_rows(np.vstack(bank)).astype(np.int64), missing, overflow
 
 
+# A neighbour round with more novel starts than this races them (_race); smaller rounds fit every start.
+RACE_MIN_STARTS = 24
+RACE_PROBE_ITERATIONS = 3
+RACE_KEEP = 16
+
+
+def _race(workspace, starts, selection_score):
+    """The RACE_KEEP starts whose short fits (RACE_PROBE_ITERATIONS fixed-K iterations) reach the best BIC
+    selection score, in start order; ties at the cut are kept whole.
+
+    A neighbour round of the bank search can propose thousands of panels at low depth (drops, adds and every
+    single-row replacement by a bank row) and fits each to convergence, while only the BIC-best endpoints are
+    admitted. The short fits share the workspace's cached transitions with the full fits that follow, so the
+    probe's work is not repeated. A start whose short fit ranks low is not fitted further: a stated approximation
+    that bounds the bank's work per round instead of growing it with the bank."""
+
+    class _Entry:
+        __slots__ = ("solution",)
+
+        def __init__(self, solution):
+            self.solution = solution
+
+    synchronized, refitted, families = fit_panels(workspace, starts, RACE_PROBE_ITERATIONS, with_families=True)
+    by_key = {solution.key: solution for solution in (*synchronized, *refitted)}
+    scores = []
+    for family in families:
+        values = [selection_score(_Entry(by_key[key])) for key in family if key in by_key]
+        scores.append(max(values) if values else -np.inf)
+    order = sorted(range(len(starts)), key=lambda index: -scores[index])
+    if len(order) <= RACE_KEEP:
+        return starts
+    cut = scores[order[RACE_KEEP - 1]]
+    kept = {index for index in range(len(starts)) if scores[index] >= cut}
+    return [start for index, start in enumerate(starts) if index in kept]
+
+
 def _neighbours(panel, bank):
     """Drops, adds of every bank row not in the panel, then replacements (closest first)."""
     k = len(panel)
@@ -309,6 +345,8 @@ def _bic_search(
                 novel, dropped = novel[:start_limit], novel[start_limit:]
             for panel in dropped:
                 fitted_starts.remove(panel.astype(np.int8).tobytes())
+        if not require_cavity and len(novel) > RACE_MIN_STARTS:
+            novel = _race(workspace, novel, selection_score)
         synchronized, refitted, families = fit_panels(workspace, novel, model.max_iterations, with_families=True)
         unique = deduplicate((*synchronized, *refitted), reverse=reverse)
         if len(novel) == 1:

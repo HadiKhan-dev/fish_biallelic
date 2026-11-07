@@ -128,7 +128,25 @@ else:
 PY
 wheel=$(find "$out/build/dist" -maxdepth 1 -name '*.whl' -print)
 sdist=$(find "$out/build/dist" -maxdepth 1 -name '*.tar.gz' -print)
-for kind in wheel sdist; do
+# The cases are independent (own venv, cache and output), so they run concurrently; each one's status is collected
+# and the first failing case names the phase.
+run_cases() {
+    local label=$1 function=$2; shift 2
+    local kind pids=() kinds=() status=0
+    for kind in "$@"; do
+        "$function" "$kind" &
+        pids+=($!); kinds+=("$kind")
+    done
+    for index in "${!pids[@]}"; do
+        if ! wait "${pids[$index]}"; then
+            [[ $status -ne 0 ]] || phase="${kinds[$index]}-$label"
+            status=1
+        fi
+    done
+    return $status
+}
+install_case() (
+    kind=$1
     case_root="$out/$kind"
     mkdir -p "$case_root"
     "$ref_py" -m venv "$case_root/venv"
@@ -140,13 +158,14 @@ for kind in wheel sdist; do
     env -u PYTHONPATH "$py" "$out/installed_probe.py" versions "$root/requirements-tested.txt" "$case_root/versions.json"
     env -u PYTHONPATH "$case_root/venv/bin/haplotypes" --version > "$case_root/cli-version.txt"
     env -u PYTHONPATH "$py" -m haplotype_reconstruction --version >> "$case_root/cli-version.txt"
-done
+)
+run_cases install install_case wheel sdist
 phase=example
 cd "$out"
 env -u PYTHONPATH "$out/wheel/venv/bin/haplotypes" example "$out/example" > "$out/example.log" 2>&1
 # One shared deterministic input location prevents path differences in source descriptors.
-for kind in source wheel sdist; do
-    phase="$kind-run"
+run_case() (
+    kind=$1
     case_root="$out/$kind"
     mkdir -p "$case_root"
     if [[ "$kind" == source ]]; then
@@ -167,7 +186,8 @@ for kind in source wheel sdist; do
     if [[ "$kind" != source ]]; then
         timeout -k 10s 120s "${probe[@]}" "$out/installed_probe.py" cache "$case_root/cache-refusal" > "$case_root/cache-refusal.log" 2>&1
     fi
-done
+)
+run_cases run run_case source wheel sdist
 phase=compare
 "$ref_py" - "$out" "$root" <<'PY'
 import json

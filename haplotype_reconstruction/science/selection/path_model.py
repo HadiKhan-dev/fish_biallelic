@@ -168,6 +168,25 @@ def _log_ratio(new, old):
     return np.log(new) - np.log(old)
 
 
+# Range of a running product of exact one-bit likelihood ratios (_chain): a product leaving it, or a ratio outside it,
+# moves into the log total, so no product over- or underflows.
+CHAIN_LOW = 2.0**-300
+CHAIN_HIGH = 2.0**300
+
+
+@kernel(overloads=((types.float64, types.float64, types.float64),), cache=True, inline="always")
+def _chain(product, total, ratio):
+    """(product, total) after one more sample's ratio, product * exp(total) being the running product of every ratio
+    so far (release 4.6). A founder-site's exact gain is the log of the product over its observed samples in ascending
+    order: one log per founder-site instead of one per sample, the same chain for any thread count or lane width."""
+    if ratio < CHAIN_LOW or ratio > CHAIN_HIGH:
+        return product, total + np.log(ratio)
+    product *= ratio
+    if product < CHAIN_LOW or product > CHAIN_HIGH:
+        return 1.0, total + np.log(product)
+    return product, total
+
+
 @kernel(
     overloads=(
         (types.int64, types.int64, _F64_C1),
@@ -732,12 +751,13 @@ def _backward_block(
     kept as upper triangles. A sample's flip gains (observed sites only) and
     copy occupancy go, with ``direct``, into the totals ``gains`` and
     ``occupancy`` in lane (= sample) order; otherwise into
-    ``lane_gains[2, k, L, lane]`` and ``lane_occupancy[s, L, lane]`` (+0 where
-    a sample adds nothing) for an ordered combine. ``initial[a, lane]`` and
+    ``lane_gains[2, k, L, lane]`` and ``lane_occupancy[s, L, lane]`` (+0, or an
+    exact ratio of 1, where a sample adds nothing) for an ordered combine. ``initial[a, lane]`` and
     ``destinations[a, lane]`` receive each sample's initial copies and its
     redraw destinations summed over sites. ``work`` holds the scratch arrays. ``level``: COUNTS
     (initial copies and destinations only), FLIPS (+ flip gains in gains[0] and occupancy) or
-    EXACT (+ exact one-bit gains in gains[1]); a lower level computes its statistics exactly as a
+    EXACT (+ each sample's exact one-bit likelihood ratio, chained into gains[1] and gains[2] by
+    _chain; lane_gains[1] holds the ratios); a lower level computes its statistics exactly as a
     higher one does.
     """
     (
@@ -851,10 +871,11 @@ def _backward_block(
         for j in range(lanes):
             any_observed |= ot[block, site, j]
         if full_statistics and not direct:
+            # Neutral elements: +0 for the expected gains, a ratio of 1 for the exact chain.
             for a in range(k):
                 for j in range(lanes):
                     lane_gains[0, a, site, j] = 0.0
-                    lane_gains[1, a, site, j] = 0.0
+                    lane_gains[1, a, site, j] = 1.0
         if full_statistics and not exact and any_observed:
             # FLIPS: the expected complete-emission gains only (as in the EXACT branch below).
             for a in range(k):
@@ -883,8 +904,6 @@ def _backward_block(
                         if ot[block, site, j]:
                             lane_gains[0, a, site, j] = qgain[a, j]
         if exact and any_observed:
-            for j in range(lanes):
-                have_log_old[j] = False
             # Carrier-excluded mass outside[a] from positive upper-triangle
             # prefix/suffix sums, which avoid subtracting a nearly complete
             # carrier mass from the total. Symmetry counts each edge twice.
@@ -937,39 +956,23 @@ def _backward_block(
                         for j in range(lanes):
                             prob, q = 2.0 * posterior[p, j], qgain[a, j]
                             qgain[a, j] = q + prob * rt[block, site, ha, hb, j] if prob > 0 else q
-                # The exact flip gain path_model._log_ratio(outside + alt,
-                # denominator): its near-branch quotient for every lane, and
-                # log(denominator) at most once per lane and site (the same
-                # libm value whenever it is evaluated).
+                # The exact flip likelihood ratio (outside + alt) / denominator of every lane; the observed samples'
+                # ratios join the founder-site's running product (_chain) in ascending sample order (release 4.6:
+                # one log per founder-site, not one libm log per sample).
                 for j in range(lanes):
-                    new = outside[a, j] + alt[a, j]
-                    old = vec[0, j]
-                    alt[a, j] = new
-                    difference = new - old
-                    quotient[j] = difference / old
-                    branch[j] = 0 if new == 0 else (1 if abs(difference) <= LOG_RATIO_NEAR * old else 2)
+                    quotient[j] = (outside[a, j] + alt[a, j]) / vec[0, j]
                 if direct:
-                    g0, g1 = gains[0, a, site], gains[1, a, site]
+                    g0, g1, chain = gains[0, a, site], gains[1, a, site], gains[2, a, site]
                 for j in range(lanes):
                     if ot[block, site, j]:
-                        kind = branch[j]
-                        if kind == 0:
-                            ratio = -np.inf
-                        elif kind == 1:
-                            ratio = np.log1p(quotient[j])
-                        else:
-                            if not have_log_old[j]:
-                                log_old[j] = np.log(vec[0, j])
-                                have_log_old[j] = True
-                            ratio = np.log(alt[a, j]) - log_old[j]
                         if direct:
                             g0 += qgain[a, j]
-                            g1 += ratio
+                            chain, g1 = _chain(chain, g1, quotient[j])
                         else:
                             lane_gains[0, a, site, j] = qgain[a, j]
-                            lane_gains[1, a, site, j] = ratio
+                            lane_gains[1, a, site, j] = quotient[j]
                 if direct:
-                    gains[0, a, site], gains[1, a, site] = g0, g1
+                    gains[0, a, site], gains[1, a, site], gains[2, a, site] = g0, g1, chain
         if site > 0:
             for j in range(lanes):
                 vec[1, j] = 0.0
@@ -1014,6 +1017,14 @@ def _backward_block(
                             backward[index, j] *= vec[5, j]
                         elif largest > 0:
                             backward[index, j] /= largest
+
+
+@kernel(overloads=((_F64_C3,),), cache=True)
+def _join_chains(gains):
+    """Exact gains = log total + log(running product), in gains[1] (the chain of _chain)."""
+    for a in range(gains.shape[1]):
+        for site in range(gains.shape[2]):
+            gains[1, a, site] += np.log(gains[2, a, site])
 
 
 @kernel(overloads=((types.int64, types.int64),), cache=True)
@@ -1112,7 +1123,10 @@ def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers)
     s = k + 1
     pairs = s * (s + 1) // 2
     likelihoods = np.empty(n)
-    gains = np.zeros((2, k, length))
+    # gains[0]: expected complete-emission gains; gains[1] and gains[2]: the exact chain's log total and running
+    # product (_chain), joined into the exact gains after the last sample.
+    gains = np.zeros((3, k, length))
+    gains[2] = 1.0
     occupancy = np.zeros((s, length))
     initial = np.zeros(s)
     destinations = np.zeros(s)
@@ -1155,6 +1169,8 @@ def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers)
                 for a in range(s):
                     initial[a] += lane_initial[a, j]
                     destinations[a] += lane_destinations[a, j]
+        if level >= EXACT:
+            _join_chains(gains)
         return likelihoods, gains, occupancy, initial, destinations
     wave = min(workers, blocks)
     lane_gains = np.empty((wave, 2, k, length if full_statistics else 0, width))
@@ -1203,13 +1219,16 @@ def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers)
             for a_index in prange(k):
                 a = np.int64(a_index)
                 for site in range(length):
-                    g0, g1 = gains[0, a, site], gains[1, a, site]
+                    g0, g1, chain = gains[0, a, site], gains[1, a, site], gains[2, a, site]
                     for slot in range(count):
                         lanes = min(width, n - (first + slot) * width)
                         for j in range(lanes):
                             g0 += lane_gains[slot, 0, a, site, j]
-                            g1 += lane_gains[slot, 1, a, site, j]
-                    gains[0, a, site], gains[1, a, site] = g0, g1
+                        if level >= EXACT:
+                            # A ratio of 1 (no observation) leaves the chain exactly as the direct path skips it.
+                            for j in range(lanes):
+                                chain, g1 = _chain(chain, g1, lane_gains[slot, 1, a, site, j])
+                    gains[0, a, site], gains[1, a, site], gains[2, a, site] = g0, g1, chain
             for a_index in prange(s):
                 a = np.int64(a_index)
                 for site in range(length):
@@ -1225,6 +1244,8 @@ def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers)
                 for a in range(s):
                     initial[a] += lane_initial[slot, a, j]
                     destinations[a] += lane_destinations[slot, a, j]
+    if level >= EXACT:
+        _join_chains(gains)
     return likelihoods, gains, occupancy, initial, destinations
 
 
@@ -1503,7 +1524,10 @@ class PreparedBlock:
     def state_prior(self, frequencies: NDArray[np.float64]) -> NDArray[np.float64]:
         """pi = ((1 - u) f / sum f, u)."""
         frequencies = np.asarray(frequencies, dtype=np.float64)
-        return np.r_[(1 - self.unknown_mass) * (frequencies / frequencies.sum()), self.unknown_mass]
+        prior = np.empty(len(frequencies) + 1)
+        prior[:-1] = (1 - self.unknown_mass) * (frequencies / frequencies.sum())
+        prior[-1] = self.unknown_mass
+        return prior
 
     def lane_emissions(self) -> NDArray[np.float64]:
         width = LANE_WIDTH

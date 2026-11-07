@@ -65,8 +65,8 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:464](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'pedigree.bridge.search'` | `policy('pedigree.bridge.search', kind='probability', reverse=reverse)` | [projection.py:466](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'pedigree.bridge.pivot'` | `policy('pedigree.bridge.pivot', kind='probability', reverse=reverse)` | [projection.py:467](../../haplotype_reconstruction/science/pedigree/projection.py) |
-| `'selection.bank.cavity'` | `fixed_policy('selection.bank.cavity', quanta.nll, reverse=reverse)` | [bank.py:198](../../haplotype_reconstruction/science/selection/bank.py) |
-| `kind` | `fixed_policy(kind, quantum, reverse=reverse)` | [bank.py:147](../../haplotype_reconstruction/science/selection/bank.py) |
+| `'selection.bank.cavity'` | `fixed_policy('selection.bank.cavity', quanta.nll, reverse=reverse)` | [bank.py:234](../../haplotype_reconstruction/science/selection/bank.py) |
+| `kind` | `fixed_policy(kind, quantum, reverse=reverse)` | [bank.py:183](../../haplotype_reconstruction/science/selection/bank.py) |
 | `'selection.start.outcome'` | `fixed_policy('selection.start.outcome', tolerance, reverse=reverse)` | [rounds.py:84](../../haplotype_reconstruction/science/selection/rounds.py) |
 | `'selection.start.set'` | `fixed_policy('selection.start.set', tolerance, reverse=reverse)` | [rounds.py:223](../../haplotype_reconstruction/science/selection/rounds.py) |
 | `'selection.merge.consensus'` | `fixed_policy('selection.merge.consensus', CONSENSUS_TIE, reverse=reverse)` | [search.py:84](../../haplotype_reconstruction/science/selection/search.py) |
