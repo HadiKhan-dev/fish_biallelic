@@ -533,6 +533,10 @@ The owner controls history (§1). After editing:
 
 Never stage generated data, checkpoints, logs or results.
 
+**Agent instructions travel with the work** (owner, 8 November 2026). When the owner authorizes a commit or a push,
+commit the pending changes to `AGENTS.md` and `CLAUDE.md` alongside it, as their own commit in the same push, without
+asking again. Check `git diff` of both files first, and commit only instruction changes, never scratch files.
+
 ### 4.9 Completion report
 
 At the end of a task, report:
@@ -738,6 +742,13 @@ validations and tests and runs".
   - Runs of the released baseline that serve the final comparison, such as a noise-control distribution, are not fix
     validation. Say so when proposing them.
   - Never rerun checks whose code and inputs have not changed.
+  - **Run the stage tier only where it tests something that changed** (owner, 8 November 2026). The stage tier
+    (`pytest -m stage`, about 300 slow tests on small simulations) checks machinery, not scientific accuracy: the
+    kernel-declaration and cold-compilation audit, resume after an interruption at every graph node, identical results
+    across storage routes (in-memory and windowed evidence), execution modes and core counts, and checkpoint
+    operations. Run it for a release that changes kernels or their declarations, evidence storage or windows,
+    threading, batching or worker scheduling, checkpoints, resume or publication records, or the workflow and command
+    line. Other releases run the default suite and the workflow receipt; say which applies and why.
 - **Cancel superseded work at once.** A task is superseded when its question has been answered, or when a newer
   candidate, tree or configuration replaces what it tests. Examples:
   - the noise matrices of a rejected candidate;
@@ -768,6 +779,18 @@ Usage limits can cut an agent off, and allocations can end abruptly.
   - Check for an existing result before redoing work, and write results atomically before returning.
   - A cut-off agent is interrupted, not passed or failed.
   - Coordinators keep the plan, the handoff notes and the status log on project storage.
+- **Every time comes from the system clock** (owner, 8 November 2026). An agent's own sense of the time drifts, usually
+  far ahead of the real clock.
+  - The incident: on 8 November 2026 an agent stamped progress entries 12:55 and 13:05 when the clock read 12:27,
+    and earlier entries that night carried wrong times too.
+  - Write a clock time (progress and status lines, reports, handoffs, ETAs given as times) only from `date` or a
+    tool's own timestamp, read in the same step that writes it: for example
+    `echo "- $(date +%H:%M) ..." >> PROGRESS.md`. Never type a time from memory, by estimate, or by adding a
+    guessed interval to an earlier time.
+  - Take durations and elapsed times from recorded start and end times (logs, `nodeq status`, run records), not from
+    an impression of how long something has run.
+  - Before giving the owner an ETA or saying how long something has taken, read the clock and the task's recorded
+    start time first.
 - **After an interruption:**
   - inspect `git status --short`, `git diff --stat` and `git diff --check`, changed and untracked files, and known
     output locations;
