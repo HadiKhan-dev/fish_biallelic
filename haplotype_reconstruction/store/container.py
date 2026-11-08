@@ -460,27 +460,43 @@ class CheckpointFile:
             finally:
                 reader.close()
 
-    def _read(self, info, nthreads, items=None, out=None, *, path=(), metadata_only=False):
-        nthreads = codec.cpu_threads(nthreads)
+    def _read(self, info, nthreads, items=None, out=None, *, path=(), metadata_only=False, check=None):
         with open(self.path, "rb") as handle:
-            metadata_offset = info.payload_offset + info.metadata_offset
-            if items is None:
-                return codec.decode(
-                    handle, info.payload_offset, info.payload_end, metadata_offset, info.n_buffers, nthreads
-                )
-            return codec.decode_items(
-                handle,
-                info.payload_offset,
-                info.payload_end,
-                metadata_offset,
-                info.n_buffers,
-                tuple(items),
-                nthreads,
-                f"{self.label}:{info.key}",
-                out=out,
-                path=path,
-                metadata_only=metadata_only,
+            return self._decode(handle, info, nthreads, items, out, path=path, metadata_only=metadata_only, check=check)
+
+    def _decode(self, handle, info, nthreads, items=None, out=None, *, path=(), metadata_only=False, check=None):
+        nthreads = codec.cpu_threads(nthreads)
+        metadata_offset = info.payload_offset + info.metadata_offset
+        if items is None:
+            return codec.decode(
+                handle, info.payload_offset, info.payload_end, metadata_offset, info.n_buffers, nthreads
             )
+        return codec.decode_items(
+            handle,
+            info.payload_offset,
+            info.payload_end,
+            metadata_offset,
+            info.n_buffers,
+            tuple(items),
+            nthreads,
+            f"{self.label}:{info.key}",
+            out=out,
+            path=path,
+            metadata_only=metadata_only,
+            check=check,
+        )
+
+    @contextmanager
+    def batch(self):
+        """A reader of many records through one index snapshot and one open handle (release 4.8).
+
+        Each info() refreshes the index (a stat) and each read opens the file: per record, two opens and a stat of a
+        network filesystem, for thousands of records per selection round (seconds to tens of seconds on a compute
+        node). The container is append-only, so the snapshot and the handle stay valid for every record it holds;
+        records appended after the snapshot are not seen. One thread per reader (the handle seeks)."""
+        records = self._records()
+        with open(self.path, "rb") as handle:
+            yield _BatchReader(self, records, handle)
 
     def encode(self, payload, *, nthreads=None, clevel=None) -> Encoded:
         """``payload`` encoded for an append (Encoded, a context manager). Writers encode before they take the
@@ -645,3 +661,20 @@ class CheckpointFile:
 
 
 __all__ = ["CheckpointMismatch", "RecordInfo", "CheckpointFile", "CONTAINER_KINDS"]
+
+
+class _BatchReader:
+    """CheckpointFile.batch's reader: info() and _read() of one container snapshot through one handle."""
+
+    def __init__(self, file, records, handle):
+        self.file = file
+        self.records = records
+        self.handle = handle
+
+    def info(self, key):
+        return self.records.get(key)
+
+    def _read(self, info, nthreads, items=None, out=None, *, path=(), metadata_only=False, check=None):
+        return self.file._decode(
+            self.handle, info, nthreads, items, out, path=path, metadata_only=metadata_only, check=check
+        )

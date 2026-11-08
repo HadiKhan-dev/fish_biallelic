@@ -269,6 +269,36 @@ def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
     return max(1, (n_children + per_contig - 1) // per_contig)
 
 
+def _child_tasks(parent_pairs, seeds, haplotypes_by_contig, ancestries_by_contig, per_task, common_by_contig):
+    """Pool tasks (_simulate_children) of every contig's children in batches of ``per_task``.
+
+    Release 4.8: a task carries only the parents its own children use, with their pairs renumbered (4.7 sent each
+    task every parent of the cohort: about 4.4 GB pickled serially by the coordinator for one 112-CPU contig).
+    The children, their seeds and every draw are unchanged."""
+    tasks = []
+    for c, (haplotypes, ancestries) in enumerate(zip(haplotypes_by_contig, ancestries_by_contig, strict=True)):
+        sites, recombination_rate, mutation_rate, chromosome_map = common_by_contig[c]
+        for first in range(0, len(parent_pairs), per_task):
+            pairs = parent_pairs[first : first + per_task]
+            used = sorted({parent for pair in pairs for parent in pair})
+            local = {parent: slot for slot, parent in enumerate(used)}
+            tasks.append(
+                (
+                    c,
+                    first,
+                    [tuple(local[parent] for parent in pair) for pair in pairs],
+                    seeds[c, first : first + per_task],
+                    [haplotypes[parent] for parent in used],
+                    [ancestries[parent] for parent in used],
+                    sites,
+                    recombination_rate,
+                    mutation_rate,
+                    chromosome_map,
+                )
+            )
+    return tasks
+
+
 def simulate_pedigree(
     founders_by_contig: Sequence[Sequence[Sequence[NDArray[np.int8]]]],
     sites_by_contig: Sequence[NDArray[np.int64]],
@@ -350,22 +380,14 @@ def simulate_pedigree(
             # B. Genetics: one seed per contig and child, fixed before any scheduling.
             seeds = child_seeds(master, n_contigs, n_children)
             per_task = _children_per_task(n_children, n_contigs, processes)
-            tasks = [
-                (
-                    c,
-                    first,
-                    parent_pairs[first : first + per_task],
-                    seeds[c, first : first + per_task],
-                    pool_haplotypes[c],
-                    pool_ancestries[c],
-                    sites_by_contig[c],
-                    recombination_rate,
-                    mutation_rate,
-                    chromosome_maps[c],
-                )
-                for c in range(n_contigs)
-                for first in range(0, n_children, per_task)
-            ]
+            tasks = _child_tasks(
+                parent_pairs,
+                seeds,
+                pool_haplotypes,
+                pool_ancestries,
+                per_task,
+                [(sites_by_contig[c], recombination_rate, mutation_rate, chromosome_maps[c]) for c in range(n_contigs)],
+            )
             offspring: list[list[Any]] = [[None] * n_children for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
                 offspring[contig_index][first : first + len(children)] = children
@@ -440,22 +462,14 @@ def simulate_explicit_pedigree(
             ]
             seeds = child_seeds(master, n_contigs, len(members))
             per_task = _children_per_task(len(members), n_contigs, processes)
-            tasks = [
-                (
-                    c,
-                    first,
-                    parent_pairs[first : first + per_task],
-                    seeds[c, first : first + per_task],
-                    [contigs[c].haplotypes[index] for index in ancestors],
-                    [contigs[c].ancestry[index] for index in ancestors],
-                    sites_by_contig[c],
-                    recombination_rate,
-                    mutation_rate,
-                    chromosome_maps[c],
-                )
-                for c in range(n_contigs)
-                for first in range(0, len(members), per_task)
-            ]
+            tasks = _child_tasks(
+                parent_pairs,
+                seeds,
+                [[contigs[c].haplotypes[index] for index in ancestors] for c in range(n_contigs)],
+                [[contigs[c].ancestry[index] for index in ancestors] for c in range(n_contigs)],
+                per_task,
+                [(sites_by_contig[c], recombination_rate, mutation_rate, chromosome_maps[c]) for c in range(n_contigs)],
+            )
             offspring: list[list[Any]] = [[None] * len(members) for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
                 offspring[contig_index][first : first + len(children)] = children

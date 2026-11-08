@@ -278,11 +278,13 @@ class SelectionRecords:
         if selected is None:
             raise InvariantError(f"selection {self.contig}/{self.round_name} is incomplete")
         result = []
-        for index in selected["indices"]:
-            saved = read_items(self.file, self.key("block", index), self.derivation("block", index), ("panel",))
-            if saved is None:
-                raise InvariantError(f"selection {self.contig}/{self.round_name} completion has missing records")
-            result.append(decode_panel(saved.payload["panel"]))
+        with self.file.batch() as reader:  # one index snapshot and handle for the round's block records (4.8)
+            for index in selected["indices"]:
+                key, identity = self.key("block", index), self.derivation("block", index)
+                saved = read_items(self.file, key, identity, ("panel",), reader=reader)
+                if saved is None:
+                    raise InvariantError(f"selection {self.contig}/{self.round_name} completion has missing records")
+                result.append(decode_panel(saved.payload["panel"]))
         return tuple(result)
 
 
@@ -340,10 +342,12 @@ class Reader:
             if selected is None:
                 continue
             summaries = []
-            for index in selected["indices"]:
-                saved = read_items(item.file, item.key("block", index), item.derivation("block", index), ("summary",))
-                assert saved is not None
-                summaries.append(from_payload(SelectionSummary, saved.payload["summary"]))
+            with item.file.batch() as reader:
+                for index in selected["indices"]:
+                    key, identity = item.key("block", index), item.derivation("block", index)
+                    saved = read_items(item.file, key, identity, ("summary",), reader=reader)
+                    assert saved is not None
+                    summaries.append(from_payload(SelectionSummary, saved.payload["summary"]))
             # The 3.5 record groups the ties report reads: a round's blocks, then its proposals (refit rounds).
             blocks = tuple(summary.tie_events for summary in summaries)
             sources.append(TieSource(f"local_selection/{item.round_name}/blocks", blocks))

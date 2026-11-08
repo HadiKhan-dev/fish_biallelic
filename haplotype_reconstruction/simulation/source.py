@@ -26,7 +26,7 @@ from ..core.errors import InputError
 from ..core.random import read_seeds, stream
 from .design import PedigreeRow, ReadModel, SimulationConfig, observed_indices
 from .pedigree import PedigreeTable, materialise_founders, pair_founders, simulate_explicit_pedigree, simulate_pedigree
-from .reads import sample_reads
+from .reads import ReadInputs, read_inputs, read_rows
 from .truth import ContigTruth, TruthCrossovers, truth_crossovers, truth_painting
 
 if TYPE_CHECKING:
@@ -35,7 +35,15 @@ if TYPE_CHECKING:
     # ContigReads.__post_init__ accepts these int64 draws and freezes them as int32.
     _ContigReadsFactory = Callable[[str, tuple[str, ...], NDArray[np.int64], NDArray[np.int64]], ContigReads]
 
-__all__ = ["FounderTemplate", "ContigSimulation", "SimulationPlan", "prepare_simulation", "generate_contig"]
+__all__ = [
+    "FounderTemplate",
+    "ContigSimulation",
+    "SimulationPlan",
+    "prepare_simulation",
+    "generate_contig",
+    "contig_read_inputs",
+    "contig_result",
+]
 
 
 @dataclass(frozen=True)
@@ -72,8 +80,8 @@ class ContigSimulation:
     """A whole-contig reads task with its already drawn seed and observed truth.
 
     Offspring is [N][2] int8[L]; ancestry is [N][2] lists of float-bp segments.
-    No field is mutated by generate_contig. Splitting the sample axis is illegal:
-    it changes the generating read sampler's draw order.
+    No field is mutated by generate_contig. Since release 4.8 each sample draws its reads from its own
+    stream (simulation/reads.py), so the sample axis may be split into blocks simulated anywhere.
     """
 
     contig: str = record_field("obs", axes=(), units="1", dtype="str")
@@ -160,23 +168,36 @@ def prepare_simulation(
     return SimulationPlan(generated, observed, tasks)
 
 
-def generate_contig(task: ContigSimulation) -> tuple[ContigReads, ContigTruth]:
-    """Return reads int32[N,L,2] and unchanged truth for one whole contig.
-
-    Maternal and paternal arrays preserve the observed pedigree row order. Mutation,
-    map crossover positions and integer truth-painting truncation are retained.
-    The only mutable object is the task-local PCG64 stream.
-    """
+def contig_read_inputs(task: ContigSimulation) -> ReadInputs:
+    """The contig's haplotypes, shared read factors and per-sample stream seed (from its task-local stream)."""
     rng = stream("simulation.contig_reads", seed=task.seed)
-    hap0 = np.array([individual[0] for individual in task.offspring])
-    hap1 = np.array([individual[1] for individual in task.offspring])
-    counts = sample_reads(hap0, hap1, task.positions, task.depth, task.read_model, rng)
+    hap0 = np.array([individual[0] for individual in task.offspring], dtype=np.int8)
+    hap1 = np.array([individual[1] for individual in task.offspring], dtype=np.int8)
+    return read_inputs(hap0, hap1, task.positions, task.depth, task.read_model, rng)
+
+
+def contig_result(
+    task: ContigSimulation, inputs: ReadInputs, counts: NDArray[np.integer]
+) -> tuple[ContigReads, ContigTruth]:
+    """Reads (counts int[N, L, 2] in the observed row order, frozen as int32) and unchanged truth of one contig."""
     truth = ContigTruth(
         sample_ids=task.sample_ids,
         positions=task.positions,
         founder_haplotypes=np.asarray([h for pair in task.founders for h in pair], dtype=np.int8),
-        alleles=np.ascontiguousarray(np.stack((hap0, hap1), axis=2), dtype=np.int8),
+        alleles=np.ascontiguousarray(np.stack((inputs.hap0, inputs.hap1), axis=2), dtype=np.int8),
         painting=truth_painting(task.ancestry),
         crossovers=task.crossovers,
     )
     return cast("_ContigReadsFactory", ContigReads)(task.contig, task.sample_ids, task.positions, counts), truth
+
+
+def generate_contig(task: ContigSimulation) -> tuple[ContigReads, ContigTruth]:
+    """Return reads int32[N,L,2] and unchanged truth for one whole contig, serially.
+
+    Maternal and paternal arrays preserve the observed pedigree row order. Mutation,
+    map crossover positions and integer truth-painting truncation are retained.
+    The only mutable objects are the task-local PCG64 streams. The simulation stage
+    simulates blocks of samples in parallel (stages/inputs/simulation.py) with the same result.
+    """
+    inputs = contig_read_inputs(task)
+    return contig_result(task, inputs, read_rows(inputs, 0, inputs.hap0.shape[0]))

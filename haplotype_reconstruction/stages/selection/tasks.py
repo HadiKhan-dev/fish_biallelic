@@ -63,6 +63,14 @@ __all__ = [
 
 BlockSettings = tuple[SelectionParameters, DiscoveryParameters, float]
 CHUNK_BLOCKS = 8  # average blocks' cost per engine task in a selection round (execution only: results are per block)
+# Guided chunk sizes (release 4.8, execution only): a new chunk takes about the round's remaining cost / (this x CPUs),
+# capped by the CHUNK_BLOCKS average and floored at that average / CHUNK_FLOOR, so the last chunks of a round are small.
+CHUNK_WAVES = 2
+CHUNK_FLOOR = 8
+# At least this many tasks per CPU a round may use (execution only). Block costs in refit rounds are poorly predicted
+# (chr1 0.5x l2: five ~20 s blocks the cost model rated average shared one 104 s task that set the round's length);
+# 2 per CPU (to 4.7) made chunks of ~7 blocks.
+CHUNK_TASKS_PER_CPU = 8
 # A block re-reads its task's CPU share (an engine boundary) at most this often: its lane evaluations run thousands of
 # times, and a block that started on one thread beside hundreds of siblings grows as they finish.
 SHARE_REREAD_SECONDS = 0.1
@@ -231,24 +239,32 @@ def round_expansion(
     # Heaviest first, as before; then consecutive blocks are grouped into engine tasks of about CHUNK_BLOCKS average
     # blocks' cost (a block at least that heavy stays alone), so the coordinator's fixed turnaround per task (reply,
     # bookkeeping, dispatch, send) is paid per chunk rather than per sub-second block. A round never has fewer tasks
-    # than twice the CPUs it may use (or its block count): heavy blocks (K = 30, about a CPU-minute each) stay about
-    # one per task, so the round still fills the node.
+    # than CHUNK_TASKS_PER_CPU times the CPUs it may use (or its block count): heavy blocks (K = 30, about a
+    # CPU-minute each) stay about one per task, so the round still fills the node. Release 4.8: guided sizes, so a
+    # round ends on small chunks (equal chunks of 40-100 s left a minute-long tail at ~10 busy CPUs on chr1 0.5x),
+    # and each task declares its chunk's cost, so the scheduler dispatches the heaviest first (it ordered
+    # equal-cost tasks by block index).
     pending.sort(key=lambda block: (-cost(block), block.index))
     costs = [cost(block) for block in pending]
-    count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), 2 * max(1, int(max_threads))))
-    target = sum(costs) / count if costs else 0.0
+    threads = max(1, int(max_threads))
+    count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), CHUNK_TASKS_PER_CPU * threads))
+    average = sum(costs) / count if costs else 0.0
+    remaining = float(sum(costs))
     chunks: list[list[BlockTask]] = []
-    total = 0.0
+    weights: list[float] = []
+    target = average
     for block, weight in zip(pending, costs, strict=True):
-        if chunks and chunks[-1] and total + weight <= target:
+        if chunks and weights[-1] + weight <= target:
             chunks[-1].append(block)
-            total += weight
+            weights[-1] += weight
         else:
+            target = max(average / CHUNK_FLOOR, min(average, remaining / (CHUNK_WAVES * threads)))
             chunks.append([block])
-            total = weight
+            weights.append(float(weight))
+        remaining -= weight
     tasks = []
     observed_rows = evidence.observed.shape[0]
-    for chunk in chunks:
+    for chunk, weight in zip(chunks, weights, strict=True):
         outputs: tuple[RecordKey, ...] = ()
         if scope is not None:
             for block in chunk:
@@ -262,10 +278,14 @@ def round_expansion(
                 args=(tuple(chunk), settings, evidence, scope),
                 kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
                 # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
-                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task is a
-                # heavy one (K = 30): its path-model kernels spread its samples' lanes over the task's threads.
+                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task and at
+                # least an average chunk's cost is a heavy one (K = 30): its path-model kernels spread its samples'
+                # lanes over the task's threads. A light block alone (a guided tail chunk) keeps one CPU.
                 resources=ResourceRequest(
-                    1, 1 if len(chunk) > 1 else max_threads, max(block_task_bytes(b, observed_rows) for b in chunk)
+                    1,
+                    max_threads if len(chunk) == 1 and weight >= average else 1,
+                    max(block_task_bytes(b, observed_rows) for b in chunk),
+                    cost=weight,
                 ),
                 outputs=outputs,
                 thread_argument="threads",

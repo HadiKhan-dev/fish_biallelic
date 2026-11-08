@@ -47,19 +47,42 @@ def _fill_views(likelihoods, observed, kept, neutral, scoring, seen):
                 scoring[sample, site, genotype] = value
 
 
-def _depth_keys(counts, observed, kept):
-    """Unseeded SHA256 of each founder-visible int64 total-depth vector; one row of scratch.
+def _depth_keys(counts, observed, kept, threads=1):
+    """Unseeded SHA256 of each founder-visible int64 total-depth vector, for the rows of ``counts`` int[n, L, 2].
 
     Non-discovery and unobserved cells are zero. Canonical little-endian bytes make the exact
     integer content independent of machine byte order. Neither likelihoods nor sample labels enter.
+    Release 4.8: depths of up to _DEPTH_ROWS rows at once (bounded scratch), hashed on up to ``threads`` threads
+    (hashing releases the GIL).
     """
-    keys = []
-    for sample in range(observed.shape[0]):
-        depth = counts[sample].sum(axis=1, dtype=np.int64).astype("<i8", copy=False)
-        depth[~observed[sample]] = 0
-        depth[~kept] = 0
-        keys.append(hashlib.sha256(depth).digest())
+    excluded = ~np.asarray(kept, dtype=bool)
+    keys: list[bytes] = []
+    pool = None
+    if threads > 1 and observed.shape[0] > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        pool = ThreadPoolExecutor(max_workers=min(int(threads), _DEPTH_ROWS, observed.shape[0]))
+    try:
+        for first in range(0, observed.shape[0], _DEPTH_ROWS):
+            stop = min(observed.shape[0], first + _DEPTH_ROWS)
+            depth = np.asarray(counts[first:stop]).sum(axis=2, dtype=np.int64).astype("<i8", copy=False)
+            depth[~np.asarray(observed[first:stop], dtype=bool)] = 0
+            depth[:, excluded] = 0
+            rows = [np.ascontiguousarray(row) for row in depth]
+            hashed = map(_sha256, rows) if pool is None else pool.map(_sha256, rows)
+            keys.extend(hashed)
+            del depth, rows
+    finally:
+        if pool is not None:
+            pool.shutdown()
     return tuple(keys)
+
+
+_DEPTH_ROWS = 32  # rows per depth batch in _depth_keys (scratch bound only)
+
+
+def _sha256(row):
+    return hashlib.sha256(row).digest()
 
 
 @dataclass(frozen=True)

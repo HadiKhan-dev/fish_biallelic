@@ -282,13 +282,17 @@ def _shareable(array) -> np.ndarray:
     return contiguous
 
 
-def _fill_shared(contiguous: np.ndarray, handle: SharedMemory, copy_threads: int) -> SharedArrayRef:
-    """Copy into an allocated segment (create_shared_array's second half); the caller owns failure cleanup."""
+def _fill_shared(
+    contiguous: np.ndarray, handle: SharedMemory, copy_threads: int, *, capped: bool = True
+) -> SharedArrayRef:
+    """Copy into an allocated segment (create_shared_array's second half); the caller owns failure cleanup.
+    ``capped=False``: ``copy_threads`` already accounts for the CPUs the caller may use (a reply copy borrowing its
+    lane's idle CPUs), so it is not capped at the task's claim again."""
     threads = int(copy_threads)
     if threads > 1 and contiguous.nbytes >= _PARALLEL_COPY_BYTES:
         from .scheduler import authority_threads, numba_threads
 
-        with numba_threads(authority_threads(threads)):
+        with numba_threads(authority_threads(threads) if capped else threads):
             _copy_shared_bytes(
                 np.frombuffer(memoryview(contiguous), dtype=np.uint8),
                 np.frombuffer(cast(memoryview, handle.buf), dtype=np.uint8, count=contiguous.nbytes),
@@ -1706,8 +1710,10 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
                 retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
                 # The reply is packed while the task still holds its CPUs, so that its large result arrays are copied
                 # into shared memory by the task's whole team (release 4.7.1), not by one thread after it released them.
+                # Release 4.8: plus the lane's CPUs nobody holds or waits for. An expanding single-CPU task (a contig's
+                # chain step) copied gigabytes of children's arrays on one thread while the node waited for them.
                 team = scheduler.authority_threads(_task_peak_threads())
-                packed = _pack_reply(replace(reply, retire=retire), copy_threads=team)
+                packed = _pack_reply(replace(reply, retire=retire), copy_threads=team + scheduler.idle_lane_cpus())
                 seat.end_task()
                 connection.send(("result", packed))
                 # Idle workers retain only explicitly registered affinity state.
@@ -1955,7 +1961,7 @@ def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
             _announce_shared("shared-", (name,))
             continue
         try:
-            return _pid(_fill_shared(array.T if transposed else array, handle, copy_threads), transposed)
+            return _pid(_fill_shared(array.T if transposed else array, handle, copy_threads, capped=False), transposed)
         finally:
             handle.close()
     raise FileExistsError("no free shared-memory segment name")

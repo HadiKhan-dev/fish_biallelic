@@ -1,5 +1,16 @@
 # Migration guides
 
+## Migrating from 4.7 to 4.8.0
+
+Start a new output and checkpoint root with the same inputs, configuration and seed. Code identities change, so
+existing roots are not resumed by 4.8; keep existing runs with their matching code.
+
+**Simulated reads change for a seed.** Each sample now draws its reads from its own stream (`simulation.sample_reads`)
+so that a contig's reads are simulated in parallel; the read laws, the pedigree, meiosis and truth are unchanged, but
+the read counts a seed produces differ from 4.7, and so do the downstream results of a simulation. Real-data (VCF/BCF)
+runs are scientifically identical to 4.7: every other change in 4.8 reorders, batches or parallelises work, or caps
+the threads of compression calls.
+
 ## Migrating from 4.6 to 4.7.0
 
 Start a new output and checkpoint root with the same inputs, configuration and

@@ -107,9 +107,13 @@ Integrating G gives a negative-binomial marginal with E[D] = mu and Var(D) = mu 
 Alpha zero sets G = 1 without draws. Site CV zero sets B = 1 without draws, regardless of window width.
 Depth remains d in expectation over factors and dropout; a finite contig need not have exactly that mean.
 
-Draw optional normalised sample factors, optional site factors, optional full sample-by-site gamma
-factors, then the full sample-by-site Poisson depth array, optional dropout starts and genotype-class
-binomial ALT counts in class/row-major order. Skip a genotype-class draw when its mask is empty. Emit REF/ALT counts after dropout. Splitting a contig into new sample chunks changes draw layout and is not a valid execution-only optimisation.
+From the contig's read stream, draw optional normalised sample factors, then optional site factors (both shared
+by all samples), then one seed for the per-sample streams. Each sample then draws, from its own stream
+`simulation.sample_reads` (that seed and its index): optional gamma factors over its sites, its Poisson depths,
+its optional dropout start and its genotype-class binomial ALT counts in class order. Skip a genotype-class draw
+when its mask is empty. Emit REF/ALT counts after dropout. Because no sample's draws depend on another's, blocks of
+samples are simulated in parallel with the same counts at any worker count (since 4.8; to 4.7 every sample drew
+from the one contig stream in sample-by-site order, so 4.8 simulates different reads for a seed under the same laws).
 
 Implementation: [simulation/reads.py](../../haplotype_reconstruction/simulation/reads.py).
 
@@ -142,8 +146,9 @@ of hits shared by i and j scales with min(T_i, T_j); it does not depend on an un
 maximum factor. No independent read top-up or duplication of existing counts is used.
 Cost: candidates exceed retained hits by the ratio of local envelope to target, not by the contig maximum.
 
-With the new effects off, skip gamma, envelope and retention draws entirely and use the historical
-fragment sampler draw order. Pack first-mate bases before second-mate bases, avoiding double-counted overlap. A sample with no covered base skips later base draws. Apply optional heterozygote bias, then the declared homozygous error mask, accumulating counts by site. Draw dropout starts only after all samples. Fragment correlation is part of the generating model.
+With the new effects off, skip gamma, envelope and retention draws entirely. The shared factors and the per-sample
+stream seed come from the contig's read stream as for independent sites; each sample's fragments, marks, bias,
+errors and dropout start come from its own `simulation.sample_reads` stream (since 4.8). Pack first-mate bases before second-mate bases, avoiding double-counted overlap. A sample with no covered base skips later base draws. Apply optional heterozygote bias, then the declared homozygous error mask, accumulating counts by site. Fragment correlation is part of the generating model.
 
 Implementation: [simulation/reads.py](../../haplotype_reconstruction/simulation/reads.py).
 
@@ -168,7 +173,9 @@ Cost and scope: O(N · segments). These terms describe the unit’s work/storage
 <a id="ou30"></a>
 ## ou30 Simulation source: streams, identity, resume, scheduling and memory
 
-Bind the realised seed once and preserve named founder, pedigree, observation, gamete and read stream constructors and draw order. Materialise the whole configured contig set, reusing only compatible completed source products. Publish truth before its read-completion product. Keep generated and analysed sample axes distinct and reject partial products without their manifest. Task order may change execution, never per-contig seeds or data.
+Bind the realised seed once and preserve named founder, pedigree, observation, gamete and read stream constructors and draw order. Materialise the whole configured contig set, reusing only compatible completed source products. Publish truth before its read-completion product. Keep generated and analysed sample axes distinct and reject partial products without their manifest. Task order may change execution, never per-contig seeds or data. Since 4.8 each contig's reads are simulated as
+blocks of samples on all CPUs from shared read-only inputs, and the contig's records are written by a gather on
+its own worker; meiosis tasks carry only the parents their children use.
 
 Implementation: [simulation/source.py](../../haplotype_reconstruction/simulation/source.py), [stages/inputs/simulation.py](../../haplotype_reconstruction/stages/inputs/simulation.py).
 

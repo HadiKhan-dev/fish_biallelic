@@ -59,7 +59,12 @@ def prepare_contig(
     model = fitted if fitted is not None else fixed_model(config.read_model.fixed_error, kept.n_samples)
     error, heterozygote = model.error_and_heterozygote()
     likelihoods = build_likelihoods(
-        counts, error, heterozygote, model.heterozygote_inverse_concentration, config.read_model.lookup_depth
+        counts,
+        error,
+        heterozygote,
+        model.heterozygote_inverse_concentration,
+        config.read_model.lookup_depth,
+        threads=team,
     )
     total_depth = counts.sum(axis=(0, 2), dtype=np.int64)
     discovery_sites = total_depth >= config.discovery_sites.threshold()

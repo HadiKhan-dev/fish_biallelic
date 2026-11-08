@@ -26,10 +26,27 @@ from ...contracts.source import ContigReads
 from ...core.digest import json_digest, jsonable
 from ...core.errors import InputError, InvariantError, SettingsError
 from ...core.random import realise_seed
-from ...engine.graph import RecordKey, ResourceRequest, Task, TaskKey, run_graph
+from ...engine.graph import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey, run_graph
+from ...engine.workers import (
+    ResidentRef,
+    SharedValue,
+    call_shared,
+    release_resident,
+    release_shared_value,
+    resident_value,
+    retain,
+    share_value,
+)
 from ...simulation.design import PedigreeRow, SimulationConfig, parse_pedigree_table
 from ...simulation.parameters import READS_BYTES_PER_CELL, READS_WORKER_BYTES
-from ...simulation.source import ContigSimulation, FounderTemplate, generate_contig, prepare_simulation
+from ...simulation.reads import ReadInputs, read_rows
+from ...simulation.source import (
+    ContigSimulation,
+    FounderTemplate,
+    contig_read_inputs,
+    contig_result,
+    prepare_simulation,
+)
 from ...simulation.truth import (
     COMPLETE,
     IN_PROGRESS,
@@ -41,7 +58,7 @@ from ...simulation.truth import (
     truth_record,
 )
 from ...store.identity import code_dependency_identity
-from ...store.protocol import claim, publish, read_items, resume
+from ...store.protocol import claim, is_complete, publish, read_items, resume
 from ...store.store import CheckpointStore
 from .genetic_map import load_genetic_maps
 from .simulation_records import load_manifest, load_reads, load_truth
@@ -66,39 +83,98 @@ def _child_batches(function: Callable[..., Any], batches: Sequence[Any], *, core
     return [results[task.key] for task in tasks]
 
 
-def _write_contig(root: str, task: ContigSimulation, identity: str) -> str:
-    store = CheckpointStore(root, nthreads=1)
-    file = store.contig(task.contig)
-    with claim(file, READS, identity) as needed:
-        if not needed:
-            return task.contig
-        reads, truth = generate_contig(task)
-        if not file.has(TRUTH):
-            publish(file, TRUTH, identity, truth_record(truth))
-        else:
-            resume(file, TRUTH, identity)
-        publish(
-            file,
-            READS,
-            identity,
-            dict(schema=SCHEMA, sample_ids=reads.sample_ids, positions=reads.positions, counts=reads.counts),
+# Blocks of samples per CPU of a contig's parallel read simulation (execution grain only: every sample draws from
+# its own stream, so the counts never depend on it).
+READ_BLOCKS_PER_CORE = 2
+
+
+def _contig_reads(root: str, task: ContigSimulation, identity: str, cores: int) -> str | Expansion:
+    """Simulate one contig's reads as blocks of samples on all CPUs, then publish TRUTH and READS (release 4.8).
+
+    The haplotypes and shared factors are shared read-only once (ENG-24 transport); each block returns its counts;
+    the gather on this contig's affinity writes the records with the run's CPUs compressing them."""
+    file = CheckpointStore(root, nthreads=1).contig(task.contig)
+    if is_complete(file, {READS: identity}):
+        return task.contig
+    inputs = contig_read_inputs(task)
+    samples, sites = inputs.hap0.shape
+    blocks = max(1, min(samples, READ_BLOCKS_PER_CORE * int(cores)))
+    edges = [round(samples * b / blocks) for b in range(blocks + 1)]
+    shared = share_value(inputs, "simulation-reads")
+    width = len(str(blocks - 1))
+    subtasks = tuple(
+        Task(
+            TaskKey("simulation", f"reads.{b:0{width}d}", scope=task.contig),
+            _read_block,
+            args=(shared, edges[b], edges[b + 1]),
+            resources=ResourceRequest(working_set_bytes=READS_BYTES_PER_CELL * (edges[b + 1] - edges[b]) * sites),
         )
+        for b in range(blocks)
+        if edges[b + 1] > edges[b]
+    )
+    retained = retain((task, inputs, shared), "simulation-reads")
+    gather = Task(
+        TaskKey("simulation", "reads.gather", scope=task.contig),
+        _publish_contig,
+        args=(root, retained, identity, tuple(ResultRef(t.key) for t in subtasks)),
+        depends_on=tuple(t.key for t in subtasks),
+        affinity=task.contig,
+        resources=ResourceRequest(1, max(1, int(cores)), READS_BYTES_PER_CELL * samples * sites),
+        thread_argument="threads",
+    )
+    return Expansion(subtasks, gather)
+
+
+def _rows_int32(inputs: ReadInputs, first: int, stop: int) -> np.ndarray:
+    return read_rows(inputs, first, stop).astype(np.int32)
+
+
+def _read_block(shared: SharedValue, first: int, stop: int) -> np.ndarray:
+    """Engine subtask: counts int32[stop - first, L, 2] of one block of samples on the shared inputs."""
+    return call_shared(shared, _rows_int32, first, stop)
+
+
+def _publish_contig(
+    root: str, reference: ResidentRef, identity: str, blocks: tuple[np.ndarray, ...], threads: int = 1
+) -> str:
+    """Gather: join the blocks in sample order and publish TRUTH then READS under the READS claim."""
+    task, inputs, shared = resident_value(reference)
+    try:
+        release_shared_value(shared)
+        file = CheckpointStore(root, nthreads=max(1, int(threads))).contig(task.contig)
+        with claim(file, READS, identity) as needed:
+            if not needed:
+                return task.contig
+            reads, truth = contig_result(task, inputs, np.concatenate(blocks, axis=0))
+            del blocks
+            if not file.has(TRUTH):
+                publish(file, TRUTH, identity, truth_record(truth))
+            else:
+                resume(file, TRUTH, identity)
+            publish(
+                file,
+                READS,
+                identity,
+                dict(schema=SCHEMA, sample_ids=reads.sample_ids, positions=reads.positions, counts=reads.counts),
+            )
+    finally:
+        release_resident(reference)
     return task.contig
 
 
-def reads_tasks(root: str, contigs: Sequence[ContigSimulation], identities: dict[str, str]) -> tuple[Task, ...]:
-    """Declare whole-contig tasks largest first; estimates report memory, never gate science."""
+def reads_tasks(
+    root: str, contigs: Sequence[ContigSimulation], identities: dict[str, str], *, cores: int = 1
+) -> tuple[Task, ...]:
+    """Declare whole-contig tasks largest first, each expanding into blocks of samples on ``cores`` CPUs;
+    estimates report memory, never gate science."""
     order = sorted(range(len(contigs)), key=lambda i: (-len(contigs[i].sample_ids) * len(contigs[i].positions), i))
     return tuple(
         Task(
             TaskKey("simulation", "reads", scope=contigs[i].contig),
-            _write_contig,
-            args=(root, contigs[i], identities[contigs[i].contig]),
+            _contig_reads,
+            args=(root, contigs[i], identities[contigs[i].contig], cores),
             outputs=(RecordKey(contigs[i].contig, TRUTH), RecordKey(contigs[i].contig, READS)),
-            resources=ResourceRequest(
-                working_set_bytes=READS_BYTES_PER_CELL * len(contigs[i].sample_ids) * len(contigs[i].positions)
-                + READS_WORKER_BYTES
-            ),
+            resources=ResourceRequest(working_set_bytes=READS_WORKER_BYTES),
             affinity=contigs[i].contig,
         )
         for i in order
@@ -252,7 +328,10 @@ class SimulationSource:
         identities = {c: self.payload_identity(c) for c in self.contigs()}
         pending = [task for task in plan.contigs if not store.contig(task.contig).has(READS)]
         run_graph(
-            reads_tasks(str(store.root), pending, identities), cores=team, in_process=team == 1, preload=(__name__,)
+            reads_tasks(str(store.root), pending, identities, cores=team),
+            cores=team,
+            in_process=team == 1,
+            preload=(__name__,),
         )
         for c in self.contigs():
             load_reads(store.contig(c), identities[c])

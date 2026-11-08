@@ -2273,6 +2273,24 @@ def authority_threads(cap: int) -> int:
     return capped_threads(current_budget(), cap)
 
 
+def idle_lane_cpus() -> int:
+    """CPUs of this pool worker's lane that no task holds and none waits for (0 outside a pool, or while a task
+    waits for CPUs). Release 4.8: a serial step of a single-CPU task that the rest of its contig waits for (a chain
+    step, a reply copy) borrows them briefly; a task dispatched meanwhile oversubscribes them only for that step."""
+    seat = _POOL_SEAT
+    if seat is None:
+        return 0
+    counters = seat.counters
+    if counters.waiting.value:
+        return 0
+    return max(0, _read(counters.total) - _read(counters.claimed))
+
+
+def spare_threads(cap: int) -> int:
+    """At most ``cap`` threads: this task's CPU authority plus its lane's idle CPUs (idle_lane_cpus)."""
+    return max(1, min(int(cap), authority_threads(cap) + idle_lane_cpus()))
+
+
 def claim_threads(*, max_threads: int | None = None) -> int:
     """Boundary call: recompute this process's share, apply it to the calling thread's Numba team, return it.
 

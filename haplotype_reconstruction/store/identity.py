@@ -12,10 +12,12 @@ root, closures are hashed on every call, so edits are seen.
 from __future__ import annotations
 
 import ast
+import contextvars
 import functools
 import hashlib
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -60,16 +62,74 @@ def add_sources(digest, directory: Path, root: Path = PACKAGE_ROOT) -> None:
                     digest.update(handle.read())
 
 
+def _read_sources(root: Path) -> dict[Path, bytes]:
+    """Every source file under ``root``, read concurrently (release 4.8): a closure's file checks, reads and hashing
+    then cost no filesystem round trips (one stat and read per module, serially, took 10-15 s on a compute node)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = []
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if name != "__pycache__"]
+        paths.extend(Path(directory) / name for name in files if name.endswith(".py"))
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(paths)))) as pool:
+        return dict(zip(paths, pool.map(Path.read_bytes, paths)))
+
+
+@functools.cache
+def _installed_sources() -> dict[Path, bytes]:
+    """The installed package's sources, read once: only used while they are fixed (a run's processes,
+    fix_installed_sources), so the bytes are the ones a closure would read."""
+    return _read_sources(PACKAGE_ROOT)
+
+
+# A closure call's own snapshot of its root (root, sources) outside fixed installed sources: read at the call, so
+# sources edited between calls (a notebook, a fixture tree) are seen, and consistent within the call.
+_CALL_SOURCES: contextvars.ContextVar[tuple[Path, dict[Path, bytes]] | None] = contextvars.ContextVar(
+    "identity_sources", default=None
+)
+
+
+def _snapshot(root: Path) -> dict[Path, bytes] | None:
+    if _SOURCES_FIXED and root == PACKAGE_ROOT:
+        return _installed_sources()
+    current = _CALL_SOURCES.get()
+    return current[1] if current is not None and current[0] == root else None
+
+
+@contextmanager
+def _call_snapshot(root: Path) -> Iterator[None]:
+    """Hold one snapshot of ``root`` for this closure call (and the calls it makes) unless one already applies."""
+    if _snapshot(root) is not None:
+        yield
+        return
+    token = _CALL_SOURCES.set((root, _read_sources(root)))
+    try:
+        yield
+    finally:
+        _CALL_SOURCES.reset(token)
+
+
 def _module_path(module: str, root: Path) -> Path | None:
     parts = module.split(".")
     if parts[0] != root.name:
         return None
     stem = root.joinpath(*parts[1:])
+    sources = _snapshot(root)
+    if sources is not None:
+        for candidate in (stem.with_suffix(".py"), stem / "__init__.py"):
+            if candidate in sources:
+                return candidate
+        return None
     if stem.with_suffix(".py").is_file():
         return stem.with_suffix(".py")
     if (stem / "__init__.py").is_file():
         return stem / "__init__.py"
     return None
+
+
+def _source_bytes(path: Path, root: Path) -> bytes:
+    sources = _snapshot(root)
+    return sources[path] if sources is not None else path.read_bytes()
 
 
 def _resolve_relative(name: str, package: str) -> str:
@@ -136,6 +196,11 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
     those bodies normally. All non-root modules retain full static traversal.
     """
     root = Path(package_root)
+    with _call_snapshot(root):
+        return _dependency_closure(tuple(modules), root)
+
+
+def _dependency_closure(modules: tuple[str, ...], root: Path) -> tuple[str, ...]:
     pending = {
         name if name.startswith(root.name + ".") or name == root.name else f"{root.name}.{name}" for name in modules
     }
@@ -146,7 +211,13 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
     for name in tuple(pending):
         path = cast(Path, _module_path(name, root))
         if path.name == "__init__.py":
-            for source in path.parent.rglob("*.py"):
+            sources = _snapshot(root)
+            members = (
+                sorted(p for p in sources if p.is_relative_to(path.parent))
+                if sources is not None
+                else path.parent.rglob("*.py")
+            )
+            for source in members:
                 parts = list(source.relative_to(root).with_suffix("").parts)
                 if parts[-1] == "__init__":
                     parts.pop()
@@ -176,7 +247,7 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
         # Only root export bodies are exempt: ordinary lazy science imports
         # still belong to the calling stage's transitive source identity.
         restricted = module == root.name and not root_exports
-        for kind, *data in _import_records(path.read_text(), restricted, str(path)):
+        for kind, *data in _import_records(_source_bytes(path, root).decode(), restricted, str(path)):
             aliases: tuple[str, ...] = ()
             if kind == "import":
                 names = list(data[0])
@@ -232,12 +303,17 @@ def _installed_identity(modules: frozenset[str]) -> CodeIdentity:
 
 
 def _hashed_closure(modules: Iterable[str], root: Path) -> CodeIdentity:
+    with _call_snapshot(root):
+        return _hashed_snapshot(tuple(modules), root)
+
+
+def _hashed_snapshot(modules: tuple[str, ...], root: Path) -> CodeIdentity:
     closure = dependency_closure(modules, package_root=root)
     digest = hashlib.sha256()
     for module in closure:
         path = cast(Path, _module_path(module, root))
         digest.update(str(path.relative_to(root)).encode("utf-8", "surrogateescape") + b"\0")
-        digest.update(path.read_bytes())
+        digest.update(_source_bytes(path, root))
     return CodeIdentity(digest.hexdigest(), closure)
 
 

@@ -622,6 +622,8 @@ class SelectionInputs:
 # (engine.workers.resident_or_load) under keys naming their store identities, so a kept value equals a fresh read and
 # any other worker reads the store; the final assembly's entry, their last consumer, releases them.
 _CHAIN_INPUTS = "chain-inputs"
+# Sample rows per evidence-count gather for the assembly depth keys (memory bound only: 32 rows of int32[L, 2]).
+DEPTH_KEY_ROWS = 32
 
 
 def _chain_input(key: str, load: Callable[[], Any]) -> Any:
@@ -654,19 +656,25 @@ def _chain_evidence(reader: Results, contig: str) -> tuple[Any, Any, Any, Any]:
         if not isinstance(evidence, ContigEvidence):
             raise SettingsError(f"{contig}: selection and assembly need complete evidence")
         founder = evidence.founder_view()
-        # The keys consume counts once. Decode one sample row at a time rather
-        # than retaining an N x L x 2 count buffer for the rest of the chain.
+        # The keys consume counts once. Decode DEPTH_KEY_ROWS sample rows at a time rather than retaining an
+        # N x L x 2 count buffer for the rest of the chain (release 4.8: batches, hashed on spare threads; one row
+        # per gather made this serial chain step ~14 s for chr1 at N = 320).
+        from ..engine.scheduler import spare_threads
+
         columns = np.arange(evidence.n_sites, dtype=np.int64)
         keys = []
+        threads = spare_threads(DEPTH_KEY_ROWS)
         with evidence_records.open_arrays(
             reader._store.contig(contig), ("counts",), expected_identity=request.identity
         ) as arrays:
             if arrays is None:
                 raise SettingsError(f"{contig}: assembly depth keys need evidence counts")
-            for sample in range(evidence.n_samples):
-                row = arrays["counts"].gather(slice(sample, sample + 1), columns)
-                keys.extend(_depth_keys(row, founder.observed[sample : sample + 1], founder.discovery_sites))
-                del row
+            for first in range(0, evidence.n_samples, DEPTH_KEY_ROWS):
+                stop = min(evidence.n_samples, first + DEPTH_KEY_ROWS)
+                rows = arrays["counts"].gather(slice(first, stop), columns)
+                observed = np.asarray(founder.observed[first:stop])
+                keys.extend(_depth_keys(rows, observed, founder.discovery_sites, threads))
+                del rows
         return evidence, founder, tuple(keys)
 
     items = ",".join(getattr(request, "items", None) or ())
@@ -2184,7 +2192,9 @@ def _with_kernel_tasks(
     """
     from ..engine.kernels import compile_tasks
 
-    compiles = {task.args[0]: task for task in compile_tasks(state)}
+    compiles: dict[tuple[str, str], list[Task]] = {}
+    for task in compile_tasks(state):  # one per missing overload, grouped by function
+        compiles.setdefault(task.args[0], []).append(task)
     if not compiles:
         return tasks, scheduling
     by_module: dict[str, list[tuple[str, str]]] = {}
@@ -2205,7 +2215,7 @@ def _with_kernel_tasks(
         for module in _stage_kernel_modules(task):
             for name in by_module.get(module, ()):
                 first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
-                dependencies.append(compiles[name].key)
+                dependencies.extend(compile.key for compile in compiles[name])
         gated.append(replace(task, depends_on=tuple(dict.fromkeys(dependencies))))
     unused = 1 + max(levels.values(), default=0)
     order = sorted(
@@ -2219,8 +2229,8 @@ def _with_kernel_tasks(
     )
     priorities = dict(scheduling.get("priorities") or {})
     floor = min(priorities.values(), default=0.0) - 1.0
-    priorities.update({compiles[name].key: floor - rank for rank, name in enumerate(order)})
-    return (*gated, *compiles.values()), dict(scheduling, priorities=priorities)
+    priorities.update({compile.key: floor - rank for rank, name in enumerate(order) for compile in compiles[name]})
+    return (*gated, *(compile for name in order for compile in compiles[name])), dict(scheduling, priorities=priorities)
 
 
 def _default_scratch(checkpoints: Path) -> Path:

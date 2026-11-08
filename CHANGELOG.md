@@ -1,5 +1,49 @@
 # Changelog
 
+## 4.8.0 (8 November 2026)
+
+This release removes serial stretches from a single chromosome's run so that one chromosome uses the whole node.
+Chromosome 1 of the N = 320 depth-0.5 simulation on one 112-CPU node (`run --stop-after painting`, then
+`reconstruct`): 1,409 s at a mean of 55 busy CPUs -> 1,094 s at 70. Simulated reads change for a seed (below); every
+other result is scientifically identical to 4.7.1: the other changes reorder, batch or parallelise work.
+
+**Simulated reads in parallel.** Each sample draws its reads from its own stream (`simulation.sample_reads`: a seed
+drawn on the contig's read stream, and the sample's index); the factors shared by all samples still come from the
+contig's stream. Both samplers (independent sites and paired-end fragments) therefore simulate blocks of samples on
+all CPUs with the same counts at any worker count, from read-only inputs shared once; a gather writes the contig with
+the run's CPUs compressing. Meiosis tasks carry only the parents their own children use (4.7.1 sent each task the
+whole parent cohort: about 4.4 GB pickled by the coordinator for chromosome 1). The read laws, pedigree, meiosis and
+truth are unchanged, but a seed's read counts differ from 4.7. Simulated input for chromosome 1: 33 s -> 7 s.
+
+**Kernel compilation per overload.** On a cold kernel cache each overload compiles as its own task, and the cache lock
+covers one overload's compilation (and every index save) rather than a whole function: a function's overloads, and
+the stages waiting for them, no longer queue behind one another. Every declared kernel cold: 204 s -> 88 s.
+
+**Evidence encoding in parallel.** The coded genotype-likelihood encoder plans and fills samples on the evidence
+task's CPUs and checks values in larger windows (bit-identical output): 15 s -> 1 s for chromosome 1.
+
+**Selection rounds end together.** A round's blocks are grouped into at least eight tasks per CPU, chunks shrink as
+the round's remaining work shrinks, and each task declares its cost so the heaviest are dispatched first (they were
+dispatched in block order). A light block alone keeps one CPU.
+
+**Checkpoint reads and writes.** A compression or decompression call takes at most one thread per MiB it handles:
+stores opened with a whole node's threads started 112 Blosc threads for every small record (a selection round's
+1,647 panel reads: 14.2 s -> 0.8 s). A record read checks its envelope on the same decode that selects its fields,
+and loops over a stage's block records read through one index snapshot and one file handle.
+
+**Fewer serial steps between stages.** A task's large result is copied into shared memory with its CPUs plus the
+lane's idle ones; the assembly depth keys are gathered 32 samples at a time and hashed in parallel; code identities
+read the package sources once, concurrently, also before a runtime starts.
+
+**Fix.** The command line's isolated start-up process now imports from its parent's module path. Started in a source
+checkout's root, it imported that checkout's package rather than the one running the command (the simulation identity
+check refused the result).
+
+Released records of two 4.8 runs of chromosome 1 on identical simulated data, before and after the read and
+scheduling changes, are identical (painting, founder refit, evidence; the final assembly differs only in timing
+fields). The test suite (3,805 tests), the stage tier (341 tests), the workflow receipt and the documentation check
+pass.
+
 ## 4.7.1 (8 November 2026)
 
 This release removes serial work from painting and gathers in-memory evidence in parallel. Every result, report and

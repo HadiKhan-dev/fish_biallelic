@@ -308,12 +308,14 @@ def publish(file: CheckpointFile, key: str, identity: str, payload: Any) -> Reco
         return file._append(fd, index, key, encoded, None, None)
 
 
-def resume(file: CheckpointFile, key: str, identity: str) -> PublishedRecord | None:
-    """Load a matching complete product; missing returns None, mismatch raises CheckpointMismatch."""
-    info = file.info(key)
+def resume(file: CheckpointFile, key: str, identity: str, *, reader: Any = None) -> PublishedRecord | None:
+    """Load a matching complete product; missing returns None, mismatch raises CheckpointMismatch. ``reader``: a
+    CheckpointFile.batch() reader of ``file``, for many reads."""
+    source = file if reader is None else reader
+    info = source.info(key)
     if info is None:
         return None
-    envelope = file._read(info, file.nthreads)
+    envelope = source._read(info, file.nthreads)
     _check(envelope, identity, f"{file.label}:{key}")
     return PublishedRecord(identity, envelope["payload"], info)
 
@@ -325,19 +327,28 @@ def read_items(
     items: tuple[str, ...],
     *,
     out: Mapping[str, np.ndarray] | None = None,
+    reader: Any = None,
 ) -> PublishedRecord | None:
     """Read selected stored fields from one identity-checked immutable snapshot.
 
     Missing records return None; absent fields are omitted. An identity mismatch
-    raises CheckpointMismatch before any payload buffer group is decompressed.
-    ``out`` receives matching selected arrays in place; inputs are not mutated.
+    raises CheckpointMismatch before any payload buffer group is decompressed (checked
+    on the same metadata decode, release 4.8). ``out`` receives matching selected arrays
+    in place; inputs are not mutated. ``reader``: a CheckpointFile.batch() reader of ``file``.
     """
-    info = file.info(key)
+    source = file if reader is None else reader
+    info = source.info(key)
     if info is None:
         return None
-    envelope = file._read(info, 1, items=("publication_schema", "derivation"))
-    _check(envelope, identity, f"{file.label}:{key}")
-    payload = file._read(info, file.nthreads, items=items, out=out, path=("payload",))
+    label = f"{file.label}:{key}"
+    payload = source._read(
+        info,
+        file.nthreads,
+        items=items,
+        out=out,
+        path=("payload",),
+        check=lambda record: _check(record, identity, label),
+    )
     return PublishedRecord(identity, payload, info)
 
 
@@ -410,16 +421,25 @@ def read_output(file: CheckpointFile, key: str, *, identity: Callable[[Any], str
 
 
 def is_complete(file: CheckpointFile, records: Mapping[str, str]) -> bool:
-    """Check every declared record's identity; never read a completion marker as truth."""
+    """Check every declared record's identity; never read a completion marker as truth (many records: one index
+    snapshot and one handle, CheckpointFile.batch)."""
+    if len(records) == 1:
+        ((key, expected),) = records.items()
+        return _envelope_matches(file, file, key, expected)
     complete = True
-    for key, expected in records.items():
-        info = file.info(key)
-        if info is None:
-            complete = False
-            continue
-        envelope = file._read(info, 1, items=("publication_schema", "derivation"))
-        _check(envelope, expected, f"{file.label}:{key}")
+    with file.batch() as reader:
+        for key, expected in records.items():
+            complete = _envelope_matches(file, reader, key, expected) and complete
     return complete
+
+
+def _envelope_matches(file: CheckpointFile, source: Any, key: str, expected: str) -> bool:
+    info = source.info(key)
+    if info is None:
+        return False
+    envelope = source._read(info, 1, items=("publication_schema", "derivation"))
+    _check(envelope, expected, f"{file.label}:{key}")
+    return True
 
 
 @contextmanager

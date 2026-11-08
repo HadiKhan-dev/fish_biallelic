@@ -232,22 +232,24 @@ class Reader:
         if PlanAdapter().decode(payload).blocks != self.blocks:
             raise InvariantError("discovery plan block count differs from evidence")
         products = []
-        for index in range(self.blocks):
-            key = block_key(index)
-            saved = resume(self.file, key, self.identities[key])
-            if saved is None:
-                raise InvariantError("discovery block domain is incomplete")
-            products.append(BlockAdapter().decode(saved.payload).result)
+        with self.file.batch() as reader:  # one index snapshot and handle for every block record (4.8)
+            for index in range(self.blocks):
+                key = block_key(index)
+                saved = resume(self.file, key, self.identities[key], reader=reader)
+                if saved is None:
+                    raise InvariantError("discovery block domain is incomplete")
+                products.append(BlockAdapter().decode(saved.payload).result)
         if self.product == "stage_panels":
             return tuple(product for product in products if product is not None)
         if self.product != "tie_sources":
             return tuple(products)
         counters = []
-        for index in range(self.blocks):
-            saved = resume(self.file, diagnostic_key(index), self.identities[block_key(index)])
-            if saved is not None:
-                require_schema(saved.payload, 1)
-                counters.append(from_payload(TieCounts, saved.payload["tie_events"]))
+        with self.file.batch() as reader:
+            for index in range(self.blocks):
+                saved = resume(self.file, diagnostic_key(index), self.identities[block_key(index)], reader=reader)
+                if saved is not None:
+                    require_schema(saved.payload, 1)
+                    counters.append(from_payload(TieCounts, saved.payload["tie_events"]))
         return (TieSource("discovery/blocks", tuple(counters), tuple(p.search for p in products if p is not None)),)
 
 

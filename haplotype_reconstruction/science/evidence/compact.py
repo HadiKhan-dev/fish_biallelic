@@ -14,7 +14,10 @@ from .likelihoods import _ROW_SUM_TOLERANCE, _invalid_likelihood_cells, likeliho
 
 # Storage policy only. GL + two int32 depths + bool mask cost 33 bytes/cell.
 ROW_METADATA_BYTES = 17
-CHECK_SITES = 8192
+# Sites per window of the exact-value check and code writing (memory bound only; results never depend on it):
+# about 3 MB of float64 GLs per window per thread. 8,192 (to 4.7) left per-window Python overhead dominant, which
+# serialises samples encoded in parallel on the GIL (chr1 0.5x, 112 threads: 3.7 s; 131,072: 1.0 s).
+CHECK_SITES = 131_072
 
 
 def index_width(distinct):
@@ -58,52 +61,69 @@ def _sample_plan(counts, size):
     return table_keys, first
 
 
-def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None):
+def _sample_map(function, samples, threads):
+    """``[function(s) for s in samples]`` on up to ``threads`` threads (release 4.8), each sample independent.
+
+    The work per sample (NumPy sorts and searches, the nogil likelihood kernels) releases the GIL. Each thread runs
+    its kernels on one Numba thread: the task's CPUs go to samples, never to nested teams. Exceptions propagate."""
+    samples = list(samples)
+    threads = max(1, min(int(threads), len(samples)))
+    if threads == 1:
+        return [function(sample) for sample in samples]
+    import numba
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(sample):
+        previous = numba.get_num_threads()
+        numba.set_num_threads(1)  # per thread
+        try:
+            return function(sample)
+        finally:
+            numba.set_num_threads(previous)
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        return list(pool.map(one, samples))
+
+
+def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None, threads=1):
     """Losslessly encode dense projections supplied by fill(samples, out, columns).
 
     Choose each sample before allocating final storage. Retain only cardinalities
     and widths across samples, then rebuild one sample plan at a time while filling
-    final arrays. No N-sample plans or duplicate float64 tables survive allocation.
-    The exact-value safety check uses bounded site windows. Dense fallback uses
-    the original output, after planning scratch dies.
+    final arrays. No N-sample plans or duplicate float64 tables survive allocation
+    (at most ``threads`` plans exist at once: samples are planned and filled on up to
+    ``threads`` threads, release 4.8). The exact-value safety check uses bounded site
+    windows. Dense fallback uses the original output, after planning scratch dies.
     """
     n, sites = counts.shape[:2]
     widths = np.zeros(n, np.uint8)
     sizes = np.zeros(n, np.int64)
-    nonconstant = []
     size = CHECK_SITES
-    for sample in range(n):
-        keys = _keys(counts[sample])
-        keys.sort()
-        keep = np.empty(sites, np.bool_)
-        if sites:
-            keep[0] = True
-            keep[1:] = keys[1:] != keys[:-1]
-        distinct = int(np.count_nonzero(keep))
-        sizes[sample] = distinct
+
+    def choose(sample):
+        """(distinct pairs, storage width or 0, whether a repeated pair had different GL bits)."""
+        table_keys, first = _sample_plan(counts[sample], size)
+        distinct = len(table_keys)
         width = storage_width(distinct, sites)
         if not width:
-            del keys, keep
-            continue
-        del keys, keep
-        table_keys, first = _sample_plan(counts[sample], size)
+            return distinct, 0, False
         table = np.empty((1, distinct, 3), np.float64)
         fill(slice(sample, sample + 1), table, first)
-        consistent = True
         for left in range(0, sites, size):
             right = min(sites, left + size)
             truth = np.empty((1, right - left, 3), np.float64)
             fill(slice(sample, sample + 1), truth, slice(left, right))
             indices = np.searchsorted(table_keys, _keys(counts[sample, left:right]))
             if not np.array_equal(table[0, indices].view(np.uint64), truth[0].view(np.uint64)):
-                consistent = False
-                break
-        del table, truth, indices
-        if consistent:
-            widths[sample] = width
-        else:
+                return distinct, 0, True
+        return distinct, width, False
+
+    nonconstant = []
+    for sample, (distinct, width, mismatch) in enumerate(_sample_map(choose, range(n), threads)):
+        sizes[sample] = distinct
+        widths[sample] = width
+        if mismatch:
             nonconstant.append(sample)
-        del table_keys, first
     # A mixed container's maps also describe dense rows. Do not keep a container
     # whose overhead would outweigh its total saving, even if one row could code.
     encoded = int(np.sum(np.where(widths, 32 * sizes + widths.astype(np.int64) * sites, 33 * sites)))
@@ -136,9 +156,12 @@ def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None):
     next_row = {width: 0 for width in (0, 1, 2, 4)}
     for sample in range(n):
         width = int(widths[sample])
-        row = next_row[width]
-        rows[sample] = row
+        rows[sample] = next_row[width]
         next_row[width] += 1
+
+    def write(sample):
+        """Fill one sample's rows of the final arrays (disjoint from every other sample's)."""
+        width, row = int(widths[sample]), int(rows[sample])
         if width:
             keys, first = _sample_plan(counts[sample], size)
             begin, end = offsets[sample : sample + 2]
@@ -148,15 +171,16 @@ def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None):
             for left in range(0, sites, size):
                 right = min(sites, left + size)
                 target[left:right] = np.searchsorted(keys, _keys(counts[sample, left:right]))
-            del keys, first, target
         else:
             fill(slice(sample, sample + 1), arrays["dense"][row : row + 1], slice(None))
+
+    _sample_map(write, range(n), threads)
     for array in arrays.values():
         declare_immutable(array)
     return CodedLikelihoods(sites, **arrays)
 
 
-def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *, statistics=None):
+def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *, statistics=None, threads=1):
     """Use the existing lookup/direct arithmetic on explicit dense projections.
 
     The table's first-occurrence sites include every depth pair, hence the same
@@ -179,4 +203,4 @@ def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *,
         out.flags.writeable = False
         return out
 
-    return encode_likelihoods(counts, fill, statistics=statistics, dense_result=dense_result)
+    return encode_likelihoods(counts, fill, statistics=statistics, dense_result=dense_result, threads=threads)

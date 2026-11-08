@@ -88,7 +88,8 @@ The stream name preserves generator construction and draw order, not just a seed
 | `simulation.founders` |
 | `simulation.reads` |
 | `simulation.contig_reads` |
+| `simulation.sample_reads` |
 | `simulation.observation` |
 | `templates.example` |
 
-Simulation realises an unspecified seed once during initialisation and persists it. Resume reuses that realised seed. Founder streams use configured contig order; read seeds are consumed for every contig, including already completed ones. Bootstrap draws preserve their original vector shapes and replicate order. Renaming a stream or replacing a loop with a bulk draw requires explicit identity proof.
+Simulation realises an unspecified seed once during initialisation and persists it. Resume reuses that realised seed. Founder streams use configured contig order; read seeds are consumed for every contig, including already completed ones. Since 4.8 each sample's reads come from `simulation.sample_reads` (a seed drawn on its contig's read stream, and the sample's index), so blocks of samples may be simulated anywhere, at any worker count, with the same counts. Bootstrap draws preserve their original vector shapes and replicate order. Renaming a stream or replacing a loop with a bulk draw requires explicit identity proof.

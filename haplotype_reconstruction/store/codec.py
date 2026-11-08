@@ -93,6 +93,17 @@ def _aligned_buffer(nbytes):
     return storage[offset : offset + nbytes]
 
 
+# Raw bytes per Blosc thread (release 4.8, execution only: Blosc output and decoded values do not depend on threads).
+# Blosc starts its threads per call: a store opened with a whole node's 112 threads spent ~8 ms per call on a small
+# record (a selection round's 1,647 panel reads: 14.2 s, against 2.0 s on one thread).
+_CODEC_BYTES_PER_THREAD = 1 << 20
+
+
+def _codec_threads(nthreads, raw_bytes):
+    """Threads for one Blosc call on ``raw_bytes``: the caller's count, at most one per _CODEC_BYTES_PER_THREAD."""
+    return max(1, min(int(nthreads), int(raw_bytes) // _CODEC_BYTES_PER_THREAD))
+
+
 def _compress(raw, nthreads, clevel):
     # A packed group may end with int8 calls and have an odd byte length. Blosc2 4.5.1 emits unreadable all-zero
     # special chunks when that length is not divisible by its default eight-byte element size. Keep the
@@ -100,11 +111,12 @@ def _compress(raw, nthreads, clevel):
     # Compression libraries initialize process settings; load them only at the I/O boundary.
     import blosc2
 
-    typesize = 8 if memoryview(raw).nbytes % 8 == 0 else 1
+    size = memoryview(raw).nbytes
+    typesize = 8 if size % 8 == 0 else 1
     return blosc2.compress2(
         raw,
         cparams=blosc2.CParams(
-            nthreads=max(1, int(nthreads)),
+            nthreads=_codec_threads(nthreads, size),
             clevel=clevel,
             codec=blosc2.Codec.ZSTD,
             typesize=typesize,
@@ -128,7 +140,9 @@ def _decompress_into(blob, destination, nthreads, context):
             f"Blosc raw/compressed={raw_size}/{compressed_size})"
         )
     try:
-        blosc2.decompress2(blob, dst=destination, dparams=blosc2.DParams(nthreads=max(1, int(nthreads))))
+        blosc2.decompress2(
+            blob, dst=destination, dparams=blosc2.DParams(nthreads=_codec_threads(nthreads, destination_size))
+        )
     except Exception as error:
         raise ValueError(f"corrupt checkpoint: cannot decompress {context}") from error
 
@@ -695,8 +709,13 @@ def decode_items(
     out=None,
     path=(),
     metadata_only=False,
+    check=None,
 ):
     """Selected entries of a dict payload, decoding only their arrays.
+
+    ``check`` (release 4.8), when given, receives the whole top-level record (arrays as untouched placeholders)
+    from the first metadata pass, before any buffer group is decompressed: a publication envelope is checked on the
+    same decode that selects its payload fields instead of a decode of its own.
 
     ``path`` descends plain-dict keys before selection; an empty path preserves the
     3.5 top-level behavior. A missing path key raises KeyError; non-dicts raise TypeError.
@@ -721,14 +740,17 @@ def decode_items(
     with tempfile.SpooledTemporaryFile(max_size=_METADATA_SPOOL_BYTES, mode="w+b") as metadata:
         _spool_metadata(handle, end, nthreads, metadata)
 
-        def selected(buffers):
-            payload = _select_path(_unpickle(metadata, buffers), path, context)
+        def selected(buffers, first=False):
+            record = _unpickle(metadata, buffers)
+            if first and check is not None:
+                check(record)
+            payload = _select_path(record, path, context)
             if not isinstance(payload, dict):
                 raise TypeError(f"{context}: selective reads need a dict payload")
             return {key: payload[key] for key in keys if key in payload}
 
         buffers = [np.empty(size, dtype=np.uint8) for descriptors, *_ in groups for size, _readonly in descriptors]
-        items = selected(buffers)
+        items = selected(buffers, first=True)
         if metadata_only:
             if out or _plain_arrays(items):
                 raise TypeError(f"{context}: status metadata cannot contain arrays or output buffers")

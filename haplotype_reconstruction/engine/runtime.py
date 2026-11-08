@@ -605,9 +605,19 @@ def isolated(
     with tempfile.TemporaryDirectory(prefix="haplotypes-isolated-") as directory:
         request, result = (Path(directory) / "request.pkl", Path(directory) / "result.pkl")
         request.write_bytes(pickle.dumps((pickle.dumps((function, args, kwargs)), cores, tuple(preload))))
-        program = "from haplotype_reconstruction.engine.runtime import _isolated_entry; _isolated_entry()"
+        # The child imports from the parent's module search path, as multiprocessing's forkserver does: with a bare
+        # -c its working directory came first, so a run started in a source checkout's root imported that checkout's
+        # package instead of the parent's (to 4.7; the simulation identity then refused the result).
+        search = Path(directory) / "path.pkl"
+        search.write_bytes(pickle.dumps(list(sys.path)))
+        program = (
+            "import pickle, sys; sys.path[:] = pickle.loads(open(sys.argv[3], 'rb').read()); "
+            "from haplotype_reconstruction.engine.runtime import _isolated_entry; _isolated_entry()"
+        )
         process = subprocess.Popen(
-            [sys.executable, "-c", program, str(request), str(result)], env=environment, start_new_session=True
+            [sys.executable, "-P", "-c", program, str(request), str(result), str(search)],
+            env=environment,
+            start_new_session=True,
         )
         try:
             with signal_boundary(lambda: None):
