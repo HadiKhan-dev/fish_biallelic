@@ -123,6 +123,13 @@ More elaborate software never substitutes for missing biological or mathematical
      evaluation or reduction order, SIMD or FMA, parallel reductions, and equivalent libraries or kernels.
    - Never slow down or complicate code to preserve bits, and never gate performance work on byte equality.
      Compare the released outputs, and report the drift in key continuous quantities.
+   - **A changed summation order is never a reason to reject or defer a change** (owner, 7 November 2026: "Even if
+     you change the summation order but get the same result in the end that's fine"). This covers fused or
+     reordered reductions, FMA contraction and the rounding differences they bring, including inside a fitted
+     objective or before a threshold.
+     - Implement the change and replay it on saved inputs. Compare the released decisions, and report any flip at a
+       threshold with its count and margins (rule 3).
+     - Test fixtures that pin exact bits are not a reason to keep the slower code. Update them, and say so.
 3. A small numerical difference is still a behavioural change, to be reported, if it changes any of: a threshold
    comparison, a branch, convergence, a selected haplotype, a pedigree, phase, a metric or another scientific result.
 4. An improved headline metric does not prove correctness. When unsure whether behaviour changed, say so and
