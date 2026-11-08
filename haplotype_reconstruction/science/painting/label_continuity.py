@@ -141,6 +141,16 @@ _OVERLOADS = {
             types.int64,
         ),
     ),
+    "_stacked_relabelled_emissions": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 3, "C", readonly=False, aligned=True),
+            types.int64,
+        ),
+    ),
     "_link_scores": (
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -272,6 +282,24 @@ def _relabelled_emissions(part_emissions, samples, part_bin, part_segment, state
             segment = part_segment[part]
             for state in range(n_diplotypes):
                 result[row, state, bin_index] += part_emissions[sample, state_maps[segment, state], part]
+    return result
+
+
+@kernel(overloads=_OVERLOADS["_stacked_relabelled_emissions"], cache=True, parallel=True, nogil=True)
+def _stacked_relabelled_emissions(part_emissions, samples, part_bin, part_segment, state_maps, n_bins):
+    """_relabelled_emissions under each of several labellings at once (release 4.7.1): row g * len(samples) + r holds
+    sample samples[r] under state_maps[g], each computed from its own sample alone, in the same order."""
+    _, n_diplotypes, n_parts = part_emissions.shape
+    n_rows = len(samples)
+    result = np.zeros((len(state_maps) * n_rows, n_diplotypes, n_bins))
+    for task in prange(len(state_maps) * n_rows):
+        labelling, row = task // n_rows, task % n_rows
+        sample = samples[row]
+        for part in range(n_parts):
+            bin_index = part_bin[part]
+            segment = part_segment[part]
+            for state in range(n_diplotypes):
+                result[task, state, bin_index] += part_emissions[sample, state_maps[labelling, segment, state], part]
     return result
 
 
@@ -506,7 +534,9 @@ def relabel_bytes(
 
 
 class _SampleBatches:
-    """Contiguous sample batches; retain part emissions and eligibility when one batch holds all samples."""
+    """Contiguous sample batches. A batch's part emissions and eligibility are kept for the whole search when they fit
+    the caller's budget, else rebuilt when used: from the resident copy of the component's evidence where it covers
+    the batch (in memory, in parallel), else from the stored evidence."""
 
     def __init__(
         self,
@@ -522,26 +552,50 @@ class _SampleBatches:
         bin_stops,
         part_bin,
         emission_builder,
-        keep=False,
+        keep_bytes=0,
+        resident=None,
     ):
         self.emission_builder = emission_builder
         self.likelihoods, self.observed, self.sites = likelihoods, observed, sites
+        # resident: (stop, likelihoods, observed, sites), the evidence of samples [0, stop) at the selected sites.
+        self.resident = resident
         self.states, self.part_start, self.part_stop, self.config = states, part_start, part_stop, config
         self.bin_starts, self.bin_stops, self.part_bin = bin_starts, bin_stops, part_bin
         self.alt_probability = states.alt_probability()
         n_samples = likelihoods.shape[0]
         self.spans = [(start, min(start + size, n_samples)) for start in range(0, n_samples, size)]
         self._kept = {}
-        # Every batch's values are kept when one batch holds all samples or the caller's budget covers them all.
-        self._keep = bool(keep) or len(self.spans) == 1
+        # Release 4.7.1: batches are kept while their part emissions (8 S^2 bytes per part and sample) fit
+        # ``keep_bytes``, those outside the resident copy first (their rebuilds read the stored evidence), each group
+        # in sample order. One batch holding every sample is always kept.
+        per_sample = 8 * states.n_states**2 * len(part_start)
+        covered = 0 if resident is None else resident[0]
+        order = [span for span in self.spans if span[1] > covered] + [span for span in self.spans if span[1] <= covered]
+        keep, used = set(), 0
+        for start, stop in order:
+            if used + (stop - start) * per_sample > keep_bytes and len(self.spans) > 1:
+                break
+            used += (stop - start) * per_sample
+            keep.add(start)
+        self._keep_starts = frozenset(keep)
+        self.all_kept = len(keep) == len(self.spans)
+        # The budget the kept emissions leave, for decoding more samples or candidates in one call.
+        self.spare_bytes = max(0, int(keep_bytes) - used)
+        # Every batch kept (release 4.7.1): their part emissions share one array over all samples, so that decoding
+        # can take wider runs of samples than a batch.
+        self.combined = None
+
+    def source(self, start, stop):
+        """(likelihoods, observed, sites) to build the batch [start, stop) from."""
+        if self.resident is not None and stop <= self.resident[0]:
+            return self.resident[1:]
+        return self.likelihoods, self.observed, self.sites
 
     def _values(self, start, stop):
         if start in self._kept:
             return self._kept[start]
         raw, observed, informative = self.emission_builder(
-            self.likelihoods,
-            self.observed,
-            self.sites,
+            *self.source(start, stop),
             slice(start, stop),
             self.alt_probability,
             self.states.background_frequency,
@@ -551,9 +605,28 @@ class _SampleBatches:
             parts=(self.part_start, self.part_stop, self.part_bin),
         )
         value = raw, np.any(informative, axis=1)
-        if self._keep:
+        if start in self._keep_starts:
+            if self.all_kept and len(self.spans) > 1:
+                if self.combined is None:
+                    self.combined = np.empty((self.spans[-1][1], *raw.shape[1:]), dtype=raw.dtype)
+                self.combined[start:stop] = raw
+                value = self.combined[start:stop], value[1]
+                del raw
             self._kept[start] = value
         return value
+
+    def units(self, width):
+        """[(start, stop, part emissions of samples start..stop)]: the batches, or, when every batch is kept, runs of
+        up to ``width`` samples of their shared array (one decoding call each)."""
+        if not (self.all_kept and len(self.spans) > 1) or width <= self.spans[0][1] - self.spans[0][0]:
+            return [(start, stop, self.part_emissions(start, stop)) for start, stop in self.spans]
+        for start, stop in self.spans:
+            self._values(start, stop)
+        n_samples = self.spans[-1][1]
+        return [
+            (start, min(start + width, n_samples), self.combined[start : min(start + width, n_samples)])
+            for start in range(0, n_samples, width)
+        ]
 
     def eligible(self, start, stop):
         return self._values(start, stop)[1]
@@ -579,6 +652,12 @@ def _leftmost_equivalent_link(panel, offsets, links, perms, row_of_class, first,
             break
         link -= 1
     return link
+
+
+# The look-ahead's walk (release 4.7.1): the same function under a second name. A look-ahead walk only chooses
+# which candidates to decode early and never decides anything, so the record of the decision's own placement
+# walks (_leftmost_equivalent_link, as the painting witnesses observe it) leaves it out.
+_lookahead_equivalent_link = _leftmost_equivalent_link
 
 
 def _relabel_linked(
@@ -624,10 +703,41 @@ def _relabel_linked(
     part_bin = np.asarray(part_bins, dtype=np.int64)
     part_segment = np.searchsorted(link_sites, part_start, side="right").astype(np.int64)
     size = max(1, int(batch))
+    # Release 4.7.1: when the budget cannot keep every batch's part emissions, the component's selected evidence is
+    # read once into a compact resident copy (codes and dictionaries, far smaller than the emissions) charged to the
+    # same budget: of every sample when it fits, else of the largest leading run of batches that fits. A rebuild of a
+    # batch it covers is a parallel in-memory gather and emission kernel, never a serial read of the stored evidence.
+    # The values gathered are the same.
+    selected_sites = evidence_sites[site_indices]
+    keep_bytes = emission_cache_bytes
+    resident = None
+    if (
+        size < n_samples
+        and n_samples * 8 * states.n_states**2 * len(part_start) > emission_cache_bytes
+        and hasattr(likelihoods, "resident_columns")
+        and hasattr(observed, "resident_columns")
+    ):
+        n_sites, covered, needed = len(selected_sites), 0, 0
+        for stop in [min(start + size, n_samples) for start in range(0, n_samples, size)]:
+            bytes_to_stop = likelihoods.resident_bytes(n_sites, slice(0, stop)) + observed.resident_bytes(
+                n_sites, slice(0, stop)
+            )
+            if bytes_to_stop > emission_cache_bytes:
+                break
+            covered, needed = stop, bytes_to_stop
+        if covered:
+            copy = likelihoods.resident_columns(selected_sites, slice(0, covered))
+            resident = (
+                covered,
+                copy,
+                observed.resident_columns(selected_sites, copy, slice(0, covered)),
+                np.arange(n_sites, dtype=np.int64),
+            )
+            keep_bytes = emission_cache_bytes - needed
     samples = _SampleBatches(
         likelihoods,
         observed,
-        evidence_sites[site_indices],
+        selected_sites,
         states,
         part_start,
         np.asarray(part_stops, dtype=np.int64),
@@ -637,7 +747,8 @@ def _relabel_linked(
         bins.stops,
         part_bin,
         emission_builder,
-        keep=n_samples * 8 * states.n_states**2 * len(part_start) <= emission_cache_bytes,
+        keep_bytes=keep_bytes,
+        resident=resident,
     )
     spans = samples.spans
     eligible = np.empty(n_samples, dtype=np.bool_)
@@ -647,6 +758,10 @@ def _relabel_linked(
         return panel, _outcome("no_evidence", **counts)
 
     n_states = states.n_states
+    # Samples per decoding call when every batch is kept: a batch, plus as many as the budget the kept emissions leave
+    # holds (relabelled, expanded and message arrays per sample); the same per-sample values in fewer, wider calls.
+    wide_bytes = 8 * n_bins * (3 * n_states**2 + (2 * n_states - 1) ** 2 + 2)
+    decode_width = min(n_samples, size + samples.spare_bytes // max(1, wide_bytes))
     # The label-level copying process of the component's model (the screen) and the full chain (every decision).
     transitions = copying_transitions(edge_morgans(bins.centers, genetic_map), n_states, model.rate)
     capable = np.concatenate((np.asarray(states.anchored, dtype=np.int64), np.zeros(1, dtype=np.int64)))
@@ -669,10 +784,11 @@ def _relabel_linked(
         [(first, second) for index, first in enumerate(movable) for second in movable[index + 1 :]], dtype=np.int64
     )
 
-    def switches(start, stop, rows, maps):
-        """Painted switches of the batch's samples ``rows`` (batch positions) under ``maps``."""
+    def switches(start, stop, rows, maps, parts=None):
+        """Painted switches of the batch's samples ``rows`` (batch positions) under ``maps`` (``parts``: the batch's
+        part emissions when the caller holds them)."""
         emissions = _relabelled_emissions(
-            samples.part_emissions(start, stop), rows, part_bin, part_segment, maps, n_bins
+            samples.part_emissions(start, stop) if parts is None else parts, rows, part_bin, part_segment, maps, n_bins
         )
         return fidelity.painted_switches(emissions, model, capable, eligible[start + rows], tie=config.viterbi_tie)
 
@@ -706,9 +822,10 @@ def _relabel_linked(
                 reverse += found == 2
         return forward, reverse
 
-    def link_scores(start, stop, maps):
-        """(left, right) link scores of the batch's samples under ``maps``."""
-        parts = samples.part_emissions(start, stop)
+    def link_scores(start, stop, maps, parts=None):
+        """(left, right) link scores of the batch's samples under ``maps`` (``parts``: their part emissions when the
+        caller holds them)."""
+        parts = samples.part_emissions(start, stop) if parts is None else parts
         emissions = _relabelled_emissions(
             parts, np.arange(stop - start, dtype=np.int64), part_bin, part_segment, maps, n_bins
         )
@@ -740,11 +857,51 @@ def _relabel_linked(
     def anchored_under(trial_perms, labels):
         return tuple(bool(np.any(called_in[trial_perms[:, label], np.arange(len(links) + 1)])) for label in labels)
 
+    def transposed(perms, key):
+        """(trial labelling, its capability is unchanged) of the relabelling ``key`` = (pair, link), for the
+        look-ahead (evaluate states the same test where a candidate is checked)."""
+        pair, link = key
+        first, second = (int(value) for value in pairs[pair])
+        trial = perms.copy()
+        trial[link + 1 :, [first, second]] = trial[link + 1 :, [second, first]]
+        return trial, anchored_under(trial, (first, second)) == anchored_under(perms, (first, second))
+
+    def decoded_changes(trials, current):
+        """Painted-switch changes of every trial labelling against ``current``; each batch's part emissions are
+        obtained once for all of them (release 4.7.1: one rebuild of a batch the budget does not keep serves several
+        candidates)."""
+        trial_maps = [_state_maps(trial, n_states) for trial in trials]
+        changes = [np.zeros_like(current) for _ in trials]
+        # Several candidates of a batch are decoded in one call (their relabelled emissions stacked along the sample
+        # axis), as many as the budget the kept emissions leave can hold beyond the one-candidate working set
+        # (relabelled and expanded emissions per stacked sample): more samples per parallel call, the same values.
+        stacked_bytes = 8 * n_bins * (n_states**2 + (2 * n_states - 1) ** 2 + 2)
+        for start, stop, parts in samples.units(decode_width):
+            rows = np.arange(stop - start, dtype=np.int64)
+            count = stop - start
+            group = max(1, min(len(trials), 1 + samples.spare_bytes // max(1, count * stacked_bytes)))
+            for first in range(0, len(trials), group):
+                chunk = trial_maps[first : first + group]
+                if len(chunk) == 1:
+                    changes[first][start:stop] = switches(start, stop, rows, chunk[0], parts) - current[start:stop]
+                    continue
+                emissions = _stacked_relabelled_emissions(
+                    parts, rows, part_bin, part_segment, np.ascontiguousarray(np.stack(chunk)), n_bins
+                )
+                stacked = fidelity.painted_switches(
+                    emissions, model, capable, np.tile(eligible[start:stop], len(chunk)), tie=config.viterbi_tie
+                )
+                del emissions
+                for offset, change in enumerate(changes[first : first + len(chunk)]):
+                    change[start:stop] = stacked[offset * count : (offset + 1) * count] - current[start:stop]
+            del parts
+        return changes
+
     perms = np.tile(np.arange(n_states, dtype=np.int64), (len(links) + 1, 1))
     maps = _state_maps(perms, n_states)
     current = np.empty(n_samples, dtype=np.int64)
-    for start, stop in spans:
-        current[start:stop] = switches(start, stop, np.arange(stop - start, dtype=np.int64), maps)
+    for start, stop, parts in samples.units(decode_width):
+        current[start:stop] = switches(start, stop, np.arange(stop - start, dtype=np.int64), maps, parts)
     switches_before = int(np.sum(current))
     minimum_gain = config.label_continuity_minimum_switch_gain
     maximum_loser_ratio = config.label_continuity_maximum_loser_ratio
@@ -756,8 +913,8 @@ def _relabel_linked(
     while True:
         # Summed gains: each batch adds its samples in sample order (the same sums as one pass).
         total = np.zeros((len(links), len(pairs)))
-        for start, stop in spans:
-            left, right = link_scores(start, stop, maps)
+        for start, stop, parts in samples.units(decode_width):
+            left, right = link_scores(start, stop, maps, parts)
             _add_transposition_gains(total, left, right, eligible[start:stop], pairs, n_states)
             del left, right
         # Rank by the score gain in tie classes (release 2.1: gains equal up to rounding, e.g. one transposition at
@@ -788,6 +945,9 @@ def _relabel_linked(
             class_members.setdefault(class_id, []).append(index)
         leftmost: dict[tuple[int, int], int] = {}
         results: dict[tuple[int, int], tuple[bool, np.ndarray, np.ndarray, np.ndarray]] = {}
+        # Changes decoded ahead of their check (batches rebuilt per use only), and the next look-ahead width.
+        ahead: dict[tuple[int, int], np.ndarray] = {}
+        width = [1]
 
         def canonical(index, candidates=candidates, leftmost=leftmost, perms=perms):
             """(pair, link) of candidate ``index`` moved to its leftmost equivalent link (memoised along a stretch)."""
@@ -807,9 +967,29 @@ def _relabel_linked(
                 leftmost[(pair, point)] = target
             return pair, target
 
-        def evaluate(key, results=results, perms=perms, current=current):
+        def ahead_key(index, candidates, perms=perms):
+            """canonical(index) for the look-ahead: the same leftmost walk (single steps to their fixed point, reading
+            but never writing canonical's memo), through _lookahead_equivalent_link, so that the look-ahead's walks,
+            which only choose which candidates to decode early, stay out of the decision's own record."""
+            link, pair = candidates[index]
+            first, second = (int(value) for value in pairs[pair])
+            while (pair, link) not in leftmost:
+                left = _lookahead_equivalent_link(
+                    panel, offsets, links, perms, row_of_class, first, second, link, steps=1
+                )
+                if left == link:
+                    return pair, link
+                link = left
+            return pair, leftmost[(pair, link)]
+
+        def evaluate(
+            key, results=results, perms=perms, current=current, ahead=ahead, width=width, candidates=candidates
+        ):
             """(acceptable, change, winners, losers) of the relabelling ``key`` = (pair, link), computed once per
-            iteration: every eligible sample is re-decoded under it (release 2.14)."""
+            iteration: every eligible sample is re-decoded under it (release 2.14). When some batches are rebuilt for
+            each use, a miss also decodes the next candidates in ranked order (1, then 2, 4, ... per iteration, within
+            the remaining check budget) from the same rebuilt part emissions (release 4.7.1); their changes wait in
+            ``ahead`` and count as checks only when evaluated, so every decision and count is unchanged."""
             nonlocal checked
             if key not in results:
                 pair, link = key
@@ -825,13 +1005,27 @@ def _relabel_linked(
                     )
                     counter.note("painting.relabel_capability_change", inside_tie=False)
                     return results[key]
-                trial_maps = _state_maps(trial, n_states)
-                change = np.zeros_like(current)
-                for start, stop in spans:
-                    change[start:stop] = (
-                        switches(start, stop, np.arange(stop - start, dtype=np.int64), trial_maps) - current[start:stop]
-                    )
-                del trial_maps
+                if key in ahead:
+                    change = ahead.pop(key)
+                else:
+                    keys, trials = [key], [trial]
+                    if not samples.all_kept:
+                        more = min(width[0], budget - (checked - checked_before)) - 1
+                        position = index + 1
+                        while more > 0 and position < len(candidates):
+                            other = ahead_key(position, candidates)
+                            position += 1
+                            if other in results or other in ahead or other in keys:
+                                continue
+                            other_trial, other_same = transposed(perms, other)
+                            if other_same:
+                                keys.append(other)
+                                trials.append(other_trial)
+                                more -= 1
+                        width[0] *= 2
+                    changes = decoded_changes(trials, current)
+                    change = changes[0]
+                    ahead.update(zip(keys[1:], changes[1:], strict=True))
                 checked += 1
                 winners, losers = np.flatnonzero(change < 0), np.flatnonzero(change > 0)
                 acceptable = -int(np.sum(change)) >= minimum_gain and len(losers) <= maximum_loser_ratio * len(winners)
@@ -930,9 +1124,7 @@ def _relabel_linked(
     switches_after = 0
     for start, stop in spans:
         new_emissions, _, _ = emission_builder(
-            likelihoods,
-            observed,
-            evidence_sites[site_indices],
+            *samples.source(start, stop),
             slice(start, stop),
             new_states.alt_probability(),
             new_states.background_frequency,

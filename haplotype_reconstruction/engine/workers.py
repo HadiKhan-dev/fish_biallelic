@@ -1703,11 +1703,15 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
                 # Failed native descendants cannot be interrupted by Python unwind.
                 # The graph aborts and reaps this worker; keep its seat until then.
                 reply = _perform(task, token, PoolShareBudget(), keep_gathers=True)
-                seat.end_task()
                 retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
-                connection.send(("result", _pack_reply(replace(reply, retire=retire))))
+                # The reply is packed while the task still holds its CPUs, so that its large result arrays are copied
+                # into shared memory by the task's whole team (release 4.7.1), not by one thread after it released them.
+                team = scheduler.authority_threads(_task_peak_threads())
+                packed = _pack_reply(replace(reply, retire=retire), copy_threads=team)
+                seat.end_task()
+                connection.send(("result", packed))
                 # Idle workers retain only explicitly registered affinity state.
-                del reply, task, token, message
+                del reply, packed, task, token, message
                 _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
                 if retire:
                     return
@@ -1894,8 +1898,10 @@ class _ReplyPickler(ForkingPickler):
         *,
         child: bool = False,
         shared: frozenset[int] = frozenset(),
+        copy_threads: int = 1,
     ):
         super().__init__(file, pickle.HIGHEST_PROTOCOL)
+        self.copy_threads = copy_threads  # threads that copy a large array into its reply segment
         # Shared by every pickler of one reply, so an array its children all carry is copied into one segment.
         self.made: dict[tuple, tuple] = {} if made is None else made
         self.kept: list[np.ndarray] = [] if kept is None else kept  # the arrays keyed in ``made`` stay alive
@@ -1919,7 +1925,7 @@ class _ReplyPickler(ForkingPickler):
                 span = (int(obj.__array_interface__["data"][0]), obj.nbytes)
                 reference = self.made.get(span)
                 if reference is None:
-                    reference = self.made[span] = _reply_segment(obj)
+                    reference = self.made[span] = _reply_segment(obj, self.copy_threads)
                     # Retain the source for this whole reply, including all packed
                     # children: its address cannot be reused for unrelated bytes.
                     self.kept.append(obj)
@@ -1934,8 +1940,9 @@ class _ReplyPickler(ForkingPickler):
         return NotImplemented
 
 
-def _reply_segment(array: np.ndarray) -> tuple:
-    """Copy ``array`` into a new segment for the coordinator to adopt; this worker keeps no mapping of it."""
+def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
+    """Copy ``array`` into a new segment for the coordinator to adopt, with ``copy_threads`` threads when it is large;
+    this worker keeps no mapping of it."""
     from .scheduler import segment_name
 
     transposed = not array.flags.c_contiguous
@@ -1948,23 +1955,23 @@ def _reply_segment(array: np.ndarray) -> tuple:
             _announce_shared("shared-", (name,))
             continue
         try:
-            return _pid(_fill_shared(array.T if transposed else array, handle, 1), transposed)
+            return _pid(_fill_shared(array.T if transposed else array, handle, copy_threads), transposed)
         finally:
             handle.close()
     raise FileExistsError("no free shared-memory segment name")
 
 
-def _pack_reply(reply: WorkerReply) -> _PackedReply:
+def _pack_reply(reply: WorkerReply, *, copy_threads: int = 1) -> _PackedReply:
     made: dict[tuple, tuple] = {}
     kept: list[np.ndarray] = []
     if isinstance(reply.value, Expansion):
         expansion = reply.value
         shared = _shared_arrays((*expansion.subtasks, expansion.gather))
-        children = tuple(_packed_child(task, made, kept, shared) for task in expansion.subtasks)
-        gather = _packed_child(expansion.gather, made, kept, shared)
+        children = tuple(_packed_child(task, made, kept, shared, copy_threads) for task in expansion.subtasks)
+        gather = _packed_child(expansion.gather, made, kept, shared, copy_threads)
         reply = replace(reply, value=replace(expansion, subtasks=children, gather=gather))
     buffer = io.BytesIO()
-    _ReplyPickler(buffer, made, kept).dump(reply)
+    _ReplyPickler(buffer, made, kept, copy_threads=copy_threads).dump(reply)
     return _PackedReply(buffer.getvalue())
 
 
@@ -2037,7 +2044,11 @@ def _shared_arrays(tasks: tuple[Task, ...]) -> frozenset[int]:
 
 
 def _packed_child(
-    task: Task, made: dict[tuple, tuple], kept: list[np.ndarray], shared: frozenset[int] = frozenset()
+    task: Task,
+    made: dict[tuple, tuple],
+    kept: list[np.ndarray],
+    shared: frozenset[int] = frozenset(),
+    copy_threads: int = 1,
 ) -> Task:
     """An expansion child or gather with its call pickled here once (_call_packed unpacks it in the worker that runs
     it and resolves its result references there, with the coordinator's own resolver). A task that would carry a
@@ -2045,7 +2056,7 @@ def _packed_child(
     if task.function is _call_packed:
         return task
     buffer = io.BytesIO()
-    pickler = _ReplyPickler(buffer, made, kept, child=True, shared=shared)
+    pickler = _ReplyPickler(buffer, made, kept, child=True, shared=shared, copy_threads=copy_threads)
     try:
         pickler.dump((task.function, task.args, dict(task.kwargs)))
     except _ByValue:

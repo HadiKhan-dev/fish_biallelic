@@ -10,7 +10,7 @@ from typing import Any, Protocol, cast
 import numpy as np
 from numba import prange, types
 
-from ...contracts.likelihoods import gather_likelihoods
+from ...contracts.likelihoods import gather_likelihoods, readonly
 from ...contracts.painting import state_alt_probabilities
 from ...core.kernels import kernel
 from .parameters import INFORMATIVE_SPREAD, PaintingParameters
@@ -122,6 +122,38 @@ _OVERLOADS = {
 }
 
 
+def _window_inputs(readonly: bool) -> tuple:
+    """GL rows, observation flags, ALT probabilities and background frequencies (all read-only or all writable)."""
+    return (
+        types.Array(types.float64, 3, "C", readonly=readonly, aligned=True),
+        types.Array(types.boolean, 2, "C", readonly=readonly, aligned=True),
+        types.Array(types.float64, 2, "C", readonly=readonly, aligned=True),
+        types.Array(types.float64, 1, "C", readonly=readonly, aligned=True),
+    )
+
+
+# The score helper is inlined into both emission kernels; its declarations only serve the compilation audit.
+_OVERLOADS["_pair_bin_score"] = tuple(
+    (*_window_inputs(readonly), *(types.int64,) * 7, types.float64, types.float64, types.float64)
+    for readonly in (False, True)
+)
+# tempered_into passes every input as a read-only view and the batch's outputs writable: one argument type.
+_OVERLOADS["_tempered_into"] = (
+    (
+        *_window_inputs(True),
+        *(types.Array(types.int64, 1, "C", readonly=True, aligned=True),) * 4,
+        *(types.int64,) * 5,
+        types.float64,
+        types.float64,
+        types.float64,
+        types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+        types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+        types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+        types.int64,
+    ),
+)
+
+
 @kernel(overloads=_OVERLOADS["informative_sites"], cache=True, parallel=True, nogil=True)
 def informative_sites(likelihoods, observed):
     """bool[N, L]: observed and max - min of the normalised GL row > 16 eps."""
@@ -200,6 +232,60 @@ def gather_sites(
 _RESCALE_BELOW = 1e-150
 
 
+@kernel(overloads=_OVERLOADS["_pair_bin_score"], cache=True, inline="always", nogil=True)
+def _pair_bin_score(
+    likelihoods,
+    observed,
+    alt_probability,
+    background_frequency,
+    sample,
+    first,
+    second,
+    n_classes,
+    start,
+    stop,
+    site_offset,
+    robustness_epsilon,
+    floor_probability,
+    uniform_log,
+):
+    """The binned log emission of states (first, second) for one sample over sites [start, stop) of ``likelihoods`` /
+    ``observed`` (site s of these reads ALT probabilities and background frequencies at s + ``site_offset``)."""
+    logs = 0.0
+    product = 1.0
+    count = 0
+    for site in range(start, stop):
+        if not observed[sample, site]:
+            continue
+        column = site + site_offset
+        first_q = background_frequency[column] if first == n_classes else alt_probability[first, column]
+        second_q = background_frequency[column] if second == n_classes else alt_probability[second, column]
+        if first == second and first < n_classes:
+            # Two homologues of one class share one latent allele.
+            p0 = 1.0 - first_q
+            p1 = 0.0
+            p2 = first_q
+        else:
+            p0 = (1.0 - first_q) * (1.0 - second_q)
+            p2 = first_q * second_q
+            p1 = 1.0 - p0 - p2
+        likelihood = (
+            likelihoods[sample, site, 0] * p0 + likelihoods[sample, site, 1] * p1 + likelihoods[sample, site, 2] * p2
+        )
+        probability = (1.0 - robustness_epsilon) * likelihood + robustness_epsilon / 3.0
+        if probability < floor_probability:  # also p <= 0; NaN propagates, as before
+            probability = floor_probability
+        count += 1
+        if probability < _RESCALE_BELOW:
+            logs += math.log(probability)  # only under a floor below log(_RESCALE_BELOW)
+            continue
+        product *= probability
+        if product < _RESCALE_BELOW:
+            logs += math.log(product)
+            product = 1.0
+    return logs + math.log(product) - count * uniform_log
+
+
 @kernel(overloads=_OVERLOADS["_emission_kernel"], cache=True, parallel=True, nogil=True)
 def _emission_kernel(
     likelihoods, observed, alt_probability, background_frequency, bin_starts, bin_stops, robustness_epsilon, log_floor
@@ -232,43 +318,153 @@ def _emission_kernel(
         state = first * n_states + second
         mirror = second * n_states + first
         for bin_index in range(n_bins):
-            logs = 0.0
-            product = 1.0
-            count = 0
-            for site in range(bin_starts[bin_index], bin_stops[bin_index]):
-                if not observed[sample, site]:
-                    continue
-                first_q = background_frequency[site] if first == n_classes else alt_probability[first, site]
-                second_q = background_frequency[site] if second == n_classes else alt_probability[second, site]
-                if first == second and first < n_classes:
-                    # Two homologues of one class share one latent allele.
-                    p0 = 1.0 - first_q
-                    p1 = 0.0
-                    p2 = first_q
-                else:
-                    p0 = (1.0 - first_q) * (1.0 - second_q)
-                    p2 = first_q * second_q
-                    p1 = 1.0 - p0 - p2
-                likelihood = (
-                    likelihoods[sample, site, 0] * p0
-                    + likelihoods[sample, site, 1] * p1
-                    + likelihoods[sample, site, 2] * p2
-                )
-                probability = (1.0 - robustness_epsilon) * likelihood + robustness_epsilon / 3.0
-                if probability < floor_probability:  # also p <= 0; NaN propagates, as before
-                    probability = floor_probability
-                count += 1
-                if probability < _RESCALE_BELOW:
-                    logs += math.log(probability)  # only under a floor below log(_RESCALE_BELOW)
-                    continue
-                product *= probability
-                if product < _RESCALE_BELOW:
-                    logs += math.log(product)
-                    product = 1.0
-            score = logs + math.log(product) - count * uniform_log
+            score = _pair_bin_score(
+                likelihoods,
+                observed,
+                alt_probability,
+                background_frequency,
+                sample,
+                first,
+                second,
+                n_classes,
+                bin_starts[bin_index],
+                bin_stops[bin_index],
+                0,
+                robustness_epsilon,
+                floor_probability,
+                uniform_log,
+            )
             result[sample, state, bin_index] = score
             result[sample, mirror, bin_index] = score
     return result
+
+
+@kernel(overloads=_OVERLOADS["_tempered_into"], cache=True, parallel=True, nogil=True)
+def _tempered_into(
+    values,
+    seen,
+    alt_probability,
+    background_frequency,
+    part_starts,
+    part_stops,
+    part_bins,
+    bin_starts,
+    first_part,
+    last_part,
+    first_bin,
+    last_bin,
+    left,
+    robustness_epsilon,
+    log_floor,
+    correlation,
+    raw,
+    flags,
+    informative,
+    sample_offset,
+):
+    """tempered_window of one whole-bin window, written in place (release 4.7.1: one kernel, no serial steps).
+
+    ``values``/``seen`` hold the window's GL rows and flags, site s being the batch's selected site ``left`` + s.
+    Parts [first_part, last_part) and whole bins [first_bin, last_bin) carry the batch's indices; a part's emission is
+    divided by the design effect of its whole bin (part_bins), the last whole bin running to the window's end (as
+    np.add.reduceat). Writes raw[sample_offset + n, :, part] and flags/informative[sample_offset + n, left + s]. The
+    same values as binned_emissions, design_effect and the division in tempered_window."""
+    n_samples, n_sites, _ = values.shape
+    n_classes = alt_probability.shape[0]
+    n_states = n_classes + 1
+    n_pairs = n_states * (n_states + 1) // 2
+    n_whole = last_bin - first_bin
+    design = np.empty((n_samples, n_whole))
+    for sample in prange(n_samples):
+        target = sample_offset + sample
+        for site in range(n_sites):
+            a = values[sample, site, 0]
+            b = values[sample, site, 1]
+            c = values[sample, site, 2]
+            flags[target, left + site] = seen[sample, site]
+            informative[target, left + site] = seen[sample, site] and max(a, b, c) - min(a, b, c) > INFORMATIVE_SPREAD
+        for whole in range(n_whole):
+            low = bin_starts[first_bin + whole] - left
+            high = bin_starts[first_bin + whole + 1] - left if whole + 1 < n_whole else n_sites
+            count = 0
+            for site in range(low, high):
+                count += informative[target, left + site]
+            design[sample, whole] = 1.0 + max(count - 1, 0) * correlation
+    uniform_log = max(math.log(1.0 / 3.0), log_floor)
+    floor_probability = math.exp(log_floor)
+    for task in prange(n_samples * n_pairs):
+        sample = task // n_pairs
+        pair = task % n_pairs
+        first = 0
+        while pair >= n_states - first:
+            pair -= n_states - first
+            first += 1
+        second = first + pair
+        state = first * n_states + second
+        mirror = second * n_states + first
+        for part in range(first_part, last_part):
+            score = _pair_bin_score(
+                values,
+                seen,
+                alt_probability,
+                background_frequency,
+                sample,
+                first,
+                second,
+                n_classes,
+                part_starts[part] - left,
+                part_stops[part] - left,
+                left,
+                robustness_epsilon,
+                floor_probability,
+                uniform_log,
+            )
+            value = score / design[sample, part_bins[part] - first_bin]
+            raw[sample_offset + sample, state, part] = value
+            raw[sample_offset + sample, mirror, part] = value
+
+
+def tempered_into(
+    values: np.ndarray,
+    seen: np.ndarray,
+    alt_probability: np.ndarray,
+    background_frequency: np.ndarray,
+    part_starts: np.ndarray,
+    part_stops: np.ndarray,
+    part_bins: np.ndarray,
+    bin_starts: np.ndarray,
+    parts: tuple[int, int],
+    bins: tuple[int, int],
+    left: int,
+    config: PaintingParameters,
+    raw: np.ndarray,
+    flags: np.ndarray,
+    informative: np.ndarray,
+    sample_offset: int,
+) -> None:
+    """Temper one whole-bin window of a batch into ``raw``/``flags``/``informative`` (_tempered_into)."""
+    _tempered_into(
+        readonly(values, np.float64),
+        readonly(seen, np.bool_),
+        readonly(alt_probability, np.float64),
+        readonly(background_frequency, np.float64),
+        readonly(part_starts, np.int64),
+        readonly(part_stops, np.int64),
+        readonly(part_bins, np.int64),
+        readonly(bin_starts, np.int64),
+        int(parts[0]),
+        int(parts[1]),
+        int(bins[0]),
+        int(bins[1]),
+        int(left),
+        float(config.robustness_epsilon),
+        float(config.emission_log_floor),
+        float(config.emission_site_correlation),
+        raw,
+        flags,
+        informative,
+        int(sample_offset),
+    )
 
 
 def binned_emissions(
@@ -354,6 +550,7 @@ __all__ = [
     "ArraySource",
     "EmissionBuilder",
     "tempered_window",
+    "tempered_into",
     "tempered_emissions",
 ]
 
@@ -401,21 +598,29 @@ def tempered_window(
     All indices are local to this whole-bin window. Returned emissions and informative
     masks are owned; inputs are unchanged. Cost O(samples * selected sites * S**2).
     """
-    raw = binned_emissions(
+    n_samples, n_sites = flags.shape
+    n_states = alt_probability.shape[0] + 1
+    raw = np.empty((n_samples, n_states * n_states, len(starts)), dtype=np.float64)
+    informative = np.empty((n_samples, n_sites), dtype=np.bool_)
+    tempered_into(
         values,
         flags,
         alt_probability,
         background_frequency,
         starts,
         stops,
-        robustness_epsilon=config.robustness_epsilon,
-        log_floor=config.emission_log_floor,
+        np.arange(len(starts), dtype=np.int64) if part_bins is None else part_bins,
+        whole_bin_starts,
+        (0, len(starts)),
+        (0, len(whole_bin_starts)),
+        0,
+        config,
+        raw,
+        np.empty((n_samples, n_sites), dtype=np.bool_),
+        informative,
+        0,
     )
-    design = design_effect(values, flags, whole_bin_starts, config.emission_site_correlation)
-    if part_bins is not None:
-        design = design[:, part_bins]
-    raw /= design[:, None, :]
-    return raw, informative_sites(values, flags)
+    return raw, informative
 
 
 def tempered_emissions(

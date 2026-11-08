@@ -447,6 +447,38 @@ def release_component(
     )
 
 
+def _component_sources(
+    panel: ComponentPanel,
+    likelihoods: ArraySource,
+    observed: ArraySource,
+    sites: np.ndarray,
+    config: PaintingParameters,
+    budget: int,
+) -> tuple[tuple[Any, Any, np.ndarray], int]:
+    """((likelihoods, observed, panel-site map) to build the component's emissions from, the emission budget left).
+
+    Release 4.7.1: when the evidence offers resident copies (resident_columns), the component's evidence at its panel
+    sites (each sample's genotype-likelihood codes and its likelihood dictionary, far smaller than the emissions) is
+    read once into memory, charged to the budget, whenever the copying-model estimate and the decode keep the packed
+    emissions they would keep without it (or could not keep them anyway). Every emission build of the component, the
+    estimate's, label continuity's and the decode's, is then a parallel in-memory gather and emission kernel instead
+    of a serial read of the stored evidence. The values are the same."""
+    unchanged = (likelihoods, observed, sites), budget
+    if not (hasattr(likelihoods, "resident_columns") and hasattr(observed, "resident_columns")):
+        return unchanged
+    states = build_states(panel.positions, panel.inference, panel.kept)
+    bins = build_bins(states.positions, config.snps_per_bin)
+    if bins.n_bins == 0:
+        return unchanged
+    packed = 8 * likelihoods.shape[0] * (states.n_states * (states.n_states + 1) // 2) * bins.n_bins
+    copy_bytes = likelihoods.resident_bytes(len(sites)) + observed.resident_bytes(len(sites))
+    if copy_bytes + (packed if packed <= budget else 0) > budget:
+        return unchanged
+    copy = likelihoods.resident_columns(sites)
+    resident = (copy, observed.resident_columns(sites, copy), np.arange(len(sites), dtype=np.int64))
+    return resident, budget - copy_bytes
+
+
 def paint_chromosome(
     panels: tuple[ComponentPanel, ...],
     evidence: PaintingEvidence,
@@ -474,7 +506,9 @@ def paint_chromosome(
     components: list[ComponentPainting] = []
     continuity: list[LabelContinuity] = []
     for component_index, panel in enumerate(panels):
-        sites = panel.site_indices()
+        (component_likelihoods, component_observed, sites), budget = _component_sources(
+            panel, likelihoods, observed, panel.site_indices(), config, cache_remaining
+        )
         # Progress records (resume after an interruption): the copying model, the label-continuity outcome and each
         # decoded sample batch, each published as soon as it is final and bound to this painting's derivation.
         saved = None if progress is None else progress.load(f"c{component_index}/model")
@@ -483,13 +517,13 @@ def paint_chromosome(
         else:
             model = component_model(
                 panel,
-                likelihoods,
-                observed,
+                component_likelihoods,
+                component_observed,
                 sites,
                 config,
                 genetic_map,
                 batch_samples=batch_samples,
-                emission_cache_bytes=cache_remaining,
+                emission_cache_bytes=budget,
                 emission_builder=emission_builder,
             )
             if progress is not None:
@@ -503,8 +537,8 @@ def paint_chromosome(
         else:
             painted, outcome = relabel_component(
                 panel,
-                likelihoods,
-                observed,
+                component_likelihoods,
+                component_observed,
                 sites,
                 config,
                 genetic_map,
@@ -513,19 +547,19 @@ def paint_chromosome(
                 reverse=reverse,
                 census_sink=census_sink,
                 emission_builder=emission_builder,
-                emission_cache_bytes=cache_remaining,
+                emission_cache_bytes=budget,
             )
             if progress is not None:
                 progress.save(f"c{component_index}/continuity", dict(outcome=to_payload(outcome)))
         decoding = decode_component(
             painted,
-            likelihoods,
-            observed,
+            component_likelihoods,
+            component_observed,
             sites,
             config,
             genetic_map,
             model=model,
-            emission_cache_bytes=cache_remaining,
+            emission_cache_bytes=budget,
             batch_samples=batch_samples,
             reverse=reverse,
             emission_builder=emission_builder,
@@ -536,8 +570,9 @@ def paint_chromosome(
             cache_remaining -= decoding.packed_emissions.nbytes
         components.append(release_component(painted, decoding, config, census_sink=census_sink))
         continuity.append(outcome)
-        # Release-only paths, masks and posterior gates end here, before the next component.
-        del decoding
+        # Release-only paths, masks and posterior gates end here, before the next component, as does its resident
+        # evidence copy.
+        del decoding, component_likelihoods, component_observed
     return Painting(
         contig=evidence.contig,
         sample_ids=tuple(evidence.sample_ids),

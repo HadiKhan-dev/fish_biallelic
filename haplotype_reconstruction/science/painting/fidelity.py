@@ -97,6 +97,30 @@ _OVERLOADS = {
             types.int64,
         ),
     ),
+    "_reversed_structured_emissions": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.int64,
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.int64,
+        ),
+    ),
+    "_track_labels": (
+        (
+            types.Array(types.int32, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
+        ),
+        (
+            types.Array(types.int32, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.boolean,
+        ),
+    ),
     "_log_terms": (
         (
             types.float64,
@@ -326,9 +350,40 @@ def _structured_emissions(raw, emission_label, n_labels):
     return out
 
 
-def structured_emissions(raw: np.ndarray, tracks: TrackStates) -> np.ndarray:
-    """float64[N, S'*S', B] pair emissions of the track states from the (tempered) label emissions raw [N, S*S, B]."""
-    return _structured_emissions(np.ascontiguousarray(raw), tracks.emission, len(tracks.error_of))
+@kernel(overloads=_OVERLOADS["_reversed_structured_emissions"], cache=True, parallel=True, nogil=True)
+def _reversed_structured_emissions(raw, emission_label, n_labels):
+    """_structured_emissions of the bin-reversed label emissions, read in place (release 4.7.1: no reversed copy)."""
+    n_samples, _, n_bins = raw.shape
+    n_track = len(emission_label)
+    out = np.empty((n_samples, n_track * n_track, n_bins))
+    for task in prange(n_samples * n_track):
+        sample, first = task // n_track, task % n_track
+        for second in range(n_track):
+            source = emission_label[first] * n_labels + emission_label[second]
+            for bin_index in range(n_bins):
+                out[sample, first * n_track + second, bin_index] = raw[sample, source, n_bins - 1 - bin_index]
+    return out
+
+
+def structured_emissions(raw: np.ndarray, tracks: TrackStates, *, reverse: bool = False) -> np.ndarray:
+    """float64[N, S'*S', B] pair emissions of the track states from the (tempered) label emissions raw [N, S*S, B];
+    ``reverse``: of the bins in reverse order (the mirrored convention), without copying ``raw``."""
+    kernel_function = _reversed_structured_emissions if reverse else _structured_emissions
+    return kernel_function(np.ascontiguousarray(raw), tracks.emission, len(tracks.error_of))
+
+
+@kernel(overloads=_OVERLOADS["_track_labels"], cache=True, parallel=True, nogil=True)
+def _track_labels(states, labels, reverse):
+    """int32[N, 2, B] labels of the Viterbi track states ``states``; ``reverse``: states of the bin-reversed chain
+    (the mirrored convention), returned in the original bin order. The same values as labels[states] (release 4.7.1)."""
+    n_samples, n_tracks, n_bins = states.shape
+    out = np.empty((n_samples, n_tracks, n_bins), dtype=np.int32)
+    for sample in prange(n_samples):
+        for track in range(n_tracks):
+            for bin_index in range(n_bins):
+                source = n_bins - 1 - bin_index if reverse else bin_index
+                out[sample, track, bin_index] = labels[states[sample, track, source]]
+    return out
 
 
 @kernel(overloads=_OVERLOADS["_log_terms"], cache=True, inline="always", nogil=True)
@@ -1247,8 +1302,8 @@ def label_paths(
             structured_emissions(raw, tracks), tracks, capable, model.theta, model.entry, model.exit, tie=tie
         )
     else:
-        mirrored = _viterbi_kernel(
-            structured_emissions(np.ascontiguousarray(raw[:, :, ::-1]), tracks),
+        states = _viterbi_kernel(
+            structured_emissions(raw, tracks, reverse=True),
             tracks.labels,
             tracks.fidelity,
             tracks.error_of,
@@ -1260,8 +1315,8 @@ def label_paths(
             float(tie),
             True,
         )
-        states = mirrored[:, :, ::-1]
-    return np.ascontiguousarray(tracks.labels[states].astype(np.int32))
+    # Release 4.7.1: the mirrored chain's states map to labels in the original bin order inside one kernel.
+    return _track_labels(states, np.ascontiguousarray(tracks.labels, dtype=np.int64), bool(reverse))
 
 
 def painted_switches(

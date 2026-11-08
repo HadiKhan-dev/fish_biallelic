@@ -39,6 +39,7 @@ INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
 
 # Exact supported layouts from the frozen 3.5 release and typed stage-route census.
 _OVERLOADS = {
+    "_minimum_switch_counts": ((types.Array(types.int32, 3, "C", readonly=False, aligned=True),),),
     "hamming_max_values": (
         (
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -382,15 +383,28 @@ def parsimonious_track_order(paths, local_keys, n_classes):
     return result
 
 
+@kernel(overloads=_OVERLOADS["_minimum_switch_counts"], cache=True, parallel=True, nogil=True)
+def _minimum_switch_counts(paths):
+    n_samples, _, n_bins = paths.shape
+    counts = np.zeros(n_samples, dtype=np.int64)
+    for sample in prange(n_samples):
+        total = 0
+        for bin_index in range(1, n_bins):
+            a, b = paths[sample, 0, bin_index - 1], paths[sample, 1, bin_index - 1]
+            c, d = paths[sample, 0, bin_index], paths[sample, 1, bin_index]
+            direct = (a != c) + (b != d)
+            swapped = (a != d) + (b != c)
+            total += min(direct, swapped)
+        counts[sample] = total
+    return counts
+
+
 def minimum_switch_counts(paths: np.ndarray) -> np.ndarray:
-    """int64[N] minimum track changes of each path; a pure track swap counts as none."""
+    """int64[N] minimum track changes of each path; a pure track swap counts as none (release 4.7.1: one
+    sample-parallel kernel, the same counts)."""
     if paths.shape[2] < 2:
         return np.zeros(paths.shape[0], dtype=np.int64)
-    previous = paths[:, :, :-1]
-    current = paths[:, :, 1:]
-    direct = (previous[:, 0] != current[:, 0]).astype(np.int8) + (previous[:, 1] != current[:, 1]).astype(np.int8)
-    swapped = (previous[:, 0] != current[:, 1]).astype(np.int8) + (previous[:, 1] != current[:, 0]).astype(np.int8)
-    return np.sum(np.minimum(direct, swapped), axis=1, dtype=np.int64)
+    return _minimum_switch_counts(np.ascontiguousarray(paths, dtype=np.int32))
 
 
 @kernel(overloads=_OVERLOADS["direct_support"], cache=True, parallel=True, nogil=True)

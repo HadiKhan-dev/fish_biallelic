@@ -319,6 +319,17 @@ class _TableWindows:
     def gather_rows(self, first: int, last: int, indices: np.ndarray) -> np.ndarray:
         indices = np.asarray(indices)
         size = int(last) - int(first)
+        row_bytes = self.array.dtype.itemsize * int(np.prod(self.array.shape[1:]))
+        low = int(indices.min()) if len(indices) else 0
+        span = int(indices.max()) + 1 - low if len(indices) else 0
+        if 0 < span <= len(indices):
+            # A selection whose rows span no more rows than it requests reads that span once and indexes it: the same
+            # rows as reading each run of distinct codes, with one read instead of one per run, and never more rows
+            # than requested (release 4.7.1).
+            block = np.empty((span, *self.array.shape[1:]), dtype=self.array.dtype)
+            begin = self.array.offset + (int(first) + low) * row_bytes
+            self.array.reader.read_range(self.array.group, begin, begin + block.nbytes, memoryview(block).cast("B"))
+            return block[indices - low]
         if 0 < len(indices) and size <= 4 * len(indices) + 4096:
             # The sorted distinct codes and their inverse by marking, O(size + n), instead of np.unique's sort:
             # the same arrays (release 4.7; painting gathers every sample's rows once per batch and pass).
@@ -329,7 +340,6 @@ class _TableWindows:
         else:
             selected, inverse = np.unique(indices, return_inverse=True)
         rows = np.empty((len(selected), *self.array.shape[1:]), dtype=self.array.dtype)
-        row_bytes = self.array.dtype.itemsize * int(np.prod(self.array.shape[1:]))
         # Each run is at most the selected window size, even when D grows with L.
         boundaries = np.r_[0, np.flatnonzero(np.diff(selected) != 1) + 1, len(selected)]
         for left, right in zip(boundaries[:-1], boundaries[1:], strict=True):
@@ -368,6 +378,56 @@ class LikelihoodWindows:
             raise ValueError("window reader is closed")
         return gather_coded(self, samples, columns)
 
+    def resident_bytes(self, n_columns: int, samples: slice = slice(None)) -> int:
+        """Bytes of resident_columns over ``n_columns`` sites for ``samples``: their dictionaries (pairs and values,
+        32 bytes a row), each coded sample's codes (1, 2 or 4 bytes a site) and each dense sample's rows (24 bytes)."""
+        first, stop, _ = samples.indices(len(self.widths))
+        widths = np.asarray(self.widths[first:stop], dtype=np.int64)
+        rows = int(self.offsets[stop]) - int(self.offsets[first])
+        return 32 * rows + int(n_columns) * (int(np.sum(widths)) + 24 * int(np.sum(widths == 0)))
+
+    def resident_columns(self, columns: np.ndarray, samples: slice = slice(None)) -> CodedLikelihoods:
+        """The evidence of ``samples`` (a contiguous range) at ``columns`` (strictly increasing site indices) as a
+        resident CodedLikelihoods: each sample's own dictionary rows, and its codes or dense rows at those sites only
+        (release 4.7.1: a component's selected evidence, read once, so that repeated emission builds gather in
+        memory, in parallel). Sample k of the copy is sample ``samples.start + k`` here."""
+        if self.reader.closed:
+            raise ValueError("window reader is closed")
+        columns = np.asarray(columns, dtype=np.int64)
+        first, stop, _ = samples.indices(len(self.widths))
+        widths = np.array(self.widths[first:stop], dtype=np.uint8)
+        source_rows = np.asarray(self.rows[first:stop], dtype=np.int64)
+        rows = np.zeros(len(widths), dtype=np.int64)
+        arrays = {}
+        for width, name in ((1, "codes8"), (2, "codes16"), (4, "codes32"), (0, "dense")):
+            members = np.flatnonzero(widths == width)
+            rows[members] = np.arange(len(members), dtype=np.int64)
+            arrays[name] = _window_rows(getattr(self, name), source_rows[members], columns)
+        offsets = np.array(self.offsets[first : stop + 1], dtype=np.int64)
+        low, high = int(offsets[0]), int(offsets[-1])
+        local = np.arange(high - low, dtype=np.int64)
+        return CodedLikelihoods(
+            sites=len(columns),
+            widths=widths,
+            rows=rows,
+            offsets=offsets - low,
+            pairs=self.pairs.gather_rows(low, high, local),
+            values=self.values.gather_rows(low, high, local),
+            **arrays,
+        )
+
+
+def _window_rows(window: Any, rows: np.ndarray, columns: np.ndarray) -> np.ndarray:
+    """Rows ``rows`` of a window array at ``columns``, in the given order, reading each run of consecutive rows once."""
+    result = np.empty((len(rows), len(columns), *window.shape[2:]), dtype=window.dtype)
+    if not result.size:
+        return result
+    breaks = np.r_[0, np.flatnonzero(np.diff(rows) != 1) + 1, len(rows)]
+    for left, right in zip(breaks[:-1], breaks[1:], strict=True):
+        first = int(rows[left])
+        result[left:right] = window.gather(slice(first, first + right - left), columns)
+    return result
+
 
 class PairWindows:
     """Logical count/mask windows sharing the GL codes and pair table handles."""
@@ -381,6 +441,26 @@ class PairWindows:
         if self.source.reader.closed:
             raise ValueError("window reader is closed")
         return gather_pairs(self.source, self.dense, self.kind, samples, columns)
+
+    def resident_bytes(self, n_columns: int, samples: slice = slice(None)) -> int:
+        """Bytes of resident_columns' own rows (the dense fallback rows of ``samples``) over ``n_columns`` sites; the
+        codes and dictionaries belong to the likelihoods' copy."""
+        first, stop, _ = samples.indices(len(self.source.widths))
+        dense = int(np.sum(np.asarray(self.source.widths[first:stop]) == 0))
+        return int(n_columns) * dense * self.dtype.itemsize * (2 if self.kind == "counts" else 1)
+
+    def resident_columns(
+        self, columns: np.ndarray, source: CodedLikelihoods, samples: slice = slice(None)
+    ) -> PairArray:
+        """These observations of ``samples`` at ``columns``, borrowing ``source`` = the likelihoods' resident_columns
+        of the same samples and sites; the dense fallback rows are numbered as in that copy."""
+        if self.source.reader.closed:
+            raise ValueError("window reader is closed")
+        columns = np.asarray(columns, dtype=np.int64)
+        first, stop, _ = samples.indices(len(self.source.widths))
+        widths = np.asarray(self.source.widths[first:stop])
+        rows = np.asarray(self.source.rows[first:stop], dtype=np.int64)
+        return PairArray(source, _window_rows(self.dense, rows[widths == 0], columns), self.kind)
 
 
 @contextmanager

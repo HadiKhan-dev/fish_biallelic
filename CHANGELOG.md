@@ -1,5 +1,50 @@
 # Changelog
 
+## 4.7.1 (8 November 2026)
+
+This release removes serial work from painting and gathers in-memory evidence in parallel. Every result, report and
+checkpoint value is scientifically identical to 4.7.0: the changes copy, cache, fuse or reorder work only.
+
+**Painting builds from memory.** Each component's evidence at its panel sites (every sample's genotype-likelihood
+codes and its likelihood dictionary, far smaller than the emissions) is read once into memory, charged to the 8 GiB
+emission budget whenever the copying-model estimate and the decode keep the packed emissions they would keep without
+it. The estimate's updates, label continuity's batches and the decode then build emissions with a parallel in-memory
+gather and emission kernel instead of serial reads of the stored evidence.
+
+**Label continuity without serial rebuilds.** Label continuity keeps each sample batch's part emissions for its whole
+search when they fit its budget. In 4.7.0 a component whose emissions did not all fit rebuilt every batch from the
+stored evidence for every candidate it checked, one sample at a time on one thread. Now:
+- the batches that fit are kept (not all or none);
+- without the component copy, the search reads its own copy of the selected evidence under its budget, for every
+  sample or for the leading batches that fit;
+- one rebuild serves several candidates: after a candidate fails, the next ones in ranked order (1, 2, 4, ... per
+  iteration, within the check budget) are decoded from the same emissions, and count as checks only when the search
+  reaches them;
+- several candidates of a batch are decoded in one call, as many as the budget the kept emissions leave can hold, so
+  each parallel call has more samples than threads;
+- when every batch is kept, they share one array and each decoding call takes as many samples as that budget holds
+  (all of them on the test below), not one batch.
+
+**Fewer serial steps between kernels.** One kernel tempers each emission window (informative sites, the design
+effect of each whole bin, the division) and writes the batch's arrays in place; the mirrored Viterbi convention reads
+the reversed emissions in place instead of copying them; path labels and switch counts are kernels. A gather of
+in-memory coded genotype likelihoods or observation flags of at least 16,384 sample-site cells runs as one
+sample-parallel kernel, in every stage, and a selection of stored dictionary rows spanning no more rows than it
+requests is read in one range read.
+
+**Task results copied in parallel.** A pool worker copies a task's large result arrays into shared memory before it
+releases the task's CPUs, with the task's whole team, instead of on one thread afterwards; a large assembly result
+held a whole node on one CPU while it was copied.
+
+Painting chromosome 12 of the N = 320 depth-0.1 simulation on a whole 76-CPU node, kernels compiled beforehand (for
+4.7.0's second case compilation is under 3% of the time), with an identical painting in every case:
+- the emissions kept (the usual case): 88 s at 34 busy CPUs on average in 4.7.0, 54 s at 58 now;
+- label continuity keeping no batch: 647 s at 7 busy CPUs in 4.7.0, 69 s at 55 now;
+- the same chromosome at depth 1: 29 s at 21 busy CPUs in 4.7.0, 11 s at 55 now (the same total CPU);
+- chromosome 7 of the real TroMau cross: 6.3 s in 4.7.0, 3.3 s now.
+
+The test suite (3,806 tests), the stage tier and the workflow receipt pass.
+
 ## 4.7.0 (8 November 2026)
 
 This release shortens the run's critical path and uses every allocated CPU. Founder calls, counts, panels,

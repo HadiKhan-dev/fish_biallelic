@@ -11,8 +11,126 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+from numba import prange, types
 
+from ..core.kernels import kernel
 from .roles import freeze_record_arrays, record_field
+
+# A resident coded gather of at least this many sample-site cells runs as one parallel kernel (release 4.7.1); smaller
+# ones keep the per-sample loop, whose cost is below a parallel region's start-up.
+PARALLEL_GATHER_CELLS = 1 << 14
+
+
+def _array(dtype: Any, ndim: int, readonly: bool) -> Any:
+    return types.Array(dtype, ndim, "C", readonly=readonly, aligned=True)
+
+
+def _coded_overloads(table: Any, table_ndim: int, dense: Any, dense_ndim: int, out: Any, out_ndim: int) -> tuple:
+    """Argument types of a resident coded gather: every input read-only (the wrappers pass read-only views), the
+    output writable."""
+    return (
+        (
+            _array(types.uint8, 1, True),
+            _array(types.int64, 1, True),
+            _array(types.int64, 1, True),
+            _array(table, table_ndim, True),
+            _array(types.uint8, 2, True),
+            _array(types.uint16, 2, True),
+            _array(types.uint32, 2, True),
+            _array(dense, dense_ndim, True),
+            _array(types.int64, 1, True),
+            _array(types.int64, 1, True),
+            _array(out, out_ndim, False),
+        ),
+    )
+
+
+def readonly(array: np.ndarray, dtype: Any) -> np.ndarray:
+    """A read-only, C-contiguous view of ``array`` as ``dtype`` (a copy only when the layout or dtype differs), so that
+    a kernel sees one argument type whatever its caller's arrays (release 4.7.1)."""
+    view = np.ascontiguousarray(array, dtype=dtype).view()
+    view.flags.writeable = False
+    return view
+
+
+@kernel(
+    overloads=_coded_overloads(types.float64, 2, types.float64, 3, types.float64, 3),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
+def _coded_rows(widths, rows, offsets, values, codes8, codes16, codes32, dense, samples, columns, out):
+    """out[t, j] = the GL row of sample ``samples[t]`` at site ``columns[j]``: its dictionary row ``values[offsets[s] +
+    code]`` for a coded sample (width 1, 2 or 4 bytes per code), its own row of ``dense`` otherwise. A copy, sample-
+    parallel; the same values as the per-sample loop of gather_coded."""
+    for target in prange(samples.shape[0]):
+        sample = samples[target]
+        width = widths[sample]
+        row = rows[sample]
+        base = offsets[sample]
+        for index in range(columns.shape[0]):
+            column = columns[index]
+            if width == 0:
+                for genotype in range(3):
+                    out[target, index, genotype] = dense[row, column, genotype]
+                continue
+            if width == 1:
+                code = np.int64(codes8[row, column])
+            elif width == 2:
+                code = np.int64(codes16[row, column])
+            else:
+                code = np.int64(codes32[row, column])
+            for genotype in range(3):
+                out[target, index, genotype] = values[base + code, genotype]
+
+
+@kernel(
+    overloads=_coded_overloads(types.int32, 2, types.boolean, 2, types.boolean, 2),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
+def _coded_flags(widths, rows, offsets, pairs, codes8, codes16, codes32, dense, samples, columns, out):
+    """out[t, j] = sample ``samples[t]`` has a read at site ``columns[j]``: its dictionary pair (REF, ALT depth) by code
+    is not (0, 0) for a coded sample, its own row of the dense mask otherwise. Sample-parallel; the same flags as the
+    per-sample loop of observations.gather_pairs."""
+    for target in prange(samples.shape[0]):
+        sample = samples[target]
+        width = widths[sample]
+        row = rows[sample]
+        base = offsets[sample]
+        for index in range(columns.shape[0]):
+            column = columns[index]
+            if width == 0:
+                out[target, index] = dense[row, column]
+                continue
+            if width == 1:
+                code = np.int64(codes8[row, column])
+            elif width == 2:
+                code = np.int64(codes16[row, column])
+            else:
+                code = np.int64(codes32[row, column])
+            out[target, index] = pairs[base + code, 0] != 0 or pairs[base + code, 1] != 0
+
+
+def resident_coded(source: Any) -> bool:
+    """Whether every table, code and dense array of a coded source is an in-memory ndarray."""
+    names = ("values", "codes8", "codes16", "codes32", "dense")
+    return all(isinstance(getattr(source, name), np.ndarray) for name in names)
+
+
+def coded_arguments(source: Any, table: str) -> tuple[np.ndarray, ...]:
+    """(widths, rows, offsets, ``table`` = values or pairs, codes8, codes16, codes32) of a resident coded source as
+    the kernels' read-only arguments."""
+    return (
+        readonly(source.widths, np.uint8),
+        readonly(source.rows, np.int64),
+        readonly(source.offsets, np.int64),
+        readonly(getattr(source, table), np.float64 if table == "values" else np.int32),
+        readonly(source.codes8, np.uint8),
+        readonly(source.codes16, np.uint16),
+        readonly(source.codes32, np.uint32),
+    )
 
 
 @dataclass(frozen=True)
@@ -91,6 +209,15 @@ def gather_coded(source: Any, samples: slice, columns: Any, *, out: np.ndarray |
     result = np.empty(shape, dtype=np.float64) if out is None else out
     if result.shape != shape or result.dtype != np.float64:
         raise ValueError("GL projection requires a matching float64 destination")
+    if len(selected) * len(columns) >= PARALLEL_GATHER_CELLS and resident_coded(source) and result.flags.c_contiguous:
+        _coded_rows(
+            *coded_arguments(source, "values"),
+            readonly(source.dense, np.float64),
+            readonly(np.asarray(selected), np.int64),
+            readonly(columns, np.int64),
+            result,
+        )
+        return result
     for target, sample in enumerate(selected):
         width, row = int(source.widths[sample]), int(source.rows[sample])
         if width:

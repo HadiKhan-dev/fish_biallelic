@@ -11,7 +11,17 @@ from typing import Any, Literal
 
 import numpy as np
 
-from .likelihoods import CodedLikelihoods, _columns, _read_rows, table_rows
+from .likelihoods import (
+    PARALLEL_GATHER_CELLS,
+    CodedLikelihoods,
+    _coded_flags,
+    _columns,
+    _read_rows,
+    coded_arguments,
+    readonly,
+    resident_coded,
+    table_rows,
+)
 from .roles import freeze_record_arrays, record_field
 
 ObservationKind = Literal["counts", "observed"]
@@ -22,6 +32,21 @@ def gather_pairs(source: Any, dense: Any, kind: ObservationKind, samples: slice,
     columns = _columns(columns, source.sites)
     shape = (len(selected), len(columns)) + ((2,) if kind == "counts" else ())
     result: np.ndarray = np.empty(shape, dtype=np.int32 if kind == "counts" else np.bool_)
+    if (
+        kind == "observed"
+        and len(selected) * len(columns) >= PARALLEL_GATHER_CELLS
+        and isinstance(dense, np.ndarray)
+        and isinstance(source.pairs, np.ndarray)
+        and resident_coded(source)
+    ):
+        _coded_flags(
+            *coded_arguments(source, "pairs"),
+            readonly(dense, np.bool_),
+            readonly(np.asarray(selected), np.int64),
+            readonly(columns, np.int64),
+            result,
+        )
+        return result
     for target, sample in enumerate(selected):
         width, row = int(source.widths[sample]), int(source.rows[sample])
         if width:

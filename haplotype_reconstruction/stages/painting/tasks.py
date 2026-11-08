@@ -25,7 +25,7 @@ from ...contracts.roles import require_schema
 from ...core.errors import InvariantError
 from ...core.ties import TieCensus, TieSettings
 from ...science.painting.diagnostics import ModelTrajectory, PaintingDiagnostics, summarise
-from ...science.painting.emissions import ArraySource, gather_sites, tempered_window
+from ...science.painting.emissions import ArraySource, gather_sites, tempered_into
 from ...science.painting.fidelity import ChainModel
 from ...science.painting.label_continuity import relabel_bytes
 from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTES, PaintingParameters
@@ -108,6 +108,7 @@ def windowed_emissions(
     if not len(bin_starts):
         return raw, flags, informative
     largest = int(np.max(bin_stops - bin_starts))
+    part_bins = np.arange(len(bin_starts), dtype=np.int64) if parts is None else np.asarray(parts[2], dtype=np.int64)
     if isinstance(likelihoods, WindowArray):
         # Flags are already a returned output. Fill them once before GL work so
         # a large mask chunk cannot evict the GL chunk between every site window.
@@ -141,20 +142,26 @@ def windowed_emissions(
                 seen = np.ascontiguousarray(flags[first_sample:last_sample, left:right])
             else:
                 values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
-            emissions, info = tempered_window(
+            # One kernel tempers the window into the batch's arrays (release 4.7.1): informative sites, the design
+            # effect of each whole bin and the parts' emissions, with no serial steps between them.
+            tempered_into(
                 values,
                 seen,
-                alt_probability[:, left:right],
-                background_frequency[left:right],
-                starts[first_part:last_part] - left,
-                stops[first_part:last_part] - left,
-                bin_starts[first_bin:last_bin] - left,
+                alt_probability,
+                background_frequency,
+                starts,
+                stops,
+                part_bins,
+                bin_starts,
+                (first_part, last_part),
+                (first_bin, last_bin),
+                left,
                 config,
-                part_bins=None if parts is None else parts[2][first_part:last_part] - first_bin,
+                raw,
+                flags,
+                informative,
+                first_sample,
             )
-            raw[first_sample:last_sample, :, first_part:last_part] = emissions
-            flags[first_sample:last_sample, left:right] = seen
-            informative[first_sample:last_sample, left:right] = info
     return raw, flags, informative
 
 
