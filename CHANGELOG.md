@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.9.0 (8 November 2026)
+
+This release removes the remaining long serial stretches of a single chromosome's run. Chromosome 1 of the N = 320
+depth-0.5 simulation on one 112-CPU node (`run --stop-after painting`, then `reconstruct`): 1,094 s at a mean of 70
+busy CPUs (4.8.0) -> 875 s at 74. The final level no longer tries founder additions (below); every other change
+schedules or parallelises work, and the released painting and founder refit of that chromosome are identical to
+4.8.0.
+
+**No founder additions at the final level.** Founder refinement's count pass at the final level tried, after its
+deletion rounds, adding a founder (each row duplicated and refitted, then tested by the count rule). Across 42
+validation runs (418 chromosomes: simulated designs including K = 30, backcross, F3, sib-rich and family designs,
+TroMau and the controls) no such addition was ever accepted (0 of 402 decisions; 238 ran full refits), while an
+addition round took about two thirds of a whole-chromosome component's refinement: chromosome 1's final level
+251 s -> 80 s with the same panel. The new internal refinement parameter `final_additions` (off) gates them.
+Founder panels are unchanged wherever additions would have been rejected; the refinement records no longer list
+addition decisions, and the ambiguity of an addition call (10 of the 402) is no longer reported.
+
+**Discovery blocks grow into freed CPUs.** A discovery block reads its task's live CPU share at every kernel choice;
+it fixed its thread count when it started, so the heaviest blocks, started beside hundreds of siblings, ran
+serially to the end (chromosome 1 block 287: about 50 s; 11 s on 32 threads, identical results).
+
+**Selection's lone blocks grow again.** Every block alone in its task may grow into CPUs its siblings leave, as in
+4.7 (4.8 kept those the cost model rated light on one CPU, and mispredicted ones ended refit rounds alone).
+
+**Serial steps between stages.** Assembly builds its evidence views 32 samples per gather and fill on the task's
+CPUs plus its lane's idle ones (one sample per kernel call ran serially at every chain step and on resume), and a
+large compression or decompression call borrows the lane's idle CPUs (a single-CPU report or refit task decoding a
+large record). Resuming a completed chromosome for founder refit: 51 s -> 44 s.
+
+Released records of chromosome 1 on identical simulated data are identical to 4.8.0's (painting, founder refit and
+its summary). The test suite (3,805 tests), the stage tier (341 tests), the workflow receipt and the documentation
+check pass.
+
 ## 4.8.0 (8 November 2026)
 
 This release removes serial stretches from a single chromosome's run so that one chromosome uses the whole node.

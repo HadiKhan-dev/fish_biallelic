@@ -121,7 +121,7 @@ def refine(
         config,
         bin_floor(state.level, state.prepared, config),
         float(parameters.cost_scale),
-        joined.record.stop_reason is not None,
+        joined.record.stop_reason is not None and config.final_additions,
         parameters.count_rule,
         state.level,
         session.inputs.genetic_map,

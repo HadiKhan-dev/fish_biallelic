@@ -164,17 +164,23 @@ class AssemblyEvidence:
                 seen.flags.writeable = False
             if depth_keys is None and counts is not None:
                 depth_keys = _depth_keys(counts, observed, kept)
-            for sample in range(likelihoods.shape[0]):
-                values = likelihoods.gather(slice(sample, sample + 1), slice(None))
+            # Release 4.9: _DEPTH_ROWS samples per gather and fill (the kernel is parallel over samples; one sample per
+            # call ran it serially, 4-8 s per chain step for chr1 at N = 320); the caller sets the Numba team.
+            kept_c = np.ascontiguousarray(kept)
+            for first in range(0, likelihoods.shape[0], _DEPTH_ROWS):
+                stop = min(likelihoods.shape[0], first + _DEPTH_ROWS)
+                values = likelihoods.gather(slice(first, stop), slice(None))
                 flags = (
-                    np.empty((1, likelihoods.shape[1]), dtype=np.bool_) if borrow_mask else seen[sample : sample + 1]
+                    np.empty((stop - first, likelihoods.shape[1]), dtype=np.bool_)
+                    if borrow_mask
+                    else seen[first:stop]
                 )
                 _fill_views(
                     values,
-                    np.ascontiguousarray(observed[sample : sample + 1]),
-                    np.ascontiguousarray(kept),
-                    neutral[sample : sample + 1],
-                    scoring[sample : sample + 1],
+                    np.ascontiguousarray(observed[first:stop]),
+                    kept_c,
+                    neutral[first:stop],
+                    scoring[first:stop],
                     flags,
                 )
                 del values

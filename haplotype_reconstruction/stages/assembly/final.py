@@ -396,7 +396,7 @@ def publish_refinement_index(session: AssemblySession, state: HierarchyState, jo
         config,
         bin_floor(state.level, state.prepared, config),
         session.parameters.cost_scale,
-        joined_level.record.stop_reason is not None,
+        joined_level.record.stop_reason is not None and config.final_additions,
         session.parameters.count_rule,
         state.level,
         session.inputs.genetic_map,

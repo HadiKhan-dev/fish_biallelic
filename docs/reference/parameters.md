@@ -351,6 +351,7 @@ Source: [haplotype_reconstruction/science/assembly/refinement/parameters.py](../
 | `frontier_bytes` | `128 << 30` | See model | base40 founder_refinement/config.py; AS7/AS8 frontier_bytes |
 | `window_work_coefficient` | `1 << 25` | See model | base40 founder_refinement/config.py; AS7/AS8 window_work_coefficient |
 | `alternative_branches` | `16` | See model | base40 founder_refinement/config.py; AS7/AS8 alternative_branches |
+| `final_additions` | `False` | See model | release 4.9: no final-level addition accepted in 42 validation runs (418 contigs) |
 | `genotype_error` | `DEFAULT_GENOTYPE_ERROR` | See model | base40 founder_refinement/config.py; AS7/AS8 genotype_error |
 | `reset_rate` | `DEFAULT_RESET_RATE` | See model | base40 founder_refinement/config.py; AS7/AS8 reset_rate |
 | `map_probability_floor` | `MAP_PROBABILITY_FLOOR` | See model | base40 founder_refinement/config.py; AS7/AS8 map_probability_floor |

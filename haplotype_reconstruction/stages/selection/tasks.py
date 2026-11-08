@@ -278,12 +278,14 @@ def round_expansion(
                 args=(tuple(chunk), settings, evidence, scope),
                 kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
                 # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
-                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task and at
-                # least an average chunk's cost is a heavy one (K = 30): its path-model kernels spread its samples'
-                # lanes over the task's threads. A light block alone (a guided tail chunk) keeps one CPU.
+                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task may grow
+                # to the task's threads (its path-model kernels spread its samples' lanes over them) as its siblings
+                # finish: the block re-reads its live share. Release 4.9 restores this for every lone block: 4.8 kept
+                # a lone block rated lighter than an average chunk on one CPU, and mispredicted ones ended each refit
+                # round alone on one thread for 13-25 s (chr1 0.5x).
                 resources=ResourceRequest(
                     1,
-                    max_threads if len(chunk) == 1 and weight >= average else 1,
+                    max_threads if len(chunk) == 1 else 1,
                     max(block_task_bytes(b, observed_rows) for b in chunk),
                     cost=weight,
                 ),

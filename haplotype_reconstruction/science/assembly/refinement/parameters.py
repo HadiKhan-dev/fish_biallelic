@@ -153,6 +153,13 @@ class RefinementParameters:
         programmes only. K is never changed by the polish, and the count decisions are not re-evaluated on
         the polished panel. A polish that exhausts the window work account (window_work_coefficient) keeps
         the count pass's panel unpolished (warned; recorded as the refinement record's polish status).
+    final_additions: whether the final level's count pass also tries founder additions (a duplicated row refitted
+        and tested by the count rule) after its deletion rounds. Off since release 4.9: across 42 validation runs
+        (418 chromosomes: simulated designs including K = 30, backcross, F3, sib-rich and family designs, TroMau and
+        the controls) no addition was ever accepted (0 of 402 final-level decisions; 238 ran full refits), while an
+        addition round's refits took about 40% of a whole-chromosome component's refinement. With additions off the
+        founder panel is unchanged whenever the additions would have been rejected; the count can then only
+        decrease during refinement, and the decision records no longer list (or flag as ambiguous) addition calls.
     """
 
     proposal_max_bins: int = field(
@@ -172,6 +179,10 @@ class RefinementParameters:
     )
     alternative_branches: int = field(
         default=16, metadata={"provenance": "base40 founder_refinement/config.py; AS7/AS8 alternative_branches"}
+    )
+    final_additions: bool = field(
+        default=False,
+        metadata={"provenance": "release 4.9: no final-level addition accepted in 42 validation runs (418 contigs)"},
     )
     genotype_error: float = field(
         default=DEFAULT_GENOTYPE_ERROR,

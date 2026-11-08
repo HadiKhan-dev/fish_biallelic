@@ -858,7 +858,12 @@ def _run_assembly(
     if request is None or selected is None:
         raise SettingsError(f"{contig}: assembly needs published selection round {previous}")
     evidence_request, evidence, _, source = _chain_evidence(reader, contig)
-    view = source()  # no assembly arrays live in the cached chain tuple
+    from ..engine.scheduler import numba_threads, spare_threads
+
+    # The views are built in this serial chain step, which the contig's other work waits for: the task's CPUs plus
+    # its lane's idle ones (release 4.9).
+    with numba_threads(spare_threads(DEPTH_KEY_ROWS)):
+        view = source()  # no assembly arrays live in the cached chain tuple
     if context is None:
         from ..engine.workers import release_resident_namespace
 

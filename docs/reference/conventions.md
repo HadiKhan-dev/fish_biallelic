@@ -44,9 +44,9 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'assembly.refine.accept'` | `policy('assembly.refine.accept', reverse=DEFAULT_SWEEP_CONVENTION_REVERSED)` | [parameters.py:90](../../haplotype_reconstruction/science/assembly/refinement/parameters.py) |
 | `'assembly.refine.polish'` | `ties.fixed_policy('assembly.refine.polish', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [run.py:164](../../haplotype_reconstruction/science/assembly/refinement/run.py) |
 | `'assembly.refine_converge'` | `policy('assembly.refine_converge', kind='refine_F', reverse=convention.reverse)` | [selection.py:37](../../haplotype_reconstruction/science/assembly/refinement/selection.py) |
-| `'discovery.fixed_k.a_band'` | `fixed_policy('discovery.fixed_k.a_band', self.quanta.sample, reverse=self.reverse)` | [workspace.py:503](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
-| `'discovery.fixed_k.h_flip'` | `fixed_policy('discovery.fixed_k.h_flip', self.quanta.h_step, reverse=self.reverse)` | [workspace.py:504](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
-| `'discovery.fixed_k.cycle'` | `fixed_policy('discovery.fixed_k.cycle', self.quanta.nll, reverse=self.reverse)` | [workspace.py:505](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.fixed_k.a_band'` | `fixed_policy('discovery.fixed_k.a_band', self.quanta.sample, reverse=self.reverse)` | [workspace.py:516](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.fixed_k.h_flip'` | `fixed_policy('discovery.fixed_k.h_flip', self.quanta.h_step, reverse=self.reverse)` | [workspace.py:517](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.fixed_k.cycle'` | `fixed_policy('discovery.fixed_k.cycle', self.quanta.nll, reverse=self.reverse)` | [workspace.py:518](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
 | `'discovery.k1'` | `fixed_policy('discovery.k1', sample_quantum, reverse=reverse)` | [moves.py:279](../../haplotype_reconstruction/science/discovery/moves.py) |
 | `'discovery.data_birth'` | `fixed_policy('discovery.data_birth', quantum, reverse=reverse)` | [moves.py:821](../../haplotype_reconstruction/science/discovery/moves.py) |
 | `'discovery.replacement'` | `fixed_policy('discovery.replacement', _nll_quantum(pool, None), reverse=workspace.reverse)` | [moves.py:1168](../../haplotype_reconstruction/science/discovery/moves.py) |

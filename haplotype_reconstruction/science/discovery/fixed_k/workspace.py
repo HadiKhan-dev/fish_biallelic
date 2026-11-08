@@ -19,6 +19,8 @@ complete 2^snps_per_bin table would hold.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import math
 from collections import OrderedDict
 
@@ -479,6 +481,15 @@ class FixedKWorkspace:
     Caches are bounded by entry count (least recently used entries leave first).
     """
 
+    @property
+    def threads(self) -> int:
+        """Threads for the next kernel: the fixed count, or the live share re-read now."""
+        return max(1, int(self._threads() if callable(self._threads) else self._threads))
+
+    @threads.setter
+    def threads(self, value: int | Callable[[], int]) -> None:
+        self._threads = value if callable(value) else int(value)
+
     def __init__(
         self,
         likelihoods: np.ndarray,
@@ -487,13 +498,15 @@ class FixedKWorkspace:
         quanta: BlockQuanta | None = None,
         *,
         reverse: bool = False,
-        threads: int = 1,
+        threads: int | Callable[[], int] = 1,
     ):
-        """``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
+        """``threads``: a count, or the task's live share (engine live_threads), read at every kernel choice so a
+        block grows into CPUs its finished siblings leave (release 4.9; serial and parallel kernels agree exactly).
+        ``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
         uses ``quanta.sample``, the H step ``quanta.h_step``, cycle and duplicate resolution ``quanta.nll``.
         Every fixed-K path uses uniform evidence over its winning category's tied states."""
         self.reverse = bool(reverse)
-        self.threads = int(threads)
+        self._threads = threads if callable(threads) else int(threads)
         self.penalty = float(model.unknown_copy_penalty)
         self.quanta = (
             quanta

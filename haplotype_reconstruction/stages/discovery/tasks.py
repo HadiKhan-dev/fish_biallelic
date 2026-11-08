@@ -90,8 +90,17 @@ def execute_block(
             return adapter.decode(record.payload).result
         collector = BlockDiagnostics(diagnostics)
         wall, cpu = time.perf_counter(), time.process_time()
+        # Release 4.9: the block reads its task's live share at every kernel choice (a heavy block that started on
+        # one CPU beside its siblings ran serially to the end, 50 s for chr1 0.5x block 287; 11 s on 32 threads).
+        from ...engine.scheduler import live_threads
+
         result = discover_block(
-            evidence, parameters, reverse=ties.reverse, keep=ties.keep, diagnostics=collector, threads=threads
+            evidence,
+            parameters,
+            reverse=ties.reverse,
+            keep=ties.keep,
+            diagnostics=collector,
+            threads=live_threads(),
         )
         measured = replace(
             collector.snapshot(), wall_seconds=time.perf_counter() - wall, cpu_seconds=time.process_time() - cpu

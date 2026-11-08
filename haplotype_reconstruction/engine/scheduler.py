@@ -2286,9 +2286,36 @@ def idle_lane_cpus() -> int:
     return max(0, _read(counters.total) - _read(counters.claimed))
 
 
+def _install_codec_idle_cpus() -> None:
+    from ..store import codec
+
+    codec.idle_cpus = idle_lane_cpus
+
+
+_install_codec_idle_cpus()
+
+
 def spare_threads(cap: int) -> int:
     """At most ``cap`` threads: this task's CPU authority plus its lane's idle CPUs (idle_lane_cpus)."""
     return max(1, min(int(cap), authority_threads(cap) + idle_lane_cpus()))
+
+
+def live_threads(interval: float = 0.1) -> Callable[[], int]:
+    """The calling task's live CPU share as a callable: claim_threads (a boundary, which also sets the calling thread's
+    kernel team) re-read when ``interval`` seconds have passed since the last read. A long task that started on one
+    CPU beside many siblings grows into the CPUs they leave (release 4.9: discovery blocks)."""
+    import math
+    import time
+
+    read_at, share = [-math.inf], [1]
+
+    def read() -> int:
+        now = time.monotonic()
+        if now - read_at[0] >= interval:
+            read_at[0], share[0] = now, claim_threads()
+        return share[0]
+
+    return read
 
 
 def claim_threads(*, max_threads: int | None = None) -> int:

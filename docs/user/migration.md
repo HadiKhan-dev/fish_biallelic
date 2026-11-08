@@ -1,5 +1,17 @@
 # Migration guides
 
+## Migrating from 4.8 to 4.9.0
+
+Start a new output and checkpoint root (code identities and the refinement parameters change).
+
+**The final level no longer tries founder additions.** The new internal refinement parameter `final_additions` (off;
+listed in the parameter reference) gates the addition rounds of the final level's count pass; deletion rounds are
+unchanged. Across 42 validation runs (418 chromosomes, simulated designs, TroMau and the controls) no final-level
+addition was ever accepted, so founder panels are unchanged wherever additions would have been rejected; the
+refinement records no longer list addition decisions, and the ambiguity of an addition call (10 of the 402
+final-level addition decisions in those runs) is no longer reported. Every other change in 4.9 schedules or
+parallelises work and leaves results unchanged.
+
 ## Migrating from 4.7 to 4.8.0
 
 Start a new output and checkpoint root with the same inputs, configuration and seed. Code identities change, so

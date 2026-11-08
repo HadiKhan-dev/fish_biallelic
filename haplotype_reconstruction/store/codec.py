@@ -99,9 +99,21 @@ def _aligned_buffer(nbytes):
 _CODEC_BYTES_PER_THREAD = 1 << 20
 
 
+# CPUs the calling task may borrow for a large Blosc call (release 4.9): the engine installs its idle-lane count
+# (engine.scheduler.idle_lane_cpus) when it is imported; the store layer itself never imports the engine. A single-CPU
+# task reading a large record (a painting report, refit's dense evidence) decompressed it on one thread while the node
+# waited for it.
+idle_cpus = lambda: 0  # noqa: E731
+
+
 def _codec_threads(nthreads, raw_bytes):
-    """Threads for one Blosc call on ``raw_bytes``: the caller's count, at most one per _CODEC_BYTES_PER_THREAD."""
-    return max(1, min(int(nthreads), int(raw_bytes) // _CODEC_BYTES_PER_THREAD))
+    """Threads for one Blosc call on ``raw_bytes``: the caller's count plus any idle CPUs it may borrow, at most one
+    per _CODEC_BYTES_PER_THREAD."""
+    limit = int(raw_bytes) // _CODEC_BYTES_PER_THREAD
+    requested = int(nthreads)
+    if limit > requested:
+        requested += idle_cpus()
+    return max(1, min(requested, limit))
 
 
 def _compress(raw, nthreads, clevel):

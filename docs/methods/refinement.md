@@ -101,7 +101,7 @@ Cost and scope: O(width_sites x affected samples x Q); O(width x K); O(E^2). The
 <a id="rc09"></a>
 ## rc09 Count pass skeleton: start fit, deletion rounds, addition rounds, stops and count limit
 
-Converge the start, then run ordinary count-deletion rounds until a round retains the larger panel or the minimum count is reached. Only at the addition-enabled level, test successive additions until rejection, a bound skip or the count limit; do not rerun deletion after an accepted addition. Refit every eligible candidate, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives.
+Converge the start, then run ordinary count-deletion rounds until a round retains the larger panel or the minimum count is reached. Only at the addition-enabled level (the final level, when `final_additions` is set), test successive additions until rejection, a bound skip or the count limit; do not rerun deletion after an accepted addition. Since 4.9 `final_additions` is off by default: across 42 validation runs (418 chromosomes) no final-level addition was accepted, while an addition round's refits and decision took about two thirds of a whole-chromosome component's refinement (chromosome 1 at 0.5x: 251 s -> 80 s with the same panel). Refit every eligible candidate, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
