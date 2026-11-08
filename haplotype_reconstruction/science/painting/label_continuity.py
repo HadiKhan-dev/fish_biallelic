@@ -167,7 +167,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_centre"], cache=True)
+@kernel(overloads=_OVERLOADS["_centre"], cache=True, nogil=True)
 def _centre(values):
     largest = -np.inf
     for value in values:
@@ -177,7 +177,7 @@ def _centre(values):
         values[index] -= largest
 
 
-@kernel(overloads=_OVERLOADS["_link_messages"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_link_messages"], cache=True, parallel=True, nogil=True)
 def _link_messages(emissions, log_same, log_one, log_two, n_states, slot_of_bin, n_slots):
     """Max-product forward messages into, and backward messages from, chosen bins.
 
@@ -255,7 +255,7 @@ def _link_messages(emissions, log_same, log_one, log_two, n_states, slot_of_bin,
     return forward, backward
 
 
-@kernel(overloads=_OVERLOADS["_relabelled_emissions"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_relabelled_emissions"], cache=True, parallel=True, nogil=True)
 def _relabelled_emissions(part_emissions, samples, part_bin, part_segment, state_maps, n_bins):
     """Bin emissions of the current labelling, for ``samples``, from emissions on bin parts.
 
@@ -275,7 +275,7 @@ def _relabelled_emissions(part_emissions, samples, part_bin, part_segment, state
     return result
 
 
-@kernel(overloads=_OVERLOADS["_link_scores"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_link_scores"], cache=True, parallel=True, nogil=True)
 def _link_scores(
     part_emissions,
     part_segment,
@@ -307,7 +307,7 @@ def _link_scores(
     return left, right
 
 
-@kernel(overloads=_OVERLOADS["_add_transposition_gains"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_add_transposition_gains"], cache=True, parallel=True, nogil=True)
 def _add_transposition_gains(total, left, right, eligible, pairs, n_states):
     """Add the exact Viterbi-score gain of each (link, transposition) of the eligible samples
     of ``left``/``right`` to total[link, pair], sample by sample in index order (so batches
@@ -385,6 +385,7 @@ def _outcome(
     row_maps=None,
     accepted=False,
     tie_events=None,
+    check_budget_reached=False,
 ) -> LabelContinuity:
     return LabelContinuity(
         accepted=accepted,
@@ -398,6 +399,7 @@ def _outcome(
         moves=tuple(moves),
         row_maps=row_maps,
         tie_events=ties.TieCounts(()) if tie_events is None else tie_events,
+        check_budget_reached=bool(check_budget_reached),
     )
 
 
@@ -414,6 +416,7 @@ def relabel_component(
     reverse: bool,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
     emission_builder: evidence_windows.EmissionBuilder = evidence_windows.tempered_emissions,
+    emission_cache_bytes: int = 0,
 ) -> tuple[ComponentPanel, LabelContinuity]:
     """Return (painted panel, outcome): the relabelled panel when that lowers painted switches.
 
@@ -461,6 +464,7 @@ def relabel_component(
         convention_reverse=reverse,
         census_sink=census_sink,
         emission_builder=emission_builder,
+        emission_cache_bytes=emission_cache_bytes,
     )
 
 
@@ -518,6 +522,7 @@ class _SampleBatches:
         bin_stops,
         part_bin,
         emission_builder,
+        keep=False,
     ):
         self.emission_builder = emission_builder
         self.likelihoods, self.observed, self.sites = likelihoods, observed, sites
@@ -527,6 +532,8 @@ class _SampleBatches:
         n_samples = likelihoods.shape[0]
         self.spans = [(start, min(start + size, n_samples)) for start in range(0, n_samples, size)]
         self._kept = {}
+        # Every batch's values are kept when one batch holds all samples or the caller's budget covers them all.
+        self._keep = bool(keep) or len(self.spans) == 1
 
     def _values(self, start, stop):
         if start in self._kept:
@@ -544,7 +551,7 @@ class _SampleBatches:
             parts=(self.part_start, self.part_stop, self.part_bin),
         )
         value = raw, np.any(informative, axis=1)
-        if len(self.spans) == 1:
+        if self._keep:
             self._kept[start] = value
         return value
 
@@ -593,9 +600,12 @@ def _relabel_linked(
     convention_reverse: bool,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
     emission_builder=evidence_windows.tempered_emissions,
+    emission_cache_bytes: int = 0,
 ):
     """The relabelling search of a component with link points and movable rows (relabel_component), over
-    contiguous batches of ``batch`` samples (every sample at once when ``batch`` covers them)."""
+    contiguous batches of ``batch`` samples (every sample at once when ``batch`` covers them). The part emissions do
+    not depend on the candidate relabelling (a candidate only remaps states), so every batch's part emissions are
+    kept for the whole search when they fit ``emission_cache_bytes``, instead of rebuilt for each check."""
     classes = states.classes
     site_indices = states.site_indices
     n_bins = bins.n_bins
@@ -627,6 +637,7 @@ def _relabel_linked(
         bins.stops,
         part_bin,
         emission_builder,
+        keep=n_samples * 8 * states.n_states**2 * len(part_start) <= emission_cache_bytes,
     )
     spans = samples.spans
     eligible = np.empty(n_samples, dtype=np.bool_)
@@ -738,6 +749,8 @@ def _relabel_linked(
     minimum_gain = config.label_continuity_minimum_switch_gain
     maximum_loser_ratio = config.label_continuity_maximum_loser_ratio
     checked = 0
+    budget = int(config.label_continuity_check_budget)
+    budget_reached = False
     moves: list[RelabelMove] = []
     counter = ties.TieCounter()
     while True:
@@ -831,8 +844,15 @@ def _relabel_linked(
         # transposition (canonical) are evaluated once.
         accepted = None
         index = 0
+        checked_before = checked
         while index < len(candidates):
             key = canonical(index)
+            if key not in results and checked - checked_before >= budget:
+                # Release 4.7 (owner, 8 Nov 2026): an iteration re-decodes at most `budget` candidates in ranked order;
+                # reaching it without an acceptable one ends the search (flagged), so the final iteration, which
+                # otherwise re-decodes every screened candidate, stays bounded.
+                budget_reached = True
+                break
             if not evaluate(key)[0]:
                 index += 1
                 continue
@@ -877,7 +897,14 @@ def _relabel_linked(
             )
         )
 
-    counts.update(unit=unit, before=switches_before, checks=checked, moves=moves, tie_events=counter.record())
+    counts.update(
+        unit=unit,
+        before=switches_before,
+        checks=checked,
+        moves=moves,
+        tie_events=counter.record(),
+        check_budget_reached=budget_reached,
+    )
     if not moves:
         return panel, _outcome("no_move", after=switches_before, **counts)
 

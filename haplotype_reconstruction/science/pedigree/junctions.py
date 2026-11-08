@@ -26,7 +26,7 @@ from .kernels.signatures import OVERLOADS
 from .parameters import JUNCTION_UNREACHABLE_COUNT, JUNCTION_UNREACHABLE_STATE
 
 
-@kernel(overloads=OVERLOADS["junctions._local_classes"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["junctions._local_classes"], cache=True, parallel=True, nogil=True)
 def _local_classes(named_alleles, bin_start, bin_stop):
     """int16 [B, C]: first-occurrence local IBS class of each trajectory class in each bin."""
     n_classes = named_alleles.shape[0]
@@ -52,7 +52,7 @@ def _local_classes(named_alleles, bin_start, bin_stop):
     return mapping
 
 
-@kernel(overloads=OVERLOADS["junctions._pooled_labels"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["junctions._pooled_labels"], cache=True, parallel=True, nogil=True)
 def _pooled_labels(labels, mapping):
     n_samples, n_bins, _ = labels.shape
     pooled = np.full_like(labels, -1, dtype=np.int16)
@@ -66,7 +66,7 @@ def _pooled_labels(labels, mapping):
     return pooled
 
 
-@kernel(overloads=OVERLOADS["junctions._unique_trajectories"], cache=True)
+@kernel(overloads=OVERLOADS["junctions._unique_trajectories"], cache=True, nogil=True)
 def _unique_trajectories(mapping):
     """Indices of the first occurrence of each distinct whole-component local-class trajectory."""
     n_bins, n_classes = mapping.shape
@@ -90,7 +90,7 @@ def _unique_trajectories(mapping):
     return unique[:count]
 
 
-@kernel(overloads=OVERLOADS["junctions._minimum_switches"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["junctions._minimum_switches"], cache=True, parallel=True, nogil=True)
 def _minimum_switches(pooled_labels, trajectory_classes):
     """(minimum switch count [N], observed haplotype-bin labels [N])."""
     n_samples, n_bins, _ = pooled_labels.shape
@@ -179,7 +179,7 @@ def junction_counts(
 
 
 # --------------------------------------------------------------------------- linked transmission (release 2.16)
-@kernel(overloads=OVERLOADS["junctions._trace_schedule"], cache=True)
+@kernel(overloads=OVERLOADS["junctions._trace_schedule"], cache=True, nogil=True)
 def _trace_schedule(labels, trajectories, costs, reverse):
     """One sample's minimum-switch unordered trajectory pair per bin (int64 [B, 2]), by traceback through the
     same 0/1/2 costs as _minimum_switches; ties take the first pair in pair order, the last under the convention
@@ -256,7 +256,7 @@ def _trace_schedule(labels, trajectories, costs, reverse):
     return trace
 
 
-@kernel(overloads=OVERLOADS["junctions._trace_schedules"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["junctions._trace_schedules"], cache=True, parallel=True, nogil=True)
 def _trace_schedules(pooled, trajectories, reverse):
     n_samples, n_bins, _ = pooled.shape
     n_trajectories = trajectories.shape[0]
@@ -296,7 +296,7 @@ def schedules(
     )
 
 
-@kernel(overloads=OVERLOADS["junctions._linked_log_cdf"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["junctions._linked_log_cdf"], cache=True, parallel=True, nogil=True)
 def _linked_log_cdf(dyads, pairs, bin_start, bin_stop, theta, theta_start, observed, detection, own):
     """log P(detected inherited junctions of the parent <= observed[child]) for dyads [D, 2] (child, parent).
 

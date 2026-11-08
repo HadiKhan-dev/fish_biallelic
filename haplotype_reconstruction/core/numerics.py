@@ -200,6 +200,7 @@ def contiguous_axis_sum(values: np.ndarray) -> np.ndarray:
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def max_range(values, lo, hi, initial):
     """max(initial, values[lo:hi]) through eight independent running maxima (two below eight

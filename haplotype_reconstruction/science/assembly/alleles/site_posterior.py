@@ -154,6 +154,7 @@ def settings(parameters: SitePosteriorParameters | None = None, *, reverse: bool
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _feedback_evidence(gl, e):
     """e = .99 gl / sum(gl) + .01 / 3 (in place); False when the sample is uninformative
@@ -188,6 +189,7 @@ def _feedback_evidence(gl, e):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _feedback_quadratic(e, w, background_q, fixed, bit_index, unary, coupling):
     """One sample's quadratic over the K founder alleles with a background state.
@@ -231,6 +233,7 @@ def _feedback_quadratic(e, w, background_q, fixed, bit_index, unary, coupling):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _carrier_support(w, k, support, carried_mass, half_band):
     """Carrier support of each founder from one sample's pair weights (in place): the sample
@@ -274,6 +277,7 @@ def _carrier_support(w, k, support, carried_mass, half_band):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _exact_feedback(gl, observed, weights, background_q, half_band):
     """``site_release_marginals`` with the carrier count and mass separate and the number of
@@ -338,6 +342,7 @@ def _exact_feedback(gl, observed, weights, background_q, half_band):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _feedback_quadratics(gl, observed, weights, background_q, half_band):
     """Per-sample quadratics, carrier count and mass, and the carrier decisions inside the 1/2
@@ -380,6 +385,7 @@ def _feedback_quadratics(gl, observed, weights, background_q, half_band):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def completion_quadratics(
     evidence: np.ndarray,
@@ -415,7 +421,7 @@ def completion_quadratics(
     return constants, unaries, couplings
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _logistic(x):
     if x >= 0.0:
         return 1.0 / (1.0 + math.exp(-x))
@@ -435,6 +441,7 @@ def _logistic(x):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _loopy_bp(constants, unaries, couplings, use, prior, settings):
     """Belief log-odds from damped flooding loopy BP, one factor per sample.
@@ -511,6 +518,7 @@ def _loopy_bp(constants, unaries, couplings, use, prior, settings):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _local_fields(constants, unaries, couplings, use, b, base, field):
     """base[n] = Q_n(b) and field[n, i] = Q_n(b with b_i = 1) - Q_n(b with b_i = 0)."""
@@ -557,6 +565,7 @@ def _local_fields(constants, unaries, couplings, use, b, base, field):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _flip_gains(couplings, use, prior, b, base, field, single, pair):
     """Log-posterior change of every single flip and pair flip (i < j) at b, O(N m^2).
@@ -615,6 +624,7 @@ def _flip_gains(couplings, use, prior, b, base, field, single, pair):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ascend(constants, unaries, couplings, use, prior, b, base, field, single, pair, settings):
     """Steepest single/pair-flip ascent of b in place; fields and gains end at b.
@@ -680,6 +690,7 @@ def _ascend(constants, unaries, couplings, use, prior, b, base, field, single, p
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _locally_uncertain(single, pair, settings):
     """Founders whose single flip or some pair flip costs at most SITE_CERTAIN_NATS."""
@@ -712,6 +723,7 @@ def _locally_uncertain(single, pair, settings):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _log_posterior(base, use, prior, b):
     """sum_n log Q_n(b) + prior . b, from base[n] = Q_n(b)."""
@@ -747,6 +759,7 @@ def _log_posterior(base, use, prior, b):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ascended(constants, unaries, couplings, use, prior, start, settings):
     """Steepest single/pair-flip ascent from ``start``: optimum, base, fields, gains, log posterior."""
@@ -772,6 +785,7 @@ def _ascended(constants, unaries, couplings, use, prior, start, settings):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _core_cube(constants, unaries, couplings, use, b, core):
     """Log likelihood of every core assignment, the rest fixed at b (little-endian codes)."""
@@ -819,6 +833,7 @@ def _core_cube(constants, unaries, couplings, use, b, core):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _binomial(n, k):
     if k < 0 or k > n:
@@ -837,6 +852,7 @@ def _binomial(n, k):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def ball_radius(core_size: int, settings: np.ndarray) -> int:
     """Largest radius within SITE_BALL_CONFIGURATIONS, at least SITE_BALL_MINIMUM_RADIUS."""
@@ -857,6 +873,7 @@ def ball_radius(core_size: int, settings: np.ndarray) -> int:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_flips(core_size, radius):
     """Flip sets of the ball: the centre, then lexicographic subsets of size 1..radius."""
@@ -932,6 +949,7 @@ def _ball_flips(core_size, radius):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_weights(couplings, use, prior, b, core, flips, sizes, base, field, log_likelihood, log_prior):
     """Log likelihood and log prior of every ball configuration relative to its centre b."""
@@ -989,6 +1007,7 @@ def _ball_weights(couplings, use, prior, b, core, flips, sizes, base, field, log
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, settings):
     """Recentred sparse Hamming ball; b, base and field end at its centre."""
@@ -1069,6 +1088,7 @@ def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, 
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_log_prior(b, core, flips, sizes, prior):
     """Core log prior from the centre and each sparse set of flips, O(B * radius)."""
@@ -1095,6 +1115,7 @@ def _ball_log_prior(b, core, flips, sizes, prior):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _core_log_prior(rows, core, prior):
     """prior . b over the core bits of every support row (the rest is common to all rows)."""
@@ -1118,6 +1139,7 @@ def _core_log_prior(rows, core, prior):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _compact_core_support(constants, unaries, couplings, use, prior, settings):
     """Uncertain-core support of p(b) ~ exp(prior . b) prod_n Q_n(b) for m > MAX_EXACT_BITS.
@@ -1212,6 +1234,7 @@ def _compact_core_support(constants, unaries, couplings, use, prior, settings):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def support_marginals(
     b: np.ndarray,
@@ -1272,6 +1295,7 @@ def support_marginals(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_marginals(b, core, flips, sizes, radius, log_likelihood, log_prior):
     """Ball marginals and shell masses from flip sets, O(B * radius + m)."""
@@ -1327,6 +1351,7 @@ def _ball_marginals(b, core, flips, sizes, radius, log_likelihood, log_prior):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def site_release_marginals(
     gl: np.ndarray, observed: np.ndarray, weights: np.ndarray, background_q: float, settings: np.ndarray
@@ -1373,6 +1398,7 @@ def site_release_marginals(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def completion_site(
     evidence: np.ndarray,
@@ -1440,6 +1466,7 @@ def completion_site(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def guard_withholds(q: float, shell: float, threshold: float, settings: np.ndarray) -> bool:
     """Ball shell guard: a release at ``threshold`` within SITE_SHELL_GUARD x shell of it."""

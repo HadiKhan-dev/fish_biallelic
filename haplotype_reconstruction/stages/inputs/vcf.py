@@ -57,17 +57,24 @@ def inspect(path: str | Path) -> VcfHeader:
         reader.close()
 
 
-def _scan_window(
-    path: str | Path, contig: str, start: int, stop: int | None, samples: Sequence[str] | None
-) -> tuple[np.ndarray, int, int, int]:
-    """Find the output site axis without decoding sample FORMAT fields."""
-    reader = VCF(str(path), lazy=True)
+def _decode_window(
+    path: str | Path, contig: str, start: int, stop: int | None, samples: Sequence[str] | None, with_payload: bool
+):
+    """One pass over the records starting in [start, stop): admit biallelic SNPs, decode and check their AD, then
+    drop every member of each duplicate-position run. Returns (positions, counts int32[N, L, 2], metadata or None,
+    not_snp, multiallelic, duplicated). Malformed AD raises at duplicate positions too, as before filtering."""
+    reader = VCF(str(path), lazy=True) if samples is None else VCF(str(path), samples=list(samples), lazy=True)
     try:
+        n_samples = len(reader.samples)
         if stop is None:
             region = contig if start <= 1 else f"{contig}:{start}-"
         else:
             region = f"{contig}:{start}-{stop - 1}"
         admitted = array("q")
+        rows: list[np.ndarray | None] = []
+        refs: list[str] = []
+        alts: list[str] = []
+        fallback: list[np.ndarray | None] = []
         not_snp = multiallelic = 0
         previous = 0
         for record in reader(region):
@@ -77,48 +84,11 @@ def _scan_window(
             if position < previous:
                 raise InputError(f"{path}: {contig}:{position}: records are not sorted by position")
             previous = position
-            alternates = record.ALT
-            if len(alternates) > 1:
+            if len(record.ALT) > 1:
                 multiallelic += 1
                 continue
             if not vcf_alleles.biallelic_snp(record):
                 not_snp += 1
-                continue
-            admitted.append(position)
-    finally:
-        reader.close()
-    positions = np.asarray(admitted, np.int64)
-    # Equal positions always belong to the same physical window. Drop every member of each
-    # duplicate run, just as the former whole-contig unique/isin pass did.
-    keep = np.ones(len(positions), bool)
-    repeated = positions[1:] == positions[:-1]
-    keep[1:] &= ~repeated
-    keep[:-1] &= ~repeated
-    duplicated = int(len(positions) - np.count_nonzero(keep))
-    return positions[keep], not_snp, multiallelic, duplicated
-
-
-def _read_window_into(
-    task: tuple[str, str, int, int | None, Sequence[str] | None],
-    positions: np.ndarray,
-    counts: np.ndarray,
-    metadata: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
-) -> None:
-    """Decode directly into this window's columns of the final sample-major count array."""
-    path, contig, start, stop, samples = task
-    reader = VCF(str(path), lazy=True) if samples is None else VCF(str(path), samples=list(samples), lazy=True)
-    try:
-        n_samples = len(reader.samples)
-        if stop is None:
-            region = contig if start <= 1 else f"{contig}:{start}-"
-        else:
-            region = f"{contig}:{start}-{stop - 1}"
-        site = 0
-        for record in reader(region):
-            position = record.POS
-            if position < start or (stop is not None and position >= stop):
-                continue
-            if not vcf_alleles.biallelic_snp(record):
                 continue
             ad = record.format("AD")
             if ad is None or (ad.shape[1] == 1 and np.all(ad < 0)):
@@ -129,22 +99,42 @@ def _read_window_into(
                     f"{path}: {contig}:{position}: AD must hold REF and ALT depths "
                     f"for every sample (found shape {ad.shape})"
                 )
-            # Validate AD even at duplicate positions: these errors were visible before filtering.
-            if site < len(positions) and position == positions[site]:
-                if ad is None:
-                    counts[:, site, :] = 0
-                else:
-                    np.maximum(ad, 0, out=counts[:, site, :])
-                if metadata is not None:
-                    ref, alt, usable, gt_types = metadata
-                    ref[site], alt[site], usable[site] = record.REF, record.ALT[0], ad is not None
-                    if ad is None:
-                        gt_types[:, site] = record.gt_types if "GT" in record.FORMAT else 2
-                site += 1
-        if site != len(positions):
-            raise InputError(f"{path}: {contig}: input changed while decoding allele depths")
+            admitted.append(position)
+            # Copies: cyvcf2 may reuse a record's FORMAT buffers once the iterator advances.
+            rows.append(None if ad is None else np.maximum(ad, 0).astype(np.int32, copy=False))
+            if with_payload:
+                refs.append(record.REF)
+                alts.append(record.ALT[0])
+                fallback.append(
+                    np.array(record.gt_types, dtype=np.int8) if ad is None and "GT" in record.FORMAT else None
+                )
     finally:
         reader.close()
+    positions = np.asarray(admitted, np.int64)
+    # Equal positions always belong to the same physical window. Drop every member of each
+    # duplicate run, just as the former whole-contig unique/isin pass did.
+    keep = np.ones(len(positions), bool)
+    repeated = positions[1:] == positions[:-1]
+    keep[1:] &= ~repeated
+    keep[:-1] &= ~repeated
+    duplicated = int(len(positions) - np.count_nonzero(keep))
+    kept = np.flatnonzero(keep)
+    counts = np.zeros((n_samples, len(kept), 2), np.int32)
+    for column, index in enumerate(kept):
+        ad = rows[index]
+        if ad is not None:
+            counts[:, column, :] = ad
+    metadata = None
+    if with_payload:
+        ref = np.asarray([refs[i] for i in kept], dtype="<U1")
+        alt = np.asarray([alts[i] for i in kept], dtype="<U1")
+        usable = np.asarray([rows[i] is not None for i in kept], dtype=bool)
+        gt_types = np.full((n_samples, len(kept)), 2, dtype=np.int8)
+        for column, index in enumerate(kept):
+            if rows[index] is None and fallback[index] is not None:
+                gt_types[:, column] = fallback[index]
+        metadata = (ref, alt, usable, gt_types)
+    return positions[keep], counts, metadata, not_snp, multiallelic, duplicated
 
 
 def _windows(length: int | None, workers: int) -> list[tuple[int, int | None]]:
@@ -177,30 +167,24 @@ def _read(
             raise InputError(f"{path}: samples not in the header: {unknown}")
         sample_ids = tuple(name for name in sample_ids if name in set(samples))
     tasks = [
-        (str(path), contig, start, stop, None if samples is None else sample_ids)
+        (str(path), contig, start, stop, None if samples is None else sample_ids, with_payload)
         for start, stop in _windows(header.lengths.get(contig), workers)
     ]
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda task: _scan_window(*task), tasks))
-        positions = np.concatenate([result[0] for result in results])
-        counts = np.empty((len(sample_ids), len(positions), 2), np.int32)
-        offsets = np.r_[0, np.cumsum([len(result[0]) for result in results])]
-        if with_payload:
-            ref = np.empty(len(positions), dtype="<U1")
-            alt = np.empty(len(positions), dtype="<U1")
-            usable = np.empty(len(positions), dtype=bool)
-            gt_types = np.full((len(sample_ids), len(positions)), 2, dtype=np.int8)
-
-        def decode(i: int) -> None:
-            columns = slice(offsets[i], offsets[i + 1])
-            metadata = (ref[columns], alt[columns], usable[columns], gt_types[:, columns]) if with_payload else None
-            _read_window_into(tasks[i], results[i][0], counts[:, columns], metadata)
-
-        list(pool.map(decode, range(len(tasks))))
+        results = list(pool.map(lambda task: _decode_window(*task), tasks))
+    positions = np.concatenate([result[0] for result in results])
+    counts = np.concatenate([result[1] for result in results], axis=1) if len(results) > 1 else results[0][1]
+    if with_payload:
+        ref = np.concatenate([result[2][0] for result in results])
+        alt = np.concatenate([result[2][1] for result in results])
+        usable = np.concatenate([result[2][2] for result in results])
+        gt_types = (
+            np.concatenate([result[2][3] for result in results], axis=1) if len(results) > 1 else results[0][2][3]
+        )
     dropped = {
-        DROPPED_NOT_SNP: sum(r[1] for r in results),
-        DROPPED_MULTIALLELIC: sum(r[2] for r in results),
-        DROPPED_DUPLICATE_POSITION: sum(r[3] for r in results),
+        DROPPED_NOT_SNP: sum(r[3] for r in results),
+        DROPPED_MULTIALLELIC: sum(r[4] for r in results),
+        DROPPED_DUPLICATE_POSITION: sum(r[5] for r in results),
     }
     reads = ContigReads(contig, sample_ids, positions, counts, dropped)
     if not with_payload:
@@ -225,7 +209,9 @@ def _read(
 def read_contig(
     path: str | Path, contig: str, workers: int = 1, *, samples: Sequence[str] | None = None
 ) -> ContigReads:
-    """Return int32[N,L,2] depths after the exact two-pass EC01 admission policy.
+    """Return int32[N,L,2] depths after the exact EC01 admission policy.
+
+    One pass per window: admit, decode, drop duplicates.
 
     workers bounds independent physical windows, gathered in position order.
     Malformed AD raises InputError even at duplicate positions; inputs are unchanged.
@@ -236,7 +222,7 @@ def read_contig(
 def read_with_payload(
     path: str | Path, contig: str, workers: int = 1, *, samples: Sequence[str] | None = None
 ) -> tuple[ContigReads, ContigPayload]:
-    """Decode observations and consumed-source identity fields in the same second pass.
+    """Decode observations and consumed-source identity fields in the same single pass.
 
     AD availability is per record; fallback GT is retained only where AD is unusable.
     Input FILTER and GT at usable AD records have no effect on this payload.

@@ -200,7 +200,7 @@ def matching_costs(cost: NDArray[np.float64]) -> list[tuple[float, NDArray[np.in
     return [(float(totals[m]), assignments[m].copy()) for m in range(len(totals))]
 
 
-@kernel(overloads=((_F64_C2,),), cache=True)
+@kernel(overloads=((_F64_C2,),), cache=True, nogil=True)
 def _matching_costs(cost):
     f_count, k = cost.shape
     n = f_count + k + 2

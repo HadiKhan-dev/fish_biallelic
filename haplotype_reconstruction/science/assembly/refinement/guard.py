@@ -53,7 +53,7 @@ from .window import cover, locate, samples_of, site_logs, skipped
 from .window import site_cost as cost_at
 
 
-@kernel(overloads=overloads_for(__name__, "_lex_take"), inline="always")
+@kernel(overloads=overloads_for(__name__, "_lex_take"), inline="always", nogil=True)
 def _lex_take(v, k, w, l, reverse):
     """(v, k) replaces the running lexicographic maximum (w, l): strictly better, or (under the
     convention reversal) exactly equal (the last state among exact ties)."""

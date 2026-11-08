@@ -16,7 +16,7 @@ from ...science.evidence.parameters import EvidenceParameters
 from ...science.evidence.run import prepare_contig
 from ...store.protocol import bind_payload_identity, cached_payload_identity, payload_identity
 from ...store.store import CheckpointStore
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from ..inputs.sources import CanonicalOrderSource
 from . import records
 
@@ -69,7 +69,7 @@ def tasks(
     parameters: EvidenceParameters,
     *,
     contigs: Sequence[str] | None = None,
-    maximum_cores: int = 16,
+    maximum_cores: int = ALL_CORES,
     depends_on: tuple[TaskKey, ...] = (),
 ) -> tuple[Task, ...]:
     """Declare one evidence task per requested contig, with a bounded runtime team."""

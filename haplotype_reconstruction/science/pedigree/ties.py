@@ -61,7 +61,7 @@ def tied_rank_probabilities(scores: np.ndarray) -> np.ndarray:
     return evidence
 
 
-@kernel(overloads=OVERLOADS["ties._top_two_finite"], cache=True)
+@kernel(overloads=OVERLOADS["ties._top_two_finite"], cache=True, nogil=True)
 def _top_two_finite(rows, scores):
     """Stable O(n) scan: first best row, best and runner-up value, finite count, max |value| (>= 1)."""
     best_row = -1

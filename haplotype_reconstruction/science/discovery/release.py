@@ -93,6 +93,7 @@ def _release(likelihoods, haplotypes, assignments, observed, unknown_copy_penalt
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _release_carriers(k, offsets, members, first, second):
     """Founder-indexed weighted state terms, with each sample's terms adjacent."""
@@ -158,6 +159,7 @@ def _release_carriers(k, offsets, members, first, second):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _release_kernel(
     likelihoods,

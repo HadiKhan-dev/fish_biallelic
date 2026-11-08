@@ -42,6 +42,7 @@ from .parameters import POSITIVE_WEIGHT_FLOOR
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def _logsum3(a, b, c):
     high = max(a, b, c)
@@ -333,6 +334,7 @@ def em_statistics(hist, depth, alt, error, heterozygote, mixture):
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def cell_probabilities(hom, het, alt, ref, depth):
     """Normalised P(reads | g), g = 0, 1, 2, of one cell with ``alt`` + ``ref`` = ``depth`` > 0 reads from the

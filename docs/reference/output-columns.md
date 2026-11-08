@@ -122,6 +122,7 @@ Source: [`MODEL_COLUMNS`](../../haplotype_reconstruction/outputs/reports/paintin
 | 11 | `error_run_bins_keeping_label` | 1 / ErrorExit; empty when ErrorExit is zero (bins). |
 | 12 | `site_correlation` | fitted within-site emission correlation (1). |
 | 13 | `eligible_samples` | eligible samples (1). |
+| 14 | `continuity_budget_reached` | label continuity's search ended at its per-iteration check budget (release 4.7): |
 
 ## painting/founder_support.csv
 
@@ -530,6 +531,7 @@ Source: [`SEARCH_DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/re
 | 9 | `parent1_screen_rank` | parent1 screen rank (1). |
 | 10 | `parent2_screen_rank` | parent2 screen rank (1). |
 | 11 | `selected_parent_at_screen_boundary` | selected parent at screen boundary (1). |
+| 12 | `m2_panel_capped` | the child's admitted M2 pairs exceeded the per-child cap, so its panel is incomplete (1). |
 
 ## pedigree/exclusion_evidence.csv
 

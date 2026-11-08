@@ -235,7 +235,7 @@ def _charge_window(work, phase, emissions, cols, domain):
         _debit(work, phase, 128, w + 1)
 
 
-@kernel(overloads=overloads_for(__name__, "_sum_max"), inline="always")
+@kernel(overloads=overloads_for(__name__, "_sum_max"), inline="always", nogil=True)
 def _sum_max(a, b):
     """max_z (a[z] + b[z]) (non-empty, no NaN) with four interleaved running maxima: the maximum of
     the same sums as a sequential scan."""
@@ -273,7 +273,7 @@ def _sum_max(a, b):
     return m0
 
 
-@kernel(overloads=overloads_for(__name__, "_diff_max"), inline="always")
+@kernel(overloads=overloads_for(__name__, "_diff_max"), inline="always", nogil=True)
 def _diff_max(a, b):
     """max_z (a[z] - b[z]) (non-empty, no NaN) with four interleaved running maxima."""
     n = len(a)

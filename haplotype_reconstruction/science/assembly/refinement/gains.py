@@ -192,7 +192,7 @@ def item_dosages(haps, leaves, offsets, k, rows, row_start, b0, b1, first, secon
     return out
 
 
-@kernel(overloads=overloads_for(__name__, "dense_blocks"), inline="always")
+@kernel(overloads=overloads_for(__name__, "dense_blocks"), inline="always", nogil=True)
 def dense_blocks(dos, lo, win, offsets, row, R, e, b0, b1, s, scale):
     """The all-state recursion of sample s over blocks [b0, b1) on a candidate's dosage table, in
     place on row; returns scale plus the blocks' normalisers, added in block order."""
@@ -202,7 +202,7 @@ def dense_blocks(dos, lo, win, offsets, row, R, e, b0, b1, s, scale):
     return scale
 
 
-@kernel(overloads=overloads_for(__name__, "dense_blocks_lex"), inline="always")
+@kernel(overloads=overloads_for(__name__, "dense_blocks_lex"), inline="always", nogil=True)
 def dense_blocks_lex(dos, lo, win, offsets, row, cnt, R, Rc, e, b0, b1, s, scale):
     """dense_blocks() with the lexicographic switch costs."""
     for b in range(b0, b1):
@@ -211,7 +211,7 @@ def dense_blocks_lex(dos, lo, win, offsets, row, cnt, R, Rc, e, b0, b1, s, scale
     return scale
 
 
-@kernel(overloads=overloads_for(__name__, "max_close"), inline="always")
+@kernel(overloads=overloads_for(__name__, "max_close"), inline="always", nogil=True)
 def max_close(row, g):
     """max over the states of row + g."""
     best = -np.inf
@@ -220,7 +220,7 @@ def max_close(row, g):
     return best
 
 
-@kernel(overloads=overloads_for(__name__, "lex_close"), inline="always")
+@kernel(overloads=overloads_for(__name__, "lex_close"), inline="always", nogil=True)
 def lex_close(row, cnt, g, gcnt):
     """The lexicographic maximum of (row + g, cnt + gcnt) over the states."""
     best = -np.inf

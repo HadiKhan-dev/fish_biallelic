@@ -60,6 +60,7 @@ def entrywise_log(probabilities: np.ndarray) -> np.ndarray:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def log_matmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """log(exp(a) @ exp(b)) by a max-shifted sum per output cell (cells without a finite term stay -inf)."""
@@ -187,6 +188,7 @@ def propagate_pair_priors(scores: np.ndarray, log_transition: np.ndarray) -> np.
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _log_sample_counts(a, b, log_t):
     """One sample's log edge counts by the stable cubic log path (zero transitions, impossible states)."""
@@ -219,6 +221,7 @@ def _log_sample_counts(a, b, log_t):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _probability_sample_counts(a, b, log_t):
     """One sample's log edge counts by max-scaled cubic contractions (deterministic reduction order)."""

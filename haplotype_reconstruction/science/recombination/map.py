@@ -92,7 +92,7 @@ def genetic_coordinates(positions, chromosome_map):
     return genetic, knots, chromosome_map.cumulative_morgans(knots)
 
 
-@kernel(overloads=_OVERLOADS["add_interval"], cache=True)
+@kernel(overloads=_OVERLOADS["add_interval"], cache=True, nogil=True)
 def add_interval(bins, totals, left, right, density):
     """Add density x overlap (bp) of [left, right] to every bin it overlaps."""
     index = max(0, np.searchsorted(bins, left, side="right") - 1)
@@ -102,7 +102,7 @@ def add_interval(bins, totals, left, right, density):
         index += 1
 
 
-@kernel(overloads=_OVERLOADS["add_genetic_interval"], cache=True)
+@kernel(overloads=_OVERLOADS["add_genetic_interval"], cache=True, nogil=True)
 def add_genetic_interval(bins, totals, left, right, density, map_positions_bp, map_genetic_morgans):
     """Add density x integrated genetic length (Morgans) of [left, right] inside every bin it overlaps."""
     index = max(0, np.searchsorted(bins, left, side="right") - 1)
@@ -123,6 +123,7 @@ def add_genetic_interval(bins, totals, left, right, density, map_positions_bp, m
         for receipt in (types.none, types.Array(types.float64, 2, "C"))
     ),
     cache=True,
+    nogil=True,
 )
 def _posterior_intervals(
     positions, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt

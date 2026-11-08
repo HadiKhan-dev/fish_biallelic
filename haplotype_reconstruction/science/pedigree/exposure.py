@@ -27,12 +27,12 @@ from ...core.kernels import kernel
 from .kernels.signatures import OVERLOADS
 
 
-@kernel(overloads=OVERLOADS["exposure._unit"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["exposure._unit"], cache=True, inline="always", nogil=True)
 def _unit(value):
     return min(1.0, max(0.0, value))
 
 
-@kernel(overloads=OVERLOADS["exposure._presence"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exposure._presence"], cache=True, parallel=True, nogil=True)
 def _presence(masses, feature_of, state_anchored, pair_anchored, available):
     """both [N, B]: mass of fully anchored distinct pairs; any / full presence [N, B, S]: mass of
     pairs containing an anchored founder (with any partner / with an anchored partner), minus the
@@ -64,7 +64,7 @@ def _presence(masses, feature_of, state_anchored, pair_anchored, available):
     return both, any_presence, full_presence
 
 
-@kernel(overloads=OVERLOADS["exposure._edges"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exposure._edges"], cache=True, parallel=True, nogil=True)
 def _edges(
     masses,
     pair_first,
@@ -149,7 +149,7 @@ def _edges(
     return matched, exposed, exposed_morgans
 
 
-@kernel(overloads=OVERLOADS["exposure._pairs"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exposure._pairs"], cache=True, parallel=True, nogil=True)
 def _pairs(
     masses,
     pair_first,

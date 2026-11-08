@@ -99,6 +99,7 @@ def from_core(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def ball_sums(
     values: np.ndarray, flips: np.ndarray, sizes: np.ndarray, bits: int, radius: int, logarithmic: bool = False
@@ -198,6 +199,7 @@ def allele_sums(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def ball_log_prior(
     centre: np.ndarray, varying: np.ndarray, flips: np.ndarray, sizes: np.ndarray, ref: np.ndarray, alt: np.ndarray

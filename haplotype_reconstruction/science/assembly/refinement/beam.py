@@ -39,7 +39,7 @@ from .proposals import window_templates
 from .window import switch_cost
 
 
-@kernel(overloads=(), inline="always")
+@kernel(overloads=(), inline="always", nogil=True)
 def bin_cost(rho, s, j, states):
     """Q-state switch cost of sample s entering bin j (+inf without a preceding informative bin)."""
     return switch_cost(rho[s, j], states)

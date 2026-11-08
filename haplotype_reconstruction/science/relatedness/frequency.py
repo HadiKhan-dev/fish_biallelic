@@ -66,6 +66,7 @@ def allele_frequency(
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def allele_frequency_sites(gl, observed, iterations, initial, clip, total_floor, out):
     """allele_frequency per site: out[l] after ``iterations`` EM steps from 0.5 (posterior sums over the samples in

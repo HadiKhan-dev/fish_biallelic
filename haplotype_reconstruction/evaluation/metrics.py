@@ -69,6 +69,7 @@ SAMPLE_COLUMNS = (
         for positions_readonly in (False, True)
     ),
     cache=True,
+    nogil=True,
 )
 def _sample_phase(calls, truth, set_ids, undetermined, positions, minimum_run, spans, released_spans):
     """One sample's released-phase counts (module docstring).

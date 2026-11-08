@@ -97,7 +97,7 @@ from .workspace import sample_ranges, sample_threads
 
 
 # ------------------------------------------------------------------ optimistic count bound
-@kernel(overloads=overloads_for(__name__, "_block_sample_scores"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_block_sample_scores"), cache=True, nogil=True)
 def _block_sample_scores(haps, win, start, stop, removed):
     """Per-sample optimistic scores of one block: its rows (minus row `removed` if >= 0) as a free
     panel with the target K's switch costs (the window's), every sample's chain started fresh at the
@@ -121,7 +121,7 @@ def _block_sample_scores(haps, win, start, stop, removed):
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "upper_bound"), cache=True, parallel=True)
+@kernel(overloads=overloads_for(__name__, "upper_bound"), cache=True, parallel=True, nogil=True)
 def upper_bound(leaves, offsets, win, target):
     """Per-block optimistic scores bounding every panel with at most `target` distinct rows per
     block, and their per-sample form.
@@ -167,6 +167,41 @@ def upper_bound(leaves, offsets, win, target):
             constrained[block] = int(deletion)
         b0 = b1
     return bounds, constrained, per_sample
+
+
+@kernel(overloads=overloads_for(__name__, "upper_bound"), cache=True, parallel=True, nogil=True)
+def option_scores(leaves, offsets, win, target):
+    """upper_bound's block scores option by option: sigma[o] holds every sample's optimistic score of
+    option o, and the options of block b are rows option_offsets[b] .. option_offsets[b + 1] - 1.
+
+    The options are one per removed row for a block with target + 1 rows, otherwise one: the
+    block's every local row. upper_bound's bounds[b] is the largest row sum of the block's options
+    and per_sample[b] their per-sample maximum. The deletion round's summed bound
+    (count_rule.deletion_bound_excludes) needs the options themselves, because a panel fixes one
+    option per block for all samples together. Stretch by stretch of blocks, as upper_bound; the
+    blocks of a stretch run in parallel. Its arguments are upper_bound's, so it shares
+    upper_bound's declared overloads."""
+    samples = samples_of(win)
+    blocks = len(leaves)
+    option_offsets = np.zeros(blocks + 1, np.int64)
+    for block in range(blocks):
+        rows = len(leaves[block])
+        option_offsets[block + 1] = option_offsets[block] + (rows if rows == target + 1 else 1)
+    sigma = np.empty((option_offsets[blocks], samples), np.float64)
+    b0 = 0
+    while b0 < blocks:
+        b1 = stretch(offsets, b0, blocks, capacity(win))
+        cover(win, offsets[b0], offsets[b1], 0, samples, False)
+        for block_index in prange(b0, b1):
+            block = np.int64(block_index)
+            haps = leaves[block]
+            deletion = len(haps) == target + 1
+            for removed in range(len(haps) if deletion else 1):
+                sigma[option_offsets[block] + removed] = _block_sample_scores(
+                    haps, win, offsets[block], offsets[block + 1], removed if deletion else -1
+                )
+        b0 = b1
+    return sigma, option_offsets
 
 
 @kernel(overloads=overloads_for(__name__, "_shadow_codes"), cache=True, nogil=True)
@@ -228,7 +263,7 @@ def _full_site_costs(win, site_offsets, dosages, dose_offsets, starts, founders)
     return result
 
 
-@kernel(overloads=(), inline="always")
+@kernel(overloads=(), inline="always", nogil=True)
 def _family_sites(row, R, e, haps, col0, win, s, j0, j1, first, second):
     """score_direct's site step over sites [j0, j1): haps column j - col0 holds site j's coded alleles."""
     for j in range(j0, j1):
@@ -1469,35 +1504,53 @@ def _count_pass_point(
         agree = len({item["accept_larger"] for item in records}) == 1
         return tuple(int(chosen[p]) for p in members), tuple(records), bool(agree), outcomes
 
-    def deletion_round(X, scores, larger_fit):
+    # A deletion round that a bound skipped computed no K - 1 refits. A restored panel's adjacent comparisons read the
+    # best-F K - 1 fit (_restored_comparisons), so before them the skipped round's refits run under its own label:
+    # the same fits and bootstrap keys as an unskipped round, whose decision the bound already proved.
+    skipped_rounds = {}
+
+    def deferred_refits(K):
+        held = skipped_rounds.pop(K, None)
+        if held is not None:
+            deletion_round(*held, use_bound=False)
+
+    def deletion_round(X, scores, larger_fit, label=None, use_bound=True):
         nonlocal round_index
         K = len(X)
-        label = f"r{round_index}"
-        round_index += 1
+        if label is None:
+            label = f"r{round_index}"
+            round_index += 1
         F = panel_objective(scores)
         # Founders without a private cell (q = 0) are decided first, as in the join.
         without = tuple(int(f) for f in np.flatnonzero(~_own_sequence(X)))
         optimistic = band_bound = None
-        if not without:
-            # Every founder has a private cell: the per-sample bounds of any K - 1 panel also bound
-            # every shadow panel, so a bound that proves the total-gain test for every deletion
-            # proves the sequence test too; the round is skipped only when the replicate-wise form
-            # of the bound also proves the band (the decision's own bootstrap stream).
+        if use_bound and not without:
+            # Every founder has a private cell: the optimistic block options of any K - 1 panel also
+            # bound every shadow panel, so a bound that proves the total-gain test for every deletion
+            # proves the sequence test too. The bound is summed over samples at one option per block
+            # (a panel's options are common to its samples); the round is skipped only when the
+            # replicate-wise form also proves the band (the decision's own bootstrap stream).
             with budget.scope(sample_threads(ws.samples, budget)):
-                bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
+                sigma, option_offsets = option_scores(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
             normalisers = ws.normalisers(K - 1)
-            per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
-            optimistic = float(panel_objective(bounds) + panel_objective(normalisers))
+            starts = option_offsets[:-1]
+            # upper_bound's block totals: each option's samples summed in order (a sequential sum, as its kernel).
+            optimistic = float(
+                panel_objective(np.maximum.reduceat(sigma.cumsum(axis=1)[:, -1], starts)) + panel_objective(normalisers)
+            )
             tolerance = COUNT_BOUND_RELATIVE * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
             excluded, band_bound = count_rule.deletion_bound_excludes(
                 view(scores),
-                view(per_sample_optimistic),
+                sigma if view.rows is None else sigma[:, view.rows],
+                starts,
+                view(normalisers),
                 cost,
                 tolerance=tolerance,
                 config=rule,
                 seed_key=[*seed_key, label, "deletion"],
             )
             if excluded:
+                skipped_rounds[K] = (X, scores, larger_fit, label)
                 return (
                     CountDecisionRecord(
                         kind="deletion",
@@ -1506,7 +1559,7 @@ def _count_pass_point(
                         skipped_by_bound=True,
                         accept_larger=True,
                         ambiguous=False,
-                        bound="deletion_per_sample",
+                        bound="deletion_summed",
                         optimistic_score=optimistic,
                         band_bound=band_bound,
                         larger_fit=larger_fit,
@@ -1903,6 +1956,7 @@ def _count_pass_point(
         from_fit = final.summary.label
         final, X, scores = held[4], held[1], held[3]
         adopt(final)
+        deferred_refits(len(X))
         comparisons = _restored_comparisons(
             engine, geometry, budget, X, scores, best_at, decisions, panels, cost, rule, seed_key, view
         )
@@ -1917,6 +1971,7 @@ def _count_pass_point(
         from_fit, old_F = final.summary.label, panel_objective(scores)
         final, X, scores = prior_fit, prior_fit.rows, prior_scores
         adopt(final)
+        deferred_refits(len(X))
         comparisons = _restored_comparisons(
             engine, geometry, budget, X, scores, best_at, decisions, panels, cost, rule, seed_key, view
         )

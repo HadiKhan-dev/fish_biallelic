@@ -49,7 +49,7 @@ def aggregate(
     return RelativeContrasts(np.array(pairs, dtype=np.int64, copy=True), tuple(views), d2, df, count, n2, nf, minimum)
 
 
-@kernel(overloads=OVERLOADS["relatives._second_degree"], cache=True)
+@kernel(overloads=OVERLOADS["relatives._second_degree"], cache=True, nogil=True)
 def _second_degree(
     child,
     parent,
@@ -169,7 +169,7 @@ def _second_degree(
     return 0.5 * (out[0] + out[1])
 
 
-@kernel(overloads=OVERLOADS["relatives._full_sib"], cache=True)
+@kernel(overloads=OVERLOADS["relatives._full_sib"], cache=True, nogil=True)
 def _full_sib(
     child,
     donor,
@@ -340,7 +340,7 @@ def _full_sib(
     return 0.5 * (out[0] + out[1])
 
 
-@kernel(overloads=OVERLOADS["relatives._proxy_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["relatives._proxy_kernel"], cache=True, parallel=True, nogil=True)
 def _proxy_kernel(
     pairs,
     pi,
@@ -424,7 +424,7 @@ def _proxy_kernel(
     return second, full
 
 
-@kernel(overloads=OVERLOADS["relatives._m1_pairs"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["relatives._m1_pairs"], cache=True, parallel=True, nogil=True)
 def _m1_pairs(
     pairs,
     pi,

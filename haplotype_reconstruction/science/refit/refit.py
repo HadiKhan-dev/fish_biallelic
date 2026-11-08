@@ -289,7 +289,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_root"], cache=True)
+@kernel(overloads=_OVERLOADS["_root"], cache=True, nogil=True)
 def _root(parent, i):
     """Union-find root with path halving."""
     while parent[i] != i:
@@ -298,7 +298,7 @@ def _root(parent, i):
     return i
 
 
-@kernel(overloads=_OVERLOADS["_tie_components"], cache=True)
+@kernel(overloads=_OVERLOADS["_tie_components"], cache=True, nogil=True)
 def _tie_components(values, carriers, n, component):
     """Tie classes of n candidate gains: the connected components of the relation |g_i - g_j| <=
     max(REFIT_TIE_QUANTUM, (n_i + n_j) REFIT_TIE_QUANTUM_PER_CARRIER), which is the union of two interval
@@ -336,7 +336,7 @@ def _tie_components(values, carriers, n, component):
         component[i] = _root(parent, i)
 
 
-@kernel(overloads=_OVERLOADS["_decision_order"], cache=True)
+@kernel(overloads=_OVERLOADS["_decision_order"], cache=True, nogil=True)
 def _decision_order(values, carriers, n, reverse, classes):
     """Decision order of n candidate moves with gains values[:n] summing carriers[:n] carriers each (candidates
     listed in content order): exact gain descending; tie classes are the components of _tie_components (two gains
@@ -375,7 +375,7 @@ def _decision_order(values, carriers, n, reverse, classes):
     return order
 
 
-@kernel(overloads=_OVERLOADS["_flip_gain"], cache=True)
+@kernel(overloads=_OVERLOADS["_flip_gain"], cache=True, nogil=True)
 def _flip_gain(table, alleles, row):
     """Log-likelihood change from flipping called row `row` (partners' alleles held)."""
     ll0 = table[row, row, 0]
@@ -390,13 +390,13 @@ def _flip_gain(table, alleles, row):
     return ll1 - ll0 if alleles[row] == 0 else ll0 - ll1
 
 
-@kernel(overloads=_OVERLOADS["_painted_together"], cache=True)
+@kernel(overloads=_OVERLOADS["_painted_together"], cache=True, nogil=True)
 def _painted_together(together, a, b):
     """Rows a and b share a painted sample at the site (or are the same row)."""
     return a == b or together[min(a, b), max(a, b)]
 
 
-@kernel(overloads=_OVERLOADS["_flip_conflicts"], cache=True)
+@kernel(overloads=_OVERLOADS["_flip_conflicts"], cache=True, nogil=True)
 def _flip_conflicts(table, refit, site, together, cand_a, cand_class, order, n, minimum_gain, marked):
     """Marks (in ``marked``) the rows of flip candidates of one tie class that interact and exclude each
     other: after either flip the other no longer reaches the minimum gain, so the row order would decide.
@@ -430,7 +430,7 @@ def _flip_conflicts(table, refit, site, together, cand_a, cand_class, order, n, 
     return found
 
 
-@kernel(overloads=_OVERLOADS["_apply_two_row"], cache=True)
+@kernel(overloads=_OVERLOADS["_apply_two_row"], cache=True, nogil=True)
 def _apply_two_row(alleles, a, b, kind):
     """Applies a two-row move to ``alleles`` (swap: exchange; pair flip: both flipped)."""
     if kind == 0:
@@ -440,7 +440,7 @@ def _apply_two_row(alleles, a, b, kind):
         alleles[b] = 1 - alleles[b]
 
 
-@kernel(overloads=_OVERLOADS["_swap_pair_conflict"], cache=True)
+@kernel(overloads=_OVERLOADS["_swap_pair_conflict"], cache=True, nogil=True)
 def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, minimum_gain, marked):
     """One pair of two-row candidates of a tie class (rows a1, b1 with kind k1 and a2, b2 with kind k2; kind 0
     swap, 1 pair flip): when they share a row or a row painted together and either no longer passes after
@@ -470,7 +470,7 @@ def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, minimum
     return True
 
 
-@kernel(overloads=_OVERLOADS["_swap_conflicts"], cache=True)
+@kernel(overloads=_OVERLOADS["_swap_conflicts"], cache=True, nogil=True)
 def _swap_conflicts(
     table, refit, site, together, cand_a, cand_b, cand_kind, cand_class, order, n, minimum_gain, marked
 ):
@@ -505,7 +505,7 @@ def _swap_conflicts(
     return found
 
 
-@kernel(overloads=_OVERLOADS["_carriers"], cache=True)
+@kernel(overloads=_OVERLOADS["_carriers"], cache=True, nogil=True)
 def _carriers(pair_count, alleles, row):
     """Scoring carriers a flip of ``row`` sums: its own pair's samples and those of partners with a called
     allele (release 2.18, the tie quantum)."""
@@ -517,7 +517,7 @@ def _carriers(pair_count, alleles, row):
     return total
 
 
-@kernel(overloads=_OVERLOADS["_touch"], cache=True)
+@kernel(overloads=_OVERLOADS["_touch"], cache=True, nogil=True)
 def _touch(touched, together, row):
     """Marks `row` and every row painted together with it at the site."""
     touched[row] = True
@@ -527,7 +527,7 @@ def _touch(touched, together, row):
             touched[partner] = True
 
 
-@kernel(overloads=_OVERLOADS["_two_row_gain"], cache=True)
+@kernel(overloads=_OVERLOADS["_two_row_gain"], cache=True, nogil=True)
 def _two_row_gain(table, alleles, a, b, kind):
     """Exact gain of a two-row move on ``alleles`` (swap: kind 0, different alleles exchanged; pair flip:
     kind 1, equal alleles both flipped), or -inf when the move does not apply to these alleles."""
@@ -543,7 +543,7 @@ def _two_row_gain(table, alleles, a, b, kind):
     return first + second
 
 
-@kernel(overloads=_OVERLOADS["_swap_gain"], cache=True)
+@kernel(overloads=_OVERLOADS["_swap_gain"], cache=True, nogil=True)
 def _swap_gain(table, alleles, a, b):
     """Log-likelihood change from exchanging the different alleles of called rows a < b.
 
@@ -564,7 +564,7 @@ def _swap_gain(table, alleles, a, b):
     return change
 
 
-@kernel(overloads=_OVERLOADS["_refit_kernel"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_refit_kernel"], cache=True, parallel=True, nogil=True)
 def _refit_kernel(
     calls,
     first,

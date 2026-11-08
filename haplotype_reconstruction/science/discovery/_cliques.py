@@ -32,7 +32,7 @@ __all__ = ["edge_clique_cover", "screened_components", "lift_groups"]
 _UINT64_2C = types.Array(types.uint64, 2, "C", readonly=False)
 
 
-@kernel(overloads=((types.uint64,),), cache=True, inline="always")
+@kernel(overloads=((types.uint64,),), cache=True, inline="always", nogil=True)
 def _count(word):
     count = 0
     while word:
@@ -41,7 +41,7 @@ def _count(word):
     return count
 
 
-@kernel(overloads=((types.uint64,),), cache=True, inline="always")
+@kernel(overloads=((types.uint64,),), cache=True, inline="always", nogil=True)
 def _low_index(word):
     # Binary search for the trailing set bit (word is nonzero).
     offset = 0
@@ -215,7 +215,7 @@ def _packed_graph(vertices, adjacent):
     return packed
 
 
-@kernel(overloads=((types.uint64,),), cache=True, inline="always")
+@kernel(overloads=((types.uint64,),), cache=True, inline="always", nogil=True)
 def _mix_word(value):
     value ^= value >> np.uint64(30)
     value *= np.uint64(0xBF58476D1CE4E5B9)

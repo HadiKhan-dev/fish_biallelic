@@ -6,6 +6,11 @@ experimental crosses. It reads VCF/BCF allele depths (`FORMAT/AD`) or generates
 observations from explicit simulation templates. Sample names identify rows;
 no sample metadata, sex labels or known-parent labels enter inference.
 
+The supported mean read depth is 1x per sample or more. Releases are also validated at 0.5x so that data a
+little below 1x still reconstruct well; below about 0.5x founder reconstruction degrades sharply (in simulated
+crosses of 320 samples: 7 founder alleles per million called wrong at 1x, 89 at 0.5x, 3,365 at 0.35x and 12,500
+or more at 0.25x).
+
 The 4.0 implementation separates scientific models, typed products, checkpoint
 storage, execution and output formatting. Repeated commands reuse compatible
 published records. Changed consumed inputs or incompatible scientific settings

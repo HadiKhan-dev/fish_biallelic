@@ -164,6 +164,7 @@ QUALITY_RULES = RULES[:4]
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _site_genotype_fit(a, n, eps, h, iters, f, ll):
     """EM over one site's free genotype frequencies (no Hardy-Weinberg).
@@ -241,6 +242,7 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _leakage_terms(n, f, eps, h, binomial=None):
     """Release 2.18: the expectation of a site's homozygote wrong-read statistic W under a clean site with error
@@ -302,7 +304,7 @@ def _leakage_terms(n, f, eps, h, binomial=None):
     return (lam, kap)
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _depth_binomial(h):
     """Read-model terms shared by every site's leakage calculation. Deeper cells use the original expression."""
     width = 129
@@ -542,7 +544,7 @@ class _Chunks:
         return _negative_binomial_values(W, lam, kap, lw, rate, shape, special.gammaln(shape), _GAMMALN)
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _digamma(x):
     out = 0.0
     while x < _POLYGAMMA_SHIFT:
@@ -566,7 +568,7 @@ def _digamma(x):
     )
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _trigamma(x):
     out = 0.0
     while x < _POLYGAMMA_SHIFT:
@@ -795,7 +797,7 @@ def _error_mixture(W, lam, kap, evaluate):
     )
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _balance_log1pmx_over_square(r):
     """(log(1 + r) - r) / r^2; near zero its Horner series through r^8."""
     if abs(r) < BALANCE_SERIES_RADIUS:
@@ -813,6 +815,7 @@ def _balance_log1pmx_over_square(r):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _balance_gamma_ratio_remainder(t, y):
     """J(t, y) = log Gamma(1/t + y) - log Gamma(1/t) + y log t and dJ/dt; J(0, y) = 0 with the exact limiting
@@ -849,6 +852,7 @@ def _balance_gamma_ratio_remainder(t, y):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _balance_beta_kernel(a, h, m, t):
     """A component's log likelihood of (A, H) = (a, h) relative to Binomial(h, 1/2), and its derivatives in m and t."""
@@ -877,6 +881,7 @@ def _balance_beta_kernel(a, h, m, t):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _balance_mixture_terms(a, h, pi, m0, t0, m1, t1):
     """Per site: the mixture log likelihood (relative to Binomial(h, 1/2)) and its derivatives in the five
@@ -917,6 +922,7 @@ def _balance_mixture_terms(a, h, pi, m0, t0, m1, t1):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _balance_posterior(a, h, pi, m0, t0, m1, t1):
     """Per site: the posterior probability of the first component."""

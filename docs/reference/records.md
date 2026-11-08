@@ -1617,6 +1617,7 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `moves` | `tuple[RelabelMove, ...]` | state | () | 1 | tuple[RelabelMove, ...] | True | `required` |
 | `row_maps` | `NDArray[np.int64] &#124; None` | call | ('A', 'K') | 1 | int64 | True | `required` |
 | `tie_events` | `TieCounts` | diagnostic | () | 1 | TieCounts | True | `lambda: TieCounts(())()` |
+| `check_budget_reached` | `bool` | report | () | 1 | bool | True | `False` |
 
 ## painting.PaintingSettings
 
@@ -1636,6 +1637,7 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `minimum_release_posterior` | `float` | state | () | probability | float | True | `required` |
 | `label_continuity_minimum_switch_gain` | `float` | state | () | count | float | True | `required` |
 | `label_continuity_maximum_loser_ratio` | `float` | state | () | share | float | True | `required` |
+| `label_continuity_check_budget` | `int` | state | () | count | int | True | `64` |
 | `viterbi_tie` | `float` | state | () | nats | float64 | True | `noise_quantum(1.9e-06)` |
 
 ## painting.Painting
@@ -1799,6 +1801,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 |---|---|---|---|---|---|---|---|
 | `trios` | `np.ndarray` | state | ('T', '3') | 1 | int64 | True | `required` |
 | `screen_scores` | `np.ndarray` | report | ('N', 'N') | 1 | float64 | True | `required` |
+| `capped_children` | `tuple[int, ...]` | report | ('C',) | 1 | int64 | True | `()` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
 
 ## pedigree.GenomeScores
@@ -2716,6 +2719,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `parent1_screen_rank` | `float` | report | () | 1 | float64 | True | `required` |
 | `parent2_screen_rank` | `float` | report | () | 1 | float64 | True | `required` |
 | `selected_parent_at_screen_boundary` | `bool` | report | () | 1 | bool | True | `required` |
+| `m2_panel_capped` | `bool` | report | () | 1 | bool | True | `False` |
 
 ## pedigree.EvidenceSummaryView
 

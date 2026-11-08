@@ -3111,14 +3111,16 @@ class _GraphProgress:
                     row[1] += total
                 parts.extend(
                     f"{stage} {completed}/{total} known ({sum(k.stage == stage for k in running)} running)"
-                    for stage, (completed, total) in sorted(stages.items()) if completed < total
+                    for stage, (completed, total) in sorted(stages.items())
+                    if completed < total
                 )
             self.candidates.difference_update(done)
             if not parts:
                 return
             cpu = (
                 sum(c.claimed.get_obj().value for c in self.group.authority.groups)
-                if self.group is not None else self.cpu_slots()
+                if self.group is not None
+                else self.cpu_slots()
             )
             # Aligned reads of the existing sample; no process traversal, new
             # sample, admission lock, task-log read or CPU rebalance.
@@ -3126,7 +3128,12 @@ class _GraphProgress:
             live, limit = int(header[_LIVE_BYTES]), int(header[_LIMIT])
             _LOG.info(
                 "[progress] %s; running %d tasks; CPU %d/%d slots claimed; memory %.2f/%.2f GiB",
-                "; ".join(parts), len(running), cpu, self.cores, live / GIB, limit / GIB,
+                "; ".join(parts),
+                len(running),
+                cpu,
+                self.cores,
+                live / GIB,
+                limit / GIB,
             )
 
     def close(self):
@@ -3421,9 +3428,7 @@ def run_graph(
             )
             if _session is not None:
                 _session.group = group
-            progress.start(
-                group, lambda: sum(min(cores, indexed[key].resources.max_cores) for key in running.copy())
-            )
+            progress.start(group, lambda: sum(min(cores, indexed[key].resources.max_cores) for key in running.copy()))
             while pending or running or expansions:
                 if stopped:
                     raise RunInterrupted(signal.SIGINT)

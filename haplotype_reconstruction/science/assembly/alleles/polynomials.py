@@ -47,6 +47,7 @@ from .parameters import POLYNOMIAL_CANCELLATION
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def add_dosage_term(
     constant: float,
@@ -104,6 +105,7 @@ def add_dosage_term(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def unknown_bit_index(founders: int, unknown: np.ndarray) -> np.ndarray:
     """int64[founders]: the bit of each unresolved founder (``unknown[t]`` -> t), -1 if called."""
@@ -133,6 +135,7 @@ def unknown_bit_index(founders: int, unknown: np.ndarray) -> np.ndarray:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def pair_quadratic(
     terms: np.ndarray,
@@ -175,6 +178,7 @@ def pair_quadratic(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def weighted_terms(weights: np.ndarray, evidence: np.ndarray, out: np.ndarray) -> np.ndarray:
     """out[s, d] = weights[s] * evidence[d]: the dosage terms of one sample (in place)."""
@@ -195,6 +199,7 @@ def weighted_terms(weights: np.ndarray, evidence: np.ndarray, out: np.ndarray) -
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def quadratic_values(constant: float, unary: np.ndarray, coupling: np.ndarray) -> np.ndarray:
     """Evaluate all binary configurations in O(2**U), in little-endian order.
@@ -231,6 +236,7 @@ def quadratic_values(constant: float, unary: np.ndarray, coupling: np.ndarray) -
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def shared_sample_likelihoods(
     evidence: np.ndarray, weights: np.ndarray, pairs: np.ndarray, fixed: np.ndarray, unknown: np.ndarray
@@ -276,6 +282,7 @@ def shared_sample_likelihoods(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def binary_dosage_marginals(probability: np.ndarray, bits: int) -> tuple[np.ndarray, np.ndarray]:
     """All unary/pair dosage masses in O(2**U + U²), by positive folding.

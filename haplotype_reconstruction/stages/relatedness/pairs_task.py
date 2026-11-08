@@ -14,7 +14,7 @@ from ...science.relatedness.ibd_parameters import PairwiseIbdParameters
 from ...science.relatedness.parameters import AlleleFrequencyParameters
 from ...store.protocol import claim
 from ...store.store import CheckpointStore
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from . import pairs_records as records
 from .evidence_pass import EvidenceArrays, EvidenceInput, evidence_pass
 
@@ -57,7 +57,7 @@ def tasks(
     parameters: PairwiseIbdParameters,
     frequency: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     *,
-    maximum_cores: int = 16,
+    maximum_cores: int = ALL_CORES,
     depends_on: tuple[TaskKey, ...] = (),
     reverse: bool = False,
     selected: bool = False,

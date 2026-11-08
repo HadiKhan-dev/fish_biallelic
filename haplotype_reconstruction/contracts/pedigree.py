@@ -32,10 +32,13 @@ class CandidatePanel:
     trios:         int64 [T, 3] rows (child, first, second), first < second, sorted by child then pair;
                    the canonical retained pairs from the bounded genome-wide selective search.
     screen_scores: float64 [N, N] robust screen utility [child, parent]; -inf off the eligible edges.
+    capped_children: the children whose admitted pairs exceeded PanelConfig.max_pairs_per_child (ascending); their
+                   panel rows are the best pairs by bound gap, whole tie classes kept.
     """
 
     trios: np.ndarray = record_field("state", axes=("T", "3"), units="1", dtype="int64")
     screen_scores: np.ndarray = record_field("report", axes=("N", "N"), units="1", dtype="float64")
+    capped_children: tuple[int, ...] = record_field("report", axes=("C",), units="1", dtype="int64", default=())
     schema: int = schema_field(1)
 
     def __post_init__(self) -> None:
@@ -1257,6 +1260,7 @@ class SearchDiagnosticView:
     parent1_screen_rank: float = record_field("report", units="1", dtype="float64")
     parent2_screen_rank: float = record_field("report", units="1", dtype="float64")
     selected_parent_at_screen_boundary: bool = record_field("report", units="1", dtype="bool")
+    m2_panel_capped: bool = record_field("report", units="1", dtype="bool", default=False)
 
 
 @dataclass(frozen=True)

@@ -16,7 +16,21 @@ from typing import Any
 
 from ..core.errors import SettingsError
 
-__all__ = ["TaskKey", "RecordKey", "ResourceRequest", "ResultRef", "Task", "dependency_order", "run_graph", "Expansion"]
+__all__ = [
+    "ALL_CORES",
+    "TaskKey",
+    "RecordKey",
+    "ResourceRequest",
+    "ResultRef",
+    "Task",
+    "dependency_order",
+    "run_graph",
+    "Expansion",
+]
+
+# A task range reaching the whole allocation, whatever its size: the scheduler grants min(cores, max_cores), so no
+# stage is held below the CPUs it could use (owner, 8 November 2026: never a fixed cap such as 16 threads).
+ALL_CORES = 1 << 16
 
 
 @dataclass(frozen=True, order=True)

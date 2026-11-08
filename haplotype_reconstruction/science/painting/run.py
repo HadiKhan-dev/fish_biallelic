@@ -18,13 +18,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.painting import ComponentPainting, LabelContinuity, Painting, PaintingSettings
-from ...contracts.panels import ComponentPanel
+from ...contracts.panels import ComponentPanel, relabel_rows
+from ...contracts.payload import from_payload, to_payload
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...core import ties
 from ...core.errors import InvariantError
@@ -35,6 +36,15 @@ from .parameters import EMISSION_CACHE_MAX_BYTES, MAXIMUM_MASK_STATES, PaintingP
 from .release import release_tracks, track_members
 from .states import PaintingBins, PaintingStates, build_bins, build_states, local_allele_keys
 from .transitions import PaintingTransitions, copying_transitions, edge_morgans
+
+
+class PaintingProgress(Protocol):
+    """Checkpoint records of one painting derivation (the stage binds them to the store): ``load`` returns a saved
+    payload or None, ``save`` publishes one atomically. Keys are relative to the painting."""
+
+    def load(self, key: str) -> Any | None: ...
+
+    def save(self, key: str, payload: Any) -> None: ...
 
 
 class PaintingEvidence(Protocol):
@@ -90,14 +100,21 @@ class ComponentDecoding:
         freeze_record_arrays(self)
 
 
-def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder):
+# Samples per decode progress record (fixed: progress records must not depend on the CPU count).
+PROGRESS_BLOCK_SAMPLES = 16
+
+
+def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=()):
     """Generator factory: for each contiguous batch of ``size`` samples, (tempered label emissions float64[n, S*S, B],
-    eligible bool[n], start, stop, informative mask, gathered observed)."""
+    eligible bool[n], start, stop, informative mask, gathered observed). Batches whose start is in ``skip`` (restored
+    from progress records) are not built."""
     alt_probability = states.alt_probability()
     n_samples = likelihoods.shape[0]
 
     def batches():
         for start in range(0, n_samples, size):
+            if start in skip:
+                continue
             stop = min(start + size, n_samples)
             raw, batch_observed, informative = emission_builder(
                 likelihoods,
@@ -138,11 +155,17 @@ def component_model(
     genetic_map: ChromosomeGeneticMap,
     *,
     batch_samples: int = 1,
+    emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
 ) -> fidelity.ChainModel | None:
     """The component's copying model (rho, a, b; painting.fidelity.estimate_chain), estimated from all its samples on
     the assembled panel, or None without bins. Label continuity then uses it unchanged: a relabelling renames states
-    but leaves their emissions and error capabilities."""
+    but leaves their emissions and error capabilities.
+
+    The tempered emissions do not depend on (rho, a, b), so every EM update reads the same batches. When their
+    packed upper triangles fit ``emission_cache_bytes`` they are built once and unpacked for each update (the same
+    values: the ordered-pair emissions are symmetric), otherwise rebuilt for each update. The cache is released
+    before label continuity, so it never coexists with decode_component's packed emissions."""
     n_samples = likelihoods.shape[0]
     states = build_states(panel.positions, panel.inference, panel.kept)
     bins = build_bins(states.positions, config.snps_per_bin)
@@ -151,8 +174,27 @@ def component_model(
     sites = evidence_sites[states.site_indices]
     size = max(1, min(n_samples, int(batch_samples)))
     batches = _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder)
+    n_states = states.n_states
+    n_packed = n_states * (n_states + 1) // 2
+    if 8 * n_samples * n_packed * bins.n_bins <= emission_cache_bytes:
+        packed = np.empty((n_samples, n_packed, bins.n_bins))
+        spans = []
+        for raw, eligible, start, stop, *_ in batches():
+            emissions.pack_emissions(raw, packed, start, n_states)
+            spans.append((eligible, start, stop))
+            del raw
+
+        def source():
+            for eligible, start, stop in spans:
+                yield emissions.unpack_emissions(packed[start:stop], n_states), eligible
+
+    else:
+
+        def source():
+            return ((raw, eligible) for raw, eligible, *_ in batches())
+
     return fidelity.estimate_chain(
-        lambda: ((raw, eligible) for raw, eligible, *_ in batches()),
+        source,
         error_capable(states),
         edge_morgans(bins.centers, genetic_map),
         config,
@@ -172,8 +214,14 @@ def decode_component(
     batch_samples: int = 1,
     reverse: bool,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
+    progress: PaintingProgress | None = None,
+    progress_key: str = "",
 ) -> ComponentDecoding:
     """Decode every sample of one component (all samples of ``likelihoods``).
+
+    ``progress``: optional records of finished sample batches under ``progress_key`` (the stage's checkpoint store,
+    bound to this painting's derivation). A restored batch is not decoded again; the packed-emission cache is then
+    left out (a cache, never a result), so later stages rebuild those emissions.
 
     ``evidence_sites`` int64[L] maps the panel's sites to the evidence site axis (``panel.site_indices()``).
     ``model``: the component's copying model (component_model; required for nonempty bins). The packed tempered label
@@ -243,8 +291,28 @@ def decode_component(
     qaf = np.empty((n_samples, n_bins))
     support = np.empty((n_samples, 2, n_bins), dtype=np.bool_)
     eligible = np.empty(n_samples, dtype=np.bool_)
+    # Progress records hold fixed blocks of PROGRESS_BLOCK_SAMPLES samples, so their keys and contents do not depend on
+    # the CPU-sized decode batch: a run and its shell workflow publish the same records, and a resume on another node
+    # reuses every block it finds. A batch is skipped when all its samples were restored.
+    done = np.zeros(n_samples, dtype=np.bool_)
+    saved_blocks: set[int] = set()
+    restored = set()
+    if progress is not None:
+        for block in range(0, n_samples, PROGRESS_BLOCK_SAMPLES):
+            saved = progress.load(f"{progress_key}/decode/{block}")
+            if saved is None:
+                continue
+            end = min(block + PROGRESS_BLOCK_SAMPLES, n_samples)
+            paths[block:end], masks[block:end] = saved["paths"], saved["masks"]
+            switch_counts[block:end], qf[block:end], qaf[block:end] = saved["switches"], saved["qf"], saved["qaf"]
+            support[block:end], eligible[block:end] = saved["support"], saved["eligible"]
+            done[block:end] = True
+            saved_blocks.add(block)
+        restored = {start for start in range(0, n_samples, size) if done[start : min(start + size, n_samples)].all()}
+    if done.any():
+        packed = None
     for raw, batch_eligible, start, stop, informative, batch_observed in _raw_batches(
-        states, bins, likelihoods, observed, sites, config, size, emission_builder
+        states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=restored
     )():
         if packed is not None:
             emissions.pack_emissions(raw, packed, start, n_states)
@@ -276,6 +344,26 @@ def decode_component(
         switch_counts[start:stop] = batch_switches
         support[start:stop] = batch_support
         eligible[start:stop] = batch_eligible
+        done[start:stop] = True
+        if progress is not None:
+            first_block = start - start % PROGRESS_BLOCK_SAMPLES
+            for block in range(first_block, stop, PROGRESS_BLOCK_SAMPLES):
+                end = min(block + PROGRESS_BLOCK_SAMPLES, n_samples)
+                if block in saved_blocks or not done[block:end].all():
+                    continue
+                progress.save(
+                    f"{progress_key}/decode/{block}",
+                    dict(
+                        paths=paths[block:end],
+                        masks=masks[block:end],
+                        switches=switch_counts[block:end],
+                        qf=qf[block:end],
+                        qaf=qaf[block:end],
+                        support=support[block:end],
+                        eligible=eligible[block:end],
+                    ),
+                )
+                saved_blocks.add(block)
     return ComponentDecoding(
         states=states,
         bins=bins,
@@ -371,6 +459,7 @@ def paint_chromosome(
     census_sink: Callable[[ties.TieCensus], None] | None = None,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
     model_sink: Callable[[int, fidelity.ChainModel | None], None] | None = None,
+    progress: PaintingProgress | None = None,
 ) -> Painting:
     """Label continuity, then the painting of every component of one chromosome.
 
@@ -386,31 +475,48 @@ def paint_chromosome(
     continuity: list[LabelContinuity] = []
     for component_index, panel in enumerate(panels):
         sites = panel.site_indices()
-        model = component_model(
-            panel,
-            likelihoods,
-            observed,
-            sites,
-            config,
-            genetic_map,
-            batch_samples=batch_samples,
-            emission_builder=emission_builder,
-        )
+        # Progress records (resume after an interruption): the copying model, the label-continuity outcome and each
+        # decoded sample batch, each published as soon as it is final and bound to this painting's derivation.
+        saved = None if progress is None else progress.load(f"c{component_index}/model")
+        if saved is not None:
+            model = None if saved["model"] is None else from_payload(fidelity.ChainModel, saved["model"])
+        else:
+            model = component_model(
+                panel,
+                likelihoods,
+                observed,
+                sites,
+                config,
+                genetic_map,
+                batch_samples=batch_samples,
+                emission_cache_bytes=cache_remaining,
+                emission_builder=emission_builder,
+            )
+            if progress is not None:
+                progress.save(f"c{component_index}/model", dict(model=None if model is None else to_payload(model)))
         if model_sink is not None:
             model_sink(component_index, model)
-        painted, outcome = relabel_component(
-            panel,
-            likelihoods,
-            observed,
-            sites,
-            config,
-            genetic_map,
-            model=model,
-            batch_samples=batch_samples,
-            reverse=reverse,
-            census_sink=census_sink,
-            emission_builder=emission_builder,
-        )
+        saved = None if progress is None else progress.load(f"c{component_index}/continuity")
+        if saved is not None:
+            outcome = from_payload(LabelContinuity, saved["outcome"])
+            painted = relabel_rows(panel, outcome.row_maps) if outcome.accepted else panel
+        else:
+            painted, outcome = relabel_component(
+                panel,
+                likelihoods,
+                observed,
+                sites,
+                config,
+                genetic_map,
+                model=model,
+                batch_samples=batch_samples,
+                reverse=reverse,
+                census_sink=census_sink,
+                emission_builder=emission_builder,
+                emission_cache_bytes=cache_remaining,
+            )
+            if progress is not None:
+                progress.save(f"c{component_index}/continuity", dict(outcome=to_payload(outcome)))
         decoding = decode_component(
             painted,
             likelihoods,
@@ -423,6 +529,8 @@ def paint_chromosome(
             batch_samples=batch_samples,
             reverse=reverse,
             emission_builder=emission_builder,
+            progress=progress,
+            progress_key=f"c{component_index}",
         )
         if decoding.packed_emissions is not None:
             cache_remaining -= decoding.packed_emissions.nbytes

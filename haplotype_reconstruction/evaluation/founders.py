@@ -67,6 +67,7 @@ _SUMMED = (
     overloads=((types.int64[::1], types.int64[::1], types.int64[::1], types.int64, types.int64),),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def _ancestry_mask(events, counts, offsets, founder_count, sites):
     result = np.empty((founder_count, sites), dtype=np.bool_)
@@ -141,6 +142,7 @@ def represented_ancestry(painting, positions, founder_count: int) -> np.ndarray:
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def _count_tiles(panels, indices, truth, represented, tasks):
     # Columns: called errors, represented called, represented errors,
@@ -174,7 +176,9 @@ def _count_tiles(panels, indices, truth, represented, tasks):
     return parts, missing
 
 
-@kernel(overloads=((types.int64[:, :, ::1], types.int64[::1], types.int64[::1]),), parallel=True, cache=True)
+@kernel(
+    overloads=((types.int64[:, :, ::1], types.int64[::1], types.int64[::1]),), parallel=True, cache=True, nogil=True
+)
 def _reduce_tiles(parts, missing_parts, row_offsets):
     counts = np.zeros((len(row_offsets) - 1, parts.shape[1], 4), dtype=np.int64)
     missing = np.zeros(len(row_offsets) - 1, dtype=np.int64)
@@ -187,7 +191,7 @@ def _reduce_tiles(parts, missing_parts, row_offsets):
     return counts, missing
 
 
-@kernel(overloads=((types.ListType(types.int64[::1]), types.boolean[:, ::1]),), parallel=True, cache=True)
+@kernel(overloads=((types.ListType(types.int64[::1]), types.boolean[:, ::1]),), parallel=True, cache=True, nogil=True)
 def _represented_counts(indices, represented):
     counts = np.zeros((len(indices), len(represented)), dtype=np.int64)
     for task in prange(len(indices) * len(represented)):
@@ -213,6 +217,7 @@ def _represented_counts(indices, represented):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def _segment_rows(panels, indices, truth, tasks, switch_cost):
     """Per row, the Viterbi truth-founder path minimising mismatches + cost x switches.

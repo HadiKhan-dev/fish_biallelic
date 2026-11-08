@@ -124,7 +124,7 @@ def block_restart_scores(flat, block_start, block_haps, block_bins, local, penal
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "_possibly_novel"), cache=True, parallel=True)
+@kernel(overloads=overloads_for(__name__, "_possibly_novel"), cache=True, parallel=True, nogil=True)
 def _possibly_novel(restart, candidates, margin):
     """True where some sample's block-restart bound exceeds margin[s]."""
     samples, blocks, _ = restart.shape
@@ -259,7 +259,7 @@ def boundary_proposals(gains, boundary, quota, kind, *, reverse: bool):
     ]
 
 
-@kernel(overloads=overloads_for(__name__, "conditional_fields"), cache=True, parallel=True)
+@kernel(overloads=overloads_for(__name__, "conditional_fields"), cache=True, parallel=True, nogil=True)
 def conditional_fields(emission, painted, local_paths, panel_size, local_k):
     """Per-path replacement deltas and pair correction for a suffix exchange.
 
@@ -295,7 +295,7 @@ def conditional_fields(emission, painted, local_paths, panel_size, local_k):
     return unary, pair + pair.T
 
 
-@kernel(overloads=overloads_for(__name__, "fixed_paint_delta"), cache=True)
+@kernel(overloads=overloads_for(__name__, "fixed_paint_delta"), cache=True, nogil=True)
 def fixed_paint_delta(emission, painted, old_local, new_local, panel_size):
     """Change of the painted emissions when the panel's local rows change old -> new."""
     result = 0.0
@@ -308,7 +308,7 @@ def fixed_paint_delta(emission, painted, old_local, new_local, panel_size):
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "_exclusion_scores"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_exclusion_scores"), cache=True, nogil=True)
 def _exclusion_scores(current):
     """All one-founder exclusions need at most three K^2 scans per sample."""
     samples, k, _ = current.shape
@@ -329,7 +329,7 @@ def _exclusion_scores(current):
     return best, excluded
 
 
-@kernel(overloads=overloads_for(__name__, "_stream_static_gains"), cache=True, parallel=True)
+@kernel(overloads=overloads_for(__name__, "_stream_static_gains"), cache=True, parallel=True, nogil=True)
 def _stream_static_gains(flat, start, haps, local, candidates, order, common, best, excluded, chunks):
     """Accumulate blocks before mate maxima; retain only a K-vector per task.
 
@@ -491,7 +491,7 @@ def greedy_permutation(weights, highest=False):
     return _improve_permutation(weights, permutation)
 
 
-@kernel(overloads=overloads_for(__name__, "_improve_permutation"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_improve_permutation"), cache=True, nogil=True)
 def _improve_permutation(weights, permutation):
     for _ in range(SWAP_PASSES):
         changed = False

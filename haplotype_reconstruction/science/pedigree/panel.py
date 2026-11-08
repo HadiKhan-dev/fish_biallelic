@@ -117,6 +117,8 @@ def bounded_panel(
     serialized by child, then by ascending parent indices.
     """
     margin = float(config.panel.pair_relevance_margin)
+    cap = int(config.panel.max_pairs_per_child)
+    capped = []
     fits = relevance_fits(compact.n_contigs)
     counts = np.diff(compact.indptr)
     offsets = np.concatenate([[0], np.cumsum(counts * (counts - 1) // 2)])
@@ -140,10 +142,22 @@ def bounded_panel(
         first, second = parents[first[admitted]], parents[second[admitted]]
         allowed = eligibility.pair_mask(int(child), first, second)
         trio = np.column_stack([np.full(int(np.sum(allowed)), child, dtype=np.int64), first[allowed], second[allowed]])
+        if len(trio) > cap:
+            # The best pairs by their largest gap over the fits (a gap that is not a number ranks first: it is
+            # never evidence for exclusion), with every pair tied at the last kept gap.
+            best = np.where(np.isnan(gap), np.inf, gap).max(axis=0)[admitted][allowed]
+            trio = trio[best >= np.sort(best)[len(best) - cap]]
+            capped.append(int(child))
         rows.append(trio[np.lexsort((trio[:, 2], trio[:, 1]))])
     trios = np.concatenate(rows) if rows else np.empty((0, 3), dtype=np.int64)
-    log = dict(retained_pairs=int(offsets[-1]), panel_rows=int(len(trios)), margin=margin, fits=int(len(fits)))
-    return CandidatePanel(np.ascontiguousarray(trios, dtype=np.int64), screen_scores), log
+    log = dict(
+        retained_pairs=int(offsets[-1]),
+        panel_rows=int(len(trios)),
+        margin=margin,
+        fits=int(len(fits)),
+        capped_children=len(capped),
+    )
+    return CandidatePanel(np.ascontiguousarray(trios, dtype=np.int64), screen_scores, tuple(capped)), log
 
 
 def search_diagnostics(
@@ -157,6 +171,7 @@ def search_diagnostics(
     of search adequacy): ``called_parents`` int64 [N, 2] of the final Tier-B calls."""
     records = []
     scores = panel.screen_scores
+    capped = set(panel.capped_children)
     convention = tie_rules.policy("pedigree.screen.rank", kind="probability", reverse=reverse)
     for child in range(len(eligibility.children)):
         parents = np.flatnonzero(eligibility.parents[child])
@@ -184,6 +199,7 @@ def search_diagnostics(
                 parent1_screen_rank=float(selected_ranks[0]) if selected_ranks[0] is not None else np.nan,
                 parent2_screen_rank=float(selected_ranks[1]) if selected_ranks[1] is not None else np.nan,
                 selected_parent_at_screen_boundary=bool(omitted and boundary in selected_ranks),
+                m2_panel_capped=child in capped,
             )
         )
     return tuple(records)

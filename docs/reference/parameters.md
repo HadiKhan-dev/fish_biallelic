@@ -680,7 +680,7 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `INFORMATIVE_SPREAD` | `16.0 * np.finfo(np.float64).eps` | See model | 3.5 painting/hmm.py:21,47; observed normalized-GL spread and incumbent preference (PR04/PR09). |
 | `VITERBI_TIE` | `noise_quantum(1.9e-06)` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 | `MAXIMUM_MASK_STATES` | `63` | See model | int64 interval-mask representation, 3.5 painting/hmm.py:50 (PR11); enforced at decode boundary. |
-| `EMISSION_CACHE_MAX_BYTES` | `1 << 30` | See model | Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions. |
+| `EMISSION_CACHE_MAX_BYTES` | `8 << 30` | See model | Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions. Release 4.7: 8 GiB, so the largest chromosomes' estimation and label-continuity emissions stay resident (chr3 at N = 320: packed estimation emissions 1.0 GiB, label-continuity part emissions about 2.8 GB); a reported working set, not a reservation (the memory governor acts on measured pressure). |
 | `WINDOW_BYTES` | `64 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 | `LABEL_CONTINUITY_BASE_BYTES` | `64 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 ## science.painting.parameters — PaintingParameters
@@ -701,6 +701,7 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `minimum_release_posterior` | `0.9` | probability | 3.5 painting/config.py: minimum_release_posterior; P0 PR08/PR13/PR17; WP_PA2 §7 |
 | `label_continuity_minimum_switch_gain` | `2.0` | 1 | 3.5 painting/config.py: label_continuity_minimum_switch_gain; P0 PR08/PR13/PR17; WP_PA2 §7 |
 | `label_continuity_maximum_loser_ratio` | `0.1` | 1 | 3.5 painting/config.py: label_continuity_maximum_loser_ratio; P0 PR08/PR13/PR17; WP_PA2 §7 |
+| `label_continuity_check_budget` | `64` | count | 4.7 (owner, 8 Nov 2026): bounds the final, unproductive search iteration at low depth |
 | `viterbi_tie` | `VITERBI_TIE` | nats | 3.5 painting/hmm.py:47; noise_quantum(1.9e-6); P0 PR09; WP_PA2 §7 |
 ## science.pedigree.parameters
 
@@ -768,6 +769,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `pair_relevance_margin` | `150.0` | See model | 3.5 pedigree/config.py:PanelConfig.pair_relevance_margin; P0 PS07 |
+| `max_pairs_per_child` | `256` | See model | owner 7 Nov 2026 (release 4.7): per-child M2 pair cap, flagged when it binds |
 | `pair_bound_high_mass` | `0.01` | See model | 3.5 pedigree/config.py:PanelConfig.pair_bound_high_mass; P0 PS07 |
 | `information_tempering_power` | `0.5` | See model | 3.5 pedigree/config.py:PanelConfig.information_tempering_power; P0 PS07 |
 | `maximum_contig_weight_ratio` | `4.0` | See model | 3.5 pedigree/config.py:PanelConfig.maximum_contig_weight_ratio; P0 PS07 |

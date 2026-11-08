@@ -50,6 +50,7 @@ def _support(part: _Partition, ranges):
     named = part.slots[live] >= 0
     joins, rest, alone, latent = np.empty((F, N)), np.empty(N), np.empty(N), np.empty((F, 2))
     for lo, hi in ranges:
+        part.claim_threads()
         llk = np.empty(F)
         family_logliks(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, llk)
         unit_terms(

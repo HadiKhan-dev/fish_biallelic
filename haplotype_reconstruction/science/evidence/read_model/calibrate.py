@@ -225,7 +225,7 @@ def select(blocks, names, config: ReadModelParameters, exposure=None):
     return names[current], steps
 
 
-@kernel(overloads=((types.Array(types.int32, 3, "C", readonly=True),),), cache=True, parallel=True)
+@kernel(overloads=((types.Array(types.int32, 3, "C", readonly=True),),), cache=True, parallel=True, nogil=True)
 def maximum_depth(counts):
     n, length = counts.shape[:2]
     per_sample = np.zeros(n, np.int64)

@@ -28,13 +28,18 @@ _SCALE_DOWN = 2.0**-SCALE_EXPONENT
 _LOG_SCALE = float(SCALE_EXPONENT) * np.log(2.0)
 
 
-@kernel(overloads=((numba.float64,) * 5,), inline="always", cache=True)
+@kernel(overloads=((numba.float64,) * 5,), inline="always", cache=True, nogil=True)
 def _family_value(member_sum, change, sign, parent_u, parent_v):
     """The single L13 genotype expression, without a per-site temporary allocation."""
     return (parent_u + parent_v) + (member_sum + sign * change)
 
 
-@kernel(overloads=((_float641C, _float641C, numba.float64, _float641C, _float641C),), inline="always", cache=True)
+@kernel(
+    overloads=((_float641C, _float641C, numba.float64, _float641C, _float641C),),
+    inline="always",
+    cache=True,
+    nogil=True,
+)
 def _family_site(S, D, sign, Au, Av):
     """L13: member sum first; retain the genotype, exponential and site reduction orders."""
     best = LOG_ZERO
@@ -74,6 +79,7 @@ def _family_site(S, D, sign, Au, Av):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def family_loglik(S, D, sign, Au, Av, lo, hi):
     """sum over sites [lo, hi) of log sum_{g_u, g_v} exp(Au[g_u] + Av[g_v] + (S + sign D)[3 g_u + g_v]): a full-sib
@@ -102,6 +108,7 @@ def family_loglik(S, D, sign, Au, Av, lo, hi):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def half_sib_loglik(SF, SG, logpi, lo, hi):
     """Two latent-parent families sharing ONE latent parent u (their other parents independent): per site
@@ -145,6 +152,7 @@ def half_sib_loglik(SF, SG, logpi, lo, hi):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def family_logliks(S, slots, families, logpi, logpost, lo, hi, out):
     """out[j] = family_loglik of family families[j] with its slot laws, over sites [lo, hi)."""
@@ -167,6 +175,7 @@ def family_logliks(S, slots, families, logpi, logpost, lo, hi, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def slot_gains(S_f, Au, logpost, allowed, out):
     """out[p] = family_loglik(S_f, Au, logpost[p]) over all sites for each allowed sample p (NaN otherwise): the
@@ -192,6 +201,7 @@ def slot_gains(S_f, Au, logpost, allowed, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def join_entries(S, C, slots, ll, logpi, logpost, families, samples, out):
     """out[t] = family_loglik(S[f] + C[c], f's slot laws) - ll[f] over all sites, f = families[t], c = samples[t]
@@ -221,6 +231,7 @@ def join_entries(S, C, slots, ll, logpi, logpost, families, samples, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def leave_entries(S, C, slots, ll, logpi, logpost, families, samples, single, out):
     """out[t] = the change of family f = families[t] when sample c = samples[t] leaves it: -ll[f] for a one-member
@@ -249,6 +260,7 @@ def leave_entries(S, C, slots, ll, logpi, logpost, families, samples, single, ou
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def member_parent_logliks(S_f, C, members, Au, logpost, out):
     """out[j] = family_loglik(S_f - C[p], Au, logpost[p]) over all sites, p = members[j]: the family without member p
@@ -274,6 +286,7 @@ def member_parent_logliks(S_f, C, members, Au, logpost, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def merge_gains(S, ll, rows, parents, logpi, logpost, tolerance, out):
     """pair_gains for the merge step: out[t, 0] the full-sib merge gain; out[t, 1] the half-sib link gain, evaluated
@@ -304,6 +317,7 @@ def merge_gains(S, ll, rows, parents, logpi, logpost, tolerance, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def half_sib_gains(S, ll, rows, logpi, out):
     """out[t] = half_sib_loglik(S[f], S[g]) - ll[f] - ll[g] over all sites, (f, g) = rows[t]."""
@@ -333,6 +347,7 @@ def half_sib_gains(S, ll, rows, logpi, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def unit_terms(S, C, slots, families, base, family_of, logpi, logpost, lo, hi, joins, rest, alone):
     """One support unit (sites [lo, hi)): joins[j, c] = family_loglik(S[f] + C[c], f's laws) - base[j] for every
@@ -375,6 +390,7 @@ def unit_terms(S, C, slots, families, base, family_of, logpi, logpost, lo, hi, j
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def latent_alternatives(S, slots, families, logpi, logpost, lo, hi, out):
     """out[j, k] = family_loglik of family f = families[j] over sites [lo, hi) with slot k latent and the other slot
@@ -401,6 +417,7 @@ def latent_alternatives(S, slots, families, logpi, logpost, lo, hi, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def alone_logliks(C, logpi, out):
     """out[c] = family_loglik(C[c], C[c], 0.0, logpi, logpi) over all sites: sample c alone with latent parents."""
@@ -423,6 +440,7 @@ def alone_logliks(C, logpi, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def family_loglik_parallel(S, D, sign, Au, Av, lo, hi):
     """family_loglik with its sites' terms evaluated in parallel and summed in site order (the same value)."""
@@ -452,6 +470,7 @@ def family_loglik_parallel(S, D, sign, Au, Av, lo, hi):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def screen_shapes(S, families, W2, logpi, m, A, y, Y):
     """For each family f in families (latent slots): m[f, i] = max_k (S[f][i, k] + W2[i, k]) and
@@ -500,6 +519,7 @@ def screen_shapes(S, families, W2, logpi, m, A, y, Y):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _merge_site(S, W, m, f, g, i):
     """The exact log-domain value of one site of the merged family, relative to m[f, i] + m[g, i]."""
@@ -527,6 +547,7 @@ def _merge_site(S, W, m, f, g, i):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _merge_estimate(S, W, m, A, f, g):
     """sum_i log sum_k A[f, i, k] A[g, i, k], with log-domain sites where the linear sum is too small."""
@@ -566,6 +587,7 @@ def _merge_estimate(S, W, m, A, f, g):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def screen_all(S, W, m, A, base, n, tile, out):
     """out in packed upper-triangle order (f < g < n): the screen's latent full-sib merge gain estimate,
@@ -622,6 +644,7 @@ def screen_all(S, W, m, A, base, n, tile, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def screen_one(S, W, m, A, base, f, others, out):
     """out[j] = the screen's estimate of the latent full-sib merge gain of family f and family others[j]."""
@@ -646,6 +669,7 @@ def screen_one(S, W, m, A, base, f, others, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def half_screen(S, logpi, pi, y, Y, base, first, second, out):
     """out[t] = the screen's estimate of the half-sib link gain of families f = first[t], g = second[t]:
@@ -715,6 +739,7 @@ def half_screen(S, logpi, pi, y, Y, base, first, second, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def full_sib_gains(S, ll, first, second, logpi, out):
     """out[t] = the latent full-sib merge gain of families first[t] < second[t] (pair_gains' first column)."""
@@ -733,6 +758,7 @@ def full_sib_gains(S, ll, first, second, logpi, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def posterior_screen(logpost, out):
     """out[p, i, g] = exp(logpost[p, i, g]) in float32: each sample's genotype posterior, for the slot screen."""
@@ -756,6 +782,7 @@ def posterior_screen(logpost, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def slot_screen(S_f, Au, posterior, logpost, out):
     """out[p] = the screen's estimate of slot_gains' family_loglik(S_f, S_f, 0, Au, logpost[p]) for every sample p:
@@ -824,6 +851,7 @@ def slot_screen(S_f, Au, posterior, logpost, out):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def sample_screen(C, n, G):
     """n[c, i] = max_k C[c, i, k] and G[c, i, k] = exp(C[c, i, k] - n[c, i]) (float32): each sample's child terms in
@@ -853,6 +881,7 @@ def sample_screen(C, n, G):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def family_screen(S_f, Au, Av, h, H):
     """h[i] = max_k (Au[i, gu] + Av[i, gv] + S_f[i, k]) and H[i, k] = exp(Au + Av + S_f - h[i]) (k = 3 gu + gv): a
@@ -889,6 +918,7 @@ def family_screen(S_f, Au, Av, h, H):
     ),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def join_screen(S_f, Au, Av, h, H, base, C, n, G, nsum, out):
     """out[c] = the screen's estimate of join_entries' family_loglik(S_f + C[c], Au, Av) - ll_f for every sample c:

@@ -317,7 +317,17 @@ class _TableWindows:
         self.array = array
 
     def gather_rows(self, first: int, last: int, indices: np.ndarray) -> np.ndarray:
-        selected, inverse = np.unique(indices, return_inverse=True)
+        indices = np.asarray(indices)
+        size = int(last) - int(first)
+        if 0 < len(indices) and size <= 4 * len(indices) + 4096:
+            # The sorted distinct codes and their inverse by marking, O(size + n), instead of np.unique's sort:
+            # the same arrays (release 4.7; painting gathers every sample's rows once per batch and pass).
+            mark = np.zeros(size, dtype=np.bool_)
+            mark[indices] = True
+            selected = np.flatnonzero(mark)
+            inverse = (np.cumsum(mark) - 1)[indices]
+        else:
+            selected, inverse = np.unique(indices, return_inverse=True)
         rows = np.empty((len(selected), *self.array.shape[1:]), dtype=self.array.dtype)
         row_bytes = self.array.dtype.itemsize * int(np.prod(self.array.shape[1:]))
         # Each run is at most the selected window size, even when D grows with L.

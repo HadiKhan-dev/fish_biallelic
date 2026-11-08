@@ -165,7 +165,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["subtree_terms"], cache=True)
+@kernel(overloads=_OVERLOADS["subtree_terms"], cache=True, nogil=True)
 def subtree_terms(n, b, g, E, X, V, par, desc, mark, F0, F1, P):
     """F0[x], F1[x], P[x0, x1]: summed emissions at bin b of n's descendant samples whose homologues copy n's
     homologue 0 / 1 (as functions of that homologue's label), with n's children's chains read through gauge g.
@@ -230,7 +230,7 @@ def subtree_terms(n, b, g, E, X, V, par, desc, mark, F0, F1, P):
     return has_pair
 
 
-@kernel(overloads=_OVERLOADS["slot_label"], cache=True)
+@kernel(overloads=_OVERLOADS["slot_label"], cache=True, nogil=True)
 def slot_label(kind, p, s, X, b):
     """Label of a homologue in source state s: observed slot (kind 1): s in {0,1} -> parent's homologue s,
     s >= 2 -> bottom with label s - 2; free slot (kind 0): label s."""
@@ -241,7 +241,7 @@ def slot_label(kind, p, s, X, b):
     return s
 
 
-@kernel(overloads=_OVERLOADS["slot_log_transition"], cache=True)
+@kernel(overloads=_OVERLOADS["slot_log_transition"], cache=True, nogil=True)
 def slot_log_transition(kind, s, t, b, lstay, lmove, mstay, mmove, ain, astay, bout, nlabels):
     """log P(source s at bin b-1 -> t at bin b) for one homologue slot (b >= 1)."""
     if kind == 0:
@@ -257,7 +257,7 @@ def slot_log_transition(kind, s, t, b, lstay, lmove, mstay, mmove, ain, astay, b
     return bout[b - 1] + math.log(0.5)
 
 
-@kernel(overloads=_OVERLOADS["slot_init"], cache=True)
+@kernel(overloads=_OVERLOADS["slot_init"], cache=True, nogil=True)
 def slot_init(kind, s, init_copy, init_bottom):
     """Initial log probability of slot state s at bin 0 (0 for a free slot: its uniform start is a constant)."""
     if kind == 0:
@@ -265,7 +265,7 @@ def slot_init(kind, s, init_copy, init_bottom):
     return init_copy if s < 2 else init_bottom
 
 
-@kernel(overloads=_OVERLOADS["gauge_children_terms"], cache=True)
+@kernel(overloads=_OVERLOADS["gauge_children_terms"], cache=True, nogil=True)
 def gauge_children_terms(b, g0, g1, V, child_tracks, mstay, mmove):
     """Sum over the supplied child tracks of the chain transition term at edge (b-1, b) with the children's chains read
     through gauge g0 at b-1 and g1 at b (only 0/1 -> 0/1 transitions depend on the gauge)."""
@@ -608,7 +608,7 @@ def block_viterbi(*args, trace=False):
     )
 
 
-@kernel(overloads=_OVERLOADS["objective"], cache=True)
+@kernel(overloads=_OVERLOADS["objective"], cache=True, nogil=True)
 def objective(E, X, V, par, lstay, lmove, mstay, mmove, ain, astay, bout, init_copy, init_bottom):
     """The joint log posterior (up to constants) of the current configuration: the sum of every sample's terms
     (row_terms), O(N B). The ascent evaluates moves by row_terms of the samples they change; this is its reference."""
@@ -634,7 +634,7 @@ def objective(E, X, V, par, lstay, lmove, mstay, mmove, ain, astay, bout, init_c
     return total
 
 
-@kernel(overloads=_OVERLOADS["row_terms"], cache=True)
+@kernel(overloads=_OVERLOADS["row_terms"], cache=True, nogil=True)
 def row_terms(E, X, V, par, rows, lstay, lmove, mstay, mmove, ain, astay, bout, init_copy, init_bottom):
     """float64 [R]: the objective's terms of samples ``rows`` [R] in the configuration X int64 [R, 2, B], V int8
     [R, 2, B] (row i holds sample rows[i]): its emissions, its homologues' label or chain transitions and its linked

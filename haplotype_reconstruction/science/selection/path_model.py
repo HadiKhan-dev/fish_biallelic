@@ -158,7 +158,7 @@ FLIPS = 1  # + expected complete-emission flip gains and copy occupancy (GEM fli
 EXACT = 2  # + exact one-bit conditional gains (stationary points, reported allele probabilities)
 
 
-@kernel(overloads=((types.float64, types.float64),), cache=True)
+@kernel(overloads=((types.float64, types.float64),), cache=True, nogil=True)
 def _log_ratio(new, old):
     if new == 0:
         return -np.inf
@@ -174,7 +174,7 @@ CHAIN_LOW = 2.0**-300
 CHAIN_HIGH = 2.0**300
 
 
-@kernel(overloads=((types.float64, types.float64, types.float64),), cache=True, inline="always")
+@kernel(overloads=((types.float64, types.float64, types.float64),), cache=True, inline="always", nogil=True)
 def _chain(product, total, ratio):
     """(product, total) after one more sample's ratio, product * exp(total) being the running product of every ratio
     so far (release 4.6). A founder-site's exact gain is the log of the product over its observed samples in ascending
@@ -197,6 +197,7 @@ def _chain(product, total, ratio):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _emission(a, b, gl):
     if a < 0 and b < 0:
@@ -217,6 +218,7 @@ def _emission(a, b, gl):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _emission_lanes(emissions, width):
     """Lane layout et of a block's emissions; padding lanes are never read."""
@@ -243,6 +245,7 @@ def _emission_lanes(emissions, width):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ratio_lanes(observed, ratios, self_ratios, width):
     """Lane layouts rt, st, ot of a block's Q log ratios and observed mask."""
@@ -262,7 +265,7 @@ def _ratio_lanes(observed, ratios, self_ratios, width):
     return rt, st, ot
 
 
-@kernel(overloads=((types.int64, types.int64, types.int64),), cache=True, inline="always")
+@kernel(overloads=((types.int64, types.int64, types.int64),), cache=True, inline="always", nogil=True)
 def _pair(a, b, s):
     """Upper-triangle pair index of the states (min(a, b), max(a, b))."""
     if a > b:
@@ -270,7 +273,7 @@ def _pair(a, b, s):
     return a * s - a * (a - 1) // 2 + (b - a)
 
 
-@kernel(overloads=((_F64_C1, _F64_C1, types.int64),), cache=True, inline="always", error_model="numpy")
+@kernel(overloads=((_F64_C1, _F64_C1, types.int64),), cache=True, inline="always", error_model="numpy", nogil=True)
 def _reciprocals(denominator, inverse, lanes):
     """One inverse per lane; subnormal divisors retain direct division.
 
@@ -297,6 +300,7 @@ def _reciprocals(denominator, inverse, lanes):
     ),
     cache=True,
     error_model="numpy",
+    nogil=True,
 )
 def _normalise_pairs(values, denominator, inverse, regular, normalized, marginal, s, lanes, copies):
     """Normalize triangular pairs and sum both endpoints in one sweep.
@@ -446,6 +450,7 @@ def _normalise_pairs(values, denominator, inverse, regular, normalized, marginal
     ),
     cache=True,
     error_model="numpy",
+    nogil=True,
 )
 def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, scale, ll, alive):
     """Scaled forward pass of the first ``lanes`` samples of one lane block.
@@ -552,6 +557,7 @@ def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, s
     cache=True,
     parallel=True,
     error_model="numpy",
+    nogil=True,
 )
 def _score_lanes(panel, et, pi, rates, n, workers):
     """Per-sample log likelihoods without trajectories: the same forward
@@ -717,6 +723,7 @@ def _score_lanes(panel, et, pi, rates, n, workers):
     ),
     cache=True,
     error_model="numpy",
+    nogil=True,
 )
 def _backward_block(
     block,
@@ -1019,7 +1026,7 @@ def _backward_block(
                             backward[index, j] /= largest
 
 
-@kernel(overloads=((_F64_C3,),), cache=True)
+@kernel(overloads=((_F64_C3,),), cache=True, nogil=True)
 def _join_chains(gains):
     """Exact gains = log total + log(running product), in gains[1] (the chain of _chain)."""
     for a in range(gains.shape[1]):
@@ -1027,7 +1034,7 @@ def _join_chains(gains):
             gains[1, a, site] += np.log(gains[2, a, site])
 
 
-@kernel(overloads=((types.int64, types.int64),), cache=True)
+@kernel(overloads=((types.int64, types.int64),), cache=True, nogil=True)
 def _backward_work(s, width):
     """Scratch arrays of one _backward_block call: O(S**2 * width)."""
     pairs = s * (s + 1) // 2
@@ -1103,6 +1110,7 @@ def _backward_work(s, width):
     cache=True,
     parallel=True,
     error_model="numpy",
+    nogil=True,
 )
 def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers):
     """Per-sample log likelihoods and the sufficient statistics at ``level``, each lane block's
@@ -1268,6 +1276,7 @@ def _evaluate_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, level, n, workers)
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _emission_matrix_into(panel, site, gl, observed, out):
     k = len(panel)
@@ -1281,7 +1290,7 @@ def _emission_matrix_into(panel, site, gl, observed, out):
             out[a, b] = _emission(ha, hb, gl)
 
 
-@kernel(overloads=((_F64_C2, _F64_C1, types.float64, _F64_C1, _F64_C1, _F64_C2),), cache=True)
+@kernel(overloads=((_F64_C2, _F64_C1, types.float64, _F64_C1, _F64_C1, _F64_C2),), cache=True, nogil=True)
 def _predict_into(filtered, pi, rate, row, col, out):
     s = len(pi)
     row[:] = 0.0
@@ -1300,7 +1309,7 @@ def _predict_into(filtered, pi, rate, row, col, out):
             )
 
 
-@kernel(overloads=((_F64_C2, _F64_C1, types.float64, _F64_C1, _F64_C1, _F64_C2),), cache=True)
+@kernel(overloads=((_F64_C2, _F64_C1, types.float64, _F64_C1, _F64_C1, _F64_C2),), cache=True, nogil=True)
 def _backward_into(weighted_future, pi, rate, row, col, out):
     s = len(pi)
     row[:] = 0.0
@@ -1367,6 +1376,7 @@ def _backward_into(weighted_future, pi, rate, row, col, out):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _forward_into(panel, gl, observed, pi, rates, history, store_path, filtered, prior, emission, row, col):
     """Scaled forward log-likelihood; normalized filtered states go to history
@@ -1394,7 +1404,7 @@ def _forward_into(panel, gl, observed, pi, rates, history, store_path, filtered,
     return log_likelihood
 
 
-@kernel(overloads=((_F64_C2, _F64_C2, _F64_C2, _F64_C2, _F64_C2, _F64_C1),), cache=True)
+@kernel(overloads=((_F64_C2, _F64_C2, _F64_C2, _F64_C2, _F64_C2, _F64_C1),), cache=True, nogil=True)
 def _outside_rows_and_columns_into(matrix, tl, tr, bl, br, out):
     """Nonnegative quadrant sums; avoid subtracting nearly all of the total."""
     s = len(matrix)
@@ -1422,7 +1432,7 @@ def _outside_rows_and_columns_into(matrix, tl, tr, bl, br, out):
         out[a] = tl[a, a] + tr[a, a + 1] + bl[a + 1, a] + br[a + 1, a + 1]
 
 
-@kernel(overloads=((_F64_C3, _BOOL_C2),), cache=True, parallel=True)
+@kernel(overloads=((_F64_C3, _BOOL_C2),), cache=True, parallel=True, nogil=True)
 def _emission_tables(gl, observed):
     """(N, L, 3, 3) emission of every allele pair (0, 1, 2 = unknown copy) per sample and site;
     1 at unobserved cells."""
@@ -1449,6 +1459,7 @@ def _emission_tables(gl, observed):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ratio_tables(emissions, observed):
     """Data-only Q log ratios of a one-allele flip: ratios[s, l, h, partner] (partner 0, 1 or
@@ -1688,7 +1699,7 @@ class PathWorkspace:
 # ---------------------------------------------------------------------------------------------
 # Release E-step (per-sample full posteriors).
 # ---------------------------------------------------------------------------------------------
-@kernel(overloads=((types.float64, types.float64, types.float64, types.float64),), cache=True)
+@kernel(overloads=((types.float64, types.float64, types.float64, types.float64),), cache=True, nogil=True)
 def _unknown_count(none, one, two, band):
     """(count, strict count, gap) of a site's posterior masses of 0, 1 and 2 unknown copies: the
     smallest count whose mass is within ``band`` x the largest mass of it (a larger count must win
@@ -1736,6 +1747,7 @@ def _unknown_count(none, one, two, band):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _release_samples(panel, gl, observed, pi, rates, favourable_margin, count_band, batch, keep_gains):
     """Per-sample posteriors for the release, aggregates summed in sample order.

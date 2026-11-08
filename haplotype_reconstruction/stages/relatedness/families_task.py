@@ -13,7 +13,7 @@ from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyP
 from ...science.relatedness.run import concatenate_terms, contig_terms, fit_families
 from ...store.protocol import claim
 from ...store.store import CheckpointStore
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from . import families_records as records
 from .evidence_pass import EvidenceInput, evidence_pass
 
@@ -37,16 +37,18 @@ def run(
     with claim(file, records.KEY, derivation) as compute:
         if not compute:
             return derivation
+        from ...engine.scheduler import claim_threads
+
+        def terms_of(item, evidence):
+            claim_threads()  # each contig's terms on the task's current share
+            return contig_terms(evidence, item.genetic_map, parameters, frequency)
+
         with task_team(team):
-            terms = evidence_pass(
-                root,
-                inputs,
-                sample_ids,
-                lambda item, evidence: contig_terms(evidence, item.genetic_map, parameters, frequency),
-                team=team,
-            )
+            terms = evidence_pass(root, inputs, sample_ids, terms_of, team=team)
             combined = concatenate_terms(sample_ids, tuple(item.contig for item in inputs), terms)
-            product = fit_families(combined, parameters)
+            # The task starts beside discovery with the CPUs it was given (often one); every search step re-reads its
+            # share, so it grows into the CPUs that finished tasks free (as painting does at each batch).
+            product = fit_families(combined, parameters, claim_threads=claim_threads)
         records.write(file, product, derivation)
     return derivation
 
@@ -58,7 +60,7 @@ def tasks(
     parameters: FamilyParameters,
     frequency: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     *,
-    maximum_cores: int = 16,
+    maximum_cores: int = ALL_CORES,
     depends_on: tuple[TaskKey, ...] = (),
     reverse: bool = False,
 ) -> tuple[Task, ...]:

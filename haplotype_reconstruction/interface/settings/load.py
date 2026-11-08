@@ -209,9 +209,11 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     simulation = mapping.get("simulation", {})
     reads = simulation.get("reads", {}) if isinstance(simulation, dict) else {}
     if isinstance(reads, dict) and reads.get("preset") == "realistic":
-        text = resources.files("haplotype_reconstruction.interface.settings").joinpath(
-            "presets", "realistic_reads.toml"
-        ).read_text()
+        text = (
+            resources.files("haplotype_reconstruction.interface.settings")
+            .joinpath("presets", "realistic_reads.toml")
+            .read_text()
+        )
         # Expand after all user/CLI layers have merged, so every explicit key wins,
         # including values equal to schema defaults. Resolved TOML records all values.
         mapping = _merge(tomllib.loads(text), mapping)

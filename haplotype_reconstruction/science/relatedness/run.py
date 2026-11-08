@@ -130,8 +130,12 @@ def concatenate_terms(
     )
 
 
-def fit_families(terms: FamilyTerms, parameters: FamilyParameters = _DEFAULT_FAMILY) -> RelatednessFamilies:
-    """Fit both bounded searches from input terms; no report selection or input mutation."""
+def fit_families(
+    terms: FamilyTerms, parameters: FamilyParameters = _DEFAULT_FAMILY, *, claim_threads=None
+) -> RelatednessFamilies:
+    """Fit both bounded searches from input terms; no report selection or input mutation. ``claim_threads``: an
+    optional step-boundary hook that re-reads the caller's CPU share for the parallel kernels (values never depend
+    on the team)."""
     fitted = fit(
         terms.child,
         terms.log_prior,
@@ -139,6 +143,7 @@ def fit_families(terms: FamilyTerms, parameters: FamilyParameters = _DEFAULT_FAM
         terms.ranges,
         max_sweeps=parameters.max_sweeps,
         parameters=parameters,
+        claim_threads=claim_threads,
     )
 
     return publish_families(terms, fitted)

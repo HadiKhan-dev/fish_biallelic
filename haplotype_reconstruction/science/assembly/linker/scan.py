@@ -144,6 +144,7 @@ def _to_lanes(weights, error_weights, width):
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def _pair_index(a, b, founders):
     """Upper-triangle index of the unordered founder pair (min(a, b), max(a, b))."""
@@ -182,6 +183,7 @@ def _pair_index(a, b, founders):
     ),
     cache=True,
     error_model="numpy",
+    nogil=True,
 )
 def _scan_lane_block(
     block,
@@ -455,6 +457,7 @@ def _scaled_scan(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _row_exclusions(values, out):
     """out[row, col] = log sum of the row's other entries (prefix + suffix log sums, no subtraction)."""

@@ -23,6 +23,7 @@ __all__ = ["haldane_fraction"]
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def haldane_fraction(distance_morgans):
     """Return -expm1(-2M)/2 for float64 scalar/vector M in Morgans; mutate nothing.

@@ -25,15 +25,14 @@ from ...science.discovery.release import DiscoveredBlock
 from ...science.discovery.run import BlockEvidence, discover_block
 from ...store.container import CheckpointFile
 from ...store.protocol import NumericalPolicy, claim, mark_complete, publish, resume
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from .records import PLAN, BlockAdapter, PlanAdapter, block_key, diagnostic_key
 from .records import identities as record_identities
 
 __all__ = ["discovery_tasks", "execute_block", "publish_plan", "complete_contig", "block_task_bytes"]
 
-# Resource-only provenance: B/discovery/stage.py TASK_BASE_BYTES and FIT_MAX_THREADS.
+# Resource-only provenance: B/discovery/stage.py TASK_BASE_BYTES.
 _TASK_BASE_BYTES = 1280 << 20
-_MAX_TASK_CORES = 16
 _DEFAULT_TIES = TieSettings()
 _DEFAULT_DIAGNOSTICS = DiagnosticOptions()
 
@@ -127,7 +126,7 @@ def discovery_tasks(
     ties: TieSettings = _DEFAULT_TIES,
     diagnostics: DiagnosticOptions = _DEFAULT_DIAGNOSTICS,
     dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = _MAX_TASK_CORES,
+    max_cores: int = ALL_CORES,
     estimated_founders: int = 32,
 ) -> tuple[Task, ...]:
     """Declare plan, independent blocks and final completion for one evidence contig.
@@ -176,7 +175,7 @@ def discovery_tasks(
                 inputs=(RecordKey(contig, "evidence"), RecordKey(contig, PLAN)),
                 outputs=(RecordKey(contig, block_key(block.block)), RecordKey(contig, diagnostic_key(block.block))),
                 resources=ResourceRequest(
-                    1, min(max_cores, _MAX_TASK_CORES), block_task_bytes(block, parameters, founders=estimated_founders)
+                    1, max_cores, block_task_bytes(block, parameters, founders=estimated_founders)
                 ),
                 affinity=None,
                 thread_argument="threads",

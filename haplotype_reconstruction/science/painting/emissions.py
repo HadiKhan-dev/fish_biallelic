@@ -122,7 +122,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["informative_sites"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["informative_sites"], cache=True, parallel=True, nogil=True)
 def informative_sites(likelihoods, observed):
     """bool[N, L]: observed and max - min of the normalised GL row > 16 eps."""
     n_samples, n_sites, _ = likelihoods.shape
@@ -136,7 +136,7 @@ def informative_sites(likelihoods, observed):
     return result
 
 
-@kernel(overloads=_OVERLOADS["_gather_kernel"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_gather_kernel"], cache=True, parallel=True, nogil=True)
 def _gather_kernel(likelihoods, observed, sites):
     n_samples = likelihoods.shape[0]
     values = np.empty((n_samples, len(sites), 3), dtype=np.float64)
@@ -195,7 +195,12 @@ def gather_sites(
     return _gather_kernel(likelihoods[samples], observed[samples], sites)
 
 
-@kernel(overloads=_OVERLOADS["_emission_kernel"], cache=True, parallel=True)
+# The running product of a bin's site probabilities is folded into its log below this value (no underflow: every
+# factor is at least min(1, e^floor) and factors below this value are logged directly).
+_RESCALE_BELOW = 1e-150
+
+
+@kernel(overloads=_OVERLOADS["_emission_kernel"], cache=True, parallel=True, nogil=True)
 def _emission_kernel(
     likelihoods, observed, alt_probability, background_frequency, bin_starts, bin_stops, robustness_epsilon, log_floor
 ):
@@ -212,6 +217,9 @@ def _emission_kernel(
     n_bins = len(bin_starts)
     result = np.empty((n_samples, n_states * n_states, n_bins), dtype=np.float64)
     uniform_log = max(math.log(1.0 / 3.0), log_floor)
+    # One log per bin (release 4.7): the clamped site probabilities are multiplied and the product's log taken once,
+    # rescaled before it can underflow; log(max(p, e^floor)) summed over sites, in another rounding.
+    floor_probability = math.exp(log_floor)
     for task in prange(n_samples * n_pairs):
         sample = task // n_pairs
         # Unordered pairs first <= second in row-major upper-triangle order.
@@ -224,7 +232,9 @@ def _emission_kernel(
         state = first * n_states + second
         mirror = second * n_states + first
         for bin_index in range(n_bins):
-            score = 0.0
+            logs = 0.0
+            product = 1.0
+            count = 0
             for site in range(bin_starts[bin_index], bin_stops[bin_index]):
                 if not observed[sample, site]:
                     continue
@@ -245,13 +255,17 @@ def _emission_kernel(
                     + likelihoods[sample, site, 2] * p2
                 )
                 probability = (1.0 - robustness_epsilon) * likelihood + robustness_epsilon / 3.0
-                if probability <= 0.0:
-                    log_probability = log_floor
-                else:
-                    log_probability = math.log(probability)
-                    if log_probability < log_floor:
-                        log_probability = log_floor
-                score += log_probability - uniform_log
+                if probability < floor_probability:  # also p <= 0; NaN propagates, as before
+                    probability = floor_probability
+                count += 1
+                if probability < _RESCALE_BELOW:
+                    logs += math.log(probability)  # only under a floor below log(_RESCALE_BELOW)
+                    continue
+                product *= probability
+                if product < _RESCALE_BELOW:
+                    logs += math.log(product)
+                    product = 1.0
+            score = logs + math.log(product) - count * uniform_log
             result[sample, state, bin_index] = score
             result[sample, mirror, bin_index] = score
     return result
@@ -300,7 +314,7 @@ def binned_emissions(
     return result
 
 
-@kernel(overloads=_OVERLOADS["pack_emissions"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["pack_emissions"], cache=True, parallel=True, nogil=True)
 def pack_emissions(emissions, packed, sample_start, n_states):
     """Store the upper triangle (first <= second) of symmetric ordered-pair emissions
     into ``packed`` [N, S(S+1)/2, B] at rows sample_start + i."""
@@ -314,7 +328,7 @@ def pack_emissions(emissions, packed, sample_start, n_states):
                 ]
 
 
-@kernel(overloads=_OVERLOADS["unpack_emissions"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["unpack_emissions"], cache=True, parallel=True, nogil=True)
 def unpack_emissions(packed, n_states):
     """float64[N, S*S, B] ordered-pair emissions from their packed upper triangle."""
     output = np.empty((packed.shape[0], n_states * n_states, packed.shape[2]))

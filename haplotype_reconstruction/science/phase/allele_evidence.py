@@ -52,13 +52,15 @@ def _terms(lab0, lab1, alleles_0, alleles_1, lg):
     [..., 3]: (e0, valid0, e1, valid1), the evidence for allele 1 of each homologue's label (a (x, x) pair counts
     once, on homologue 0)."""
     same = lab0 == lab1
-    g0 = np.take_along_axis(lg, np.clip(alleles_1, 0, 1)[..., None].astype(np.int64), axis=-1)[..., 0]
-    g1 = np.take_along_axis(lg, (np.clip(alleles_1, 0, 1) + 1)[..., None].astype(np.int64), axis=-1)[..., 0]
-    e0 = np.where(same, lg[..., 2] - lg[..., 0], g1 - g0)
+    # The genotype columns of an allele a in {-1, 0, 1} clipped to {0, 1}: lg[..., a] and lg[..., a + 1], selected
+    # directly (the same values as an index gather).
+    # The step from a's column to the next is lg[..., 2] - lg[..., 1] when a is ALT, else lg[..., 1] - lg[..., 0]
+    # (the same subtraction of the same operands as gathering both columns first).
+    zero, one, two = lg[..., 0], lg[..., 1], lg[..., 2]
+    upper, lower = two - one, one - zero
+    e0 = np.where(same, two - zero, np.where(alleles_1 >= 1, upper, lower))
     valid0 = (alleles_0 >= 0) & (same | (alleles_1 >= 0))
-    h0 = np.take_along_axis(lg, np.clip(alleles_0, 0, 1)[..., None].astype(np.int64), axis=-1)[..., 0]
-    h1 = np.take_along_axis(lg, (np.clip(alleles_0, 0, 1) + 1)[..., None].astype(np.int64), axis=-1)[..., 0]
-    e1 = h1 - h0
+    e1 = np.where(alleles_0 >= 1, upper, lower)
     valid1 = (alleles_1 >= 0) & (alleles_0 >= 0) & ~same
     return e0, valid0, e1, valid1
 

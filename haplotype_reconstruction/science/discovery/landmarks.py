@@ -56,6 +56,7 @@ QUANTUM = tie_quantum(0.0, "probability")
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _agreement_to(rows, targets, ceiling):
     n, sites, _ = rows.shape
@@ -73,7 +74,7 @@ def _agreement_to(rows, targets, ceiling):
     return out
 
 
-@kernel(overloads=((_FLOAT64_3C,),), cache=True)
+@kernel(overloads=((_FLOAT64_3C,),), cache=True, nogil=True)
 def _agreement_ceiling(rows):
     ceiling = 0.0
     for i in range(len(rows)):
@@ -84,7 +85,7 @@ def _agreement_ceiling(rows):
     return ceiling
 
 
-@kernel(overloads=((_INT8_2C,),), cache=True)
+@kernel(overloads=((_INT8_2C,),), cache=True, nogil=True)
 def _pack(rows):
     known = np.zeros((len(rows), (rows.shape[1] + 63) // 64), dtype=np.uint64)
     alt = np.zeros_like(known)
@@ -98,7 +99,7 @@ def _pack(rows):
     return known, alt
 
 
-@kernel(overloads=((types.uint64,),), cache=True)
+@kernel(overloads=((types.uint64,),), cache=True, nogil=True)
 def _popcount(x):
     n = 0
     while x:

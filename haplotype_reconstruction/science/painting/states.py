@@ -106,7 +106,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_local_allele_keys_kernel"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_local_allele_keys_kernel"], cache=True, parallel=True, nogil=True)
 def _local_allele_keys_kernel(named_alleles, bin_starts, bin_stops):
     n_classes, n_sites = named_alleles.shape
     n_bins = len(bin_starts)

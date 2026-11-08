@@ -111,7 +111,7 @@ _WORKSPACE_1 = types.Tuple(
 # memory is O(N K^2) per tile, never O(N L K^2).
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _stable_sigmoid(logit: float) -> float:
     # exp(-37) < 2**-53, so 1 + exp(-logit) already rounds to exactly one:
     # returning 1.0 skips the exponential without changing any result.
@@ -132,6 +132,7 @@ def _stable_sigmoid(logit: float) -> float:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _site_workspace(k, n_edges, max_iter):
     q = np.empty(k, dtype=np.float64)
@@ -206,6 +207,7 @@ def _site_workspace(k, n_edges, max_iter):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _set_site_potentials(site, k, unary, pair, edge_first, edge_second, work):
     """Fill the site's complete-data potentials, shared by its held-outs.
@@ -299,6 +301,7 @@ def _set_site_potentials(site, k, unary, pair, edge_first, edge_second, work):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _solve_cavity_site(
     heldout,
@@ -611,6 +614,7 @@ def _solve_cavity_site(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _eligible_endpoint_indices(endpoints, elbo, converged, elbo_tie):
     """Distinct winning training endpoints, with the existing convergence/ELBO rules.
@@ -656,6 +660,7 @@ def _eligible_endpoint_indices(endpoints, elbo, converged, elbo_tie):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _endpoint_class_labels(endpoints, indices, equivalence_scale=0.0):
     """Connected components at the stated endpoint equivalence scale.
@@ -698,6 +703,7 @@ def _endpoint_class_labels(endpoints, indices, equivalence_scale=0.0):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _predictive_family_log_states(
     endpoints, indices, g0, g1, g2, likelihood_floor, ww_log_emission, equivalence_scale=0.0
@@ -766,6 +772,7 @@ def _predictive_family_log_states(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _membership_groups(offsets, members):
     """Exact labels of complete membership lists; candidate keys are verified in full.
@@ -870,6 +877,7 @@ def _membership_groups(offsets, members):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def grouped_cavity_predictions(
     likelihood,
@@ -1056,7 +1064,7 @@ def grouped_cavity_predictions(
     return representatives, predictions, not_converged
 
 
-@kernel(overloads=((_FLOAT64_1C,),), cache=True)
+@kernel(overloads=((_FLOAT64_1C,),), cache=True, nogil=True)
 def _logaddexp_values(values: np.ndarray) -> float:
     maximum = -math.inf
     for index in range(values.shape[0]):
@@ -1076,6 +1084,7 @@ def _logaddexp_values(values: np.ndarray) -> float:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _floor_log_likelihood_kernel(
     likelihood: np.ndarray,
@@ -1103,6 +1112,7 @@ def _floor_log_likelihood_kernel(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _build_evidence_emission_cache_kernel(
     likelihood: np.ndarray,
@@ -1147,6 +1157,7 @@ def _build_evidence_emission_cache_kernel(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _build_cavity_potentials(log_likelihood, rw_log_likelihood, k, member_offsets, member_states, first, second):
     """Weighted founder fields and distinct-sample support, before any held-out deletion."""
@@ -1272,6 +1283,7 @@ def _build_cavity_potentials(log_likelihood, rw_log_likelihood, k, member_offset
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _score_mode_cavity_kernel(
     likelihood: np.ndarray,

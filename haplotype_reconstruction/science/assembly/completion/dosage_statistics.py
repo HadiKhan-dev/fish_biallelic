@@ -74,6 +74,7 @@ def prepare(configurations, log_priors, log_emission, n_founders, support_radius
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_site_dosages(out, site, centres, indices, flips, sizes, pairs, start, stop, probability):
     """Single/joint flip masses in O(C*r^2+K^2), not C*K."""
@@ -136,6 +137,7 @@ def _ball_site_dosages(out, site, centres, indices, flips, sizes, pairs, start, 
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def dosage_marginals(
     centres: np.ndarray,
@@ -197,6 +199,7 @@ def dosage_marginals(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _ball_values(constant, unary, coupling, centre, flips, sizes):
     bits = len(unary)
@@ -251,6 +254,7 @@ def _ball_values(constant, unary, coupling, centre, flips, sizes):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def configuration_probabilities(
     statistics: np.ndarray,

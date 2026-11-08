@@ -121,7 +121,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_lse"], cache=True)
+@kernel(overloads=_OVERLOADS["_lse"], cache=True, nogil=True)
 def _lse(a, b):
     if a < b:
         a, b = b, a
@@ -202,7 +202,7 @@ def block_tables(
     return em, T0, T1, TG, labs0, labs1
 
 
-@kernel(overloads=_OVERLOADS["_step"], cache=True)
+@kernel(overloads=_OVERLOADS["_step"], cache=True, nogil=True)
 def _step(prev, T0b, T1b, TGb, G):
     """log sum over predecessors of prev[r0, r1, h] + T0[r0, s0] + T1[r1, s1] + TG[h, g] -> out[s0, s1, g]."""
     n0, n1 = prev.shape[0], prev.shape[1]
@@ -233,7 +233,7 @@ def _step(prev, T0b, T1b, TGb, G):
     return out
 
 
-@kernel(overloads=_OVERLOADS["_step_back"], cache=True)
+@kernel(overloads=_OVERLOADS["_step_back"], cache=True, nogil=True)
 def _step_back(nxt, T0b, T1b, TGb, G):
     """beta[r0, r1, h] = log sum over successors of T0[r0, s0] + T1[r1, s1] + TG[h, g] + nxt[s0, s1, g]."""
     n0, n1 = nxt.shape[0], nxt.shape[1]
@@ -339,7 +339,7 @@ def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, *, trace=False):
     )
 
 
-@kernel(overloads=_OVERLOADS["_flip_pair"], cache=True)
+@kernel(overloads=_OVERLOADS["_flip_pair"], cache=True, nogil=True)
 def _flip_pair(f1x, f1y, keep, epsilon, g0, g1, g2, weight, out, i):
     """Adds weight x the ordered allele posterior of one label pair (P(homologue 0 carries allele 1) = f1x, homologue
     1: f1y), with independent per-homologue flips, given the site's reads to out[:, i] (site_posteriors' law)."""

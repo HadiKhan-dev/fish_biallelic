@@ -254,6 +254,7 @@ COLUMNS = {
         "Parent1ScreenRank",
         "Parent2ScreenRank",
         "SelectedParentAtScreenBoundary",
+        "M2PanelCapped",
     ],
     "exclusion_evidence": ["Sample", "CandidateParent", "LogE", "ObservedSites"],
     "exclusion_diagnostics": [
@@ -526,12 +527,11 @@ def write_pedigree(
     exclusion = record_mapping(product.exclusion)
     directory = Path(output) / "pedigree"
     items = separate_collections(frames, product.views, product.sample_ids, input_ids)
+
     def write_table(name):
         return write_frame(directory / f"{name}.csv", frame_in_input_order(frames[name], input_ids))
 
-    names = [
-        field.name for field in fields(product.views) if field.name in frames and frames[field.name] is not None
-    ]
+    names = [field.name for field in fields(product.views) if field.name in frames and frames[field.name] is not None]
     written = list(map(write_table, names)) if map_work is None else map_work(write_table, names)
     written.append(write_rows(directory / "cell_items.csv", items, columns=CELL_ITEM_COLUMNS))
     written.append(write_json(directory / "evidence_calibration.json", record_mapping(product.calibration)))
@@ -1046,6 +1046,7 @@ SEARCH_DIAGNOSTICS_COLUMNS = (
     "Parent1ScreenRank",
     "Parent2ScreenRank",
     "SelectedParentAtScreenBoundary",
+    "M2PanelCapped",
 )
 """Columns in published order.
 
@@ -1060,6 +1061,7 @@ SEARCH_DIAGNOSTICS_COLUMNS = (
     Parent1ScreenRank: parent1 screen rank (1).
     Parent2ScreenRank: parent2 screen rank (1).
     SelectedParentAtScreenBoundary: selected parent at screen boundary (1).
+    M2PanelCapped: the child's admitted M2 pairs exceeded the per-child cap, so its panel is incomplete (1).
 """
 
 EXCLUSION_EVIDENCE_COLUMNS = ("Sample", "CandidateParent", "LogE", "ObservedSites")

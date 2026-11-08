@@ -46,6 +46,7 @@ CENTER = math.log(1.0 / 3.0)
     overloads=tuple((a, b, types.boolean) for a in (types.int8, types.int64) for b in (types.int8, types.int64)),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def pair_code(first, second, same_source):
     """Code of an ordered founder pair at one site from its alleles (0, 1 or -1 = unknown).
@@ -65,6 +66,7 @@ def pair_code(first, second, same_source):
     overloads=tuple((p, p, p, c) for p in (types.float32, types.float64) for c in (types.int8, types.int64)),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def predictive_likelihood(p0, p1, p2, code):
     """P(observation | pair class ``code``) from the genotype likelihoods p0, p1, p2 of dosages 0, 1, 2."""
@@ -83,7 +85,7 @@ def predictive_likelihood(p0, p1, p2, code):
     return 0.5 * (p0 + p2)
 
 
-@kernel(overloads=tuple((p, p, p) for p in (types.float32, types.float64)), cache=True, inline="always")
+@kernel(overloads=tuple((p, p, p) for p in (types.float32, types.float64)), cache=True, inline="always", nogil=True)
 def normalised_likelihoods(p0, p1, p2):
     """(informative, p0, p1, p2): a sample's genotype likelihoods divided by their sum (in their own precision);
     informative is False, and the values are returned unchanged, when the sum is not positive or the three are
@@ -94,7 +96,7 @@ def normalised_likelihoods(p0, p1, p2):
     return True, p0 / total, p1 / total, p2 / total
 
 
-@kernel(overloads=((types.float32,), (types.float64,)), cache=True, inline="always")
+@kernel(overloads=((types.float32,), (types.float64,)), cache=True, inline="always", nogil=True)
 def robust_log_likelihood(likelihood):
     """max(log(0.99 P + 0.01 / 3), -2): the robust log likelihood of a normalised genotype likelihood P (uncentred)."""
     return max(math.log(0.99 * likelihood + 0.01 / 3.0), -2.0)

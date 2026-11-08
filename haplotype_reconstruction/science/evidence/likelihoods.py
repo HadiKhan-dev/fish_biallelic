@@ -111,6 +111,7 @@ def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _invalid_likelihood_cells(likelihoods, counts, tolerance):
     """Cells whose likelihoods are not finite, negative, not normalised, or not 1/3 at zero depth."""

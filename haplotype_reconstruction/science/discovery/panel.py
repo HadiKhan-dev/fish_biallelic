@@ -468,6 +468,7 @@ def deduplicate(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _unknown_alleles_from_membership(observed, k, mask):
     """Exact Boolean carrier union, without per-founder fancy-index temporaries."""
@@ -682,6 +683,7 @@ def log_haplotype_set_count(n_sites: int, k: int) -> float:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def state_membership(assignments, k, tie_mask, state_kind, state_first, state_second):
     """Compact full membership and actual founder pairs (K denotes the unknown copy)."""

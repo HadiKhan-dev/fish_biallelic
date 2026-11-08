@@ -377,52 +377,103 @@ def addition_per_sample_bound_excludes(per_sample_optimistic, per_sample_score, 
     return bool(bound + tolerance < cost / (2.0 * len(gains))), bound, int(np.argmax(gains))
 
 
-def deletion_bound_excludes(
-    per_sample_score, per_sample_optimistic, cost, *, tolerance, config: CountRuleConfig, seed_key
-):
-    """Whether per-sample optimistic K-1 scores prove that every deletion keeps the larger panel
-    and that the call is not ambiguous. Returns (excluded, band_bound).
+def _block_chunks(option_starts, options, width):
+    """Consecutive block ranges [b0, b1) whose options times width stay near _CHUNK_ENTRIES (at least one block)."""
+    blocks = len(option_starts)
+    bounds = np.append(option_starts, options)
+    b0 = 0
+    while b0 < blocks:
+        b1 = b0 + 1
+        while b1 < blocks and (bounds[b1 + 1] - bounds[b0]) * width <= _CHUNK_ENTRIES:
+            b1 += 1
+        yield b0, b1, int(bounds[b0]), int(bounds[b1])
+        b0 = b1
 
-    Point decision. The test keeps a founder only if both m and the leave-one-sample-out margin
-    m' are positive; a chromosome total cannot bound m', so it needs per-sample upper bounds
-    U_s >= F_s(any K-1 panel). With lower bounds l_s = F_s(X_K) - U_s of d_s, m >= sum l / c - 1/2
-    (n_eff <= S) and m' >= (sum l - max l) / c - (S - 1) / (2S) (the S - 1 smallest d_s sum to at
-    least the S - 1 smallest l_s).
+
+_CHUNK_ENTRIES = 1 << 21
+
+
+def _summed_optimum(option_scores, option_starts, weights):
+    """U(w) - sum_s w_s n_s for every row w of ``weights``: sum over blocks of the best option's weighted total."""
+    total = np.zeros(len(weights))
+    for b0, b1, o0, o1 in _block_chunks(option_starts, len(option_scores), len(weights)):
+        weighted = option_scores[o0:o1] @ weights.T
+        total += np.maximum.reduceat(weighted, option_starts[b0:b1] - o0, axis=0).sum(axis=0)
+    return total
+
+
+def deletion_bound_excludes(
+    per_sample_score, option_scores, option_starts, normalisers, cost, *, tolerance, config: CountRuleConfig, seed_key
+):
+    """Whether optimistic K-1 scores prove that every deletion keeps the larger panel and that the
+    call is not ambiguous. Returns (excluded, band_bound).
+
+    Optimistic scores (founder refinement's count.option_scores). P_{K-1} is the set of panels with
+    at most K-1 distinct prepared rows per block. Every Y in P_{K-1} fixes at every block b an
+    option o_b(Y): a row Y lacks at a block with K rows, otherwise the block's only option, which
+    is all its rows. The option is the same for every sample, and F_s(Y) <= sum_b sigma_s(b, o_b(Y)) + n_s
+    for every sample s (count.upper_bound's relaxation: each block is scored as a free panel of the
+    option's rows, with every sample's chain started afresh). ``option_scores`` holds sigma for the
+    informative samples, one row per option; block b owns rows option_starts[b] up to
+    option_starts[b+1] (or the end); ``normalisers`` holds n_s. For any weights w >= 0:
+
+        sum_s w_s F_s(Y) <= U(w) = sum_b max_o sum_s w_s sigma_s(b, o) + sum_s w_s n_s   for every Y.
+
+    U(w) never exceeds sum_s w_s U_s, where U_s is the per-sample bound (each sample at its own best
+    option). Every margin below needs only a weighted sum of d_s = F_s(X_K) - F_s(Y).
+
+    Point decision. The test keeps a founder only if m > 0 and the leave-one-sample-out margin
+    m' > 0. With n_eff <= S, m >= (sum_s F_s(X_K) - U(1)) / c - 1/2. In m' the removed sample t
+    is the largest d_s, so it depends on Y; for every t,
+    sum_{s != t} d_s >= sum_{s != t} F_s(X_K) - U(1 - e_t) and n_eff' <= S - 1, hence
+    m' >= min_t [sum_{s != t} F_s(X_K) - U(1 - e_t)] / c - (S - 1) / (2S).
 
     The same proof covers the sequence part in founder refinement, whose q is an exact shadow
-    difference: the shadow of a deletion of f uses at every block only rows that X_K minus f
-    uses, at most K - 1 distinct rows, and the count bound bounds every panel with at most K - 1
-    distinct rows per block, duplicated founders adding no emission; so U_s >= F_s(shadow),
-    l_s <= q_s and both tests pass for every candidate. A founder without a private cell has
-    q = 0 = F_s(X_K) - F_s(X_K), and X_K then has at most K - 1 distinct rows per block, so
-    l_s <= 0 and no round is skipped. (The join's near-identity shortcut is not a score and no
-    score bound sees it; refinement does not use it.)
+    difference. The shadow of a deletion of f uses at every block only rows that X_K minus f uses,
+    so it is in P_{K-1}, with duplicated founders adding no emission. So the bounds on d also bound
+    q for every candidate. A founder without a private cell has q = 0 = F_s(X_K) - F_s(X_K), and
+    X_K is then itself in P_{K-1}, so the margins cannot pass and no round is skipped. (The join's
+    near-identity shortcut is not a score, and no score bound sees it; refinement does not use it.)
 
-    Band. The point bounds say nothing about the bootstrap band (lower bounds can be negative and
-    a replicate can miss the few carriers), so a skipped round would otherwise report
-    ``ambiguous = False`` unproven. Replicate r of the decision's bootstrap (``seed_key``: the key
-    :func:`decide` would use, so the same individuals i_r1 .. i_rS) has, for d and for q alike,
-    margin >= sum_j l_(i_rj) / c - 1/2 = B_r (its n_eff is at most its S entries), hence
-    min(m_d, m_q) >= B_r replicate by replicate, and the band's lower percentile is at least the
-    same percentile of B (order statistics and their interpolation are monotone). band_bound is
-    that percentile; the round is skipped only when it also exceeds the tolerance, so band[0] > 0:
-    the call is proven not ambiguous for every candidate. Otherwise the round runs.
+    Band. Replicate r of the decision's bootstrap (``seed_key``: the key :func:`decide` would use,
+    so the same individuals) draws sample s w_rs times (sum_s w_rs = S). For d and for q alike its
+    margin is >= (sum_s w_rs F_s(X_K) - U(w_r)) / c - 1/2 = B_r, because its n_eff is at most its
+    S entries. So min(m_d, m_q) >= B_r replicate by replicate, and the band's lower percentile is
+    at least the same percentile of B (order statistics and their interpolation are monotone).
+    band_bound is that percentile. The round is skipped only when it also exceeds the tolerance,
+    so band[0] > 0: the call is proven not ambiguous for every candidate. Otherwise the round runs.
 
-    ``per_sample_score`` (F_s(X_K)) and ``per_sample_optimistic`` (U_s) cover the informative
-    samples (length S); ``tolerance`` (nats) covers the rounding of the computed scores; ``config``
-    gives the bootstrap's resamples and level. band_bound is None when the point bounds fail.
+    ``per_sample_score`` holds F_s(X_K) (length S); ``tolerance`` (nats) covers the rounding of
+    the computed scores; ``config`` gives the bootstrap's resamples and level. band_bound is None
+    when the point bounds fail. The weighted totals are taken block chunk by block chunk, keeping
+    memory near _CHUNK_ENTRIES floats for any K, sample count or block count.
     """
-    lower = np.asarray(per_sample_score, np.float64) - np.asarray(per_sample_optimistic, np.float64)
-    samples = len(lower)
-    total = float(lower.sum())
+    score = np.asarray(per_sample_score, np.float64)
+    sigma = np.asarray(option_scores, np.float64)
+    starts = np.asarray(option_starts, np.int64)
+    norm = np.asarray(normalisers, np.float64)
+    samples = len(score)
     relative = tolerance / cost
-    if not (
-        total / cost - 0.5 > relative
-        and (total - float(lower.max())) / cost - (samples - 1) / (2.0 * samples) > relative
-    ):
+    ones = np.ones((1, samples))
+    whole = float(score.sum()) - float(_summed_optimum(sigma, starts, ones)[0] + norm.sum())
+    if not whole / cost - 0.5 > relative:
+        return False, None
+    # U(1 - e_t) = sum_b max_o (A_b(o) - sigma_t(b, o)) + sum_{s != t} n_s, with A_b(o) the option's total.
+    rest = np.zeros(samples)
+    by_option = sigma.sum(axis=1)
+    for b0, b1, o0, o1 in _block_chunks(starts, len(sigma), samples):
+        reduced = by_option[o0:o1, None] - sigma[o0:o1]
+        rest += np.maximum.reduceat(reduced, starts[b0:b1] - o0, axis=0).sum(axis=0)
+    rest += norm.sum() - norm
+    loso = float(((score.sum() - score) - rest).min())
+    if not loso / cost - (samples - 1) / (2.0 * samples) > relative:
         return False, None
     index = _resampled_individuals(bootstrap_seed(seed_key), int(config.bootstrap_resamples), samples)
-    replicate_bounds = lower[index].sum(axis=1) / cost - 0.5
+    replicates = len(index)
+    offsets = np.repeat(np.arange(replicates) * samples, index.shape[1])
+    weights = np.bincount(offsets + index.ravel(), minlength=replicates * samples).reshape(replicates, samples)
+    weights = weights.astype(np.float64)
+    replicate_bounds = (weights @ score - _summed_optimum(sigma, starts, weights) - weights @ norm) / cost - 0.5
     band_bound = float(np.quantile(replicate_bounds, (1.0 - float(config.bootstrap_level)) / 2.0))
     return bool(band_bound > relative), band_bound
 

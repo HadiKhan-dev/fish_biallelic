@@ -460,6 +460,7 @@ MODEL_COLUMNS = (
     "ErrorRunBinsKeepingLabel",
     "SiteCorrelation",
     "EligibleSamples",
+    "ContinuityBudgetReached",
 )
 """Columns in published order.
 
@@ -475,6 +476,8 @@ MODEL_COLUMNS = (
     ErrorRunBinsKeepingLabel: 1 / ErrorExit; empty when ErrorExit is zero (bins).
     SiteCorrelation: fitted within-site emission correlation (1).
     EligibleSamples: eligible samples (1).
+    ContinuityBudgetReached: label continuity's search ended at its per-iteration check budget (release 4.7):
+        candidates ranked below the budget were not checked (bool).
 """
 
 
@@ -484,6 +487,7 @@ def painting_model_rows(painting) -> list[tuple]:
     1 / b, the mean length of a run that keeps its label; a at its floor 1e-6 is a boundary fit: no support for error
     runs) and the site correlation r of the emissions' design effect."""
     rows = []
+    continuity = getattr(painting, "label_continuity", ())
     for index, component in enumerate(painting.components):
         if component.bins.n_bins == 0:
             continue
@@ -503,6 +507,7 @@ def painting_model_rows(painting) -> list[tuple]:
                 (1.0 / transitions.error_exit) if transitions.error_exit > 0 else None,
                 float(transitions.site_correlation),
                 int(component.eligible.sum()),
+                bool(getattr(continuity[index], "check_budget_reached", False)) if index < len(continuity) else False,
             )
         )
     return rows

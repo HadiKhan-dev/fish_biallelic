@@ -102,7 +102,6 @@ __all__ = [
 ]
 
 COPY_CHUNK_BYTES = 1 << 20  # ENG-24 shared_arrays.py: 1 MiB copy partitions.
-COPY_THREADS = 16
 _PARALLEL_COPY_BYTES = 4 << 20
 
 
@@ -250,7 +249,7 @@ def new_segment(size: int, *, name: str | None = None, track: bool = True) -> Sh
     raise FileExistsError("no free shared-memory segment name")
 
 
-@kernel(overloads=((numba.types.uint8[::1], numba.types.uint8[::1]),), cache=True, parallel=True)
+@kernel(overloads=((numba.types.uint8[::1], numba.types.uint8[::1]),), cache=True, parallel=True, nogil=True)
 def _copy_shared_bytes(source, destination):
     chunk = COPY_CHUNK_BYTES
     for part in numba.prange((source.size + chunk - 1) // chunk):
@@ -263,8 +262,8 @@ def create_shared_array(array, *, copy_threads: int = 1) -> tuple[SharedMemory, 
     """Copy ``array`` (C-contiguous) into a new segment; return (handle, reference).
 
     POSIX shared memory has no zero-byte segments, so an empty array gets a one-byte segment and keeps its shape
-    and dtype. ``copy_threads`` parallelises the first-touch copy of large arrays, capped at COPY_THREADS and at
-    the caller's CPU authority (in a task, its claim). If anything fails after allocation, the segment is closed
+    and dtype. ``copy_threads`` parallelises the first-touch copy of large arrays, capped at the caller's CPU
+    authority (in a task, its claim). If anything fails after allocation, the segment is closed
     and unlinked at once.
     """
     contiguous = _shareable(array)
@@ -285,7 +284,7 @@ def _shareable(array) -> np.ndarray:
 
 def _fill_shared(contiguous: np.ndarray, handle: SharedMemory, copy_threads: int) -> SharedArrayRef:
     """Copy into an allocated segment (create_shared_array's second half); the caller owns failure cleanup."""
-    threads = min(int(copy_threads), COPY_THREADS)
+    threads = int(copy_threads)
     if threads > 1 and contiguous.nbytes >= _PARALLEL_COPY_BYTES:
         from .scheduler import authority_threads, numba_threads
 
@@ -1153,8 +1152,12 @@ class BudgetedPool:
                 forced += 1
             process.join(timeout=0.5)
         if forced:
-            _LOG.warning("%s: %d pool process(es) did not stop within %.0f s and were killed", self.label, forced,
-                         POOL_TERMINATE_GRACE_SECONDS)
+            _LOG.warning(
+                "%s: %d pool process(es) did not stop within %.0f s and were killed",
+                self.label,
+                forced,
+                POOL_TERMINATE_GRACE_SECONDS,
+            )
         for pool in pools:
             pool._inqueue.close()
             pool._outqueue.close()
@@ -2591,8 +2594,12 @@ class WorkerGroup:
                 forced += 1
             handle.process.join(timeout=1.0)
         if forced and abort:
-            _LOG.warning("%d worker(s) did not stop within %.0f s and were killed; the resource tracker reclaims "
-                         "anything they still owned", forced, GROUP_TERMINATE_GRACE_SECONDS)
+            _LOG.warning(
+                "%d worker(s) did not stop within %.0f s and were killed; the resource tracker reclaims "
+                "anything they still owned",
+                forced,
+                GROUP_TERMINATE_GRACE_SECONDS,
+            )
         try:
             for index, handle in enumerate(self.handles):
                 self._drain_shared(index, handle)

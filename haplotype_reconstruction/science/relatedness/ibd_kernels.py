@@ -48,6 +48,7 @@ IBD_MASKS = np.array([[1, 1, 1], [0, 1, 1], [1, 1, 0]], dtype=np.bool_)
     ),
     parallel=True,
     cache=False,
+    nogil=True,
 )
 def pair_ibd(gl, observed, p, stay, pairs, masks, posterior, loglik):
     """Pairwise 3-state IBD chain (IBD0, IBD1, IBD2; Jacquard emissions at allele frequency p under Hardy-Weinberg;
@@ -108,6 +109,7 @@ def pair_ibd(gl, observed, p, stay, pairs, masks, posterior, loglik):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _pair_chain(gl, observed, p, stay, i, j, masks, M, L, em, alpha, scale, posterior, loglik):
     """pair_ibd for one pair (i, j), in the buffers em, alpha [L, 3] and scale [L]; accumulates into its rows

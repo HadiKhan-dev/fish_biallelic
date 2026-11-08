@@ -37,7 +37,7 @@ from .projection import Projection
 _SMALLEST_NORMAL = 2.2250738585072014e-308
 
 
-@kernel(overloads=OVERLOADS["forward.site_likelihood"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["forward.site_likelihood"], cache=True, inline="always", nogil=True)
 def site_likelihood(gl, coefficient, first_alt, second_alt, mismatch):
     value = coefficient[0] + coefficient[1] * (first_alt + second_alt) + coefficient[2] * first_alt * second_alt
     if value > SITE_POLYNOMIAL_THRESHOLD:
@@ -63,7 +63,7 @@ def child_coefficients(gl: np.ndarray, mismatch: float) -> np.ndarray:
     return coefficient
 
 
-@kernel(overloads=OVERLOADS["forward.observed_sites"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward.observed_sites"], cache=True, parallel=True, nogil=True)
 def observed_sites(observed, bin_start, bin_stop):
     """CSR of each child's observed markers per bin: (sites, start [N, B], stop [N, B])."""
     children = observed.shape[0]
@@ -95,7 +95,7 @@ def observed_sites(observed, bin_start, bin_stop):
     return sites, start, stop
 
 
-@kernel(overloads=OVERLOADS["forward._common_products"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward._common_products"], cache=True, parallel=True, nogil=True)
 def _common_products(
     state_alt, child_gl, coefficient, site_index, site_start, site_stop, mismatch, child_start, child_stop
 ):
@@ -134,7 +134,7 @@ def _common_products(
     return result
 
 
-@kernel(overloads=OVERLOADS["forward._fill_named_first_products"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward._fill_named_first_products"], cache=True, parallel=True, nogil=True)
 def _fill_named_first_products(
     products, state_alt, child_gl, coefficient, site_index, site_start, site_stop, mismatch, child_start
 ):
@@ -179,18 +179,14 @@ def _fill_named_first_products(
                     products[local_child, block, first, second] = product
 
 
-@kernel(overloads=OVERLOADS["forward.normalized_power"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["forward.normalized_power"], cache=True, inline="always", nogil=True)
 def normalized_power(emission, maximum, exponent):
     """L12: the single probability-domain normalized power, including eta one."""
     base = emission / maximum
     return base if exponent == 1.0 else math.pow(base, exponent)
 
 
-@kernel(
-    overloads=OVERLOADS["forward._powered_products"],
-    cache=True,
-    parallel=True,
-)
+@kernel(overloads=OVERLOADS["forward._powered_products"], cache=True, parallel=True, nogil=True)
 def _powered_products(products, exponent, child_start):
     """Cache normalized powers, plus their exact normalization maximum.
 
@@ -220,7 +216,7 @@ def _powered_products(products, exponent, child_start):
     return powered
 
 
-@kernel(overloads=OVERLOADS["forward._normalise"], cache=True)
+@kernel(overloads=OVERLOADS["forward._normalise"], cache=True, nogil=True)
 def _normalise(values):
     total = np.sum(values)
     if total <= 0.0 or not np.isfinite(total):
@@ -229,7 +225,7 @@ def _normalise(values):
     return math.log(total)
 
 
-@kernel(overloads=OVERLOADS["forward._apply_probability_emission"], cache=True)
+@kernel(overloads=OVERLOADS["forward._apply_probability_emission"], cache=True, nogil=True)
 def _apply_probability_emission(current, emission, exponent, powered=None):
     """Apply pow(emission / maximum, exponent), then normalize the pair mass.
 
@@ -252,7 +248,7 @@ def _apply_probability_emission(current, emission, exponent, powered=None):
     return increment + exponent * log_maximum if np.isfinite(increment) else -np.inf
 
 
-@kernel(overloads=OVERLOADS["forward._apply_log_emission"], cache=True)
+@kernel(overloads=OVERLOADS["forward._apply_log_emission"], cache=True, nogil=True)
 def _apply_log_emission(current, log_emission):
     maximum = np.max(log_emission)
     if not np.isfinite(maximum):
@@ -265,7 +261,7 @@ def _apply_log_emission(current, log_emission):
     return increment + maximum if np.isfinite(increment) else -np.inf
 
 
-@kernel(overloads=OVERLOADS["forward._apply_star_bridge"], cache=True)
+@kernel(overloads=OVERLOADS["forward._apply_star_bridge"], cache=True, nogil=True)
 def _apply_star_bridge(current, output, stay, alpha, row_arm, pivot, axis):
     """Exact Hall-star support: only the pivot has a nonzero beta; its two sums keep the general
     operator's ascending prefix and descending suffix order."""
@@ -302,7 +298,7 @@ def _apply_star_bridge(current, output, stay, alpha, row_arm, pivot, axis):
                 output[first, destination] = value
 
 
-@kernel(overloads=OVERLOADS["forward.apply_bridge"], cache=True)
+@kernel(overloads=OVERLOADS["forward.apply_bridge"], cache=True, nogil=True)
 def apply_bridge(current, output, stay, alpha, beta, row_arm, column_arm, pivot, axis, prefix, suffix, branch):
     """One compressed bridge on one selector axis with cancellation-free leave-one-out sums."""
     if branch == 3:
@@ -353,7 +349,7 @@ def apply_bridge(current, output, stay, alpha, beta, row_arm, column_arm, pivot,
                 output[first, destination] = value
 
 
-@kernel(overloads=OVERLOADS["forward.apply_excursion"], cache=True)
+@kernel(overloads=OVERLOADS["forward.apply_excursion"], cache=True, nogil=True)
 def apply_excursion(current, output, probability, axis):
     """Complete T' = (1 - k) T + k U after a bridge mapped ``current`` to ``output``."""
     states = current.shape[0]
@@ -376,7 +372,7 @@ def apply_excursion(current, output, probability, axis):
                 output[first, destination] = keep * output[first, destination] + share
 
 
-@kernel(overloads=OVERLOADS["forward.apply_null"], cache=True)
+@kernel(overloads=OVERLOADS["forward.apply_null"], cache=True, nogil=True)
 def apply_null(current, output, diagonal, off, frequency, axis):
     """One null-slot step: stay with weight diagonal - off, else draw the destination from ``frequency``.
 
@@ -405,7 +401,7 @@ def apply_null(current, output, diagonal, off, frequency, axis):
                 )
 
 
-@kernel(overloads=OVERLOADS["forward.advance"], cache=True)
+@kernel(overloads=OVERLOADS["forward.advance"], cache=True, nogil=True)
 def advance(
     current,
     work,
@@ -485,7 +481,7 @@ def advance(
         )
 
 
-@kernel(overloads=OVERLOADS["forward.score_path"], cache=True)
+@kernel(overloads=OVERLOADS["forward.score_path"], cache=True, nogil=True)
 def score_path(
     child,
     first_parent,
@@ -674,11 +670,7 @@ def score_path(
     return tempered_log, full_log
 
 
-@kernel(
-    overloads=OVERLOADS["forward.named_column_powers"],
-    cache=True,
-    parallel=True,
-)
+@kernel(overloads=OVERLOADS["forward.named_column_powers"], cache=True, parallel=True, nogil=True)
 def named_column_powers(products, exponent, child_start):
     """For the M1 screen's completed cache (_fill_named_first_products): per child and bin, the largest named-first
     product (NaN unless every named-first entry is cached) and, for each named first state, the tempered power
@@ -711,7 +703,7 @@ def named_column_powers(products, exponent, child_start):
     return maximum, powered
 
 
-@kernel(overloads=OVERLOADS["forward._apply_tempered_m1"], cache=True)
+@kernel(overloads=OVERLOADS["forward._apply_tempered_m1"], cache=True, nogil=True)
 def _apply_tempered_m1(current, emission, exponent, powered, named_maximum, column_powered):
     """_apply_probability_emission for a fractional exponent with the M1 screen's caches: the same values, except that
     a BACKGROUND-second entry with a named first state takes its cached power when the bin's maximum equals the
@@ -738,7 +730,7 @@ def _apply_tempered_m1(current, emission, exponent, powered, named_maximum, colu
     return increment + exponent * log_maximum if np.isfinite(increment) else -np.inf
 
 
-@kernel(overloads=OVERLOADS["forward.score_m1_cached"], cache=True)
+@kernel(overloads=OVERLOADS["forward.score_m1_cached"], cache=True, nogil=True)
 def score_m1_cached(
     child,
     parent,
@@ -963,7 +955,7 @@ def score_m1_cached(
     return tempered_log, full_log
 
 
-@kernel(overloads=OVERLOADS["forward._m0_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward._m0_kernel"], cache=True, parallel=True, nogil=True)
 def _m0_kernel(
     pi,
     candidate_alt,
@@ -1028,7 +1020,7 @@ def _m0_kernel(
     return tempered, full
 
 
-@kernel(overloads=OVERLOADS["forward._m2_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward._m2_kernel"], cache=True, parallel=True, nogil=True)
 def _m2_kernel(
     trios,
     pi,
@@ -1283,7 +1275,7 @@ def component_m2(
     return two
 
 
-@kernel(overloads=OVERLOADS["forward._dyads"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["forward._dyads"], cache=True, parallel=True, nogil=True)
 def _dyads(
     pairs,
     pi,
@@ -1353,11 +1345,7 @@ def _dyads(
     return output
 
 
-@kernel(
-    overloads=OVERLOADS["forward._dyads_cached"],
-    cache=True,
-    parallel=True,
-)
+@kernel(overloads=OVERLOADS["forward._dyads_cached"], cache=True, parallel=True, nogil=True)
 def _dyads_cached(
     pairs,
     pi,
@@ -1454,6 +1442,13 @@ def component_m0(
     return 0.5 * (a + b)
 
 
+# Pair chunks per M1 query call (release 4.7): the calling thread re-reads its CPU share before each chunk, so a
+# chromosome whose query outlasts its peers grows into the CPUs they free (a kernel's team is fixed for the whole call).
+# Pairs are scored independently, so chunking does not change any value.
+_CLAIM_CHUNKS = 32
+_CLAIM_CHUNK_MINIMUM = 256
+
+
 def component_m1(
     p: Projection,
     t: ChildTerms,
@@ -1465,26 +1460,19 @@ def component_m1(
     claim_threads: Callable[[], int | None],
     columns: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
-    claim_threads()
-    if columns is not None and products is not None and powered is not None:
-        return _dyads_cached(
-            np.ascontiguousarray(pairs, dtype=np.int64),
-            *model_arguments(p),
-            p.available,
-            *terms_args(p, t),
-            zero_scores,
-            products,
-            first_child,
-            powered,
-            *columns,
-        )
-    return _dyads(
-        np.ascontiguousarray(pairs, dtype=np.int64),
-        *model_arguments(p),
-        p.available,
-        *terms_args(p, t),
-        zero_scores,
-        products,
-        first_child,
-        powered,
-    )
+    pairs = np.ascontiguousarray(pairs, dtype=np.int64)
+    model, terms = model_arguments(p), terms_args(p, t)
+    output = np.empty(len(pairs))
+    step = max(_CLAIM_CHUNK_MINIMUM, -(-len(pairs) // _CLAIM_CHUNKS))
+    for start in range(0, max(1, len(pairs)), step):
+        claim_threads()
+        chunk = pairs[start : start + step]
+        if columns is not None and products is not None and powered is not None:
+            output[start : start + len(chunk)] = _dyads_cached(
+                chunk, *model, p.available, *terms, zero_scores, products, first_child, powered, *columns
+            )
+        else:
+            output[start : start + len(chunk)] = _dyads(
+                chunk, *model, p.available, *terms, zero_scores, products, first_child, powered
+            )
+    return output

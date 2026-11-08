@@ -49,6 +49,7 @@ def normalised_evidence(evidence: np.ndarray) -> np.ndarray:
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def carrier_probability(pairs: np.ndarray, weights: np.ndarray, founders: int) -> np.ndarray:
     """float64[N, K]: each sample's probability of carrying each founder row, from its pair-state

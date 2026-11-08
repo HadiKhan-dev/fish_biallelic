@@ -67,7 +67,7 @@ _TERM_HIGH = (0, 1, 2, 1, 2, 2)
 _CODE_PAIR_TERM = (0, 1, 2, 1, 3, 4, 2, 4, 5)
 
 
-@kernel(overloads=((types.int64, types.float64),), cache=True, inline="always")
+@kernel(overloads=((types.int64, types.float64),), cache=True, inline="always", nogil=True)
 def _code_probability(code, background):
     return background if code == 2 else float(code)
 
@@ -86,6 +86,7 @@ def _code_probability(code, background):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _emission_grid(h, gl, observed, starts, stops, mix):
     """Per sample and bin, the summed log emission of every copy-state pair (sites added in
@@ -160,6 +161,7 @@ def _emission_grid(h, gl, observed, starts, stops, mix):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _redraw_forward(x, pi, r):
     s = len(pi)
@@ -184,6 +186,7 @@ def _redraw_forward(x, pi, r):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _redraw_backward(x, pi, r):
     s = len(pi)
@@ -210,6 +213,7 @@ def _redraw_backward(x, pi, r):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _carrier_weights(weights, intervals_morgans, rate, background_mass, count_band):
     """Per sample and bin, the normalised cavity weights (bin emission excluded) of the ordered
@@ -285,6 +289,7 @@ def _carrier_weights(weights, intervals_morgans, rate, background_mass, count_ba
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _refit_sites(
     result,

@@ -188,6 +188,17 @@ class PanelConfig:
         default=150.0,
         metadata={"provenance": "3.5 pedigree/config.py:PanelConfig.pair_relevance_margin; P0 PS07"},
     )
+    # Release 4.7 (owner, 7 November 2026): at most this many admitted pairs of a child enter the M2 panel, the best
+    # by their largest bound gap over the relevance fits. Pairs tied with the last kept one (an equal gap) all enter,
+    # and a pair whose gap is not a number is always kept. A child with more admitted pairs is flagged
+    # (CandidatePanel.capped_children, the search diagnostics' m2_panel_capped): its M2 evidence then covers fewer
+    # pairs, so its calls rest on an incomplete panel. The cap binds only at very low depth, where admitted pairs grow
+    # with the square of the eligible parents (about 50,000 per child at 0.05x and N = 320, against about 1.4 at
+    # 0.35x), making the M2 scoring cubic in N.
+    max_pairs_per_child: int = field(
+        default=256,
+        metadata={"provenance": "owner 7 Nov 2026 (release 4.7): per-child M2 pair cap, flagged when it binds"},
+    )
     # States with at least this transmitted-state mass keep their own group in the pair bound (a parent's other named
     # states are aggregated). Any value keeps the bound valid; it only sets its tightness and cost.
     pair_bound_high_mass: float = field(

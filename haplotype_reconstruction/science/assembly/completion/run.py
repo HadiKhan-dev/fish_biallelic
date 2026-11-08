@@ -161,6 +161,7 @@ def _unknown_mass_veto(panel: LocalPanel, maximum_mass: float) -> bool:
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _focal_mask(neutral, observed, starts, offsets, kept, tolerance, focal):
     """Block-major focal-informative mask, in one scan over (block, sample) rows: block b occupies

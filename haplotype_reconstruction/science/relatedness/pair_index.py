@@ -15,6 +15,7 @@ from ...core.kernels import kernel
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def pair_indices(n, lo, hi):
     """Unordered sample pairs [lo, hi) in row-major upper-triangle order, without triu temporaries."""

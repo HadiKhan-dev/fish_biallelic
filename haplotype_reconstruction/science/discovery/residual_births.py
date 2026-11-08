@@ -153,7 +153,7 @@ def alt_fraction_families(
     return first, second
 
 
-@kernel(overloads=((_FLOAT64_2C,),), cache=True)
+@kernel(overloads=((_FLOAT64_2C,),), cache=True, nogil=True)
 def _sample_sum_2d(values):
     result = np.empty(values.shape[1], dtype=np.float64)
     for column in range(values.shape[1]):
@@ -704,7 +704,7 @@ def _residual_records(
     )
 
 
-@kernel(overloads=((types.uint64,),), cache=True, inline="always")
+@kernel(overloads=((types.uint64,),), cache=True, inline="always", nogil=True)
 def _popcount(value):
     """64-bit population count (SWAR reduction)."""
     value = value - ((value >> np.uint64(1)) & np.uint64(0x5555555555555555))
@@ -764,6 +764,7 @@ def _hamming_distances(hard_calls, minimum_joint):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _diameter_within(distance, members, bound):
     """The dense submatrix maximum test, without allocating that submatrix."""
@@ -924,6 +925,7 @@ def _cluster_cached(
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
     """Per site, the sum over samples of min(1, w_s) x (the sample's responsibility-weighted
@@ -985,6 +987,7 @@ def _pooled_log_odds(members, sample_indices, weights, compatible, log_odds):
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _sample_support(ordered, sample_indices, weights):
     """(distinct samples, each sample's capped support min(1, running sum of its records' weights) in member
@@ -1024,6 +1027,7 @@ def _consensus(members, sample_indices, weights, compatible, log_odds, call_prob
         ),
     ),
     cache=True,
+    nogil=True,
 )
 def _closest(candidate, existing, minimum_joint, n_sites, known_probability):
     """Nearest existing row by missing-aware Hamming distance over sites called in both

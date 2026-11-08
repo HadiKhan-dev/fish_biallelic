@@ -16,7 +16,7 @@ from .parameters import CERTIFICATE_GL_ULPS
 EPS = np.finfo(float).eps
 
 
-@kernel(overloads=OVERLOADS["certificates.vector_bridge"], cache=True)
+@kernel(overloads=OVERLOADS["certificates.vector_bridge"], cache=True, nogil=True)
 def vector_bridge(current, stay, alpha, beta, row_arm, column_arm, pivot, branch, excursion):
     """The existing cancellation-free bridge on a single vector, O(K)."""
     n = len(current)
@@ -56,7 +56,7 @@ def vector_bridge(current, stay, alpha, beta, row_arm, column_arm, pivot, branch
     return out
 
 
-@kernel(overloads=OVERLOADS["certificates.dense_bridges"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["certificates.dense_bridges"], cache=True, parallel=True, nogil=True)
 def dense_bridges(stay, alpha, beta, row_arm, column_arm, pivot, branch, excursion):
     n, bins, k = stay.shape
     out = np.empty((n, bins, k, k))
@@ -79,7 +79,7 @@ def dense_bridges(stay, alpha, beta, row_arm, column_arm, pivot, branch, excursi
     return out
 
 
-@kernel(overloads=OVERLOADS["certificates.power_common"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["certificates.power_common"], cache=True, parallel=True, nogil=True)
 def power_common(common, children, exponent):
     count, bins, k, _ = common.shape
     powered = np.empty((count, bins, 2, k, k))
@@ -104,7 +104,7 @@ def power_common(common, children, exponent):
     return powered, scales
 
 
-@kernel(overloads=OVERLOADS["certificates.block_upper"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["certificates.block_upper"], cache=True, parallel=True, nogil=True)
 def block_upper(
     children,
     first,
@@ -230,7 +230,7 @@ def block_upper(
     return output
 
 
-@kernel(overloads=OVERLOADS["certificates.global_common_logs"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["certificates.global_common_logs"], cache=True, parallel=True, nogil=True)
 def global_common_logs(children, state_alt, gl, coefficient, indices, starts, stops, mismatch):
     """Relax only uncertain parental alleles to [0,1]; retain the null chain.
 

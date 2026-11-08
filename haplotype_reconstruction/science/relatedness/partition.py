@@ -29,6 +29,10 @@ from .parameters import FamilyParameters
 _DEFAULT_FAMILY = FamilyParameters()
 
 
+def _no_claim():
+    return None
+
+
 class _Partition:
     """Mutable families over the run's samples (family indices are reused once a family empties), with the search's
     kept gains.
@@ -37,8 +41,11 @@ class _Partition:
     computed for and is evaluated again once that differs. join[f, c]: the change of family f's log-likelihood when
     sample c joins it; leave[c]: the change of c's family's log-likelihood when c leaves it."""
 
-    def __init__(self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY):
+    def __init__(self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY, claim_threads=None):
         self.parameters = parameters
+        # Step boundary hook: the caller re-reads its CPU share and applies it to the parallel kernels' team, so a
+        # search that starts beside other stages grows into the CPUs they free. Values never depend on the team.
+        self.claim_threads = claim_threads if claim_threads is not None else _no_claim
         self.C, self.logpi, self.logpost = C, logpi, logpost
         self.N, self.M = C.shape[0], C.shape[1]
         # Every live family contains a sample; even a split or an undone merge needs at most N slots.

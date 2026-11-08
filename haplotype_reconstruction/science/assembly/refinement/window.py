@@ -103,7 +103,7 @@ MEMO_SLOTS = 2048
 
 
 # ------------------------------------------------------------------ one sample-site from the evidence
-@kernel(overloads=overloads_for(__name__, "informative_at"), inline="always")
+@kernel(overloads=overloads_for(__name__, "informative_at"), inline="always", nogil=True)
 def informative_at(ev, kept, s, f):
     """Forward site f carries evidence for sample s: an objective site where its likelihoods are informative."""
     if not kept[f]:
@@ -112,7 +112,7 @@ def informative_at(ev, kept, s, f):
     return informative
 
 
-@kernel(overloads=overloads_for(__name__, "site_values"), inline="always")
+@kernel(overloads=overloads_for(__name__, "site_values"), inline="always", nogil=True)
 def site_values(ev, kept, partial, s, f, e):
     """e[0..6] = the uncentred robust log evidence of the seven pair codes of sample s at forward site f
     (codes 3-6 only at partial sites); returns False (e untouched) where the site is skipped. The arithmetic
@@ -133,7 +133,7 @@ def site_values(ev, kept, partial, s, f, e):
     return True
 
 
-@kernel(overloads=overloads_for(__name__, "switch_cost"), inline="always")
+@kernel(overloads=overloads_for(__name__, "switch_cost"), inline="always", nogil=True)
 def switch_cost(rho, founders):
     """Per changed homologue log(1 - rho (1 - 1/K)) - log(rho / K) >= 0; +inf without a preceding
     informative site (rho = 0), 0 for an exact uniform reset."""
@@ -144,7 +144,7 @@ def switch_cost(rho, founders):
     return math.log1p(-rho * (1.0 - 1.0 / founders)) - math.log(rho) + math.log(founders)
 
 
-@kernel(overloads=overloads_for(__name__, "gap_cost"), inline="always")
+@kernel(overloads=overloads_for(__name__, "gap_cost"), inline="always", nogil=True)
 def gap_cost(mass, founders):
     """float32 switch cost of a gap of reset hazard `mass` (3.3's map_switch_costs: rho = 1 - exp(-mass))."""
     return np.float32(switch_cost(-math.expm1(-mass), founders))
@@ -179,7 +179,7 @@ def cost_value(ev, kept, hazards, s, f, founders, reverse):
 
 
 # ------------------------------------------------------------------ kernel accessors
-@kernel(overloads=overloads_for(__name__, "locate"), inline="always")
+@kernel(overloads=overloads_for(__name__, "locate"), inline="always", nogil=True)
 def locate(win, s, j):
     """(forward site, column, row) of sample s at site j of the window's orientation; column or row -1 when
     the window does not hold it."""
@@ -192,7 +192,7 @@ def locate(win, s, j):
     return f, k, r
 
 
-@kernel(overloads=overloads_for(__name__, "site_logs"), inline="always")
+@kernel(overloads=overloads_for(__name__, "site_logs"), inline="always", nogil=True)
 def site_logs(win, s, f, k, r, e):
     """e[0..6] = the uncentred log evidence of the pair codes of sample s at forward site f (column k, row r
     from locate); False where the site is skipped. Codes 3-6 are set only at partial sites."""
@@ -217,7 +217,7 @@ def site_logs(win, s, f, k, r, e):
     return site_values(win[0], win[1], win[2], s, f, e)
 
 
-@kernel(overloads=overloads_for(__name__, "site_cost"), inline="always")
+@kernel(overloads=overloads_for(__name__, "site_cost"), inline="always", nogil=True)
 def site_cost(win, s, f, k, r):
     """float32 switch cost of sample s at forward site f in the window's orientation (column k, row r)."""
     meta = win[8]
@@ -226,7 +226,7 @@ def site_cost(win, s, f, k, r):
     return cost_value(win[0], win[1], win[3], s, f, meta[FOUNDERS], win[9])
 
 
-@kernel(overloads=overloads_for(__name__, "skipped"), inline="always")
+@kernel(overloads=overloads_for(__name__, "skipped"), inline="always", nogil=True)
 def skipped(win, s, j):
     """Site j (window orientation) carries no evidence for sample s (read from the evidence itself)."""
     meta = win[8]
@@ -234,24 +234,24 @@ def skipped(win, s, j):
     return not informative_at(win[0], win[1], s, f)
 
 
-@kernel(overloads=overloads_for(__name__, "capacity"), inline="always")
+@kernel(overloads=overloads_for(__name__, "capacity"), inline="always", nogil=True)
 def capacity(win):
     """Sites a window can hold (the whole component for a resident window)."""
     return win[4].shape[1]
 
 
-@kernel(overloads=overloads_for(__name__, "samples_of"), inline="always")
+@kernel(overloads=overloads_for(__name__, "samples_of"), inline="always", nogil=True)
 def samples_of(win):
     return win[0].shape[0]
 
 
-@kernel(overloads=overloads_for(__name__, "sites_of"), inline="always")
+@kernel(overloads=overloads_for(__name__, "sites_of"), inline="always", nogil=True)
 def sites_of(win):
     return win[8][SITES]
 
 
 # ------------------------------------------------------------------ filling
-@kernel(overloads=overloads_for(__name__, "_memo_slot"), inline="always")
+@kernel(overloads=overloads_for(__name__, "_memo_slot"), inline="always", nogil=True)
 def _memo_slot(x0, x1, x2):
     """Hash slot of a likelihood triple (any deterministic function: a slot is used only on an exact match)."""
     h = (int(x0 * 1048573.0) * 31 + int(x1 * 1048583.0)) * 31 + int(x2 * 1048589.0)
@@ -498,7 +498,7 @@ def cover(win, lo, hi, s0, s1, backward):
     refill(win, f0, f1, s0, s1)
 
 
-@kernel(overloads=overloads_for(__name__, "stretch"), inline="always")
+@kernel(overloads=overloads_for(__name__, "stretch"), inline="always", nogil=True)
 def stretch(offsets, b0, b1, limit):
     """The end block of the next stretch of whole blocks from b0 (towards b1 > b0) holding at most `limit`
     sites (at least one block)."""
@@ -508,7 +508,7 @@ def stretch(offsets, b0, b1, limit):
     return end
 
 
-@kernel(overloads=overloads_for(__name__, "stretch_back"), inline="always")
+@kernel(overloads=overloads_for(__name__, "stretch_back"), inline="always", nogil=True)
 def stretch_back(offsets, b0, b1, limit):
     """The start block of the next stretch of whole blocks ending at b1 (towards b0 < b1) holding at most
     `limit` sites (at least one block)."""

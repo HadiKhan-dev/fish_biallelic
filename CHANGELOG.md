@@ -1,5 +1,139 @@
 # Changelog
 
+## 4.7.0 (8 November 2026)
+
+This release shortens the run's critical path and uses every allocated CPU. Founder calls, counts, panels,
+paintings, pedigree calls and phase are scientifically identical to 4.6.0. These reports change:
+- count-step decision records of rounds skipped by a bound carry the proven bound instead of a computed margin and
+  band, and those rounds publish no `count_unverified` record (about half of them disappear);
+- `pedigree/search_diagnostics.csv` has a new column, `m2_panel_capped`, and children whose parent pairs are capped
+  have shorter explanation and candidate tables;
+- `painting/painting_model.csv` has a new column, `ContinuityBudgetReached`.
+
+A new output root is required: kernels and painting and pedigree parameters were added, so checkpoint identities
+differ from 4.6's.
+
+The supported mean read depth is now stated: 1x per sample or more, with releases also validated at 0.5x
+(see the README).
+
+**Every allocated CPU.** No stage limits itself to a fixed thread count any more. Discovery block tasks and the
+evidence, relatedness-family and relatedness-pair tasks accepted at most 16 CPUs, and shared-array copies used at
+most 16 threads; they now take the whole allowance the scheduler grants.
+
+**Relatedness: the family fit grows its thread team.** The family partition is fitted once for the whole genome,
+after every contig's evidence and before discovery finishes. It started with the CPUs free at that moment, often
+one, and kept them: in the 4.6 N = 320 depth-1 run it held the critical path for about an hour on one of 112 CPUs.
+It now re-reads its share at every agglomeration batch, move sweep and support unit, as other stages do. The family
+product is identical; the fit took 478 s on one thread, 49 s on 16 and 24 s on 112.
+
+**Every kernel releases the interpreter lock.** Several stages run kernels from concurrent threads of one
+process: the pedigree screen's chromosome tasks, assembly's component team, concurrent refits and join passes, and
+the evidence site-quality and read-model pools. A kernel that held Python's interpreter lock ran alone, however
+many threads were waiting. All 653 kernels are now declared `nogil` (260 already were). Kernels allocate their
+scratch per call and concurrent threads write disjoint outputs, so results are unchanged. Replays of the 4.6
+N = 320 depth-1 run: chr22 and chr10 assembly (all cores) take 947 s and 866 s instead of 1,475 s and 1,353 s,
+with the same decisions; painting and evidence preparation are identical.
+
+**Pedigree: the slowest chromosome uses the CPUs its peers free.** The selective screen runs one task per
+chromosome in each query phase, and each phase waits for the slowest. A task's parallel kernel kept the thread team
+it started with, about a twentieth of the CPUs, for the whole call; the largest chromosome then ran alone on that
+share while the rest of the node idled. Each query now runs in 32 chunks of parent pairs and re-reads its share
+before each chunk. Pairs are scored independently, so the screen product is identical. Replaying the 4.6 depth-1
+screen on 76 CPUs: 1,126 s with 23 CPUs busy on average, now 521 s with 53 (the interpreter-lock change alone gave
+1,063 s).
+
+**Founder refinement: a summed count-deletion bound.** A count-deletion round is skipped when an optimistic bound
+proves, for every candidate, that the larger panel is kept and that the call is not ambiguous. 4.6 bounded each
+sample separately, and each sample could drop a different founder at every block. That bound almost never fired
+(0 of 1,385 recorded decisions). 4.7 sums the bound over samples at one dropped row per block, the same for all
+samples, as any panel with one founder fewer must. It covers the point margin, the leave-one-sample-out margin and
+every bootstrap replicate of the decision's own stream. In replays of the 4.6 N = 320 depth-1 run:
+- chr22: 61 of 239 deletion rounds are skipped; refinement windows fall 22-34% by level (31% overall);
+- chr10: windows fall 12% at the first two levels.
+
+The decisions, founder rows and counts are unchanged. A skipped round runs no shadow-family evaluation. So a round whose
+shadow family would have overflowed its evaluation budget is no longer reported `count_unverified`: the bound proves the
+decision for every shadow. In the release matrix 318 such records fall to 152. If a best-F restore needs the adjacent
+smaller fit, the skipped round's refits run first, under the same label.
+
+**Painting: emissions built once.** The tempered emissions do not depend on the copying model's parameters, so its
+8 EM updates now read one packed copy instead of rebuilding them each update. Label continuity likewise keeps each
+sample batch's part emissions for all its candidate checks instead of recomputing them per candidate. Both caches
+share a budget of up to 8 GiB per contig; they are not reservations. The painting product is identical. Painting
+times (wall / CPU):
+- chr22, depth 1: 183 s / 1,509 CPU-s to 43 s / 712 CPU-s;
+- chr9, depth 0.25: 721 s / 4,904 CPU-s to 103 s / 2,214 CPU-s;
+- chr12, depth 0.1: 4,824 s to 450 s wall.
+
+**Painting: interrupted work is kept.** Painting publishes progress records as it goes: each component's copying
+model, its label-continuity outcome and its decoded samples in fixed blocks of 16. A resumed run restores them and
+decodes only the missing samples, on any number of CPUs. The records do not depend on the CPU count, so a run and its
+shell workflow still publish the same records. The product is identical to an uninterrupted run.
+
+**Painting: fewer logarithms and cheaper evidence reads.** Each bin's emission now takes one logarithm of the
+product of its sites' clamped probabilities (rescaled before it can underflow) instead of one per site; the
+emissions move in the last digits (at most 4e-14 on chr22), and every released painting value is unchanged. Reading
+a sample's coded evidence rows marks the requested codes instead of sorting them; the rows are identical. Painting
+chr22 at depth 1 on 8 CPUs: 92 s / 530 CPU-s before, 64 s / 403 CPU-s after.
+
+**Painting: label continuity is bounded on long chromosomes at low depth.** Label continuity repairs label
+exchanges between founder rows by trying relabellings and re-decoding every sample under each. Its last iteration
+must show that no remaining candidate is acceptable, so it re-decoded every candidate that passed the screen: on long
+chromosomes below 0.5x that is hundreds of whole-chromosome decodes (621 checks for 3 accepted moves on chr12 at 0.1x),
+and painting time grew with the square of chromosome length. An iteration now re-decodes at most
+`label_continuity_check_budget` (64) candidates in ranked order; reaching it ends the search, and the component is
+flagged (painting model table, ContinuityBudgetReached). Candidates ranked below the budget are not checked. At the
+release-matrix depths and N = 320 at 0.5x and 1x, no component checked more than 8 candidates, so their paintings are
+unchanged. On chr12 at 0.1x (76-CPU node) the search makes the same 3 moves and the painting is identical, with
+84 checks instead of 621: painting takes 144 s instead of 470 s (4.6: 4,763 s); chr9 at 0.25x is unchanged (the
+budget is not reached).
+
+**Family phase: cheaper allele-evidence terms.** The per-site evidence terms select precomputed genotype-column
+steps directly instead of gathering columns. The results are bit-identical. Phase CPU on chr22 falls 17%
+(681 to 565 CPU-seconds).
+
+**VCF input: one pass per window.** Each window of a contig is read once: records are admitted, their allele depths
+decoded and duplicate positions dropped in the same pass (4.6 scanned every window twice). The decoded reads and
+the payload identity are identical; a TroMau contig decodes in 4.0 s instead of 6.3 s on one worker.
+
+**Pedigree: a per-child cap on scored parent pairs.** At very low depth the admitted M2 parent pairs grow with the
+square of the eligible parents (about 50,000 per child at 0.05x and N = 320), and scoring them became cubic in N.
+A child now scores at most `max_pairs_per_child` (256) pairs: the best by bound gap, with whole tie classes, and
+pairs with an unscored gap always kept. When the cap binds, the child is flagged (`m2_panel_capped`). In the release
+matrix it binds in 8 of 39 cases (4 children of 112 in f3, 19 of 116 in each of the seven actm3 variants): their
+pedigree calls are unchanged, and their explanation and candidate tables list the 256 pairs scored.
+
+Measured and not adopted:
+- a second search direction only for promising refits (it changes the winning refit in 17-31% of large-component
+  rounds);
+- screening acceptance candidates (no exact bound cheaper than the exact gain);
+- sharing proposal templates across refits (their inputs never coincide);
+- fused multiply-add (about 1% faster);
+- a fused site-quality objective (no faster);
+- discovery start races, at birth groups or at every fit call (they change the discovered panels: at depth 0.5,
+  56 of 100 blocks changed and the fit was worse in 33 of them, better in 16);
+- a local-selection trial race (identical calls, but slower at depths 1 and 5, faster only at 0.5 and below);
+- incremental merge scoring in relatedness (the thread-team growth above removed its cost);
+- stopping label-continuity checks at a certain rejection (identical decisions, 11% less CPU but 21% more wall time
+  on chr12 at 0.1x: rejected candidates fail late, and smaller decode calls parallelise worse).
+
+**Validation.** The 39-case release matrix and whole-genome N = 320 simulations at depths 1 and 0.5 were rerun and
+compared with 4.6 cell by cell:
+- every case completes; founder accuracy against truth is identical wherever it is scored;
+- 31 of 39 matrix cases, all seven TroMau cases among them, and both N = 320 runs have no scientific difference,
+  only the report changes above and continuous values within 1e-12 relative (painting emissions computed with one
+  logarithm per bin reach phase and pedigree);
+- the other 8 cases differ only where the pair cap binds, in pedigree explanation and candidate tables; their
+  released pedigree calls are identical;
+- N = 320: founders 5 and 79 alleles per million wrong at depths 1 and 0.5, every parent state and all 600 pedigree
+  edges right, phase switch errors 31 and 32, as with 4.6.
+
+The test suite (3,797 tests) and the workflow receipt pass; the stage tier (301) passed on the candidate before the
+check budget was added. Wall time: the N = 320 critical path falls from 3.7 to 2.3 hours at depth 1 (relatedness from an
+hour to 6 minutes; pedigree, phase and export faster) and from 3.5 to 2.9 hours at depth 0.5; matrix cases on the same
+hardware take 16% less time (median), with real-data cases unchanged. On identical hardware a run uses the same total
+CPU as with 4.6.
+
 ## 4.6.0 (7 November 2026)
 
 This release makes local selection faster, most at low depth. Configurations, commands, record schemas and table

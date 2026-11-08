@@ -62,7 +62,7 @@ from .projection import Projection
 # Pair rows per batch.
 
 
-@kernel(overloads=OVERLOADS["pair_bound.emission_bound"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound.emission_bound"], cache=True, parallel=True, nogil=True)
 def emission_bound(
     state_alt,
     background_low,
@@ -113,7 +113,7 @@ def emission_bound(
     return out
 
 
-@kernel(overloads=OVERLOADS["pair_bound.partner_bound"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound.partner_bound"], cache=True, parallel=True, nogil=True)
 def partner_bound(
     state_alt,
     background_low,
@@ -174,7 +174,7 @@ def partner_bound(
     return out
 
 
-@kernel(overloads=OVERLOADS["pair_bound._candidate_groups"], cache=True)
+@kernel(overloads=OVERLOADS["pair_bound._candidate_groups"], cache=True, nogil=True)
 def _candidate_groups(
     n,
     pi,
@@ -254,7 +254,7 @@ def _candidate_groups(
                     transfer[n, block, g, h] = mass[h]
 
 
-@kernel(overloads=OVERLOADS["pair_bound._group_counts"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound._group_counts"], cache=True, parallel=True, nogil=True)
 def _group_counts(pi, available, high_mass):
     candidates, bins, states = pi.shape
     background = states - 1
@@ -274,7 +274,7 @@ def _group_counts(pi, available, high_mass):
     return count
 
 
-@kernel(overloads=OVERLOADS["pair_bound._fill_groups"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound._fill_groups"], cache=True, parallel=True, nogil=True)
 def _fill_groups(
     pi,
     stay,
@@ -350,7 +350,7 @@ def slot_groups(
     return group, count, initial, transfer
 
 
-@kernel(overloads=OVERLOADS["pair_bound.scaled_emissions"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound.scaled_emissions"], cache=True, parallel=True, nogil=True)
 def scaled_emissions(log_emission, exponent, child_list):
     """Emission bounds relative to each child and bin's best state pair: (full, tempered [n, B, S, S] probabilities,
     their summed log offsets [n] per view, the bin maxima [n, B])."""
@@ -383,7 +383,7 @@ def scaled_emissions(log_emission, exponent, child_list):
     return full, tempered, offset_full, offset_tempered, top
 
 
-@kernel(overloads=OVERLOADS["pair_bound._step"], cache=True)
+@kernel(overloads=OVERLOADS["pair_bound._step"], cache=True, nogil=True)
 def _step(alpha, work, n_from_p, n_from_q, n_to_p, n_to_q, tp, tq):
     """alpha[to_p, to_q] = sum alpha[from_p, from_q] tp[from_p, to_p] tq[from_q, to_q] (axis by axis)."""
     for i in range(n_from_p):
@@ -400,7 +400,7 @@ def _step(alpha, work, n_from_p, n_from_q, n_to_p, n_to_q, tp, tq):
             alpha[i, j] = value
 
 
-@kernel(overloads=OVERLOADS["pair_bound._log_absorb"], cache=True)
+@kernel(overloads=OVERLOADS["pair_bound._log_absorb"], cache=True, nogil=True)
 def _log_absorb(alpha, log_group, n_p, n_q):
     """alpha <- alpha x exp(log_group), normalised; returns the log normaliser. The shift is the largest
     log(alpha) + log_group over groups holding mass, so no group's product underflows against an empty maximum."""
@@ -427,7 +427,7 @@ def _log_absorb(alpha, log_group, n_p, n_q):
     return maximum + math.log(total)
 
 
-@kernel(overloads=OVERLOADS["pair_bound._absorb_view"], cache=True)
+@kernel(overloads=OVERLOADS["pair_bound._absorb_view"], cache=True, nogil=True)
 def _absorb_view(
     alpha,
     saved,
@@ -482,7 +482,7 @@ def _absorb_view(
     return _log_absorb(alpha, log_group, n_p, n_q), False
 
 
-@kernel(overloads=OVERLOADS["pair_bound._pair_row"], cache=True)
+@kernel(overloads=OVERLOADS["pair_bound._pair_row"], cache=True, nogil=True)
 def _pair_row(
     row,
     trios,
@@ -611,7 +611,7 @@ def _pair_row(
     return 0.5 * (log_full + log_temp)
 
 
-@kernel(overloads=OVERLOADS["pair_bound.pair_bounds"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["pair_bound.pair_bounds"], cache=True, parallel=True, nogil=True)
 def pair_bounds(
     trios,
     row_child,

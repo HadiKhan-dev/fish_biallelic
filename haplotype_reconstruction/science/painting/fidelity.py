@@ -312,7 +312,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_structured_emissions"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_structured_emissions"], cache=True, parallel=True, nogil=True)
 def _structured_emissions(raw, emission_label, n_labels):
     n_samples, _, n_bins = raw.shape
     n_track = len(emission_label)
@@ -331,7 +331,7 @@ def structured_emissions(raw: np.ndarray, tracks: TrackStates) -> np.ndarray:
     return _structured_emissions(np.ascontiguousarray(raw), tracks.emission, len(tracks.error_of))
 
 
-@kernel(overloads=_OVERLOADS["_log_terms"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_log_terms"], cache=True, inline="always", nogil=True)
 def _log_terms(theta, n_labels, a, b):
     """(log stay, log move to one particular other label, log F[2, 2], log pi[2])."""
     log_stay = math.log1p(-theta)
@@ -363,7 +363,7 @@ def initial_log(tracks: TrackStates, capable: np.ndarray, a: float, b: float) ->
     return result
 
 
-@kernel(overloads=_OVERLOADS["_first_within"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_first_within"], cache=True, inline="always", nogil=True)
 def _first_within(values, labels, threshold, excluded, reverse):
     """The smallest index y (the largest under ``reverse``) with values[y] >= threshold and labels[y] != excluded
     (-1 when there is none)."""
@@ -375,7 +375,7 @@ def _first_within(values, labels, threshold, excluded, reverse):
     return -1
 
 
-@kernel(overloads=_OVERLOADS["_max_stage"], cache=True)
+@kernel(overloads=_OVERLOADS["_max_stage"], cache=True, nogil=True)
 def _max_stage(
     values,
     labels,
@@ -470,7 +470,7 @@ def _max_stage(
         out_index[z] = top_index
 
 
-@kernel(overloads=_OVERLOADS["_viterbi_kernel"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_viterbi_kernel"], cache=True, parallel=True, nogil=True)
 def _viterbi_kernel(emissions, labels, fids, error_of, capable, initial, theta, a, b, tie, reverse):
     """Max-product recursion over the bins in the given order; ``reverse`` (the mirrored convention, emissions and
     theta reversed by the caller) uses the transposed transition and the reversed index ties, and takes the initial
@@ -587,7 +587,7 @@ def viterbi_track_states(
     )
 
 
-@kernel(overloads=_OVERLOADS["_sum_stage"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_sum_stage"], cache=True, inline="always", nogil=True)
 def _sum_stage(values, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary, out):
     """out[z] = sum_y values[y] T(y -> z) (probabilities, values scaled), O(S')."""
     n = len(values)
@@ -612,7 +612,7 @@ def _sum_stage(values, labels, fids, error_of, capable, n_labels, log_stay, log_
         out[z] = same + moved
 
 
-@kernel(overloads=_OVERLOADS["_transposed_parts"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_transposed_parts"], cache=True, inline="always", nogil=True)
 def _transposed_parts(
     values,
     labels,
@@ -683,7 +683,7 @@ def _transposed_parts(
             total[y] = moved[y] + stay * values[label]
 
 
-@kernel(overloads=_OVERLOADS["_chain_kernel"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["_chain_kernel"], cache=True, parallel=True, nogil=True)
 def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a, b, eligible, want_masses):
     """Exact scaled forward-backward of the chain, per eligible sample: expected label changes per edge (both
     tracks); expected error-run starts and ends and kept faithful and kept error transitions of anchored labels that
@@ -970,7 +970,7 @@ def chain_statistics(
     )
 
 
-@kernel(overloads=_OVERLOADS["masses_from_pairs"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["masses_from_pairs"], cache=True, parallel=True, nogil=True)
 def masses_from_pairs(faithful_mass, masks, other_masks, public_ids, local_keys):
     """qF and qAF float64[N,B], preserving the native first/second state summation.
 

@@ -255,7 +255,7 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["hamming_max_values"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["hamming_max_values"], cache=True, inline="always", nogil=True)
 def hamming_max_values(
     values,
     cost_same,
@@ -323,7 +323,7 @@ def hamming_max_values(
             out[row * n_states + column] = best
 
 
-@kernel(overloads=_OVERLOADS["_allele_visible_change"], cache=True)
+@kernel(overloads=_OVERLOADS["_allele_visible_change"], cache=True, nogil=True)
 def _allele_visible_change(previous, current, bin_index, local_keys, n_classes):
     """1 if a track change previous -> current changes the track's alleles."""
     if previous == current:
@@ -337,7 +337,7 @@ def _allele_visible_change(previous, current, bin_index, local_keys, n_classes):
     return 1
 
 
-@kernel(overloads=_OVERLOADS["parsimonious_track_order"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["parsimonious_track_order"], cache=True, parallel=True, nogil=True)
 def parsimonious_track_order(paths, local_keys, n_classes):
     """Among equal-score Viterbi paths, the track order with fewer allele changes.
 
@@ -393,7 +393,7 @@ def minimum_switch_counts(paths: np.ndarray) -> np.ndarray:
     return np.sum(np.minimum(direct, swapped), axis=1, dtype=np.int64)
 
 
-@kernel(overloads=_OVERLOADS["direct_support"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["direct_support"], cache=True, parallel=True, nogil=True)
 def direct_support(paths, named_alleles, informative, bin_starts, bin_stops, background):
     """bool[N, 2, B]: the track's Viterbi class is called at an informative site of the bin."""
     n_samples, _, n_bins = paths.shape
@@ -411,7 +411,7 @@ def direct_support(paths, named_alleles, informative, bin_starts, bin_stops, bac
     return result
 
 
-@kernel(overloads=_OVERLOADS["_distinguishable"], cache=True)
+@kernel(overloads=_OVERLOADS["_distinguishable"], cache=True, nogil=True)
 def _distinguishable(
     first, second, partner, sample, bin_index, named_alleles, observed, bin_starts, bin_stops, n_classes
 ):
@@ -437,7 +437,7 @@ def _distinguishable(
     return False
 
 
-@kernel(overloads=_OVERLOADS["switch_interval_masks"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["switch_interval_masks"], cache=True, parallel=True, nogil=True)
 def switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops, n_classes):
     """int64[N, 2, B] candidate states of each track and bin as bit masks (release 2.2 switch intervals).
 
@@ -506,7 +506,7 @@ def switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops,
     return masks
 
 
-@kernel(overloads=_OVERLOADS["_bit_count"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_bit_count"], cache=True, inline="always", nogil=True)
 def _bit_count(value):
     count = 0
     while value:
@@ -515,7 +515,7 @@ def _bit_count(value):
     return count
 
 
-@kernel(overloads=_OVERLOADS["combine_candidate_masks"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["combine_candidate_masks"], cache=True, parallel=True, nogil=True)
 def combine_candidate_masks(primary, secondary):
     """int64[N, 2, B]: per bin the smallest unordered cover of two decodings' candidate sets, in ``primary``'s
     track order (release 2.2).
@@ -553,7 +553,7 @@ def combine_candidate_masks(primary, secondary):
     return result
 
 
-@kernel(overloads=_OVERLOADS["_mask_change"], cache=True, inline="always")
+@kernel(overloads=_OVERLOADS["_mask_change"], cache=True, inline="always", nogil=True)
 def _mask_change(previous, current, bin_index, local_keys, n_classes, n_states):
     """(changed, visible) of one track moving between candidate masks: (0, 0) when the masks share a state; else
     changed, and allele-invisible, (1, 0), when some pair of their states shares a local key below C in bin_index - 1
@@ -569,7 +569,7 @@ def _mask_change(previous, current, bin_index, local_keys, n_classes, n_states):
     return 1, 1
 
 
-@kernel(overloads=_OVERLOADS["canonical_track_order"], cache=True, parallel=True)
+@kernel(overloads=_OVERLOADS["canonical_track_order"], cache=True, parallel=True, nogil=True)
 def canonical_track_order(masks, local_keys, n_classes):
     """bool[N, B]: whether to exchange the two tracks of each bin, so that the track order (the H1/H2 gauge) is a
     function of the unordered candidate pairs alone (release 2.14).

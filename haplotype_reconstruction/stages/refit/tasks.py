@@ -18,7 +18,7 @@ from ...science.refit.run import refit_chromosome, summary
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from . import records
 
 _DEFAULT_TIES = TieSettings()
@@ -113,7 +113,7 @@ def refit_task(
     ties: TieSettings = _DEFAULT_TIES,
     numerical_policy: NumericalPolicy | None = None,
     dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = 16,
+    max_cores: int = ALL_CORES,
 ) -> Task:
     """Declare one affinity-scoped contig task; no live resources enter identity."""
     if max_cores < 1:

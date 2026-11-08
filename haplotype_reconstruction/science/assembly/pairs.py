@@ -17,7 +17,7 @@ from haplotype_reconstruction.core.kernels import kernel
 from .join.kernels import overloads_for
 
 
-@kernel(overloads=overloads_for(__name__, "emission_pair_index"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "emission_pair_index"), cache=True, inline="always", nogil=True)
 def emission_pair_index(first: int, second: int) -> int:
     """Packed triangular emission index, valid for nonnegative local row indices."""
     high = max(first, second)
@@ -52,7 +52,7 @@ def state_pairs(founders: int, allowed=None):
     return first, second
 
 
-@kernel(overloads=overloads_for(__name__, "splice_column"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "splice_column"), cache=True, inline="always", nogil=True)
 def splice_column(first: int, second: int, founders: int) -> int:
     """Strict first < second triangular column of the K(K-1)/2 splice table."""
     return first * (2 * founders - first - 1) // 2 + second - first - 1

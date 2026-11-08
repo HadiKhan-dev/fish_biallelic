@@ -233,7 +233,7 @@ def mixture_terms(counts, grid):
 
 # The pairing statistic of every locus pair: each parent decidable at both loci contributes the term of its
 # (k, n) count to three flip mixtures. A (k, n) count is coded n (n + 1) / 2 + k and its terms are tabulated once.
-@kernel(overloads=_OVERLOADS["_pair_codes"], cache=True)
+@kernel(overloads=_OVERLOADS["_pair_codes"], cache=True, nogil=True)
 def _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second, here, there, discordance):
     """Count codes per parent with edges decidable at both loci; returns the number of parents."""
     rows = 0
@@ -256,7 +256,7 @@ def _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second, her
     return rows
 
 
-@kernel(overloads=_OVERLOADS["_used_pair_codes"], cache=True)
+@kernel(overloads=_OVERLOADS["_used_pair_codes"], cache=True, nogil=True)
 def _used_pair_codes(decidable, odd, parent_offsets, parent_edges, codes):
     """Mark the switch (here/there) and discordance count codes that occur in any locus pair."""
     loci, parents = decidable.shape[0], len(parent_offsets) - 1
@@ -273,7 +273,7 @@ def _used_pair_codes(decidable, odd, parent_offsets, parent_edges, codes):
     return switch, discordant
 
 
-@kernel(overloads=_OVERLOADS["_mixture_maximum"], cache=True)
+@kernel(overloads=_OVERLOADS["_mixture_maximum"], cache=True, nogil=True)
 def _mixture_maximum(table, rows, codes, count, sums):
     """Maximum over the grid of the parents' summed mixture terms (summed in parent order)."""
     sums[:] = 0.0
@@ -284,7 +284,7 @@ def _mixture_maximum(table, rows, codes, count, sums):
     return np.max(sums)
 
 
-@kernel(overloads=_OVERLOADS["_pairing_scores"], cache=True)
+@kernel(overloads=_OVERLOADS["_pairing_scores"], cache=True, nogil=True)
 def _pairing_scores(
     decidable, odd, parent_offsets, parent_edges, switch_table, switch_rows, discordance_table, discordance_rows
 ):

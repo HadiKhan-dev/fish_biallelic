@@ -57,6 +57,7 @@ def informative_sites(component: FounderComponent, prepared, max_sites: int, usa
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _informative_samples(neutral, site_sets):
     """bool[n, N]: sample s is informative for component c when its (neutral) evidence is

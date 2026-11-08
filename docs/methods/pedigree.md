@@ -163,11 +163,11 @@ Cost and scope: O(R² B G²); O(G³); O(K³). These terms describe the unit’s 
 <a id="ps15"></a>
 ## ps15 Bounded M2 panel admission
 
-For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent or fixed pair-count cap; it is a score-defined model approximation.
+For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent cap; it is a score-defined model approximation. A per-child pair cap (`max_pairs_per_child`) bounds it. A child with more admitted pairs keeps the best by its largest gap over the fits, with the whole tie class at the last kept gap and every NaN-gap pair. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel. The cap binds only at very low depth, where admitted pairs grow with the square of the eligible parents.
 
 Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
 
-Parameters by name: `pair_relevance_margin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `pair_relevance_margin`, `max_pairs_per_child`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C² P); O(C P). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

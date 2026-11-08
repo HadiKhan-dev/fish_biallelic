@@ -112,7 +112,7 @@ Cost and scope: O(N L K³) per round for O(K) quadratic candidate fits; at most 
 <a id="rc10"></a>
 ## rc10 Optimistic count bounds and round skipping
 
-Build blockwise free-panel bounds with independent cohort-best and per-sample-best deletion options. The per-sample bound must maximise separately for each sample. Test deletion only when all founders have private cells; test addition by the total bound before its per-sample bound. Use the decision’s bootstrap stream for a deletion band certificate. A certified skip is a recorded rejection, never unverified evidence for changing the count.
+Build blockwise free-panel bounds with independent cohort-best and per-sample-best deletion options. Test deletion only when all founders have private cells; test addition by the total bound before its per-sample bound. The deletion test sums its bound over samples at one option per block, because a K − 1 panel lacks the same row at a block for all its samples. For weights w ≥ 0, sum_s w_s F_s(Y) ≤ sum_b max_o sum_s w_s σ_s(b, o) + sum_s w_s n_s for every K − 1 panel and shadow Y. This bounds the point margin (w = 1), the leave-one-sample-out margin (w = 1 − e_t, minimised over t) and every bootstrap replicate (w = its draw counts from the decision’s own stream). The form is never looser than the per-sample one it replaces, which let each sample drop a different row. If a best-F restore later reads the adjacent K − 1 fit, a skipped round’s refits run before that comparison, under the round’s label. A certified skip is a recorded rejection, never unverified evidence for changing the count.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 

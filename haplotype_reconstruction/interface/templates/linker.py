@@ -164,7 +164,7 @@ def chain_paths(windows, scores, similarities, count: int) -> list[list[tuple[in
     return paths
 
 
-@kernel(overloads=((types.float64,),), cache=True)
+@kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _information(probability):
     """Signed information of P(ALT) = p: sign(p - 1/2) (1 - binary entropy), +-1 at certainty."""
     if probability >= 1.0:
@@ -176,7 +176,7 @@ def _information(probability):
     return sign * (1.0 - entropy)
 
 
-@kernel(overloads=((types.float64, types.float64),), cache=True)
+@kernel(overloads=((types.float64, types.float64),), cache=True, nogil=True)
 def _add_information(first, second):
     """Relativistic addition of signed informations (0 when they cancel exactly)."""
     if abs(first * second + 1.0) < CANCELLATION_TOLERANCE:
@@ -184,7 +184,7 @@ def _add_information(first, second):
     return (first + second) / (1.0 + first * second)
 
 
-@kernel(overloads=((types.float64[:, ::1], types.float64[:, ::1]),), cache=True)
+@kernel(overloads=((types.float64[:, ::1], types.float64[:, ::1]),), cache=True, nogil=True)
 def merge_overlap(first, second):
     """[n, 2] (P(REF), P(ALT)) of two windows' rows merged site by site: their informations added and the sum
     inverted by bisection (60 halvings)."""

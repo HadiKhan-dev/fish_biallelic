@@ -529,6 +529,7 @@ def fractional_buckets(mask, k):
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def _fractional_sum_error(count, cost_bound):
     """Bound the ordinary difference's error relative to the expansion-sum difference.
@@ -556,6 +557,7 @@ def _fractional_sum_error(count, cost_bound):
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def _fractional_guard(nll0, nll1, current, tie, error):
     """Certified allele, or -1 when the accurate-sum reference is required."""
@@ -585,6 +587,7 @@ def _fractional_guard(nll0, nll1, current, tie, error):
     ),
     cache=True,
     inline="always",
+    nogil=True,
 )
 def _fractional_allele(nll0, nll1, current, tie, terms0, terms1, partials, error):
     """Use ordinary sums only when their interval certifies the H-step decision."""

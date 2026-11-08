@@ -37,7 +37,10 @@ def save_index(file: CheckpointFile) -> None:
             if index.header is None:
                 return
             document = dict(
-                schema=1, header=index.header, end=index.end, next_seq=index.next_seq,
+                schema=1,
+                header=index.header,
+                end=index.end,
+                next_seq=index.next_seq,
                 records=[list(info.__dict__.values()) for info in index.records.values()],
             )
         with atomic_path(snapshot_path(file)) as temporary:

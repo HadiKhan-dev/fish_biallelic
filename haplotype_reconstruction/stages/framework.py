@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from ..contracts.roles import require_schema
-from ..engine.graph import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
+from ..engine.graph import ALL_CORES, Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from ..store.container import CheckpointFile, RecordInfo
 from ..store.protocol import publish, resume
 
@@ -20,6 +20,7 @@ __all__ = [
     "Task",
     "TaskKey",
     "RecordKey",
+    "ALL_CORES",
     "ResourceRequest",
     "ResultRef",
     "Stage",

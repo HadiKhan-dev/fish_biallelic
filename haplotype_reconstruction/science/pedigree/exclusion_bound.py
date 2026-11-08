@@ -33,7 +33,7 @@ def observation_words(observed):
     return words
 
 
-@kernel(overloads=OVERLOADS["exclusion_bound._popcount"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["exclusion_bound._popcount"], cache=True, inline="always", nogil=True)
 def _popcount(value):
     value -= (value >> np.uint64(1)) & np.uint64(0x5555555555555555)
     value = (value & np.uint64(0x3333333333333333)) + ((value >> np.uint64(2)) & np.uint64(0x3333333333333333))
@@ -41,7 +41,7 @@ def _popcount(value):
     return int((value * np.uint64(0x0101010101010101)) >> np.uint64(56))
 
 
-@kernel(overloads=OVERLOADS["exclusion_bound._observed_counts"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exclusion_bound._observed_counts"], cache=True, parallel=True, nogil=True)
 def _observed_counts(words, rows):
     result = np.zeros(len(rows), np.int64)
     for row in prange(len(rows)):
@@ -53,7 +53,7 @@ def _observed_counts(words, rows):
     return result
 
 
-@kernel(overloads=OVERLOADS["exclusion_bound._completed_windows"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exclusion_bound._completed_windows"], cache=True, parallel=True, nogil=True)
 def _completed_windows(
     gl,
     observed,

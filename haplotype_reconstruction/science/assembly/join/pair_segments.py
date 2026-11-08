@@ -19,7 +19,7 @@ from .kernels import overloads_for
 from .objective import _gather_states, pair_lists
 
 
-@kernel(overloads=overloads_for(__name__, "best_without"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "best_without"), cache=True, inline="always", nogil=True)
 def best_without(weights, first, second, a, b):
     best = -np.inf
     which = -1
@@ -33,7 +33,7 @@ def best_without(weights, first, second, a, b):
     return which, best
 
 
-@kernel(overloads=overloads_for(__name__, "interval_values"), cache=True)
+@kernel(overloads=overloads_for(__name__, "interval_values"), cache=True, nogil=True)
 def interval_values(weights, first, second, qa, qb, out):
     z0, v0 = best_without(weights, first, second, -1, -1)
     roots = np.empty(2, np.int64)
@@ -121,7 +121,7 @@ def pair_segment_dp(emission, first, second, qa, qb, penalty, prune=True):
     return values, intervals, max_active, pair_visits
 
 
-@kernel(overloads=overloads_for(__name__, "choose_segments"), cache=True)
+@kernel(overloads=overloads_for(__name__, "choose_segments"), cache=True, nogil=True)
 def choose_segments(k, m, queries):
     """Compare proportional loop-cost models, without inspecting scientific outcomes.
 

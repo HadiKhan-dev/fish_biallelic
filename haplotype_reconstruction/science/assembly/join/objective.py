@@ -43,13 +43,13 @@ from .emissions import pair_index
 from .kernels import overloads_for
 
 
-@kernel(overloads=overloads_for(__name__, "pair_lists"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "pair_lists"), cache=True, inline="always", nogil=True)
 def pair_lists(allowed):
     """Unordered objective states without renumbering the allowed slots."""
     return state_pairs(len(allowed), allowed)
 
 
-@kernel(overloads=overloads_for(__name__, "widest_block"), cache=True)
+@kernel(overloads=overloads_for(__name__, "widest_block"), cache=True, nogil=True)
 def widest_block(block_bins):
     """The largest bin count of a block (at least 1): the size of a per-block gather buffer."""
     widest = 1
@@ -58,7 +58,7 @@ def widest_block(block_bins):
     return widest
 
 
-@kernel(overloads=overloads_for(__name__, "record_covers"), cache=True)
+@kernel(overloads=overloads_for(__name__, "record_covers"), cache=True, nogil=True)
 def record_covers(scores, best, first, second, singles, pairs, record_pairs):
     """Vertex covers of size <= 2 of this bin's maximiser set.
 
@@ -123,7 +123,7 @@ def record_covers(scores, best, first, second, singles, pairs, record_pairs):
             pairs[min(x, w1), max(x, w1)] = True
 
 
-@kernel(overloads=overloads_for(__name__, "_gather_states"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "_gather_states"), cache=True, inline="always", nogil=True)
 def _gather_states(flat, base, haps, bins, rows, first, second, block, gathered):
     """gathered[t, z]: the emissions of states z (pairs first[z] <= second[z] of panel paths) at
     every bin t of one block, contiguous per bin (base: the block's first value of the sample)."""
@@ -133,7 +133,7 @@ def _gather_states(flat, base, haps, bins, rows, first, second, block, gathered)
             gathered[marker, z] = flat[at + marker]
 
 
-@kernel(overloads=overloads_for(__name__, "_start"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "_start"), cache=True, inline="always", nogil=True)
 def _start(scores, n, gathered, marker):
     """S_0(z) = e(z, 0) for the n states; returns max_z S_0(z)."""
     for z in range(n):
@@ -141,7 +141,7 @@ def _start(scores, n, gathered, marker):
     return max_range(scores, 0, n, -np.inf)
 
 
-@kernel(overloads=overloads_for(__name__, "_advance"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "_advance"), cache=True, inline="always", nogil=True)
 def _advance(scores, n, gathered, marker, switch_base):
     """The recursion's step: S_t(z) = max(S_(t-1)(z), switch_base) + e(z, t) for the n states
     (switch_base = max_z' S_(t-1)(z') - penalty); returns max_z S_t(z)."""
@@ -151,7 +151,7 @@ def _advance(scores, n, gathered, marker, switch_base):
     return max_range(scores, 0, n, -np.inf)
 
 
-@kernel(overloads=overloads_for(__name__, "forward"), cache=True)
+@kernel(overloads=overloads_for(__name__, "forward"), cache=True, nogil=True)
 def forward(
     flat,
     block_start,

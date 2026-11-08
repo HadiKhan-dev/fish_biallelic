@@ -72,7 +72,7 @@ from .window import capacity, cover, locate, site_cost, site_logs, sites_of
 SWITCH_PENALTY = 20.0
 
 
-@kernel(overloads=overloads_for(__name__, "pair_code7"), inline="always")
+@kernel(overloads=overloads_for(__name__, "pair_code7"), inline="always", nogil=True)
 def pair_code7(x, y):
     """Pair code of two coded alleles (called allele 0/1, or -2 - prepared row when uncalled): dosage
     0-2 when both are called, 3 + the known allele when one is, else 6 when both copy the same
@@ -86,7 +86,7 @@ def pair_code7(x, y):
     return 6 if x == y else 5
 
 
-@kernel(overloads=overloads_for(__name__, "unordered_pairs"), cache=True, inline="always")
+@kernel(overloads=overloads_for(__name__, "unordered_pairs"), cache=True, inline="always", nogil=True)
 def unordered_pairs(founders):
     """The Q = K(K+1)/2 unordered states (first[q] <= second[q]) in upper-triangle order."""
     first = np.empty(founders * (founders + 1) // 2, np.int64)
@@ -99,7 +99,7 @@ def unordered_pairs(founders):
     return first, second
 
 
-@kernel(overloads=overloads_for(__name__, "pair_founders"), inline="always")
+@kernel(overloads=overloads_for(__name__, "pair_founders"), inline="always", nogil=True)
 def pair_founders(states):
     """K of a row of Q = K(K+1)/2 unordered states."""
     founders = 1
@@ -139,7 +139,7 @@ def pair_dosages(haps, first, second, lo, hi):
 
 
 # ------------------------------------------------------------------ inline site steps
-@kernel(overloads=overloads_for(__name__, "row_max"), inline="always")
+@kernel(overloads=overloads_for(__name__, "row_max"), inline="always", nogil=True)
 def row_max(row):
     """max(row) of a non-empty row (no NaN): eight interleaved running maxima, then combined. The
     maximum of the same values as a sequential scan, without its serial dependence chain (every
@@ -193,7 +193,7 @@ def row_max(row):
     return m0
 
 
-@kernel(overloads=overloads_for(__name__, "transition"), inline="always")
+@kernel(overloads=overloads_for(__name__, "transition"), inline="always", nogil=True)
 def transition(row, c, R):
     """One site's per-homologue transition on unordered states, in place (module docstring):
     row{a, b} = max(row{a, b}, max(R[a], R[b]) - c, G - 2c). c = +inf (no preceding informative
@@ -228,13 +228,13 @@ def transition(row, c, R):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "lex_better"), inline="always")
+@kernel(overloads=overloads_for(__name__, "lex_better"), inline="always", nogil=True)
 def lex_better(v, k, w, l):
     """(v, k) beats (w, l) lexicographically: higher score, then lower switch cost."""
     return v > w or (v == w and k < l)
 
 
-@kernel(overloads=overloads_for(__name__, "transition_lex"), inline="always")
+@kernel(overloads=overloads_for(__name__, "transition_lex"), inline="always", nogil=True)
 def transition_lex(row, cst, c, R, Rc):
     """transition() on the lexicographic pair (score, switch cost of the maximum path): among exact
     score ties the lower switch cost; a one-homologue change adds c, a change of both 2c (the
@@ -293,7 +293,7 @@ def transition_lex(row, cst, c, R, Rc):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "transition_count"), inline="always")
+@kernel(overloads=overloads_for(__name__, "transition_count"), inline="always", nogil=True)
 def transition_count(row, cnt, c, R, Rc):
     """transition_lex() with integer homologue-switch counts as the secondary key (the fit tie
     prior: fewest exact-optimal switches). Rc: int64 (K,)."""
@@ -339,7 +339,7 @@ def transition_count(row, cnt, c, R, Rc):
             q += 1
 
 
-@kernel(overloads=overloads_for(__name__, "emit"), inline="always")
+@kernel(overloads=overloads_for(__name__, "emit"), inline="always", nogil=True)
 def emit(row, dos, i, e):
     """row[q] += the centred emission of pair code dos[i, q] (e: the site's uncentred log evidence of
     the seven codes, window.site_logs), every state."""
@@ -347,7 +347,7 @@ def emit(row, dos, i, e):
         row[q] += e[dos[i, q]] - CENTER
 
 
-@kernel(overloads=overloads_for(__name__, "founder_maxima"), inline="always")
+@kernel(overloads=overloads_for(__name__, "founder_maxima"), inline="always", nogil=True)
 def founder_maxima(row, R):
     """R[x] = the maximum of row over the states containing founder x: transition()'s scan (row
     segments {a, b >= a} and their columns, in that order)."""
@@ -365,14 +365,14 @@ def founder_maxima(row, R):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "centred"), inline="always")
+@kernel(overloads=overloads_for(__name__, "centred"), inline="always", nogil=True)
 def centred(e, ec):
     """ec[code] = e[code] - CENTER, the subtraction emit() makes per state, once per site."""
     for x in range(7):
         ec[x] = e[x] - CENTER
 
 
-@kernel(overloads=overloads_for(__name__, "fused_step"), inline="always")
+@kernel(overloads=overloads_for(__name__, "fused_step"), inline="always", nogil=True)
 def fused_step(row, c, R, Rn, ec, dos, i, scanned):
     """Complete transition(row, c, R) (c finite; R the founder maxima of row when scanned, else
     computed here) then the emission ec[dos[i, q]], in one pass over the states that also collects
@@ -402,7 +402,7 @@ def fused_step(row, c, R, Rn, ec, dos, i, scanned):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "emit_scan"), inline="always")
+@kernel(overloads=overloads_for(__name__, "emit_scan"), inline="always", nogil=True)
 def emit_scan(row, Rn, ec, dos, i):
     """emit() with centred evidence ec, collecting the emitted row's founder maxima into Rn
     (founder_maxima()'s order)."""
@@ -421,7 +421,7 @@ def emit_scan(row, Rn, ec, dos, i):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "finish_transition"), inline="always")
+@kernel(overloads=overloads_for(__name__, "finish_transition"), inline="always", nogil=True)
 def finish_transition(row, c, R):
     """transition() given R = the founder maxima of row (c finite)."""
     K = len(R)
@@ -437,7 +437,7 @@ def finish_transition(row, c, R):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "forward_sites"), inline="always")
+@kernel(overloads=overloads_for(__name__, "forward_sites"), inline="always", nogil=True)
 def forward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's forward message row over sites [j0, j1) of the window's orientation: per
     informative site the transition entering it (its switch cost) then its emission (dosage rows
@@ -464,7 +464,7 @@ def forward_sites(row, dos, lo, win, s, j0, j1, R, e):
         scanned = True
 
 
-@kernel(overloads=overloads_for(__name__, "backward_sites"), inline="always")
+@kernel(overloads=overloads_for(__name__, "backward_sites"), inline="always", nogil=True)
 def backward_sites(row, dos, lo, win, s, j0, j1, R, e):
     """Carry sample s's backward (stored-convention) row over sites [j0, j1) from right to left:
     per informative site its emission, then the transition entering it.
@@ -495,7 +495,7 @@ def backward_sites(row, dos, lo, win, s, j0, j1, R, e):
         finish_transition(row, owed_c, R)
 
 
-@kernel(overloads=overloads_for(__name__, "lex_founder_maxima"), inline="always")
+@kernel(overloads=overloads_for(__name__, "lex_founder_maxima"), inline="always", nogil=True)
 def lex_founder_maxima(row, cst, R, Rc):
     """(R[x], Rc[x]) = the lexicographic maximum (score, then lower switch cost) of the states containing
     founder x: transition_lex()'s first scan, with its comparisons in its order."""
@@ -523,7 +523,7 @@ def lex_founder_maxima(row, cst, R, Rc):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "lex_fused_step"), inline="always")
+@kernel(overloads=overloads_for(__name__, "lex_fused_step"), inline="always", nogil=True)
 def lex_fused_step(row, cst, c, R, Rc, Rn, Rcn, ec, dos, i, emit_here):
     """Complete the rest of transition_lex(row, cst, c, R, Rc) given (R, Rc) = lex_founder_maxima(row, cst)
     (c finite), then, when emit_here, emit()'s addition ec[dos[i, q]] (ec = the site's e[code] - CENTER), in one
@@ -579,7 +579,7 @@ def lex_fused_step(row, cst, c, R, Rc, Rn, Rcn, ec, dos, i, emit_here):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "lex_emit_scan"), inline="always")
+@kernel(overloads=overloads_for(__name__, "lex_emit_scan"), inline="always", nogil=True)
 def lex_emit_scan(row, cst, Rn, Rcn, ec, dos, i):
     """emit() with centred evidence ec, collecting the emitted row's founder maxima into (Rn, Rcn)
     (lex_founder_maxima()'s comparisons in its order)."""
@@ -608,7 +608,7 @@ def lex_emit_scan(row, cst, Rn, Rcn, ec, dos, i):
         q += K - a
 
 
-@kernel(overloads=overloads_for(__name__, "forward_sites_lex"), inline="always")
+@kernel(overloads=overloads_for(__name__, "forward_sites_lex"), inline="always", nogil=True)
 def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """forward_sites() with the lexicographic switch costs.
 
@@ -638,7 +638,7 @@ def forward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
         scanned = True
 
 
-@kernel(overloads=overloads_for(__name__, "backward_sites_lex"), inline="always")
+@kernel(overloads=overloads_for(__name__, "backward_sites_lex"), inline="always", nogil=True)
 def backward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
     """backward_sites() with the lexicographic switch costs.
 
@@ -671,7 +671,7 @@ def backward_sites_lex(row, cst, dos, lo, win, s, j0, j1, R, Rc, e):
         lex_fused_step(row, cst, owed_c, R, Rc, Rn, Rcn, ec, dos, 0, False)
 
 
-@kernel(overloads=overloads_for(__name__, "normalise"), inline="always")
+@kernel(overloads=overloads_for(__name__, "normalise"), inline="always", nogil=True)
 def normalise(row):
     """Subtract the maximum (returned) so a block-boundary message has maximum 0; x - x = +0, so
     normalised messages hold no negative zero and equal values are equal bits."""

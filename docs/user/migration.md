@@ -1,5 +1,26 @@
 # Migration guides
 
+## Migrating from 4.6 to 4.7.0
+
+Start a new output and checkpoint root with the same inputs, configuration and
+seed. **4.7.0 adds a kernel and a pedigree setting, so its checkpoint identities
+differ from 4.6's and it requires a new root.** Keep existing runs with their
+matching code; this release does not convert their checkpoints.
+
+Released outputs are scientifically identical to 4.6 except where the new per-child
+cap on scored parent pairs binds (very low depth only; see below):
+- founder refinement skips a count-deletion round when a sample-summed optimistic
+  bound proves its decision (keep the larger panel, not ambiguous) for every
+  candidate, so it runs fewer refits;
+- painting builds a component's emissions once for its copying-model estimate;
+- family phase computes its allele-evidence terms with fewer array passes.
+
+One table changes: `search_diagnostics` has a new last column, `M2PanelCapped`. It is
+true for a child whose admitted parent pairs exceeded `max_pairs_per_child` (256),
+so its two-parent evidence covers an incomplete panel (an internal pedigree
+parameter, listed in the parameter reference). Count-decision records name the
+deletion bound `deletion_summed`.
+
 ## Migrating from 4.5 to 4.6.0
 
 Start a new output and checkpoint root with the same inputs, configuration and

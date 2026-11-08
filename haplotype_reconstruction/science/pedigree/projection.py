@@ -152,7 +152,7 @@ class ProjectionInvariantError(InvariantError):
         )
 
 
-@kernel(overloads=OVERLOADS["projection._symmetrise"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["projection._symmetrise"], cache=True, parallel=True, nogil=True)
 def _symmetrise(posterior):
     """Average each ordered diplotype with its mirror and renormalise per bin (in place)."""
     candidates, bins, states, _ = posterior.shape
@@ -177,7 +177,7 @@ def _symmetrise(posterior):
     return valid
 
 
-@kernel(overloads=OVERLOADS["projection._transmitted_alt"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["projection._transmitted_alt"], cache=True, parallel=True, nogil=True)
 def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, site_to_bin, background_index, epsilon):
     """P(transmitted allele = ALT | transmitted state, own reads), the untransmitted homologue
     marginalised over the source posterior, without an S^2 per-site array.
@@ -227,7 +227,7 @@ def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, sit
     return result
 
 
-@kernel(overloads=OVERLOADS["projection._exclusion_sums"], cache=True)
+@kernel(overloads=OVERLOADS["projection._exclusion_sums"], cache=True, nogil=True)
 def _exclusion_sums(matrix):
     """Row-without, column-without and complement leave-one-out sums, cancellation-free, O(S^2)."""
     states = matrix.shape[0]
@@ -266,7 +266,7 @@ def _exclusion_sums(matrix):
     return row_without, column_without, complement
 
 
-@kernel(overloads=OVERLOADS["projection._selected_flows"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["projection._selected_flows"], cache=True, parallel=True, nogil=True)
 def _selected_flows(posterior, right_weight, same, one, two, selector):
     """Propagate the selected (transmitted) diplotypes and the positive adjacent selected-state
     flows: same-state (diagonal), outgoing-change and incoming-change flow per boundary."""
@@ -373,7 +373,7 @@ def _selected_flows(posterior, right_weight, same, one, two, selector):
     return diagonal_flow, outgoing_change_flow, incoming_change_flow, valid
 
 
-@kernel(overloads=OVERLOADS["projection._small_diagonal_product"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["projection._small_diagonal_product"], cache=True, inline="always", nogil=True)
 def _small_diagonal_product(q, a, b):
     """Stable small root of the excluded diagonal product x_i y_i."""
     if q <= 0.0 or a <= 0.0 or b <= 0.0:
@@ -388,7 +388,7 @@ def _small_diagonal_product(q, a, b):
     return 2.0 * q * a * b / denominator if denominator > 0.0 else 0.0
 
 
-@kernel(overloads=OVERLOADS["projection._branch_function"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["projection._branch_function"], cache=True, inline="always", nogil=True)
 def _branch_function(q, a, b, large_index):
     total_u = 0.0
     large_u = 0.0
@@ -411,7 +411,7 @@ def _branch_function(q, a, b, large_index):
     return base + total_u - 2.0 * large_u
 
 
-@kernel(overloads=OVERLOADS["projection._bisect_root"], cache=True)
+@kernel(overloads=OVERLOADS["projection._bisect_root"], cache=True, nogil=True)
 def _bisect_root(a, b, large_index, q_max, max_iterations):
     lower = 0.0
     upper = q_max
@@ -468,7 +468,7 @@ def _bridges(
     )
 
 
-@kernel(overloads=OVERLOADS["projection._bridges_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["projection._bridges_kernel"], cache=True, parallel=True, nogil=True)
 def _bridges_kernel(
     pi,
     diagonal_flow,

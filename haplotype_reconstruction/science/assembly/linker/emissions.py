@@ -34,6 +34,7 @@ from ..parameters import LINKER_EMISSION_FLOOR
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def pair_codes(alleles: np.ndarray, source_rows: np.ndarray) -> np.ndarray:
     """uint8[L, K * K] code of every ordered founder pair (a, b) at column a * K + b of each site.

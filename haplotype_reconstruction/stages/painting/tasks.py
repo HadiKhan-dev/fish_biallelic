@@ -32,11 +32,11 @@ from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTE
 from ...science.painting.run import paint_chromosome
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish, read_items
+from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish, read_items, resume
 from ...store.slices import WindowArray
 from ..evidence.records import SUPPORTED_SCHEMAS
 from ..evidence.records import open_arrays as evidence_windows
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from . import records
 
 _DEFAULT_TIES = TieSettings()
@@ -181,6 +181,24 @@ def identity(
     ).identity
 
 
+class _Progress:
+    """Painting progress records in the contig's checkpoint file (science.painting.run.PaintingProgress): the copying
+    model, the label-continuity outcome and each decoded sample batch, under keys namespaced by the painting's
+    derivation, so an interrupted painting resumes from its last published step and another derivation never
+    reads them."""
+
+    def __init__(self, file: CheckpointFile, identity: str) -> None:
+        self.file, self.identity = file, identity
+        self.prefix = f"painting/progress/{identity[:16]}"
+
+    def load(self, key: str) -> Any | None:
+        record = resume(self.file, f"{self.prefix}/{key}", self.identity)
+        return None if record is None else record.payload
+
+    def save(self, key: str, payload: Any) -> None:
+        publish(self.file, f"{self.prefix}/{key}", self.identity, payload)
+
+
 def _at_batch_boundary(builder: Callable[..., Any], batch: int, *args: Any, **kwargs: Any) -> Any:
     """A sample batch's emissions, after re-reading this task's CPU share (it grows into free CPUs and gives back
     when peers are short) and applying it to the Numba team of the batch's kernels."""
@@ -247,6 +265,7 @@ def run_contig(
                     model_sink=model_sink,
                     census_sink=census_sink if census or ties.census is not None else None,
                     emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
+                    progress=_Progress(file, expected),
                 )
 
             wall, cpu = time.perf_counter(), time.process_time()
@@ -305,7 +324,7 @@ def painting_task(
     numerical_policy: NumericalPolicy | None = None,
     evidence: ContigEvidence | None = None,
     dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = 16,
+    max_cores: int = ALL_CORES,
 ) -> Task:
     """One contig task; engine selects the team, components retain chromosome order."""
     if max_cores < 1:

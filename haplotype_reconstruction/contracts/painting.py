@@ -379,6 +379,8 @@ class LabelContinuity:
         row row_maps[a, k]), None unless accepted.
     tie_events: candidate rankings decided inside a tie class (``maths.ties.TieCounter``
         record; release 2.1).
+    check_budget_reached: an iteration re-decoded label_continuity_check_budget candidates without an acceptable
+        one and ended the search (release 4.7): candidates ranked below the budget were not checked.
     """
 
     accepted: bool = record_field("call", axes=(), units="1", dtype="bool")
@@ -394,6 +396,7 @@ class LabelContinuity:
     tie_events: TieCounts = record_field(
         "diagnostic", axes=(), units="1", dtype="TieCounts", default_factory=lambda: TieCounts(())
     )
+    check_budget_reached: bool = record_field("report", axes=(), units="1", dtype="bool", default=False)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -415,6 +418,7 @@ class PaintingSettings:
     minimum_release_posterior: float = record_field("state", axes=(), units="probability", dtype="float")
     label_continuity_minimum_switch_gain: float = record_field("state", axes=(), units="count", dtype="float")
     label_continuity_maximum_loser_ratio: float = record_field("state", axes=(), units="share", dtype="float")
+    label_continuity_check_budget: int = record_field("state", axes=(), units="count", dtype="int", default=64)
 
     # 3.5 painting/hmm.py:47, P0 PR09, WP_PA2 §7. Captured in the payload.
     viterbi_tie: float = record_field("state", units="nats", dtype="float64", default=noise_quantum(1.9e-6))
@@ -543,6 +547,7 @@ def segment_rows(painting: Painting, input_ids: Sequence[str] | None = None) -> 
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _carrier_observed_kernel(
     member_ids: NDArray[np.int32],

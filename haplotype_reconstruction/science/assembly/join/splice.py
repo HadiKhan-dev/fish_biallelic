@@ -35,7 +35,7 @@ def pair_column(founders: int, first: int, second: int) -> int:
     return splice_column(first, second, founders)
 
 
-@kernel(overloads=overloads_for(__name__, "_junction_scores"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_junction_scores"), cache=True, nogil=True)
 def _junction_scores(prefix, suffix, first, second, index, output):
     """Score every founder transposition at one sample's boundary in O(K^3)."""
     founders = len(index)

@@ -158,6 +158,7 @@ def _capped_update_costs(cost_ww, log_probs, observed, penalty):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _ww_bin_emissions(cost_ww, snps_per_bin, n_bins):
     """Binned log emission of the unknown-unknown state: -sum of cost_ww over each bin, left to
@@ -194,6 +195,7 @@ def _ww_bin_emissions(cost_ww, snps_per_bin, n_bins):
     ),
     cache=True,
     parallel=True,
+    nogil=True,
 )
 def _binned_contraction_inputs(log_probs, observed, penalty, snps_per_bin, n_bins):
     """Panel-independent inputs of the A step's binned emissions.

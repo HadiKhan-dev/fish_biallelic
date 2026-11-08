@@ -47,7 +47,16 @@ from ...science.pedigree import calibration
 from ...science.pedigree.calibration import CalibrationProblem
 from ...science.pedigree.resampling import FitResult, FitTask, ResamplingPlan, evaluate_task
 
-__all__ = ["calibrate", "calibration_chunk", "calibration_round", "child_ranges", "fit_subtasks", "fit_task", "fit_batch", "fit_batches"]
+__all__ = [
+    "calibrate",
+    "calibration_chunk",
+    "calibration_round",
+    "child_ranges",
+    "fit_subtasks",
+    "fit_task",
+    "fit_batch",
+    "fit_batches",
+]
 
 # Calibration chunks (3.5's pool cut; execution only, values never depend on them): contiguous child ranges of
 # about equal cost, a child's cost being its term count plus this overhead, and one chunk per worker.

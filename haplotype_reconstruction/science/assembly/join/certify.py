@@ -125,7 +125,7 @@ def single_exclusions(flat, block_start, block_haps, block_bins, rows, penalty, 
     return excluded, second
 
 
-@kernel(overloads=overloads_for(__name__, "region_source"), cache=True)
+@kernel(overloads=overloads_for(__name__, "region_source"), cache=True, nogil=True)
 def region_source(index, second, pairs, sample, a, b, k):
     """Where G^{-F} of one sample lives, F = {a, b} (a < b; -1 = absent).
 
@@ -149,7 +149,7 @@ def region_source(index, second, pairs, sample, a, b, k):
     return (2, -1) if pairs[sample, a, b] else (0, -1)
 
 
-@kernel(overloads=overloads_for(__name__, "_gather_move"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_gather_move"), cache=True, nogil=True)
 def _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b, gathered):
     """gathered[t, z]: the emissions of a move's new states at every bin t of one block, in
     _two_region's state order: (r1, x) [and (r2, x)] for every retained row x, then (r1, r1)
@@ -184,7 +184,7 @@ def _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, r
     return z
 
 
-@kernel(overloads=overloads_for(__name__, "_two_region"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_two_region"), cache=True, nogil=True)
 def _two_region(
     flat,
     block_start,
@@ -325,7 +325,7 @@ def move_bounds(
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "_advance_block"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_advance_block"), cache=True, nogil=True)
 def _advance_block(
     flat,
     base,
@@ -367,7 +367,7 @@ def _advance_block(
                 state[1 + z] = (value if value > switch else switch) + gathered[marker, z]
 
 
-@kernel(overloads=overloads_for(__name__, "_retreat_block"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_retreat_block"), cache=True, nogil=True)
 def _retreat_block(
     flat,
     base,
@@ -413,7 +413,7 @@ def _retreat_block(
             beta[1 + z] = value if value > carry else carry
 
 
-@kernel(overloads=overloads_for(__name__, "_meet"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_meet"), cache=True, nogil=True)
 def _meet(state, beta, count):
     """The move's bound from the state before a point and the backward vector after it."""
     best = -np.inf
@@ -731,7 +731,7 @@ def structural_bounds(
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "_region_block"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_region_block"), cache=True, nogil=True)
 def _region_block(gathered, bins, removed, has_region, region, t0, penalty, a_value, state):
     """Advance one single-path two-region DP over the bins of one block.
 
@@ -759,7 +759,7 @@ def _region_block(gathered, bins, removed, has_region, region, t0, penalty, a_va
     return a_value
 
 
-@kernel(overloads=overloads_for(__name__, "_gather_flat"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_gather_flat"), cache=True, nogil=True)
 def _gather_flat(flat, base, haps, bins, r1, rows, block, gathered):
     """gathered[t, x] = emission of (r1, panel row x) and gathered[t, k] = (r1, r1) for every bin t
     of one block (EmissionLayout values, base: the block's first value of the sample): the new
@@ -831,7 +831,7 @@ def birth_bounds(
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "_region_retreat"), cache=True)
+@kernel(overloads=overloads_for(__name__, "_region_retreat"), cache=True, nogil=True)
 def _region_retreat(gathered, bins, removed, has_region, region, t0, penalty, beta, work):
     """Carry the backward vector of _region_block's DP over one block, last bin first: on entry
     beta[0] (retained states) and beta[1:] (the new states, _region_block's layout) apply to the

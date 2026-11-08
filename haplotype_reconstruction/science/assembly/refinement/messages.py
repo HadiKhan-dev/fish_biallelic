@@ -317,7 +317,7 @@ def backward_chain_lex(haps, win, offsets, end, end_cnt, gperm, a, c):
     return out, out_cnt, scale
 
 
-@kernel(overloads=overloads_for(__name__, "max_lead"), inline="always")
+@kernel(overloads=overloads_for(__name__, "max_lead"), inline="always", nogil=True)
 def max_lead(row):
     """Maximum of row and the first state attaining it (four interleaved running maxima with
     their first states, then combined: the pair a sequential scan finds)."""

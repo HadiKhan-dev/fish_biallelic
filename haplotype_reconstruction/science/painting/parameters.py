@@ -22,7 +22,10 @@ VITERBI_TIE = noise_quantum(1.9e-6)
 # int64 interval-mask representation, 3.5 painting/hmm.py:50 (PR11); enforced at decode boundary.
 MAXIMUM_MASK_STATES = 63
 # Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions.
-EMISSION_CACHE_MAX_BYTES = 1 << 30
+# Release 4.7: 8 GiB, so the largest chromosomes' estimation and label-continuity emissions stay resident (chr3 at
+# N = 320: packed estimation emissions 1.0 GiB, label-continuity part emissions about 2.8 GB); a reported working
+# set, not a reservation (the memory governor acts on measured pressure).
+EMISSION_CACHE_MAX_BYTES = 8 << 30
 WINDOW_BYTES = 64 << 20
 LABEL_CONTINUITY_BASE_BYTES = 64 << 20
 
@@ -66,6 +69,9 @@ class PaintingParameters:
         the painted switch total by at least this many switches.
     label_continuity_maximum_loser_ratio: samples whose painted switches rise
         may be at most this fraction of the samples whose switches fall.
+    label_continuity_check_budget: candidates re-decoded per search iteration at most (release 4.7, owner 8 Nov
+        2026); an iteration that reaches it without an acceptable candidate ends the search, and the outcome is
+        flagged (LabelContinuity.check_budget_reached).
     """
 
     emission_site_correlation: float = field(
@@ -197,6 +203,17 @@ class PaintingParameters:
             "axes": (),
             "units": "1",
             "dtype": "float64",
+            "stored": True,
+        },
+    )
+    label_continuity_check_budget: int = field(
+        default=64,
+        metadata={
+            "provenance": "4.7 (owner, 8 Nov 2026): bounds the final, unproductive search iteration at low depth",
+            "role": "state",
+            "axes": (),
+            "units": "count",
+            "dtype": "int64",
             "stored": True,
         },
     )

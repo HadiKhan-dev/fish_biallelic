@@ -32,6 +32,7 @@ bo = types.boolean[:, ::1]
     overloads=tuple((f64, b2, b1, a64, a32, bo) for f64 in _READ_F64 for b2 in _READ_BOOL2 for b1 in _READ_BOOL1),
     parallel=True,
     cache=True,
+    nogil=True,
 )
 def _fill_views(likelihoods, observed, kept, neutral, scoring, seen):
     """Write the float64 neutral view, its float32 copy and observed & kept in one pass over the cells."""

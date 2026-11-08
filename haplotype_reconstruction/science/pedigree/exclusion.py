@@ -37,7 +37,7 @@ def physical_windows(positions: np.ndarray, widths: tuple[int, ...]) -> np.ndarr
     return np.asarray(sorted(set(spans)), dtype=np.int64)
 
 
-@kernel(overloads=OVERLOADS["exclusion._ratio"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["exclusion._ratio"], cache=True, inline="always", nogil=True)
 def _ratio(x0, x1, x2, y0, y1, y2, delta):
     """A / D of one jointly observed site (see the module docstring)."""
     compatible = max(x0 * max(y0, y1), x1 * max(y0, y1, y2), x2 * max(y1, y2))
@@ -46,12 +46,12 @@ def _ratio(x0, x1, x2, y0, y1, y2, delta):
     return (x0 * y2 + x2 * y0) / 2 / max(bound, EXCLUSION_TINY)
 
 
-@kernel(overloads=OVERLOADS["exclusion._log_bet"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["exclusion._log_bet"], cache=True, inline="always", nogil=True)
 def _log_bet(ratio, bet):
     return np.log(max(1 - bet + bet * ratio, EXCLUSION_TINY))
 
 
-@kernel(overloads=OVERLOADS["exclusion._encode_patterns"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["exclusion._encode_patterns"], cache=True, parallel=True, nogil=True)
 def _encode_patterns(gl, observed, cap):
     """Exact per-sample codes of distinct GL triples (-1 unobserved); count -1 = over the cap."""
     samples, sites, _ = gl.shape

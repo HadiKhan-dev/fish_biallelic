@@ -69,7 +69,7 @@ def selected_markers(
     return (np.concatenate(chosen) if chosen else np.empty(0, dtype=np.int64)), counts
 
 
-@kernel(overloads=OVERLOADS["prepare._informative_counts"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["prepare._informative_counts"], cache=True, parallel=True, nogil=True)
 def _informative_counts(likelihoods, observed, sites, spread):
     """int64 [N]: observed sites among ``sites`` whose GL row spread exceeds ``spread``."""
     counts = np.zeros(likelihoods.shape[0], dtype=np.int64)
@@ -83,7 +83,7 @@ def _informative_counts(likelihoods, observed, sites, spread):
     return counts
 
 
-@kernel(overloads=OVERLOADS["prepare._information_exponent"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["prepare._information_exponent"], cache=True, parallel=True, nogil=True)
 def _information_exponent(likelihoods, bin_sizes, markers_per_block, effective_markers):
     """float64 [N, B]: per child and bin min(effective, n) / n for the n non-uniform GL markers of the
     bin's information group (consecutive bins of >= ``markers_per_block`` selected markers)."""

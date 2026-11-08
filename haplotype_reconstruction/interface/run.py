@@ -1196,9 +1196,7 @@ def _export_manifest_part(root: str, output: str, contig: str, full_length: bool
     return dict(record.payload["entry"]), (contig, "founder_refit", release.identity_flags)
 
 
-def _write_export_manifest(
-    root: str, output: str, contigs: tuple[str, ...], full_length: bool, parts=None
-) -> None:
+def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], full_length: bool, parts=None) -> None:
     """Publish the manifest after ordered, independently checked chromosome parts."""
     from ..outputs.export.records import ExportConfig
     from ..outputs.export.run import write_founder_identity, write_manifest
@@ -1403,7 +1401,10 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
             manifest_key,
             _write_export_manifest,
             (
-                root, output, resolved.contigs, prepared.settings.export.full_length,
+                root,
+                output,
+                resolved.contigs,
+                prepared.settings.export.full_length,
                 tuple(ResultRef(task.key) for task in parts),
             ),
             depends_on=tuple(task.key for task in parts),
@@ -1947,8 +1948,13 @@ def export_command(args: argparse.Namespace) -> int:
     )
     tasks = [
         make_task(
-            reader, destination, contig, config, _export_identity(reader, contig, config),
-            max_cores=min(3, prepared.cores), map_work=_map_output,
+            reader,
+            destination,
+            contig,
+            config,
+            _export_identity(reader, contig, config),
+            max_cores=min(3, prepared.cores),
+            map_work=_map_output,
         )
         for contig in contigs
     ]

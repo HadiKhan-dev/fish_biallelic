@@ -34,7 +34,7 @@ class SourceInferenceError(InvariantError):
         super().__init__(f"{message}; sample={sample}, component={component}, boundary={boundary}")
 
 
-@kernel(overloads=OVERLOADS["sources._hamming_contract"], cache=True, inline="always")
+@kernel(overloads=OVERLOADS["sources._hamming_contract"], cache=True, inline="always", nogil=True)
 def _hamming_contract(matrix, same, one, two, output, rows, columns):
     """output = A matrix for the symmetric ordered-diplotype Hamming kernel A, in O(S^2)."""
     states = matrix.shape[0]
@@ -57,7 +57,7 @@ def _hamming_contract(matrix, same, one, two, output, rows, columns):
             )
 
 
-@kernel(overloads=OVERLOADS["sources._factor_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["sources._factor_kernel"], cache=True, parallel=True, nogil=True)
 def _factor_kernel(emission, same, one, two, available, failed_boundary=None):
     """Backward factors per candidate (prange): initial [N, S, S], right [N, B-1, S, S], valid [N]."""
     candidates, bins, states, _ = emission.shape
@@ -131,7 +131,7 @@ def _factor_kernel(emission, same, one, two, available, failed_boundary=None):
     return initial, right, valid_out
 
 
-@kernel(overloads=OVERLOADS["sources._marginal_kernel"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["sources._marginal_kernel"], cache=True, parallel=True, nogil=True)
 def _marginal_kernel(initial, right, same, one, two):
     """Per-bin ordered-diplotype posterior marginals [N, B, S, S] of the stored chains."""
     candidates, states, _ = initial.shape
@@ -265,7 +265,7 @@ def marginals(factors: SourceFactors, transition: HammingTransition) -> np.ndarr
     return posterior
 
 
-@kernel(overloads=OVERLOADS["sources._pair_masses"], cache=True, parallel=True)
+@kernel(overloads=OVERLOADS["sources._pair_masses"], cache=True, parallel=True, nogil=True)
 def _pair_masses(posterior, pair_first, pair_second, pair_diagonal):
     """float64 [N, B, F]: unordered pair mass p[a, b] + p[b, a] (p[a, a] on the diagonal)."""
     n_samples, n_bins = posterior.shape[:2]
