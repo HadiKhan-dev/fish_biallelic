@@ -81,15 +81,18 @@ def contig_terms(
     genetic_map: ChromosomeGeneticMap,
     family_parameters: FamilyParameters,
     frequency_parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
+    *,
+    map_work=None,
 ) -> ContigTerms:
-    """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and support boundaries; mutate nothing."""
+    """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and support boundaries; mutate nothing. ``map_work`` (ordered,
+    optional): the allele frequencies' site windows concurrently (release 4.10)."""
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         n = len(evidence.sample_ids)
         return ContigTerms(
             np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.asarray([0, 0], dtype=np.int64)
         )
-    p = allele_frequency(gl, observed, frequency_parameters)
+    p = allele_frequency(gl, observed, frequency_parameters, map_work=map_work)
     keep = (np.minimum(p, 1 - p) >= family_parameters.minor_allele_frequency) & (
         observed.mean(axis=0) >= family_parameters.minimum_observed
     )

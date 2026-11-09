@@ -90,17 +90,27 @@ def read_inputs(
     return ReadInputs(hap0, hap1, positions, factor, site_factor, float(depth), model, seed)
 
 
-def read_rows(inputs: ReadInputs, first: int, stop: int) -> NDArray[np.int64]:
+def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer] | None = None) -> NDArray[np.integer]:
     """REF/ALT counts int64[stop - first, L, 2] of samples first..stop-1, each from its own stream
     (simulation.sample_reads, the inputs' seed and the sample's index): any partition of the samples into blocks,
-    simulated anywhere, gives the same counts."""
+    simulated anywhere, gives the same counts. ``out`` (optional, integer [stop - first, L, 2]; release 4.10): written
+    in place and returned instead (the simulation stage's shared int32 counts)."""
     sample = _fragment_sample if inputs.model.read_length_bp else _site_sample
     sites = inputs.hap0.shape[1]
-    out = np.zeros((stop - first, sites, 2), dtype=np.int64)
+    if out is None:
+        out = np.zeros((stop - first, sites, 2), dtype=np.int64)
+    elif out.shape != (stop - first, sites, 2):
+        raise ValueError("read counts destination has the wrong shape")
     for row, i in enumerate(range(first, stop)):
         out[row] = sample(
-            inputs.hap0[i], inputs.hap1[i], inputs.positions, inputs.depth, inputs.model, float(inputs.factor[i]),
-            inputs.site_factor, stream("simulation.sample_reads", seed=inputs.seed, index=i),
+            inputs.hap0[i],
+            inputs.hap1[i],
+            inputs.positions,
+            inputs.depth,
+            inputs.model,
+            float(inputs.factor[i]),
+            inputs.site_factor,
+            stream("simulation.sample_reads", seed=inputs.seed, index=i),
         )
     return out
 

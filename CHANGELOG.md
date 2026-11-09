@@ -1,5 +1,69 @@
 # Changelog
 
+## 4.10.0 (9 November 2026)
+
+This release removes serial stretches from the whole-genome stages (pedigree to the end) and from a simulated run's
+initialisation. On the N = 320 depth-0.5 simulation, one 112-CPU node after the 22 chromosome tasks, the genome-wide
+run took 2,059 s at a mean of 26 busy CPUs with 4.9.0 and 970 s at 53 with this release; the whole run, chromosome
+tasks included, took 9.32 node-hours with 4.9.0 and 7.04 with this release (the chromosome stages' code is unchanged:
+part of that difference is the nodes they ran on). The changes schedule, parallelise or stream work, and one fixes a
+fault that could silently corrupt a run's painting in releases 4.7.1 to 4.9.0 (next paragraph); the release
+matrix's published products are identical to 4.9.0's (below), and the replays named below are byte-identical.
+
+**Fixed: corrupted painting in some runs of 4.7.1 to 4.9.0.** Numba names the native loop of a parallel kernel after
+the address of its intermediate representation and its argument types. Worker processes started alike allocate alike,
+so two different kernels with the same argument types, compiled in two workers, could receive the same name, and a
+process that loaded both from the run's kernel cache then ran one kernel's loop for the other. The pair that met this
+in practice is painting's forward and bin-reversed structured emissions (both since 4.7.1). When the variant a run
+called collided, the decode's posteriors collapsed in almost every sample batch while the fitted model stayed
+correct, and the released painting, the pedigree evidence, founder refinement and phase of that run were degraded. It
+happened at random, per run with a newly compiled kernel cache: in about one run in four of one test design, with
+4.9.0 and with this release's first candidate alike, and in three of the 39 cases of that candidate's release matrix.
+Each process now gives its parallel loops names of its own; no computed value depends on a name. With Numba 0.68, an
+affected run showed low-posterior abstentions (`LOW_POSTERIOR_ABSTENTION` in `painting/sample_segments.csv`) over
+most of its painted sequence (58-73% in the three affected matrix runs, at most 5% in 39 unaffected ones, 1.3% on the
+TroMau cross), with several times as many segments. That is a warning sign, not a complete test: a collision
+affecting only some batches or contigs can stay below it, a run reusing an affected kernel cache repeats the fault,
+and weak evidence alone raises abstention. Analyses run with 4.7.1 to 4.9.0 should be rerun with this release,
+keeping the old outputs for comparison; deleting a kernel cache does not repair published results (this release's
+caches are separate from older ones).
+
+**Family phase uses the node.** A component's two label models are solved at once, each on a share of the task's
+CPUs, and each model's coordinate ascent updates samples in conflict-aware waves: a sample's update writes its own and
+its affected descendants' rows and reads those rows and their linked parents, and samples whose sets do not meet an
+earlier one's in the sweep order run together, giving the sequential sweep's result. The uncertainty, the release
+(site windows of 65,536 sites, copied once per solve), the agreement and the phase-set starts are mapped over the
+task's CPUs. Chromosome 3 alone on a node (saved 4.9.0 inputs): 645 s -> 117 s, the same phase product.
+
+**Export.** The sample-phase VCF text is formatted natively instead of one Python string per cell, and VCF text goes
+straight to htslib's BGZF writer with the blocks its record writer makes (a phase set beyond int32 is written missing,
+as htslib does); a writer with a share of T CPUs compresses and indexes on T - 1 htslib workers beside its own thread.
+Chromosome 3's export (saved 4.9.0 inputs): 120 s -> 30 s, files and indexes byte-identical.
+
+**Pedigree and relatedness.** The screen builds its certified selective bounds with array operations (the same
+bounds, bit for bit). Relatedness counts observed sites one site window of all samples at a time (its genome-wide
+task: 45 s -> 24 s in the run above). The screen now reads its contigs' prepared records, and the decision each
+contig's observed totals in sample ranges, on separate threads; their large decodes still run one at a time, so
+neither is faster yet (the decision's step was slower than when contigs were read whole; results are identical).
+
+**Resume.** A completed contig's discovery, selection and assembly are recognised from their published records instead
+of being expanded again; code identities are cached per process; binding and completion checks read their records
+concurrently. Creating a checkpoint directory under concurrent claims checks its status again after FileExistsError
+(a bounded retry; an entry that is not a directory still fails).
+
+**Initialisation.** A simulation's read blocks write into one shared array per contig, owned by its task like other
+shared values, instead of returning their counts through the coordinator; the pedigree rounds and the reads share one
+worker group; templates and founders are read and drawn concurrently; completion and resume check the reads' records
+without decoding them. N = 320: 73 s -> 44 s, with identical simulated data.
+
+**Operational.** A worker that cannot close a reply segment because a view of it is still alive collects and retries,
+then defers the close, instead of failing the run (one release-matrix case failed so in assembly; the code was
+unchanged since 4.9.0); the shared-memory copy kernel declares its read-only source.
+
+Validation: the test suite (3,808 tests), the stage tier (341 tests), the workflow receipt and the documentation check
+pass. All 39 cases of the release matrix are identical to 4.9.0's in every scientific, numerical and diagnostic value:
+36 from the first candidate and, for the three that candidate's painting corrupted (above), reruns of this release.
+
 ## 4.9.0 (8 November 2026)
 
 This release removes the remaining long serial stretches of a single chromosome's run. Chromosome 1 of the N = 320

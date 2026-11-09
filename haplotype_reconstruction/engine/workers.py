@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import functools
+import gc
 import io
 import logging
 import math
@@ -97,6 +98,8 @@ __all__ = [
     "share_value",
     "call_shared",
     "release_shared_value",
+    "share_output",
+    "release_output",
     "RecyclingPolicy",
     "WorkerGroup",
 ]
@@ -249,7 +252,16 @@ def new_segment(size: int, *, name: str | None = None, track: bool = True) -> Sh
     raise FileExistsError("no free shared-memory segment name")
 
 
-@kernel(overloads=((numba.types.uint8[::1], numba.types.uint8[::1]),), cache=True, parallel=True, nogil=True)
+@kernel(
+    overloads=(
+        (numba.types.uint8[::1], numba.types.uint8[::1]),
+        # Release 4.10: a read-only source (a frozen record array's bytes) is declared too; it was compiled on the fly.
+        (numba.types.Array(numba.types.uint8, 1, "C", readonly=True), numba.types.uint8[::1]),
+    ),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
 def _copy_shared_bytes(source, destination):
     chunk = COPY_CHUNK_BYTES
     for part in numba.prange((source.size + chunk - 1) // chunk):
@@ -1561,6 +1573,30 @@ def release_shared_value(reference: SharedValue) -> None:
         backing.release()
 
 
+def share_output(shape, dtype, key: str) -> tuple[SharedArrayRef, np.ndarray]:
+    """A writable shared array owned by the calling task's affinity like a SharedValue (release 4.10): subtasks attach
+    its reference (attach_shared_array) and each fills its own part; ``release_output(key)`` unlinks it after its last
+    use. Until then it is one of the affinity's owned segments, so the engine's failure paths unlink it as they unlink
+    shared values (a failed task's holds, an aborted in-process graph, the coordinator's announced names, exit).
+    Returns (reference, the owner's writable view)."""
+    if _ACTIVE_AFFINITY is None:
+        raise InvariantError("a shared output requires task affinity")
+    identity = (_ACTIVE_AFFINITY, key)
+    if identity in _SHARED_OWNED:
+        raise InvariantError(f"shared output {key!r} already exists for {_ACTIVE_AFFINITY!r}")
+    handle, reference, view = empty_shared_array(shape, dtype)
+    backing = _SharedBacking(None, handle)
+    backing.users = 1
+    _SHARED_OWNED[identity] = [backing]
+    _announce_shared("shared+", (handle.name,))
+    return reference, view
+
+
+def release_output(key: str) -> None:
+    """Unlink the calling affinity's shared output ``key`` (drop the views of it first)."""
+    release_shared_value(SharedValue(_ACTIVE_AFFINITY, key, None, ()))
+
+
 def _release_all_shared() -> None:
     """Unlink every segment this process still owns (process exit or an aborted in-process graph)."""
     while _SHARED_OWNED:
@@ -1946,11 +1982,26 @@ class _ReplyPickler(ForkingPickler):
         return NotImplemented
 
 
+# Reply segments whose mapping could not be closed yet (a view of it was still alive), closed at a later reply.
+_REPLY_UNCLOSED: list[SharedMemory] = []
+
+
+def _close_reply_handle(handle: SharedMemory) -> bool:
+    try:
+        handle.close()
+        return True
+    except BufferError:
+        return False
+
+
 def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
     """Copy ``array`` into a new segment for the coordinator to adopt, with ``copy_threads`` threads when it is large;
-    this worker keeps no mapping of it."""
+    this worker keeps no mapping of it. (Release 4.10: if a view of the new mapping is still alive when it closes,
+    which failed a 4.10 matrix case with BufferError once, it is collected and closed again, else kept and closed at a
+    later reply; the coordinator adopts the segment by name either way.)"""
     from .scheduler import segment_name
 
+    _REPLY_UNCLOSED[:] = [handle for handle in _REPLY_UNCLOSED if not _close_reply_handle(handle)]
     transposed = not array.flags.c_contiguous
     for _ in range(64):
         name = segment_name()
@@ -1963,7 +2014,10 @@ def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
         try:
             return _pid(_fill_shared(array.T if transposed else array, handle, copy_threads, capped=False), transposed)
         finally:
-            handle.close()
+            if not _close_reply_handle(handle):
+                gc.collect()
+                if not _close_reply_handle(handle):
+                    _REPLY_UNCLOSED.append(handle)
     raise FileExistsError("no free shared-memory segment name")
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from ...core.concurrency import live_threads
 from ...core.errors import InvariantError
 from ...core.files import staged_path
 from ..reports.tables import record_mapping, write_json
@@ -30,6 +31,12 @@ from .samples import write_sample_phase
 from .vcf import place, suffix
 
 SCHEMA = "released-allele-export-v4"
+
+
+def _writer_threads() -> int:
+    """The CPUs this writer may use now (release 4.10: the export task's map gives each writer a live share; its
+    BGZF compression and index threads come from it)."""
+    return live_threads()
 
 
 def _released_alleles(calls: np.ndarray) -> bool:
@@ -89,6 +96,7 @@ def export_contig(
     track_name = f"{stem}.tracks.csv.gz" if "tracks" in products else None
 
     def write_founders():
+        threads = _writer_threads()
         with staged_path(destination / vcf_name) as temporary:
             write_founder_vcf(
                 temporary,
@@ -99,6 +107,7 @@ def export_contig(
                 file_format=file_format,
                 withheld=withheld,
                 release_segments=founder_release,
+                threads=threads,
             )
             return place(
                 temporary,
@@ -106,6 +115,7 @@ def export_contig(
                 file_format=file_format,
                 last_position=int(sites.positions[-1]),
                 index=index,
+                threads=_writer_threads(),  # re-read: the share may have grown while writing
             )
 
     def write_tracks():
@@ -134,6 +144,7 @@ def export_contig(
         if not _released_alleles(calls):
             raise InvariantError("unexpected final allele encoding")
         filename = stem + ".samples" + suffix(file_format)
+        threads = _writer_threads()
         with staged_path(destination / filename) as temporary:
             rows = input_rows(sample_ids, input_sample_ids)
             names = tuple(sample_ids) if rows is None else tuple(map(str, input_sample_ids))
@@ -150,6 +161,7 @@ def export_contig(
                 sample_rows=rows,
                 phase_breaks=breaks,
                 frame_undetermined=undetermined,
+                threads=threads,
             )
             return place(
                 temporary,
@@ -157,10 +169,11 @@ def export_contig(
                 file_format=file_format,
                 last_position=int(sites.positions[-1]),
                 index=index,
+                threads=_writer_threads(),  # re-read: the share may have grown while writing
             )
 
     # Each callback owns a distinct data/index pair. The engine bounds their
-    # combined CPU use; the ordered map preserves manifest file order.
+    # combined CPU use (each writer's threads are its share); the ordered map preserves manifest file order.
     writers = [
         writer
         for product, writer in (("founders", write_founders), ("tracks", write_tracks), ("samples", write_samples))

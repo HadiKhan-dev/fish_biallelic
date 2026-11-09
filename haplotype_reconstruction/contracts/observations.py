@@ -137,22 +137,43 @@ class PairArray:
         return counts / self.shape[axis]
 
 
-def observation_counts(observed: Any, axis: int = 1) -> np.ndarray:
-    """Exact int64 positive-depth counts without a whole-contig mask projection."""
+def observation_counts(observed: Any, axis: int = 1, *, rows: tuple[int, int] | None = None) -> np.ndarray:
+    """Exact int64 positive-depth counts without a whole-contig mask projection. ``rows`` (first, stop; axis 1 only,
+    release 4.10): the totals of samples first..stop-1 only (independent sample ranges read concurrently)."""
+    if rows is not None and axis != 1:
+        raise ValueError("a sample range applies to per-sample totals (axis 1) only")
+    first, stop = (0, observed.shape[0]) if rows is None else (int(rows[0]), int(rows[1]))
     if isinstance(observed, np.ndarray):
-        return np.count_nonzero(observed, axis=axis)
-    result = np.zeros(observed.shape[1 - axis], dtype=np.int64)
+        return np.count_nonzero(observed if rows is None else observed[first:stop], axis=axis)
+    result = np.zeros(stop - first if axis == 1 else observed.shape[1], dtype=np.int64)
+    if (
+        isinstance(observed, PairArray)
+        and isinstance(observed.dense, np.ndarray)
+        and isinstance(observed.source.pairs, np.ndarray)
+        and resident_coded(observed.source)
+    ):
+        # Release 4.10: a resident coded mask, every sample of a site window in one gather (the sample-parallel
+        # native kernel); one call per sample and window before (chr3: about 7,400 calls). Exact integer counts.
+        window = max(1024, min(65536, (1 << 24) // max(1, observed.shape[0])))  # at most ~2^24 flags at once
+        for left in range(0, observed.shape[1], window):
+            right = min(observed.shape[1], left + window)
+            block = observed.gather(slice(first, stop), np.arange(left, right, dtype=np.int64))
+            if axis == 0:
+                result[left:right] = np.count_nonzero(block, axis=0)
+            else:
+                result += np.count_nonzero(block, axis=1)
+        return result
     # Count one contiguous sample row at a time. Checkpoint code arrays are
     # sample-major; cycling through every sample in each small site tile would
     # repeatedly evict/decompress the same large physical chunks.
-    for sample in range(observed.shape[0]):
+    for sample in range(first, stop):
         for left in range(0, observed.shape[1], 65536):
             right = min(observed.shape[1], left + 65536)
             block = observed.gather(slice(sample, sample + 1), np.arange(left, right, dtype=np.int64))
             if axis == 0:
                 result[left:right] += block[0]
             else:
-                result[sample] += np.count_nonzero(block)
+                result[sample - first] += np.count_nonzero(block)
 
     return result
 

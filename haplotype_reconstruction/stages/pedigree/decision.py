@@ -30,6 +30,7 @@ from ...contracts.pedigree import (
     ReleasedDecision,
     SearchDiagnosticView,
 )
+from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
 from ...science.pedigree import panel, resampling, stacking
@@ -81,6 +82,8 @@ __all__ = [
 ]
 precheck = science.precheck
 _AFFINITY = "pedigree/decision"
+# Sample ranges per contig for the observed totals (execution grain only: exact integer totals of disjoint samples).
+OBSERVED_COUNT_RANGES = 8
 
 
 def product_receipt(identity: str) -> dict[RecordKey, str]:
@@ -653,12 +656,27 @@ def run_stored(
     if family is None or family.sample_ids != bound.sample_ids:
         raise InputError("relatedness/families sample axis differs from the pedigree")
     relatedness = GuardRelatedness(bound.sample_ids, family.family, family.member_support)
-    observed_counts = np.empty((len(bound.contigs), len(bound.sample_ids)), dtype=np.int64)
-    for k, (c, identity) in enumerate(bound.dependencies.evidence):
-        counts = evidence_records.load_observed_counts(store.contig(c), expected_identity=identity)
-        if counts.shape != (len(bound.sample_ids),):
+    samples = len(bound.sample_ids)
+    observed_counts = np.empty((len(bound.contigs), samples), dtype=np.int64)
+    # Release 4.10: each contig's exact counts in OBSERVED_COUNT_RANGES sample ranges, every range on its own reader,
+    # all read concurrently (decoded contig after contig, one sample at a time, before; the largest contig ran alone).
+    edges = [round(samples * r / OBSERVED_COUNT_RANGES) for r in range(OBSERVED_COUNT_RANGES + 1)]
+    units = [
+        (k, contig, identity, first, stop)
+        for k, (contig, identity) in enumerate(bound.dependencies.evidence)
+        for first, stop in zip(edges[:-1], edges[1:], strict=True)
+        if stop > first
+    ]
+
+    def count(unit: tuple[int, str, str, int, int]) -> np.ndarray:
+        _, contig, identity, first, stop = unit
+        file = store.contig(contig)
+        return evidence_records.load_observed_counts(file, expected_identity=identity, rows=(first, stop))
+
+    for (k, _, _, first, stop), counts in zip(units, threaded_each(count, units), strict=True):
+        if counts.shape != (stop - first,):
             raise InputError("observed-count sample axis differs from the pedigree")
-        observed_counts[k] = counts
+        observed_counts[k, first:stop] = counts
     prepared = tuple(
         StoredPrepared(store.contig(c), identity, summary)
         for (c, identity), summary in zip(bound.dependencies.prepared, bound.summary, strict=True)

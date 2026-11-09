@@ -442,6 +442,35 @@ def _envelope_matches(file: CheckpointFile, source: Any, key: str, expected: str
     return True
 
 
+_DIRECTORY_CHECKS = 5  # status checks of an existing directory before a failure is believed
+
+
+def _ensure_directory(path: Path) -> None:
+    """mkdir -p for a directory many processes create at once.
+
+    pathlib's exist_ok re-raises EEXIST when its follow-up status check fails, and on a shared filesystem under a
+    burst of metadata requests that check can fail for an existing directory (release 4.10: a resumed N = 320 run's
+    concurrent block claims stopped the run with FileExistsError on checkpoints/contigs). The entry's existence is then
+    confirmed by its own status, retried briefly, before the error is raised.
+    """
+    import stat
+    import time
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    except FileExistsError as error:
+        failure = error
+    for attempt in range(_DIRECTORY_CHECKS):
+        try:
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                return
+            break  # a non-directory entry: a real error
+        except OSError:
+            time.sleep(0.05 * (attempt + 1))
+    raise failure
+
+
 @contextmanager
 def claim(file: CheckpointFile, key: str, identity: str) -> Iterator[bool]:
     """Claim one result; yield whether it needs computation, waiting for a competing writer.
@@ -453,7 +482,7 @@ def claim(file: CheckpointFile, key: str, identity: str) -> Iterator[bool]:
     lock file per record. Lock files hold no completion state.
     """
     path = Path(file.path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(path.parent)
     lock = path.with_name(f".{path.name}.{json_digest(key)}.claim")
     with lock.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

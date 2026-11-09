@@ -37,11 +37,19 @@ def run(
     with claim(file, records.KEY, derivation) as compute:
         if not compute:
             return derivation
-        from ...engine.scheduler import claim_threads
+        from ...engine.scheduler import claim_threads, current_budget
 
         def terms_of(item, evidence):
             claim_threads()  # each contig's terms on the task's current share
-            return contig_terms(evidence, item.genetic_map, parameters, frequency)
+            # Release 4.10: the allele frequencies' site windows on that share (decoded one after another before).
+            budget = current_budget()
+            return contig_terms(
+                evidence,
+                item.genetic_map,
+                parameters,
+                frequency,
+                map_work=lambda work, items: budget.thread_map(work, items, label="relatedness frequency windows"),
+            )
 
         with task_team(team):
             terms = evidence_pass(root, inputs, sample_ids, terms_of, team=team)

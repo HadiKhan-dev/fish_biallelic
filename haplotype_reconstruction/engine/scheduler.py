@@ -2295,6 +2295,27 @@ def _install_codec_idle_cpus() -> None:
 _install_codec_idle_cpus()
 
 
+def _ordered_reads(function, items):
+    """core.concurrency's map (release 4.10): independent record reads on the caller's budget (a task's claim; in
+    the coordinator its configured threads), one thread per item; inside an item a nested map runs serially."""
+    return current_budget().thread_map(function, items, label="independent record reads")
+
+
+def _live_allowance() -> int:
+    """core.concurrency.live_threads (release 4.10): the caller's live CPU allowance (a task's claim or its share)."""
+    return current_budget().threads()
+
+
+def _install_ordered_reads() -> None:
+    from ..core import concurrency
+
+    concurrency.ordered_map = _ordered_reads
+    concurrency.allowance = _live_allowance
+
+
+_install_ordered_reads()
+
+
 def spare_threads(cap: int) -> int:
     """At most ``cap`` threads: this task's CPU authority plus its lane's idle CPUs (idle_lane_cpus)."""
     return max(1, min(int(cap), authority_threads(cap) + idle_lane_cpus()))

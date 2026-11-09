@@ -116,6 +116,7 @@ def prepare_simulation(
     pedigree_rows: tuple[PedigreeRow, ...] | None = None,
     cores: int = 1,
     runner: Callable | None = None,
+    map_work: Callable | None = None,
 ) -> SimulationPlan:
     """Materialise founders and shared pedigree; return tasks with all read seeds bound.
 
@@ -123,16 +124,21 @@ def prepare_simulation(
     Explicit rows override cohorts and retain table observation. Input axes are not
     mutated; unequal founder counts across contigs raise InputError before draws.
     The runner executes independent child batches and returns indexed results.
+    ``map_work(function, items)`` (ordered, optional; release 4.10) draws the contigs' founders concurrently, each
+    from its own stream, so the founders are the same.
     """
     if len(templates) != len(config.contigs) or len(chromosome_maps) != len(config.contigs):
         raise InputError("templates and generating maps must follow the configured contig axis")
     if len({len(t.allele_probabilities) for t in templates}) != 1:
         raise InputError("simulation contigs have different founder counts")
     sites = [t.positions for t in templates]
-    founders = [
-        pair_founders(materialise_founders(t.allele_probabilities, stream("simulation.founders", seed=seed, index=c)))
-        for c, t in enumerate(templates)
-    ]
+
+    def contig_founders(c: int) -> list:
+        rng = stream("simulation.founders", seed=seed, index=c)
+        return pair_founders(materialise_founders(templates[c].allele_probabilities, rng))
+
+    indices = range(len(templates))
+    founders = list(map(contig_founders, indices) if map_work is None else map_work(contig_founders, indices))
     common: dict[str, Any] = dict(
         seed=seed,
         recombination_rate=chromosome_maps[0].fallback_rate_per_bp,

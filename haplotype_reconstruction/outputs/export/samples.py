@@ -20,8 +20,9 @@ import numpy as np
 
 from ...contracts.phase import DISPLAYED_UNDETERMINED
 from ...core.errors import InvariantError
+from .formatting import sample_line_bytes, sample_lines
 from .records import SiteTable
-from .vcf import FILEFORMAT, LEGACY_FILEFORMAT, contig_line, site_header_lines
+from .vcf import FILEFORMAT, LEGACY_FILEFORMAT, RecordWriter, contig_line, site_header_lines
 
 _ALLELES = (".", "0", "1")
 # Sites formatted at once: CHUNK_SITES, fewer with many samples so that a chunk holds at most CHUNK_CELLS cells (its
@@ -73,6 +74,7 @@ def write_sample_phase(
     sample_rows: np.ndarray | None = None,
     phase_breaks=None,
     frame_undetermined: np.ndarray | None = None,
+    threads: int = 1,
 ) -> None:
     """Write one chromosome's phased calls int8 [N, L, 2] (-1 / 0 / 1) at ``positions`` (the kept rows of
     ``sites``) with the rows of ``sites`` to ``path`` (format "bcf" or "vcf").
@@ -82,8 +84,6 @@ def write_sample_phase(
     chunk by chunk (no reordered copy of the calls). ``phase_breaks`` (per call row, int64 marker boundaries) and
     ``frame_undetermined`` (int8 [N, L], bit DISPLAYED_UNDETERMINED) are family phase's released phase ambiguity
     (release 2.2; None = none)."""
-    from cyvcf2 import Writer
-
     positions = np.asarray(positions)
     calls = np.asarray(calls)
     components = np.asarray(components)
@@ -117,22 +117,10 @@ def write_sample_phase(
     if frame_undetermined is not None and np.asarray(frame_undetermined).shape != (len(names), len(positions)):
         raise InvariantError("frame_undetermined sample/site axes do not match")
     set_starts = phase_set_starts(components, phase_breaks)
-    tables: dict[int, list[str]] = {}
-    unphased = _genotype_table("/", ".")
-
-    def table_of(phase_set: int) -> list[str]:
-        if phase_set < 0:
-            return unphased
-        found = tables.get(phase_set)
-        if found is None:
-            found = tables[phase_set] = _genotype_table("|", str(phase_set))
-        return found
-
-    filtered = "\t".join([unphased[0]] * len(names))  # "./.:." in every sample
     filters = sites.filters()
     kept_index: np.ndarray = np.cumsum(sites.kept) - 1  # row -> index among the kept sites
     rows, refs, alts = sites.positions.tolist(), sites.ref.tolist(), sites.alt.tolist()
-    writer = Writer.from_string(str(path), header, mode="wb" if file_format == "bcf" else "wz")
+    writer = RecordWriter(path, header, file_format, threads=threads)
     try:
         step = max(1, min(CHUNK_SITES, CHUNK_CELLS // max(1, len(names))))
         for start in range(0, len(rows), step):
@@ -155,20 +143,25 @@ def write_sample_phase(
                 phase_sets[(np.asarray(frame_undetermined)[:, selected] & DISPLAYED_UNDETERMINED) != 0] = -1
             if sample_rows is not None:
                 phase_sets = phase_sets[sample_rows]
-            # Every cell's text at once: the genotype table of its phase set (the unphased one for -1) at its code.
-            values, cell_sets = np.unique(phase_sets, return_inverse=True)
-            texts = np.empty((len(values), len(_ALLELES) ** 2), dtype=object)
-            for index, value in enumerate(values.tolist()):
-                texts[index] = table_of(value)
-            cells = texts[cell_sets.reshape(phase_sets.shape), codes].T.tolist()  # one list of cells per selected site
-            k = 0
-            for offset, row in enumerate(range(start, stop)):
-                if kept[offset]:
-                    genotypes = "\t".join(cells[k])
-                    k += 1
-                else:
-                    genotypes = filtered
-                line = f"{contig}\t{rows[row]}\t.\t{refs[row]}\t{alts[row]}\t.\t{filters[row]}\t.\tGT:PS\t" + genotypes
-                writer.write_record(writer.variant_from_string(line))
+            # Release 4.10: the records' text as bytes (formatting.sample_lines: each cell the genotype table's text of
+            # its phase set, the unphased table for -1; "./.:." throughout a removed record), not Python cell strings.
+            prefixes = [
+                f"{contig}\t{rows[row]}\t.\t{refs[row]}\t{alts[row]}\t.\t{filters[row]}\t.\tGT:PS\t".encode()
+                for row in range(start, stop)
+            ]
+            prefix = np.frombuffer(b"".join(prefixes), dtype=np.uint8)
+            prefix_ends = np.cumsum([len(item) for item in prefixes], dtype=np.int64)
+            out = np.empty(sample_line_bytes(len(prefix), stop - start, len(names)), dtype=np.uint8)
+            line_ends = np.empty(stop - start, dtype=np.int64)
+            written = sample_lines(
+                prefix,
+                prefix_ends,
+                np.array(kept, dtype=np.bool_),  # a writable copy: the declared signature (sites.kept may be frozen)
+                np.ascontiguousarray(codes, dtype=np.int64),
+                np.ascontiguousarray(phase_sets, dtype=np.int64),
+                out,
+                line_ends,
+            )
+            writer.write_chunk(out[:written], line_ends)
     finally:
         writer.close()

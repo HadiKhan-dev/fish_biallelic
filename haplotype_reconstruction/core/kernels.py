@@ -19,6 +19,37 @@ from typing import Any
 import numba
 from numba.core.serialize import dumps
 
+# Numba names a parallel loop's native function after hash(parfor), the loop's IR object (numba's IR objects hash by
+# id(), i.e. by address), followed by the mangled argument types: "__numba_parfor_gufunc_0x<address>...". Worker
+# processes started alike allocate alike, so two different kernels with the same argument types compiled in two
+# workers can receive the same symbol. A process that later loads both from the kernel cache links both callers to
+# one of the two loops and silently runs the wrong code (release 4.10's matrix: painting's forward and bin-reversed
+# structured emissions, after which the decode's posteriors collapsed in three of 39 cases). Each process therefore
+# hashes parfors with its own random salt and numba's per-process parfor counter: names differ between processes,
+# and within a process a reused address no longer repeats a name. Parfor equality and identity semantics are
+# unchanged (distinct parfors keep distinct hashes); no computed value depends on the name.
+_PARFOR_SALT = [int.from_bytes(os.urandom(8), "little")]
+
+
+def _new_parfor_salt() -> None:
+    _PARFOR_SALT[0] = int.from_bytes(os.urandom(8), "little")
+
+
+def _salted_parfor_hash(parfor: Any) -> int:
+    return hash((_PARFOR_SALT[0], id(parfor), getattr(parfor, "id", -1)))
+
+
+def _unique_parfor_symbols() -> None:
+    """Install the salted parfor hash (above) once; forked children (fork and forkserver workers) draw a new salt."""
+    from numba.parfors.parfor import Parfor
+
+    if Parfor.__hash__ is not _salted_parfor_hash:
+        Parfor.__hash__ = _salted_parfor_hash
+        os.register_at_fork(after_in_child=_new_parfor_salt)
+
+
+_unique_parfor_symbols()
+
 __all__ = [
     "KernelDeclaration",
     "SAMPLES_PER_THREAD",

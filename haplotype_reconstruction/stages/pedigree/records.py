@@ -15,6 +15,7 @@ from typing import Any
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import CandidatePanel, ChromosomeSummaryView, ExclusionRequest, ParentEligibility, Pedigree
 from ...contracts.roles import require_schema
+from ...core.concurrency import threaded_each
 from ...core.digest import json_digest
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieCounts
@@ -187,8 +188,8 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     policy = NumericalPolicy(**manifest["numerical_policy"])
     sample_ids, contigs = tuple(manifest["sample_ids"]), tuple(manifest["contigs"])
     eligibility = ParentEligibility.unrestricted(sample_ids)
-    prepared_ids, evidence_ids, prepared_headers = [], [], []
-    for c in contigs:
+
+    def bind(c: str) -> tuple[str, str, dict[str, Any]]:
         file = store.contig(c)
         evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
         painting = painting_records.result_reader(
@@ -208,9 +209,15 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         header = _header(file, PREPARED, prepared_identity, ("contig", "component_count", "omitted_reason"))
         if header["contig"] != c:
             raise InputError("prepared header contig differs from its configured axis")
-        prepared_ids.append((c, prepared_identity))
-        evidence_ids.append((c, evidence.identity))
-        prepared_headers.append(header)
+        return prepared_identity, evidence.identity, header
+
+    # Release 4.10: each contig's upstream chain (evidence, painting and through it assembly, selection and discovery
+    # readers: header reads and decodes) is independent of the others; contig after contig, this binding took most of
+    # an export check and of the run's completion step (chr3's export manifest check: 55 s on one CPU).
+    bound = threaded_each(bind, contigs)
+    prepared_ids = [(c, prepared) for c, (prepared, _, _) in zip(contigs, bound, strict=True)]
+    evidence_ids = [(c, evidence) for c, (_, evidence, _) in zip(contigs, bound, strict=True)]
+    prepared_headers = [header for _, _, header in bound]
     informative = tuple(
         pair for pair, h in zip(prepared_ids, prepared_headers, strict=True) if h["omitted_reason"] is None
     )

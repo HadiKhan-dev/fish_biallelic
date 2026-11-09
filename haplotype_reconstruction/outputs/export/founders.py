@@ -25,7 +25,7 @@ from ...core.errors import InvariantError
 from ...core.files import atomic_path
 from ..reports.tables import write_text_table
 from .records import SiteTable
-from .vcf import FILEFORMAT, common_allele_line, contig_line, site_header_lines
+from .vcf import FILEFORMAT, RecordWriter, common_allele_line, contig_line, site_header_lines
 
 _TEXT = np.array([".", "0", "1"])
 # Sites formatted at once: the text temporaries stay below ~20 bytes x founder rows x CHUNK_SITES.
@@ -129,13 +129,13 @@ def write_founder_vcf(
     file_format: str,
     withheld=None,
     release_segments=None,
+    threads: int = 1,
 ) -> None:
     """Write the founder VCF of one chromosome (module docstring) to ``path`` (format "bcf" or "vcf").
 
     ``panels``: [(positions int64 [L_c], released int8 [K_c, L_c])] in component order; ``withheld``: alleles
     per component released as '.' because no painted carrier observes them (header ##component lines).
     """
-    from cyvcf2 import Writer
 
     contig = sites.contig
     panels = [(np.asarray(positions, dtype=np.int64), np.asarray(calls, dtype=np.int8)) for positions, calls in panels]
@@ -219,11 +219,11 @@ def write_founder_vcf(
     dots = ["\t".join(["."] * len(calls)) for _, calls in panels]
     # Row ranges with one set of covering components (spans are disjoint in practice; overlaps are handled).
     boundaries = sorted({0, len(rows), *(lo for lo, _, _ in blocks), *(hi for _, hi, _ in blocks)})
-    writer = Writer.from_string(str(path), header, mode="wb" if file_format == "bcf" else "wz")
+    writer = RecordWriter(path, header, file_format, threads=threads)
 
     def emit(row: int, genotypes: str | None) -> None:
         line = f"{contig}\t{rows[row]}\t.\t{sites.ref[row]}\t{sites.alt[row]}\t.\t{filters[row]}\t."
-        writer.write_record(writer.variant_from_string(line if genotypes is None else line + "\tGT\t" + genotypes))
+        writer.write(line if genotypes is None else line + "\tGT\t" + genotypes)
 
     try:
         for a, b in zip(boundaries[:-1], boundaries[1:], strict=False):

@@ -47,7 +47,7 @@ from . import release_kernels as kernels
 from .allele_evidence import own_terms
 from .diagnostics import DecisionTrace, PhaseTrace
 from .model import LabelModel
-from .parameters import PhaseParameters
+from .parameters import RELEASE_WINDOW, PhaseParameters
 from .window import site_windows
 
 
@@ -76,6 +76,17 @@ class ReleaseInputs:
     audit: DecisionTrace | None = record_field(
         "diagnostic", units="1", dtype="DecisionTrace | None", stored=False, default=None
     )
+    # Release 4.10: the solve's per-window contiguous copies of site_alleles and flips (shared_windows), made once
+    # for all its samples instead of in every sample's every window.
+    shared_windows: dict | None = record_field("diagnostic", units="1", dtype="dict | None", stored=False, default=None)
+
+
+def shared_windows(site_bin: np.ndarray, alleles: np.ndarray, flips: np.ndarray) -> dict:
+    """{(lo, hi): (alleles [S, w], flips [S, w])} contiguous, for the release's site windows (RELEASE_WINDOW)."""
+    return {
+        (lo, hi): (np.ascontiguousarray(alleles[:, lo:hi]), np.ascontiguousarray(flips[:, lo:hi]))
+        for lo, hi in site_windows(site_bin, window=RELEASE_WINDOW)
+    }
 
 
 def release_tables(model: LabelModel, n: int) -> ReleaseTables:
@@ -133,19 +144,23 @@ def _bin_orientation(ordered, site_bin, tau_g, B, *, trace=False, audit=None):
     )
 
 
-def _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo=0, hi=None):
+def _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo=0, hi=None, shared=None):
     """kernels.site_posteriors over the sites [lo, hi) with the sample's flip arrays ``flips`` (flips [S, m],
-    own_state [2, m], own_flip [2, m])."""
+    own_state [2, m], own_flip [2, m]); ``shared``: the solve's window copies of alleles and flips[0]."""
     hi = len(site_bin) if hi is None else hi
     if lo == 0 and hi == len(site_bin):
         return kernels.site_posteriors(post, site_bin, alleles, gl, epsilon, *flips)
+    window = None if shared is None else shared.get((lo, hi))
+    if window is None:
+        window = (np.ascontiguousarray(alleles[:, lo:hi]), np.ascontiguousarray(flips[0][:, lo:hi]))
     return kernels.site_posteriors(
         post,
         site_bin[lo:hi],
-        np.ascontiguousarray(alleles[:, lo:hi]),
+        window[0],
         gl[lo:hi],
         epsilon,
-        *(np.ascontiguousarray(a[:, lo:hi]) for a in flips),
+        window[1],
+        *(np.ascontiguousarray(a[:, lo:hi]) for a in flips[1:]),
     )
 
 
@@ -172,7 +187,7 @@ def _orientation_certainty(
         ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo, hi)
         return _bin_orientation(ordered, site_bin[lo:hi], tau_g, B, audit=audit)
     orientation = np.full(B, np.nan)
-    for left, right in site_windows(site_bin, lo, hi):
+    for left, right in site_windows(site_bin, lo, hi, window=RELEASE_WINDOW):
         bins = site_bin[left:right]
         ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, left, right)
         local = _bin_orientation(ordered, bins, tau_g, B, audit=audit)
@@ -298,11 +313,16 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
     undetermined = np.zeros(len(site_bin), dtype=bool)
     scores = np.empty((2, len(site_bin)), dtype=np.float32) if ctx.scores else None
     chain = None
-    windows = site_windows(site_bin) if windowed else ((0, len(site_bin)),)
+    windows = site_windows(site_bin, window=RELEASE_WINDOW) if windowed else ((0, len(site_bin)),)
+    shared = ctx.shared_windows
     for left, right in windows:
         if windowed:
-            ordered = _site_posteriors(posts, site_bin, alleles, gl, config.site_deviation, flips, left, right)
-        genotype = _site_posteriors(gposts, site_bin, alleles, gl, config.site_deviation, flips, left, right)
+            ordered = _site_posteriors(
+                posts, site_bin, alleles, gl, config.site_deviation, flips, left, right, shared=shared
+            )
+        genotype = _site_posteriors(
+            gposts, site_bin, alleles, gl, config.site_deviation, flips, left, right, shared=shared
+        )
         pg = np.stack([genotype[0], genotype[1] + genotype[2], genotype[3]])
         g = pg.argmax(axis=0)
         if audit is not None:

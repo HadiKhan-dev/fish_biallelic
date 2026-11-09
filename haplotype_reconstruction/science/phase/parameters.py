@@ -199,6 +199,10 @@ IMPOSSIBLE_LOG_WEIGHT = -1e300
 # FP14/FP22: fixed chunks preserve CAL2 carrier accumulation and complete-bin medians.
 EVIDENCE_CHUNK = 4096
 SITE_WINDOW = 4096
+# Release 4.10: whole-bin site windows of the per-sample release loops (a workspace size; windows are whole bins, so
+# every site posterior, call and bin orientation is the same at any size). 4096-site windows ran one Python step per
+# window and sample: on chr3 at 0.5x most of 112 release threads waited for the interpreter between kernel calls.
+RELEASE_WINDOW = 1 << 16
 EMPTY_COMPONENT_BIN_SITES = 100
 
 

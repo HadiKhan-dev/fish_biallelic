@@ -66,31 +66,52 @@ def _terms(lab0, lab1, alleles_0, alleles_1, lg):
 
 
 def allele_evidence(
-    X: np.ndarray, site_bin: np.ndarray, alleles: np.ndarray, site_gl: np.ndarray, excluded: np.ndarray, eps: float
+    X: np.ndarray,
+    site_bin: np.ndarray,
+    alleles: np.ndarray,
+    site_gl: np.ndarray,
+    excluded: np.ndarray,
+    eps: float,
+    *,
+    map_work=None,
 ) -> np.ndarray:
     """float64 [S, m]: E(x, j), the summed carrier evidence for allele 1 of every state at the component's released
     sites. X int64 [N, 2, B] (the solve's MAP labels), site_bin int64 [m], alleles int8 [S, m], site_gl float32
-    [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the robust mixture."""
+    [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the robust mixture.
+
+    Release 4.10: each EVIDENCE_CHUNK of sites sums its carrier terms in kernels.evidence_terms (the same terms in the
+    same order as the previous bincount; numpy held the GIL, so the two solves' evidence ran one sample of CPU at a
+    time); ``map_work(function, items)`` (ordered, optional) runs the fixed chunks concurrently."""
+    from .kernels import evidence_terms
+
     S, m = alleles.shape
     out = np.zeros((S, m))
     keep = ~np.asarray(excluded, dtype=bool)
     rows = np.flatnonzero(keep)
     if not len(rows) or not m:
         return out
-    for lo in range(0, m, EVIDENCE_CHUNK):
+    X0, X1 = np.ascontiguousarray(X[rows, 0]), np.ascontiguousarray(X[rows, 1])
+
+    def chunk(lo: int) -> None:
         hi = min(m, lo + EVIDENCE_CHUNK)
-        c = hi - lo
         bins = site_bin[lo:hi]
-        lab0 = X[rows, 0][:, bins]
-        lab1 = X[rows, 1][:, bins]
-        cols = np.arange(c)[None, :]
-        a0 = alleles[:, lo:hi][lab0, cols]
-        a1 = alleles[:, lo:hi][lab1, cols]
         lg = _robust_log(site_gl[rows, lo:hi], eps)
-        e0, v0, e1, v1 = _terms(lab0, lab1, a0, a1, lg)
-        flat = np.concatenate(((lab0 * c + cols)[v0], (lab1 * c + cols)[v1]))
-        weights = np.concatenate((e0[v0], e1[v1]))
-        out[:, lo:hi] = np.bincount(flat, weights=weights, minlength=S * c).reshape(S, c)
+        part = np.zeros((S, hi - lo))
+        evidence_terms(
+            np.ascontiguousarray(X0[:, bins]),
+            np.ascontiguousarray(X1[:, bins]),
+            np.ascontiguousarray(alleles[:, lo:hi]),
+            np.ascontiguousarray(lg),
+            part,
+        )
+        out[:, lo:hi] = part
+
+    starts = list(range(0, m, EVIDENCE_CHUNK))
+    if map_work is None or len(starts) == 1:
+        for lo in starts:
+            chunk(lo)
+    else:
+        map_work(chunk, starts)
     return out
 
 

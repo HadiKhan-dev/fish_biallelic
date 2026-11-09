@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
+from functools import partial
 from typing import Any
 
 from ...contracts.evidence import ContigEvidence
@@ -17,6 +18,7 @@ from ...contracts.painting import Painting
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import ParentEligibility, PreparedChromosome
 from ...contracts.roles import require_schema
+from ...core.concurrency import threaded_each
 from ...core.digest import json_digest
 from ...core.errors import InputError
 from ...engine.graph import Expansion, ResultRef
@@ -367,7 +369,9 @@ def _after_prepared(
     store = CheckpointStore(root, nthreads=threads)
     cached = read_items(store.run, screen.SCREEN, identity, ("schema",))
     if cached is None:
-        prepared = tuple(_required_prepared(store, r) for r in informative)
+        # Release 4.10: the contigs' prepared records decoded concurrently on this task's share (one after another
+        # before: the first ~36 s of the N = 320 screen at 4-17 busy CPUs).
+        prepared = tuple(threaded_each(partial(_required_prepared, store), informative))
         screen.run(prepared, eligibility, parameters, threads=threads, nested=True, file=store.run, identity=identity)
         del prepared
     else:

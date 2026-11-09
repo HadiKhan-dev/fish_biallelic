@@ -390,6 +390,19 @@ def _map_output(function, items):
     return current_budget().thread_map(function, items, label="independent output writers")
 
 
+def _map_writers(function, items):
+    """Release 4.10: an ordered map giving each output writer a live share of this task's CPUs (its BGZF compression
+    and index threads; core.concurrency.live_threads), one thread per writer before."""
+    from ..engine.scheduler import current_budget
+
+    items = list(items)
+    results: list[Any] = [None] * len(items)
+    calls = [lambda share, item=item: function(item) for item in items]
+    for index, value in current_budget().concurrent(calls, label="output writers"):
+        results[index] = value
+    return results
+
+
 def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[str, float]:
     """Plan longest contigs first from site positions, without decoding genotypes.
 
@@ -579,6 +592,26 @@ def _run_discovery(
     from ..store.protocol import NumericalPolicy
 
     reader = _task_reader(output, root)
+    from ..stages.discovery import records as discovery_records
+    from ..stages.discovery.tasks import complete_contig_receipt
+    from ..stages.framework import RecordKey, Task, TaskKey
+
+    # Release 4.10: a contig whose plan and every block are already published under the identities this run derives
+    # (the reader checks each record's envelope; no marker is trusted) needs only its completion step. Expanding it
+    # resumed every block as its own task (chr3 0.5x: 7,533 tasks, each decoding and returning its stored result).
+    done = discovery_records.result_reader(reader._store, reader.manifest, product="discovery", contig=contig)
+    if done is not None:
+        identities = dict(done.identities)
+        return Expansion(
+            (),
+            Task(
+                TaskKey("discovery", "complete", contig),
+                complete_contig_receipt,
+                (reader._store.contig(contig), contig, identities),
+                inputs=tuple(RecordKey(contig, key) for key in identities),
+                affinity=contig,
+            ),
+        )
     evidence, identity = _required_product(reader, records, "evidence", contig)
     founder = evidence.founder_view()
     blocks = tuple(block_evidence(founder, index) for index in range(len(founder.block_spans)))
@@ -756,13 +789,26 @@ def _run_selection(
 ) -> Expansion:
     """Expand precisely one selection round, consuming G1's preceding context assembly."""
     from ..contracts.roles import require_schema
-    from ..engine.graph import Expansion, ResultRef, Task, TaskKey
+    from ..engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
     from ..stages.discovery import records as discovery_records
     from ..stages.evidence import records as evidence_records
     from ..stages.selection.tasks import SelectionSession, selection_round_task
     from ..store.protocol import NumericalPolicy, read_items
 
     reader = _task_reader(output, root)
+    # Release 4.10: a round whose completion is published under the identities this run derives (each promised block,
+    # memo and proposal record checked against its identity) is not expanded: its selected-record receipt is the
+    # gather's. Expanding decoded every panel of the round in its entry task before the gather checked the same record.
+    from ..stages.selection import records as selection_records
+
+    done = selection_records.result_reader(
+        reader._store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + round_name
+    )
+    if done is not None and done.scopes[done.round_index].selected(verify=True) is not None:
+        saved = read_items(reader._store.contig(contig), done.key, done.identity, ("schema",))
+        if saved is not None:
+            require_schema(saved.payload, done.schema)
+            return {RecordKey(contig, done.key): done.identity}  # type: ignore[return-value]
     upstream = {}
     for name, adapter in (("evidence", evidence_records), ("discovery", discovery_records)):
         request = adapter.result_reader(reader._store, reader.manifest, product=name, contig=contig)
@@ -850,6 +896,22 @@ def _run_assembly(
 
     reader = _task_reader(output, root)
     context = None if not round_name else round_name.removeprefix("context.")
+    # Release 4.10: a role already published under the identities this run derives returns the receipt its gather
+    # (_publication_result) would, after the same checks, instead of decoding the selected panels, building the
+    # evidence view and decoding the stored product's diagnostics again.
+    from ..contracts.roles import require_schema
+    from ..engine.graph import RecordKey
+    from ..stages.assembly import records as assembly_records
+    from ..store.protocol import read_items
+
+    done = assembly_records.result_reader(
+        reader._store, reader.manifest, product="assembly", contig=contig, round_name=context
+    )
+    if done is not None:
+        saved = read_items(reader._store.contig(contig), done.key, done.identity, ("schema",))
+        if saved is not None:
+            require_schema(saved.payload, done.schema)
+            return {RecordKey(contig, done.key): done.identity}  # type: ignore[return-value]
     previous = "l2" if context is None else "initial" if context == "l1" else "l1"
     request = selection_records.result_reader(
         reader._store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + previous
@@ -1177,7 +1239,7 @@ def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
         config,
         identity,
         None if previous is None else ExportRecord(**previous.payload),
-        map_work=_map_output,
+        map_work=_map_writers,
     )
     publish_output(
         file,
@@ -1296,8 +1358,14 @@ def _complete_workflow(
         return
     scopes = tuple(dict.fromkeys(key.scope for key in nodes if key.scope != "run"))
     name = cut.step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
+
+    # Release 4.10: the containers' envelope checks run concurrently (file reads and decodes after the graph).
     if not complete_cut(
-        replace(cut, nodes=nodes), containers, outputs, prepared.paths.checkpoints / "markers" / (name + ".done")
+        replace(cut, nodes=nodes),
+        containers,
+        outputs,
+        prepared.paths.checkpoints / "markers" / (name + ".done"),
+        map_work=_threaded_each,
     ):
         raise InvariantError(f"{cut.step}: declared products did not pass completion checks")
     recorder.published(
@@ -1383,7 +1451,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
                 (root, output, c, prepared.settings.export.full_length),
                 depends_on=tuple(key(stage, c) for stage in ("sites", "release", "phase")),
                 outputs=(RecordKey(c, "outputs/export"),),
-                resources=ResourceRequest(1, min(3, prepared.cores)),
+                resources=ResourceRequest(1, prepared.cores),  # its writers' compression threads (release 4.10)
             )
     dependencies = {
         "quality": tuple(key("evidence", c) for c in resolved.contigs),
@@ -1405,6 +1473,9 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
                 _export_manifest_part,
                 (root, output, c, prepared.settings.export.full_length),
                 depends_on=(key("export", c),),
+                # Release 4.10: its identity check binds every contig's upstream chain (pedigree's inputs) on the
+                # task's CPUs; at the end of a run they are idle (chr3 at 0.5x: 55 s on one CPU).
+                resources=ResourceRequest(1, prepared.cores),
             )
             for c in resolved.contigs
         )
@@ -1966,8 +2037,8 @@ def export_command(args: argparse.Namespace) -> int:
             contig,
             config,
             _export_identity(reader, contig, config),
-            max_cores=min(3, prepared.cores),
-            map_work=_map_output,
+            max_cores=prepared.cores,
+            map_work=_map_writers,
         )
         for contig in contigs
     ]
@@ -2005,7 +2076,8 @@ def _check_recombination_bindings(
     from ..store.protocol import read_items
 
     candidate = dict(manifest, **resolved.manifest())
-    for contig in resolved.contigs:
+
+    def check(contig: str) -> None:
         file = store.contig(contig)
         request = records.result_reader(
             store, candidate, product="recombination", contig=contig, parameters=resolved.parameters.recombination
@@ -2013,7 +2085,7 @@ def _check_recombination_bindings(
         if request is None:
             if file.has("identity/recombination") or file.has("recombination"):
                 raise InvariantError(f"{contig}: recombination adapter omitted an existing binding")
-            continue
+            return
         if file.has("identity/recombination"):
             binding = read_items(file, "identity/recombination", request.identity, ("schema", "derivation"))
             assert binding is not None
@@ -2023,6 +2095,18 @@ def _check_recombination_bindings(
         saved = read_items(file, request.key, request.identity, ("schema",))
         if saved is not None:
             require_schema(saved.payload, request.schema)
+
+    # Release 4.10: each contig derives its upstream chain (recombination, phase, painting, assembly, selection,
+    # discovery readers: envelope reads and decodes); contig after contig this took 20-30 s of a resumed run's start
+    # and 165 s of an export of one contig. The checks are independent reads; the first error in contig order wins.
+    _threaded_each(check, resolved.contigs)
+
+
+def _threaded_each(function: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
+    """core.concurrency.threaded_each (release 4.10): bounded threads for a coordinator's independent record reads."""
+    from ..core.concurrency import threaded_each
+
+    return threaded_each(function, items)
 
 
 def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunResult:

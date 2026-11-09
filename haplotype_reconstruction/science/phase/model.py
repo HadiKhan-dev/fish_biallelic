@@ -38,6 +38,8 @@ not a calibrated posterior of the pairing.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from ...core.errors import InvariantError
@@ -134,6 +136,52 @@ class LabelModel:
         self.pairings = []
         self.audit = None
         self.decision_audit = decision_audit
+        # Release 4.10: concurrent blocks (solve(map_work=...)). The rows a block of n writes (n and its descendants:
+        # labels, chains, its children's gauge) and reads (those rows and their parents: the kernel's copied labels
+        # and subtree marks, propagate) fix which blocks commute; ``_waves`` keeps the sequential order of every
+        # pair that does not. Each thread has its own subtree mark scratch.
+        self.map_work = None
+        self.reads = []
+        for rows in self.affected:
+            linked = np.concatenate((rows, self.par[rows].ravel()))
+            self.reads.append(np.unique(linked[linked >= 0]))
+        self._scratch = threading.local()
+        self._sweep_waves = None
+        self._initial_waves = None
+
+    def _waves(self, order):
+        """Partition ``order`` into waves of mutually independent blocks, each wave after every block it conflicts
+        with: a block goes one wave after the latest wave that wrote a row it reads or read a row it writes (writes
+        are among a block's reads). Running the waves in turn, each wave's blocks in any order or at once, applies
+        every conflicting pair in its sequential order and so reproduces the sequential sweep exactly."""
+        last_write = np.full(self.N, -1, dtype=np.int64)
+        last_read = np.full(self.N, -1, dtype=np.int64)
+        waves = []
+        for n in order:
+            n = int(n)
+            writes, reads = self.affected[n], self.reads[n]
+            wave = 1 + max(int(last_write[reads].max(initial=-1)), int(last_read[writes].max(initial=-1)))
+            if wave == len(waves):
+                waves.append([])
+            waves[wave].append(n)
+            last_write[writes] = np.maximum(last_write[writes], wave)
+            last_read[reads] = np.maximum(last_read[reads], wave)
+        return [np.asarray(members, dtype=np.int64) for members in waves]
+
+    def _mark(self):
+        """The subtree scratch for this thread (int8 [2N], -1 outside a block call)."""
+        if self.map_work is None:
+            return self.mark
+        mark = getattr(self._scratch, "mark", None)
+        if mark is None:
+            mark = self._scratch.mark = np.full(2 * self.N, -1, dtype=np.int8)
+        return mark
+
+    def _concurrent(self, function, members):
+        """function(n) for every member of one wave: on the map when a wave has more than one block."""
+        if len(members) > 1:
+            return self.map_work(function, members.tolist())
+        return [function(int(n)) for n in members]
 
     # ------------------------------------------------------------------------------------------- objective
     def objective(self):
@@ -221,7 +269,7 @@ class LabelModel:
             self.par,
             desc,
             child_tracks,
-            self.mark,
+            self._mark(),
             self.S,
             self.lstay,
             self.lmove,
@@ -271,16 +319,45 @@ class LabelModel:
         """Every sample by its own painting Viterbi (both homologues free, no relatives), then samples with a
         released parent, ancestors first, without their children's terms: parental origin orients them."""
         free = np.zeros(2, dtype=np.int64)
-        for n in range(self.N):
+
+        def own(n):
             path0, path1, _, _ = self.block(n, free, use_children=False)
             self.X[n, 0] = path0
             self.X[n, 1] = path1
-        for n in self.order:
-            if np.all(self.par[n] < 0):
-                continue
+
+        def oriented(n):
             kinds = self.kinds(n)
             path0, path1, gpath, _ = self.block(n, kinds, use_children=False)
             self.apply(n, path0, path1, np.zeros_like(gpath), kinds)
+
+        if self.map_work is not None:
+            # Release 4.10: the free blocks read and write only their own sample; the oriented ones run in waves.
+            self._concurrent(own, np.arange(self.N, dtype=np.int64))
+            if self._initial_waves is None:
+                self._initial_waves = self._waves([n for n in self.order if np.any(self.par[n] >= 0)])
+            for members in self._initial_waves:
+                self._concurrent(oriented, members)
+            return
+        for n in range(self.N):
+            own(n)
+        for n in self.order:
+            if np.all(self.par[n] < 0):
+                continue
+            oriented(n)
+
+    def _sweep_block(self, n):
+        """One block of a sweep without audits: apply it when its local gain exceeds the gain quantum, else restore
+        n's and its descendants' rows. Returns whether it was applied."""
+        rows = self.affected[n]
+        X0, V0 = self.X[rows], self.V[rows]
+        kinds = self.kinds(n)
+        path0, path1, gpath, _ = self.block(n, kinds)
+        self.apply(n, path0, path1, gpath, kinds)
+        gain, changed = self._gain(rows, X0, V0)
+        if gain > self.config.gain_quantum:
+            return True
+        self._restore(rows, X0, V0, changed)
+        return False
 
     def sweeps(self):
         """Block coordinate ascent from the current state until a sweep applies no block (``settled``) or
@@ -291,9 +368,14 @@ class LabelModel:
         accept = lambda change: change > quantum  # noqa: E731
         J = self.objective()
         self.history.append(float(J))
+        concurrent = self.map_work is not None and self.decision_audit is None and self.audit is None
+        if concurrent and self._sweep_waves is None:
+            self._sweep_waves = self._waves(self.order)
         for sweep_index in range(self.config.max_sweeps):
             accepted = 0
-            for n in self.order:
+            for members in self._sweep_waves if concurrent else ():
+                accepted += sum(self._concurrent(self._sweep_block, members))
+            for n in () if concurrent else self.order:
                 n = int(n)
                 rows = self.affected[n]
                 X0, V0 = self.X[rows], self.V[rows]
@@ -354,7 +436,16 @@ class LabelModel:
         self.settled = False
         return J
 
-    def solve(self, *, trace=False):
+    def solve(self, *, trace=False, map_work=None):
+        """The capped ascent below (_solve); with ``map_work(function, items)`` (ordered results, one thread per call)
+        its initial blocks and sweep blocks run in conflict-free waves (release 4.10) and reach the same state."""
+        self.map_work = None if trace or self.decision_audit is not None else map_work
+        try:
+            return self._solve(trace=trace)
+        finally:
+            self.map_work = None
+
+    def _solve(self, *, trace=False):
         """Perform one capped global ascent and retain its final X/V for release.
 
         Initialise every sample, then alternate whole-pedigree block sweeps and

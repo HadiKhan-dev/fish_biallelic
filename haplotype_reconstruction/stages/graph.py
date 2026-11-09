@@ -414,13 +414,20 @@ def execution_options(
 
 
 def complete_cut(
-    cut: Cut, containers: Mapping[str, CheckpointFile], outputs: Mapping[TaskKey, Mapping[RecordKey, str]], marker: Any
+    cut: Cut,
+    containers: Mapping[str, CheckpointFile],
+    outputs: Mapping[TaskKey, Mapping[RecordKey, str]],
+    marker: Any,
+    *,
+    map_work: Any = None,
 ) -> bool:
     """Write a workflow marker last, only after checking every expected record.
 
     This also repairs a missing marker after process death without recomputation.
     Markers never enter the completion decision. Append-only records make the
     multi-container check stable while the final marker is atomically placed.
+    ``map_work(function, items)`` (ordered results) checks the containers concurrently (release 4.10: one container
+    after another took most of a run's last minute); a mismatch propagates through the map.
     """
     from ..store.protocol import is_complete
 
@@ -435,9 +442,12 @@ def complete_cut(
             grouped[key.container][key.key] = identity
     if not grouped:
         return False
-    for container, records in grouped.items():
-        if not is_complete(containers[container], records):
-            return False
+    if map_work is None:
+        for container, records in grouped.items():
+            if not is_complete(containers[container], records):
+                return False
+    elif not all(map_work(lambda item: is_complete(containers[item[0]], item[1]), list(grouped.items()))):
+        return False
     # Stage actions own complete/<step> in their permitted container. The cut
     # only writes its external marker after all checked publications exist.
     import os

@@ -1006,6 +1006,7 @@ Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_r
 | `IMPOSSIBLE_LOG_WEIGHT` | `-1e+300` | See model | Family-phase model, solver and release constants (release 3.0 rebuild). |
 | `EVIDENCE_CHUNK` | `4096` | See model | FP14/FP22: fixed chunks preserve CAL2 carrier accumulation and complete-bin medians. |
 | `SITE_WINDOW` | `4096` | See model | Family-phase model, solver and release constants (release 3.0 rebuild). |
+| `RELEASE_WINDOW` | `1 << 16` | See model | Release 4.10: whole-bin site windows of the per-sample release loops (a workspace size; windows are whole bins, so every site posterior, call and bin orientation is the same at any size). 4096-site windows ran one Python step per window and sample: on chr3 at 0.5x most of 112 release threads waited for the interpreter between kernel calls. |
 | `EMPTY_COMPONENT_BIN_SITES` | `100` | See model | Family-phase model, solver and release constants (release 3.0 rebuild). |
 ## science.recombination.parameters — JunctionParameters
 

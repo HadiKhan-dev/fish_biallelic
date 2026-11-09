@@ -52,34 +52,49 @@ class Geometry:
             hashlib.sha256(component.genotype_likelihoods[i].tobytes() + component.observed[i].tobytes()).digest()
             for i in range(n)
         ]
+        # A group's reference is its member with the smallest key, the lowest sample index among equal keys (min()'s
+        # first minimum over members in ascending order): one rank per sample orders both.
+        by_key = sorted(range(n), key=lambda q: (keys[q], q))
+        rank = np.empty(n, np.int64)
+        rank[by_key] = np.arange(n)
+        by_key = np.asarray(by_key, np.int64)
+        parents = np.flatnonzero(candidates & p.available)
         edges = list(range(0, p.n_bins, SELECTIVE_BOUND_GROUP_BINS)) + [p.n_bins]
         for bounds in (edges, sorted({p.n_bins - e for e in edges})):
             blocks = []
             for first, stop in zip(bounds[:-1], bounds[1:], strict=True):
                 word = np.ascontiguousarray(labels[:, first:stop]).reshape(n, -1)
-                parents = np.flatnonzero(candidates & p.available)
                 _, inverse = np.unique(word[parents], axis=0, return_inverse=True)
+                inverse = inverse.reshape(-1)
                 which = np.full(n, -1, np.int64)
                 which[parents] = inverse
                 groups = int(inverse.max() + 1)
-                refs = np.empty(groups, np.int64)
+                lowest = np.full(groups, n, np.int64)
+                np.minimum.at(lowest, inverse, rank[parents])
+                refs = by_key[lowest]
                 tv = np.zeros((groups, stop - first, p.n_states))
                 mass = np.ones_like(tv)
                 reference = np.ones_like(tv)
-                for g in range(groups):
-                    members = np.flatnonzero((which == g) & p.available)
-                    ref = min(members, key=lambda q: keys[q])
-                    refs[g] = ref
-                    j = max(first, 1)
-                    target = slice(j - first, stop - first)
-                    source = slice(j - 1, stop - 1)
-                    rv = normal[ref, source]
-                    distance = 0.5 * np.abs(normal[members, source] - rv).sum(-1)
-                    tv[g, target] = np.nextafter(distance.max(0) + SELECTIVE_BOUND_ULPS * np.finfo(float).eps, np.inf)
-                    mass[g, target] = np.nextafter(
-                        masses[members, source].max(0) * (1 + SELECTIVE_BOUND_ULPS * np.finfo(float).eps), np.inf
-                    )
-                    reference[g, target] = np.where(masses[ref, source] > 0, masses[ref, source], 1.0)
+                j = max(first, 1)
+                target = slice(j - first, stop - first)
+                source = slice(j - 1, stop - 1)
+                # Release 4.10: every parent's distance to its group's reference at once (each sum over the last
+                # axis is the same reduction as for one group's members), then the groups' maxima (exact in any
+                # order); the per-group Python loop dominated the screen set-up of a long chromosome.
+                distance = 0.5 * np.abs(normal[parents, source] - normal[refs[inverse], source]).sum(-1)
+                order = np.argsort(inverse, kind="stable")
+                starts = np.searchsorted(inverse[order], np.arange(groups))
+                tv[:, target] = np.nextafter(
+                    np.maximum.reduceat(distance[order], starts, axis=0) + SELECTIVE_BOUND_ULPS * np.finfo(float).eps,
+                    np.inf,
+                )
+                mass[:, target] = np.nextafter(
+                    np.maximum.reduceat(masses[parents, source][order], starts, axis=0)
+                    * (1 + SELECTIVE_BOUND_ULPS * np.finfo(float).eps),
+                    np.inf,
+                )
+                held = masses[refs, source]
+                reference[:, target] = np.where(held > 0, held, 1.0)
                 blocks.append(Block(first, stop, which, refs, tv, mass, reference))
             self.partitions.append(blocks)
 

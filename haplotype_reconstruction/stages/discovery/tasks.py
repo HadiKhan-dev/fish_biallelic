@@ -29,7 +29,14 @@ from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from .records import PLAN, BlockAdapter, PlanAdapter, block_key, diagnostic_key
 from .records import identities as record_identities
 
-__all__ = ["discovery_tasks", "execute_block", "publish_plan", "complete_contig", "block_task_bytes"]
+__all__ = [
+    "discovery_tasks",
+    "execute_block",
+    "publish_plan",
+    "complete_contig",
+    "complete_contig_receipt",
+    "block_task_bytes",
+]
 
 # Resource-only provenance: B/discovery/stage.py TASK_BASE_BYTES.
 _TASK_BASE_BYTES = 1280 << 20
@@ -124,6 +131,14 @@ def complete_contig(file: CheckpointFile, identities: dict[str, str]) -> None:
     mark_complete(file, "discovery", identities)
 
 
+def complete_contig_receipt(file: CheckpointFile, contig: str, identities: dict[str, str]) -> dict[RecordKey, str]:
+    """complete_contig, replying with the records it checked (release 4.10): mark_complete has verified every
+    record's envelope against ``identities``, so the run's completion step takes the receipt instead of deriving and
+    checking the whole block domain again in the coordinator (one contig at a time, after the graph)."""
+    complete_contig(file, identities)
+    return {RecordKey(contig, key): identity for key, identity in identities.items()}
+
+
 def discovery_tasks(
     contig: str,
     blocks: Sequence[BlockEvidence],
@@ -193,8 +208,8 @@ def discovery_tasks(
     tasks.append(
         Task(
             TaskKey("discovery", "complete", contig),
-            complete_contig,
-            (file, identities),
+            complete_contig_receipt,
+            (file, contig, identities),
             depends_on=tuple(block_tasks) or (plan_key,),
             inputs=tuple(RecordKey(contig, key) for key in identities),
             affinity=contig,

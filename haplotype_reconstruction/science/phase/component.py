@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -44,7 +45,7 @@ from .junctions import JunctionInputs, junction_candidates, withheld_joins
 from .model import LabelModel
 from .painting_inputs import component_bin_edges, tie_break_bins
 from .parameters import SITE_WINDOW, PhaseParameters
-from .release import ReleaseInputs, release_sample
+from .release import ReleaseInputs, release_sample, shared_windows
 
 __all__ = ["PhaseWorkspace", "phase_component", "component_emissions"]
 
@@ -64,6 +65,11 @@ class PhaseWorkspace:
         "diagnostic", units="1", dtype="Callable[..., np.ndarray] | None", stored=False, default=None
     )
     map_work: Callable[..., list[Any]] | None = record_field(
+        "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
+    )
+    # Release 4.10: ``concurrent(functions)`` runs each function(map_work) at once, each with a map over its own CPU
+    # share, and returns their results in order (both solves, each running its blocks in waves).
+    concurrent: Callable[..., list[Any]] | None = record_field(
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
     )
 
@@ -136,12 +142,12 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
     return emissions
 
 
-def _solve_one(model):
-    model.solve()
+def _solve_one(model, map_work=None):
+    model.solve(map_work=map_work)
     return model
 
 
-def _solve_models(inputs, parameters, emissions, rates, audit=None, map_work=None):
+def _solve_models(inputs, parameters, emissions, rates, audit=None, map_work=None, concurrent=None):
     """Default then mirror, with the original sample and pairing search orders (FP05-FP09)."""
     parents = np.full((len(inputs.observations.sample_ids), 2), -1, dtype=np.int64)
     edges = inputs.pedigree
@@ -164,6 +170,9 @@ def _solve_models(inputs, parameters, emissions, rates, audit=None, map_work=Non
     if map_work is None or audit is not None:
         for model in models:
             model.solve()
+    elif concurrent is not None:
+        # Release 4.10: both solves at once, each running its blocks in conflict-free waves on its CPU share.
+        models = tuple(concurrent([partial(_solve_one, model) for model in models]))
     else:
         models = tuple(map_work(_solve_one, models))
     return models, parents
@@ -206,11 +215,11 @@ def _release_sites(inputs, bin_edges, bins):
     return indices, site_bins[indices], alleles[:, columns[indices]]
 
 
-def _uncertainty(model, inputs, site_bins, site_alleles, site_gl):
-    """CAL2 with the original chunk and carrier addition order (FP14)."""
+def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, map_work=None):
+    """CAL2 with the original chunk and carrier addition order (FP14); ``map_work`` runs its chunks concurrently."""
     epsilon = inputs.painting.robustness_epsilon
     excluded = inputs.observations.excluded
-    evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon)
+    evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon, map_work=map_work)
     prior = allele_prior(inputs.refit.prior_ones, inputs.refit.prior_called)
     return AlleleUncertainty(evidence, flip_probabilities(evidence, site_alleles, prior), prior)
 
@@ -240,6 +249,8 @@ def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, wo
     """Every sample's release inputs from one fixed solve, in run order."""
     site_bins, alleles, site_gl = sites
     break_bins, tie_cuts = breaks
+    # Release 4.10: the solve's window copies of its alleles and flips, made once for all its samples.
+    shared = shared_windows(site_bins, alleles, uncertainty.flips) if workspace.windowed else None
     values = []
     for sample in range(model.N):
         context = ReleaseInputs(
@@ -258,6 +269,7 @@ def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, wo
             workspace.scores,
             True,
             audit,
+            shared_windows=shared,
         )
         values.append((model, sample, context))
     return values
@@ -280,7 +292,9 @@ def phase_component(
     workspace = PhaseWorkspace() if workspace is None else workspace
     emissions = component_emissions(inputs, windowed=workspace.windowed)
     rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
-    models, parents = _solve_models(inputs, parameters, emissions, rates, audit, workspace.map_work)
+    models, parents = _solve_models(
+        inputs, parameters, emissions, rates, audit, workspace.map_work, workspace.concurrent
+    )
     model, mirror = models
     bin_edges = component_bin_edges(inputs.painting, inputs.refit.positions)
     junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges, audit)
@@ -290,7 +304,11 @@ def phase_component(
         if workspace.prepare_likelihoods is None
         else workspace.prepare_likelihoods(inputs.observations, site_indices, site_bins)
     )
-    uncertainty = tuple(_uncertainty(solved, inputs, site_bins, site_alleles, site_gl) for solved in models)
+    # Release 4.10: each solve's evidence chunks run concurrently (a serial numpy tail before).
+    chunks = workspace.map_work if audit is None else None
+    uncertainty = tuple(
+        _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, map_work=chunks) for solved in models
+    )
     releases = _sample_releases(
         models,
         inputs,
@@ -301,8 +319,16 @@ def phase_component(
         workspace,
         audit,
     )
-    agreed = [_agreement(first, second, site_bins) for first, second in zip(*releases, strict=False)]
-    starts = tuple(_set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)
+    pairs = list(zip(*releases, strict=False))
+    if workspace.map_work is not None and audit is None:
+        # Release 4.10: samples' agreements are independent (sample after sample they were a serial tail).
+        agreed = workspace.map_work(lambda pair: _agreement(pair[0], pair[1], site_bins), pairs)
+    else:
+        agreed = [_agreement(first, second, site_bins) for first, second in pairs]
+    if workspace.map_work is not None and audit is None:
+        starts = tuple(workspace.map_work(lambda value: _set_start_bins(value.set_starts, site_bins, model.B), agreed))
+    else:
+        starts = tuple(_set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)
     chains = _edge_chains(
         model,
         mirror,
@@ -425,6 +451,7 @@ def phase_contig(
         mirrored.append(mirror_row)
         pairing_rows.append(pairing_row)
         ties = tie_break_bins((painted,), component.observations.positions, state.parents, bin_edges)
+        indices = lo + state.result.site_indices
         for sample, agreed in enumerate(state.result.agreed):
             tie_bins = ties[sample]
             joins = set(state.withheld.get(sample, ()))
@@ -432,7 +459,6 @@ def phase_contig(
             withheld_joins += len(joins - tie_bins)
             a, b = state.result.releases[0][sample], state.result.releases[1][sample]
             tie_breaks -= len(set(state.tie_cuts[sample]) - set(a.set_breaks) - set(b.set_breaks))
-            indices = lo + state.result.site_indices
             calls[sample, indices] = agreed.calls
             undetermined[sample, indices] = np.where(agreed.undetermined, 3, 0)
             breaks[sample].extend(lo + int(state.result.site_indices[i]) - 1 for i in agreed.set_starts)

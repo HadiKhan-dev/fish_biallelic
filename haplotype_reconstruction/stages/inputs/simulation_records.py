@@ -15,10 +15,10 @@ from ...contracts.roles import require_schema
 from ...core.errors import InputError
 from ...simulation.truth import MANIFEST, READS, SCHEMA, TRUTH, ContigTruth, SimulationManifest, truth_from_record
 from ...store.container import CheckpointFile
-from ...store.protocol import resume
+from ...store.protocol import read_items, resume
 from ...store.store import CheckpointStore
 
-__all__ = ["load_manifest", "load_reads", "load_truth"]
+__all__ = ["check_reads", "load_manifest", "load_reads", "load_truth"]
 
 
 def load_manifest(store: CheckpointStore) -> SimulationManifest | None:
@@ -37,6 +37,15 @@ def load_reads(file: CheckpointFile, identity: str) -> dict[str, Any]:
         raise InputError(f"{file.label}: no simulated reads")
     require_schema(record.payload, SCHEMA)
     return record.payload
+
+
+def check_reads(file: CheckpointFile, identity: str) -> None:
+    """Refuse a missing contig, another identity or schema, as load_reads does, without decoding the counts (release
+    4.10: the simulation's completion and resume checks; the evidence stage decodes and checks them in full)."""
+    record = read_items(file, READS, identity, ("schema",))
+    if record is None:
+        raise InputError(f"{file.label}: no simulated reads")
+    require_schema(record.payload, SCHEMA)
 
 
 def load_truth(file: CheckpointFile, identity: str) -> ContigTruth:

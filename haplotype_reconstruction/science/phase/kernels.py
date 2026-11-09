@@ -162,7 +162,55 @@ _OVERLOADS = {
             types.float64,
         ),
     ),
+    "evidence_terms": (
+        (
+            types.Array(types.int64, 2, "C", False, aligned=True),
+            types.Array(types.int64, 2, "C", False, aligned=True),
+            types.Array(types.int8, 2, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 2, "C", False, aligned=True),
+        ),
+    ),
 }
+
+
+@kernel(overloads=_OVERLOADS["evidence_terms"], cache=True, nogil=True)
+def evidence_terms(lab0, lab1, alleles, lg, out):
+    """Release 4.10: allele_evidence's carrier sums for one chunk of sites, added into ``out`` float64 [S, c] (zero
+    on entry). lab0, lab1 int64 [R, c]: the carriers' MAP labels at the sites; alleles int8 [S, c]; lg float64
+    [R, c, 3]: their robust log likelihoods (computed by the caller, as before). The terms are allele_evidence._terms's
+    (the same subtractions); each site's cells receive the homologue-0 terms of rows 0..R-1, then the homologue-1
+    terms of rows 0..R-1, the order in which np.bincount over the concatenated homologue-0 and homologue-1 terms
+    added them, so every sum is the same to the bit. No GIL: chunks run concurrently."""
+    R, c = lab0.shape
+    for j in range(c):
+        for r in range(R):
+            x0 = lab0[r, j]
+            x1 = lab1[r, j]
+            a0 = alleles[x0, j]
+            a1 = alleles[x1, j]
+            same = x0 == x1
+            if a0 >= 0 and (same or a1 >= 0):
+                zero = lg[r, j, 0]
+                one = lg[r, j, 1]
+                two = lg[r, j, 2]
+                if same:
+                    out[x0, j] += two - zero
+                elif a1 >= 1:
+                    out[x0, j] += two - one
+                else:
+                    out[x0, j] += one - zero
+        for r in range(R):
+            x0 = lab0[r, j]
+            x1 = lab1[r, j]
+            a0 = alleles[x0, j]
+            a1 = alleles[x1, j]
+            if a1 >= 0 and a0 >= 0 and x0 != x1:
+                one = lg[r, j, 1]
+                if a0 >= 1:
+                    out[x1, j] += lg[r, j, 2] - one
+                else:
+                    out[x1, j] += one - lg[r, j, 0]
 
 
 @kernel(overloads=_OVERLOADS["subtree_terms"], cache=True, nogil=True)
@@ -668,6 +716,7 @@ def row_terms(E, X, V, par, rows, lstay, lmove, mstay, mmove, ain, astay, bout, 
 
 
 __all__ = [
+    "evidence_terms",
     "subtree_terms",
     "slot_label",
     "slot_log_transition",

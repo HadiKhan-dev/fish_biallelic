@@ -517,10 +517,13 @@ def load_observed(file: CheckpointFile, *, expected_identity: str, likelihoods: 
     return PairArray(source, record.payload["observed_dense"], "observed")
 
 
-def load_observed_counts(file: CheckpointFile, *, expected_identity: str) -> np.ndarray:
-    """Exact per-sample observed totals from checked, bounded sample-major windows."""
+def load_observed_counts(
+    file: CheckpointFile, *, expected_identity: str, rows: tuple[int, int] | None = None
+) -> np.ndarray:
+    """Exact per-sample observed totals from checked, bounded sample-major windows (``rows``: samples first..stop-1
+    only, each range on its own reader)."""
     with open_arrays(file, ("observed",), expected_identity=expected_identity) as arrays:
-        return observation_counts(arrays["observed"], axis=1)
+        return observation_counts(arrays["observed"], axis=1, rows=rows)
 
 
 def load_decisions(file: CheckpointFile, *, expected_identity: str | None = None) -> EvidenceDecisions:

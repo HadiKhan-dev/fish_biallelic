@@ -144,18 +144,38 @@ def execute_contig(
     def allocate(shape: tuple[int, ...], fill: int, *, dtype: Any) -> np.ndarray:
         return mapped_array(shape, dtype, fill, root=root)
 
+    budget = current_budget()
+
     def prepare_likelihoods(observations: PhaseObservations, indices: np.ndarray, site_bins: np.ndarray) -> np.ndarray:
         spool = mapped_array((len(observations.sample_ids), len(indices), 3), np.float32, root=root)
-        for sample in range(len(observations.sample_ids)):
-            for left, right in site_windows(site_bins):
+        windows = tuple(site_windows(site_bins))
+
+        def row(sample: int) -> None:
+            for left, right in windows:
                 spool[sample, left:right] = observations.likelihoods[sample, indices[left:right]]
             discard_pages(spool[sample])
-        return spool
 
-    budget = current_budget()
+        # Release 4.10: each sample fills its own spool row (one sample at a time before chr3's uncertainty).
+        budget.thread_map(row, range(len(observations.sample_ids)), label="family-phase likelihood spool")
+        return spool
 
     def map_work(function: Callable[[T], R], items: Iterable[T]) -> list[R]:
         return budget.thread_map(function, items, label="family-phase independent work")
+
+    def concurrent(functions: list[Callable[[Callable[..., list[Any]]], R]]) -> list[R]:
+        """Release 4.10: each function(map) at once on a live share of the task's CPUs, ``map`` running one-thread
+        calls on that share (a solve's blocks); results in order."""
+
+        def on_share(function: Callable[[Callable[..., list[Any]]], R]) -> Callable[[Any], R]:
+            def run(share: Any) -> R:
+                return function(lambda work, items: share.thread_map(work, items, label="family-phase blocks"))
+
+            return run
+
+        results: list[Any] = [None] * len(functions)
+        for index, value in budget.concurrent([on_share(f) for f in functions], label="family-phase solves"):
+            results[index] = value
+        return results
 
     return phase_contig(
         evidence.contig,
@@ -169,6 +189,7 @@ def execute_contig(
             scores=False,
             prepare_likelihoods=prepare_likelihoods if windowed else None,
             map_work=map_work,
+            concurrent=concurrent,
         ),
         allocate=allocate if windowed else None,
     )

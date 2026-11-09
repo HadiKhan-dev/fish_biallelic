@@ -185,20 +185,41 @@ def identities(
     numerical_policy: NumericalPolicy,
     ties: TieSettings,
 ) -> dict[str, str]:
-    """Bind the ordered block domain and each block to independent scientific inputs."""
-    code = code_dependency_identity(("science.discovery", "stages.discovery.tasks", "stages.discovery.records"))
+    """Bind the ordered block domain and each block to independent scientific inputs.
+
+    Release 4.10: a process keeps the result, keyed by everything it derives from: every reader of a contig's domain
+    derived thousands of identities again (chr3 at 0.5x: 7,533 blocks, about 1 s, derived anew by the pedigree
+    decision, each export check and the run's completion step). The shared parts are converted to plain JSON data
+    once for the key; ``jsonable`` returns plain JSON data unchanged, so every identity is the same."""
+    from ...core.digest import json_digest, jsonable
+
+    code = jsonable(
+        code_dependency_identity(("science.discovery", "stages.discovery.tasks", "stages.discovery.records"))
+    )
+    plain = jsonable(parameters)
+    policy = jsonable(numerical_policy)
+    key = (json_digest([code, plain, policy]), contig, int(blocks), evidence_identity, ties.reverse, ties.keep)
+    cached = _IDENTITIES.get(key)
+    if cached is not None:
+        return dict(cached)
 
     def derive(unit: tuple[str, int]) -> str:
         return Derivation(
             code,
-            dict(discovery=parameters, contig=contig, unit=unit),
-            numerical_policy,
+            dict(discovery=plain, contig=contig, unit=unit),
+            policy,
             {"evidence": evidence_identity},
             ties.reverse,
             ties.keep,
         ).identity
 
-    return {PLAN: derive(("plan", blocks)), **{block_key(i): derive(("block", i)) for i in range(blocks)}}
+    result = {PLAN: derive(("plan", blocks)), **{block_key(i): derive(("block", i)) for i in range(blocks)}}
+    _IDENTITIES[key] = result
+    return dict(result)
+
+
+# Discovery identities per process (release 4.10), keyed by everything they derive from.
+_IDENTITIES: dict[tuple, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -306,9 +327,15 @@ def result_reader(
         return Reader(file, expected, product, count)
     # One pass over the plan and every block: each record's envelope is checked once, with its small metadata. Every
     # record is read before deciding, so a present record whose identity differs raises CheckpointMismatch even when
-    # another is missing; a missing record leaves the domain incomplete.
-    plan = read_items(file, PLAN, expected[PLAN], ("schema", "blocks"))
-    blocks = [read_items(file, block_key(i), expected[block_key(i)], ("schema", "block", "kind")) for i in range(count)]
+    # another is missing; a missing record leaves the domain incomplete. Release 4.10: through one index snapshot and
+    # one handle (CheckpointFile.batch); per block, an index refresh and an open cost a network filesystem far more
+    # than the small decode (chr3 at 0.5x: 7,533 blocks, read again by every process that checks the domain).
+    with file.batch() as reader:
+        plan = read_items(file, PLAN, expected[PLAN], ("schema", "blocks"), reader=reader)
+        blocks = [
+            read_items(file, block_key(i), expected[block_key(i)], ("schema", "block", "kind"), reader=reader)
+            for i in range(count)
+        ]
     present = [block for block in blocks if block is not None]
     if plan is None or len(present) < count:
         return None
