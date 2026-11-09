@@ -220,8 +220,10 @@ def _site_flips(positive: NDArray[np.float64]) -> NDArray[np.bool_] | None:
     """The joint GEM step's allele flips from one E-step's positive expected complete-emission gains (K x L, zero
     where a gain does not exceed the tolerance): at each site the founder with the largest gain. Complete-data
     gains add over sites but not over founders at one site, so at most one founder flips per site and the step's
-    complete-data gain is the sum of the chosen gains (at least the single best founder's whole-row gain). A site
-    whose two largest gains lie within FLIP_TIE (relative) of each other keeps its alleles (no row-order choice).
+    complete-data gain is the sum of the chosen gains: the largest gain at each untied site, positive whenever a
+    mask is returned (release 4.11 wording: tied sites are left out, so it need not reach a single founder's
+    whole-row gain). A site whose two largest gains lie within FLIP_TIE (relative) of each other keeps its alleles
+    (no row-order choice).
     None when no site has an untied positive gain."""
     k, length = positive.shape
     if k == 1:

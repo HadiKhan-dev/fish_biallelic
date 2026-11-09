@@ -2278,12 +2278,24 @@ def idle_lane_cpus() -> int:
     waits for CPUs). Release 4.8: a serial step of a single-CPU task that the rest of its contig waits for (a chain
     step, a reply copy) borrows them briefly; a task dispatched meanwhile oversubscribes them only for that step."""
     seat = _POOL_SEAT
-    if seat is None:
+    if seat is None or getattr(_THREAD_BUDGET, "no_idle_loans", False):
         return 0
     counters = seat.counters
     if counters.waiting.value:
         return 0
     return max(0, _read(counters.total) - _read(counters.claimed))
+
+
+@contextmanager
+def _no_idle_loans():
+    """Refuse idle-lane loans to the calling thread (release 4.11): it is one item of a one-thread map, whose siblings
+    run beside it, so every item borrowing the lane's idle CPUs for one decode would multiply the lane's threads."""
+    previous = getattr(_THREAD_BUDGET, "no_idle_loans", False)
+    _THREAD_BUDGET.no_idle_loans = True
+    try:
+        yield
+    finally:
+        _THREAD_BUDGET.no_idle_loans = previous
 
 
 def _install_codec_idle_cpus() -> None:
@@ -2626,7 +2638,13 @@ def _one_thread_map(budget: CpuBudget, function, items, label):
     def work():
         presence = governor.presence(label, depth, parent=parent)
         try:
-            with executing_task(owner), numba_threads(1), budget_context(FixedBudget(1)), adopted(presence.held):
+            with (
+                executing_task(owner),
+                numba_threads(1),
+                budget_context(FixedBudget(1)),
+                adopted(presence.held),
+                _no_idle_loans(),
+            ):
                 while True:
                     with changed:
                         if (

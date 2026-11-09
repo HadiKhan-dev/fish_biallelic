@@ -23,6 +23,7 @@ from ...core.digest import json_digest
 from ...core.errors import InputError
 from ...engine.graph import Expansion, ResultRef
 from ...engine.runtime import task_team
+from ...engine.scheduler import TASK_THREADS
 from ...science.pedigree import prepare as science
 from ...science.pedigree.parameters import PedigreeConfig, PreparationConfig
 from ...store.container import CheckpointFile
@@ -369,9 +370,11 @@ def _after_prepared(
     store = CheckpointStore(root, nthreads=threads)
     cached = read_items(store.run, screen.SCREEN, identity, ("schema",))
     if cached is None:
-        # Release 4.10: the contigs' prepared records decoded concurrently on this task's share (one after another
-        # before: the first ~36 s of the N = 320 screen at 4-17 busy CPUs).
-        prepared = tuple(threaded_each(partial(_required_prepared, store), informative))
+        # Release 4.10: the contigs' prepared records read on this task's share, one per thread (one after another
+        # before). Release 4.11: each thread decodes on its own budget (TASK_THREADS: one CPU inside the map), with
+        # Blosc's GIL release on, so the decodes overlap (a store with the task's width ran them one at a time).
+        readers = CheckpointStore(root, nthreads=TASK_THREADS)
+        prepared = tuple(threaded_each(partial(_required_prepared, readers), informative))
         screen.run(prepared, eligibility, parameters, threads=threads, nested=True, file=store.run, identity=identity)
         del prepared
     else:

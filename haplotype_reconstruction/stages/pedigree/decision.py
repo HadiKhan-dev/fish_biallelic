@@ -32,6 +32,7 @@ from ...contracts.pedigree import (
 )
 from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
+from ...engine.scheduler import TASK_THREADS
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
 from ...science.pedigree import panel, resampling, stacking
 from ...science.pedigree import run as science
@@ -668,9 +669,13 @@ def run_stored(
         if stop > first
     ]
 
+    # Release 4.11: each range decodes on its own budget (TASK_THREADS: one CPU inside the map), so the ranges'
+    # decodes overlap (a store with the task's width ran them one at a time behind the codec's pipeline lock).
+    readers = CheckpointStore(root, nthreads=TASK_THREADS)
+
     def count(unit: tuple[int, str, str, int, int]) -> np.ndarray:
         _, contig, identity, first, stop = unit
-        file = store.contig(contig)
+        file = readers.contig(contig)
         return evidence_records.load_observed_counts(file, expected_identity=identity, rows=(first, stop))
 
     for (k, _, _, first, stop), counts in zip(units, threaded_each(count, units), strict=True):

@@ -148,13 +148,15 @@ def observation_counts(observed: Any, axis: int = 1, *, rows: tuple[int, int] | 
     result = np.zeros(stop - first if axis == 1 else observed.shape[1], dtype=np.int64)
     if (
         isinstance(observed, PairArray)
+        and observed.kind == "observed"  # release 4.11: a counts-kind array keeps the row-at-a-time route below
         and isinstance(observed.dense, np.ndarray)
         and isinstance(observed.source.pairs, np.ndarray)
         and resident_coded(observed.source)
     ):
         # Release 4.10: a resident coded mask, every sample of a site window in one gather (the sample-parallel
         # native kernel); one call per sample and window before (chr3: about 7,400 calls). Exact integer counts.
-        window = max(1024, min(65536, (1 << 24) // max(1, observed.shape[0])))  # at most ~2^24 flags at once
+        # At most 2^24 flags at once (release 4.11: no 1,024-site floor, which exceeded it beyond 16,384 samples).
+        window = max(1, min(65536, (1 << 24) // max(1, stop - first)))
         for left in range(0, observed.shape[1], window):
             right = min(observed.shape[1], left + window)
             block = observed.gather(slice(first, stop), np.arange(left, right, dtype=np.int64))

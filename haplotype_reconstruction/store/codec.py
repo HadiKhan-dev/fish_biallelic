@@ -55,9 +55,27 @@ _GROUP_BYTES = 128 << 20
 _CHUNK_BYTES = 1 << 30
 _METADATA_SPOOL_BYTES = 64 << 20
 
-# Blosc2's GIL-release flag is process-global. Production parallel I/O uses separate processes; overlapping
-# pipeline scopes within one process are serialised.
+# Multi-thread chunk pipelines in one process run one at a time (each uses the CPUs its caller holds).
 _PARALLEL_READ_LOCK = RLock()
+_BLOSC_LOCK = threading.Lock()
+_BLOSC = None
+
+
+def _blosc():
+    """Blosc2, imported at the I/O boundary (compression libraries initialise process settings), with its process-wide
+    GIL release on from the first use (release 4.11). The flag was set only inside a multi-thread pipeline and restored
+    after it, so single-thread decodes from several threads of one process (concurrent record reads, release 4.10)
+    held the GIL and ran one at a time; Blosc2 makes a private context per call, so they may overlap. It is never
+    restored: a scope-wise restore would race between overlapping callers."""
+    global _BLOSC
+    if _BLOSC is None:
+        with _BLOSC_LOCK:
+            if _BLOSC is None:
+                import blosc2
+
+                blosc2.set_releasegil(True)
+                _BLOSC = blosc2
+    return _BLOSC
 
 
 def cpu_threads(nthreads) -> int:
@@ -120,8 +138,7 @@ def _compress(raw, nthreads, clevel):
     # A packed group may end with int8 calls and have an odd byte length. Blosc2 4.5.1 emits unreadable all-zero
     # special chunks when that length is not divisible by its default eight-byte element size. Keep the
     # established shuffle for aligned chunks; otherwise compress as bytes.
-    # Compression libraries initialize process settings; load them only at the I/O boundary.
-    import blosc2
+    blosc2 = _blosc()
 
     size = memoryview(raw).nbytes
     typesize = 8 if size % 8 == 0 else 1
@@ -137,8 +154,7 @@ def _compress(raw, nthreads, clevel):
 
 
 def _decompress_into(blob, destination, nthreads, context):
-    # Compression libraries initialize process settings; load them only at the I/O boundary.
-    import blosc2
+    blosc2 = _blosc()
 
     try:
         raw_size, compressed_size, _block_size = blosc2.get_cbuffer_sizes(blob)
@@ -190,9 +206,6 @@ class _ChunkPipeline:
     """
 
     def __init__(self, nthreads, *, ordered):
-        # Compression libraries initialize process settings; load them only at the I/O boundary.
-        import blosc2
-
         self.cpus = max(1, nthreads - 1)
         self.free_cpus = self.cpus
         self.ordered = ordered
@@ -203,11 +216,6 @@ class _ChunkPipeline:
         self.started = False
         self.pool = None
         _PARALLEL_READ_LOCK.acquire()
-        try:
-            self.previous_releasegil = blosc2.set_releasegil(True)
-        except BaseException:
-            _PARALLEL_READ_LOCK.release()
-            raise
 
     def add(self, function, args, weight, consume):
         while self.entries and self.bytes + weight > _CHUNK_BYTES:
@@ -273,9 +281,6 @@ class _ChunkPipeline:
             self._progress()
 
     def close(self):
-        # Compression libraries initialize process settings; load them only at the I/O boundary.
-        import blosc2
-
         try:
             if self.pool is not None:
                 self.pool.shutdown(wait=True, cancel_futures=True)
@@ -283,10 +288,7 @@ class _ChunkPipeline:
             self.entries.clear()
             self.queued.clear()
         finally:
-            try:
-                blosc2.set_releasegil(self.previous_releasegil)
-            finally:
-                _PARALLEL_READ_LOCK.release()
+            _PARALLEL_READ_LOCK.release()
 
 
 def _compress_checked(raw, clevel, nthreads):
@@ -338,8 +340,7 @@ class _BufferWriter:
             self._write_group(pending)
 
     def _chunk(self, raw, release=None):
-        # Compression libraries initialize process settings; load them only at the I/O boundary.
-        import blosc2
+        blosc2 = _blosc()
 
         prefix, self.prefix = self.prefix, bytearray()
 

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import os
 from pathlib import Path
 
-from ...core.files import atomic_path
+from ...core.files import placement_lock, staged_path
 from .records import COMMON_ALLELE_RULE, RULE_DESCRIPTIONS, SiteTable
 
 # Tabix (TBI) indexes address positions below 2^29; longer contigs get a CSI index.
@@ -241,23 +242,66 @@ def place(
     temporary: Path, final: Path, *, file_format: str, last_position: int, index: bool, threads: int = 1
 ) -> list[str]:
     """Index ``temporary`` when asked (on ``threads``), then move it (and its index) to ``final``; returns the file
-    names placed."""
+    names placed.
+
+    A failure before the new index is in place leaves the previous publication as it was (release 4.11; the previous
+    indexes were removed before the data moved, so a failed rename lost the accepted index): the new index is built
+    first, the previous data is kept under a hard link while the new data and then its index are renamed into place,
+    and it is restored beside its untouched index if the index cannot be placed (without previous data, the new data
+    is removed rather than left unindexed). The rollback is decided by the files, so an interruption just after a
+    rename leaves either the new pair or the previous one; an index of the other kind is moved aside first and
+    restored only with the previous data. Writers of the same file serialise these moves
+    (core.files.placement_lock); two renames are still not one atomic step for a concurrent reader, nor safe against
+    a hard kill."""
     names = [final.name]
     # Own a caller's staged data even when indexing or placement fails.
     try:
-        if index:
-            target = index_path(final, file_format, last_position)
-            with atomic_path(target) as staged:
-                build_index(temporary, staged, csi=target.suffix == ".csi", threads=threads)
-                for stale in (Path(str(final) + ".csi"), Path(str(final) + ".tbi")):
-                    stale.unlink(missing_ok=True)
-                temporary.replace(final)
-            names.append(target.name)
-        else:
+        if not index:
             temporary.replace(final)
+            return names
+        target = index_path(final, file_format, last_position)
+        other = Path(str(final) + (".tbi" if target.suffix == ".csi" else ".csi"))
+        with staged_path(target) as staged, staged_path(final) as previous, staged_path(other) as retired:
+            build_index(temporary, staged, csi=target.suffix == ".csi", threads=threads)
+            # Only the moves are serialised: a duplicate writer that fails part-way restores the pair it found, never
+            # data placed by another writer beside that writer's index.
+            with placement_lock(final):
+                try:
+                    _keep_previous(final, previous)
+                    if other.exists():
+                        # The other index kind leaves the namespace before the commit (it is restored with the
+                        # accepted data, or discarded with this staging), so no exit leaves it beside the new pair.
+                        other.replace(retired)
+                    temporary.replace(final)
+                    staged.replace(target)
+                except BaseException:
+                    # Decided by the files rather than by the step that raised: an interruption (a handled SIGTERM)
+                    # can arrive just after a rename completed.
+                    if not staged.exists():
+                        raise  # the new index is in place beside the new data: the new pair stands
+                    if previous.exists():
+                        previous.replace(final)  # the accepted data, kept by link or rename, beside its own index
+                    elif not temporary.exists():
+                        final.unlink(missing_ok=True)  # new data without previous data or its index
+                    if retired.exists():
+                        retired.replace(other)
+                    raise
+        names.append(target.name)
     finally:
         temporary.unlink(missing_ok=True)
     return names
+
+
+def _keep_previous(final: Path, previous: Path) -> bool:
+    """Keep ``final``'s current data at ``previous`` (a hard link; a rename where links are unsupported, which leaves
+    ``final`` absent until the new data arrives); False when there is none."""
+    if not final.exists():
+        return False
+    try:
+        os.link(final, previous)
+    except OSError:
+        final.replace(previous)
+    return True
 
 
 def index_kind(file_format: str, last_position: int) -> str:

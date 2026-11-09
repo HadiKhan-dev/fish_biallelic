@@ -463,7 +463,24 @@ def apply_worker_settings(settings: WorkerSettings) -> None:
     attach_governor(settings.governor_handle)
     import numba
 
+    _unnamed_numba_init_lock()
     numba.set_num_threads(1)
+
+
+def _unnamed_numba_init_lock() -> None:
+    """Release 4.11: give Numba's threading-backend initialisation lock an unnamed semaphore before the layer starts.
+
+    Numba creates that lock lazily (numba.np.ufunc.parallel._set_init_process_lock) from the default start method's
+    context: under forkserver a named semaphore registered with the resource tracker, which a worker killed inside a
+    native call (an interrupted run's forced kill) left behind ("leaked semaphore objects" at shutdown). A lock from
+    the fork context is unlinked as it is made and serves the same purpose inside this process. Numba versions
+    without this module attribute are left alone."""
+    import multiprocessing
+
+    from numba.np.ufunc import parallel
+
+    if getattr(parallel, "_backend_init_process_lock", 0) is None:
+        parallel._backend_init_process_lock = multiprocessing.get_context("fork").RLock()
 
 
 def _check_declarations(settings: RunSettings) -> None:

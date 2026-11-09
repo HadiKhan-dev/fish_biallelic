@@ -1,5 +1,48 @@
 # Changelog
 
+## 4.11.0 (9 November 2026)
+
+This release follows an independent review of every change since 4.4.0 that had not been reviewed (4.4.0's late fixes
+through 4.9.0, and the items 4.10 deferred). The review found no further scientific defect in the supported paths
+(the silent painting fault of 4.7.1 to 4.9.0 was found by 4.10's release matrix and is fixed in 4.10.0); the fixes
+below are operational, and 38 of the 39 release-matrix cases are identical to 4.9.0's in every scientific, numerical
+and diagnostic value; their output directories also hold the new lock files (the 39th case was still running at
+release).
+
+**Prepared and observed-count decodes overlap.** Checkpoint decompression releases the GIL under one process-wide
+setting made once, instead of saving and restoring it around every decode under a lock, and the pedigree screen's
+prepared records and the decision's observed-count ranges are read with thread-shared stores. On the N = 320
+depth-0.5 checkpoints on one 112-CPU node (warm file cache): the decision's observed totals 36 s -> 9 s, the
+screen's 22 prepared records 7 s -> 3 s, identical values. (4.10 read them on separate threads, but their decodes
+still ran one at a time.) Items of a one-thread map no longer borrow a worker lane's idle CPUs for their decodes:
+their siblings run beside them, so each would have multiplied the lane's threads.
+
+**Export keeps a consistent pair on failure.** Replacing an indexed VCF builds the new index first, then, under a
+lock on the file, keeps the accepted data under a link, moves an index of the other kind aside and renames the new
+data and index into place. A failure before the new index is in place restores the accepted data and indexes; after
+it, the new pair stands and no index of the other kind is left beside it (4.10 removed the previous indexes before
+moving the data, so a failed rename left the accepted file without its index). This holds for handled interruptions,
+not for a hard kill. Writers of the same file serialise these moves, so a failing duplicate writer never restores
+older data beside another writer's new index. The lock is a hidden, empty `.<file>.lock` beside each indexed output
+file: persistent coordination metadata, not a product, absent from the export manifest but present in a raw listing
+of the directory. An export destination holding only such locks counts as empty. When a change to the run's export
+options replaces a contig's files, the contig's previous export record no longer certifies them, so an interrupted
+export is rendered again when the run resumes.
+
+**Bounded painting memory.** Label continuity builds the emissions of uncached sample batches one batch at a time as
+they are consumed, instead of all at once.
+
+**Observation counts.** The whole-window counting path is taken only for observation masks (allele-count arrays keep
+the per-row path, which 4.10's fast path did not accept), and its window is sized by the selected sample rows with no
+1,024-site minimum, so a gather holds at most 2^24 cells (one site column when the selected rows alone exceed that).
+
+**Clean interruption.** Worker processes give Numba's backend initialisation an unnamed lock, so a terminated run no
+longer leaves that lock's semaphore for the resource tracker to report. A reply segment whose close was deferred
+(4.10) is retried after each later reply and when the worker goes idle.
+
+Validation: the test suite (3,810 tests, on RHEL 8 and on RHEL 9), the stage tier (341 tests), the workflow receipt
+and the documentation check pass. Reviewed adversarially: four review workstreams and an integration review.
+
 ## 4.10.0 (9 November 2026)
 
 This release removes serial stretches from the whole-genome stages (pedigree to the end) and from a simulated run's

@@ -70,7 +70,12 @@ def write(
         map_work=map_work,
     )
     if previous is not None:
-        for name in set(previous.entry["files"]) - set(entry["files"]):
+        kept = set(entry["files"])
+        for name in set(previous.entry["files"]) - kept:
+            # The other index of a data file this render kept was retired by its placement, under the file's lock
+            # (release 4.11); removing it here, after the lock, could remove a later writer's current index.
+            if any(str(name) == f"{data}{index}" for data in kept for index in (".tbi", ".csi")):
+                continue
             (destination / str(name)).unlink(missing_ok=True)
     return ExportRecord(identity=identity, entry=entry)
 

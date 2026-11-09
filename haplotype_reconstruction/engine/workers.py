@@ -1339,6 +1339,7 @@ def _release_idle_cache() -> int:
     _RELOADABLE.clear()
     release_memory()
     _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
+    _retry_reply_closes()
     return count
 
 
@@ -1755,6 +1756,7 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
                 # Idle workers retain only explicitly registered affinity state.
                 del reply, packed, task, token, message
                 _SHARED_UNCLOSED = _close_unreferenced(_SHARED_UNCLOSED)
+                _retry_reply_closes()
                 if retire:
                     return
     except BaseException as error:
@@ -1994,6 +1996,12 @@ def _close_reply_handle(handle: SharedMemory) -> bool:
         return False
 
 
+def _retry_reply_closes() -> None:
+    """Close the reply mappings whose views have gone (at the next reply, and, release 4.11, after each reply is sent
+    and at an idle boundary: a worker sending no more large replies kept them until it exited)."""
+    _REPLY_UNCLOSED[:] = [handle for handle in _REPLY_UNCLOSED if not _close_reply_handle(handle)]
+
+
 def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
     """Copy ``array`` into a new segment for the coordinator to adopt, with ``copy_threads`` threads when it is large;
     this worker keeps no mapping of it. (Release 4.10: if a view of the new mapping is still alive when it closes,
@@ -2001,7 +2009,7 @@ def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
     later reply; the coordinator adopts the segment by name either way.)"""
     from .scheduler import segment_name
 
-    _REPLY_UNCLOSED[:] = [handle for handle in _REPLY_UNCLOSED if not _close_reply_handle(handle)]
+    _retry_reply_closes()
     transposed = not array.flags.c_contiguous
     for _ in range(64):
         name = segment_name()

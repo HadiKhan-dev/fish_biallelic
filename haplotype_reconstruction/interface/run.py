@@ -1232,6 +1232,13 @@ def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
     previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
     if previous is not None:
         require_schema(previous.payload, SCHEMA)
+        if previous.payload["identity"] != identity:
+            # Release 4.11: the files are about to be replaced one product at a time. Until the new record is
+            # published, the old record must not certify them (an interrupted replacement could leave one product
+            # rerendered under it); it keeps listing its files so the replacement still retires them.
+            replacing = dict(previous.payload, identity=f"replacing:{identity}")
+            publish_output(file, "outputs/export", replacing["identity"], replacing, supersede=True)
+            previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
     record = write(
         reader,
         Path(output) / "export",
@@ -2014,10 +2021,12 @@ def export_command(args: argparse.Namespace) -> int:
     """Format selected published releases into a new destination, publishing its manifest last."""
     settings = _load_recorded_settings(args.run_directory, args.cores)
     prepared, _ = _recorded_run(settings, args.run_directory)
+    from ..core.files import is_placement_lock
     from ..engine.graph import run_graph
     from ..outputs.export.records import ExportConfig
     from ..outputs.export.run import write_founder_identity, write_manifest
     from ..outputs.export.task import make_task
+    from ..outputs.export.vcf import suffix
     from ..results.reader import Results
 
     reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints)
@@ -2025,7 +2034,11 @@ def export_command(args: argparse.Namespace) -> int:
     if not contigs or len(set(contigs)) != len(contigs) or set(contigs) - set(reader.contigs):
         raise SettingsError("export contigs must be unique names in the initialized run")
     destination = args.destination.expanduser().resolve()
-    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+    # Empty placement locks left by an earlier failed export into this destination are not contents (release 4.11).
+    if destination.exists() and (
+        not destination.is_dir()
+        or any(not is_placement_lock(entry, (suffix("vcf"), suffix("bcf"))) for entry in destination.iterdir())
+    ):
         raise SettingsError("export destination must be new or empty")
     config = ExportConfig(
         full_length=args.full_length, file_format=args.format, products=tuple(dict.fromkeys(args.products))

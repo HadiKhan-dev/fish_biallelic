@@ -616,10 +616,12 @@ class _SampleBatches:
         return value
 
     def units(self, width):
-        """[(start, stop, part emissions of samples start..stop)]: the batches, or, when every batch is kept, runs of
-        up to ``width`` samples of their shared array (one decoding call each)."""
+        """(start, stop, part emissions of samples start..stop) for each batch, built as the caller reaches it (release
+        4.11: a list built every uncached batch before the first was used, so their emissions all lived at once,
+        whatever ``keep_bytes``), or, when every batch is kept, runs of up to ``width`` samples of their shared array
+        (one decoding call each). Callers iterate once."""
         if not (self.all_kept and len(self.spans) > 1) or width <= self.spans[0][1] - self.spans[0][0]:
-            return [(start, stop, self.part_emissions(start, stop)) for start, stop in self.spans]
+            return ((start, stop, self.part_emissions(start, stop)) for start, stop in self.spans)
         for start, stop in self.spans:
             self._values(start, stop)
         n_samples = self.spans[-1][1]
