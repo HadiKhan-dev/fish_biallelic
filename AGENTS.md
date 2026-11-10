@@ -255,40 +255,48 @@ From a multi-sample VCF or BCF it:
 It reads only the VCF/BCF and the genetic map: sample names are identifiers, and no sample metadata enters (owner,
 30 October 2026; §2.4).
 
-It is one pipeline of stage packages run by the `haplotypes` command: evidence, relatedness, discovery,
-local_selection, assembly, painting, pedigree, founder_refit, family_phase, recombination and export.
+It is one pipeline run by the `haplotypes` command. The stages, in graph order, are evidence, relatedness,
+discovery, local selection, assembly, painting, founder refit, pedigree, family phase, recombination and export.
 - **The primary real workflow is the TroMau cichlid cross:** `haplotypes run CONFIG` with `preset = "tromau"`. The
-  preset is `haplotype_reconstruction/config/presets/tromau.toml`, and the example is `configs/tropheops.toml`.
+  preset is `haplotype_reconstruction/interface/settings/presets/tromau.toml`, and the example is
+  `configs/tropheops.toml`.
 - **AulStu is never used for testing.** The owner, 17 October 2026: "real data aul stu is very very bloated, do not
   use it for any testing".
-  - Its preset exists for production runs, which are the owner's decision.
+  - Production runs are the owner's decision. There is no AulStu preset: `configs/astcal.toml` lists its contigs.
   - Finished AulStu measurements may be cited as data.
 
 ### 3.2 Repository map
 
 Entry points:
-- `haplotypes` (`haplotype_reconstruction/cli.py`, also `python -m haplotype_reconstruction`), with the commands
-  `run`, `status`, `recombination`, `evaluate`, `export`, `example`, `templates` and `batch-worker`.
-- `haplotype_reconstruction/pipeline/driver.py`: fail-fast checks, stage order, resume and shards.
-- Presets and example configurations:
-  - `haplotype_reconstruction/config/presets/{tromau,aulstu}.toml`;
-  - `configs/*.toml`, covering TroMau, AulStu, generic VCF and simulations.
-- `haplotype_reconstruction/simulation/`: simulated end-to-end validation (§2.6).
-- `haplotype_reconstruction/recombination/`: `haplotypes recombination RUN` reruns the stage.
-- `haplotype_reconstruction/export/`: per-chromosome founder and phased-sample VCFs in `OUTPUT/export/`.
-  `haplotypes export RUN DEST` re-exports.
+- `haplotypes` (`haplotype_reconstruction/interface/cli.py`, also `python -m haplotype_reconstruction`):
+  - `run` (initialize if needed, then run or resume the whole graph);
+  - the step commands `init`, `evidence --contig`, `relatedness`, `reconstruct --contig`, `pedigree`,
+    `phase --contig` and `report`, for scattering a run over jobs;
+  - `status`, `recombination`, `evaluate`, `export`, `example` and `templates`.
+- The workflow runner is `haplotype_reconstruction/interface/run.py`; the public API is `interface/api.py`.
+- Settings: the TOML schema `interface/settings/schema.py`, the loader `interface/settings/load.py`, presets in
+  `interface/settings/presets/` (`tromau`, `generic`, `realistic_reads`), and example configurations in `configs/`.
+- Simulation with known truth: `haplotype_reconstruction/simulation/`, evaluated by
+  `haplotype_reconstruction/evaluation/` (§2.6).
 
-Infrastructure, under `haplotype_reconstruction/`:
-- `config/`:
-  - the TOML schema (`schema.py`);
-  - the loader and presets (`load.py`);
-  - the mapping to each stage's frozen config (`stages.py`).
-- `execution/`:
-  - the CPU budget and process pools;
-  - numerical-library and Numba set-up (`bootstrap.py`);
-  - the memory governor (`memory.py`), run records and the kernel cache.
-- `store/`: the checkpoint store, codecs and code identities. Each stage's `records.py` owns its checkpoint keys.
-- `evidence/`: VCF/BCF loading, site and sample filters, the read model and genotype likelihoods.
+Package layers (dependencies point downwards only; the suite's layer test enforces it):
+- `science/<stage>/`: the mathematics and statistics of each stage (`evidence`, `relatedness`, `discovery`,
+  `selection`, `assembly`, `painting`, `refit`, `pedigree`, `phase`, `recombination`, plus `shared`). No scheduling,
+  storage or I/O. Each has a `parameters.py` holding its model constants with meaning, units and rationale.
+- `stages/<stage>/`: orchestration of each stage: its tasks (`tasks.py`) and checkpoint records (`records.py` owns
+  the keys).
+- `engine/`: generic execution: the task graph and scheduler, worker processes, the CPU authority, contig lanes and
+  thread maps, the memory governor, run records and Numba kernel compilation.
+- `store/`: persistence: the checkpoint store, codecs and code identities.
+- `contracts/`: the typed records passed between stages.
+- `core/`: shared primitives (ties, numerics, digests, errors, files, random streams, kernel declarations).
+- `interface/`: command line, settings, runner and public API.
+- `outputs/` (reports and VCF export), `results/` (reading published products), `evaluation/`, `simulation/`.
+
+The test suite is not part of the repository. It lives in the lab: the archived 4.3.0 suite
+(`work/archive/release_4.3.0_tests/`) with each candidate tree's `tests/` overlaid (validation-only references and
+comparisons with past releases live there), run by `claude_lab/v44lab/harness/run_suite.sh`; the tree's
+`tests/REMOVED.txt` lists archived tests a release retires.
 
 **How the stages fit together.** `docs/methods/` documents each stage. In brief:
 - relatedness estimates pairwise IBD and full-sib families from genotype likelihoods alone (no painting, pedigree,
@@ -311,13 +319,16 @@ relying on any filename or relationship given here.
 ### 3.3 Configuration
 
 - **Where settings live:**
-  - Tunable model thresholds live in the owning stage's frozen config dataclass, `<stage>/config.py`.
-  - User-facing settings live in the TOML schema, mapped to the stage configs in `config/stages.py`.
-  - Internal constants are listed in `docs/configuration.md`.
+  - Tunable model constants live in each stage's `science/<stage>/parameters.py`, in one parameter record per stage
+    (`*Parameters`), with meaning, units and rationale.
+  - User-facing settings live in the TOML schema (`interface/settings/schema.py`) and are mapped to the stage
+    parameters in `stages/configure.py`.
+  - `docs/reference/` (settings, parameters, records, outputs) and `docs/configuration.md` are generated.
 - **Before adding a constant:** search for an equivalent, follow how related parameters are organised, and confirm
   it is shared rather than specific to one entry point.
-- **Keep configuration modules logic-free.** Regenerate `docs/configuration.md` with
-  `docs/generate_configuration.py` whenever the schema, the CLI, a preset or a stage config changes.
+- **Keep configuration modules logic-free.** Regenerate the generated documentation with
+  `python docs/generate_docs.py` whenever the schema, the command line, a preset or a parameter module changes, and
+  check it with `python -P tools/check_docs.py`.
 - **Paths and selections:** dataset paths, output paths and experiment selections belong in entry-point
   configurations.
 - **Numerical constants:** do not scatter unexplained ones through scientific modules. Established low-level
