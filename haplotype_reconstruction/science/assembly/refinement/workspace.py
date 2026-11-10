@@ -10,7 +10,7 @@ of the same segment parity. Proposal flanks are copied before parallel workers r
 import numpy as np
 from numba.typed import List
 
-from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD, sample_team
+from haplotype_reconstruction.core.kernels import sample_team, samples_per_thread
 
 from .capabilities import ComponentWorkspaceView, RefinementExecution
 from .objective import selected_alleles
@@ -19,8 +19,8 @@ __all__ = ["Orientation", "sample_ranges", "sample_threads"]
 
 # A search's messages and per-sample scores run over consecutive sample ranges and re-read its thread share before
 # each range, so a search whose share grows while it computes them (its peers finished) takes the freed threads
-# within the phase. At most SAMPLE_RANGES ranges per phase (each range rebuilds the phase's shared pair-dosage tables)
-# and at least SAMPLES_PER_THREAD samples per thread of a range (core.kernels.sample_team): a wide share runs one
+# within the phase. At most SAMPLE_RANGES ranges per phase (each range rebuilds the phase's shared pair-dosage tables),
+# each sized by the team's grain (core.kernels.sample_team, from the component's work estimate): a wide share runs one
 # range, and a range never wakes more threads than its samples can occupy. Sample order and values do not depend on
 # either.
 SAMPLE_RANGES = 8
@@ -28,18 +28,20 @@ SAMPLE_RANGES = 8
 
 def sample_threads(samples: int, team: RefinementExecution) -> int:
     """Threads for one parallel region over ``samples`` samples: the team's live share read now, at most one thread per
-    SAMPLES_PER_THREAD samples (core.kernels.sample_team)."""
-    return sample_team(samples, team.threads())
+    samples_per_thread(team.sample_work) samples (core.kernels.sample_team)."""
+    return sample_team(samples, team.threads(), team.sample_work)
 
 
 def sample_ranges(samples: int, team: RefinementExecution):
     """Consecutive ranges (s0, s1, n) covering samples 0 .. samples - 1, in order; n threads for the range: the team's
-    live share read when the range starts, at most one thread per SAMPLES_PER_THREAD samples of the range."""
+    live share read when the range starts, at most one thread per samples_per_thread(team.sample_work) samples of
+    the range."""
     start = 0
+    work = team.sample_work
     while start < samples:
         share = max(1, int(team.threads()))
-        stop = min(samples, start + max(-(-samples // SAMPLE_RANGES), SAMPLES_PER_THREAD * share))
-        yield start, stop, sample_team(stop - start, share)
+        stop = min(samples, start + max(-(-samples // SAMPLE_RANGES), samples_per_thread(work) * share))
+        yield start, stop, sample_team(stop - start, share, work)
         start = stop
 
 

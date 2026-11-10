@@ -45,6 +45,7 @@ from .parameters import (
     CHAIN_LOW,
     COMBINE_TILE,
     LANE_ALIGN,
+    LANE_MIN_WIDTH,
     LANE_WIDTH,
     LOG_RATIO_NEAR,
     RELEASE_SAMPLE_BATCH,
@@ -1548,7 +1549,7 @@ class PreparedBlock:
         width = LANE_WIDTH
         if self.samples > LANE_WIDTH:
             threads = self.threads
-            for candidate in (16, 32):
+            for candidate in (LANE_MIN_WIDTH, LANE_WIDTH // 2):
                 if (self.samples + candidate - 1) // candidate <= threads:
                     width = candidate
                     break

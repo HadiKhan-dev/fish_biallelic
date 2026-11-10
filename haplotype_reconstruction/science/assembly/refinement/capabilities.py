@@ -29,7 +29,12 @@ __all__ = [
 
 
 class RefinementExecution(Protocol):
-    """A declared CPU share with scoped kernel execution and ordered task mapping."""
+    """A declared CPU share with scoped kernel execution and ordered task mapping.
+
+    ``sample_work`` is the work of one sample's component messages in site-diplotype cells (sites x K^2), or 0 when
+    unknown; it sets how many samples one thread of a sample kernel takes (core.kernels.sample_team)."""
+
+    sample_work: int
 
     def threads(self) -> int: ...
     def scope(self, cores: int | None = None) -> AbstractContextManager[None]: ...

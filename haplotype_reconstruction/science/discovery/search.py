@@ -105,8 +105,8 @@ class SearchSummary:
     residual_calls, residual_rows: soft-residual birth calls and the novel rows they emitted.
     limits: omitted tied-class/component causes and mean-field nonconvergence, in first-occurrence
         order. Ranked truncations are excluded.
-    heuristic_gauge_cuts: some expanded panel had K > exact_cut_max_k, so its gauge rewires came
-        from the degree-ordered local-search maximum cut (reported here, not as a limit).
+    heuristic_gauge_cuts: some expanded panel had K > 1, so its gauge rewires came from the
+        heuristic cut search (reported here, not as a limit).
     stop_reason: "generated_neighbourhood_local_optimum", "incumbent_neighbourhood_search_limited"
         or "expansion_backstop".
     certified: the selected panel's generated neighbourhood was completely generated and scored
@@ -118,10 +118,11 @@ class SearchSummary:
     tied_alternatives: the number of other members of that complete fitted set.
     score_margin: the selected score minus the best other represented K's score (inf if none).
     tie_events: core.ties.TieCounter record {kind: {decisions, inside_tie, wide, boundary}}.
-    search_incomplete: a straddling tied class or whole candidate component was omitted.
+    search_incomplete: a tied class was omitted or canonically truncated, or a whole candidate component was omitted.
     omissions: dictionaries with kind, cause, count, scope and count_kind (exact or lower_bound).
-        kind is tie_class_at_budget or ranked_truncation. Ordinary lower-ranked truncations are
-        recorded but do not set search_incomplete or limits.
+        kind is tie_class_at_budget, tie_class_truncated (gauge cuts cut canonically at their budget),
+        or ranked_truncation. Ordinary lower-ranked truncations are recorded but do not set search_incomplete
+        or limits.
     unresolved: no scored incumbent exists; release an empty panel only in this case.
     archive_max_k: largest K ever added to the archive, even if subsequently pruned.
     wall_seconds, cpu_seconds, phase_seconds: optional block timings (BlockDiagnostics).
@@ -388,7 +389,7 @@ class SearchState:
         )
         self.growth = growth_inputs(likelihood, observed, self.counter, reverse=reverse, keep=keep)
         self.residual_inputs = ResidualInputs(likelihood, observed, reverse=reverse, keep=keep, diagnostics=diagnostics)
-        self.cuts = MaximumCuts(search.exact_cut_max_k, search.max_cut_ties, reverse=reverse, keep=keep)
+        self.cuts = MaximumCuts(search.max_cut_ties, reverse=reverse, keep=keep)
         self.cavity_workspace = CavityWorkspace(
             likelihood if bool(self.active.all()) else likelihood[self.active], config.cavity
         )

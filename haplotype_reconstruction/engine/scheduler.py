@@ -388,6 +388,7 @@ class _GraphRun:
         self.indexed = {task.key: task for task in self.tasks}
         self.writers = {output: task.key for task in self.tasks for output in task.outputs}
         self.pending = set(self.indexed)
+        self.pending_order = list(self.indexed)
         self.requests: dict[TaskKey, AdmissionToken] = {}
         self.gathers: dict[TaskKey, tuple[TaskKey, int]] = {}
         self.expansions: dict[TaskKey, tuple[tuple[TaskKey, ...], Task, int]] = {}
@@ -548,6 +549,7 @@ class _GraphRun:
             self.indexed[child.key] = child
             self.owners[child.key] = child.affinity if child.affinity is not None else self.owners[task.key]
             self.pending.add(child.key)
+            self.pending_order.append(child.key)
             self.parents[child.key] = task.key
             self.depths[child.key] = self.depths[task.key] + 1
         self.progress.add((*expansion.subtasks, gather))
@@ -609,11 +611,17 @@ class _GraphRun:
                 self.indexed[gather.key] = gather
                 self.owners[gather.key] = self.owners[parent]
                 self.pending.add(gather.key)
+                self.pending_order.append(gather.key)
                 self.depths[gather.key] = self.depths[parent]
                 self.gathers[gather.key] = (parent, worker)
+        # Retain the previous sorted run so Timsort handles an almost unchanged
+        # queue in linear time. Recompute every key: learned costs and caller
+        # priorities may change between passes, and new expansions append here.
+        self.pending_order = [key for key in self.pending_order if key in self.pending]
+        self.pending_order.sort(key=self.task_order)
         ready = [
             key
-            for key in sorted(self.pending, key=self.task_order)
+            for key in self.pending_order
             if all(dependency in self.results for dependency in self.indexed[key].depends_on)
         ]
         if not ready and not self.running:

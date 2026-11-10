@@ -136,11 +136,11 @@ Cost and scope: O(K) candidate fits, O(N L K³) per count round under the quadra
 <a id="rc12"></a>
 ## rc12 Symmetric sequence null and shared nearest-shadow family rule
 
-Build the larger panel’s death class, preferring founders without private cells. For each member use the [shared shadow-family rule](assembly.md#aj33): evaluate the complete nearest-row product only when the total test passes and the product fits the budget; otherwise evaluate the conventional incumbent. A passing total with budget overflow records count_unverified. Share one round stream across members, refits and shadows. Opposed shadow verdicts withhold the larger count while preserving the selected bootstrap band; disagreement between death-class references retains its independent ambiguity rule. Prefix-sharing scores admitted complete families in canonical order. Exact decision-key ties use the shared convention when reducing those scores. The shadow-family prior is `smaller_k+nearest_shadow`.
+Build the larger panel’s death class, preferring founders without private cells. For each member use the [shared shadow-family rule](assembly.md#aj33): evaluate the complete nearest-row product only when the total test passes and the product fits the budget; otherwise evaluate the conventional incumbent. A passing total with budget overflow records count_unverified. Share one round stream across members, refits and shadows. Opposed shadow verdicts withhold the larger count while preserving the selected bootstrap band; disagreement between death-class references retains its independent ambiguity rule. Prefix-sharing scores admitted complete families in canonical order. Exact per-sample misses and admitted family vectors enter the component's shared score ledger under the canonical full-panel key, preserving duplicate founders. Later endpoints reuse vectors while recomputing their own total differences, bootstrap bands and decisions. The shared family rule still selects complete evaluation, a single conventional shadow or overflow; caching never expands that domain. Exact decision-key ties use the shared convention when reducing those scores. The shadow-family prior is `smaller_k+nearest_shadow`.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
-Parameters by name: `shadow_combinations`, `bootstrap_resamples`, `bootstrap_level`, `FAMILY_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `shadow_combinations`, `bootstrap_resamples`, `bootstrap_level`, `FAMILY_BYTES`, `SCORE_LEDGER_ENTRIES`, `SCORE_LEDGER_BYTES`, `SCORE_LEDGER_ENTRY_OVERHEAD`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -215,11 +215,11 @@ Cost and scope: One single-direction polish fit per distinct live start and term
 
 **Accretion:** Dimension-based admission governs resources independently of scientific search limits.
 
-Construct component tasks from shared level settings and checked records. Execute independent components through the supplied team and storage capabilities, then assemble by component number. Runtime memory pressure governs task admission and cancellation; it does not alter candidate budgets, work accounts, component results or output order. Scientific code receives no worker-pool or memory-governor decision.
+Construct component tasks from shared level settings and checked records. Execute independent components through the supplied team and storage capabilities, then assemble by component number. Runtime memory pressure governs task admission and cancellation; it does not alter candidate budgets, work accounts, component results or output order. The component reserves `SCORE_LEDGER_BYTES` once for additional exact score misses shared by all fits and continuation branches. Locked admission enforces both `SCORE_LEDGER_ENTRIES` and the byte allowance, charging owned ndarray storage, panel/row tuples, every referenced Python integer and conservative dictionary/metadata overhead. Saturation recomputes the same score. Admission remains charged for the component lifetime, including misses later published by fits, so retained keys and dictionary capacity cannot reopen the allowance. Completed-fit vectors retain their separate lifetime and unconditional publication precedence; these limits do not bound the entire fitted-result ledger. Family scoring scratch and score-result transients remain separately reserved. Scientific code receives no worker-pool or memory-governor decision.
 
 Implementation: [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [stages/assembly/refinement.py](../../haplotype_reconstruction/stages/assembly/refinement.py).
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Parameters by name: `SCORE_LEDGER_ENTRIES`, `SCORE_LEDGER_BYTES`, `SCORE_LEDGER_ENTRY_OVERHEAD`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Independent component costs plus shared-evidence and task-boundary overhead.
 

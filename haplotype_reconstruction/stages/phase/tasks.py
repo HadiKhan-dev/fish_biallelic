@@ -1,8 +1,9 @@
 """Declare one family-phase component task with its true upstream record dependencies.
 
 Owns the engine boundary and the explicit storage-route choice, never science.
-The component task is serial; painting's independent emission cells may use its
-thread team. Memory estimates are diagnostics and do not choose a reduction order.
+Components run in contig order. Independent solves, sample releases and hard-cut
+release intervals share the task's CPU authority. Memory estimates are diagnostics
+and do not choose a reduction order.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from ...contracts.phase import PhasedSamples, PhaseInputIdentities, PhaseObserva
 from ...contracts.refit import FounderRefit
 from ...science.phase.component import PhaseWorkspace
 from ...science.phase.parameters import PhaseParameters
+from ...science.selection.parameters import LANE_WIDTH
 from ...store.container import CheckpointFile
 from ...store.protocol import Derivation
 from ..framework import RecordKey, ResourceRequest, Task
@@ -39,6 +41,15 @@ __all__ = ["execute_contig", "publish_contig", "task"]
 
 
 RESIDENT_EVIDENCE_BYTES = 8 << 30
+
+
+def use_elastic_releases(observed_rows: int) -> bool:
+    """Reserve elastic sample children for cohorts fitting one SIMD lane block.
+
+    Larger cohorts already supply many independent releases; reusable map workers
+    amortise their short calls without per-sample thread admission.
+    """
+    return observed_rows <= LANE_WIDTH
 
 
 def use_windows(samples: int, sites: int, storage: str = "auto") -> bool:
@@ -112,17 +123,17 @@ def execute_contig(
         return budget.thread_map(function, items, label="family-phase independent work")
 
     def concurrent(functions: list[Callable[[Callable[..., list[Any]]], R]]) -> list[R]:
-        """each function(map) at once on a live share of the task's CPUs, ``map`` running one-thread
-        calls on that share (a solve's blocks); results in order."""
+        """Each function(map) on a live share; map runs its independent blocks or
+        hard-cut release intervals with one thread each. Return results in order."""
 
         def on_share(function: Callable[[Callable[..., list[Any]]], R]) -> Callable[[Any], R]:
             def run(share: Any) -> R:
-                return function(lambda work, items: share.thread_map(work, items, label="family-phase blocks"))
+                return function(lambda work, items: share.thread_map(work, items, label="family-phase child work"))
 
             return run
 
         results: list[Any] = [None] * len(functions)
-        for index, value in budget.concurrent([on_share(f) for f in functions], label="family-phase solves"):
+        for index, value in budget.concurrent([on_share(f) for f in functions], label="family-phase children"):
             results[index] = value
         return results
 
@@ -139,6 +150,7 @@ def execute_contig(
             prepare_likelihoods=prepare_likelihoods if windowed else None,
             map_work=map_work,
             concurrent=concurrent,
+            concurrent_releases=concurrent if use_elastic_releases(evidence.observed.shape[0]) else None,
         ),
         allocate=allocate if windowed else None,
     )

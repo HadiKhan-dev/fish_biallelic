@@ -293,6 +293,12 @@ def _family_scores(engine, choices, shape, budget):
                 index = index * base_count + digit
             if result[index] is None:
                 result[index] = raw[:, leaf] + normalisers
+    # Only the shared shadow rule's admitted complete families reach this pass.
+    # Reuse their immutable vectors across endpoint tests; each test still owns
+    # its total differences, bootstrap band and conventional reduction order.
+    for cells, vector in zip(itertools.product(*choices), result, strict=True):
+        key = tie_rules.panel_key(np.asarray(cells, np.int64).reshape(shape))
+        engine.ledger.remember_score(key, vector)
     return result
 
 
@@ -710,7 +716,7 @@ def _count_refit_endpoints(engine, chosen, refits):
         # A label-only pending vector belongs to the primary, not a companion.
         pending = engine.ledger.fit_scores.pop(label, None)
         if pending is not None:
-            engine.ledger.scores[tie_rules.panel_key(fit.rows)] = pending
+            engine.ledger.publish_score(tie_rules.panel_key(fit.rows), pending)
         variants = (fit,)
         if fit.summary.tied_panels:
             token = (label, engine.ledger.invocations[label])

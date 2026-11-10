@@ -163,13 +163,19 @@ Cost and scope: Up to K deletion starts per expanded parent, each with the fixed
 <a id="di15"></a>
 ## di15 Gauge rewires and death/gauge family admission
 
-Generate gauge rewires, deduplicate each death/gauge bucket by content, and admit deaths first under the complete-class proposal budget. Use the exact cut only within its named size ceiling; larger components use the heuristic cut and record that limitation. Fit admitted starts before considering births.
+Generate gauge rewires, deduplicate each death/gauge start bucket by content, and admit deaths first under the complete-class proposal budget. Use one heuristic cut search at every K and record its use. Keep at most eight times `max_cut_ties` cuts (32 by default): the canonical prefix of the complete found family at its best found weight. Record any truncation as `tie_class_truncated`, cause `gauge_tie_class_truncated`, so it sets search limits and `search_incomplete` and prevents a generated-neighbourhood certificate. Its count is exact for the found family and a lower bound on all cuts at that weight; it does not count certified global maximum cuts. The scope states the weight and retained count. This cut budget is separate from the later whole-class death/gauge start budget. Fit admitted starts before considering births.
+
+The cut search pins vertex zero on side False and visits the other vertices by descending weighted degree, with index ties following convention d9. Run strictly improving single-vertex searches from every unpinned singleton, an alternating start and `GAUGE_CUT_GW_PLANES` Goemans-Williamson starts; retain the distinct endpoints at the best integer (cross, within) weight. Move gains are initialized once and updated exactly after each move. The endpoints are locally optimal with respect to unpinned vertices; the search does not certify a global maximum.
+
+For the GW starts, approximate the max-cut semidefinite relaxation by the Burer-Monteiro mixing method at rank ⌈√(2K)⌉ + 1. Stop after a sweep whose summed squared unit-vector movement is below `GAUGE_CUT_SDP_TOLERANCE`, or after `GAUGE_CUT_SDP_SWEEPS` sweeps. The tolerance is a step-size criterion, not an objective-error bound. Round with 16 random hyperplanes. The private generator uses `GAUGE_CUT_GW_SEED` and CRC-32 of the int64 weights in founder-content order; solve and round in that order, then map back. Production panels have distinct rows sorted by content and remapped assignments. Together with sample-count edge weights, this makes the ordered retained cuts and truncation records invariant to founder/sample input order for distinct founder rows. Equal rows keep input order and are excluded by the distinct-row production contract. Convention d9 reverses both local-search index ties and cut ordering; keeping d9 restores normal behaviour.
+
+The SDP only supplies extra valid cuts. Integer local search scores every endpoint exactly; finite or unconverged mixing affects proposal coverage, not the validity of a cut score. Keeping the singleton and alternating starts ensures that adding GW starts cannot lower the best weight found. The tied family and retained prefix may change, so released discovery panels may change. No production SDP certificate or approximation ratio is promised.
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `exact_cut_max_k`, `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`, `GAUGE_CUT_GW_PLANES`, `GAUGE_CUT_GW_SEED`, `GAUGE_CUT_SDP_SWEEPS`, `GAUGE_CUT_SDP_TOLERANCE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(2^(m-1) m); O(K); O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: For total integer edge weight W ≤ N, local search costs O(K² + K W) per start, and the K + P starts cost O((K + P)(K² + K W)), P = 16. Mixing costs O(T K² √K), T ≤ 2000; rounding costs O(P K √K). With fixed P and T this is O(K³ + K² W + T K² √K), polynomial with at most cubic K dependence. The complete found family has at most K + P members. Cache eviction changes recomputation only.
 
 <a id="di16"></a>
 ## di16 Data births

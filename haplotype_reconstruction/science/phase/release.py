@@ -191,7 +191,7 @@ def _bridged_ties(ties, orientation, tau_s):
     return out
 
 
-def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRelease:
+def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=None) -> SampleRelease:
     """One sample's release over the component's released sites.
 
     ctx: site_bin int64 [m] (bin of each site), site_alleles int8 [S, m] (painting-state alleles at the sites),
@@ -204,6 +204,8 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRelea
     set-break bins, optional float32[2,m] reporting scores and optional
     float64[2,2,B] source probabilities. Free-homologue chains are NaN. Inputs
     are borrowed; arrays in the returned record are owned by this sample call.
+    The optional ordered map runs independent hard-cut intervals concurrently;
+    each interval writes only its own bins and retains full-chain posteriors.
     """
     config = ctx.config
     windowed = ctx.windowed
@@ -231,26 +233,39 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRelea
         posts = np.zeros((B, S, S))  # bins of a partition without an anchor: no phase
         het_conf = 1.0 - np.einsum("bxx->b", gposts)  # P(the label pair is heterozygous)
         candidates = [int(b) for b in het_bins if het_conf[b] >= tau_p]
-        start = 0
-        while start < B:
-            if start > 0:
-                set_breaks.append(start)
-            hard = next((c for c in cuts if c > start), B)
-            anchor = next((b for b in candidates if start <= b < hard), None)
-            if anchor is None:
-                start = hard
-                continue
-            mask = labs0[anchor][:, None] < labs1[anchor][None, :]
-            lp = label_pair_posterior(kernels.forward_backward(em, T0, T1, TG, anchor, mask), labs0, labs1, S)
-            orientation = _orientation_certainty(
-                lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, anchor, hard, B, windowed
-            )
-            stop = next(
-                (int(b) for b in het_bins if anchor < b < hard and het_conf[b] >= tau_g and orientation[b] < tau_s),
-                hard,
-            )
-            posts[start:stop] = lp[start:stop]
-            start = stop
+        def partition(bounds):
+            # Hard cuts fix independent release intervals. Each anchored posterior
+            # still uses the complete chain, with exactly the same anchor search
+            # and continuation tests inside its interval.
+            start, hard = bounds
+            breaks = []
+            while start < hard:
+                if start > 0:
+                    breaks.append(start)
+                anchor = next((b for b in candidates if start <= b < hard), None)
+                if anchor is None:
+                    break
+                mask = labs0[anchor][:, None] < labs1[anchor][None, :]
+                lp = label_pair_posterior(kernels.forward_backward(em, T0, T1, TG, anchor, mask), labs0, labs1, S)
+                orientation = _orientation_certainty(
+                    lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, anchor, hard, B, windowed
+                )
+                stop = next(
+                    (int(b) for b in het_bins if anchor < b < hard and het_conf[b] >= tau_g and orientation[b] < tau_s),
+                    hard,
+                )
+                posts[start:stop] = lp[start:stop]
+                start = stop
+            return breaks
+
+        boundaries = [0, *cuts, B]
+        intervals = list(zip(boundaries[:-1], boundaries[1:], strict=True))
+        released = (
+            map_work(partition, intervals)
+            if map_work is not None and len(intervals) > 1
+            else [partition(bounds) for bounds in intervals]
+        )
+        set_breaks = [edge for interval in released for edge in interval]
     else:
         posts = gposts
         set_breaks = cuts

@@ -6,15 +6,16 @@ generators, their growth tables (GrowthInputs) and the maximum-cut cache.
 Must not: score or select panels (the cavity score and search.py decide), read storage, the environment or a clock,
 or log.
 Method: docs/methods/discovery.md, units di13-di16 and di19-di20.
-Identity: generator families are admitted whole through twice ``max_proposals_per_expansion``, never by a byte
-prefix; data births consume whole excess/coverage tie groups (budgets ``data_birth_attempts``,
-``data_birth_children``, ``data_birth_tie_budget_factor``); gauge rewires use exact maximum cuts up to
-``exact_cut_max_k``; replacements follow births in tie-class order (``max_replacement_children``).
+Identity: death/gauge start families are admitted whole through twice ``max_proposals_per_expansion``; data births
+consume whole excess/coverage tie groups (budgets ``data_birth_attempts``,
+``data_birth_children``, ``data_birth_tie_budget_factor``); gauge rewires use the best-found cuts of one
+heuristic search at every K, with canonical cut-family truncation; replacements follow births in tie-class order
+(``max_replacement_children``).
 
 * K = 1 data seeds: HDBSCAN clusters of samples by expected genotype agreement, each pooled
   into one row (fallback: the most decisive sample's dosage row).
 * Deaths: every one-row deletion.
-* Gauge rewires: for a maximum cut of the assignment graph (rows linked by samples assigned to
+* Gauge rewires: for a best-found cut of the assignment graph (rows linked by samples assigned to
   both), flip the sites where both sides are internally constant and differ: per site to the
   better allele for the samples within one side ("sitewise"), and all such sites ("opposite").
 * Data births: K + 1 starts from the samples with the largest excess NLL over their sitewise
@@ -33,6 +34,7 @@ consuming tied samples as whole groups. Replacements follow births in tie-class 
 from __future__ import annotations
 
 import math
+import zlib
 from bisect import bisect_left
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -68,7 +70,15 @@ from .panel import (
     whole_class_cut,
 )
 from .parameters import COUNT_CHUNK as _COUNT_CHUNK
-from .parameters import MAX_CUT_CACHE_ENTRIES, DiscoveryParameters, SearchParameters
+from .parameters import (
+    GAUGE_CUT_GW_PLANES,
+    GAUGE_CUT_GW_SEED,
+    GAUGE_CUT_SDP_SWEEPS,
+    GAUGE_CUT_SDP_TOLERANCE,
+    MAX_CUT_CACHE_ENTRIES,
+    DiscoveryParameters,
+    SearchParameters,
+)
 from .residual_births import (
     HALF_BAND,
     alt_fraction_families,
@@ -102,6 +112,7 @@ __all__ = [
     "replacements",
     "data_birth_order",
     "collect_birth_starts",
+    "gauge_cut_family",
 ]
 
 # Supported lazy overloads for the declared kernel routes.
@@ -110,6 +121,7 @@ _BOOLEAN_1C = types.Array(types.boolean, 1, "C", readonly=False)
 _INT64_1C = types.Array(types.int64, 1, "C", readonly=False)
 _INT64_2C_RO = types.Array(types.int64, 2, "C", readonly=True)
 _FLOAT64_3C = types.Array(types.float64, 3, "C", readonly=False)
+_FLOAT64_2C = types.Array(types.float64, 2, "C", readonly=False)
 
 
 _TINY = np.finfo(np.float64).tiny
@@ -380,144 +392,6 @@ def assignment_graph(assignments, k):
     return weights
 
 
-@kernel(overloads=((_INT64_2C,),), cache=True, nogil=True)
-def _exact_cut_scores(weights):
-    """Cut weight of every bipartition with vertex 0 on the first side, by Gray-code updates
-    (O(K) per candidate); entry (bits - 1) holds the cut whose other side is ``bits``."""
-    k = len(weights)
-    n_candidates = (1 << (k - 1)) - 1
-    cross_scores = np.empty(n_candidates, dtype=np.int64)
-    side = np.zeros(k, dtype=np.bool_)
-    cross = 0
-    previous_gray = 0
-    for traversal in range(1, 1 << (k - 1)):
-        gray = traversal ^ (traversal >> 1)
-        changed = gray ^ previous_gray
-        bit = 0
-        while (changed >> bit) != 1:
-            bit += 1
-        vertex = bit + 1
-        delta = 0
-        old_side = side[vertex]
-        for other in range(k):
-            if other == vertex:
-                continue
-            if old_side == side[other]:
-                delta += weights[vertex, other]
-            else:
-                delta -= weights[vertex, other]
-        side[vertex] = not old_side
-        cross += delta
-        cross_scores[gray - 1] = cross
-        previous_gray = gray
-    return cross_scores
-
-
-@kernel(
-    overloads=(
-        (
-            _INT64_2C,
-            types.int64,
-            types.boolean,
-        ),
-    ),
-    cache=True,
-    nogil=True,
-)
-def _component_exact_cuts(weights, max_ties, reverse):
-    """Maximum cuts by independent components: bipartite components by 2-colouring,
-    the others by exhaustive enumeration. Cuts are integer codes with vertex order as most to
-    least significant bit; the smallest codes are kept (byte-lexicographic tie rule; the largest under reversed
-    conventions), at most ``max_ties`` non-empty cuts."""
-    k = len(weights)
-    component = np.full(k, -1, dtype=np.int64)
-    color = np.zeros(k, dtype=np.bool_)
-    vertices = np.empty((k, k), dtype=np.int64)
-    sizes = np.zeros(k, dtype=np.int64)
-    bipartite = np.ones(k, dtype=np.bool_)
-    count = 0
-    for root in range(k):
-        if component[root] >= 0:
-            continue
-        component[root] = count
-        vertices[count, 0] = root
-        sizes[count] = 1
-        head = 0
-        while head < sizes[count]:
-            vertex = vertices[count, head]
-            head += 1
-            for other in range(k):
-                if weights[vertex, other] == 0:
-                    continue
-                if component[other] < 0:
-                    component[other] = count
-                    color[other] = not color[vertex]
-                    vertices[count, sizes[count]] = other
-                    sizes[count] += 1
-                elif color[other] == color[vertex]:
-                    bipartite[count] = False
-        count += 1
-    # One extra permits omission of the all-False empty cut at the end.
-    limit = max_ties + 1
-    combined = np.zeros(1, dtype=np.int64)
-    for c in range(count):
-        members = np.sort(vertices[c, : sizes[c]])
-        mask = np.int64(0)
-        for vertex in members:
-            mask |= np.int64(1) << (k - 1 - vertex)
-        if bipartite[c]:
-            code = np.int64(0)
-            for vertex in members:
-                if color[vertex]:
-                    code |= np.int64(1) << (k - 1 - vertex)
-            choices = np.empty(1 if c == 0 else 2, dtype=np.int64)
-            choices[0] = code
-            if c > 0:
-                choices[1] = code ^ mask
-        else:
-            m = len(members)
-            local = np.empty((m, m), dtype=np.int64)
-            for i in range(m):
-                for j in range(m):
-                    local[i, j] = weights[members[i], members[j]]
-            cross = _exact_cut_scores(local)
-            best = np.max(cross)
-            winners = np.flatnonzero(cross == best)
-            choices = np.empty(len(winners) * (1 if c == 0 else 2), dtype=np.int64)
-            cursor = 0
-            for index in winners:
-                bits = index + 1
-                code = np.int64(0)
-                for j in range(1, m):
-                    if bits & (1 << (j - 1)):
-                        code |= np.int64(1) << (k - 1 - members[j])
-                choices[cursor] = code
-                cursor += 1
-                if c > 0:
-                    choices[cursor] = code ^ mask
-                    cursor += 1
-        choices = np.sort(choices)
-        if reverse:
-            choices = choices[::-1].copy()
-        choices = choices[:limit]
-        joined = np.empty(len(combined) * len(choices), dtype=np.int64)
-        cursor = 0
-        for previous in combined:
-            for choice in choices:
-                joined[cursor] = previous | choice
-                cursor += 1
-        combined = np.sort(joined)
-        if reverse:
-            combined = combined[::-1].copy()
-        combined = combined[:limit]
-    combined = combined[combined != 0][:max_ties]
-    result = np.zeros((len(combined), k), dtype=np.bool_)
-    for row in range(len(combined)):
-        for vertex in range(k):
-            result[row, vertex] = bool(combined[row] & (np.int64(1) << (k - 1 - vertex)))
-    return result
-
-
 @kernel(
     overloads=(
         (
@@ -552,99 +426,249 @@ def _cut_score(weights, side):
     nogil=True,
 )
 def _local_search_cut(weights, initial, order):
-    """Single-vertex moves in ``order`` while one improves the cut."""
+    """Strictly improving single-vertex moves in ``order`` with exact integer gains.
+
+    Gain is same-side weight minus cross weight. A move negates its own gain and changes every
+    other gain by +2w on the moved side or -2w opposite it. Updating gains costs O(K) per move;
+    initialization costs O(K^2). Each move raises the integer cut weight by at least one, so a
+    start costs O(K^2 + K W), where W is the graph's total upper-triangle weight. The endpoint is
+    locally optimal with respect to the visited, unpinned vertices.
+    """
     side = initial.copy()
+    k = len(weights)
+    gain = np.zeros(k, dtype=np.int64)
+    for index in range(k):
+        total = 0
+        for other in range(k):
+            if other == index:
+                continue
+            if side[index] == side[other]:
+                total += weights[index, other]
+            else:
+                total -= weights[index, other]
+        gain[index] = total
     while True:
         changed = False
         for position in range(len(order)):
             index = order[position]
-            old_side = side[index]
-            delta = 0
-            for other in range(len(weights)):
-                if other == index:
-                    continue
-                if old_side == side[other]:
-                    delta += weights[index, other]
-                else:
-                    delta -= weights[index, other]
-            if delta > 0:
-                side[index] = not old_side
+            if gain[index] > 0:
+                moved = not side[index]
+                side[index] = moved
+                gain[index] = -gain[index]
+                for other in range(k):
+                    if other == index:
+                        continue
+                    if side[other] == moved:
+                        gain[other] += 2 * weights[other, index]
+                    else:
+                        gain[other] -= 2 * weights[other, index]
                 changed = True
         if not changed:
             return side
 
 
-class MaximumCuts:
-    """Deterministic maximum-weight bipartitions of assignment graphs (memoised per block).
+@kernel(
+    overloads=(
+        (
+            _FLOAT64_2C,
+            _FLOAT64_2C,
+            types.int64,
+            types.float64,
+        ),
+    ),
+    cache=True,
+    nogil=True,
+)
+def _mixing_sweeps(weights, vectors, sweeps, tolerance):
+    """Burer-Monteiro mixing method for the max-cut SDP (maximise 1/4 sum_ij w_ij (1 - <v_i, v_j>) over unit vectors):
+    exact block-coordinate updates v_i <- -normalise(sum_j w_ij v_j) in place, at most ``sweeps`` sweeps, stopping
+    when a sweep's squared change is below ``tolerance``. A vertex with no weighted neighbour keeps its vector.
+    Returns the sweeps used. O(sweeps K^2 r) for rank r."""
+    k, rank = vectors.shape
+    direction = np.empty(rank)
+    for sweep in range(sweeps):
+        change = 0.0
+        for i in range(k):
+            for c in range(rank):
+                direction[c] = 0.0
+            for j in range(k):
+                if j != i and weights[i, j] != 0.0:
+                    for c in range(rank):
+                        direction[c] += weights[i, j] * vectors[j, c]
+            norm = 0.0
+            for c in range(rank):
+                norm += direction[c] * direction[c]
+            norm = math.sqrt(norm)
+            if norm == 0.0:
+                continue
+            for c in range(rank):
+                updated = -direction[c] / norm
+                change += (updated - vectors[i, c]) ** 2
+                vectors[i, c] = updated
+        if change < tolerance:
+            return sweep + 1
+    return sweeps
 
-    Vertex 0 stays on side False (complement cuts are one cut). Exact by components up to
-    ``exact_max_k`` vertices; above, degree-ordered local searches from every singleton and an
-    alternating start (``heuristic`` reports that). At most ``max_ties`` equal optima, in
-    lexicographic bit order.
+
+def _gauge_cut_starts(weights, planes=None, labels=None):
+    """Goemans-Williamson starts for the single-vertex cut search.
+
+    The max-cut SDP is solved in rank ceil(sqrt(2K)) + 1 by the mixing method (Burer-Monteiro) from a random start;
+    each of ``planes`` random hyperplanes g gives the cut sign(<v_i, g>) >= 0, complemented so that vertex 0 stays on
+    side False (the searches' pinned vertex). Returns the distinct non-empty cuts in hyperplane order.
+
+    Canonical order: with ``labels`` (one content row per vertex, the founder haplotypes) the SDP, its random start
+    and the hyperplanes are computed on the weights in founder-content order (rows sorted by their bytes, equal rows
+    by input index) and mapped back, and the generator is seeded with (GAUGE_CUT_GW_SEED, CRC-32 of those reordered
+    int64 weights). The weights count samples per row pair, so they do not depend on the sample order; the starts,
+    as bipartitions of founders, are then identical under any permutation of distinct founder rows. Without labels
+    the input order is used (the production caller passes the canonical, content-sorted panel, so both agree).
+
+    Approximation: the solve is a finite, rank-factorised approximation of the SDP (at most GAUGE_CUT_SDP_SWEEPS
+    sweeps; GAUGE_CUT_SDP_TOLERANCE bounds the vectors' movement in one sweep, not the objective error), and no
+    dual certificate is computed in production. Its accuracy only decides which extra starts are tried: every start
+    is a valid pinned cut, and every end point is found and scored exactly by the integer search, so a poor or
+    unconverged solve cannot return an invalid or mis-scored cut. The singleton and alternating starts are always
+    searched, so adding GW starts cannot decrease the best cut weight found. The returned family (endpoints tied
+    at that weight, truncated to max_ties) can change, and a larger found family can exceed the gauge budget and
+    be truncated
+    (gauge_cut_family). Cost O(GAUGE_CUT_SDP_SWEEPS K^2 sqrt(K) + planes K sqrt(K))."""
+    planes = GAUGE_CUT_GW_PLANES if planes is None else int(planes)
+    matrix = np.ascontiguousarray(weights, dtype=np.int64)
+    k = len(matrix)
+    if planes <= 0 or k < 3 or not np.any(matrix):
+        return []
+    if labels is None:
+        permutation = np.arange(k, dtype=np.int64)
+    else:
+        keys = [np.ascontiguousarray(row).tobytes() for row in labels]
+        permutation = np.asarray(sorted(range(k), key=lambda index: (keys[index], index)), dtype=np.int64)
+    canonical = np.ascontiguousarray(matrix[np.ix_(permutation, permutation)])
+    rng = np.random.default_rng([GAUGE_CUT_GW_SEED, zlib.crc32(canonical.tobytes())])
+    rank = int(math.ceil(math.sqrt(2 * k))) + 1
+    vectors = rng.standard_normal((k, rank))
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    _mixing_sweeps(canonical.astype(np.float64), vectors, int(GAUGE_CUT_SDP_SWEEPS), float(GAUGE_CUT_SDP_TOLERANCE))
+    hyperplanes = rng.standard_normal((planes, rank))
+    starts = []
+    seen = set()
+    for normal in hyperplanes:
+        side = np.empty(k, dtype=bool)
+        side[permutation] = (vectors @ normal) >= 0.0
+        if side[0]:
+            side = ~side
+        key = side.tobytes()
+        if key not in seen and np.any(side):
+            seen.add(key)
+            starts.append(np.ascontiguousarray(side))
+    return starts
+
+
+class MaximumCuts:
+    """Deterministic best-found bipartitions of assignment graphs (memoised per block).
+
+    Vertex 0 stays on side False (complement cuts are one cut). At every K, degree-ordered single-vertex
+    improving searches run from every singleton, an alternating start and the Goemans-Williamson starts. Return
+    distinct endpoints at the best (cross, within) weight, at most ``max_ties``, in lexicographic bit order
+    (reversed under reversed conventions). The cuts are locally optimal with respect to unpinned vertices;
+    global maxima are not certified.
     """
 
-    def __init__(self, exact_max_k: int, max_ties: int, *, reverse: bool = False, keep: tuple[str, ...] = ()):
+    def __init__(self, max_ties: int, *, reverse: bool = False, keep: tuple[str, ...] = ()):
         self.reverse = reverse
         self.keep = tuple(keep)
-        self.exact_max_k = int(exact_max_k)
         self.max_ties = int(max_ties)
         self._cache: OrderedDict = OrderedDict()
 
     def heuristic(self, k: int) -> bool:
-        return k > self.exact_max_k
+        """Whether gauge cuts of a K-row panel come from the heuristic search: every K > 1."""
+        return k > 1
 
-    def partitions(self, weights, max_ties=None):
-        """Up to ``max_ties`` (default the configured number) maximum cuts of ``weights``."""
+    def partitions(self, weights, max_ties=None, labels=None):
+        """Up to ``max_ties`` best-found cuts (default the configured number).
+
+        Return distinct endpoints at the best found (cross, within) weight, locally optimal with respect to
+        unpinned vertices. Global maxima are not certified. ``labels`` supplies one founder-content row per
+        vertex to put the Goemans-Williamson starts in founder-content order.
+        """
         max_ties = self.max_ties if max_ties is None else int(max_ties)
         matrix = np.ascontiguousarray(weights, dtype=np.int64)
         if len(matrix) < 2:
             return ()
-        key = (len(matrix), max_ties, matrix.tobytes())
+        label_key = None if labels is None else np.ascontiguousarray(labels).tobytes()
+        key = (len(matrix), max_ties, matrix.tobytes(), label_key)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
         k = len(matrix)
-        if k <= self.exact_max_k:
-            result = tuple(
-                side.copy()
-                for side in _component_exact_cuts(matrix, max_ties, rev("d9", reverse=self.reverse, keep=self.keep))
+        reverse = rev("d9", reverse=self.reverse, keep=self.keep)
+        order = np.asarray(
+            sorted(range(1, k), key=lambda index: (-int(np.sum(matrix[index])), -index if reverse else index)),
+            dtype=np.int64,
+        )
+        candidates = []
+        for index in range(1, k):
+            side = np.zeros(k, dtype=bool)
+            side[index] = True
+            candidates.append(_local_search_cut(matrix, side, order))
+        alternating = np.zeros(k, dtype=bool)
+        alternating[order[::2]] = True
+        candidates.append(_local_search_cut(matrix, alternating, order))
+        for side in _gauge_cut_starts(matrix, labels=labels):
+            candidates.append(_local_search_cut(matrix, side, order))
+        unique: dict[bytes, np.ndarray] = {}
+        for side in candidates:
+            if np.any(side):
+                unique.setdefault(side.tobytes(), side)
+        scored = [(_cut_score(matrix, side), side.tobytes(), side) for side in unique.values()]
+        if scored:
+            best_cross = max(item[0][0] for item in scored)
+            best_within = min(item[0][1] for item in scored if item[0][0] == best_cross)
+            winners = sorted(
+                (item for item in scored if item[0] == (best_cross, best_within)),
+                key=lambda item: item[1],
+                reverse=reverse,
             )
+            result = tuple(item[2].copy() for item in winners[:max_ties])
         else:
-            reverse = rev("d9", reverse=self.reverse, keep=self.keep)
-            order = np.asarray(
-                sorted(range(1, k), key=lambda index: (-int(np.sum(matrix[index])), -index if reverse else index)),
-                dtype=np.int64,
-            )
-            candidates = []
-            for index in range(1, k):
-                side = np.zeros(k, dtype=bool)
-                side[index] = True
-                candidates.append(_local_search_cut(matrix, side, order))
-            alternating = np.zeros(k, dtype=bool)
-            alternating[order[::2]] = True
-            candidates.append(_local_search_cut(matrix, alternating, order))
-            unique: dict[bytes, np.ndarray] = {}
-            for side in candidates:
-                if np.any(side):
-                    unique.setdefault(side.tobytes(), side)
-            scored = [(_cut_score(matrix, side), side.tobytes(), side) for side in unique.values()]
-            if scored:
-                best_cross = max(item[0][0] for item in scored)
-                best_within = min(item[0][1] for item in scored if item[0][0] == best_cross)
-                winners = sorted(
-                    (item for item in scored if item[0] == (best_cross, best_within)),
-                    key=lambda item: item[1],
-                    reverse=reverse,
-                )
-                result = tuple(item[2].copy() for item in winners[:max_ties])
-            else:
-                result = ()
+            result = ()
         self._cache[key] = result
         self._cache.move_to_end(key)
         while len(self._cache) > MAX_CUT_CACHE_ENTRIES:
             self._cache.popitem(last=False)
         return result
+
+
+def gauge_cut_family(cuts, weights, haplotypes, budget, omissions=None):
+    """The gauge cuts of a panel: the tied best cuts MaximumCuts finds, at most ``budget`` of them.
+
+    A found family larger than ``budget`` is truncated canonically. The cuts come in lexicographic order of
+    their sides (vertex 0, the
+    content-first founder of the canonical panel, on side False; reversed under reversed conventions), with the
+    vertices in founder-content order (the caller's canonical panel; the Goemans-Williamson starts are computed in
+    that order too), so the first ``budget`` cuts are a function of the founders' content, not of their or the
+    samples' input order (for distinct founder rows; equal rows keep their input order). The truncation is recorded
+    as a tie_class_truncated omission (cause gauge_tie_class_truncated) whose count is the number of distinct cuts
+    found at the best found weight: exact for the found family and a lower bound on all cuts of that weight (other
+    cuts of that weight may not have been reached; it is not a count of global maximum cuts, which the heuristic
+    search does not certify). The scope names the weight and how many were kept. Distinct founder rows are a
+    precondition (discovery panels are deduplicated). This cut-family truncation is separate from the later
+    whole-class budget on death/gauge start families (max_proposals_per_expansion)."""
+    k = len(weights)
+    # K singleton/alternating starts plus at most P GW starts bound the complete found family by K + P.
+    family = cuts.partitions(weights, k + 2 + max(0, GAUGE_CUT_GW_PLANES), labels=haplotypes)
+    if len(family) > budget:
+        best_weight = int(_cut_score(np.ascontiguousarray(weights, dtype=np.int64), np.ascontiguousarray(family[0]))[0])
+        _note_omission(
+            omissions,
+            "gauge_tie_class_truncated",
+            len(family),
+            f"gauge cuts at the best found weight {best_weight} (kept {budget} of {len(family)} found)",
+            "lower_bound",
+            kind="tie_class_truncated",
+        )
+    return tuple(family[:budget])
 
 
 def _gauge_sites(haplotypes, side):
@@ -1231,15 +1255,9 @@ def ordinary_moves(
     if solution.k > 1:
         buckets[-1].extend(death_starts(solution))
         weights = assignment_graph(solution.assignments, solution.k)
-        # The effective budget is 4 x max_cut_ties. A complete tied family may extend through twice that
-        # budget; probe one further cut to detect whole-family omission.
+        # Retain the canonical prefix of the complete found cut family and report any truncation.
         cap = 4 * search.max_cut_ties
-        partitions = cuts.partitions(weights, 2 * cap + 1)
-        if len(partitions) > 2 * cap:
-            _note_omission(
-                omissions, "gauge_tie_class_at_budget", len(partitions), "gauge maximum-cut class", "lower_bound"
-            )
-            partitions = ()
+        partitions = gauge_cut_family(cuts, weights, solution.haplotypes, 2 * cap, omissions)
         buckets[0].extend(gauge_starts(solution, likelihoods, partitions, workspace.quanta.nll))
     unique = {}
     for offset, starts in buckets.items():

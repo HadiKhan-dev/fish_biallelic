@@ -6,11 +6,11 @@ An accretion is a retained special rule, bounded-search device or diagnostic who
 
 | Decision | Retained scope | Cost/limitation |
 |---|---|---|
-| 0 | Rare context-coded selection screening | O(K⁵) per round; at K = 30 the K-only factor is 24,300,000 |
+| 0 | Context-coded selection screening | O(K⁴) per round from certificates and start de-duplication, plus at most 128 cubic exact-code solves; at K = 30 the quartic K-only factor is 810,000 |
 | 0c | Bounded discovery and selection searches | Discovery O(N L K⁴); selection backstop O(N L K³(K+L)) and context-snap passes O((K+L)²); K⁴ = 810,000 at K = 30. discovery's replacement starts (48/96) and archive beam (6/12), and selection's backstops, bank budgets, context snaps and LS10/LS17 caps bind at every K; they are bounded-search devices that need new search or stopping contracts, not larger constants |
 | 0d | Optional pairwise IBD | Off by default; O(N² L), with 3,123,750 unordered pairs at N = 2,500 |
 
-These are algebraic factors, not measured operation counts or timings. See [costs](costs.md) for their scope. Four further worst-case costs above cubic in K (assembly joins' structural screening, refinement window fixing, painting label-continuity checks and founder-refit ties) are carried exactly as documented exceptions under owner decision 0e, the treatment of 0c; the [cost page](costs.md#exemptions-and-exceptions) names them with their current scope.
+These are algebraic factors, not measured operation counts or timings. See [costs](costs.md) for their scope. Three further worst-case costs above cubic in K (assembly joins' structural screening, refinement window fixing and founder-refit ties) are carried exactly as documented exceptions under owner decision 0e, the treatment of 0c; the [cost page](costs.md#exemptions-and-exceptions) names them with their current scope.
 
 ## Accretion register
 

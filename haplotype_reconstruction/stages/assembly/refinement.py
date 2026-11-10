@@ -236,6 +236,9 @@ def _component_stage(
         if records is None or (not force_fit_records and component.stop - component.start <= 100)
         else records.scoped(name + "/fit", nthreads=1)
     )
+    team = RefinementTeam(cores, current_budget())
+    # Work of one sample's component messages (core.kernels.sample_team): sites x K^2 diplotype cells.
+    team.sample_work = int(sum(panel.sites for panel in panels)) * int(component.founders) ** 2
     with attached_scoring(evidence) as scoring:
         result = refine_component(
             number,
@@ -244,7 +247,7 @@ def _component_stage(
             component_evidence(scoring, panels),
             context,
             settings,
-            RefinementTeam(cores, current_budget()),
+            team,
             fit_records,
             incoming=incoming,
             storage=storage,

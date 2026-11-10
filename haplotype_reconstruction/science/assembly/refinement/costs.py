@@ -13,7 +13,7 @@ import math
 import numpy as np
 
 from . import checkpoints
-from .parameters import COUNT_FANOUT_BYTES, FAMILY_BYTES
+from .parameters import COUNT_FANOUT_BYTES, FAMILY_BYTES, SCORE_LEDGER_BYTES
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
 __all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "component_task_bytes"]
@@ -181,5 +181,8 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
         component_bytes(panels, samples, min_sites_per_bin=min_sites_per_bin, max_bins=config.proposal_max_bins)
         + max(1, cores) * child
         + families
+        # Optional score residence includes Python keys/metadata, not just N
+        # floats. One shared ledger serves every concurrent fit and branch.
+        + SCORE_LEDGER_BYTES
         + (256 << 20)
     )

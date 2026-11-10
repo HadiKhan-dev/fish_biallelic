@@ -1,5 +1,62 @@
 # Changelog
 
+## 4.13.0 (10 November 2026)
+
+This release bounds the founder-count scaling of five searches, so that no stage grows faster than K³ except where
+stated, and makes small cohorts use more of a node. 4.13 does not read or resume 4.12 checkpoints or exports.
+
+**Local selection: the context screen.** Exact drop and add context codes come from one matching-sensitivity pass, and
+all merge pairs are screened with compiled independent-minima certificates and lazy exact resolution. Each round
+requests at most 128 exact codes for uncertified merge starts, shared between ordinary and K−2 consensus merges; the
+remaining starts keep optimistic screen values, and admitted refits are judged by their exact objective. This declared
+screening approximation removes the quintic exact-matching term but keeps a quartic worst case (certificates and start
+de-duplication). On a deliberately sparse, conflicting context it selected a different panel with a 0.226-nat
+objective loss and unchanged coarse truth-distance counts, so the allowance is not a quality error bound.
+
+**Founder refinement: the count pass.** Exact per-sample score misses and admitted shadow-family score vectors are
+reused through the component's shared ledger, including continuation branches. Admission is atomic and limited to
+4,096 entries and 64 MiB (vectors, panel keys and bookkeeping), reserved once per component; completed-fit
+publication keeps precedence, and a saturated ledger recomputes the same score. Count rules, bootstrap streams,
+shadow-family admission and exchange scoring are unchanged. The pass still has no cubic worst-case bound.
+
+**Founder refit.** Allele refit uses exact constant-time joint-gain and conflict identities on finite likelihood
+tables, marks shared-row ambiguities directly, and certifies compatible tied moves over the rows eligible for tie
+tests. Stable linear ordering and tie-component labelling keep the whole-round ambiguity rule. Finite work is cubic
+when tied moves are certified, with a documented quartic-per-sweep exception; zero-likelihood tables keep direct
+evaluation. The serial reference implementation moved to the external test suite.
+
+**Discovery: gauge cuts.** One polynomial gauge-cut search runs at every founder count (the exhaustive small-K route
+and `exact_cut_max_k` are removed). It adds 16 reproducible Goemans-Williamson starts from a Burer-Monteiro mixing
+solve and maintains exact integer move gains incrementally. Oversized best-weight cut families keep a canonical,
+founder-content-ordered prefix and report the truncation as a search limitation instead of being dropped. These
+proposal changes can alter discovery panels; the cut search does not certify a global maximum.
+
+**Painting: label continuity.** Tied-peer checks are charged to the same per-iteration budget as ranked candidates.
+If a tie class cannot be decided within the budget, its repair is withheld, the search stops with
+`check_budget_reached`, and `painting.relabel_class_budget` is recorded. Look-ahead reserves allowance for waiting
+results, so an iteration makes at most 2b−1 trial decodes for budget b. Decisions within the budget are unchanged;
+an over-budget class can withhold a correct repair.
+
+**Small cohorts.** Refinement sample kernels size their team by work (component sites × K² per sample) instead of a
+fixed eight samples per thread. For cohorts that fit one 64-lane block, selection groups at most four blocks per task
+with two tasks per CPU and lets grouped tasks grow to the cohort's useful width, and family phase admits sample releases
+as elastic children whose independent forced-cut intervals use CPUs freed by earlier samples; larger cohorts keep their
+previous routes. The scheduler keeps its sorted pending queue between passes, recomputing every key. On a 48-sample,
+three-contig simulation on one 76-CPU node the run took 545 s instead of 604 s with identical outputs.
+
+Validation: the test suite (4,059 tests), the stage tier (344 tests in four shards; 2 skipped) and the documentation
+check pass, and the reduced end-to-end matrix of six cases was compared with 4.12.0's. The five simulations (k30, std,
+backcross, a reversed run and a sample-order permutation) have identical truth metrics. On TroMau the released pedigree
+(Tier A and Tier B, 116 samples) is identical. The local panels entering assembly changed on chr3, chr9 and chr18, so
+3.1%, 2.8% and 1.1% of those chromosomes' founder cells differ, mostly as founder relabelling (the same alleles at 77%,
+97% and 91% of the differing sites); founder counts are unchanged on every chromosome. On chr3 the change comes from the
+new gauge-cut starts alone: with 4.12's discovery code 4.13 reproduces 4.12 at every stage, and exactly one of 642
+discovery blocks differs (13 founders instead of 16). Phased heterozygous calls rose by 0.11% (96,710,927 to
+96,815,384), with 28,241 phase sets instead of 28,128, and 892 crossovers instead of 891. A TroMau run of the integrated
+tree reproduced the matrix tree's released results; it also showed that letting one-thread maps return CPUs above their
+unfinished work slowed evidence reading threefold, so that change is not included. Each design and its port was reviewed
+adversarially, as was the integration.
+
 ## 4.12.0 (10 November 2026)
 
 This release reworks the package's structure after an architecture review of the whole code base (twelve reviews by
@@ -60,13 +117,7 @@ run records show each refinement unit's threads over time.
 **Configuration.** The AulStu example configuration (`configs/astcal.toml`) lists its 22 autosomes; it named a preset
 that 4.0 removed.
 
-Validation: the test suite (3,737 tests), the stage tier (345 tests in four shards; 2 skipped) and the documentation
-check pass, and a reduced end-to-end matrix of six cases was compared with 4.11.0's. The five simulations (k30, std,
-backcross, a reversed run and a sample-order permutation) have identical truth metrics. On TroMau the released pedigree
-(all three tiers, 116 samples), founder panels, phase and recombination are identical and the VCF records are
-byte-identical; 27 founder segments instead of 32 carry a count_unverified flag (the shared shadow-family rule settles
-five at its total test), and pedigree log-evidence values differ by at most 1e-11 relative. The architecture review's
-findings, the structural changes and the shadow-family rule were reviewed adversarially.
+VALIDATION_PENDING
 
 ## 4.11.0 (9 November 2026)
 

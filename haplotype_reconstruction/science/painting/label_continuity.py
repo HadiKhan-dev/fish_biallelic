@@ -935,7 +935,7 @@ def _relabel_linked(
         ):
             """(acceptable, change, winners, losers) of ``key`` = (pair, link), computed once per iteration by
             re-decoding every eligible sample. For uncached batches, a miss also decodes following ranked
-            candidates (1, then 2, 4, ... within the remaining main-loop budget) from the same rebuilt
+            candidates (1, then 2, 4, ... subject to the remaining allowance) from the same rebuilt
             emissions. Their changes wait in ``ahead`` and count as checks when evaluated."""
             nonlocal checked
             if key not in results:
@@ -957,7 +957,10 @@ def _relabel_linked(
                 else:
                     keys, trials = [key], [trial]
                     if not samples.all_kept:
-                        more = min(width[0], budget - (checked - checked_before)) - 1
+                        # Waiting results reserve look-ahead allowance. An iteration has at most b charged checks
+                        # and b - 1 waiting trial decodes: at most 2b - 1 physical trial decodes for b >= 1,
+                        # none for b = 0. Look-ahead changes when trials run, not which checks decide a repair.
+                        more = min(width[0], budget - (checked - checked_before) - len(ahead)) - 1
                         position = index + 1
                         while more > 0 and position < len(candidates):
                             other = ahead_key(position, candidates)
@@ -989,16 +992,40 @@ def _relabel_linked(
         while index < len(candidates):
             key = canonical(index)
             if key not in results and checked - checked_before >= budget:
-                # The main ranked loop stops when checked candidates reach budget without an acceptable
-                # repair, and flags the outcome. Certification against tied peers can perform additional
-                # checks; it preserves whole-class ambiguity.
+                # Ranked checks and tied-peer checks share the per-iteration budget.
                 budget_reached = True
                 break
             if not evaluate(key)[0]:
                 index += 1
                 continue
             members = [other for other in class_members[candidate_class[index]] if other != index]
-            if any(canonical(other) != key and evaluate(canonical(other))[0] for other in members):
+            # A repair needs a decided tie class. Stop without this repair if a peer would require a charged
+            # check beyond the budget; cached verdicts and capability rejections can still decide the class.
+            undecided = [False]
+
+            def exhausted(
+                other, undecided=undecided, checked_before=checked_before, candidates=candidates,
+                leftmost=leftmost, results=results, perms=perms,
+            ):
+                """Whether a peer needs a charged check beyond the budget.
+
+                The preceding canonical(other) call fills leftmost for this candidate. Read that memo without
+                another canonical call so decision observers see the same sequence. Capability changes reject
+                without decoding or a charge and must reach evaluate even when the budget is spent.
+                """
+                if checked - checked_before < budget:
+                    return False
+                link, pair = candidates[other]
+                peer = (pair, leftmost[(pair, link)])
+                undecided[0] = peer not in results and transposed(perms, peer)[1]
+                return undecided[0]
+
+            if any(canonical(other) != key and (exhausted(other) or evaluate(canonical(other))[0])
+                   for other in members):
+                if undecided[0]:
+                    budget_reached = True
+                    counter.note("painting.relabel_class_budget", inside_tie=True)
+                    break
                 counter.note("painting.relabel_ambiguous", inside_tie=True)
                 index = max(members) + 1
                 continue

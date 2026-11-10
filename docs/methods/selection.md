@@ -44,9 +44,11 @@ Cost and scope: O(K). These terms describe the unit’s work/storage dimensions;
 
 Compute edit-ball costs for context founders against panel rows, solve minimum-cost matchings for every matching size, then choose the largest size within the description tie tolerance. Canonicalise content for released matching pairs. Matching order and the selection of size are separate rules.
 
+Cache exact descriptions by panel content within each context, independently of frequencies; the bounded memo clears and recomputes exact values when full. One residual-network matching pass on the incumbent supplies exact one-row drop and add sensitivities for screening. This preserves the shortest-description rule, including duplicate context claimers and the description tie band.
+
 Implementation: [science/selection/objective.py](../../haplotype_reconstruction/science/selection/objective.py).
 
-Parameters by name: `model`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `model`, `DESCRIPTION_MEMO_ENTRIES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(F K); O(F L); O(min(F, K) (F + K)^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -100,18 +102,27 @@ Implementation: [science/selection/diagnostics.py](../../haplotype_reconstructio
 
 Parameters by name: `CONSENSUS_TIE`, `PROPOSAL_FREQUENCY_TIE`, `CONSENSUS_CENSUS_WINDOW`, `search`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(K^2); O(L); O(K L log K). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(K^2) merges; O(K^3 L) panel copying before canonicalisation; Θ(K^4) frequency-coordinate comparisons when starts share drop row sets. These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ls09"></a>
 ## ls09 Proposal screening: exact scores, merge EM lower bounds, double-removal representatives
 
 Memoise bounds by full panel/frequency content. Select the declared nearest-row and double-removal merge representatives in bound tie classes, score those exactly, and retain bounds for the others. Exact and bounded values enter the same admission ranking; equal bounds do not imply equal exact scores.
 
+All row pairs are offered. A merge whose retained and consensus rows can simultaneously claim their own minimum-cost founders has an exact code by the independent-minima certificate. Other merges, including a consensus equal to a third row (K − 2 rows), enter at an optimistic value: the likelihood bound plus the regularizer at the sorted row-minima lower bound of the description length. This is an upper bound on the all-exact screen value at the same likelihood bound, not on the refitted objective.
+
+Resolve exact codes in batches where the admission cut can depend on them: recompute the tie classes, request unsolved members of the classes examined by the cut, then any unsolved entry within the decision tolerance of their floor. At most `MERGE_EXACT_CODES_PER_ROUND = 128` uncertified starts are resolved per round across both panel shapes. Distinct frequency starts count separately, and a memo hit still consumes allowance; certified codes do not. A batch that fits is resolved whole. A batch that exceeds the remaining allowance is truncated by optimistic value descending, then panel bytes and entry index ascending (the last two reverse under the reversed ranking convention), and resolution stops. Unsolved merges retain their optimistic values under the same whole-class refit cut. Admitted refits are judged by their exact objective.
+
+The allowance is a declared scientific approximation: a binding cap can change the shortlist, search path and selected panel. It is not an error bound. A deliberately sparse, conflicting context selected a different panel with objective 0.226 nats lower than the all-exact screen, with unchanged truth-distance counts. The accepted saved-input A128 replays found equal panels and no binding rounds; they do not establish equivalence when the allowance binds. Search reuse includes the allowance and ranking convention in its identity.
+
+For F = Θ(K), the exact matching term is at most 128 × O(K³). The overall screen remains quartic: certificates cost O(K F) per merge over O(K²) merges, and proposal start de-duplication separately takes Θ(K⁴) frequency-coordinate work when endpoint consensuses repeat drop row sets. Constructing and canonicalising the merge panels includes O(K³ L) panel copying. On the accepted certificate stress input at K = 30, the merge round took about 0.16 s. This measured time is input-specific, not an asymptotic bound.
+
+
 Implementation: [science/selection/search.py](../../haplotype_reconstruction/science/selection/search.py).
 
-Parameters by name: `decision_tolerance`, `DECISION_MOTION`, `search`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `decision_tolerance`, `DECISION_MOTION`, `search`, `MERGE_EXACT_CODES_PER_ROUND`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N L K^2); O(N L K^3); O(K^2 (L + K)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N L K^2); O(N L K^3); context screening O(K^3 F) plus at most 128 × O(min(F, K)(F + K)^2); proposal construction O(K^3 L) and start de-duplication Θ(K^4). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ls10"></a>
 ## ls10 Refit admission cut (whole tie classes, whole-class limits per kind)

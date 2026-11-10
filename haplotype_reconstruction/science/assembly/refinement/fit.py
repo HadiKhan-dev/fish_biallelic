@@ -349,9 +349,10 @@ class SweepEngine:
     def per_sample(self, panel, budget):
         """Per-sample exact scores F_s of the panel, over consecutive sample ranges at the budget's
         live share re-read before each range."""
-        # Completed fits already hold this exact score vector; do not rescore
-        # an original-input branch or count shadow that reaches the same panel.
-        cached = self.ledger.scores.get(tie_rules.panel_key(panel))
+        # The immutable component fixes scores of a canonical panel, including
+        # founder multiplicity. Fits and previous misses share this exact vector.
+        key = tie_rules.panel_key(panel)
+        cached = self.ledger.scores.get(key)
         if cached is not None:
             return cached
         ws = self.workspace
@@ -364,7 +365,9 @@ class SweepEngine:
                 score_panel(alleles, window, sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES, budget)
             )
         # The panel-independent terms of K (start and stay): scores of different K compare.
-        return scores + self.normalisers(founders, budget)
+        scores = scores + self.normalisers(founders, budget)
+        self.ledger.remember_score(key, scores)
+        return scores
 
     def minimum_switches(self, panel, budget):
         """Fewest exact-optimal diplotype switches, summed over the common evidence."""
@@ -394,7 +397,7 @@ class SweepEngine:
             scores = self.ledger.scores.get(key)
         if scores is None:
             scores = self.per_sample(panel, budget)
-        self.ledger.scores[key] = scores
+        self.ledger.publish_score(key, scores)
         return scores
 
     def fit_bytes(self, founders, polish=False):
@@ -1176,7 +1179,7 @@ class SweepEngine:
         scores = {first: self.ledger.fit_scores.pop(f"{label}.{first}", None) for first in ("fwd", "rev")}
         if scores[chosen] is not None:
             self.ledger.fit_scores[label] = scores[chosen]
-            self.ledger.scores[tie_rules.panel_key(X)] = scores[chosen]
+            self.ledger.publish_score(tie_rules.panel_key(X), scores[chosen])
         summary = FitSummary(
             label=label,
             founders=int(kept["founders"]),
@@ -1240,7 +1243,7 @@ class SweepEngine:
             )
             variants.append(Fit(other_X, other_summary, other_weak))
             if scores[other_name] is not None:
-                self.ledger.scores[tie_rules.panel_key(other_X)] = scores[other_name]
+                self.ledger.publish_score(tie_rules.panel_key(other_X), scores[other_name])
         payloads = [
             dict(
                 rows=fit.rows.astype(np.int32),

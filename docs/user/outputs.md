@@ -113,7 +113,7 @@ FILTER/site-set/omission lines, the simulation note when appropriate, and column
 Observed [full sample](../examples/full.samples.header.vcf.txt) and
 [kept sample](../examples/kept.samples.header.vcf.txt) headers are captured from real
 produced files. Full and kept files each have one VCFv4.2 declaration and an
-explicit `haplotype_reconstruction_release=4.12` header. htslib's inserted line is
+explicit `haplotype_reconstruction_release=4.13` header. htslib's inserted line is
 `##FILTER=<ID=PASS,Description="All filters passed">`.
 
 ## VCF and BCF indexes
@@ -246,8 +246,8 @@ and component durations remain in assembly records, and task durations in run re
 Feedback searches belong to selection's context assemblies.
 
 Checkpoint layout markers, invocation records, export manifests and VCF/BCF
-headers identify the writer release. 4.12 refuses earlier checkpoints and exports;
-re-run their original inputs with 4.12 in a new output root. The published
+headers identify the writer release. 4.13 refuses earlier checkpoints and exports;
+re-run their original inputs with 4.13 in a new output root. The published
 format-1 kernel manifest and standalone payload-file codecs remain available.
 
 Task resource detail is retained in `run_records/*.tasks.jsonl`, including after
@@ -263,7 +263,7 @@ failed tasks retain measured publish times when their exception reaches the
 coordinator, or null when the worker dies without reporting them. Missing measurements for failed
 tasks are not estimated. Nested stage timers retain inclusive and exclusive
 wall time separately; summed task wall time can exceed invocation wall time.
-Invocation JSON records identify release 4.12 and use the current `run-record-v5`
+Invocation JSON records identify release 4.13 and use the current `run-record-v5`
 schema. Readers use the retained task log for detail and the bounded aggregates
 for status. Earlier invocation formats are refused.
 

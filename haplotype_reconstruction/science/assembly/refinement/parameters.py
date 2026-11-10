@@ -194,6 +194,16 @@ BRIDGE_BATCH_BYTES = 256 << 20
 WINDOW_MEMO_BYTES = 256 << 20
 WINDOW_MEMO_OVERHEAD = 1 << 20
 WINDOW_MEMO_ENTRIES = 4096
+# Cumulative exact score miss admissions per component, shared by continuation branches.
+# Both limits bound storage only; saturation recomputes the same score. The byte
+# allowance keeps long panel keys from dominating small score vectors.
+SCORE_LEDGER_ENTRIES = 4096
+# Retained miss allowance (bytes), reserved once per component. A fixed 64 MiB
+# bounds multiplied component residence; large keys reduce the admitted count.
+SCORE_LEDGER_BYTES = 64 << 20
+# Conservative bytes per miss for dictionary storage, admission counters
+# and allocator slack; tuple/int keys and ndarray storage are charged separately.
+SCORE_LEDGER_ENTRY_OVERHEAD = 512
 FAMILY_BYTES = 1 << 30
 COUNT_FANOUT_BYTES = 4 << 30
 
@@ -220,6 +230,9 @@ PARAMETER_PROVENANCE = {
     "WINDOW_MEMO_BYTES": "Cached window-solve result budget per component (bytes).",
     "WINDOW_MEMO_OVERHEAD": "Per-entry accounting overhead in the window-solve memo (bytes).",
     "WINDOW_MEMO_ENTRIES": "Maximum window-solve memo entries (entries), bounding metadata residence.",
+    "SCORE_LEDGER_ENTRIES": "Cumulative per-sample/shadow score miss admissions per component (entries); fitted publications remain unconditional.",
+    "SCORE_LEDGER_BYTES": "Retained miss-score allowance per component (bytes), including vectors, panel keys and metadata; reserved once across branches.",
+    "SCORE_LEDGER_ENTRY_OVERHEAD": "Conservative miss-entry bookkeeping allowance (bytes) for dictionary storage, admission counters and allocator slack.",
     "FAMILY_BYTES": "Shadow-family scoring array budget (bytes); larger families are scored member by member.",
     "COUNT_FANOUT_BYTES": "Concurrent count-scoring and shadow-decision transient budget (bytes); larger items run alone.",
 }

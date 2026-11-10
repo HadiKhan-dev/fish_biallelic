@@ -23,7 +23,7 @@ def unsupported_release(path: Any, release: Any = None) -> CheckpointMismatch:
             writer += f" [checkpoint layout {release!r}]"
     else:
         writer = f"release {release}"
-    return CheckpointMismatch(f"{path}: written by {writer}; it must be re-run with 4.12 in a new output root")
+    return CheckpointMismatch(f"{path}: written by {writer}; it must be re-run with {CURRENT_RELEASE} in a new output root")
 
 
 def require_current_release(document: Mapping[str, Any], path: Any) -> None:

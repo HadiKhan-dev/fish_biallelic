@@ -68,8 +68,13 @@ class PhaseWorkspace:
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
     )
     # ``concurrent(functions)`` runs each function(map_work) at once, each with a map over its own CPU share, and
-    # returns their results in order: the two solves run side by side, each running its blocks in waves.
+    # returns their results in order: independent solves map their block waves.
     concurrent: Callable[..., list[Any]] | None = record_field(
+        "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
+    )
+    # The stage supplies this capability where elastic release intervals repay
+    # per-sample admission. Otherwise releases share reusable map workers.
+    concurrent_releases: Callable[..., list[Any]] | None = record_field(
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
     )
 
@@ -226,20 +231,25 @@ def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, map_work=None)
     return AlleleUncertainty(evidence, flip_probabilities(evidence, site_alleles, prior), prior)
 
 
-def _release_one(arguments):
-    return release_sample(*arguments)
+def _release_one(arguments, map_work=None):
+    return release_sample(*arguments, map_work=map_work)
 
 
 def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, workspace):
     """Release independent samples from the fixed solves (default, then mirror), each solve's samples in run order
     (FP15-FP19); one release tuple per solve. The releases of both solves are independent and form one map, so the
-    mirror's releases do not wait for the default solve's slowest sample."""
+    mirror's releases do not wait for the default solve's slowest sample. Each
+    release may map its hard-cut intervals over its live share."""
     jobs = [
         _release_arguments(solved, inputs, sites, breaks, uncertainty, parameters, workspace)
         for solved, uncertainty in zip(solves, uncertainties, strict=True)
     ]
     work = [arguments for job in jobs for arguments in job]
-    if workspace.map_work is not None:
+    if workspace.concurrent_releases is not None:
+        # A remaining sample can use freed CPUs for its independent hard-cut
+        # intervals, rather than keeping the release tail on one thread.
+        released = workspace.concurrent_releases([partial(_release_one, arguments) for arguments in work])
+    elif workspace.map_work is not None:
         released = workspace.map_work(_release_one, work)
     else:
         released = [_release_one(arguments) for arguments in work]

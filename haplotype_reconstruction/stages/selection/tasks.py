@@ -44,7 +44,18 @@ from ...science.selection.context_refit import (
     refit_tasks,
 )
 from ...science.selection.diagnostics import CensusSink
-from ...science.selection.parameters import SelectionParameters
+from ...science.selection.parameters import (
+    CHUNK_BLOCKS,
+    CHUNK_FLOOR,
+    CHUNK_TASKS_PER_CPU,
+    CHUNK_WAVES,
+    SHARE_REREAD_SECONDS,
+    LANE_MIN_WIDTH,
+    LANE_WIDTH,
+    SMALL_COHORT_CHUNK_BLOCKS,
+    SMALL_COHORT_TASKS_PER_CPU,
+    SelectionParameters,
+)
 from ...science.selection.rounds import BlockSelection, BlockTask, block_task_bytes, select_task
 from ...science.selection.run import initial_tasks, round_tasks
 from ...store.protocol import claim
@@ -61,18 +72,6 @@ __all__ = [
 
 
 BlockSettings = tuple[SelectionParameters, DiscoveryParameters, float]
-CHUNK_BLOCKS = 8  # average blocks' cost per engine task in a selection round (execution only: results are per block)
-# Guided chunk sizes (execution only): a new chunk takes about the round's remaining cost / (this x CPUs),
-# capped by the CHUNK_BLOCKS average and floored at that average / CHUNK_FLOOR, so the last chunks of a round are small.
-CHUNK_WAVES = 2
-CHUNK_FLOOR = 8
-# At least this many tasks per CPU a round may use (execution only). Block costs in refit rounds are poorly predicted
-# (chr1 0.5x l2: five ~20 s blocks the cost model rated average shared one 104 s task that set the round's length);
-# Small chunks reduce the tail from a mispredicted heavy block.
-CHUNK_TASKS_PER_CPU = 8
-# A block re-reads its task's CPU share (an engine boundary) at most this often: its lane evaluations run thousands of
-# times, and a block that started on one thread beside hundreds of siblings grows as they finish.
-SHARE_REREAD_SECONDS = 0.1
 
 
 class FounderEvidence(Protocol):
@@ -219,25 +218,26 @@ def round_expansion(
         )
         return len(block.columns) * (size + 1) ** 2
 
-    # Heaviest first; then consecutive blocks are grouped into engine tasks of about CHUNK_BLOCKS average
-    # blocks' cost (a block at least that heavy stays alone), so the coordinator's fixed turnaround per task (reply,
-    # bookkeeping, dispatch, send) is paid per chunk rather than per sub-second block. A round never has fewer tasks
-    # than CHUNK_TASKS_PER_CPU times the CPUs it may use (or its block count): heavy blocks (K = 30, about a
-    # CPU-minute each) stay about one per task, so the round still fills the node. guided sizes, so a
-    # round ends on small chunks (equal chunks of 40-100 s left a minute-long tail at ~10 busy CPUs on chr1 0.5x),
-    # and each task declares its chunk's cost, so the scheduler dispatches the heaviest first (it ordered
-    # equal-cost tasks by block index).
+    # Heaviest first. Cost-guided chunks amortise coordinator turnaround and
+    # repeated evidence metadata. Small SIMD cohorts keep at least two chunks
+    # per CPU and at most four blocks per chunk; other cohorts retain the higher
+    # task-count floor for variable-cost refits. Guided targets shrink as work
+    # finishes, and declared costs let the engine dispatch the heaviest first.
     pending.sort(key=lambda block: (-cost(block), block.index))
     costs = [cost(block) for block in pending]
     threads = max(1, int(max_threads))
-    count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), CHUNK_TASKS_PER_CPU * threads))
+    observed_rows = evidence.observed.shape[0]
+    small_cohort = observed_rows <= LANE_WIDTH
+    tasks_per_cpu = SMALL_COHORT_TASKS_PER_CPU if small_cohort else CHUNK_TASKS_PER_CPU
+    chunk_blocks = SMALL_COHORT_CHUNK_BLOCKS if small_cohort else max(1, len(pending))
+    count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), tasks_per_cpu * threads))
     average = sum(costs) / count if costs else 0.0
     remaining = float(sum(costs))
     chunks: list[list[BlockTask]] = []
     weights: list[float] = []
     target = average
     for block, weight in zip(pending, costs, strict=True):
-        if chunks and weights[-1] + weight <= target:
+        if chunks and len(chunks[-1]) < chunk_blocks and weights[-1] + weight <= target:
             chunks[-1].append(block)
             weights[-1] += weight
         else:
@@ -246,7 +246,9 @@ def round_expansion(
             weights.append(float(weight))
         remaining -= weight
     tasks = []
-    observed_rows = evidence.observed.shape[0]
+    block_threads = (
+        min(max_threads, max(1, -(-observed_rows // LANE_MIN_WIDTH))) if small_cohort else max_threads
+    )
     for chunk, weight in zip(chunks, weights, strict=True):
         outputs: tuple[RecordKey, ...] = ()
         if scope is not None:
@@ -260,14 +262,12 @@ def round_expansion(
                 _run_blocks,
                 args=(tuple(chunk), settings, evidence, scope),
                 kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
-                # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
-                # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task may grow
-                # to the task's threads (its path-model kernels spread its samples' lanes over them) as its siblings
-                # finish: the block re-reads its live share. Every lone block may grow, including one predicted
-                # lighter than an average chunk, because refit-round block costs are poorly predicted.
+                # Small-cohort chunks may grow within their useful-width cap.
+                # At larger sample counts only singleton chunks may grow;
+                # grouped chunks share the node through one CPU apiece.
                 resources=ResourceRequest(
                     1,
-                    max_threads if len(chunk) == 1 else 1,
+                    block_threads if small_cohort or len(chunk) == 1 else 1,
                     max(block_task_bytes(b, observed_rows) for b in chunk),
                     cost=weight,
                 ),

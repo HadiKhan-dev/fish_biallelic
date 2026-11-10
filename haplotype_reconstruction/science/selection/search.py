@@ -9,7 +9,8 @@ the refit budget. The same-panel kind representative is not convention-reversed.
 Whole-search reuse excludes the incumbent from its key. Packed
 memos are scientific state: fresh and restored fits can carry different posterior
 last bits, so hit order and completion precedence must be retained exactly.
-The context-coded screen costs O(K^5) when the number of context founders scales with K.
+The context-coded screen is quartic when context founders scale with K; uncertified
+merge-code matching work is bounded by a constant number of cubic solves per round.
 """
 
 from __future__ import annotations
@@ -27,12 +28,13 @@ from ...core.digest import array_digest, json_digest
 from ...core.ties import TieCounter, census, census_enabled, fixed_policy, improves, tie_classes
 from .diagnostics import CensusSink
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
-from .objective import ContextFounders, coded_regularizer, selection_objective
+from .objective import ContextFounders, ContextScreen, coded_regularizer, regularizer, selection_objective
 from .parameters import (
     CONSENSUS_CENSUS_WINDOW,
     CONSENSUS_TIE,
     DECISION_MOTION,
     KIND_ORDER,
+    MERGE_EXACT_CODES_PER_ROUND,
     PROPOSAL_FREQUENCY_TIE,
     PathSearchParameters,
 )
@@ -407,13 +409,17 @@ def search_input_key(
     prepared: PreparedBlock,
     search_config: PathSearchParameters,
     founders: np.ndarray | None,
+    reverse: bool = False,
 ) -> str:
     """Exact deterministic-search inputs: start, bank, data, model and search settings, context
-    founders (a reuse key, not a likelihood test)."""
+    founders and the tie convention (a reuse key, not a likelihood test)."""
     arrays = (start, bank, prepared.gl, prepared.observed, prepared.rates, founders)
     return json_digest(
         {
-            "version": "selection-search-v1",
+            # The allowance and convention affect the shortlist, so both belong to search identity.
+            "version": "selection-search-v2",
+            "merge_exact_codes_per_round": MERGE_EXACT_CODES_PER_ROUND,
+            "reverse": bool(reverse),
             "arrays": tuple(None if value is None else array_digest(value) for value in arrays),
             "unknown_mass": prepared.unknown_mass,
             "search": search_config,
@@ -441,6 +447,138 @@ def tied_cut(classes, limit: int, cap: int) -> tuple[int, bool]:
             return take, True
         take = end
     return take, False
+
+
+def _merge_screen(fit, merges, bounds, exact, score, screen, context, tolerance, search_config, reverse, work):
+    """The merge entries of the ranked screen with context codes.
+
+    Every merge's screened value is its likelihood bound (or exact score for the double-removal representatives)
+    plus its context-coded regularizer. Certified merges (independent-minima certificate, ContextScreen.merge_batch)
+    enter with their exact code. The others, including merges whose consensus equals a third row (K - 2 rows), enter
+    at an optimistic value: the regularizer with every row claimed at the sorted row-minima lower bound of the
+    description (an upper bound on the all-exact screen value at the same likelihood bound, not on the refitted
+    objective). Exact codes are then solved in batches, as the cut needs them: each step recomputes the tie classes
+    and solves the unsolved members of the classes the cut examines (then those within the tolerance of their
+    floor), until no unsolved merge can join or bridge an examined class. At most MERGE_EXACT_CODES_PER_ROUND exact
+    codes are solved per round (requests per uncertified start: two frequency starts of one panel count twice); a
+    batch that does not fit is truncated in order of optimistic value (descending), then panel bytes, then entry
+    index (the last two reversed under the reversed "selection.search.rank" convention), and the remaining merges
+    stay in the ranking at their optimistic values (same tie classes, content order and whole-class cut).
+
+    Cost per round, F = Theta(K) context founders and M = K(K - 1)/2 merges: certificates and lower bounds
+    O(M K F) = O(K^4) (the minimum-edge matching is repaired per merge), exact codes at most
+    MERGE_EXACT_CODES_PER_ROUND x O(K^3); merge generation (proposals) builds and canonicalises M panels, O(K^3 L),
+    and its start de-duplication compares the frequency vectors of starts sharing a panel, Theta(K^4) when endpoint
+    consensuses repeat drop row sets. So the screen stays quartic in the worst case, from at
+    least two sources.
+    A strictly cubic screen would need a cheaper certificate and a cheaper start de-duplication."""
+    limit, cap = search_config.refits_per_kind, search_config.refits_per_kind_cap
+    values = [None] * len(merges)
+    base = []
+    batch = []
+    pair_drops = set()
+    for index, (bound, (panel, frequency, origin)) in enumerate(zip(bounds, merges, strict=True)):
+        if index in exact:
+            bound = score(panel, frequency)
+        base.append(bound)
+        if len(panel) == len(fit.panel) - 1:
+            batch.append(index)
+        else:
+            # A consensus equal to a third row removes two rows. Its exact code shares the allowance
+            # with ordinary merges; until requested it ranks at the sorted-minima optimistic value.
+            values[index] = bound + regularizer(panel, frequency, 0, screen.pair_drop_minima_lower(*origin[:2]))
+            pair_drops.add(index)
+    solved = [False] * len(merges)
+    position = {}
+    solve = None
+    if batch:
+        first = np.asarray([merges[n][2][0] for n in batch], dtype=np.int64)
+        second = np.asarray([merges[n][2][1] for n in batch], dtype=np.int64)
+        rows = np.asarray([merges[n][2][2] for n in batch], dtype=np.int64)
+        _cost, certified, free, code, lower, solve = screen.merge_batch(rows, first, second)
+        position = {n: t for t, n in enumerate(batch)}
+        for t, n in enumerate(batch):
+            panel, frequency = merges[n][0], merges[n][1]
+            if certified[t]:
+                values[n] = base[n] + regularizer(panel, frequency, int(free[t]), float(code[t]))
+                solved[n] = True
+            else:
+                values[n] = base[n] + regularizer(panel, frequency, 0, float(lower[t]))
+
+    def solve_merges(indices):
+        kernel_indices = [n for n in indices if n not in pair_drops]
+        if kernel_indices:
+            got_free, got_code = solve([position[n] for n in kernel_indices])
+            for n, f_value, c_value in zip(kernel_indices, got_free, got_code, strict=True):
+                values[n] = base[n] + regularizer(merges[n][0], merges[n][1], int(f_value), float(c_value))
+                solved[n] = True
+        for n in indices:
+            if n in pair_drops:
+                values[n] = base[n] + coded_regularizer(merges[n][0], merges[n][1], context)
+                solved[n] = True
+        work["lazy_exact_codes"] = work.get("lazy_exact_codes", 0) + len(indices)
+
+    if batch or pair_drops:
+        allowance = int(MERGE_EXACT_CODES_PER_ROUND)
+        rank_reverse = fixed_policy("selection.search.rank", tolerance, reverse=reverse).reverse
+        spent = 0
+        while True:
+            classes = tie_classes(
+                values,
+                tolerance,
+                content=[(merges[n][0].tobytes(), n) for n in range(len(merges))],
+                descending=True,
+                motion=DECISION_MOTION,
+                reverse=rank_reverse,
+            )
+            order = classes.order
+            take, _overflow = tied_cut(classes, limit, cap)
+            last = min(take, len(order) - 1)
+            examined = {int(classes.classes[int(order[t])]) for t in range(last + 1)} if len(order) else set()
+            members = [n for n in range(len(merges)) if int(classes.classes[n]) in examined]
+            pending = [n for n in members if not solved[n]]
+            if not pending:
+                floor = min((values[n] for n in members), default=np.inf)
+                pending = [n for n in range(len(merges)) if not solved[n] and values[n] >= floor - tolerance]
+                if not pending:
+                    break
+            if spent + len(pending) > allowance:
+                work["merge_cap_binds"] = work.get("merge_cap_binds", 0) + 1
+                pending = sorted(
+                    pending,
+                    key=lambda n: (-values[n], merges[n][0].tobytes(), n),
+                    reverse=False,
+                )
+                if rank_reverse:
+                    # Reversed convention: content order reversed inside equal values.
+                    pending = sorted(pending, key=lambda n: (-values[n], _Reversed(merges[n][0].tobytes()), -n))
+                pending = pending[: max(0, allowance - spent)]
+                if pending:
+                    solve_merges(pending)
+                    spent += len(pending)
+                work["merge_cap_unsolved"] = work.get("merge_cap_unsolved", 0) + sum(
+                    1 for n in range(len(merges)) if not solved[n]
+                )
+                break
+            solve_merges(pending)
+            spent += len(pending)
+    work["lazy_unsolved"] = work.get("lazy_unsolved", 0) + sum(1 for flag in solved if not flag)
+    return [(values[n], merges[n][0], merges[n][1]) for n in range(len(merges))]
+
+
+class _Reversed:
+    """Sort key wrapper ordering bytes descending (the reversed content convention of exact-code request order)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: bytes):
+        self.value = value
+
+    def __lt__(self, other: _Reversed) -> bool:
+        return self.value > other.value
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Reversed) and self.value == other.value
 
 
 def _selection(context):
@@ -509,7 +647,7 @@ def search_panel(
     tolerance = search_config.decision_tolerance
     ties = TieCounter() if ties is None else ties
     collect = census_key is not None and census_enabled(sink=census_sink)
-    input_key = search_input_key(start, bank, prepared, search_config, founders)
+    input_key = search_input_key(start, bank, prepared, search_config, founders, reverse)
     if incumbent is not None and incumbent.input_key == input_key:
         return replace(incumbent, search_start="reused", work=(("reused_previous_search", 1),))
     memo = LikelihoodMemo() if memo is None else memo
@@ -625,6 +763,9 @@ def search_panel(
         drops: dict = {}
         merges: list = []
         fit = complete(fit)
+        # One matching pass supplies every drop/add code; merge requests share one round allowance.
+        screen = ContextScreen(fit.panel, context) if context is not None and len(context) else None
+        current_rows = {row.tobytes(): index for index, row in enumerate(fit.panel)}
         for kind, panel, frequency, origin in proposals(
             fit,
             bank,
@@ -642,7 +783,14 @@ def search_panel(
                 ranked.setdefault(kind, [])
                 merges.append((panel, frequency, origin))
                 continue
-            value = score(panel, frequency) + coded_regularizer(panel, frequency, context)
+            if screen is None:
+                code = coded_regularizer(panel, frequency, context)
+            elif kind == "drop":
+                code = regularizer(panel, frequency, *screen.drop(int(origin)))
+            else:
+                added = next(row for row in panel if row.tobytes() not in current_rows)
+                code = regularizer(panel, frequency, *screen.add(added))
+            value = score(panel, frequency) + code
             ranked.setdefault(kind, []).append((value, panel, frequency))
             if kind == "drop":
                 drops[origin] = (panel, frequency)
@@ -659,10 +807,17 @@ def search_panel(
                 memo.hits["bounds"] += 1
             exact = double_removal_merges(fit.panel, merges, bounds, tolerance, ties, reverse=reverse)
             work["exact_merges"] += len(exact)
-            for index, (bound, (panel, frequency, _origin)) in enumerate(zip(bounds, merges, strict=True)):
-                if index in exact:
-                    bound = score(panel, frequency)
-                ranked["merge"].append((bound + coded_regularizer(panel, frequency, context), panel, frequency))
+            if screen is not None:
+                ranked["merge"].extend(
+                    _merge_screen(
+                        fit, merges, bounds, exact, score, screen, context, tolerance, search_config, reverse, work
+                    )
+                )
+            else:
+                for index, (bound, (panel, frequency, _origin)) in enumerate(zip(bounds, merges, strict=True)):
+                    if index in exact:
+                        bound = score(panel, frequency)
+                    ranked["merge"].append((bound + coded_regularizer(panel, frequency, context), panel, frequency))
         trials = []
         limit, cap = search_config.refits_per_kind, search_config.refits_per_kind_cap
         for kind, options in ranked.items():

@@ -48,7 +48,13 @@ import numpy as np
 from numba import prange, types
 
 from ...core.kernels import kernel
-from .parameters import REFIT_TIE_QUANTUM, REFIT_TIE_QUANTUM_PER_CARRIER, SITE_TILE, WIDE_QUANTA
+from .parameters import (
+    REFIT_TIE_QUANTUM,
+    REFIT_TIE_QUANTUM_PER_CARRIER,
+    SITE_TILE,
+    STABLE_SORT_COMPARISON_LIMIT,
+    WIDE_QUANTA,
+)
 
 # A move gain sums its carriers' log terms. Relative GL noise of 1e-6 moves one carrier's two terms by at most
 # about 2e-6, so two gains with n carriers between them tie within max(REFIT_TIE_QUANTUM, n
@@ -59,11 +65,9 @@ from .parameters import REFIT_TIE_QUANTUM, REFIT_TIE_QUANTUM_PER_CARRIER, SITE_T
 
 # Supported layouts for typed stage routes.
 _OVERLOADS = {
-    "_root": (
-        (
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.int64,
-        ),
+    "_stable_argsort": (
+        (types.Array(types.float64, 1, "C", readonly=False, aligned=True), types.literal(0)),
+        (types.Array(types.float64, 1, "C", readonly=False, aligned=True), types.int64),
     ),
     "_tie_components": (
         (
@@ -248,6 +252,82 @@ _OVERLOADS = {
             types.int64,
         ),
     ),
+    "_pair_curvature": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 1, "A", readonly=False, aligned=True),
+            types.int64,
+            types.int64,
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 1, "C", readonly=False, aligned=True),
+            types.int64,
+            types.int64,
+        ),
+    ),
+    "_flip_conflicts_fast": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 2, "C", readonly=False, aligned=True),
+            types.int64,
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.literal(0),
+            types.float64,
+            types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 2, "C", readonly=False, aligned=True),
+            types.int64,
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.int64,
+            types.float64,
+            types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+        ),
+    ),
+    "_swap_conflicts_fast": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 2, "C", readonly=False, aligned=True),
+            types.int64,
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.literal(0),
+            types.float64,
+            types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 2, "C", readonly=False, aligned=True),
+            types.int64,
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.int64,
+            types.float64,
+            types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+        ),
+    ),
     "_refit_kernel": (
         (
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
@@ -279,13 +359,46 @@ _OVERLOADS = {
 }
 
 
-@kernel(overloads=_OVERLOADS["_root"], cache=True, nogil=True)
-def _root(parent, i):
-    """Union-find root with path halving."""
-    while parent[i] != i:
-        parent[i] = parent[parent[i]]
-        i = parent[i]
-    return i
+@kernel(overloads=_OVERLOADS["_stable_argsort"], cache=True, nogil=True)
+def _stable_argsort(keys, n):
+    """Indices 0..n-1 ordered by keys[:n] ascending, equal keys in index order: the order of
+    np.argsort(keys[:n], kind="mergesort") for non-NaN keys (-0.0 is ordered as +0.0), by an 8-pass LSD radix sort
+    of the order-preserving unsigned images of the IEEE bit patterns, O(n). Ordering adds no log factor to
+    the sweep. At most STABLE_SORT_COMPARISON_LIMIT keys use comparison sorting (every round at K <= 30,
+    with at most K + K(K-1)/2 candidates); its log factor is then at most 12, a constant;
+    the bounded comparison sort is faster than eight radix passes at this size."""
+    if n <= STABLE_SORT_COMPARISON_LIMIT:
+        # Bounded key count: the comparison sort's log factor is a constant here and it beats eight radix passes.
+        small = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            small[i] = keys[i] + 0.0
+        return np.argsort(small, kind="mergesort")
+    bits = np.empty(n, dtype=np.uint64)
+    scratch = np.empty(1, dtype=np.float64)
+    image = scratch.view(np.uint64)
+    top = np.uint64(1) << np.uint64(63)
+    for i in range(n):
+        scratch[0] = keys[i] + 0.0
+        u = image[0]
+        bits[i] = ~u if u & top else u | top
+    order = np.arange(n)
+    other = np.empty(n, dtype=np.int64)
+    count = np.empty(257, dtype=np.int64)
+    mask = np.uint64(255)
+    for shift in range(0, 64, 8):
+        step = np.uint64(shift)
+        count[:] = 0
+        for t in range(n):
+            count[np.int64((bits[order[t]] >> step) & mask) + 1] += 1
+        for b in range(256):
+            count[b + 1] += count[b]
+        for t in range(n):
+            index = order[t]
+            byte = np.int64((bits[index] >> step) & mask)
+            other[count[byte]] = index
+            count[byte] += 1
+        order, other = other, order
+    return order
 
 
 @kernel(overloads=_OVERLOADS["_tie_components"], cache=True, nogil=True)
@@ -293,28 +406,41 @@ def _tie_components(values, carriers, n, component):
     """Tie classes of n candidate gains: the connected components of the relation |g_i - g_j| <=
     max(REFIT_TIE_QUANTUM, (n_i + n_j) REFIT_TIE_QUANTUM_PER_CARRIER), which is the union of two interval
     relations: consecutive gains (in value order) within REFIT_TIE_QUANTUM, and intervals of radius
-    n_i REFIT_TIE_QUANTUM_PER_CARRIER around each gain that overlap. Two sorts and union-find, O(n log n);
-    neither the convention nor the candidates' listing order enters. component[i] receives the root of i."""
-    parent = np.arange(n)
-    by_value = np.argsort(values[:n], kind="mergesort")
-    for t in range(n - 1):
-        i, j = by_value[t], by_value[t + 1]
-        if values[j] - values[i] <= REFIT_TIE_QUANTUM:
-            a, b = _root(parent, i), _root(parent, j)
-            if a != b:
-                parent[b] = a
+    n_i REFIT_TIE_QUANTUM_PER_CARRIER around each gain that overlap. Their edges (consecutive value-order pairs
+    within the quantum; each candidate joined to the sweep frontier of the lower-end order it overlaps) are at most
+    2 (n - 1); a depth-first labelling gives the components in O(n) after the two O(n) sorts. Neither the convention nor the
+    candidates' listing order enters. component[i] receives the smallest index of i's component."""
+    by_value = _stable_argsort(values, n)
     lower = np.empty(n, dtype=np.float64)
     for i in range(n):
         lower[i] = values[i] - carriers[i] * REFIT_TIE_QUANTUM_PER_CARRIER
-    by_lower = np.argsort(lower, kind="mergesort")
+    by_lower = _stable_argsort(lower, n)
+    head = np.full(n, -1, dtype=np.int64)
+    link = np.empty(4 * n, dtype=np.int64)
+    target = np.empty(4 * n, dtype=np.int64)
+    edges = 0
+    for t in range(n - 1):
+        i, j = by_value[t], by_value[t + 1]
+        if values[j] - values[i] <= REFIT_TIE_QUANTUM:
+            target[edges] = j
+            link[edges] = head[i]
+            head[i] = edges
+            target[edges + 1] = i
+            link[edges + 1] = head[j]
+            head[j] = edges + 1
+            edges += 2
     if n:
         frontier = by_lower[0]
         for t in range(1, n):
             i = by_lower[t]
             if lower[i] <= values[frontier] + carriers[frontier] * REFIT_TIE_QUANTUM_PER_CARRIER:
-                a, b = _root(parent, frontier), _root(parent, i)
-                if a != b:
-                    parent[b] = a
+                target[edges] = i
+                link[edges] = head[frontier]
+                head[frontier] = edges
+                target[edges + 1] = frontier
+                link[edges + 1] = head[i]
+                head[i] = edges + 1
+                edges += 2
                 if (
                     values[i] + carriers[i] * REFIT_TIE_QUANTUM_PER_CARRIER
                     > values[frontier] + carriers[frontier] * REFIT_TIE_QUANTUM_PER_CARRIER
@@ -323,7 +449,25 @@ def _tie_components(values, carriers, n, component):
             else:
                 frontier = i
     for i in range(n):
-        component[i] = _root(parent, i)
+        component[i] = -1
+    stack = np.empty(n, dtype=np.int64)
+    for root in range(n):
+        if component[root] >= 0:
+            continue
+        component[root] = root
+        stack[0] = root
+        top = 1
+        while top > 0:
+            top -= 1
+            x = stack[top]
+            e = head[x]
+            while e >= 0:
+                y = target[e]
+                if component[y] < 0:
+                    component[y] = root
+                    stack[top] = y
+                    top += 1
+                e = link[e]
 
 
 @kernel(overloads=_OVERLOADS["_decision_order"], cache=True, nogil=True)
@@ -334,16 +478,19 @@ def _decision_order(values, carriers, n, reverse, classes):
     order; content (list) order inside a class; a class wider than WIDE_QUANTA x its largest pair quantum keeps
     value order (list order among equal gains). Under the convention reversal (reverse) the list order is
     reversed; class membership does not depend on it. classes[i] receives the class of candidate i (equal values
-    = same tie class). O(n log n)."""
+    = same tie class). O(n) using radix order and counting placement."""
     keys = np.empty(n, dtype=np.float64)
     for i in range(n):
         keys[i] = -values[n - 1 - i] if reverse else -values[i]
-    order = np.argsort(keys, kind="mergesort")
+    order = _stable_argsort(keys, n)
     if reverse:
         for t in range(n):
             order[t] = n - 1 - order[t]
     component = np.empty(n, dtype=np.int64)
     _tie_components(values, carriers, n, component)
+    segment_start = np.empty(n, dtype=np.int64)
+    segment_end = np.empty(n, dtype=np.int64)
+    in_content_order = np.zeros(n, dtype=np.bool_)
     start = 0
     while start < n:
         # A component covers a contiguous range of gains, so its members are consecutive in the order.
@@ -357,12 +504,29 @@ def _decision_order(values, carriers, n, reverse, classes):
         for t in range(start, end):
             # a wide class keeps value order: its members are not tied alternatives (own class ids)
             classes[order[t]] = n + t if wide else start
-        if end - start > 1 and not wide:
-            segment = np.sort(order[start:end])
-            for t in range(end - start):
-                order[start + t] = segment[end - start - 1 - t] if reverse else segment[t]
+        for t in range(start, end):
+            segment_start[t] = start
+            segment_end[t] = end
+            in_content_order[t] = end - start > 1 and not wide
         start = end
-    return order
+    # Content (list) order inside each tied class, in one pass over the candidates in list order (a counting
+    # placement instead of a sort per class, O(n)).
+    position = np.empty(n, dtype=np.int64)
+    for t in range(n):
+        position[order[t]] = t
+    filled = np.zeros(n, dtype=np.int64)
+    arranged = order.copy()
+    for i in range(n):
+        t = position[i]
+        if in_content_order[t]:
+            first = segment_start[t]
+            k = filled[first]
+            filled[first] += 1
+            if reverse:
+                arranged[segment_end[t] - 1 - k] = i
+            else:
+                arranged[first + k] = i
+    return arranged
 
 
 @kernel(overloads=_OVERLOADS["_flip_gain"], cache=True, nogil=True)
@@ -554,6 +718,184 @@ def _swap_gain(table, alleles, a, b):
     return change
 
 
+@kernel(overloads=_OVERLOADS["_pair_curvature"], cache=True, nogil=True)
+def _pair_curvature(table, alleles, u, v):
+    """Delta_uv: the change of row u's flip gain when row v flips (u != v, both called), which equals the change of
+    v's flip gain when u flips. With t = table[min(u, v), max(u, v)] and s = x_u + x_v it is the second difference
+    t[2 - s] - t[1 + x_u - x_v] - t[1 - x_u + x_v] + t[s] (zero unless u and v are painted together). Hence a
+    two-row move (both rows flip) gains flip_gain(u) + flip_gain(v) + Delta_uv, and after a move flipping rows V a
+    row's flip gain is its old one plus its Delta with every row of V (both rows must be called)."""
+    lo, hi = min(u, v), max(u, v)
+    xu = np.int64(alleles[u])
+    xv = np.int64(alleles[v])
+    total = xu + xv
+    return table[lo, hi, 2 - total] - table[lo, hi, 1 + xu - xv] - table[lo, hi, 1 - xu + xv] + table[lo, hi, total]
+
+
+@kernel(overloads=_OVERLOADS["_flip_conflicts_fast"], cache=True, nogil=True)
+def _flip_conflicts_fast(table, refit, site, together, cand_a, cand_gain, cand_class, order, n, minimum_gain, marked):
+    """_flip_conflicts with O(1) pair tests: after row ri flips, rj's flip gain is cand_gain[j] + Delta_{ri rj}
+    (and symmetrically), so a pair costs O(1) instead of two O(K) gains: the same predicate in mathematically equivalent
+    arithmetic for finite tables."""
+    marked[:] = False
+    found = False
+    column = refit[:, site]
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and cand_class[order[end]] == cand_class[order[start]]:
+            end += 1
+        for p in range(start, end):
+            for q in range(p + 1, end):
+                i, j = order[p], order[q]
+                ri, rj = cand_a[i], cand_a[j]
+                if not _painted_together(together, ri, rj):
+                    continue
+                d = _pair_curvature(table, column, ri, rj)
+                gj = cand_gain[j] + d
+                gi = cand_gain[i] + d
+                fails = not (gj > 0.0 and gj >= minimum_gain and gi > 0.0 and gi >= minimum_gain)
+                if fails:
+                    marked[ri] = True
+                    marked[rj] = True
+                    found = True
+        start = end
+    return found
+
+
+@kernel(overloads=_OVERLOADS["_swap_conflicts_fast"], cache=True, nogil=True)
+def _swap_conflicts_fast(
+    table, refit, site, together, cand_a, cand_b, cand_kind, cand_gain, cand_class, order, n, minimum_gain, marked,
+    row_uses
+):
+    """The rows _swap_conflicts marks, in O(K) per examined candidate instead of O(K^2) for finite tables.
+
+    Inside one tie class: (i) two members sharing exactly one row always exclude each other (a move flips both its
+    rows, so after one the other's kind no longer matches its alleles and its gain is -inf): every member with a
+    row used by another member is marked, O(c); (ii) a member using no row of another member (at most K/2 per
+    class, pairwise row-disjoint) is tested against every other member with the O(1) form: after a move flipping
+    rows V the other's gain is its own plus W = sum of Delta_uv over its rows u and v in V (a symmetric quantity),
+    so the pair fails when either gain + W misses the minimum. Members whose rows are all marked need no test (a
+    pair's marks are the union of both members' rows, and each unmarked member runs its own tests). Tests within
+    ``row_uses``: zeroed int64[K] scratch, left zeroed.
+
+    Certified members: let T be the rows of the
+    members of tie classes with at least two members (the only rows a test can involve) and m(v) = min(0,
+    min_{u in T, u != v} Delta_vu). Every cross term of W(i, j) for two row-disjoint members of one class pairs a
+    row of i with a row of j, both in T, so W(i, j) >= max(L_i, L_j) with L_i = 2 (m(a_i) + m(b_i)). A member
+    whose gain + L passes is certified (safe); two certified members cannot fail against each other (each gain + W
+    >= gain + own L passes), so a certified member is tested only against the uncertified members of its class.
+    Exact (a mathematical bound; which classes are examined and the ambiguity rule are unchanged); members sharing a
+    row are still marked by (i). Restricting the minimum to T gives a bound at least as tight as minimising
+    over all called rows. m costs O(K |T|) <= O(K^2) per call.
+
+    Cost per round: O(K^2 + P) plus the explicit pair scans. A scan between two unshared members involves an
+    uncertified unshared member, so these total at most K Uu_r for Uu_r uncertified unshared members in round r
+    (u_c <= K/2 unshared members per class). Scans against members sharing a row are at most K/2 per such member;
+    the round releases its rows and released rows never return, so these total O(K^3) over the site. A sweep has at
+    most K/2 two-row rounds that apply a move and a site at most K/2 that release, so with S sweeps the two-row
+    conflict work is O((S + 1) K^3 + K sum_r Uu_r), the sum over every two-row round of the site, applying and
+    releasing alike (a chain of releasing rounds re-examines its uncertified members each round). With every member
+    certified (for example sustained matching classes, whose interactions are positive) the sum is
+    zero and the work is cubic. For fixed S, supercubic work requires the sum to exceed order K^2;
+    order K uncertified members per round
+    over order K rounds is still cubic. Many classes with strongly negative curvature can leave
+    order K^2 unshared members uncertified in each round. At worst O(K^3) per round and O(K^4) per sweep
+    (the documented exception). Algebraic decisions equal the direct rule except where a threshold or
+    tie comparison sits within rounding of an exact equality (the O(1) gains round differently from the direct
+    sums)."""
+    marked[:] = False
+    found = False
+    column = refit[:, site]
+    k = column.shape[0]
+    tied = np.zeros(k, dtype=np.bool_)
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and cand_class[order[end]] == cand_class[order[start]]:
+            end += 1
+        if end - start > 1:
+            for p in range(start, end):
+                tied[cand_a[order[p]]] = True
+                tied[cand_b[order[p]]] = True
+        start = end
+    lowest = np.zeros(k)
+    for v in range(k):
+        if not tied[v]:
+            continue
+        for u in range(k):
+            if u != v and tied[u] and _painted_together(together, u, v):
+                d = _pair_curvature(table, column, v, u)
+                if d < lowest[v]:
+                    lowest[v] = d
+    safe = np.zeros(n, dtype=np.bool_)
+    unsafe = np.empty(n, dtype=np.int64)
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and cand_class[order[end]] == cand_class[order[start]]:
+            end += 1
+        if end - start > 1:
+            for p in range(start, end):
+                row_uses[cand_a[order[p]]] += 1
+                row_uses[cand_b[order[p]]] += 1
+            for p in range(start, end):
+                i = order[p]
+                if row_uses[cand_a[i]] > 1 or row_uses[cand_b[i]] > 1:
+                    marked[cand_a[i]] = True
+                    marked[cand_b[i]] = True
+                    found = True
+            n_unsafe = 0
+            for p in range(start, end):
+                i = order[p]
+                bound = cand_gain[i] + 2.0 * (lowest[cand_a[i]] + lowest[cand_b[i]])
+                safe[p] = bound > 0.0 and bound >= minimum_gain
+                if not safe[p]:
+                    unsafe[n_unsafe] = p
+                    n_unsafe += 1
+            for p in range(start, end):
+                i = order[p]
+                a1, b1 = cand_a[i], cand_b[i]
+                if row_uses[a1] > 1 or row_uses[b1] > 1 or (marked[a1] and marked[b1]):
+                    continue
+                count = n_unsafe if safe[p] else end - start
+                for t in range(count):
+                    q = unsafe[t] if safe[p] else start + t
+                    if q == p:
+                        continue
+                    j = order[q]
+                    a2, b2 = cand_a[j], cand_b[j]
+                    if not (
+                        _painted_together(together, a1, a2)
+                        or _painted_together(together, a1, b2)
+                        or _painted_together(together, b1, a2)
+                        or _painted_together(together, b1, b2)
+                    ):
+                        continue
+                    w = (
+                        _pair_curvature(table, column, a2, a1)
+                        + _pair_curvature(table, column, a2, b1)
+                        + _pair_curvature(table, column, b2, a1)
+                        + _pair_curvature(table, column, b2, b1)
+                    )
+                    g2 = cand_gain[j] + w
+                    g1 = cand_gain[i] + w
+                    fails = not (g2 > 0.0 and g2 >= minimum_gain and g1 > 0.0 and g1 >= minimum_gain)
+                    if fails:
+                        marked[a1] = True
+                        marked[b1] = True
+                        marked[a2] = True
+                        marked[b2] = True
+                        found = True
+                        break
+            for p in range(start, end):
+                row_uses[cand_a[order[p]]] = 0
+                row_uses[cand_b[order[p]]] = 0
+        start = end
+    return found
+
+
+
 @kernel(overloads=_OVERLOADS["_refit_kernel"], cache=True, parallel=True, nogil=True)
 def _refit_kernel(
     calls,
@@ -582,15 +924,15 @@ def _refit_kernel(
     together at the site (``together[a, b]``: some sample painted {a, b} is
     observed there), accepted at a gain >= 2 x minimum_gain because it changes
     two cells; moves are judged against the round's start state in decision
-    order (module docstring). Per site: O(N) to fill the table, then per round
-    O(K^2) for the K flip gains and O(P K) for direct two-row gains of the
-    P co-painted pairs (P <= min(N, K (K - 1) / 2)), then O(n log n) to order
-    n qualifying moves. A phase has at most K rounds (a row changes at most
-    once), so pair scoring is O(K^4) per sweep in the worst case. The corpus
-    uses at most three rounds; K=30 cost is measured in the package report.
-    Tie-conflict examinations add O(K) per tied interacting candidate pair;
-    fills add O(K^2) per site.
-    1024-site tiles in parallel.
+    order (module docstring). Per site (finite tables): O(N) to fill the table, then per round
+    O(K^2) for the K flip gains and the O(1) two-row gains of the P co-painted pairs (P <= min(N, K (K - 1) / 2))
+    and O(n) to order n qualifying moves; a round applies a move or releases alleles, so a phase has at most K
+    rounds per sweep (and K/2 releasing rounds per site). Conflict tests: flip phase O(K^2) per round; two-row
+    phase O(K^2 + P) per round for certified classes plus the tests of uncertified members (_swap_conflicts_fast).
+    Total O(N + (S + 1) K^3 + K sum_r Uu_r) per site over S sweeps (Uu_r: uncertified unshared tied members of
+    two-row round r; _swap_conflicts_fast), cubic when every tied member is certified, O(N + K^4) per sweep at worst;
+    tables with an infinite entry use direct O(K) gains and tests (up to O(K^5) in one round). Fills add O(K^2)
+    per site. SITE_TILE-site tiles in parallel.
     """
     founders, sites = calls.shape
     samples = first.shape[0]
@@ -613,6 +955,8 @@ def _refit_kernel(
         row_carriers = np.zeros(founders, dtype=np.int64)
         favour = np.zeros((founders, founders, 4), dtype=np.int32)
         pair_count = np.zeros((founders, founders), dtype=np.int64)
+        flip_gain = np.zeros(founders, dtype=np.float64)
+        row_uses = np.zeros(founders, dtype=np.int64)
         for site in range(tile * SITE_TILE, min(sites, (tile + 1) * SITE_TILE)):
             table[:] = 0.0
             together[:] = False
@@ -651,6 +995,14 @@ def _refit_kernel(
                 carried = True
             if not carried:
                 continue
+            # With zero likelihoods at epsilon=0, the flip-gain identity can evaluate inf - inf
+            # even when a swap has finite direct gain because its shared dosage is unchanged.
+            finite = True
+            for a in range(founders):
+                for b in range(a, founders):
+                    for g in range(3):
+                        if not np.isfinite(table[a, b, g]):
+                            finite = False
             for _ in range(sweeps):
                 moved = False
                 flipped[:] = False
@@ -670,8 +1022,14 @@ def _refit_kernel(
                     if n == 0:
                         break
                     order = _decision_order(cand_gain, cand_n, n, reverse, cand_class)
-                    if _flip_conflicts(
-                        table, refit, site, together, cand_a, cand_class, order, n, minimum_gain, touched
+                    if (
+                        _flip_conflicts_fast(
+                            table, refit, site, together, cand_a, cand_gain, cand_class, order, n, minimum_gain, touched
+                        )
+                        if finite
+                        else _flip_conflicts(
+                            table, refit, site, together, cand_a, cand_class, order, n, minimum_gain, touched
+                        )
                     ):
                         for row in range(founders):
                             if touched[row]:
@@ -697,6 +1055,7 @@ def _refit_kernel(
                     for row in range(founders):
                         if refit[row, site] >= 0:
                             row_carriers[row] = _carriers(pair_count, refit[:, site], row)
+                            flip_gain[row] = _flip_gain(table, refit[:, site], row)
                     for a in range(founders):
                         if swapped[a]:
                             continue
@@ -706,8 +1065,11 @@ def _refit_kernel(
                             xa, xb = refit[a, site], refit[b, site]
                             if xa < 0 or xb < 0:
                                 continue
-                            # L10: use the same direct gain for qualification and conflict rechecks.
-                            delta = _two_row_gain(table, refit[:, site], a, b, 0 if xa != xb else 1)
+                            # Both rows flip: the joint gain is their flip gains plus the pair curvature.
+                            if finite:
+                                delta = flip_gain[a] + flip_gain[b] + _pair_curvature(table, refit[:, site], a, b)
+                            else:
+                                delta = _two_row_gain(table, refit[:, site], a, b, 0 if xa != xb else 1)
                             if delta > 0.0 and delta >= swap_minimum_gain:
                                 cand_a[n] = a
                                 cand_b[n] = b
@@ -718,20 +1080,17 @@ def _refit_kernel(
                     if n == 0:
                         break
                     order = _decision_order(cand_gain, cand_n, n, reverse, cand_class)
-                    if _swap_conflicts(
-                        table,
-                        refit,
-                        site,
-                        together,
-                        cand_a,
-                        cand_b,
-                        cand_kind,
-                        cand_class,
-                        order,
-                        n,
-                        swap_minimum_gain,
-                        touched,
-                    ):
+                    if not finite:
+                        conflict = _swap_conflicts(
+                            table, refit, site, together, cand_a, cand_b, cand_kind, cand_class, order, n,
+                            swap_minimum_gain, touched,
+                        )
+                    else:
+                        conflict = _swap_conflicts_fast(
+                            table, refit, site, together, cand_a, cand_b, cand_kind, cand_gain, cand_class, order, n,
+                            swap_minimum_gain, touched, row_uses,
+                        )
+                    if conflict:
                         for row in range(founders):
                             if touched[row]:
                                 refit[row, site] = -1

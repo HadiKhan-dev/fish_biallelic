@@ -123,17 +123,34 @@ def bounded_team(items: int) -> Iterator[None]:
         numba.set_num_threads(previous)
 
 
-# A kernel parallel over samples gives every thread at least this many samples (the static OpenMP schedule gives each
-# thread one contiguous slice): a slice of fewer samples costs less than waking and joining its thread, tens of
-# microseconds of CPU per parallel region (over a hundred on nodes held at base clock), so a wider team only adds
-# wake-ups. Sample order and values never depend on the team.
+# The minimum grain of a kernel parallel over samples, when the work per sample is unknown: the team is sized so that
+# each thread would take at least this many samples (the static OpenMP schedule gives each thread one contiguous
+# slice). A slice of fewer samples of short work costs less than waking and joining its thread, tens of microseconds
+# of CPU per parallel region (over a hundred on nodes held at base clock). Sample order and values never depend on
+# the team.
 SAMPLES_PER_THREAD = 8
 
+# The grain above stands in for a work floor. When the caller supplies a scheduling estimate of one sample's work
+# (site-diplotype cells: sites x K^2 for a component's messages), the grain is the samples that carry
+# THREAD_WORK_FLOOR cells, g = min(SAMPLES_PER_THREAD, max(1, ceil(THREAD_WORK_FLOOR / work))), and a kernel's team
+# is max(1, min(share, samples // g)); a limited share can still give a thread more samples than g: a 40-sample component of 300,000 sites and
+# 6 founders can wake 40 threads instead of 5, and one of 2,000 sites (72,000 cells per sample) 10 instead of 5. On
+# 8 CPUs that 2,000-site component runs 1.4x faster at 4 samples per thread than at 8 with the same CPU time, and
+# spends 4% more CPU at 1. Threads change scheduling only; sample order and values never depend on them.
+THREAD_WORK_FLOOR = 250_000
 
-def sample_team(samples: int, share: int) -> int:
+
+def samples_per_thread(work_per_sample: int = 0) -> int:
+    """Samples one thread needs: SAMPLES_PER_THREAD, or fewer when each carries ``work_per_sample`` cells (> 0)."""
+    if work_per_sample <= 0:
+        return SAMPLES_PER_THREAD
+    return min(SAMPLES_PER_THREAD, max(1, -(-THREAD_WORK_FLOOR // int(work_per_sample))))
+
+
+def sample_team(samples: int, share: int, work_per_sample: int = 0) -> int:
     """Threads for parallel regions over ``samples`` samples within a share of ``share`` CPUs: at most one thread per
-    SAMPLES_PER_THREAD samples, never fewer than one."""
-    return max(1, min(int(share), int(samples) // SAMPLES_PER_THREAD))
+    samples_per_thread(work_per_sample) samples, never fewer than one."""
+    return max(1, min(int(share), int(samples) // samples_per_thread(work_per_sample)))
 
 
 def _writable_directory(directory: str) -> bool:

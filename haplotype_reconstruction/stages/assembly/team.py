@@ -40,6 +40,7 @@ class RefinementTeam:
     budget: Any = None  # the task's live allowance (None: the declared count; concurrent child teams have none)
     live = False  # whether cores is a live share (a budget's, or a concurrent child's); else the declared count
     _held: Callable[[], int] | None = None  # CPUs the team's running templates or children use (while one is open)
+    sample_work = 0  # cells (sites x K^2) of one sample's component messages; 0: unknown (core.kernels.sample_team)
 
     def __init__(self, cores: int, budget: Any | None = None) -> None:
         enable_caches()
@@ -189,6 +190,7 @@ class RefinementTeam:
             shares.start(index)
             try:
                 child = _ChildTeam(shares, index)
+                child.sample_work = self.sample_work
                 with child.scope():
                     return index, function(child)
             finally:

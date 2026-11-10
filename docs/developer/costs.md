@@ -8,7 +8,7 @@ N samples; K founder haplotypes; L sites (M selected sites); B bins or blocks; P
 
 ## Exemptions and exceptions
 
-The [mechanism register](accretions.md#cost-exemptions) identifies costly bounded searches and optional reports. Assembly structural screening, refinement window fixing, painting label-continuity checks and founder-refit tie checks can exceed cubic work in founder count. Their method sections state the relevant candidate, frontier and work limits.
+The [mechanism register](accretions.md#cost-exemptions) identifies costly bounded searches and optional reports. Assembly structural screening, the local-selection context screen, refinement window fixing, the refinement count pass and founder-refit tie checks can exceed cubic work in founder count; painting label continuity is bounded per iteration by its check budget. Their method sections state the relevant candidate, frontier and work limits.
 
 ## Natural-domain count refits
 
@@ -24,10 +24,10 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [relatedness.families](../methods/relatedness.md) | O(N² M) screen; O(N² F) per sweep; O(F N M) support | 192 N M concatenate; 64 N M screens | no K term | F is families, not founders |
 | [relatedness.pairs](../methods/relatedness.md) | O(P L/10), P=N(N-1)/2; optional | 72 P | exemption 0d | N2500:3123750 pairs,224910000 bytes; off by default |
 | [discovery.fit](../methods/discovery.md) | O(N L K²) trajectory; O(N L K⁴) whole fitting term | 32 N×16384 transition cache; 24 B×1024 N patterns | exemption 0c | K⁴=810000; 50 iterations; ≤2 trajectories/start |
-| [discovery.search](../methods/discovery.md) | O(N L K⁴) fitting; O(N L K³) cavity; bounded exact cuts | 18 R L residual; 8 N S tile | exemption 0c | 810000 N L; exact switch 12; 48/96 replacements; 6 panels/K; 50 iterations |
+| [discovery.search](../methods/discovery.md) | O(N L K⁴) fitting; O(N L K³) cavity; O(K³ + K² W + T K² √K) gauge cuts (W≤N, T≤2000) | 18 R L residual; 8 N S tile | exemption 0c | 810000 N L; 16 GW starts at every K; 48/96 replacements; 6 panels/K; 50 iterations |
 | [discovery.release](../methods/discovery.md) | O(N K L) release; O(K L log K) keys | 32 N×16384 plus patterns | ≤ K³ | linear release factor 30 |
 | [selection.fit](../methods/selection.md) | O(N L K²(K+L)) backstop; context snaps O((20+4K+2L)²) passes | 8 threads×64 L(S(S+1)/2+S); 1024 L S² release | exemption 0c | K²=900; snaps(140+2L)²; L400 release 393625600 bytes |
-| [selection.search](../methods/selection.md) | O(N L K³(K+L)) search; O(K⁵) context screening | 232 N L+workspace; context 8 N B S² | exemptions 0 and 0c | K⁵=24300000/round; 27000 N L(30+L); N2500 B100 S31=1922000000 bytes |
+| [selection.search](../methods/selection.md) | O(N L K³(K+L)) search; O(K⁴) context screening plus ≤128 O(K³) exact codes/round | 232 N L+workspace; context 8 N B S² | exemptions 0 and 0c | K⁴=810000/round; ≤128 exact codes; 27000 N L(30+L); N2500 B100 S31=1922000000 bytes |
 | [assembly.completion](../methods/assembly.md) | O(N L K²) cross-fit; O(N K³) core sites; O(N K²) links | 25 N L+40 N K² min(L,50)+24 bins N Q+64 N Q+48MiB | ≤ K³ | N2500 K30 bin 50:900000000 bytes/array; 4500000000 with temporaries |
 | [assembly.site_model](../methods/assembly.md) | O(I N K²) BP I≤500; O(N K³) radius 3 ball; bounded 2^10 cube | 8 N K² quadratics+support | ≤ K³ | 4526 radius 3 configurations; 500×900×N BP work/site |
 | [assembly.linker](../methods/assembly.md) | O(N E K²) scans; O(N K³) edge propagation | 28 N E+8 N E C; 16 N K² per block/gap | ≤ K³ | 27000 cubic factor; ≤51 evaluations/gap |
@@ -35,10 +35,10 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [assembly.shadow_refits](../methods/assembly.md) | ≤2048 O(N L K²) shadow scores; O(K) seed fits, O(N L K³)/round | 8 N m(K+2)+2^26+8 N×8192/refit | natural domain; repeated rounds can be quartic | 30 seed fits/round; shadow budgets unchanged |
 | [assembly.orchestration_release](../methods/assembly.md) | O(N proxy_sites) partition; O(K B) composition; O(B A K log K) release | 256MiB+24 N L+component emissions+8 N bins(K+2)+moves/beams | ≤ K³ | 16 branch cap; the other assembly rows are separate |
 | [refinement.search](../methods/refinement.md) | O(N L K²) messages; O(B N K³) exchanges; canonical fixing O(K W R×programme) | acceptance≈2.5GB; polish 8 N Q(6h+12+b)+8 N b²/thread | above cubic: exception 0e ([RS05](../methods/refinement.md#rs05), [RS07](../methods/refinement.md#rs07)) | K30 N2500 polish≈3.7GB; canonical-fixing worst case carried |
-| [refinement.count](../methods/refinement.md) | O(K) fits/round, O(N L K³); ≤d+1 deletion rounds, O(N L K⁴) worst case; ≤16 histories | candidate fits plus existing message and shadow workspaces; admission-only copy messages removed | natural domain; quartic worst-case pass | up to 30 eligible fits/round; ≤2048 shadow scores/member |
-| [painting.coalescence](../methods/painting.md) | O(N B S²) messages; O(links N(S² log S+C² S)); worst K⁴ checks | 0.6–0.8GB/sample at K30 B10000 | above cubic: exception 0e ([PR17](../methods/painting.md#pr17)) | N2500 K30 links 2000≈1e11 gain operations; quartic candidate checks carried |
+| [refinement.count](../methods/refinement.md) | O(K) fits/round, O(N L K³); ≤d+1 deletion rounds, O(N L K⁴) worst case; ≤16 histories | candidate fits plus existing message and shadow workspaces; one 64MiB score-miss ledger per component; admission-only copy messages removed | natural domain; quartic worst-case pass | up to 30 eligible fits/round; ≤2048 shadow scores/member |
+| [painting.coalescence](../methods/painting.md) | O(N B S²) messages; O(links N(S² log S+C² S)); per iteration ≤b charged checks and ≤2b−1 trial decodes, O(b N (B+J) K²); iterations ≤ the initial switch total | 0.6–0.8GB/sample at K30 B10000 | ≤ K³ per iteration ([PR17](../methods/painting.md#pr17)) | N2500 K30 links 2000≈1e11 gain operations; b=64 |
 | [painting](../methods/painting.md) | O(N L S²) emissions; O(N B S'²) chain; O(N B S³) masks; S'≤2K+1 | 40 S'² B+16 S² B+24 L/sample; pointers 4 S'² B | ≤ K³ | S'=61; pointers 148840000 bytes B10000; ≈1.6GB/sample |
-| [founder_refit](../methods/refit.md) | O(N+K³ log K)/site/sweep; direct two-row worst K⁴; ties K⁴ flips/K⁵ pairs | 4 N L label expansion | above cubic: exception 0e ([FR04](../methods/refit.md#fr04)) | K⁴=810000; K⁵=24300000/site/phase |
+| [founder_refit](../methods/refit.md) | Finite: O(N+(S+1)K³+K sum_r Uu_r)/site over S sweeps; worst K⁴/sweep. Non-finite: up to K⁵/round | 4 N L label expansion; O(K²) table/candidate scratch per tile | above cubic: exception 0e ([FR04](../methods/refit.md#fr04)) | K³=27000 base; K⁴=810000 worst/sweep; K⁵=24300000 non-finite/round |
 | [pedigree.prepare](../methods/pedigree.md) | O(N B S²) sources; O(N M S) ALT; O(N B(S²+128S)) bridges | 24 N B S²+1.25 evidence+painting+2GiB | ≤ K³ | S31:right weights 7688 bytes/sample/bin |
 | [pedigree.screen_pair_bound](../methods/pedigree.md) | O(R² B G³) pair bound G≤S+1; O(C² P) panel; O(D L) exclusion | 16 N(B-1)S² geometry; 4 P/contig; stack streamed | ≤ K³ | N2500 B1000 S31≈38GB geometry; 414M pairs≈1.7GB/contig |
 | [pedigree.scores_exposure](../methods/pedigree.md) | O((E/2+T)B S(S+1)/2) exposure; O(N B J²) junctions; O(C N²) order/fit | 8 N B S(S+1)/2 masses; 32 N² outputs; 40 N² family | ≤ K³ | S31:496 features×3123750 unordered edges×B |
@@ -57,6 +57,11 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [store](../methods/execution.md) | O(bytes) encode/decode; selective items | bounded in-flight payload | no intrinsic K/N | payload-size proxy only |
 | [engine_graph](../methods/execution.md) | O(tasks)/boundary; O(contigs nodes) graph | O(tasks + live expansion results + public outputs); geometric ledger growth | no intrinsic K/N | task-count proxy; overhead separate |
 | [interface](../methods/execution.md) | Parsing/validation; negligible | O(configuration) | no intrinsic K/N | settings-resolution proxy only (interface.settings); no scientific K ladder |
+
+
+## Founder refit
+
+For this row S denotes coordinate sweeps and Uu_r denotes uncertified tied candidates with no row shared within their class in two-row round r. Its sum covers applying and releasing rounds. Finite tables use cached flip gains, O(1) joint gains and conflict tests, linear ordering/components, shared-row marking and a certificate over tied-member endpoints. Scans involving shared members total O(K³) per site as their rows are released permanently. The remaining term is K sum_r Uu_r, bounded by O(K⁴) per sweep. All-certified sustained matching classes have zero remaining term; order K uncertified members per round over order K rounds is also cubic. This is a residual worst-case exception, not a universal cubic guarantee. Zero likelihoods at robustness epsilon 0 can produce non-finite tables, which retain the direct route and its O(K⁵) one-round worst case.
 
 
 ## Evidence dictionary windows

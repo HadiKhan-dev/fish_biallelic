@@ -1,7 +1,7 @@
 ##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##source=haplotype-reconstruction
-##haplotype_reconstruction_release=4.12
+##haplotype_reconstruction_release=4.13
 ##contig=<ID=c,length=30>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Released genotype; no imputation">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the position of its first site; it restarts at every component boundary and after each of the sample's undetermined phase boundaries">

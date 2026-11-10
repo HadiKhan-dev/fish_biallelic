@@ -341,10 +341,9 @@ class SearchParameters:
     data_seed_count: soft-cluster seeds tried for K=1.
     seed_min_cluster_size: HDBSCAN minimum cluster size of the K=1 seeds.
     max_replacement_children: generator size of birth-delete replacements per expansion.
-    exact_cut_max_k: gauge rewires use exact maximum cuts up to this K, a degree-ordered local
-        search above (reported separately from search limits).
-    max_cut_ties: nominal maximum-cut multiplicity; the effective family budget is four times
-        this value, with whole-family admission through twice that effective budget.
+    max_cut_ties: the gauge-cut budget is eight times this value (32 by default). Keep the
+        canonical prefix of the found best-weight family and report any truncation as a search limit.
+        The later whole-class death/gauge start budget is separate.
     data_birth_attempts_factor: data births fit at most max(16, 2(K + 1)) x this many starts (the
         attempt budget).
     data_birth_children_factor: data births stop once (K + 1) x this many distinct complete
@@ -473,23 +472,13 @@ class SearchParameters:
             ),
         },
     )
-    exact_cut_max_k: int = field(
-        default=12,
-        metadata={
-            "units": "rows",
-            "provenance": (
-                "Largest founder count using exhaustive maximum cuts (rows); larger panels use "
-                "degree-ordered local-search proposals."
-            ),
-        },
-    )
     max_cut_ties: int = field(
         default=4,
         metadata={
-            "units": "cuts (effective cap 4x = 16; family limit 32)",
+            "units": "cuts (retained family budget 8x = 32)",
             "provenance": (
-                "Quarter of the nominal gauge-cut family budget (cuts); four times this value "
-                "gives 16 nominal cuts, with whole-family admission through 32 at the default."
+                "One eighth of the retained gauge-cut family budget (cuts); keep a canonical prefix "
+                "of up to 32 cuts by default and report any truncated best-found tie class."
             ),
         },
     )
@@ -603,8 +592,15 @@ H_SUM_ERROR_FACTOR = 16.0  # Error-enclosure multiplier (dimensionless).
 H_SUM_ERROR_CUTOFF = 0.0625  # Maximum count times float64 epsilon for the error enclosure.
 SET_COUNT_ROUNDING_FLOOR = -1e-12  # Allowed roundoff below zero description length (nats).
 
+# Extra gauge-cut starts from a finite rank-factorised max-cut SDP solve.
+GAUGE_CUT_GW_PLANES = 16  # Hyperplanes (starts); improves cut coverage while bounding proposal work.
+GAUGE_CUT_GW_SEED = 4134  # Dimensionless RNG seed combined with CRC-32 of content-ordered int64 weights.
+GAUGE_CUT_SDP_SWEEPS = 2000  # Maximum mixing sweeps; bounds work even on slowly converging symmetric graphs.
+GAUGE_CUT_SDP_TOLERANCE = 1e-20  # Summed squared unit-vector movement per sweep; each vector moves < 1e-10.
+# The tolerance is a step-size stopping rule, not an SDP objective-error bound; only valid cuts enter scoring.
+
 # Operational memo/tile bounds, outside the resolved scientific configuration.
-MAX_CUT_CACHE_ENTRIES = 256  # Maximum memoized exact max-cut problems (entries).
+MAX_CUT_CACHE_ENTRIES = 256  # Maximum memoized best-found cut problems (entries); eviction changes work only.
 COUNT_CHUNK = 256  # Samples per omitted-start counting batch.
 PREDICTION_TILE_BYTES = 8 * 1024 * 1024  # Predictive contraction workspace target (bytes).
 PREDICTIVE_CHUNK_BYTES = 32 * 1024 * 1024  # Residual predictive workspace target (bytes).
@@ -629,4 +625,8 @@ __all__ = [
     "H_SUM_ERROR_FACTOR",
     "H_SUM_ERROR_CUTOFF",
     "SET_COUNT_ROUNDING_FLOOR",
+    "GAUGE_CUT_GW_PLANES",
+    "GAUGE_CUT_GW_SEED",
+    "GAUGE_CUT_SDP_SWEEPS",
+    "GAUGE_CUT_SDP_TOLERANCE",
 ]

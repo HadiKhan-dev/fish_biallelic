@@ -25,10 +25,20 @@ __all__ = [
     "FLIP_TIE",
     "EXACT_FIRST_UPDATE_MAX_K",
     "DESCRIPTION_TIE",
+    "DESCRIPTION_MEMO_ENTRIES",
+    "MERGE_EXACT_CODES_PER_ROUND",
     "MATCHING_SLACK",
     "LOG_RATIO_NEAR",
     "LANE_WIDTH",
     "LANE_ALIGN",
+    "LANE_MIN_WIDTH",
+    "CHUNK_BLOCKS",
+    "CHUNK_WAVES",
+    "CHUNK_FLOOR",
+    "CHUNK_TASKS_PER_CPU",
+    "SHARE_REREAD_SECONDS",
+    "SMALL_COHORT_TASKS_PER_CPU",
+    "SMALL_COHORT_CHUNK_BLOCKS",
     "RELEASE_SAMPLE_BATCH",
     "COMBINE_TILE",
     "CONSENSUS_TIE",
@@ -366,10 +376,22 @@ CHAIN_HIGH = 2.0**300
 FLIP_TIE = 2.0**-20 * NOISE_SCALE
 EXACT_FIRST_UPDATE_MAX_K = 16
 DESCRIPTION_TIE = 1e-9
+DESCRIPTION_MEMO_ENTRIES = 4096
+MERGE_EXACT_CODES_PER_ROUND = 128
 MATCHING_SLACK = 1e-12
 LOG_RATIO_NEAR = 0.5
 LANE_WIDTH = 64
 LANE_ALIGN = 8
+LANE_MIN_WIDTH = 16
+# Execution grain and live-share boundaries; provenance below gives units and rationale.
+CHUNK_BLOCKS = 8
+CHUNK_WAVES = 2
+CHUNK_FLOOR = 8
+CHUNK_TASKS_PER_CPU = 8
+SHARE_REREAD_SECONDS = 0.1
+# Small-cohort chunks amortise repeated evidence metadata and coordinator turnaround.
+SMALL_COHORT_TASKS_PER_CPU = 2
+SMALL_COHORT_CHUNK_BLOCKS = 4
 RELEASE_SAMPLE_BATCH = 128
 COMBINE_TILE = 4096
 CONSENSUS_TIE = 2.0**-20
@@ -403,10 +425,47 @@ PARAMETER_PROVENANCE = {
         "first frequency update; controls work only."
     ),
     "DESCRIPTION_TIE": "Relative shortest-description preference slack 1e-9, scaled by max(1, absolute code in nats).",
+    "DESCRIPTION_MEMO_ENTRIES": (
+        "Resource-only limit of 4096 panel descriptions per context; clearing recomputes exact values."
+    ),
+    "MERGE_EXACT_CODES_PER_ROUND": (
+        "At most 128 exact context-code requests per round for uncertified merge starts, including K-2 panels "
+        "and memo hits; certified codes are free. Unsolved starts rank optimistically. This declared screening "
+        "approximation bounds cubic matching work at a constant allowance; smaller allowances lost more "
+        "objective on constructed cases. It is not an error bound on selected panels."
+    ),
     "MATCHING_SLACK": "Reduced-cost matching rounding allowance 1e-12 nats.",
     "LOG_RATIO_NEAR": "Dimensionless close-ratio boundary 0.5 for stable log-ratio evaluation.",
     "LANE_WIDTH": "Resource layout: 64 sample lanes per likelihood block.",
-    "LANE_ALIGN": "Resource layout: align lane storage to multiples of 8 lanes.",
+    "LANE_ALIGN": "Resource layout: multiples of 8 sample lanes retain vector work within each likelihood worker.",
+    "LANE_MIN_WIDTH": "Resource layout: 16 sample lanes, the narrowest block a likelihood worker takes; bounds a small cohort's useful selection width.",
+    "CHUNK_BLOCKS": (
+        "Execution grain: average 8 blocks' cost per chunk, amortising coordinator turnaround; "
+        "individual block results and publication remain independent."
+    ),
+    "CHUNK_WAVES": (
+        "Execution grain: 2 waves per CPU in the guided remaining-work target, keeping tail chunks small."
+    ),
+    "CHUNK_FLOOR": (
+        "Execution-only ratio 8: guided chunks have at least one eighth of the average target cost, "
+        "bounding scheduling overhead as a round drains."
+    ),
+    "CHUNK_TASKS_PER_CPU": (
+        "Execution-only minimum 8 chunks per declared CPU for larger cohorts; extra ready chunks "
+        "limit straggler tails when refit block costs are poorly predicted."
+    ),
+    "SHARE_REREAD_SECONDS": (
+        "Execution interval 0.1 seconds between live CPU-share reads; amortises boundary calls "
+        "across frequent lane evaluations while allowing a block to grow as peers finish."
+    ),
+    "SMALL_COHORT_TASKS_PER_CPU": (
+        "Resource-only minimum 2 chunks per declared CPU for cohorts fitting in one 64-lane block; "
+        "amortises coordinator messages while retaining more ready tasks than CPU seats."
+    ),
+    "SMALL_COHORT_CHUNK_BLOCKS": (
+        "Resource-only ceiling 4 blocks per small-cohort chunk bounds a cost-model underprediction's tail "
+        "while sharing repeated evidence metadata across short blocks."
+    ),
     "RELEASE_SAMPLE_BATCH": "Resource layout: process 128 samples per release batch.",
     "COMBINE_TILE": "Resource layout: 4096 elements per parallel reduction tile.",
     "CONSENSUS_TIE": "Absolute allele-probability band 2^-20 around one half for merge consensus.",

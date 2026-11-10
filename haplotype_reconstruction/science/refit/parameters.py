@@ -11,6 +11,9 @@ REFIT_TIE_QUANTUM = 2.0**-16
 REFIT_TIE_QUANTUM_PER_CARRIER = 2.0**-18
 # Sites per independent parallel task; each task owns one founder-pair table.
 SITE_TILE = 1024
+# Maximum keys for stable comparison sort (keys); depth <=12 beats eight radix passes here.
+# Larger arrays use fixed-width radix sorting to keep round ordering linear in candidate count.
+STABLE_SORT_COMPARISON_LIMIT = 4096
 
 
 @dataclass(frozen=True)
@@ -74,4 +77,11 @@ class RefitParameters:
     )
 
 
-__all__ = ["RefitParameters", "REFIT_TIE_QUANTUM", "REFIT_TIE_QUANTUM_PER_CARRIER", "WIDE_QUANTA", "SITE_TILE"]
+__all__ = [
+    "RefitParameters",
+    "REFIT_TIE_QUANTUM",
+    "REFIT_TIE_QUANTUM_PER_CARRIER",
+    "WIDE_QUANTA",
+    "SITE_TILE",
+    "STABLE_SORT_COMPARISON_LIMIT",
+]

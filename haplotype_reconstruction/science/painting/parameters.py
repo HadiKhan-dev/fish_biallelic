@@ -77,8 +77,8 @@ class PaintingParameters:
         the painted switch total by at least this many switches.
     label_continuity_maximum_loser_ratio: samples whose painted switches rise
         may be at most this fraction of the samples whose switches fall.
-    label_continuity_check_budget: ranked candidate checks before the main-loop guard ends an
-        unsuccessful iteration (LabelContinuity.check_budget_reached); tied-peer certification can add checks.
+    label_continuity_check_budget: maximum charged candidate checks per search iteration, including tie peers.
+        An undecided class withholds its repair and flags LabelContinuity.check_budget_reached.
     """
 
     emission_site_correlation: float = field(
@@ -254,9 +254,9 @@ class PaintingParameters:
         default=64,
         metadata={
             "provenance": (
-                "Ranked candidate-check limit per search iteration (candidates); ends an "
-                "unsuccessful search at the main-loop guard, while tied-peer certification can "
-                "add checks."
+                "Maximum charged candidate checks per search iteration, including tie peers (candidates). "
+                "An unresolved class withholds its repair and ends the search with check_budget_reached; "
+                "capability rejections need no decode or charge. Bounds trial work at large founder counts."
             ),
             "role": "state",
             "axes": (),

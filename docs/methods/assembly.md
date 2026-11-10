@@ -631,8 +631,12 @@ cost ordering and keyed composition.
 Stage expansion preserves the enclosing graph task's declared CPU maximum,
 rather than freezing the share passed when its parent first started. A join's
 CPU ceiling covers its independent count refits. Each sample kernel is
-separately capped at the useful sample width (`SAMPLES_PER_THREAD`), so that width
-does not restrict the entire refit family. Engine child budgets split the current
+separately capped at the useful sample width, so that width does not restrict the
+entire refit family. The team is sized so that each thread would take a grain of at most
+`SAMPLES_PER_THREAD` (8) samples; in refinement the grain is only as many samples as
+carry `THREAD_WORK_FLOOR` site-diplotype cells (a scheduling estimate: component sites x
+K² per sample), so a 40-sample component of 300,000 sites can use 40 threads rather than
+5. A limited CPU share can still give a thread more samples than the grain. Team size changes scheduling only. Engine child budgets split the current
 task allowance and lend finished children's CPUs at later kernel boundaries.
 Refit results return to their original indices before the existing count, tie and
 acceptance rules run. Neither completion order nor team size chooses a founder
