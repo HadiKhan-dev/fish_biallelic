@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from ..core.errors import ResourceError, SettingsError
 from ..core.files import atomic_path
 from ..results.paths import RunPaths
+from ..stages.context import default_scratch
+from ..stages.export import records as export_records
 from .settings.load import default_output
 from .settings.schema import Settings
 
@@ -50,7 +52,7 @@ class RunResult:
 
 
 def run_paths(settings: Settings) -> RunPaths:
-    """Resolve the 3.5 output/checkpoint/log defaults without making directories."""
+    """Resolve output, checkpoint and log defaults without making directories."""
     output = settings.run.output or default_output(settings)
     checkpoints = settings.run.checkpoints or output / "checkpoints"
     return RunPaths(output, checkpoints, output / "logs")
@@ -90,7 +92,7 @@ def error_report(error: BaseException, args: argparse.Namespace) -> Path:
 
 @dataclass(frozen=True)
 class TieCensusSink:
-    """Append explicit C1 events in the baseline per-process JSONL form (maths/ties.py:435)."""
+    """Append explicit tie-census events to the per-process JSONL log."""
 
     directory: Path
 
@@ -162,7 +164,7 @@ def check_run(
 ) -> PreparedRun:
     """Apply ENG-02 fail-fast checks in order, before computation or filesystem writes.
 
-    Paths, CPU affinity, canonical source check, parameters, maps, layout and
+    Paths, CPU affinity, release/layout, canonical source check, parameters, maps and
     configured-contig gates are checked in that order. Init and run may lack a bound
     manifest; run performs the same serialized initialization before its graph.
     Numerical policy is checked before importing scientific dependencies.
@@ -173,6 +175,10 @@ def check_run(
     paths = run_paths(settings)
     cores = resolve_cores(settings)
     configure_worker(cores)
+    from ..store.releases import check_directory_release
+
+    check_directory_release(paths.output)
+    store = _existing_store(paths)
     from ..stages.configure import configure, genetic_maps
     from ..stages.inputs.sources import observation_source
 
@@ -185,7 +191,6 @@ def check_run(
         raise InputError(f"cannot read input source: {error}") from error
     parameters = configure(settings)
     maps = genetic_maps(settings)
-    store = _existing_store(paths)
     manifest = None if store is None else store.manifest("run")
     if contigs is not None and (len(set(contigs)) != len(contigs) or set(contigs) - set(settings.input.contigs)):
         raise SettingsError("selected contigs must be unique members of the initialized contig list")
@@ -200,7 +205,7 @@ def check_run(
 def _manifest_for(
     resolved: ResolvedConfiguration, source: CanonicalOrderSource, *, tie_reverse: bool, tie_keep: tuple[str, ...]
 ) -> dict[str, Any]:
-    """Add the source descriptor and explicit conventions to G1's frozen binding."""
+    """Add the source descriptor and explicit conventions to the frozen run binding."""
     from ..core.digest import jsonable
     from ..store.protocol import NumericalPolicy
 
@@ -238,13 +243,6 @@ def _match_manifest(actual: dict[str, Any], expected: dict[str, Any], *, recombi
         raise SettingsError("resolved configuration differs from the initialized manifest; use a new output root")
 
 
-def _initial_identity(manifest: dict[str, Any], resolved: ResolvedConfiguration) -> str:
-    """Rebuild G1's immutable init identity from its declared manifest fields."""
-    from ..core.digest import json_digest
-
-    return json_digest({key: manifest[key] for key in resolved.manifest()})
-
-
 def _match_bound_configuration(
     candidate: dict[str, Any],
     manifest: dict[str, Any],
@@ -253,7 +251,7 @@ def _match_bound_configuration(
     *,
     allow_new_recombination: bool = False,
 ) -> None:
-    """Check immutable init science plus RC1's independently bound downstream choice."""
+    """Check immutable init science plus recombination's independently bound downstream choice."""
     from ..core.digest import canonical_json
 
     _match_manifest(candidate, manifest, recombination=True)
@@ -344,6 +342,7 @@ def _resume_configuration(
     from ..stages.configure import resolve
     from ..store.protocol import resume
     from ..store.store import CheckpointStore
+    from ..stages.init import records as init_records
 
     assert prepared.source is not None
     store = CheckpointStore(prepared.paths.checkpoints, nthreads=prepared.cores)
@@ -368,39 +367,16 @@ def _resume_configuration(
     _match_bound_configuration(
         _manifest_for(resolved, prepared.source, tie_reverse=tie_reverse, tie_keep=tie_keep), manifest, store, resolved
     )
-    if resume(store.run, "configuration/resolved", _initial_identity(manifest, resolved)) is None:
+    if resume(store.run, "configuration/resolved", init_records.expected(manifest, resolved)) is None:
         raise SettingsError("resolved configuration publication is missing; rerun haplotypes init")
     return resolved
 
 
-def _check_initialized(root: str, identity: str) -> str:
-    """A graph init node verifies its prerequisite publication and returns its identity."""
-    from ..store.protocol import resume
-    from ..store.store import CheckpointStore
-
-    if resume(CheckpointStore(root).run, "configuration/resolved", identity) is None:
-        raise SettingsError("run has not been initialized; use haplotypes init")
-    return identity
-
-
 def _map_output(function, items):
     """Supply formatters an ordered map bounded by this task's live CPU claim."""
-    from ..engine.scheduler import current_budget
+    from ..engine.cpu import current_budget
 
     return current_budget().thread_map(function, items, label="independent output writers")
-
-
-def _map_writers(function, items):
-    """Release 4.10: an ordered map giving each output writer a live share of this task's CPUs (its BGZF compression
-    and index threads; core.concurrency.live_threads), one thread per writer before."""
-    from ..engine.scheduler import current_budget
-
-    items = list(items)
-    results: list[Any] = [None] * len(items)
-    calls = [lambda share, item=item: function(item) for item in items]
-    for index, value in current_budget().concurrent(calls, label="output writers"):
-        results[index] = value
-    return results
 
 
 def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[str, float]:
@@ -427,877 +403,22 @@ def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict
     return costs
 
 
-def _model_actions(
-    prepared: PreparedRun,
-    resolved: ResolvedConfiguration,
-    cut: Cut,
-    *,
-    outputs: dict[TaskKey, Task] | None = None,
-    ties: TieSettings | None = None,
-) -> dict[TaskKey, Task]:
-    """Bind concrete stage declarations to the model; no stage is treated as a no-op."""
-    from ..core.errors import InvariantError
-    from ..engine.graph import RecordKey, ResourceRequest, Task, TaskKey
+def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None):
+    """Bind the stage-owned factories for the selected graph cut."""
+    import importlib
 
-    function: Callable[..., Any]
-    args: tuple[Any, ...]
-    actions: dict[TaskKey, Task] = (
-        {} if outputs is None else {key: task for key, task in outputs.items() if key in cut.nodes}
-    )
-    needed = {key.stage for key in cut.nodes}
-    if "init" in needed:
-        key = TaskKey("init", "run", "run")
-        actions[key] = Task(
-            key,
-            _check_initialized,
-            args=(str(prepared.paths.checkpoints), _initial_identity(prepared.manifest or {}, resolved)),
-            outputs=(RecordKey("run", "configuration/resolved"),),
-        )
-    if "evidence" in needed:
-        if prepared.source is None:
-            raise SettingsError("evidence requires a checked observation source")
-        from ..stages.evidence.tasks import tasks
+    from ..stages.catalog import STAGES
+    from ..stages.context import StageRun
 
-        selected = tuple(key.scope for key in cut.nodes if key.stage == "evidence")
-        actions.update(
-            (task.key, task)
-            for task in tasks(
-                prepared.paths.checkpoints,
-                prepared.source,
-                resolved.parameters.evidence,
-                contigs=selected,
-                maximum_cores=prepared.cores,
-            )
-        )
-    if "relatedness" in needed:
-        for key in (key for key in cut.nodes if key.stage == "relatedness"):
-            pairs = key.unit == "pairs"
-            actions[key] = Task(
-                key,
-                _run_relatedness,
-                args=(str(prepared.paths.checkpoints), resolved, prepared.genetic_maps),
-                kwargs={
-                    "pairs": pairs,
-                    "reverse": bool((prepared.manifest or {}).get("ties", {}).get("reverse", False)),
-                },
-                inputs=tuple(RecordKey(c, "evidence") for c in resolved.contigs),
-                outputs=(RecordKey("run", "relatedness/pairs" if pairs else "relatedness/families"),),
-                resources=ResourceRequest(min_cores=1, max_cores=prepared.cores),
-                thread_argument="team",
-            )
-    if "discovery" in needed:
-        for key in (key for key in cut.nodes if key.stage == "discovery"):
-            actions[key] = Task(
-                key,
-                _run_discovery,
-                (str(prepared.paths.checkpoints), str(prepared.paths.output), key.scope, resolved, ties),
-                kwargs={"cores": prepared.cores},
-                inputs=(RecordKey(key.scope, "evidence"),),
-                # Up to the allocation: reading the contig's inputs decompresses with the task's live share.
-                resources=ResourceRequest(1, prepared.cores),
-            )
-    for key in (key for key in cut.nodes if key.stage == "selection"):
-        actions[key] = Task(
-            key,
-            _run_selection,
-            (
-                str(prepared.paths.checkpoints),
-                str(prepared.paths.output),
-                key.scope,
-                key.round,
-                resolved,
-                prepared.genetic_maps,
-                ties,
-            ),
-            kwargs={"cores": prepared.cores},
-            resources=ResourceRequest(1, prepared.cores),
-        )
-    for key in (key for key in cut.nodes if key.stage in {"painting", "refit"}):
-        args = (str(prepared.paths.checkpoints), str(prepared.paths.output), key.scope, resolved)
-        if key.stage == "painting":
-            function = _run_painting
-            args += (prepared.genetic_maps, ties)
-            published = ("painting", "painting/summary", "identity/painting")
-        else:
-            function = _run_refit
-            args += (ties,)
-            published = ("founder_refit", "founder_refit/summary", "identity/founder_refit")
-        actions[key] = Task(
-            key,
-            function,
-            args,
-            kwargs={"cores": prepared.cores} if key.stage == "painting" else {},
-            outputs=tuple(RecordKey(key.scope, name) for name in published),
-            resources=ResourceRequest(1, prepared.cores),
-            thread_argument="team",
-        )
-    for key in (key for key in cut.nodes if key.stage in {"phase", "recombination"}):
-        args = (str(prepared.paths.checkpoints), str(prepared.paths.output), key.scope, resolved, prepared.genetic_maps)
-        if key.stage == "phase":
-            function = _run_phase
-            args += (str(_scratch_base(prepared)),)
-            # Family phase maps its independent work over the task's live thread budget (thread_map, input order
-            # kept): declared serial, a contig's phase ran on one CPU however many were idle.
-            resources = ResourceRequest(1, prepared.cores)
-        else:
-            function = _run_recombination
-            resources = ResourceRequest(1, 1)
-        actions[key] = Task(key, function, args, outputs=(RecordKey(key.scope, key.stage),), resources=resources)
-    for key in (key for key in cut.nodes if key.stage == "assembly"):
-        actions[key] = Task(
-            key,
-            _run_assembly,
-            (
-                str(prepared.paths.checkpoints),
-                str(prepared.paths.output),
-                key.scope,
-                key.round,
-                resolved,
-                prepared.genetic_maps,
-                ties,
-            ),
-            kwargs={"cores": prepared.cores},
-            resources=ResourceRequest(1, prepared.cores),
-        )
-    if "pedigree" in needed:
-        from ..stages.pedigree.prepare import pipeline_task
-
-        task = pipeline_task(
-            str(prepared.paths.checkpoints), prepared.genetic_maps, prepared.manifest, cores=prepared.cores
-        )
-        actions[task.key] = task
-    missing = tuple(key for key in cut.nodes if key not in actions)
-    if missing:
-        raise InvariantError(f"workflow cut has no concrete action for {missing}")
+    context = StageRun(str(prepared.paths.checkpoints), str(prepared.paths.output), resolved,
+                       prepared.genetic_maps, prepared.manifest, prepared.cores, ties,
+                       prepared.source, str(_scratch_base(prepared)))
+    actions = {} if outputs is None else {key: value for key, value in outputs.items() if key in cut.nodes}
+    for key in cut.nodes:
+        if key not in actions:
+            module = importlib.import_module("haplotype_reconstruction." + STAGES[key.stage].tasks)
+            actions[key] = module.task(key, context)
     return actions
-
-
-def _required_product(reader: Results, adapter: Any, product: str, contig: str | None) -> tuple[Any, str]:
-    """Decode a required upstream through its owner, returning its verified derivation."""
-    request = adapter.result_reader(reader._store, reader.manifest, product=product, contig=contig)
-    value = None if request is None else reader.read(request, contig)
-    if value is None:
-        raise SettingsError(f"{contig}: required {product} publication is missing")
-    return value, request.identity
-
-
-def _run_discovery(
-    root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, cores: int = 1
-) -> Expansion:
-    """Expand a contig into DI2's plan, independent block tasks and checked gather."""
-    from ..engine.graph import Expansion
-    from ..science.discovery.run import block_evidence
-    from ..stages.discovery.tasks import discovery_tasks
-    from ..stages.evidence import records
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    from ..stages.discovery import records as discovery_records
-    from ..stages.discovery.tasks import complete_contig_receipt
-    from ..stages.framework import RecordKey, Task, TaskKey
-
-    # Release 4.10: a contig whose plan and every block are already published under the identities this run derives
-    # (the reader checks each record's envelope; no marker is trusted) needs only its completion step. Expanding it
-    # resumed every block as its own task (chr3 0.5x: 7,533 tasks, each decoding and returning its stored result).
-    done = discovery_records.result_reader(reader._store, reader.manifest, product="discovery", contig=contig)
-    if done is not None:
-        identities = dict(done.identities)
-        return Expansion(
-            (),
-            Task(
-                TaskKey("discovery", "complete", contig),
-                complete_contig_receipt,
-                (reader._store.contig(contig), contig, identities),
-                inputs=tuple(RecordKey(contig, key) for key in identities),
-                affinity=contig,
-            ),
-        )
-    evidence, identity = _required_product(reader, records, "evidence", contig)
-    founder = evidence.founder_view()
-    blocks = tuple(block_evidence(founder, index) for index in range(len(founder.block_spans)))
-    tasks = discovery_tasks(
-        contig,
-        blocks,
-        resolved.parameters.discovery,
-        file=reader._store.contig(contig),
-        evidence_identity=identity,
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-        ties=ties,
-        max_cores=cores,
-    )
-    return Expansion(tasks[:-1], tasks[-1])
-
-
-@dataclass(frozen=True)
-class SelectionInputs:
-    """Picklable capability loading checked discovery and evidence only when a round needs them."""
-
-    root: str
-    output: str
-    contig: str
-
-    def __call__(self) -> Any:
-        from ..stages.discovery import records as discovery_records
-
-        reader = _task_reader(self.output, self.root)
-        request = discovery_records.result_reader(
-            reader._store, reader.manifest, product="discovery", contig=self.contig
-        )
-        if request is None:
-            raise SettingsError(f"{self.contig}: required discovery publication is missing")
-        discovered = _chain_input(f"discovery/{request.identity}", lambda: _decoded(reader, request, self.contig))
-        _, _, founder, view = _chain_evidence(reader, self.contig)
-        return discovered, founder, view
-
-
-# A contig's selection rounds and assembly entries run as separate actions on the contig's worker (its affinity) and
-# each needs the contig's discovery and evidence, decoded. They are kept there between those actions
-# (engine.workers.resident_or_load) under keys naming their store identities, so a kept value equals a fresh read and
-# any other worker reads the store; the final assembly's entry, their last consumer, releases them.
-_CHAIN_INPUTS = "chain-inputs"
-# Sample rows per evidence-count gather for the assembly depth keys (memory bound only: 32 rows of int32[L, 2]).
-DEPTH_KEY_ROWS = 32
-
-
-def _chain_input(key: str, load: Callable[[], Any]) -> Any:
-    from ..engine.workers import resident_or_load
-
-    return resident_or_load(f"{_CHAIN_INPUTS}/{key}", load)
-
-
-def _decoded(reader: Results, request: Any, contig: str) -> Any:
-    value = reader.read(request, contig)
-    if value is None:
-        raise SettingsError(f"{contig}: required {request.key} publication is missing")
-    return value
-
-
-def _chain_evidence(reader: Results, contig: str) -> tuple[Any, Any, Any, Any]:
-    """Cache count-free evidence and depth keys; defer assembly arrays to their consumer."""
-    import numpy as np
-
-    from ..contracts.evidence import ContigEvidence
-    from ..science.assembly.evidence import AssemblyEvidenceSource, _depth_keys
-    from ..stages.evidence import records as evidence_records
-
-    request = evidence_records.result_reader(reader._store, reader.manifest, product="evidence", contig=contig)
-    if request is None:
-        raise SettingsError(f"{contig}: selection and assembly need complete evidence")
-
-    def load() -> tuple[Any, Any, Any]:
-        evidence = reader.read(request, contig)
-        if not isinstance(evidence, ContigEvidence):
-            raise SettingsError(f"{contig}: selection and assembly need complete evidence")
-        founder = evidence.founder_view()
-        # The keys consume counts once. Decode DEPTH_KEY_ROWS sample rows at a time rather than retaining an
-        # N x L x 2 count buffer for the rest of the chain (release 4.8: batches, hashed on spare threads; one row
-        # per gather made this serial chain step ~14 s for chr1 at N = 320).
-        from ..engine.scheduler import spare_threads
-
-        columns = np.arange(evidence.n_sites, dtype=np.int64)
-        keys = []
-        threads = spare_threads(DEPTH_KEY_ROWS)
-        with evidence_records.open_arrays(
-            reader._store.contig(contig), ("counts",), expected_identity=request.identity
-        ) as arrays:
-            if arrays is None:
-                raise SettingsError(f"{contig}: assembly depth keys need evidence counts")
-            for first in range(0, evidence.n_samples, DEPTH_KEY_ROWS):
-                stop = min(evidence.n_samples, first + DEPTH_KEY_ROWS)
-                rows = arrays["counts"].gather(slice(first, stop), columns)
-                observed = np.asarray(founder.observed[first:stop])
-                keys.extend(_depth_keys(rows, observed, founder.discovery_sites, threads))
-                del rows
-        return evidence, founder, tuple(keys)
-
-    items = ",".join(getattr(request, "items", None) or ())
-    evidence, founder, depth_keys = _chain_input(f"evidence/{request.identity}/{items}", load)
-    source = AssemblyEvidenceSource(
-        founder.positions,
-        founder.likelihoods,
-        founder.observed,
-        founder.discovery_sites,
-        request.identity,
-        depth_keys,
-        bool(evidence.discovery_sites.all() and not evidence.founder_excluded.any()),
-    )
-    return request, evidence, founder, source
-
-
-@dataclass(frozen=True)
-class SelectionContext:
-    """Read the already published context assembly without creating a second assembly task."""
-
-    root: str
-    output: str
-    contig: str
-    round_name: str
-
-    def __call__(self) -> Any:
-        from ..stages.assembly import records
-
-        reader = _task_reader(self.output, self.root)
-        request = records.result_reader(
-            reader._store,
-            reader.manifest,
-            product="assembly",
-            contig=self.contig,
-            round_name=self.round_name,
-        )
-        context = None if request is None else reader.read(request, self.contig)
-        if context is None:
-            raise SettingsError(f"{self.contig}: selection needs published context {self.round_name}")
-        return context
-
-
-def _selected_result(root: str, output: str, contig: str, round_name: str, completed: object) -> dict[RecordKey, str]:
-    """Verify the round publication before returning its graph completion identity."""
-    from ..contracts.roles import require_schema
-    from ..engine.graph import RecordKey
-    from ..stages.selection import records
-    from ..store.protocol import read_items
-
-    reader = _task_reader(output, root)
-    request = records.result_reader(
-        reader._store,
-        reader.manifest,
-        product="selected",
-        contig=contig,
-        stage="local_selection_" + round_name,
-    )
-    saved = (
-        None
-        if request is None
-        else read_items(reader._store.contig(contig), request.key, request.identity, ("schema",))
-    )
-    if request is None or saved is None:
-        raise SettingsError(f"{contig}: selection completed without its {round_name} publication")
-    require_schema(saved.payload, request.schema)
-    return {RecordKey(contig, request.key): request.identity}
-
-
-def _run_selection(
-    root: str,
-    output: str,
-    contig: str,
-    round_name: str,
-    resolved: ResolvedConfiguration,
-    maps: GeneticMapSet,
-    ties: TieSettings,
-    *,
-    cores: int = 1,
-) -> Expansion:
-    """Expand precisely one selection round, consuming G1's preceding context assembly."""
-    from ..contracts.roles import require_schema
-    from ..engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
-    from ..stages.discovery import records as discovery_records
-    from ..stages.evidence import records as evidence_records
-    from ..stages.selection.tasks import SelectionSession, selection_round_task
-    from ..store.protocol import NumericalPolicy, read_items
-
-    reader = _task_reader(output, root)
-    # Release 4.10: a round whose completion is published under the identities this run derives (each promised block,
-    # memo and proposal record checked against its identity) is not expanded: its selected-record receipt is the
-    # gather's. Expanding decoded every panel of the round in its entry task before the gather checked the same record.
-    from ..stages.selection import records as selection_records
-
-    done = selection_records.result_reader(
-        reader._store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + round_name
-    )
-    if done is not None and done.scopes[done.round_index].selected(verify=True) is not None:
-        saved = read_items(reader._store.contig(contig), done.key, done.identity, ("schema",))
-        if saved is not None:
-            require_schema(saved.payload, done.schema)
-            return {RecordKey(contig, done.key): done.identity}  # type: ignore[return-value]
-    upstream = {}
-    for name, adapter in (("evidence", evidence_records), ("discovery", discovery_records)):
-        request = adapter.result_reader(reader._store, reader.manifest, product=name, contig=contig)
-        saved = (
-            None
-            if request is None
-            else read_items(reader._store.contig(contig), request.key, request.identity, ("schema",))
-        )
-        if request is None or saved is None:
-            raise SettingsError(f"{contig}: selection requires published {name}")
-        require_schema(saved.payload, request.schema)
-        upstream[name] = request.identity
-    session = SelectionSession(
-        reader._store,
-        contig,
-        resolved.parameters.local_selection,
-        resolved.parameters.discovery,
-        resolved.parameters.assembly,
-        maps.for_contig(contig),
-        upstream,
-        SelectionInputs(root, output, contig),
-        reverse=ties.reverse,
-        tie_keep=ties.keep,
-        census_sink=ties.census,
-        max_threads=cores,
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    child = selection_round_task(
-        session,
-        round_name,
-        load_context=None if round_name == "initial" else SelectionContext(root, output, contig, round_name),
-        key=TaskKey("selection", "select", contig, round_name),
-    )
-    gather = Task(
-        TaskKey("selection", "published", contig, round_name),
-        _selected_result,
-        (root, output, contig, round_name, ResultRef(child.key)),
-        depends_on=(child.key,),
-        affinity=contig,
-    )
-    return Expansion((child,), gather)
-
-
-def _publication_result(
-    root: str, output: str, contig: str, round_name: str | None, completed: object
-) -> dict[RecordKey, str]:
-    """Return only independently verified assembly publication identities after its expansion."""
-    from ..contracts.roles import require_schema
-    from ..engine.graph import RecordKey
-    from ..stages.assembly import records
-    from ..store.protocol import read_items
-
-    reader = _task_reader(output, root)
-    request = records.result_reader(
-        reader._store, reader.manifest, product="assembly", contig=contig, round_name=round_name
-    )
-    saved = (
-        None
-        if request is None
-        else read_items(reader._store.contig(contig), request.key, request.identity, ("schema",))
-    )
-    if request is None or saved is None:
-        raise SettingsError(f"{contig}: assembly completed without its declared publication")
-    require_schema(saved.payload, request.schema)
-    return {RecordKey(contig, request.key): request.identity}
-
-
-def _run_assembly(
-    root: str,
-    output: str,
-    contig: str,
-    round_name: str,
-    resolved: ResolvedConfiguration,
-    maps: GeneticMapSet,
-    ties: TieSettings,
-    *,
-    cores: int = 1,
-) -> Expansion:
-    """Expand one AS6 context/final role from checked selected panels and founder evidence."""
-    from ..engine.graph import Expansion, ResultRef, Task, TaskKey
-    from ..science.assembly.run import AssemblyInputs, Role
-    from ..stages.assembly.final import assembly_task, bind_session
-    from ..stages.selection import records as selection_records
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    context = None if not round_name else round_name.removeprefix("context.")
-    # Release 4.10: a role already published under the identities this run derives returns the receipt its gather
-    # (_publication_result) would, after the same checks, instead of decoding the selected panels, building the
-    # evidence view and decoding the stored product's diagnostics again.
-    from ..contracts.roles import require_schema
-    from ..engine.graph import RecordKey
-    from ..stages.assembly import records as assembly_records
-    from ..store.protocol import read_items
-
-    done = assembly_records.result_reader(
-        reader._store, reader.manifest, product="assembly", contig=contig, round_name=context
-    )
-    if done is not None:
-        saved = read_items(reader._store.contig(contig), done.key, done.identity, ("schema",))
-        if saved is not None:
-            require_schema(saved.payload, done.schema)
-            return {RecordKey(contig, done.key): done.identity}  # type: ignore[return-value]
-    previous = "l2" if context is None else "initial" if context == "l1" else "l1"
-    request = selection_records.result_reader(
-        reader._store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + previous
-    )
-    selected = None if request is None else reader.read(request, contig)
-    if request is None or selected is None:
-        raise SettingsError(f"{contig}: assembly needs published selection round {previous}")
-    evidence_request, evidence, _, source = _chain_evidence(reader, contig)
-    from ..engine.scheduler import numba_threads, spare_threads
-
-    # The views are built in this serial chain step, which the contig's other work waits for: the task's CPUs plus
-    # its lane's idle ones (release 4.9).
-    with numba_threads(spare_threads(DEPTH_KEY_ROWS)):
-        view = source()  # no assembly arrays live in the cached chain tuple
-    if context is None:
-        from ..engine.workers import release_resident_namespace
-
-        release_resident_namespace(_CHAIN_INPUTS)  # the final assembly is the chain inputs' last consumer
-    child_key = TaskKey("assembly", "compute", contig, round_name)
-    session = bind_session(
-        AssemblyInputs(tuple(selected), view, maps.for_contig(contig)),
-        resolved.parameters.assembly,
-        file=reader._store.contig(contig),
-        upstream=dict(
-            panels=request.identity,
-            evidence=evidence_request.identity,
-            payload=evidence.payload_identity,
-            map=dict(resolved.map_identities)[contig],
-        ),
-        role=Role.FINAL if context is None else Role.CONTEXT,
-        levels=None if context is None else int(context[1:]),
-        records_prefix="assembly" if context is None else f"local_selection/{context}/assembly",
-        parent=child_key,
-        max_cores=cores,
-        ties=ties,
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    child = assembly_task(session)
-    gather = Task(
-        TaskKey("assembly", "published", contig, round_name),
-        _publication_result,
-        (root, output, contig, context, ResultRef(child.key)),
-        depends_on=(child.key,),
-        affinity=contig,
-    )
-    return Expansion((child,), gather)
-
-
-def _run_painting(
-    root: str,
-    output: str,
-    contig: str,
-    resolved: ResolvedConfiguration,
-    maps: GeneticMapSet,
-    ties: TieSettings,
-    *,
-    team: int = 1,
-    cores: int = 1,
-) -> str:
-    """Bind AS6's checked final assembly to PA2's window-capable contig action."""
-    from ..stages.assembly import records as assembly_records
-    from ..stages.painting.tasks import identity, run_contig
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    assembly, assembled = _required_product(reader, assembly_records, "assembly", contig)
-    evidence_id = _evidence_identity(reader._store, resolved, contig, reverse=ties.reverse)
-    file = reader._store.contig(contig)
-    from ..store.protocol import bound_payload_identity
-
-    payload = bound_payload_identity(file)
-    expected = identity(
-        resolved.parameters.painting,
-        contig=contig,
-        sample_ids=resolved.sample_ids,
-        assembly_identity=assembled,
-        evidence_identity=evidence_id,
-        payload_identity=payload,
-        map_identity=dict(resolved.map_identities)[contig],
-        ties=ties,
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    run_contig(
-        file,
-        expected,
-        (assembly.prepared, assembly.components),
-        maps.for_contig(contig),
-        resolved.parameters.painting,
-        evidence_identity=evidence_id,
-        payload_identity=payload,
-        ties=ties,
-        threads=team,
-        max_threads=cores,
-        census=ties.census is not None,
-    )
-    return expected
-
-
-def _required_dense_evidence(reader: Results, contig: str) -> tuple[Any, str]:
-    """Read one checked dense view for a whole-contig consumer, without a source twin."""
-    from ..stages.evidence import records
-
-    request = records.result_reader(reader._store, reader.manifest, product="evidence", contig=contig)
-    if request is None:
-        raise SettingsError(f"{contig}: required evidence publication is missing")
-    return records.load_dense(reader._store.contig(contig), expected_identity=request.identity), request.identity
-
-
-def _run_refit(
-    root: str, output: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, team: int = 1
-) -> str:
-    """Pass the checked immutable painting and evidence to RF1's one contig action."""
-    from ..stages.painting import records as painting_records
-    from ..stages.refit.tasks import identity, run_contig
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    painting, painted = _required_product(reader, painting_records, "painting", contig)
-    evidence, evidence_id = _required_dense_evidence(reader, contig)
-    expected = identity(
-        resolved.parameters.founder_refit,
-        contig=contig,
-        sample_ids=resolved.sample_ids,
-        painting_identity=painted,
-        evidence_identity=evidence_id,
-        payload_identity=evidence.payload_identity,
-        ties=ties,
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    run_contig(
-        reader._store.contig(contig),
-        expected,
-        painting,
-        evidence,
-        resolved.parameters.founder_refit,
-        payload_identity=evidence.payload_identity,
-        ties=ties,
-        threads=team,
-    )
-    return expected
-
-
-def _run_phase(
-    root: str, output: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet, scratch: str | None
-) -> str:
-    """Bind the canonical typed upstream products to PH1's complete-contig publisher."""
-    from ..contracts.phase import PhaseInputIdentities
-    from ..core.digest import json_digest
-    from ..stages.painting import records as painting_records
-    from ..stages.pedigree import records as pedigree_records
-    from ..stages.phase import records
-    from ..stages.phase.tasks import publish_contig
-    from ..stages.refit import records as refit_records
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    evidence, evidence_id = _required_dense_evidence(reader, contig)
-    painting, painting_id = _required_product(reader, painting_records, "painting", contig)
-    refit, refit_id = _required_product(reader, refit_records, "refit", contig)
-    pedigree, _ = _required_product(reader, pedigree_records, "pedigree", None)
-    identities = PhaseInputIdentities(
-        evidence_id, painting_id, refit_id, pedigree.edges.identity, dict(resolved.map_identities)[contig]
-    )
-    expected = records.derivation(
-        contig,
-        resolved.sample_ids,
-        identities,
-        resolved.parameters.family_phase,
-        reverse=reader.manifest["ties"]["reverse"],
-        policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    publish_contig(
-        reader._store.contig(contig),
-        evidence,
-        painting,
-        refit,
-        pedigree.edges,
-        maps.for_contig(contig),
-        resolved.parameters.family_phase,
-        identities,
-        expected,
-        root=_default_scratch(Path(root)) / "phase" / json_digest(contig)[:16]
-        if scratch is None
-        else Path(scratch) / "phase" / json_digest(contig)[:16],
-    )
-    return expected.identity
-
-
-def _run_recombination(
-    root: str, output: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet
-) -> str:
-    """Execute RC1 against checked phase and conditioned edges, binding before resume."""
-    from ..stages.pedigree import records as pedigree_records
-    from ..stages.phase import records as phase_records
-    from ..stages.recombination import records
-    from ..stages.recombination.tasks import publish_contig
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    phase, phase_id = _required_product(reader, phase_records, "phase", contig)
-    pedigree, _ = _required_product(reader, pedigree_records, "pedigree", None)
-    reverse = reader.manifest["ties"]["reverse"]
-    expected = records.derivation(
-        contig,
-        resolved.sample_ids,
-        phase_id,
-        pedigree.edges,
-        resolved.parameters.recombination,
-        maps.for_contig(contig),
-        reverse=reverse,
-        policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    publish_contig(
-        reader._store.contig(contig),
-        phase,
-        pedigree.edges,
-        resolved.parameters.recombination,
-        maps.for_contig(contig),
-        expected,
-        reverse=reverse,
-    )
-    return expected.identity
-
-
-def _task_reader(output: str | Path, root: str | Path) -> Any:
-    """The run's reader inside a graph task: its store decompresses with the task's live CPU share."""
-    from ..engine.scheduler import TASK_THREADS
-    from ..results.reader import Results
-
-    return Results(output, checkpoints=root, nthreads=TASK_THREADS)
-
-
-def _run_sites(root: str, output: str, contig: str, source: Any, *, team: int = 1) -> str:
-    """Publish OU1's option-independent site product after checked evidence."""
-    from ..stages.evidence import records
-    from ..stages.inputs import sites
-
-    reader = _task_reader(output, root)
-    evidence, identity = _required_product(reader, records, "evidence", contig)
-    report, _ = _required_product(reader, records, "summary", contig)
-    view = sites.from_evidence(evidence, report, synthetic=reader.synthetic)
-    sites.run(
-        reader._store.contig(contig),
-        source,
-        view,
-        evidence_identity=identity,
-        payload_identity=evidence.payload_identity,
-        team=team,
-    )
-    return sites.identity(identity, evidence.payload_identity, synthetic=reader.synthetic)
-
-
-def _run_release(root: str, output: str, contig: str, *, team: int = 1) -> str:
-    """Pass checked typed inputs to AS6's release operation without transforming them."""
-    from ..stages.assembly import records as assembly_records
-    from ..stages.assembly.release import ReleaseInputs, execute_release, release_identity
-    from ..stages.evidence import records as evidence_records
-    from ..stages.painting import records as painting_records
-    from ..stages.refit import records as refit_records
-    from ..store.protocol import NumericalPolicy
-
-    reader = _task_reader(output, root)
-    assembly, assembly_id = _required_product(reader, assembly_records, "assembly", contig)
-    painting, painting_id = _required_product(reader, painting_records, "painting", contig)
-    refit, refit_id = _required_product(reader, refit_records, "refit", contig)
-    evidence, evidence_id = _required_product(reader, evidence_records, "evidence", contig)
-    identity = release_identity(
-        dict(
-            assembly=assembly_id,
-            painting=painting_id,
-            refit=refit_id,
-            evidence=evidence_id,
-            payload=evidence.payload_identity,
-        ),
-        reverse=reader.manifest["ties"]["reverse"],
-        numerical_policy=NumericalPolicy(**reader.manifest["numerical_policy"]),
-    )
-    execute_release(
-        ReleaseInputs(assembly, painting, refit, evidence), reader._store.contig(contig), identity, cores=team
-    )
-    return identity
-
-
-def _export_identity(reader: Results, contig: str, config: ExportConfig) -> str:
-    """Bind formatting to its checked source products and exact selected options."""
-    from ..outputs.export.records import output_identity
-    from ..store.identity import code_dependency_identity
-
-    upstream: dict[str, str] = {}
-    products = set(config.products)
-    names = []
-    if products & {"founders", "samples"}:
-        names.append("released_sites")
-    if products & {"founders", "tracks"}:
-        names.append("founder_release")
-    if "samples" in products:
-        names.append("phase")
-    for name in names:
-        identity = reader.product_identity(name, contig)
-        if identity is None:
-            raise SettingsError(f"{contig}: export requires published {name}")
-        upstream[name] = identity
-    code = code_dependency_identity(("outputs.export.task", "outputs.export.run")).digest
-    return output_identity(upstream, config, code)
-
-
-def _run_export(root: str, output: str, contig: str, full_length: bool) -> str:
-    """Render checked release products and publish the output selection after its files."""
-    from ..contracts.roles import require_schema
-    from ..outputs.export.records import SCHEMA, ExportConfig, ExportRecord
-    from ..outputs.export.task import write
-    from ..store.protocol import publish_output, read_output
-
-    reader = _task_reader(output, root)
-    config = ExportConfig(full_length=full_length)
-    identity = _export_identity(reader, contig, config)
-    file = reader._store.contig(contig)
-    previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
-    if previous is not None:
-        require_schema(previous.payload, SCHEMA)
-        if previous.payload["identity"] != identity:
-            # Release 4.11: the files are about to be replaced one product at a time. Until the new record is
-            # published, the old record must not certify them (an interrupted replacement could leave one product
-            # rerendered under it); it keeps listing its files so the replacement still retires them.
-            replacing = dict(previous.payload, identity=f"replacing:{identity}")
-            publish_output(file, "outputs/export", replacing["identity"], replacing, supersede=True)
-            previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
-    record = write(
-        reader,
-        Path(output) / "export",
-        contig,
-        config,
-        identity,
-        None if previous is None else ExportRecord(**previous.payload),
-        map_work=_map_writers,
-    )
-    publish_output(
-        file,
-        "outputs/export",
-        record.identity,
-        dict(schema=record.schema, identity=record.identity, entry=dict(record.entry)),
-        supersede=True,
-    )
-    return identity
-
-
-def _export_manifest_part(root: str, output: str, contig: str, full_length: bool):
-    """Check one published export and collect its released identity flags."""
-    from ..contracts.roles import require_schema
-    from ..outputs.export.records import SCHEMA, ExportConfig
-    from ..store.protocol import read_output
-
-    reader = _task_reader(output, root)
-    record = read_output(reader._store.contig(contig), "outputs/export", identity=lambda p: p["identity"])
-    if record is None:
-        raise SettingsError(f"{contig}: export record is missing")
-    expected = _export_identity(reader, contig, ExportConfig(full_length=full_length))
-    if record.identity != expected:
-        raise SettingsError(f"{contig}: export differs from current published products or options")
-    require_schema(record.payload, SCHEMA)
-    release = reader.founder_release(contig)
-    if release is None:
-        raise SettingsError(f"{contig}: released founder identity flags are missing")
-    return dict(record.payload["entry"]), (contig, "founder_refit", release.identity_flags)
-
-
-def _write_export_manifest(root: str, output: str, contigs: tuple[str, ...], full_length: bool, parts=None) -> None:
-    """Publish the manifest after ordered, independently checked chromosome parts."""
-    from ..outputs.export.records import ExportConfig
-    from ..outputs.export.run import write_founder_identity, write_manifest
-
-    reader = _task_reader(output, root)
-    if parts is None:
-        parts = tuple(_export_manifest_part(root, output, contig, full_length) for contig in contigs)
-    entries, flags = zip(*parts, strict=True)
-    write_founder_identity(
-        Path(output) / "export", reader, contigs, ExportConfig(full_length=full_length).products, collected=flags
-    )
-    write_manifest(
-        Path(output) / "export",
-        Path(root),
-        synthetic=reader.synthetic,
-        reference=reader.manifest["source"].get("reference_vcf"),
-        contigs=list(entries),
-        settings=ExportConfig(full_length=full_length),
-    )
 
 
 def _complete_workflow(
@@ -1324,15 +445,12 @@ def _complete_workflow(
         if task.key.stage == "pedigree":
             # The stored decision replies with its publication receipt, never the product:
             # check it against the independently bound reader and the record on disk.
-            from ..contracts.roles import require_schema
-            from ..stages.pedigree.records import result_reader
-            from ..store.protocol import read_items
+            from ..results.reader import Results
 
-            request = result_reader(store, manifest, product="pedigree")
-            saved = None if request is None else read_items(store.run, request.key, request.identity, ("schema",))
-            if request is None or saved is None:
+            reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints)
+            request = reader.stage_request("pedigree")
+            if reader.receipt(request) is None:
                 raise InvariantError("pedigree completed without its checked publication")
-            require_schema(saved.payload, request.schema)
             checked = {RecordKey("run", request.key): request.identity}
             if value != checked:
                 raise InvariantError("pedigree receipt differs from its checked publication")
@@ -1366,7 +484,7 @@ def _complete_workflow(
     scopes = tuple(dict.fromkeys(key.scope for key in nodes if key.scope != "run"))
     name = cut.step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
 
-    # Release 4.10: the containers' envelope checks run concurrently (file reads and decodes after the graph).
+    # the containers' envelope checks run concurrently (file reads and decodes after the graph).
     if not complete_cut(
         replace(cut, nodes=nodes),
         containers,
@@ -1401,7 +519,7 @@ def _task_seconds(output: Path, stage: str) -> dict[str, float]:
 def _recombination_contig(
     output: Path, reader: Results, contig: str
 ) -> tuple[tuple[str, dict[str, Path]], RecombinationMap]:
-    """Attach observed task timings from invocation records to RC1's report rows."""
+    """Attach observed task timings from invocation records to recombination's report rows."""
     from ..outputs.reports.recombination import contig_recombination
 
     return contig_recombination(
@@ -1410,7 +528,7 @@ def _recombination_contig(
 
 
 def _phase_report(output: Path, reader: Results) -> Path:
-    """Format PH1's exact per-contig summaries with measured invocation task times."""
+    """Format family phase's exact per-contig summaries with measured invocation task times."""
     from ..outputs.reports.tables import write_family_phase
 
     return write_family_phase(output, reader.phase_summaries(elapsed_seconds=_task_seconds(output, "phase")))
@@ -1432,34 +550,20 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
 
     for c in resolved.contigs:
         release_inputs = tuple(key(stage, c) for stage in ("assembly", "painting", "refit", "evidence"))
-        actions[key("sites", c)] = Task(
-            key("sites", c),
-            _run_sites,
-            (root, output, c, prepared.source),
-            depends_on=(key("evidence", c),),
-            inputs=(RecordKey(c, "evidence"),),
-            outputs=(RecordKey(c, "sites"),),
-            resources=ResourceRequest(1, prepared.cores),
-            thread_argument="team",
-        )
-        actions[key("release", c)] = Task(
-            key("release", c),
-            _run_release,
-            (root, output, c),
-            depends_on=release_inputs,
-            outputs=(RecordKey(c, "release"),),
-            resources=ResourceRequest(1, prepared.cores),
-            thread_argument="team",
-        )
+        from ..stages.context import StageRun
+        from ..stages.sites.tasks import task as sites_task
+
+        context = StageRun(root, output, resolved, prepared.genetic_maps, prepared.manifest, prepared.cores,
+                           source=prepared.source)
+        actions[key("sites", c)] = sites_task(key("sites", c), context)
+        from ..stages.release.tasks import task as release_task
+
+        actions[key("release", c)] = release_task(key("release", c), context)
         if prepared.settings.export.enabled:
-            actions[key("export", c)] = Task(
-                key("export", c),
-                _run_export,
-                (root, output, c, prepared.settings.export.full_length),
-                depends_on=tuple(key(stage, c) for stage in ("sites", "release", "phase")),
-                outputs=(RecordKey(c, "outputs/export"),),
-                resources=ResourceRequest(1, prepared.cores),  # its writers' compression threads (release 4.10)
-            )
+            from ..stages.export.tasks import task as export_task
+
+            actions[key("export", c)] = export_task(key("export", c), context,
+                                                   full_length=prepared.settings.export.full_length)
     dependencies = {
         "quality": tuple(key("evidence", c) for c in resolved.contigs),
         "painting": tuple(key("painting", c) for c in resolved.contigs),
@@ -1474,32 +578,11 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     if reader.synthetic:
         dependencies["truth"] = (key("init"),)
     if prepared.settings.export.enabled:
-        parts = tuple(
-            Task(
-                TaskKey("report", "contig", c, "export_manifest"),
-                _export_manifest_part,
-                (root, output, c, prepared.settings.export.full_length),
-                depends_on=(key("export", c),),
-                # Release 4.10: its identity check binds every contig's upstream chain (pedigree's inputs) on the
-                # task's CPUs; at the end of a run they are idle (chr3 at 0.5x: 55 s on one CPU).
-                resources=ResourceRequest(1, prepared.cores),
-            )
-            for c in resolved.contigs
-        )
-        actions.update((task.key, task) for task in parts)
-        manifest_key = TaskKey("report", "run", "run", "export_manifest")
-        actions[manifest_key] = Task(
-            manifest_key,
-            _write_export_manifest,
-            (
-                root,
-                output,
-                resolved.contigs,
-                prepared.settings.export.full_length,
-                tuple(ResultRef(task.key) for task in parts),
-            ),
-            depends_on=tuple(task.key for task in parts),
-        )
+        from ..stages.export.tasks import manifest_tasks
+
+        declarations = manifest_tasks(context, full_length=prepared.settings.export.full_length)
+        actions.update((task.key, task) for task in declarations)
+        manifest_key = declarations[-1].key
     dependencies["complete"] = tuple(dict.fromkeys(k for values in dependencies.values() for k in values))
     dependencies["science"] = dependencies["complete"]
     if prepared.settings.export.enabled:
@@ -1544,99 +627,30 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
     return replace(cut, nodes=tuple(node.key for node in graph.nodes if node.key in selected))
 
 
-def _prerequisites(prepared: PreparedRun, resolved: ResolvedConfiguration, cut: Cut) -> dict[TaskKey, str]:
-    """Resolve workflow prerequisites through the same checked record adapters as readers."""
-    import importlib
-
-    from ..core.errors import InvariantError
+def _prerequisites(prepared, resolved, cut):
+    """Resolve the cut's prerequisites through stage-owned requests and one receipt check."""
     from ..results.reader import Results
+    from ..stages.init import records as init_records
+    from ..stages.init.tasks import check
+    from ..outputs.export.records import SCHEMA, ExportConfig
 
     results = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints)
     values = {}
     for key in cut.prerequisites:
+        contig = None if key.scope == "run" else key.scope
         if key.stage == "init":
-            values[key] = _check_initialized(
-                str(prepared.paths.checkpoints), _initial_identity(results.manifest, resolved)
-            )
-            continue
-        if key.stage == "evidence":
-            from ..store.store import CheckpointStore
-
-            values[key] = _evidence_identity(
-                CheckpointStore(prepared.paths.checkpoints),
-                resolved,
-                key.scope,
-                reverse=bool(results.manifest.get("ties", {}).get("reverse", False)),
-            )
+            values[key] = check(str(prepared.paths.checkpoints), init_records.expected(results.manifest, resolved))
             continue
         if key.stage == "export":
-            from ..contracts.roles import require_schema
-            from ..outputs.export.records import SCHEMA, ExportConfig
-            from ..store.protocol import read_output
-
-            expected = _export_identity(
-                results, key.scope, ExportConfig(full_length=prepared.settings.export.full_length)
-            )
-            saved_export = read_output(results._file(key.scope), "outputs/export", identity=lambda p: p["identity"])
-            if saved_export is None or saved_export.identity != expected:
-                raise SettingsError(f"{key.scope}: current export is not published")
-            require_schema(saved_export.payload, SCHEMA)
-            values[key] = expected
+            identity = export_records.expected(results, contig, ExportConfig(full_length=prepared.settings.export.full_length))
+            saved = results.output_receipt("outputs/export", identity, SCHEMA, contig)
+            if saved is None:
+                raise SettingsError(f"{contig}: current export is not published")
+            values[key] = identity
             continue
-        products = {
-            "discovery": "discovery",
-            "selection": "selected",
-            "assembly": "assembly",
-            "painting": "painting",
-            "refit": "refit",
-            "pedigree": "pedigree",
-            "phase": "phase",
-            "recombination": "recombination",
-            "sites": "released_sites",
-            "release": "founder_release",
-        }
-        if key.stage == "relatedness":
-            module_name = (
-                "stages.relatedness.pairs_records" if key.unit == "pairs" else "stages.relatedness.families_records"
-            )
-            product = "pairs" if key.unit == "pairs" else "families"
-        else:
-            module_name = {"sites": "stages.inputs.sites_records", "release": "stages.assembly.records"}.get(
-                key.stage, f"stages.{key.stage}.records"
-            )
-            product = products[key.stage]
-        module = importlib.import_module(f"haplotype_reconstruction.{module_name}")
-        options: dict[str, Any] = {}
-        if key.stage == "selection":
-            options["stage"] = "local_selection_" + key.round
-        elif key.stage == "assembly" and key.round:
-            options["round_name"] = key.round.removeprefix("context.")
-        elif key.stage == "painting":
-            options.update(panels=False, emissions=False)
-        elif key.stage == "refit":
-            options["panels"] = False
-        request = module.result_reader(
-            results._store,
-            results.manifest,
-            product=product,
-            contig=None if key.scope == "run" else key.scope,
-            **options,
-        )
-        from ..contracts.roles import require_schema
-        from ..store.protocol import read_items
-
-        saved = (
-            None
-            if request is None
-            else read_items(
-                results._file(None if key.scope == "run" else key.scope), request.key, request.identity, ("schema",)
-            )
-        )
-        if saved is None:
+        request = results.stage_request(key.stage, contig, round_name=key.round, pairs=key.unit == "pairs")
+        if results.receipt(request, contig) is None:
             raise SettingsError(f"workflow prerequisite {key.stage} for {key.scope} is not published")
-        require_schema(saved.payload, request.schema)
-        if key in values:
-            raise InvariantError(f"duplicate workflow prerequisite: {key}")
         values[key] = request.identity
     return values
 
@@ -1695,7 +709,7 @@ def execute(
         assert resolved is not None
         from ..engine.graph import TaskKey, run_graph
         from ..results.reader import Results
-        from ..stages.graph import Node, bind_tasks, build_graph, execution_options, workflow_cut
+        from ..stages.graph import Node, bind_tasks, build_graph, execution_options, workflow_cut, task_preloads, with_kernel_tasks
 
         output_actions = _output_actions(prepared, resolved)
         output_nodes = tuple(Node(task.key, task.depends_on) for task in output_actions.values())
@@ -1726,20 +740,22 @@ def execute(
         from ..core.ties import TieSettings
 
         ties = TieSettings(
-            reverse=tie_reverse,
-            keep=tie_keep,
+            reverse=bool(prepared.manifest["ties"]["reverse"]),
+            keep=tuple(prepared.manifest["ties"].get("keep", ())),
             census=None if tie_census is None else TieCensusSink(tie_census.expanduser().resolve()),
         )
         tasks = bind_tasks(
             graph, cut, _model_actions(prepared, resolved, cut, outputs=output_actions, ties=ties), completed=completed
         )
-        scheduling = execution_options(graph, cut, phase_costs=_phase_costs(prepared, resolved))
-        preload = _task_preloads(tasks)
+        # the contigs' size estimates (sites x samples) also order and weight the chromosome chains:
+        # the largest contigs claim lanes first and a chain at least twice the median keeps a proportional floor.
+        sizes = _phase_costs(prepared, resolved)
+        scheduling = execution_options(graph, cut, contig_costs=sizes, phase_costs=sizes)
+        preload = task_preloads(tasks)
     else:
         preload = ()
     # Init reads its source's header and binds the manifest; it runs kernels only when it simulates the source.
-    # Warming them in init's own runtime first (an isolated process, before the run's warm-up on every CPU) delayed
-    # every run's start by its compile pool.
+    # Warming kernels during observation-only init would duplicate the following run's compile-pool startup.
     warm = command != "init" or (prepared.source is not None and prepared.source.kind == "simulation")
     if warm:
         _start_runtime(prepared, preload=preload)
@@ -1781,7 +797,7 @@ def execute(
             _output_selection(prepared.paths.output, settings)
         assert cut is not None
         if defer:
-            tasks, scheduling = _with_kernel_tasks(tasks, scheduling, kernels)
+            tasks, scheduling = with_kernel_tasks(tasks, scheduling, kernels)
         values = run_graph(
             tasks,
             cores=prepared.cores,
@@ -1808,53 +824,6 @@ def execute(
     )
 
 
-def _evidence_identity(store: CheckpointStore, resolved: ResolvedConfiguration, contig: str, *, reverse: bool) -> str:
-    """Rebuild an evidence derivation from its source binding and initialized parameters."""
-    from ..contracts.roles import require_schema
-    from ..stages.evidence import records
-    from ..store.protocol import bound_payload_identity, read_items
-
-    file = store.contig(contig)
-    if not file.has("input/payload"):
-        raise SettingsError(f"{contig}: evidence source payload is not bound")
-    consumed = bound_payload_identity(file)
-    identity = records.identity(resolved.parameters.evidence, consumed, resolved.sample_ids, reverse=reverse)
-    recorded = read_items(file, records.EVIDENCE, identity, ("schema",))
-    if recorded is None:
-        raise SettingsError(f"{contig}: evidence is not published")
-    require_schema(recorded.payload, records.SCHEMA)
-    return identity
-
-
-def _run_relatedness(
-    root: str,
-    resolved: ResolvedConfiguration,
-    maps: GeneticMapSet,
-    *,
-    pairs: bool = False,
-    reverse: bool = False,
-    team: int = 1,
-) -> str:
-    """Construct the bound-order evidence inputs after their graph dependencies finish."""
-    from ..stages.relatedness.evidence_pass import EvidenceInput
-    from ..store.store import CheckpointStore
-
-    store = CheckpointStore(root, nthreads=team)
-    inputs = tuple(
-        EvidenceInput(c, _evidence_identity(store, resolved, c, reverse=reverse), maps.for_contig(c))
-        for c in resolved.contigs
-    )
-    if pairs:
-        from ..stages.relatedness.pairs_task import run as run_pairs
-
-        return run_pairs(
-            root, inputs, resolved.sample_ids, resolved.parameters.pairwise_ibd, reverse=reverse, team=team
-        )
-    from ..stages.relatedness.families_task import run as run_families
-
-    return run_families(root, inputs, resolved.sample_ids, resolved.parameters.relatedness, reverse=reverse, team=team)
-
-
 def _recorded_run(
     settings: Settings, directory: str | Path, *, recombination: bool = False
 ) -> tuple[PreparedRun, ResolvedConfiguration]:
@@ -1862,15 +831,15 @@ def _recorded_run(
 
     from ..engine.runtime import configure_worker
 
-    paths = RunPaths.from_directory(directory)
-    settings = replace(settings, run=replace(settings.run, output=paths.output, checkpoints=paths.checkpoints))
     cores = resolve_cores(settings)
     configure_worker(cores)
+    paths = RunPaths.from_directory(directory)
+    settings = replace(settings, run=replace(settings.run, output=paths.output, checkpoints=paths.checkpoints))
+    store = _existing_store(paths)
     from ..stages.configure import configure, genetic_maps, resolve
 
     parameters = configure(settings)
     maps = genetic_maps(settings)
-    store = _existing_store(paths)
     manifest = None if store is None else store.manifest("run")
     if manifest is None or store is None:
         raise SettingsError(f"{paths.output}: run has not been initialized; use haplotypes init")
@@ -1883,12 +852,29 @@ def _recorded_run(
     return PreparedRun(settings, paths, cores, None, parameters, maps, manifest), resolved
 
 
-def _load_recorded_settings(directory: Path, cores: int | None = None) -> Settings:
-    """Load the recorded versioned settings with an execution-only CPU override."""
+def _load_recorded_settings(
+    directory: Path,
+    cores: int | None = None,
+    *,
+    options: Mapping[str, Mapping[str, Any]] | None = None,
+    overrides: Sequence[str] = (),
+) -> Settings:
+    """Check provenance before settings decoding, after establishing numerical policy."""
+    from ..engine.runtime import configure_worker
     from .settings.load import load_settings
 
-    options = {} if cores is None else {"execution": {"cores": cores}}
-    return load_settings(directory / "config.toml", options=options)
+    # The container codec needs NumPy, but not Numba. Establish the scalar
+    # library policy before reading it; select the actual Numba capacity from
+    # the checked settings before returning to any scientific command imports.
+    configure_worker(1)
+    paths = RunPaths.from_directory(directory)
+    _existing_store(paths)
+    requested = {name: dict(values) for name, values in (options or {}).items()}
+    if cores is not None:
+        requested.setdefault("execution", {})["cores"] = cores
+    settings = load_settings(directory / "config.toml", options=requested, overrides=overrides)
+    configure_worker(resolve_cores(settings))
+    return settings
 
 
 @contextmanager
@@ -1951,7 +937,7 @@ def _evaluation_tasks(tasks: Any, reader: Any, *, cores: int, recorder: Any) -> 
 
 
 def templates_command(args: argparse.Namespace) -> int:
-    """Apply the numerical/runtime boundary before SI1 imports or computes template windows."""
+    """Apply the numerical/runtime boundary before template generation imports or computes template windows."""
     from ..core.errors import InputError
     from ..engine.runtime import affinity_cpus, configure_worker, kernel_run, start_run
 
@@ -2020,6 +1006,8 @@ def evaluate_command(args: argparse.Namespace) -> int:
 def export_command(args: argparse.Namespace) -> int:
     """Format selected published releases into a new destination, publishing its manifest last."""
     settings = _load_recorded_settings(args.run_directory, args.cores)
+    from ..stages.export.tasks import map_writers
+
     prepared, _ = _recorded_run(settings, args.run_directory)
     from ..core.files import is_placement_lock
     from ..engine.graph import run_graph
@@ -2034,7 +1022,7 @@ def export_command(args: argparse.Namespace) -> int:
     if not contigs or len(set(contigs)) != len(contigs) or set(contigs) - set(reader.contigs):
         raise SettingsError("export contigs must be unique names in the initialized run")
     destination = args.destination.expanduser().resolve()
-    # Empty placement locks left by an earlier failed export into this destination are not contents (release 4.11).
+    # Empty placement locks left by an earlier failed export into this destination are not contents.
     if destination.exists() and (
         not destination.is_dir()
         or any(not is_placement_lock(entry, (suffix("vcf"), suffix("bcf"))) for entry in destination.iterdir())
@@ -2049,9 +1037,9 @@ def export_command(args: argparse.Namespace) -> int:
             destination,
             contig,
             config,
-            _export_identity(reader, contig, config),
+            export_records.expected(reader, contig, config),
             max_cores=prepared.cores,
-            map_work=_map_writers,
+            map_work=map_writers,
         )
         for contig in contigs
     ]
@@ -2087,6 +1075,7 @@ def _check_recombination_bindings(
     from ..core.errors import InvariantError
     from ..stages.recombination import records
     from ..store.protocol import read_items
+    from ..results.protocol import check_receipt
 
     candidate = dict(manifest, **resolved.manifest())
 
@@ -2105,18 +1094,16 @@ def _check_recombination_bindings(
             require_schema(binding.payload, 1)
             if binding.payload["derivation"] != request.identity:
                 raise InvariantError(f"{contig}: recombination binding payload differs from its derivation")
-        saved = read_items(file, request.key, request.identity, ("schema",))
-        if saved is not None:
-            require_schema(saved.payload, request.schema)
+        check_receipt(file, request)
 
-    # Release 4.10: each contig derives its upstream chain (recombination, phase, painting, assembly, selection,
+    # each contig derives its upstream chain (recombination, phase, painting, assembly, selection,
     # discovery readers: envelope reads and decodes); contig after contig this took 20-30 s of a resumed run's start
     # and 165 s of an export of one contig. The checks are independent reads; the first error in contig order wins.
     _threaded_each(check, resolved.contigs)
 
 
 def _threaded_each(function: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
-    """core.concurrency.threaded_each (release 4.10): bounded threads for a coordinator's independent record reads."""
+    """core.concurrency.threaded_each: bounded threads for a coordinator's independent record reads."""
     from ..core.concurrency import threaded_each
 
     return threaded_each(function, items)
@@ -2133,7 +1120,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     from ..engine.graph import run_graph
     from ..engine.records import record_run, run_log
     from ..engine.runtime import kernel_run
-    from ..stages.graph import Node, bind_tasks, build_graph, workflow_cut
+    from ..stages.graph import Node, bind_tasks, build_graph, workflow_cut, task_preloads
     from ..store.store import CheckpointStore
     from .settings.load import write_settings
     from .settings.schema import to_dict
@@ -2148,7 +1135,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)
     tasks = bind_tasks(graph, cut, _model_actions(prepared, resolved, cut, outputs=outputs), completed=completed)
-    preload = _task_preloads(tasks)
+    preload = task_preloads(tasks)
     _start_runtime(prepared, preload=preload)
     prepared.paths.logs.mkdir(parents=True, exist_ok=True)
     log = prepared.paths.logs / f"recombination_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S_%f')}_{os.getpid()}.log"
@@ -2177,176 +1164,13 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     return RunResult("complete", None, resolved.contigs)
 
 
-# The stage implementations behind the application's task wrappers (a wrapper names its stage, not its code): preloaded
-# for warm-up, and their import closures order the kernel compilations. Init only checks the run's bound configuration
-# (_check_initialized): no stage code. Relatedness depends on the unit.
-_STAGE_OWNERS: dict[str, tuple[str, ...]] = {
-    "init": (),
-    "evidence": ("stages.evidence.tasks",),
-    "discovery": ("stages.discovery.tasks",),
-    "selection": ("stages.selection.tasks",),
-    "assembly": ("stages.assembly.final",),
-    "painting": ("stages.painting.tasks",),
-    "refit": ("stages.refit.tasks",),
-    "pedigree": (
-        "stages.pedigree.prepare",
-        "stages.pedigree.screen",
-        "stages.pedigree.scores",
-        "stages.pedigree.decision",
-    ),
-    "phase": ("stages.phase.tasks",),
-    "recombination": ("stages.recombination.tasks",),
-    "sites": ("stages.inputs.sites",),
-    "release": ("stages.assembly.release",),
-    "export": ("outputs.export.task",),
-    "report": ("outputs.reports.tasks",),
-}
-
-
-def _stage_modules(task: Task) -> tuple[str, ...] | None:
-    """The stage implementation modules behind ``task`` (its stage's owners, with the kernel modules assembly imports
-    lazily); None for a stage outside the table."""
-    stage = task.key.stage
-    if stage == "relatedness":
-        modules: tuple[str, ...] = (
-            "stages.relatedness." + ("pairs_task" if task.key.unit == "pairs" else "families_task"),
-        )
-    elif stage in _STAGE_OWNERS:
-        modules = _STAGE_OWNERS[stage]
-    else:
-        return None
-    result = tuple("haplotype_reconstruction." + module for module in modules)
-    if stage == "assembly":
-        from ..science.assembly.kernel_inventory import MODULES
-
-        result += tuple(module.__name__ for module in MODULES)
-    return result
-
-
-def _task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
-    """Name the stage implementations behind application wrappers before C2 warms workers."""
-    from ..stages.graph import preload_modules
-
-    modules = list(preload_modules(tasks))
-    for task in tasks:
-        modules.extend(_stage_modules(task) or ())
-    return tuple(dict.fromkeys(modules))
-
-
-# Source identities also traverse readers, codecs and type-only imports into other stages. Those producers are
-# not numerical work performed by this task. Bound first-use waits to the stage's scientific operations, plus
-# shared/core/contract kernels in its source closure. General selection tasks can expand context assembly;
-# application round tasks consume separate context nodes instead. Pedigree and phase can recompute painting
-# emissions. Keep these real cross-stage consumers in their respective groups.
-_STAGE_KERNEL_SCIENCE: dict[str, tuple[str, ...]] = {
-    "evidence": ("evidence",),
-    "relatedness": ("relatedness",),
-    "discovery": ("discovery",),
-    "selection": ("selection", "assembly"),
-    "assembly": ("assembly",),
-    "painting": ("painting",),
-    "refit": ("refit",),
-    "pedigree": ("pedigree", "painting"),
-    "phase": ("phase", "painting"),
-    "recombination": ("recombination",),
-}
-
-
-def _stage_kernel_modules(task: Task) -> tuple[str, ...]:
-    """Numerical ownership within the stage's static closure, including dynamically expanded work."""
-    from ..store.identity import code_dependency_identity
-
-    roots = _stage_modules(task)
-    if not roots:
-        return ()
-    modules = code_dependency_identity(roots).modules
-    science = _STAGE_KERNEL_SCIENCE.get(task.key.stage)
-    if science is None:  # output adapters retain their complete closure
-        return modules
-    if task.key.stage == "selection" and task.key.round in {"initial", "l1", "l2"}:
-        science = ("selection", "assembly.evidence")
-        if task.key.round != "initial":
-            science += ("assembly.alleles",)
-        else:
-            modules = tuple(m for m in modules if m != "haplotype_reconstruction.science.selection.context_refit")
-    if task.key.stage == "assembly" and task.key.round.startswith("context."):
-        # CONTEXT returns after the join; only FINAL expands AS8 refinement.
-        modules = tuple(m for m in modules if not m.startswith("haplotype_reconstruction.science.assembly.refinement."))
-    prefixes = tuple(
-        "haplotype_reconstruction." + name + "."
-        for name in ("core", "contracts", "science.shared", *("science." + name for name in science))
-    )
-    return tuple(
-        module
-        for module in modules
-        if (module + ".").startswith(prefixes) or module == "haplotype_reconstruction.science.evidence.likelihoods"
-    )
-
-
-def _with_kernel_tasks(
-    tasks: tuple[Task, ...], scheduling: dict[str, Any], state: Any
-) -> tuple[tuple[Task, ...], dict[str, Any]]:
-    """Gate each scientific root on its own missing compiles, leaving unrelated work runnable.
-
-    A root's dependency also protects its dynamic expansions: no child can use a tail signature before its module
-    has been warmed in the shared run cache. Only state.missing emits tasks or edges. Compilation retains the
-    earliest-consumer/learned-cost order; independent stages keep their existing priority over spare warm-up work.
-    """
-    from ..engine.kernels import compile_tasks
-
-    compiles: dict[tuple[str, str], list[Task]] = {}
-    for task in compile_tasks(state):  # one per missing overload, grouped by function
-        compiles.setdefault(task.args[0], []).append(task)
-    if not compiles:
-        return tasks, scheduling
-    by_module: dict[str, list[tuple[str, str]]] = {}
-    for name in compiles:
-        by_module.setdefault(name[0], []).append(name)
-    indexed = {task.key: task for task in tasks}
-    levels: dict[TaskKey, int] = {}
-
-    def level(key: TaskKey) -> int:  # the longest dependency path to ``key`` within this graph
-        if key not in levels:
-            levels[key] = 1 + max((level(d) for d in indexed[key].depends_on if d in indexed), default=-1)
-        return levels[key]
-
-    first_use: dict[tuple[str, str], int] = {}
-    gated = []
-    for task in tasks:
-        dependencies = list(task.depends_on)
-        for module in _stage_kernel_modules(task):
-            for name in by_module.get(module, ()):
-                first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
-                dependencies.extend(compile.key for compile in compiles[name])
-        gated.append(replace(task, depends_on=tuple(dict.fromkeys(dependencies))))
-    unused = 1 + max(levels.values(), default=0)
-    order = sorted(
-        compiles,
-        key=lambda name: (
-            first_use.get(name, unused),
-            -state.seconds.get(name, 0.0),
-            -len(state.missing[name]),
-            name,
-        ),
-    )
-    priorities = dict(scheduling.get("priorities") or {})
-    floor = min(priorities.values(), default=0.0) - 1.0
-    priorities.update({compile.key: floor - rank for rank, name in enumerate(order) for compile in compiles[name]})
-    return (*gated, *(compile for name in order for compile in compiles[name])), dict(scheduling, priorities=priorities)
-
-
-def _default_scratch(checkpoints: Path) -> Path:
-    """Keep disposable files beside the immutable checkpoint layout on its filesystem."""
-    return checkpoints.parent / ("." + checkpoints.name + ".scratch")
-
-
 def _scratch_base(prepared: PreparedRun) -> Path:
     """Resolve the invocation's explicit scratch choice or checkpoint-adjacent default."""
-    return prepared.settings.execution.scratch or _default_scratch(prepared.paths.checkpoints)
+    return prepared.settings.execution.scratch or default_scratch(prepared.paths.checkpoints)
 
 
 def _kernel_store(prepared: PreparedRun) -> Path:
-    """Keep C2's disposable persistent cache on the invocation's selected scratch filesystem."""
+    """Keep kernel warm-up's disposable persistent cache on the invocation's selected scratch filesystem."""
     return _scratch_base(prepared) / "kernel_store"
 
 
@@ -2354,7 +1178,7 @@ def _start_runtime(prepared: PreparedRun, *, preload: tuple[str, ...] = ()) -> N
     """Enter the engine with declared task roots and a code-keyed optional scratch namespace."""
     from ..engine.runtime import start_run
 
-    # E1 forwards the registered declarations after importing these roots. Keep
+    # evidence forwards the registered declarations after importing these roots. Keep
     # the caller roots stable across repeated calls in the same interpreter.
     roots = tuple(dict.fromkeys(("haplotype_reconstruction.interface.run", *preload)))
     cache = None

@@ -3,7 +3,7 @@
 Owns immutable state/bin/transition records and released calls, not raw Viterbi
 paths or posterior buffers. Panel row paths and optional packed emissions travel
 as independent top-level payload items; adapters supply assembly for panel views.
-Pure views are relocated from painting.release (PA2 handoff, PR19); no I/O.
+Pure release views perform no I/O.
 """
 
 from __future__ import annotations
@@ -17,9 +17,11 @@ import numpy as np
 from numba import prange, types
 from numpy.typing import NDArray
 
+from haplotype_reconstruction.science.painting.parameters import PaintingParameters
+
 from ..core.errors import InvariantError
 from ..core.kernels import kernel
-from ..core.ties import TieCounts, noise_quantum
+from ..core.ties import TieCounts
 from .panels import ComponentPanel, FounderComponent, PreparedPanel, materialise
 from .payload import from_payload, to_payload
 from .roles import freeze_record_arrays, record_field, require_schema, schema_field
@@ -85,7 +87,7 @@ def coalesce_chunks(
 def state_alt_probabilities(
     named_alleles: NDArray[np.int8], background_frequency: NDArray[np.float64]
 ) -> NDArray[np.float64]:
-    """Called class alleles, otherwise the recorded background frequency (P0 PR01).
+    """Called class alleles, otherwise the recorded background frequency (PR01).
 
     Shared by PaintingStates and the emissions producer; no clipping or prior.
     """
@@ -287,7 +289,7 @@ class ComponentPainting:
     def carrier_observed(
         self, positions: np.ndarray, columns: np.ndarray, observed: np.ndarray, n_rows: int
     ) -> np.ndarray:
-        """bool[K, L]: founder row k at bp ``positions[j]`` is observed by a painted carrier (release 2.2): some
+        """bool[K, L]: founder row k at bp ``positions[j]`` is observed by a painted carrier: some
         eligible sample whose released track at that site names k in its member set (named, pooled, local
         equivalence or switch interval) has read depth there (``observed`` bool [N, L_e] at evidence columns
         ``columns`` int64 [L]). False outside the painting bins."""
@@ -335,7 +337,7 @@ class RelabelMove:
     score_gain_switches: summed Viterbi score gain in units of one track change;
     painted_switch_change: change of the painted switch total (negative);
     winners, losers: samples whose painted switches fall / rise;
-    winners_forward, winners_reverse (release 2.14): winners whose decoded path, under the labels before the move,
+    winners_forward, winners_reverse: winners whose decoded path, under the labels before the move,
         switches from rows[0] to rows[1] at the link, or from rows[1] to rows[0]. A label exchange of two founders'
         rows makes carriers of either founder switch, so both directions are expected; one shared recombinant
         lineage switches one way only, and the panel's founder identity across the link is then not identified
@@ -377,10 +379,9 @@ class LabelContinuity:
     moves: accepted moves in search order (also when the final check rejects them);
     row_maps: int64[A, K] applied relabelling (span a, new row k carries old
         row row_maps[a, k]), None unless accepted.
-    tie_events: candidate rankings decided inside a tie class (``maths.ties.TieCounter``
-        record; release 2.1).
+    tie_events: candidate rankings decided inside a tie class (``core.ties.TieCounter`` record).
     check_budget_reached: an iteration re-decoded label_continuity_check_budget candidates without an acceptable
-        one and ended the search (release 4.7): candidates ranked below the budget were not checked.
+        one and ended the search: candidates ranked below the budget were not checked.
     """
 
     accepted: bool = record_field("call", axes=(), units="1", dtype="bool")
@@ -403,31 +404,6 @@ class LabelContinuity:
 
 
 @dataclass(frozen=True)
-class PaintingSettings:
-    """Captured parameters from 3.5 painting/config.py:47–59; science owns defaults."""
-
-    emission_site_correlation: float = record_field("state", axes=(), units="1", dtype="float")
-    initial_switch_rate: float = record_field("state", axes=(), units="Morgan^-1", dtype="float")
-    initial_error_entry: float = record_field("state", axes=(), units="probability", dtype="float")
-    initial_error_exit: float = record_field("state", axes=(), units="probability", dtype="float")
-    estimation_iterations: int = record_field("state", axes=(), units="count", dtype="int")
-    estimate_grid: float = record_field("state", axes=(), units="nats", dtype="float")
-    robustness_epsilon: float = record_field("state", axes=(), units="probability", dtype="float")
-    snps_per_bin: int = record_field("state", axes=(), units="sites", dtype="int")
-    emission_log_floor: float = record_field("state", axes=(), units="nats", dtype="float")
-    minimum_release_posterior: float = record_field("state", axes=(), units="probability", dtype="float")
-    label_continuity_minimum_switch_gain: float = record_field("state", axes=(), units="count", dtype="float")
-    label_continuity_maximum_loser_ratio: float = record_field("state", axes=(), units="share", dtype="float")
-    label_continuity_check_budget: int = record_field("state", axes=(), units="count", dtype="int", default=64)
-
-    # 3.5 painting/hmm.py:47, P0 PR09, WP_PA2 §7. Captured in the payload.
-    viterbi_tie: float = record_field("state", units="nats", dtype="float64", default=noise_quantum(1.9e-6))
-
-    def __post_init__(self) -> None:
-        freeze_record_arrays(self)
-
-
-@dataclass(frozen=True)
 class Painting:
     __payload_custom__: ClassVar[bool] = True
     """Painting product with explicit hoisted row paths and optional emission caches."""
@@ -438,7 +414,7 @@ class Painting:
     label_continuity: tuple[LabelContinuity, ...] = record_field(
         "call", axes=("C",), units="1", dtype="LabelContinuity"
     )
-    parameters: PaintingSettings = record_field("state", axes=(), units="1", dtype="PaintingSettings")
+    parameters: PaintingParameters = record_field("state", axes=(), units="1", dtype="PaintingParameters")
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -483,7 +459,7 @@ class PaintingSummary:
 
 
 def segment_rows(painting: Painting, input_ids: Sequence[str] | None = None) -> list[dict[str, str | int]]:
-    """The released painting as segments (release 2.2): one row per sample, component, track and run of bins with
+    """The released painting as segments: one row per sample, component, track and run of bins with
     one release (status, label and candidate rows), in sample, component, track and position order.
 
     Columns: SampleID, Component, Track (0/1, the painting's gauge: which homologue is track 0 carries no meaning),
@@ -640,7 +616,7 @@ def painting_from_payload(
     return Painting(
         contig=payload["contig"],
         sample_ids=tuple(payload["sample_ids"]),
-        parameters=from_payload(PaintingSettings, payload["parameters"]),
+        parameters=from_payload(PaintingParameters, payload["parameters"]),
         label_continuity=tuple(from_payload(LabelContinuity, item) for item in payload["label_continuity"]),
         components=tuple(
             from_payload(ComponentPainting, item, derived={"panel": panel, "packed_emissions": cache})

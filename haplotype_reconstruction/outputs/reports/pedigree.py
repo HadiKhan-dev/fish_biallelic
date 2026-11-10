@@ -1,8 +1,8 @@
-"""Render PE5's typed pedigree views as the 17 baseline CSVs and two summaries.
+"""Render typed pedigree views as the 17 published CSVs and two summaries.
 
 Owns OU15/PD25 names, tuple text, column order and missing-value text inference.
-All selected rows, probabilities, guard transformations and support sets are PE5
-values. Method: docs/methods/pedigree.md; baseline pedigree/tables.py:58-458.
+All selected rows, probabilities, guard transformations and support sets are pedigree
+values. Method: docs/methods/pedigree.md.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from .tables import record_mapping, write_frame, write_json, write_rows
 
 __all__ = ["render", "write_pedigree", "COLUMNS"]
 
-# Fixed table schemas, copied from the frozen baseline; never read expected data during computation.
+# Fixed published table schemas; report construction never reads expected data.
 COLUMNS = {
     "tier_b_relationships": [
         "Sample",
@@ -300,8 +300,7 @@ COLUMNS = {
 }
 
 
-# Empty frames preserve the constructor used by B pedigree/tables.py:407-458,
-# panel.py:218 and stage.py:428. Fixed-column frames retain their full header.
+# Empty row-dict frames have no header. Fixed-column frames retain their full header.
 EMPTY_COLUMNS = {
     "tier_b_relationships": ("ReleaseEvidence",),
     "tier_b_partial_relationships": (),
@@ -348,7 +347,7 @@ SET_FIELDS = {
 
 
 def _value(column, value, names, table):
-    # B uses None for absent search ranks before pandas infers the column dtype.
+    # Absent search ranks are None before pandas infers the column dtype.
     if column in {"Parent1ScreenRank", "Parent2ScreenRank"}:
         return None if value is None or np.isnan(value) else int(value)
     if column == "ScreenBoundaryRank":
@@ -484,11 +483,11 @@ def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd
                 if any(v.parents_before_guard is not None and v.parents_before_guard[slot] >= 0 for v in values):
                     result[table][column] = pd.Series(result[table][column].tolist(), dtype="str")
         if oriented and "ParentSlotBasis" in columns:
-            # The baseline slot renderer writes explicitly object-typed names/bases after a swap.
+            # Swapped names and bases use explicit object dtype.
             result[table]["ParentSlotBasis"] = pd.Series([v.parent_slot_basis for v in values], dtype=object)
         if table == "sibling_guard":
             if not values:
-                # B guard.fixed_point assigns empty lists after constructing the frame.
+                # Assign empty lists after constructing the frame to preserve column dtypes.
                 for column in ("WithdrawalIteration", "WithholdingBasis"):
                     result[table][column] = np.empty(0, dtype=np.float64)
             result[table].attrs.update(
@@ -499,8 +498,8 @@ def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd
     return result
 
 
-# B pedigree/exclusion.py summary insertion order; chromosome details precede
-# released count. D1 field layout is a storage contract, not the JSON key order.
+# Summary insertion order: chromosome details precede the released count.
+# Record field layout is a storage contract, separate from JSON key order.
 EXCLUSION_SUMMARY_FIELDS = (
     "model",
     "alpha",
@@ -520,7 +519,7 @@ def write_pedigree(
 ) -> list[Path]:
     """Write every table of ``product.views``, the calibration and the run summary; returns the paths written.
     ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
-    per-sample tables list their rows in it (the records keep the canonical order, release 2.1)."""
+    per-sample tables list their rows in it (the records keep the canonical order)."""
     from .tables import frame_in_input_order
 
     frames = render(product.views, product.sample_ids)
@@ -552,8 +551,8 @@ def write_pedigree(
     return written
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
+# Published report column schemas.
+# Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
 TIER_B_RELATIONSHIPS_COLUMNS = (
     "Sample",

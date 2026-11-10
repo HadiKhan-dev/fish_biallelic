@@ -1,4 +1,4 @@
-"""Resolve settings into stage-owned parameters, preserving ENG-10 field mappings.
+"""Resolve current settings into stage-owned parameters.
 
 Auto quality switches depend only on source kind. Parsed breakpoint content and
 map identities are bound; execution and output selections are invocation-local.
@@ -19,10 +19,10 @@ from ..core.random import realise_seed
 if TYPE_CHECKING:
     from ..contracts.genetic_map import GeneticMapSet
     from ..science.assembly.parameters import AssemblyParameters
-    from ..science.discovery.parameters import DiscoveryConfig
+    from ..science.discovery.parameters import DiscoveryParameters
     from ..science.evidence.parameters import EvidenceParameters
     from ..science.painting.parameters import PaintingParameters
-    from ..science.pedigree.parameters import PedigreeConfig
+    from ..science.pedigree.parameters import PedigreeParameters
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
@@ -42,16 +42,12 @@ __all__ = [
     "simulation",
     "genetic_maps",
     "resolve",
-    "resolve_and_bind",
-    "RETIRED_BASELINE_FIELDS",
     "bind_resolved",
-    "FIELD_MAP",
-    "baseline_projection",
 ]
 
 
 class SettingsView(Protocol):
-    """Structural boundary to I1 settings, without an upward interface import."""
+    """Structural boundary to interface settings, without an upward interface import."""
 
     @property
     def input(self) -> Any: ...
@@ -73,12 +69,18 @@ class SettingsView(Protocol):
 
 @dataclass(frozen=True)
 class ExportParameters:
-    """ENG-10 output-only setting; I1 passes this value into OU1's own config."""
+    """Output-only settings, excluded from the scientific binding."""
 
-    full_length: bool = field(default=True, metadata={"provenance": "3.5 export/config.py:ExportConfig"})
-    file_format: str = field(default="vcf", metadata={"provenance": "3.5 export/config.py:ExportConfig"})
+    full_length: bool = field(
+        default=True,
+        metadata={"provenance": "Boolean; include filtered sites to preserve the input site axis."},
+    )
+    file_format: str = field(
+        default="vcf", metadata={"provenance": "Format name; vcf selects bgzipped VCF files with an index."}
+    )
     products: tuple[str, ...] = field(
-        default=("founders", "samples"), metadata={"provenance": "3.5 export/config.py:ExportConfig"}
+        default=("founders", "samples"),
+        metadata={"provenance": "Product names; render founder haplotypes and phased sample genotypes by default."},
     )
 
 
@@ -92,16 +94,16 @@ class OutputSelection:
 
 @dataclass(frozen=True)
 class StageConfigs:
-    """Typed stage-owned parameters; legacy names retained in the field map."""
+    """Typed stage-owned parameters."""
 
     evidence: EvidenceParameters
-    discovery: DiscoveryConfig
+    discovery: DiscoveryParameters
     local_selection: SelectionParameters
     assembly: AssemblyParameters
     painting: PaintingParameters
     relatedness: FamilyParameters
     pairwise_ibd: PairwiseIbdParameters
-    pedigree: PedigreeConfig
+    pedigree: PedigreeParameters
     founder_refit: RefitParameters
     family_phase: PhaseParameters
     recombination: RecombinationParameters
@@ -119,12 +121,12 @@ def _quality(value: bool | str, kind: str) -> bool:
 
 
 def stage_configs(settings: SettingsView) -> StageConfigs:
-    """The exact 3.5 config/stages mapping, now to each stage's parameter record."""
+    """Map user settings to each stage's parameter record, retaining other documented defaults."""
     from ..science.assembly.parameters import AssemblyParameters
-    from ..science.discovery.parameters import DiscoveryConfig
+    from ..science.discovery.parameters import DiscoveryParameters
     from ..science.evidence.parameters import EvidenceParameters
     from ..science.painting.parameters import PaintingParameters
-    from ..science.pedigree.parameters import ExposureConfig, PedigreeConfig
+    from ..science.pedigree.parameters import ExposureParameters, PedigreeParameters
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
@@ -150,15 +152,15 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         protected = ordered = ()
     return StageConfigs(
         evidence,
-        DiscoveryConfig(),
+        DiscoveryParameters(),
         SelectionParameters(),
         AssemblyParameters(),
         PaintingParameters(),
         FamilyParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
         PairwiseIbdParameters(),
-        PedigreeConfig(
+        PedigreeParameters(
             evidence_calibration=settings.pedigree.evidence_calibration,
-            exposure=ExposureConfig(rate_is_measured=settings.genetic_map.rate_is_measured),
+            exposure=ExposureParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
         ),
         RefitParameters(),
         PhaseParameters(protected_intervals=tuple(protected)),
@@ -238,9 +240,9 @@ class ResolvedConfiguration:
 
     @property
     def identity(self) -> str:
-        import json
+        from .init.records import identity
 
-        return json_digest(json.loads(self.scientific_json))
+        return identity(self.manifest())
 
     def manifest(self) -> dict[str, Any]:
         import json
@@ -295,96 +297,12 @@ def resolve(
 
 
 def bind_resolved(file: Any, resolved: ResolvedConfiguration, *, key: str = "configuration/resolved") -> Any:
-    """Publish the immutable init binding through ST1; conflicting bindings refuse."""
+    """Publish the immutable init binding through the store protocol; conflicting bindings refuse."""
     from ..store.protocol import publish
 
     return publish(file, key, resolved.identity, resolved.manifest())
 
 
 # Field-by-field migration map. Every unlisted leaf has the identical dotted
-# field name. RL1 split the two optional pairwise constants out of family identity.
-# The full expanded leaf map is written by the G1 corpus extractor and checked in
-# tests; unknown/missing baseline leaves raise, never disappear from comparison.
-RETIRED_BASELINE_FIELDS = {
-    "pedigree.panel.parents_per_child": "WP_PE2 section 6 / WP_PE4 section 7 (PS25): dead fixed-panel parameter",
-    "discovery.residual_births.usable_founder_known_fraction": "WP_DI3 section 7 (DI30): unused field; retired",
-}
-
-FIELD_MAP = {
-    "pedigree.scoring.bridge_tolerance": "pedigree.scoring.bridge_postcheck_tolerance",
-    "evidence.fixed_error": "evidence.read_model.fixed_error",
-    "relatedness.ibd_site_step": "pairwise_ibd.ibd_site_step",
-    "relatedness.ibd_switch_rate": "pairwise_ibd.ibd_switch_rate",
-}
-
-
-def baseline_projection(parameters: StageConfigs, baseline_fields: Sequence[str]) -> dict[str, Any]:
-    """Project named baseline leaves exactly; extra 4.0 constants are not silently compared."""
-    data = jsonable(parameters)
-    projected = {}
-    missing = []
-    for source in baseline_fields:
-        if source in RETIRED_BASELINE_FIELDS:
-            continue
-        value = data
-        for part in FIELD_MAP.get(source, source).split("."):
-            if not isinstance(value, dict) or part not in value:
-                missing.append(source)
-                break
-            value = value[part]
-        projected[source] = value
-    if missing:
-        raise SettingsError(f"unmapped 3.5 configuration fields: {missing}")
-    return projected
-
-
-def resolve_and_bind(
-    settings: SettingsView,
-    store: Any,
-    *,
-    contigs: Sequence[str] | None = None,
-    sample_ids: Sequence[str] = (),
-    maps: GeneticMapSet | None = None,
-    source_descriptor: Any = None,
-) -> ResolvedConfiguration:
-    """Initialize atomically, realizing a random seed exactly once across contenders.
-
-    A fixed request identity excludes invocation-only choices and the unrealized
-    entropy value. Its published payload holds the realized seeds. A crash after
-    this record but before manifest publication therefore reuses the same seed.
-    """
-    from ..store.protocol import claim, publish, resume
-
-    store.bind_layout()
-    maps = genetic_maps(settings) if maps is None else maps
-    order = tuple(settings.input.contigs if contigs is None else contigs)
-    parameters = jsonable(configure(settings))
-    parameters.pop("export")
-    sim = simulation(settings) if settings.input.kind == "simulation" else None
-    if sim is not None:
-        sim = replace(sim, contigs=order)
-    request = dict(
-        parameters=parameters,
-        contigs=order,
-        sample_ids=tuple(sample_ids),
-        maps={c: maps.identity(c) for c in order},
-        simulation=jsonable(sim),
-        source=jsonable(source_descriptor),
-    )
-    identity = json_digest(request)
-    key = "configuration/request"
-    with claim(store.run, key, identity) as needed:
-        if needed:
-            resolved = resolve(settings, contigs=order, sample_ids=sample_ids, maps=maps)
-            publish(store.run, key, identity, {"realised_seeds": dict(resolved.realised_seeds)})
-        else:
-            bound = resume(store.run, key, identity)
-            if bound is None:
-                raise SettingsError("init claim completed without its configuration record")
-            resolved = resolve(
-                settings, contigs=order, sample_ids=sample_ids, maps=maps, bound_seeds=bound.payload["realised_seeds"]
-            )
-    manifest = resolved.manifest()
-    manifest["source"] = jsonable(source_descriptor)
-    store.bind_run_manifest(manifest)
-    return resolved
+# field name. Optional pairwise settings have their own parameter record. The archived
+# configuration extractor checks the expanded map; unknown or missing baseline leaves raise.

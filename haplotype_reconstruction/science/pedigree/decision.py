@@ -25,14 +25,14 @@ from ...contracts.pedigree import (
     Resampling,
     Selection,
 )
-from ...core.numerics import chromosome_sum
+from ...core.numerics import ordered_sum
 from ...core.ties import TieCounter
 from . import alternatives as alternatives_module
 from . import calibration, release, resampling, selection
 from .alternatives import Alternatives
 from .eligibility import ParentEligibility
 from .orientation import junction_evidence
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .selection import DecisionInputs
 from .ties import unique_finite_winner
 
@@ -41,11 +41,9 @@ __all__ = [
     "child_units",
     "FitStart",
     "FullFit",
-    "fit_full",
     "start_fit",
     "finish_fit",
     "decide_resampled",
-    "decide_floored",
 ]
 
 
@@ -95,7 +93,7 @@ class FullFit:
 
 @dataclass(frozen=True)
 class FitStart:
-    """fit_full before its evidence scale: contiguous scores, alternatives and the prepared PD03 problem."""
+    """The full fit before its evidence scale: contiguous scores, alternatives and the prepared PD03 problem."""
 
     scores: GenomeScores
     eligibility: ParentEligibility
@@ -103,18 +101,9 @@ class FitStart:
     calibration: calibration.CalibrationProblem
 
 
-def fit_full(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeConfig, executor=None) -> FullFit:
-    """Rows, evidence scale, fit inputs, the full-data fit and its prior sensitivity (decide_floored's first part).
-
-    ``executor``: the stage's calibration term executor (None: serial).
-    """
-    started = start_fit(scores, eligibility, config)
-    return finish_fit(started, calibration.solve(started.calibration, executor), config)
-
-
-def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeConfig) -> FitStart:
-    """fit_full's first part: rows and the calibration problem; the stage may run its scale search in rounds."""
-    # L2: np.argwhere's Fortran memory order must not choose downstream reductions.
+def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeParameters) -> FitStart:
+    """Prepare rows and the calibration problem; the stage may run its scale search in rounds."""
+    # np.argwhere's Fortran memory order must not choose downstream reductions.
     # Any: each value replaces an ndarray field by name, which mypy cannot match from a **mapping to the fields.
     contiguous: dict[str, Any] = {
         f.name: np.ascontiguousarray(getattr(scores, f.name))
@@ -126,8 +115,8 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
     return FitStart(scores, eligibility, alternatives, calibration.problem(scores, alternatives, config))
 
 
-def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], config: PedigreeConfig) -> FullFit:
-    """fit_full's last part: the scaled fit inputs, the full-data fit and its prior sensitivity."""
+def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], config: PedigreeParameters) -> FullFit:
+    """Complete the scaled fit inputs, the full-data fit and its prior sensitivity."""
     scores, eligibility, alternatives = started.scores, started.eligibility, started.alternatives
     scale, calibration_report = fitted
     if scale != 1.0:
@@ -161,14 +150,14 @@ def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], confi
     )
 
 
-def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreeConfig) -> Decision:
-    """Support, tiers, views and candidate sets from the full fit and its resampling (decide_floored's last part)."""
+def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreeParameters) -> Decision:
+    """Support, tiers, views and candidate sets from the full fit and its resampling."""
     scores, eligibility, inputs = state.scores, state.eligibility, state.inputs
     alternatives, full, trace, counter = inputs.alternatives, state.full, state.trace, state.counter
     winners = informative_chromosomes(alternatives, counter=counter)
     informative = winners.sum(axis=0).astype(np.int64)
-    informative_units = chromosome_sum(
-        winners * child_units(scores.edges, inputs.exposure.edge_units, alternatives.n_samples)
+    informative_units = ordered_sum(
+        winners * child_units(scores.edges, inputs.exposure.edge_units, alternatives.n_samples), axis=0
     )
     tie_events = counter.record()
     log_odds = trace["orientation_log_odds"]
@@ -219,18 +208,3 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreeConf
         tie_events,
         informative_units,
     )
-
-
-def decide_floored(
-    scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeConfig, executor=None
-) -> Decision:
-    """Decide from the already fixed full-genome M1 profile, resampling serially in this process.
-
-    Used by the certified screen. The genome floor is not idempotent: chromosome M1 inputs
-    must already have been floored exactly once using the fixed genome profile.
-    ``eligibility`` must be the one ``scores`` was stacked with.
-    ``executor``: the stage's calibration term executor (None: serial). The stage runs the same resampling
-    tasks as independent engine subtasks between fit_full and decide_resampled.
-    """
-    state = fit_full(scores, eligibility, config, executor)
-    return decide_resampled(state, resampling.run(state.inputs, config), config)

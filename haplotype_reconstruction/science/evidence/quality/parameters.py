@@ -1,4 +1,4 @@
-"""Declare unchanged evidence parameters with their 3.5 provenance (EC01-24)."""
+"""Site- and sample-quality model controls and numerical solver bounds."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SiteQualityParameters:
-    """Self-calibrated site filter r1-r5 (``evidence/site_quality.py``).
+    """Self-calibrated site filter r1-r5 (``evidence/quality/site_quality.py``).
 
     Every removal threshold comes from the contig's own distributions: an empirical null
     (histogram mode and half-maximum widths) for total depth (r1) and per-sample depth
@@ -21,29 +21,53 @@ class SiteQualityParameters:
     """
 
     enabled: bool = field(
-        default=True, metadata={"provenance": "B/evidence/config.py: enabled; P0 evidence-core.parameters.csv"}
+        default=True,
+        metadata={
+            "provenance": (
+                "Enable contig-calibrated site quality filtering (boolean); the loader still "
+                "applies its biallelic-SNP rule."
+            ),
+        },
     )
     # Read model used only to classify each sample's genotype at a site; the clean-core error
     # rate and allele balance are then fitted, not these.
     classification_error: float = field(
         default=0.01,
-        metadata={"provenance": "B/evidence/config.py: classification_error; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Read error probability for genotype classification (probability); clean-core "
+                "error rates are fitted separately."
+            ),
+        },
     )
     classification_heterozygote_alt: float = field(
         default=0.5,
         metadata={
-            "provenance": "B/evidence/config.py: classification_heterozygote_alt; P0 evidence-core.parameters.csv"
+            "provenance": (
+                "Heterozygote ALT fraction for genotype classification (probability); clean-core "
+                "balance is fitted separately."
+            ),
         },
     )
     # r1/r2 windows: where the fitted core's local posterior is >= this level (histogram
     # smoothed over this many bins).
     core_posterior_level: float = field(
         default=0.5,
-        metadata={"provenance": "B/evidence/config.py: core_posterior_level; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Minimum local core posterior for depth and heterogeneity windows (probability); "
+                "defines the retained empirical-null interval."
+            ),
+        },
     )
     histogram_smoothing_bins: int = field(
         default=5,
-        metadata={"provenance": "B/evidence/config.py: histogram_smoothing_bins; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Histogram smoothing width (bins); stabilizes the empirical depth and "
+                "heterogeneity core."
+            ),
+        },
     )
     # r3/r4: a site is flagged when P(clean core) < this level, and only if the artefact class is
     # separated from the clean core by this factor (r3: rate ratio; r4: latent standard deviation or
@@ -51,32 +75,57 @@ class SiteQualityParameters:
     # median depth)).
     clean_posterior_level: float = field(
         default=0.5,
-        metadata={"provenance": "B/evidence/config.py: clean_posterior_level; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Clean-core posterior threshold for wrong-read and balance mixtures "
+                "(probability); lower posteriors flag a site when components are separated."
+            ),
+        },
     )
     minimum_artefact_separation: float = field(
         default=3.0,
-        metadata={"provenance": "B/evidence/config.py: minimum_artefact_separation; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Minimum artefact separation (dimensionless rate ratio or standardized balance "
+                "displacement); avoids labelling unresolved mixtures."
+            ),
+        },
     )
     # r5 (informativeness, not quality): fewer expected carriers of a non-major genotype than
     # this. It removes sites without segregating information.
     drop_uninformative_sites: bool = field(
         default=True,
-        metadata={"provenance": "B/evidence/config.py: drop_uninformative_sites; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Apply the expected non-major-carrier gate (boolean); removes sites without "
+                "segregating information."
+            ),
+        },
     )
     minimum_expected_carriers: float = field(
         default=2.0,
-        metadata={"provenance": "B/evidence/config.py: minimum_expected_carriers; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Minimum expected non-major-genotype carriers (samples); sets the informativeness "
+                "gate."
+            ),
+        },
     )
     # Contigs with fewer biallelic SNPs than this are not filtered.
     minimum_calibration_sites: int = field(
         default=1000,
-        metadata={"provenance": "B/evidence/config.py: minimum_calibration_sites; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Minimum biallelic SNPs on a contig (sites) before fitting its quality filter; "
+                "smaller contigs are not filtered."
+            ),
+        },
     )
 
 
 @dataclass(frozen=True)
 class SampleQualityParameters:
-    """Per-sample, per-contig quality exclusion from founder construction (``evidence/sample_quality.py``).
+    """Per-sample, per-contig quality exclusion from founder construction (``evidence/quality/sample_quality.py``).
 
     Runs only where the site filter is applied (it uses the r1-r4-passing SNPs, r3's clean error rate and r4's clean
     heterozygote balance h0, widened to r4's two component means when r4 records an unresolved fit). Per library, a
@@ -93,7 +142,14 @@ class SampleQualityParameters:
     """
 
     enabled: bool = field(
-        default=True, metadata={"provenance": "B/evidence/config.py: enabled; P0 evidence-core.parameters.csv"}
+        default=True,
+        metadata={
+            "role": "state", "axes": (), "dtype": "bool", "stored": True, "units": "1",
+            "provenance": (
+                "Enable per-library quality exclusion from founder construction (boolean); "
+                "painting still uses every sample."
+            ),
+        },
     )
     # q: a library carries the cohort-minor allele when P(K >= k | d, e) <= q / (N - 1) (a site nobody carries
     # shows a carrier anywhere with probability <= q). The same q sets the working threshold of the per-library test:
@@ -102,12 +158,18 @@ class SampleQualityParameters:
     # specified likelihood of independent windows; the measured clean false-flag rate is what supports it.
     carrier_tail_level: float = field(
         default=0.05,
-        metadata={"provenance": "B/evidence/config.py: carrier_tail_level; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "float64", "stored": True, "units": "1",
+            "provenance": (
+                "Carrier-tail level and nominal library-test calibration (probability); controls "
+                "cohort-wise carrier calls and the working multiple-test threshold."
+            ),
+        },
     )
     # alpha_min: twice the working foreign-allele amplitude a_min. The null admits any error distribution of the
     # library up to a_min = alpha_min / 2; a flag needs a component above it. Motivation (not a derived safety
     # boundary): the founder-construction and painting emissions mix each observed site's genotype evidence with a
-    # uniform genotype error of mass r = 0.01 (assembly LinkerConfig.robustness, PaintingConfig.robustness_epsilon,
+    # uniform genotype error of mass r = 0.01 (assembly LinkerParameters.robustness, PaintingParameters.robustness_epsilon,
     # the founder refit), which limits the influence of discordant observations. At a site where foreign DNA at read
     # fraction alpha is homozygous for an allele the sample lacks, a cell of depth d shows K ~ Bin(d, alpha) foreign
     # reads; two or more contradict a homozygote decisively (heterozygote likelihood ratio above 3 (1 - r) / r at
@@ -119,7 +181,14 @@ class SampleQualityParameters:
     # calibrated on any real library.
     minimum_foreign_fraction: float = field(
         default=0.01,
-        metadata={"provenance": "B/evidence/config.py: minimum_foreign_fraction; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "float64", "stored": True, "units": "1",
+            "provenance": (
+                "Working foreign-read fraction (fraction); half this value is the minimum "
+                "foreign-allele amplitude tested against own errors, not a calibrated "
+                "contamination estimate."
+            ),
+        },
     )
     # f: foreign alleles are resolved up to a_hi = f h_lo / 2 (h0/4: a foreign heterozygote at alpha/2 with alpha up
     # to h0/2), with h_lo the lower end of the balance interval (h0, or the lower of r4's two component means when r4's
@@ -130,19 +199,38 @@ class SampleQualityParameters:
     # The fitted fraction is not a calibrated contamination estimate.
     heterozygote_floor_ratio: float = field(
         default=0.5,
-        metadata={"provenance": "B/evidence/config.py: heterozygote_floor_ratio; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "float64", "stored": True, "units": "1",
+            "provenance": (
+                "Foreign-allele ceiling multiplier of half the lower clean heterozygote balance "
+                "(dimensionless); separates the foreign grid from own heterozygotes."
+            ),
+        },
     )
     # Own private heterozygotes and errors may be commoner at some depths (mapping bias lowers depth and allele
     # fraction together): their weights are fitted in this many depth classes (the library's eligible-cell depth
     # quantiles), foreign alleles' share in none (foreign reads do not depend on a site's depth).
     heterozygote_depth_classes: int = field(
         default=4,
-        metadata={"provenance": "B/evidence/config.py: heterozygote_depth_classes; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "1",
+            "provenance": (
+                "Eligible-cell depth quantile classes (count); allows own-error and heterozygote "
+                "weights to vary with depth."
+            ),
+        },
     )
-    # Kept from release 2.16: smaller cohorts flag nothing (with few libraries most alleles absent from every other
-    # library are the library's own, and the eligible set is too small to separate foreign alleles from them).
+    # Smaller cohorts have too little eligible private-allele evidence to separate foreign-like reads
+    # from a library's own alleles.
     minimum_samples: int = field(
-        default=20, metadata={"provenance": "B/evidence/config.py: minimum_samples; P0 evidence-core.parameters.csv"}
+        default=20,
+        metadata={
+            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "1",
+            "provenance": (
+                "Minimum libraries (samples) for quality fitting; smaller cohorts have too little "
+                "private-allele evidence to distinguish foreign-like reads."
+            ),
+        },
     )
     # Local artefacts (both hypotheses): the contig's passing sites are cut into this many regions of equal site
     # counts, and in each region a free share of the library's cells may be local artefacts (a collapsed repeat, a
@@ -151,83 +239,108 @@ class SampleQualityParameters:
     # is (1 - pi_R) c in region R. No independent regional support is required; local excesses can be absorbed,
     # but need not be. The uniform law and region count are working choices. 1: one contig-wide artefact share.
     artefact_regions: int = field(
-        default=16, metadata={"provenance": "B/evidence/config.py: artefact_regions; P0 evidence-core.parameters.csv"}
+        default=16,
+        metadata={
+            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "1",
+            "provenance": (
+                "Equal-site-count regions per contig (count); allows a separate local-artefact "
+                "share in each region under both hypotheses."
+            ),
+        },
     )
     # Cells of one sample closer than one sequenced fragment can share reads: each eligible cell weighs 1 / (the
     # library's eligible cells in its fragment_bp window, counted from the first passing site), and segment-report
     # cells form one event.
     fragment_bp: int = field(
-        default=1000, metadata={"provenance": "B/evidence/config.py: fragment_bp; P0 evidence-core.parameters.csv"}
+        default=1000,
+        metadata={
+            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "bp",
+            "provenance": (
+                "Read-sharing window width (base pairs); eligible cells in a window share one "
+                "unit of test weight."
+            ),
+        },
     )
     # Inherited-segment report only: heterozygous near-private events of one (sample, partner)
     # less than segment_gap_bp apart form a region; regions with fewer events are not listed.
     segment_gap_bp: int = field(
         default=1_000_000,
-        metadata={"provenance": "B/evidence/config.py: segment_gap_bp; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "bp",
+            "provenance": (
+                "Maximum gap between inherited near-private events (base pairs); groups events "
+                "for the segment report only."
+            ),
+        },
     )
     segment_minimum_events: float = field(
         default=3.0,
-        metadata={"provenance": "B/evidence/config.py: segment_minimum_events; P0 evidence-core.parameters.csv"},
+        metadata={
+            "role": "state", "axes": (), "dtype": "float64", "stored": True, "units": "1",
+            "provenance": (
+                "Minimum weighted events per reported inherited segment (events); suppresses "
+                "sparsely supported report regions."
+            ),
+        },
     )
 
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Maximum genotype-frequency EM updates per site (iterations).
 SITE_SITE_EM_ITERATIONS = 60
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Maximum clean/artefact mixture EM updates (iterations).
 SITE_MIXTURE_ITERATIONS = 300
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Histogram range endpoints (percentiles); limits the empirical core fit to the central depth/heterogeneity
+# range.
 SITE_HISTOGRAM_RANGE_PERCENTILES = (0.5, 99.5)
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Projected-gradient stopping scale of the error-mixture M step (dimensionless).
 SITE_M_STEP_GRADIENT = 1e-09
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Relative coordinate-motion stopping scale of the error-mixture M step (dimensionless).
 SITE_M_STEP_STEP = 1e-08
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Objective-rounding allowance for M-step backtracking (dimensionless).
 SITE_M_STEP_ROUNDING = 1e-13
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Noise scale for M-step convergence (dimensionless).
 SITE_M_STEP_NOISE = 1e-11
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Maximum error-mixture M-step Newton updates (iterations).
 SITE_M_STEP_ITERATIONS = 100
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Chunks for deterministic M-step objective reductions (chunks).
 SITE_M_STEP_CHUNKS = 256
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Minimum argument for the polygamma asymptotic expansion (dimensionless).
 SITE_POLYGAMMA_SHIFT = 16.0
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Target cells per site-QC tile (sample-site cells); bounds dense scratch space.
 SITE_SITE_TILE_CELLS = 1 << 20
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Maximum sites per site-QC tile (sites); bounds scratch even for small cohorts.
 SITE_MAXIMUM_TILE_SITES = 4096
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
-SITE_MINIMUM_CHUNK_SITES = 16384
-
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Error-mixture optimizer bounds on log(rate) and log(shape) (dimensionless transformed coordinates).
 SITE_ERROR_LOWER, SITE_ERROR_UPPER = (np.log([1e-12, 0.001]), np.log([10.0, 10000.0]))
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Clean wrong-read rate interval (probability); bounds the concave one-dimensional fit.
 SITE_CLEAN_RATE_BOUNDS = (1e-12, 0.5)
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Minimum leakage slope relative to expected homozygote reads (dimensionless); requires information for the
+# error-mixture fit.
 SITE_LEAKAGE_SLOPE_FLOOR = 1e-09
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Stirling-series coefficients (dimensionless); evaluates beta-binomial gamma-ratio remainders.
 SITE_BALANCE_STIRLING = np.array(
     [1 / 12, -1 / 360, 1 / 1260, -1 / 1680, 1 / 1188, -691 / 360360, 1 / 156, -3617 / 122400], dtype=np.float64
 )
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Scale of the log1p-transformed balance dispersion (dimensionless).
 SITE_BALANCE_T_SCALE = 0.001
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Bounds for balance-mixture logits and transformed dispersions (dimensionless coordinates).
 SITE_BALANCE_BOUNDS = (
     (-18.0, 18.0),
     (-18.0, 18.0),
@@ -236,109 +349,112 @@ SITE_BALANCE_BOUNDS = (
     (0.0, math.log1p(1000000.0 / SITE_BALANCE_T_SCALE)),
 )
 
-# Provenance: B/evidence/site_quality.py; P0 evidence-core.parameters.csv.
+# Projected-gradient stationarity threshold for balance fitting (dimensionless).
 SITE_BALANCE_GRADIENT = 1e-08
 
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Ratio between own-error grid amplitudes (dimensionless); spaces the nuisance error grid geometrically.
 SAMPLE_ERROR_GRID_RATIO = 1.6
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Lower own-error grid amplitude relative to the fitted clean error rate (fraction).
 SAMPLE_ERROR_GRID_BOTTOM = 0.1
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Foreign-allele grid size (points); resolves alternatives above the own-error range.
 SAMPLE_FOREIGN_GRID = 24
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Private-heterozygote dispersion grid rho (dimensionless); latent SD is sqrt(h (1-h) rho),
+# at most 0.1 at h = 1/2. The working nuisance uses the same grid in both orientations.
 SAMPLE_HET_DISPERSION_GRID = np.array([0.0, 0.0001, 0.0004, 0.0016, 0.0064, 0.0256, 0.04])
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Weight updates within each sample-mixture M step (iterations).
 SAMPLE_M_STEP_ITERATIONS = 4
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Maximum sample-mixture EM updates (iterations).
 SAMPLE_EM_ITERATIONS = 400
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Sample-mixture EM gain tolerance relative to the total log likelihood (dimensionless).
 SAMPLE_EM_TOLERANCE = 1e-10
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Bisection steps for the mixture-share update (iterations).
 SAMPLE_SHARE_BISECTIONS = 48
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Minimum nonzero mixture share (fraction); keeps share updates finite.
 SAMPLE_SHARE_FLOOR = 1e-12
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Initial non-reference mixture weight (fraction); starts weight fitting away from zero.
 SAMPLE_WEIGHT_START = 0.001
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Sites per sparse sample-quality chunk (sites); bounds extraction workspace.
 SAMPLE_CHUNK_SITES = 1024
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Radix of packed sample-quality cell keys (integer codes); separates depth and allele-count coordinates.
 SAMPLE_CODE = 1 << 20
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Target entries in sample-quality reductions (entries); bounds reduction workspace.
 SAMPLE_REDUCE_ENTRIES = 1 << 22
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Minimum foreign amplitude range relative to its lower bound (dimensionless); requires a resolvable foreign
+# grid.
 SAMPLE_MINIMUM_FOREIGN_RANGE = 1.25
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Own-error amplitude separation factor (dimensionless); spaces the nuisance and foreign grids.
 SAMPLE_ERROR_SEPARATION = 2.0
 
-# Provenance: B/evidence/sample_quality.py; P0 evidence-core.parameters.csv.
+# Balance-fit reason strings identifying unresolved labelling (text); widen the private-heterozygote balance
+# interval.
 SAMPLE_AMBIGUOUS_BALANCE = ("unresolved class labelling", "no start of the balance fit")
 
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Central-difference step for the balance-polish Hessian (coordinate units).
 BALANCE_POLISH_DIFFERENCE_STEP = 0.0001
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Relative objective improvement threshold for balance polish (dimensionless).
 BALANCE_POLISH_RELATIVE_STOP = 1e-11
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Relative bracket/step tolerance of the clean-rate fit (dimensionless).
 CLEAN_RATE_RELATIVE_STEP = 1e-12
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum site mean depth in heterogeneity scaling (reads per sample); avoids a zero denominator.
 DEPTH_MEAN_FLOOR = 1e-09
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Maximum posterior-clean change for mixture convergence (probability).
 ERROR_MIXTURE_RELATIVE_STOP = 1e-05
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum negative-binomial shape (dimensionless); bounds artefact dispersion.
 ERROR_MIXTURE_SHAPE_FLOOR = 0.001
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum clean/artefact mixture share (probability); keeps both mixture logs finite.
 ERROR_MIXTURE_WEIGHT_FLOOR = 1e-06
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum fitted histogram-core width (histogram coordinate units); avoids zero-width scaling.
 HISTOGRAM_WIDTH_FLOOR = 1e-12
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Positive probability/weight floor (dimensionless); keeps logarithms and denominators finite.
 POSITIVE_WEIGHT_FLOOR = 1e-300
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Distance of regional artefact shares below one (probability); keeps non-artefact mass finite.
 REGION_SHARE_CEILING_GAP = 1e-09
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum genotype frequency in site-classification EM (probability).
 SITE_EM_FREQUENCY_FLOOR = 1e-06
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Per-site genotype EM log-likelihood gain threshold (nats); stops negligible updates.
 SITE_EM_LOG_GAIN_TOLERANCE = 1e-07
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum Newton damping for sample-mixture weights (dimensionless).
 WEIGHT_DAMPING_FLOOR = 1e-10
 
-# Provenance: B/evidence/quality; unchanged inline numerical setting (EC04-22).
+# Minimum accepted sample-weight objective gain (objective units).
 WEIGHT_GAIN_TOLERANCE = 1e-12
 
 __all__ = ["SiteQualityParameters", "SampleQualityParameters"]
 
 
-# Provenance: B/evidence/sample_quality.py:539-587, damped Newton weight solver.
+# Damped Newton weight-solver ceiling, growth and shrink factors (dimensionless).
 WEIGHT_DAMPING_CEILING = 1e12
 WEIGHT_DAMPING_GROWTH = 10.0
 WEIGHT_DAMPING_SHRINK = 0.01
-# Provenance: B/evidence/site_quality.py:822-920, r4 stationarity and optimizer budgets.
+# Balance-fit stationarity controls (iterations, backtracking trials and restarts) and L-BFGS-B options.
 BALANCE_POLISH_ITERATIONS = 8
 BALANCE_BACKTRACK_TRIALS = 8
 BALANCE_RESTART_LIMIT = 3
@@ -354,12 +470,13 @@ BALANCE_STARTS = (
     (0.95, 0.0, 0.0, 0.02, 0.03),
     (0.5, -0.03, 0.01, 0.02, 0.001),
 )
-# Provenance: B/evidence/site_quality.py: balance gamma-ratio remainder series switch.
+# Gamma-ratio remainder-series switch radius (dimensionless).
 BALANCE_SERIES_RADIUS = 0.01
-# Provenance: B/evidence/site_quality.py: genotype EM initial log likelihood.
+# Initial genotype EM objective sentinel (nats); any finite supported likelihood improves it.
 SITE_EM_INITIAL_LOG_LIKELIHOOD = -1e300
 
-# Provenance: B/evidence/site_quality.py:_peak_core, _posterior_clean, _newton_maximum, _error_mixture.
+# Histogram bin-count bounds, posterior log-odds clamp, Newton backtracking count and error-mixture initial
+# values (counts, nats and probabilities).
 HISTOGRAM_MINIMUM_BINS = 50
 HISTOGRAM_MAXIMUM_BINS = 2000
 POSTERIOR_LOG_ODDS_BOUND = 700

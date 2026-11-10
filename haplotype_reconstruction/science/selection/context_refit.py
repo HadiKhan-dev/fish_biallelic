@@ -3,14 +3,13 @@
 Owns LS26-LS31: complete-coverage tasks, ordered-pair cavity HMM, founder-site
 posterior, witness masks and duplicate local-row aggregation. Must not assemble,
 schedule workers, read storage or inspect process state.
-Method: docs/methods/local_selection.md#context-refit (WP_SE2 section 4.13).
+Method: docs/methods/selection.md#ls26.
 Distinct inference rows retain consensus released templates. Local duplicates
 sum support and use its weighted posterior, with a plain mean at zero support.
 Background count is the minimum label among individual pairs within
 BACKGROUND_COUNT_BAND of the pair maximum; pair weights are never aggregated by
-label. L11 forms interval Morgans once before the redraw expm1 transition.
-Accretion (LS29): the ordered-pair background rule is preserved as scientific state.
-The component's N x B x S x S workspace remains the approved 0c memory exemption.
+label. Interval Morgans are formed once before the redraw expm1 transition.
+The component stores one N x B x S x S workspace for bin emissions and cavity weights.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ from ..assembly.api import (
 )
 from .diagnostics import CensusSink
 from .fit import unique_rows
-from .parameters import BACKGROUND_COUNT_BAND, HALF_CENSUS_WINDOW, ContextRefitConfig, SelectionParameters
+from .parameters import BACKGROUND_COUNT_BAND, HALF_CENSUS_WINDOW, ContextRefitParameters, SelectionParameters
 
 __all__ = [
     "refit_task_bytes",
@@ -220,10 +219,8 @@ def _carrier_weights(weights, intervals_morgans, rate, background_mass, count_ba
     state pairs (forward-backward over bins, each step normalised), written over ``weights``,
     which holds the summed log emissions on entry (a sample's are read before its cavity weights
     replace them, so one (N, B, S, S) array serves both). Returns per sample and bin the MAP
-    number of background copies (0, 1, 2): release 2.2, the smallest count among the state pairs
-    whose posterior weight is within ``count_band`` x the largest of it (the conservative side,
-    as the release's unknown-copy count; 2.1 took the first maximum in row-major pair order, a
-    convention)."""
+    number of background copies (0, 1, 2): the smallest count among state pairs whose posterior
+    weight is within ``count_band`` times the largest weight (the conservative side)."""
     n, bins, s, _ = weights.shape
     pi = np.full(s, (1 - background_mass) / (s - 1))
     pi[-1] = background_mass
@@ -309,10 +306,10 @@ def _refit_sites(
     site_bands,
     settings,
 ):
-    """Refit and release the alleles of sites [start, stop) of one bin. Release 2.1: the support
+    """Refit and release the alleles of sites [start, stop) of one bin. The support
     test is ``count >= min_support`` or ``mass > min_support + band`` (a carrier mass sitting
     exactly at the threshold, a sum of exact halves by the refit's symmetric founder prior, is
-    withheld inside the band, design A-7); site_bands[0, site] counts the carrier decisions inside
+    withheld inside the band); site_bands[0, site] counts the carrier decisions inside
     the 1/2 band, site_bands[1, site] the founders whose support mass lies inside the threshold
     band (count below the threshold)."""
     band = settings[SETTING_HALF_BAND]
@@ -398,7 +395,7 @@ def refit_component(
     stops: np.ndarray,
     intervals_morgans: np.ndarray,
     rate: float,
-    config: ContextRefitConfig,
+    config: ContextRefitParameters,
     unknown_mass: float,
     census_key: str | None = None,
     *,
@@ -430,7 +427,7 @@ def refit_component(
                 (0.0, float(carried[sample, bin_index, founder] - 0.5)),
                 sink=census_sink,
             )
-    # The kernel writes only the calls it releases; the rest keep h below (release 2.12: the release mask is kept).
+    # The kernel writes only the calls it releases; the rest keep h below (the release mask is kept).
     result = np.full(h.shape, -1, dtype=h.dtype)
     probabilities = np.full(h.shape, 0.5)
     supporters = np.zeros(h.shape)
@@ -483,7 +480,7 @@ class ContextRefitTask:
     stops: np.ndarray = record_field("state", axes=("B",), dtype="int64", units="site")
     intervals_morgans: np.ndarray = record_field("state", axes=("B_minus_one",), dtype="float64", units="Morgans")
     rate: float = record_field("state", dtype="float64", units="1/Morgan")
-    config: ContextRefitConfig = record_field("state", dtype="ContextRefitConfig")
+    config: ContextRefitParameters = record_field("state", dtype="ContextRefitParameters")
     unknown_mass: float = record_field("state", dtype="float64", units="probability")
     census_key: str | None = record_field("diagnostic", dtype="str | None")
     template: np.ndarray = record_field("state", axes=("K", "L_component"), dtype="int8", units="allele")
@@ -500,7 +497,7 @@ def finish_component(task: ContextRefitTask, outputs: RefitOutputs, observed: np
     observed is bool[N,L_component]. The refit owns outputs and this function fills
     its withheld calls from the released template. Input task arrays are unchanged.
     Returns the component index, block proposals, changed/fill/site/founder counts,
-    and the exact AS2 report. Duplicate inference/local rows retain the 3.5 rules.
+    and the site-posterior report. Duplicate inference rows use consensus calls; local duplicates sum support.
     """
     result, q, support, slots, report, released = outputs
     template = task.template
@@ -516,7 +513,7 @@ def finish_component(task: ContextRefitTask, outputs: RefitOutputs, observed: np
         rows = result[:, lo:hi]
         # Distinct local rows in content order. Founders whose local rows are equal carry the same local
         # haplotype: its support is their summed support and its ALT posterior their support-weighted mean
-        # (release 2.2: order-free; 2.1 kept the first founder's, a convention).
+        # (order-independent across duplicate founders).
         local, inverse = unique_rows(rows, return_inverse=True)
         posterior_alt, local_support = _combine_duplicates(q[:, lo:hi], support[:, lo:hi], inverse, len(local))
         # A distinct local row's call is witnessed when the refit released it for one of its founders (equal rows
@@ -557,7 +554,7 @@ def refit_tasks(
     positions is int64[L_contig] in bp; observed is bool[N,L_contig]. No arrays are
     mutated. Coverage compares concatenated complete block positions exactly;
     partial components increment skipped. Centres remain mean bp coordinates and
-    L11 forms their interval Morgans once. Returns immutable task records and skips.
+    Their interval Morgans are formed once. Returns immutable task records and skips.
     """
     evidence_positions = positions
     refit_config = parameters.context_refit
@@ -576,7 +573,7 @@ def refit_tasks(
             continue
         inference = np.asarray(component.inference, np.int8)
         # Distinct founder rows in content order; the released template of duplicate inference
-        # rows is their consensus (release 2.2: an allele where every duplicate's released call
+        # rows is their consensus (an allele where every duplicate's released call
         # agrees, -1 elsewhere; 2.1 kept the first occurrence's, a convention).
         h, inverse = unique_rows(inference, return_inverse=True)
         h = np.ascontiguousarray(h)
@@ -585,7 +582,7 @@ def refit_tasks(
         starts = np.r_[0, np.cumsum(lengths)[:-1]].astype(np.int64)
         stops = np.r_[starts[1:], len(positions)].astype(np.int64)
         centers = np.array([np.mean(panels[int(b)].positions) for b in members])
-        # L11: one interval-Morgans form; centres remain in base pairs.
+        # Form interval Morgans once; centres remain in base pairs.
         # Do not subtract separately scaled bp coordinates: that changes cancellation.
         intervals_morgans = np.asarray(genetic_map.interval_morgans(centers[:-1], centers[1:]), dtype=np.float64)
         rate = float(redraw_rate)

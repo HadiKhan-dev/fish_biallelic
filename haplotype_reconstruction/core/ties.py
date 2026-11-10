@@ -1,12 +1,11 @@
 """Keep decisions stable under numerical noise through explicit, named tie policies.
 
 Owns the six shared quanta, assembly quanta, single-linkage classes, width and boundary
- guards, content conventions and typed counters (P0 EC30-34). Assembly path/linkage
- orders belong to science.assembly.orders. Arithmetic is relocated from 3.5 unchanged;
- L8 replaces reversal, discovery keep switches and census environment reads with
- explicit arguments. Census sinks are supplied by stages; this module performs no I/O.
+guards, content conventions and typed counters (EC30-34). Assembly path/linkage
+orders belong to science.assembly.orders. Reversal, discovery keep settings and
+census sinks are explicit arguments supplied by stages; this module performs no I/O.
 
-Caller guide (STYLE_40 §6; P0 EC30-34): name the decision and its original quantity,
+Caller guide (EC30-34): name the decision and its original quantity,
 units, direction and scale beside the call. State the exact discrete content key and
 why equal keys are exchangeable. State each secondary preference separately: it is
 science, not an arbitrary convention, and never reverses. Pass the same explicit
@@ -33,12 +32,17 @@ import numpy as np
 
 from .kernels import kernel
 
-# Relative GL noise the tie quanta are placed against (release 2.13; 2.1-2.12: 1e-9), the margin of a quantum over
-# the motion of its compared contrast under that noise, and the factor (a power of two, the ratio of the noise levels)
-# by which 2.13 multiplies a 2.1 relative factor that has no recorded motion.
+# GL_NOISE is relative genotype-likelihood perturbation amplitude (dimensionless). NOISE_MARGIN is the
+# dimensionless quantum-to-motion margin. NOISE_SCALE is the adopted power-of-two multiplier for relative
+# scale coefficients without a recorded motion; it is 1024, not the exact ratio of calibration amplitudes.
 GL_NOISE = 1e-6
 NOISE_MARGIN = 16.0
 NOISE_SCALE = 2.0**10
+
+
+def _power_of_two_ceiling(target: float) -> float:
+    """Round a positive finite target up to a power of two; math errors propagate."""
+    return math.ldexp(1.0, int(math.ceil(math.log2(target))))
 
 
 def noise_quantum(motion: float) -> float:
@@ -46,12 +50,11 @@ def noise_quantum(motion: float) -> float:
 
     No mutation. motion must be positive and finite; math domain/overflow errors propagate.
     """
-    return math.ldexp(1.0, int(math.ceil(math.log2(NOISE_MARGIN * float(motion)))))
+    return _power_of_two_ceiling(NOISE_MARGIN * float(motion))
 
 
-# Movement of the compared contrasts under GL_NOISE relative GL noise (nats; per kind): the N1 census measured under
-# 1e-9 noise (review F1/F3: nll 5.5e-8, h_step 1e-8, improvement 5.5e-8, sample 5e-9, cell 2e-9, probability 1e-9)
-# times 10^3, the motion scaling linearly with the noise amplitude.
+# Contrast motions at relative GL noise 1e-6, in each kind's comparison units (nats except probability).
+# The measured motions at 1e-9 noise are scaled by 1000, assuming linear motion with noise amplitude.
 NOISE_MOTION: dict[str, float] = {
     "nll": 5.5e-5,
     "h_step": 1e-5,
@@ -61,7 +64,7 @@ NOISE_MOTION: dict[str, float] = {
     "probability": 1e-6,
 }
 # (floor, relative factor of the scale) per decision kind; quantum = power of two at least max(floor, factor x scale).
-# Floors: noise_quantum of the kind's motion; factors: the 2.1 factors (no recorded relative motion) times NOISE_SCALE.
+# Floors exceed each kind's motion by NOISE_MARGIN; relative factors use NOISE_SCALE where motion is unrecorded.
 QUANTUM_KINDS: dict[str, tuple[float, float]] = {
     "nll": (noise_quantum(NOISE_MOTION["nll"]), 2.0**-30 * NOISE_SCALE),
     "h_step": (noise_quantum(NOISE_MOTION["h_step"]), 0.0),
@@ -83,7 +86,7 @@ def tie_quantum(scale: float, kind: str) -> float:
     """
     floor, factor = QUANTUM_KINDS[kind]
     target = max(floor, factor * abs(float(scale)))
-    return math.ldexp(1.0, int(math.ceil(math.log2(target))))
+    return _power_of_two_ceiling(target)
 
 
 @dataclass(frozen=True)
@@ -218,7 +221,7 @@ def _exact_key(value):
     nogil=True,
 )
 def _class_membership(x, exact_order, sign, quantum, guard, with_guard):
-    """The original consecutive-gap scan, with the same float64 arithmetic and guards."""
+    """Scan consecutive float64 gaps with explicit non-finite and boundary guards."""
     n = len(x)
     classes = np.empty(n, dtype=np.int64)
     spans = np.empty(n, dtype=np.float64)
@@ -351,7 +354,7 @@ class TieSettings:
 
     Reverse and keep belong in derivation identities; the sink never does. Runtime
     constructs the settings; science only consumes them. ``keep`` applies to the
-    named discovery conventions that 3.5 allowed callers to hold at default.
+    named discovery conventions that callers may explicitly hold at default.
     """
 
     reverse: bool = False
@@ -364,7 +367,7 @@ class TieSettings:
 
 
 class TieCounter:
-    """Accumulate per-kind decisions, ties, wide classes and boundary gaps (P0 EC30-34).
+    """Accumulate per-kind decisions, ties, wide classes and boundary gaps (EC30-34).
 
     Updates mutate only this accumulator; record() returns independent frozen values.
     Use SharedCounter for concurrent updates. Numeric conversion errors propagate.
@@ -487,7 +490,7 @@ def improves(new: float, old: float, quantum: float, *, higher_is_better: bool =
 
 def threshold_band(value: float, threshold: float, quantum: float) -> int:
     """-1 below the band [threshold - q, threshold + q], 0 inside, +1 above. For threshold rules that give values
-    sitting exactly at a threshold a fixed conservative decision (owner decision 5; design A-7: use the band only where
+    sitting exactly at a threshold a fixed conservative decision (use the band only where
     values can sit at the threshold mathematically).
 
     No mutation or custom errors; callers supply finite operands and the policy quantum.
@@ -501,7 +504,7 @@ def threshold_band(value: float, threshold: float, quantum: float) -> int:
 
 def run_sample_order(sample_ids: Sequence[str], *, reverse: bool = False) -> np.ndarray:
     """int64[N] permutation putting a run's samples in canonical order (by name; names are unique and travel with the
-    data, so the order does not depend on the input order). Applied once at the evidence entry (design A-11).
+    data, so the order does not depend on the input order). Applied once at the evidence entry.
     Reverse name order under reverse_conventions(reverse).
 
     Does not mutate names. Duplicate stringified names raise ValueError.
@@ -536,7 +539,7 @@ def census_enabled(sink: Callable[[TieCensus], None] | None = None) -> bool:
 def census(
     kind: str, key: str | None, values: Iterable[float], *, sink: Callable[[TieCensus], None] | None = None
 ) -> None:
-    """Deliver the original census record to the caller's sink; never open files.
+    """Deliver the census record to the caller's sink; never open files.
 
         Consumes values only when sink and key are present. Inputs are unchanged; the sink may mutate its own
     collector. Float conversion and sink exceptions propagate. The stage adapter owns dictionary serialization.
@@ -600,27 +603,6 @@ def conv_key(key, *, reverse: bool = False):
     return _Descending(key) if reverse_conventions(reverse) else key
 
 
-def conv_order(size: int, *, reverse: bool = False) -> np.ndarray:
-    """int64[size]: the convention's traversal order of ``size`` exchangeable items (0 .. size-1, or reversed).
-
-    Returns a new int64 permutation; no mutation. Size must be a nonnegative integer.
-    """
-    order = np.arange(int(size), dtype=np.int64)
-    return order[::-1].copy() if reverse_conventions(reverse) else order
-
-
-def conv_argmin(values, *, reverse: bool = False) -> int:
-    """np.argmin over the flattened values with exact ties going to the lowest index, or to the highest under the
-    reversal.
-
-    No mutation; NumPy errors for empty or invalid value arrays propagate.
-    """
-    a = np.ravel(np.asarray(values))
-    if not reverse_conventions(reverse):
-        return int(np.argmin(a))
-    return int(len(a) - 1 - np.argmin(a[::-1]))
-
-
 def conv_argmax(values, *, reverse: bool = False) -> int:
     """np.argmax over the flattened values with exact ties going to the lowest index, or to the highest under the
     reversal.
@@ -653,9 +635,9 @@ ASSEMBLY_QUANTA: dict[str, tuple[float, float]] = {
     "count_margin": (2.0**-26, 0.0),
     "paint": (2.0**-30, 2.0**-30),
 }
-# Measured motion of compared differences (P0 EC30; 1e-9 relative GL noise, refine_F at 1e-6 since release
-# 2.13), as (absolute, relative to the decision's scale): max(absolute, relative x |scale|) enables the boundary guard
-# of tie_classes.
+# Measured contrast motions: relative GL noise 1e-9, except refine_F at 1e-6. Pairs contain
+# absolute motion and motion relative to the decision scale; max(absolute, relative x |scale|)
+# enables the tie-class boundary guard.
 ASSEMBLY_MOTION: dict[str, tuple[float, float]] = {
     "refine_F": (9e-5, 5e-10),
     "join_ll": (1.3e-7, 2.7e-12),
@@ -674,7 +656,7 @@ def quantum(kind: str, scale: float = 0.0) -> float:
     """
     floor, factor = ASSEMBLY_QUANTA[kind]
     target = max(floor, factor * abs(float(scale)) if math.isfinite(scale) else floor)
-    return math.ldexp(1.0, int(math.ceil(math.log2(target))))
+    return _power_of_two_ceiling(target)
 
 
 def motion(kind: str, scale: float = 0.0) -> float | None:
@@ -701,8 +683,8 @@ def relevant_boundaries(
 ) -> int:
     """Boundary-guard events of one decision: the gaps that decide it lying within BOUNDARY_GUARD noise motions of
     q -- for a winner the gap between the best class and the next, for a truncation that keeps ``cut`` items the
-    gaps entering and leaving the class the cut falls in. (maths.ties reports every consecutive gap of the list;
-    gaps elsewhere do not decide anything.)
+    gaps entering and leaving the class the cut falls in. Gaps elsewhere in the list
+    do not decide the winner or truncation.
 
     Inputs are unchanged; values and classes must share one element axis. NumPy/index errors propagate.
     """
@@ -775,9 +757,9 @@ def count_vector_classes(
 
 def truncate(items: list, ties_value: TieClasses, limit: int, cap: int | None = None) -> list:
     """The first ``limit`` items in decision order, extended by the members of the class the cut falls in, so the
-    whole cut class is kept (release 2.2: order-invariant). When the cut class would take the list beyond ``cap``
-    items (default 2 x limit), the whole class is dropped instead and only the classes before it are kept (2.1 kept
-    the class's first members in content order); a first class larger than the cap is kept whole. ``items`` are in
+    whole cut class is kept to avoid content-order dependence. When it would take the list beyond ``cap``
+    items (default 2 x limit), the whole class is dropped and only the classes before it are kept;
+    a first class larger than the cap is kept whole. ``items`` are in
     the original indexing of ``ties_value``.
 
         Does not mutate items or tie arrays. Nonempty inputs require a positive limit and matching element axes;
@@ -841,13 +823,13 @@ class TiePolicy:
     fixed_quantum: float | None = None
 
     def quantum(self, scale: float = 0.0) -> float:
-        """Return this decision's original power-of-two quantum at its magnitude."""
+        """Return this decision's power-of-two quantum at its magnitude."""
         if self.fixed_quantum is not None:
             return self.fixed_quantum
         return quantum(self.kind, scale) if self.kind in ASSEMBLY_QUANTA else tie_quantum(scale, self.kind)
 
     def motion(self, scale: float = 0.0) -> float | None:
-        """Return the original noise motion used by the boundary guard."""
+        """Return the declared noise motion used by the boundary guard."""
         if self.fixed_quantum is not None:
             return None
         return motion(self.kind, scale) if self.kind in ASSEMBLY_QUANTA else NOISE_MOTION[self.kind]
@@ -899,38 +881,13 @@ def policy(name: str, *, kind: str | None = None, reverse: bool = False) -> TieP
     return TiePolicy(name, selected, bool(reverse))
 
 
-@dataclass(frozen=True)
-class TieBand:
-    """A named scalar width with no content order or reversible convention."""
-
-    name: str
-    width: float
-
-    def quantum(self) -> float:
-        """Return the caller's unchanged width; no mutation or numerical transformation."""
-        return self.width
-
-
-def fixed_band(name: str, quantum: float) -> TieBand:
-    """Name an existing scalar band that does not choose among tied contents.
-
-    For example, discovery release suppresses a within-band contribution before
-    its fixed ALT probability test. That test has no reversible content order.
-    The caller retains its native inequality and parameter provenance. No mutation;
-    nonpositive or nonfinite widths raise ValueError exactly as fixed_policy does.
-    """
-    if not math.isfinite(quantum) or quantum <= 0:
-        raise ValueError("a fixed tie quantum must be positive and finite")
-    return TieBand(name, float(quantum))
-
-
 def fixed_policy(name: str, quantum: float, *, reverse: bool) -> TiePolicy:
-    """Bind a named single-linkage decision to its caller's original fixed quantum.
+    """Bind a named single-linkage decision to its caller's fixed quantum.
 
     The owning parameters module documents the constant and provenance. This does
     not convert anchored bands or incumbent preferences into class rules. No input
     mutation; nonpositive or nonfinite quanta raise ValueError. No motion guard is
-    invented for a fixed quantum that had none in 3.5.
+    inferred for a fixed quantum without a declared noise motion.
     """
     if not math.isfinite(quantum) or quantum <= 0:
         raise ValueError("a fixed tie quantum must be positive and finite")
@@ -959,8 +916,6 @@ __all__ = [
     "reverse_conventions",
     "rev",
     "conv_key",
-    "conv_order",
-    "conv_argmin",
     "conv_argmax",
     "conv_sorted",
     "quantum",
@@ -974,8 +929,6 @@ __all__ = [
     "TiePolicy",
     "TieSettings",
     "fixed_policy",
-    "TieBand",
-    "fixed_band",
     "policy",
     "GL_NOISE",
     "NOISE_MARGIN",

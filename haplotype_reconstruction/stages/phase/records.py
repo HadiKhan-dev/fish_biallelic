@@ -19,23 +19,17 @@ from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.painting import Painting
 from ...contracts.pedigree import ParentEdges
 from ...contracts.phase import (
-    AgreedRelease,
-    AlleleUncertainty,
-    MeiosisChain,
     PhaseBins,
     PhaseComponentInputs,
-    PhaseComponentResult,
     PhasedSamples,
     PhaseInputIdentities,
     PhaseMap,
     PhaseObservations,
     PhasePainting,
     PhaseRefit,
-    PhaseSolve,
     PhaseStates,
     PhaseSummary,
     PhaseTransitions,
-    SampleRelease,
 )
 from ...contracts.refit import FounderRefit
 from ...science.phase.parameters import PhaseParameters
@@ -45,129 +39,7 @@ from ...store.protocol import Derivation, NumericalPolicy
 from ...store.store import CheckpointStore
 from .boundaries import chromosome_prior_counts, validate_parent_edges, validate_sample_order
 
-__all__ = ["component_inputs", "canonical_component_inputs", "ComponentResultAdapter"]
-
-
-def _map_distances(record: Mapping[str, Any], centers: np.ndarray) -> np.ndarray:
-    """Use the canonical shared map, including its exact fallback and tail rules."""
-    genetic_map = ChromosomeGeneticMap(**record)
-    return np.asarray(genetic_map.interval_morgans(centers[:-1], centers[1:]), dtype=np.float64)
-
-
-def component_inputs(payload: Mapping[str, Any]) -> tuple[PhaseComponentInputs, PhaseParameters]:
-    """Borrow fixture arrays and construct typed inputs plus parameters; mutate nothing.
-
-    The payload is the normalized 3.5 component seam, with local evidence sites,
-    absolute provenance, painting/refit records and all contig prior inference
-    arrays. The exact integer sufficient statistics replace those prior arrays.
-    Missing required fields raise KeyError at this adapter boundary.
-    """
-    painting = payload["painting"]
-    sample_ids = tuple(payload["sample_ids"])
-    observations = PhaseObservations(
-        sample_ids,
-        payload["positions"],
-        payload["absolute_site_indices"],
-        payload["likelihoods"],
-        payload["observed"],
-        payload["excluded"],
-    )
-    bins = PhaseBins(painting["bin_starts"], painting["bin_stops"], painting["bin_centers"], painting["bin_edges"])
-    states = PhaseStates(
-        painting["positions"],
-        painting["named_alleles"],
-        tuple(tuple(rows) for rows in painting["classes"]),
-        painting["background_frequency"],
-        len(painting["classes"]) + 1,
-    )
-    transitions = PhaseTransitions(painting["log_same"], painting["site_correlation"])
-    painted = PhasePainting(
-        states,
-        bins,
-        transitions,
-        painting["local_keys"],
-        painting["eligible"],
-        painting["labels"],
-        painting["track_classes"],
-        painting["status"],
-        painting["member_ids"],
-        tuple(tuple(rows) for rows in painting["member_sets"]),
-        payload["packed_emissions"],
-        payload["painting_config"]["robustness_epsilon"],
-        payload["painting_config"]["emission_log_floor"],
-        sample_ids=tuple(painting.get("sample_ids", sample_ids)),
-    )
-    refit = PhaseRefit(
-        payload["refit"]["positions"],
-        payload["refit"]["inference"],
-        *chromosome_prior_counts(payload["prior_inference"]),
-    )
-    edges = payload["edges"]
-    pedigree = ParentEdges(
-        tuple(edges.get("sample_ids", sample_ids)),
-        edges["parents"],
-        edges["children"],
-        edges["slots"],
-        np.bincount(edges["children"], minlength=len(sample_ids)).astype(np.int64),
-        np.full(len(sample_ids), 2, dtype=np.int64),
-    )
-    validate_sample_order(
-        sample_ids,
-        painting=painted.sample_ids,
-        pedigree=pedigree.sample_ids,
-        refit=tuple(payload["refit"].get("sample_ids", sample_ids)),
-    )
-    validate_parent_edges(pedigree)
-    config = PhaseParameters(**payload["config"])
-    genetic_map = PhaseMap(
-        _map_distances(payload["genetic_map"], bins.centers), tuple(config.protected_for(payload["contig"]))
-    )
-    return PhaseComponentInputs(
-        payload["contig"], payload["component"], observations, painted, refit, pedigree, genetic_map
-    ), config
-
-
-class ComponentResultAdapter:
-    """Encode/decode the component result through the foundation's RecordAdapter protocol.
-
-    Axes, labels and integer encodings are preserved exactly. Only frozen records
-    become named dictionaries; no field is omitted and unknown fields raise.
-    """
-
-    schema = 1
-
-    def encode(self, product: PhaseComponentResult) -> dict[str, Any]:
-        """Return the versioned codec payload; arrays are borrowed and not mutated."""
-        from dataclasses import fields
-
-        def values(record: Any) -> dict[str, Any]:
-            return {field.name: getattr(record, field.name) for field in fields(record)}
-
-        return {
-            "schema": self.schema,
-            "solves": [values(solve) for solve in product.solves],
-            "site_indices": product.site_indices,
-            "site_bins": product.site_bins,
-            "site_alleles": product.site_alleles,
-            "uncertainty": [values(value) for value in product.uncertainty],
-            "releases": [[values(value) for value in release] for release in product.releases],
-            "agreed": [values(value) for value in product.agreed],
-            "chains": [values(value) for value in product.chains],
-        }
-
-    def decode(self, payload: Mapping[str, Any]) -> PhaseComponentResult:
-        """Reconstruct the frozen component result; raise on an unsupported schema or field."""
-        from ...contracts.roles import require_schema
-
-        require_schema(payload, self.schema)
-        record = dict(payload)
-        record.pop("schema")
-        record["solves"] = tuple(PhaseSolve(**value) for value in record["solves"])
-        record["uncertainty"] = tuple(AlleleUncertainty(**value) for value in record["uncertainty"])
-        record["releases"] = tuple(tuple(SampleRelease(**value) for value in release) for release in record["releases"])
-        record["agreed"] = tuple(AgreedRelease(**value) for value in record["agreed"])
-        record["chains"] = tuple(MeiosisChain(**value) for value in record["chains"])
-        return PhaseComponentResult(**record)
+__all__ = ["canonical_component_inputs"]
 
 
 def validate_canonical_inputs(
@@ -414,14 +286,13 @@ class Reader:
         return PhasedSamplesAdapter().decode(payload)
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
     product: str,
     contig: str | None = None,
-    elapsed_seconds: float | None = None,
-) -> Reader | None:
+) -> Derivation:
     """Derive phase identity from checked upstream products, never the phase envelope itself."""
     from ...contracts.payload import from_payload
     from ...contracts.roles import require_schema
@@ -435,8 +306,6 @@ def result_reader(
     if product not in ("phase", "phase_summary") or contig is None or contig not in manifest["contigs"]:
         raise InputError("phase reader requires a declared product and bound contig")
     file = store.contig(contig)
-    if not file.has(KEY) and not file.has(BINDING_KEY):
-        return None
     requests = (
         evidence_records.result_reader(store, manifest, product="evidence", contig=contig),
         painting_records.result_reader(
@@ -479,7 +348,15 @@ def result_reader(
         reverse=manifest["ties"]["reverse"],
         policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
-    return Reader(expected.identity, product, elapsed_seconds)
+    return expected
+
+
+def result_reader(store, manifest, *, product, contig=None, elapsed_seconds=None):
+    """Read the publication using the same expected phase derivation as its writer."""
+    if contig is None or not (store.contig(contig).has(KEY) or store.contig(contig).has(BINDING_KEY)):
+        return None
+    request = expected(store, manifest, product=product, contig=contig)
+    return Reader(request.identity, product, elapsed_seconds)
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:

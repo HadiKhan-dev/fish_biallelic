@@ -1,11 +1,17 @@
 """Run one contig's painting, with sequential components and whole-bin windows.
 
 The engine owns the team and scheduling. Storage windows and cache sizes affect
-cost only; evidence includes every sample. A completed product resumes as a unit,
-so an interrupted contig repeats model fitting, label continuity and release.
+cost only; evidence includes every sample. A completed product resumes as a unit;
+partial model, continuity and sample-block publications resume within the stage.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..configure import ResolvedConfiguration
+    from ...contracts.genetic_map import GeneticMapSet
 
 import time
 from collections.abc import Callable, Iterator
@@ -27,21 +33,19 @@ from ...core.ties import TieCensus, TieSettings
 from ...science.painting.diagnostics import ModelTrajectory, PaintingDiagnostics, summarise
 from ...science.painting.emissions import ArraySource, gather_sites, tempered_into
 from ...science.painting.fidelity import ChainModel
-from ...science.painting.label_continuity import relabel_bytes
 from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTES, PaintingParameters
-from ...science.painting.run import paint_chromosome
+from .compute import paint_chromosome
 from ...store.container import CheckpointFile
-from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish, read_items, resume
+from ...store.protocol import claim, mark_complete, publish, read_items, resume
 from ...store.slices import WindowArray
 from ..evidence.records import SUPPORTED_SCHEMAS
 from ..evidence.records import open_arrays as evidence_windows
-from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import RecordKey, ResourceRequest, Task
 from . import records
 
 _DEFAULT_TIES = TieSettings()
 
-__all__ = ["WindowEvidence", "windowed_emissions", "read_evidence", "identity", "run_contig", "painting_task"]
+__all__ = ["WindowEvidence", "windowed_emissions", "read_evidence", "run_contig", "task"]
 
 
 @dataclass(frozen=True)
@@ -142,7 +146,7 @@ def windowed_emissions(
                 seen = np.ascontiguousarray(flags[first_sample:last_sample, left:right])
             else:
                 values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
-            # One kernel tempers the window into the batch's arrays (release 4.7.1): informative sites, the design
+            # One kernel tempers the window into the batch's arrays: informative sites, the design
             # effect of each whole bin and the parts' emissions, with no serial steps between them.
             tempered_into(
                 values,
@@ -165,31 +169,8 @@ def windowed_emissions(
     return raw, flags, informative
 
 
-def identity(
-    parameters: PaintingParameters,
-    *,
-    contig: str,
-    sample_ids: tuple[str, ...],
-    assembly_identity: str,
-    evidence_identity: str,
-    payload_identity: str,
-    map_identity: str,
-    ties: TieSettings = _DEFAULT_TIES,
-    numerical_policy: NumericalPolicy | None = None,
-) -> str:
-    """Bind scientific inputs and convention; exclude cache, batches and thread counts."""
-    return Derivation(
-        code_dependency_identity(("science.painting", "stages.painting.tasks", "stages.painting.records")),
-        dict(parameters=parameters, contig=contig, sample_ids=sample_ids),
-        numerical_policy or NumericalPolicy.current(),
-        dict(assembly_final=assembly_identity, evidence=evidence_identity, payload=payload_identity, map=map_identity),
-        tie_reverse=ties.reverse,
-        tie_keep=ties.keep,
-    ).identity
-
-
 class _Progress:
-    """Painting progress records in the contig's checkpoint file (science.painting.run.PaintingProgress): the copying
+    """Painting progress records in the contig's checkpoint file: the copying
     model, the label-continuity outcome and each decoded sample batch, under keys namespaced by the painting's
     derivation, so an interrupted painting resumes from its last published step and another derivation never
     reads them."""
@@ -209,7 +190,7 @@ class _Progress:
 def _at_batch_boundary(builder: Callable[..., Any], batch: int, *args: Any, **kwargs: Any) -> Any:
     """A sample batch's emissions, after re-reading this task's CPU share (it grows into free CPUs and gives back
     when peers are short) and applying it to the Numba team of the batch's kernels."""
-    from ...engine.scheduler import claim_threads
+    from ...engine.cpu import claim_threads
 
     claim_threads(max_threads=batch)
     return builder(*args, **kwargs)
@@ -289,79 +270,55 @@ def run_contig(
         return result
 
 
-def working_bytes(assembly: records.Assembly, samples: int, parameters: PaintingParameters, cores: int) -> int:
-    """Dimension-only upper bound for cache, output, per-sample E-step and search scratch.
-
-    All panel sites and founder rows bound selected sites and trajectory classes.
-    Components execute serially, so only the largest component workspace is live.
-    """
-    prepared, components = assembly
-    peak = 0
-    output = 0
-    for component in components:
-        sites = sum(len(p.positions) for p in prepared[component.start : component.stop])
-        founders = len(component.rows)
-        states = founders + 1
-        tracks = 2 * states - 1
-        bins = max(1, sites // parameters.snps_per_bin)
-        links = max(0, component.stop - component.start - 1)
-        batch = min(samples, cores)
-        decoder = batch * (40 * tracks * tracks * bins + 16 * states * states * bins + 24 * sites)
-        continuity = relabel_bytes(batch, states, bins, links, sites)
-        statistics = 8 * samples * (max(0, bins - 1) + 9)
-        panels = 24 * founders * sites + 8 * founders * (links + 1)
-        peak = max(peak, max(decoder, continuity) + statistics + panels)
-        output += 128 * samples * bins
-    return EMISSION_CACHE_MAX_BYTES + (512 << 20) + output + peak
+from ..inputs.products import task_inputs, required_product
+from ..context import StageRun
 
 
-def painting_task(
+def run(
+    root: str,
     contig: str,
+    resolved: ResolvedConfiguration,
+    maps: GeneticMapSet,
+    ties: TieSettings,
     *,
-    file: CheckpointFile,
-    assembly: records.Assembly,
-    genetic_map: ChromosomeGeneticMap,
-    parameters: PaintingParameters,
-    sample_ids: tuple[str, ...],
-    assembly_identity: str,
-    evidence_identity: str,
-    payload_identity: str,
-    map_identity: str,
-    ties: TieSettings = _DEFAULT_TIES,
-    numerical_policy: NumericalPolicy | None = None,
-    evidence: ContigEvidence | None = None,
-    dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = ALL_CORES,
-) -> Task:
-    """One contig task; engine selects the team, components retain chromosome order."""
-    if max_cores < 1:
-        raise InvariantError("painting max_cores must be positive")
-    expected = identity(
-        parameters,
-        contig=contig,
-        sample_ids=sample_ids,
-        assembly_identity=assembly_identity,
-        evidence_identity=evidence_identity,
-        payload_identity=payload_identity,
-        map_identity=map_identity,
+    team: int = 1,
+    cores: int = 1,
+) -> str:
+    """Bind assembly's checked final assembly to painting's window-capable contig action."""
+    from ..assembly import records as assembly_records
+    from ..painting.tasks import run_contig
+    from ..painting import records
+    from ..evidence import records as evidence_records
+
+    reader, store = task_inputs(root)
+    assembly = required_product(reader, assembly_records, "assembly", contig)
+    evidence_id = evidence_records.expected(store, reader.manifest, product="evidence", contig=contig).identity
+    file = store.contig(contig)
+    from ...store.protocol import bound_payload_identity
+
+    payload = bound_payload_identity(file)
+    expected = records.expected(store, reader.manifest, product="painting", contig=contig).identity
+    run_contig(
+        file,
+        expected,
+        (assembly.prepared, assembly.components),
+        maps.for_contig(contig),
+        resolved.parameters.painting,
+        evidence_identity=evidence_id,
+        payload_identity=payload,
         ties=ties,
-        numerical_policy=numerical_policy,
+        threads=team,
+        max_threads=cores,
+        census=ties.census is not None,
     )
+    return expected
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare painting's production window-capable contig action."""
     return Task(
-        TaskKey("painting", "contig", contig),
-        run_contig,
-        (file, expected, assembly, genetic_map, parameters),
-        kwargs=dict(
-            evidence_identity=evidence_identity,
-            payload_identity=payload_identity,
-            evidence=evidence,
-            ties=ties,
-            max_threads=max_cores,
-        ),
-        depends_on=dependencies,
-        inputs=(RecordKey(contig, "assembly/final"), RecordKey(contig, "evidence")),
-        outputs=tuple(RecordKey(contig, key) for key in (records.PAINTING, records.SUMMARY, records.CACHE)),
-        resources=ResourceRequest(1, max_cores, working_bytes(assembly, len(sample_ids), parameters, max_cores)),
-        affinity=contig,
-        thread_argument="threads",
+        key, run, (context.root, key.scope, context.resolved, context.maps, context.ties),
+        kwargs={"cores": context.cores},
+        outputs=tuple(RecordKey(key.scope, name) for name in ("painting", "painting/summary", "identity/painting")),
+        resources=ResourceRequest(1, context.cores), thread_argument="team",
     )

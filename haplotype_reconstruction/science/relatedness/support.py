@@ -1,13 +1,13 @@
 """Measure member and parent support on map units.
 
-Owns the relocated support units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from ...core.concurrency import thread_count
 from .family_kernels import family_logliks, latent_alternatives, unit_terms
 from .partition import _Partition
 
@@ -50,7 +50,7 @@ def _support(part: _Partition, ranges):
     named = part.slots[live] >= 0
     joins, rest, alone, latent = np.empty((F, N)), np.empty(N), np.empty(N), np.empty((F, 2))
     for lo, hi in ranges:
-        part.claim_threads()
+        thread_count(part.threads)
         llk = np.empty(F)
         family_logliks(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, llk)
         unit_terms(

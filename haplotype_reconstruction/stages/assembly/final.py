@@ -1,13 +1,13 @@
 """Resume final and context assemblies at completion, join and refinement seams.
 
 Owns the sequential hierarchy and publication. Stop rules and L1 context order
-come from science.assembly.run. Refinement is a caller-supplied AS8 stage action,
-so storage and execution never enter science (WP_AS6 §4.5/4.6).
+come from science.assembly.run. Refinement is a caller-supplied final refinement stage action,
+so storage and execution never enter science.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 
@@ -15,23 +15,16 @@ from haplotype_reconstruction.contracts.assembly import (
     AssemblyProduct,
     CompletionProduct,
     JoinedLevel,
-    LevelRecord,
     RefinedLevel,
-    ReleaseFamily,
 )
-from haplotype_reconstruction.contracts.evidence import ContigEvidence
-from haplotype_reconstruction.contracts.genetic_map import ChromosomeGeneticMap
-from haplotype_reconstruction.contracts.panels import LocalPanel
 from haplotype_reconstruction.core.errors import SettingsError
 from haplotype_reconstruction.core.ties import TieSettings
 from haplotype_reconstruction.engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from haplotype_reconstruction.science.assembly import kernel_inventory
-from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput
 from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
 from haplotype_reconstruction.science.assembly.run import (
     AssemblyInputs,
-    AssemblyResult,
     Role,
     initial_components,
     join_settings,
@@ -39,11 +32,8 @@ from haplotype_reconstruction.science.assembly.run import (
     next_context,
 )
 from haplotype_reconstruction.stages.framework import Expansion
-from haplotype_reconstruction.store.container import CheckpointFile
-from haplotype_reconstruction.store.protocol import NumericalPolicy
 
-from .completion import SharedEvidence, complete_stage, expand_completion
-from .join_team import task_cpu_ceiling
+from .completion import SharedEvidence, expand_completion
 from .levels import expand_level
 from .records import (
     FINAL,
@@ -64,7 +54,7 @@ KERNEL_MODULES = kernel_inventory.MODULES
 
 @dataclass(frozen=True)
 class AssemblySession:
-    """One role's bound inputs, record capability and AS8 orchestration callback."""
+    """One role's bound inputs, record capability and final refinement orchestration callback."""
 
     inputs: AssemblyInputs
     parameters: AssemblyParameters
@@ -159,7 +149,7 @@ def joined(session: AssemblySession, state: HierarchyState, result: LevelOutput)
 def after_join(
     session: AssemblySession, state: HierarchyState, joined_level: JoinedLevel
 ) -> AssemblyProduct | Expansion:
-    """Release neutral evidence only after the terminal join, before AS8 runs."""
+    """Release neutral evidence only after the terminal join, before final refinement runs."""
     if session.role is Role.CONTEXT:
         return finish_level(session, state, joined_level, None)
     if joined_level.record.stop_reason is not None:
@@ -193,7 +183,7 @@ def after_join(
 def execute_refinement(
     session: AssemblySession, state: HierarchyState, joined_level: JoinedLevel, *, cores: int = 1
 ) -> RefinedLevel | Expansion:
-    """Delegate AS8's component expansion, or run its explicit stage callback."""
+    """Delegate final refinement's component expansion, or run its explicit stage callback."""
     from .refinement import refine
 
     action = refine if session.refine is None else session.refine
@@ -271,115 +261,8 @@ def assembly_task(
     )
 
 
-def bind_session(
-    inputs: AssemblyInputs,
-    parameters: AssemblyParameters,
-    *,
-    file: CheckpointFile | None,
-    upstream: Mapping[str, str],
-    role: Role = Role.FINAL,
-    levels: int | None = None,
-    records_prefix: str = "assembly",
-    parent: TaskKey,
-    max_cores: int = 1,
-    ties: TieSettings | None = None,
-    numerical_policy: NumericalPolicy | None = None,
-    storage: SharedEvidence | None = None,
-) -> AssemblySession:
-    """Bind independently checked inputs to every resumable assembly subrecord."""
-    from .records import assembly_identity
-
-    ties = TieSettings() if ties is None else ties
-    expected = assembly_identity(
-        parameters,
-        upstream,
-        role=role.value,
-        levels=levels,
-        reverse=ties.reverse,
-        tie_keep=ties.keep,
-        numerical_policy=numerical_policy,
-    )
-    records = None if file is None else RecordCapability(file, records_prefix, expected)
-    if storage is not None:
-        inputs = replace(inputs, evidence=storage.view)
-    return AssemblySession(
-        inputs, parameters, role, levels, records, ties, parent, task_cpu_ceiling(max_cores), storage=storage
-    )
-
-
-def assemble_context(
-    panels: Sequence[LocalPanel],
-    evidence: AssemblyEvidence,
-    genetic_map: ChromosomeGeneticMap,
-    parameters: AssemblyParameters,
-    *,
-    level: int,
-    records_prefix: str,
-    file: CheckpointFile | None,
-    upstream: Mapping[str, str],
-    cores: int = 1,
-    ties: TieSettings | None = None,
-    numerical_policy: NumericalPolicy | None = None,
-) -> AssemblyResult:
-    """SE2's bounded context callback, using its existing task's declared team.
-
-    IN1 supplies file, checked upstream identities, ties and cores with partial.
-    The caller passes panels/evidence/map/parameters, level and records_prefix.
-    Each join is published as it finishes; no new scheduler or pool is created.
-    """
-    from .levels import run_level_stage
-
-    if level not in (1, 2):
-        raise SettingsError("a context assembly requires levels 1 or 2")
-    session = bind_session(
-        AssemblyInputs(tuple(panels), evidence, genetic_map),
-        parameters,
-        file=file,
-        upstream=upstream,
-        role=Role.CONTEXT,
-        levels=level,
-        records_prefix=records_prefix,
-        parent=TaskKey("assembly", "context", records_prefix),
-        max_cores=cores,
-        ties=ties,
-        numerical_policy=numerical_policy,
-    )
-    completion = complete_stage(session.inputs, parameters.completion, session.records, ties=session.ties, cores=cores)
-    working = initial_components(completion.prepared)
-    families: tuple[ReleaseFamily, ...] = ()
-    records: list[LevelRecord] = []
-    for ordinal in range(1, level + 1):
-        saved = None if session.records is None else session.records.load(level_key(ordinal))
-        if saved is None:
-            result = run_level_stage(
-                working,
-                completion.prepared,
-                evidence,
-                join_settings(parameters, genetic_map, ordinal, session.ties),
-                batch_size=parameters.batch_size,
-                min_informative=parameters.min_boundary_informative_samples,
-                records=None if session.records is None else session.records.scoped(f"l{ordinal}"),
-                release_alternatives=families,
-                cores=cores,
-            )
-            record = level_record(ordinal, len(working), result, parameters, Role.CONTEXT, level)
-            families = tuple(
-                f.updated(source_level=f.get("source_level", ordinal)) for f in result.release_alternatives
-            )
-            product = JoinedLevel(result.components, record, families)
-            if session.records is not None:
-                session.records.save(level_key(ordinal), encode_joined(product))
-        else:
-            product = decode_joined(saved)
-        working, families = product.components, product.release_alternatives
-        records.append(product.record)
-        if product.record.stop_reason is not None:
-            break
-    return AssemblyResult(completion.prepared, tuple(working), tuple(records), tuple(families))
-
-
 def publish_refinement_index(session: AssemblySession, state: HierarchyState, joined_level: JoinedLevel) -> None:
-    """Bind the component scopes under the level before AS8 or a resume reads them.
+    """Bind the component scopes under the level before final refinement or a resume reads them.
 
     The report reader checks this parent identity and each indexed child identity;
     it never obtains expected identities from the child publication envelopes.
@@ -396,7 +279,6 @@ def publish_refinement_index(session: AssemblySession, state: HierarchyState, jo
         config,
         bin_floor(state.level, state.prepared, config),
         session.parameters.cost_scale,
-        joined_level.record.stop_reason is not None and config.final_additions,
         session.parameters.count_rule,
         state.level,
         session.inputs.genetic_map,
@@ -411,50 +293,6 @@ def publish_refinement_index(session: AssemblySession, state: HierarchyState, jo
             level=state.level,
             context=macro_context(component, state.l1_context),
             parameters=settings,
-            additions=settings.additions,
         )
         entries.append(dict(name=f"{number:05d}", prefix=scope.prefix, identity=identity))
     records.save(refinement_index_key(state.level), dict(schema=1, components=entries))
-
-
-def run_contig(
-    file: CheckpointFile,
-    panels: Sequence[LocalPanel],
-    evidence: ContigEvidence,
-    genetic_map: ChromosomeGeneticMap,
-    parameters: AssemblyParameters,
-    *,
-    upstream: Mapping[str, str],
-    parent: TaskKey,
-    cores: int = 1,
-    ties: TieSettings | None = None,
-    numerical_policy: NumericalPolicy | None = None,
-    role: Role = Role.FINAL,
-    levels: int | None = None,
-    records_prefix: str = "assembly",
-) -> AssemblyProduct | Expansion:
-    """IN1's concrete contig action, returning dynamic work to its existing engine.
-
-    evidence is the checked ContigEvidence product. This entry constructs the
-    exact assembly views once; in-process tasks share those immutable arrays.
-    Isolated callers may instead bind_session with an owned SharedEvidence.
-    """
-    from .completion import build_evidence
-
-    if not isinstance(evidence, ContigEvidence):
-        raise TypeError("assembly run_contig requires checked ContigEvidence")
-    view = build_evidence(evidence, upstream["evidence"], cores=cores)
-    session = bind_session(
-        AssemblyInputs(tuple(panels), view, genetic_map),
-        parameters,
-        file=file,
-        upstream=upstream,
-        role=role,
-        levels=levels,
-        records_prefix=records_prefix,
-        parent=parent,
-        max_cores=cores,
-        ties=ties,
-        numerical_policy=numerical_policy,
-    )
-    return start_assembly(session, cores=cores)

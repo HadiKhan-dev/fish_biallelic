@@ -1,13 +1,13 @@
-"""Name the 3.5 random streams without changing their seeds, generators or draw order.
+"""Name random streams with explicit seeds, generators and draw order.
 
-Count bootstrap keys use the original JSON spacing and SHA-256 first eight bytes,
+Count bootstrap keys use default JSON spacing and SHA-256 first eight bytes,
 not the canonical digest encoding. Refinement's key is
 [first_position, last_position, B, incoming_K, label, kind]; joins use
-('join_count', kind, sorted(seed_panel)). Completion folds are AS1's deterministic
+('join_count', kind, sorted(seed_panel)). Completion folds use a deterministic
 content-hash rule, with no random stream. NumPy streams are PCG64. The simulation structure
 uses Python's Mersenne Twister seeded by a draw from its master. No name is hashed
 into a seed: doing so would change the science. Callers retain each generator across
-its original sequence of draws; retries reconstruct it from the same semantic key.
+its sequence of draws; retries reconstruct it from the same semantic key.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ import random as _stdlib_random
 from typing import Any
 
 import numpy as np
+
+from .parameters import PEDIGREE_BOOTSTRAP_SEED
 
 __all__ = [
     "STREAMS",
@@ -34,7 +36,7 @@ __all__ = [
 
 _UNSET = object()
 
-# Live constructors in B; the uncalled deterministic_two_folds helper is excluded.
+# Supported stream names; deterministic content-hash folds do not use a stream.
 # There are no RandomState or explicitly constructed PCG64 streams.
 STREAMS = (
     "assembly.count.bootstrap",  # count_rule/criterion.py: JSON decision key
@@ -45,14 +47,14 @@ STREAMS = (
     "simulation.founders",  # source.py: SeedSequence child per contig
     "simulation.reads",  # source.py: master producing one seed per contig
     "simulation.contig_reads",  # source.py: worker uses the already drawn seed
-    "simulation.sample_reads",  # reads.py: one stream per sample from a seed drawn on the contig stream (4.8)
+    "simulation.sample_reads",  # reads.py: one stream per sample from a seed drawn on the contig stream
     "simulation.observation",  # design.py: subsampling after pedigree creation
     "templates.example",  # templates/example.py: SeedSequence child per contig
 )
 
 
 def bootstrap_seed(seed_key: Any) -> int:
-    """Return the original unsigned little-endian 64-bit seed of a JSON decision key.
+    """Return the unsigned little-endian 64-bit seed of a JSON decision key.
 
     Refinement passes [first_position, last_position, B, incoming_K, label, kind];
     joins pass ('join_count', kind, sorted(seed_panel)) through the same stream.
@@ -79,7 +81,7 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
             raise ValueError("count bootstrap requires either key or seed, not both")
         seed = bootstrap_seed(key)
     if name == "pedigree.bootstrap" and seed is None:
-        seed = 20260725
+        seed = PEDIGREE_BOOTSTRAP_SEED
     if seed is None:
         raise ValueError(f"{name}: a realised seed is required")
     if name == "simulation.reads":
@@ -99,7 +101,7 @@ def structure_stream(master: np.random.Generator) -> _stdlib_random.Random:
     """Draw simulation.structure's MT seed from the master, advancing it exactly once.
 
     Use for a generated pedigree only. An explicit pedigree starts drawing child
-    seeds from the untouched master, as in 3.5 simulation/pedigree.py.
+    seeds from the untouched master.
     """
     return _stdlib_random.Random(int(master.integers(0, 2**31)))
 
@@ -120,11 +122,11 @@ def resampled_individuals(seed: int, resamples: int, samples: int) -> np.ndarray
     return stream("assembly.count.bootstrap", seed=seed).integers(0, samples, size=(resamples, samples))
 
 
-def bootstrap_multiplicities(n_contigs: int, replicates: int = 1000, seed: int = 20260725) -> np.ndarray:
+def bootstrap_multiplicities(n_contigs: int, replicates: int = 1000, seed: int = PEDIGREE_BOOTSTRAP_SEED) -> np.ndarray:
     """Return float64[R, C] pedigree bootstrap counts; each row draws C contigs.
 
-    Keep the replicate loop: consuming one vector per replicate is the documented
-    3.5 protocol, including its generator buffering. Inputs are not mutated.
+    Consume one vector per replicate so the generator's buffering and draw order
+    are explicit. Inputs are not mutated.
     """
     rng = stream("pedigree.bootstrap", seed=seed)
     multiplicities = np.empty((replicates, n_contigs), dtype=np.float64)
@@ -135,12 +137,12 @@ def bootstrap_multiplicities(n_contigs: int, replicates: int = 1000, seed: int =
 
 
 def realise_seed(seed: int | None) -> int:
-    """Resolve simulation's optional seed once at init, retaining the 3.5 OS-entropy form.
+    """Resolve simulation's optional seed once at init from a supplied value or OS entropy.
 
     init calls realise_seed(configured_seed) once, persists the returned integer in
     the run manifest, and passes it to all science streams and retries. On resume,
     init reads that persisted seed rather than realizing another. Science never
-    calls this boundary helper (ARCHITECTURE_40 §3.3).
+    calls this boundary helper.
 
     A supplied integer is unchanged; otherwise use eight OS-random bytes interpreted
     little-endian. The stage must bind this value before any work or retry.

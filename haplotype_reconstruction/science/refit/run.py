@@ -80,7 +80,7 @@ def refit_chromosome(
 
 @dataclass(frozen=True)
 class RefitSummary:
-    """Exact per-contig counts and median accepted/ambiguous-cell gain (P0 FR06)."""
+    """Exact per-contig counts and median accepted/ambiguous-cell gain."""
 
     contig: str = record_field("report", dtype="str", units="1")
     components: int = record_field("report", dtype="int64", units="1")

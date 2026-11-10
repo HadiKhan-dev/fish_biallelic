@@ -5,8 +5,7 @@ Read the [installation guide](user/installation.md), try the
 The [workflow guide](user/workflow.md) gives explicit scatter/gather steps.
 
 The [output dictionary](user/outputs.md) defines public products and missing values.
-Check [limitations](user/limitations.md) before interpreting a result and
-[migration](user/migration.md) before moving a configuration from 3.5.
+Check [limitations](user/limitations.md) before interpreting a result.
 
 [Methods](methods/index.md) describe models and ordered decisions. Generated
 [settings](reference/settings.md), [scientific parameters](reference/parameters.md),

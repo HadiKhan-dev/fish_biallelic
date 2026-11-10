@@ -6,7 +6,6 @@ is unavailable; the published M1 profile is supplied separately. Chromosome
 scores sum components in their prepared order.
 
 Method: docs/methods/pedigree.md#ragged-quadratic-scoring-of-m0-m1-and-m2
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import numpy as np
 from ...contracts.pedigree import ChromosomeScores, PreparedChromosome
 from . import exposure, forward, junctions
 from .eligibility import ParentEligibility
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .resident import ResidentComponent, resident
 
 
@@ -56,25 +55,26 @@ def scored_morgans(prepared: PreparedChromosome, interval_cap: float) -> float:
 def score_chromosome(
     prepared: PreparedChromosome,
     screen: ChromosomeScreen,
-    states: list[ResidentComponent | None] | None,
+    states: list[ResidentComponent | None],
     trios: np.ndarray,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     claim_threads=lambda: None,
     *,
-    one_values=None,
+    one_values: np.ndarray,
     reverse: bool | None = None,
 ) -> ChromosomeScores:
     """M2, exposure and junction evidence for ``trios``; M0 and fallback M1 from ``screen``.
 
-    ``one_values`` supplies the fixed chromosome M1 profile for publication."""
+    ``states`` supplies resident components, consumed in order. ``one_values`` supplies the fixed
+    chromosome M1 profile for publication; fallback scratch cells are never published as that profile."""
     reverse = config.reverse_conventions if reverse is None else reverse
     required = eligibility.parents | eligibility.parents.T
     np.fill_diagonal(required, True)
     parts = []
     schedules, thetas = [], []
     for index, (component, component_screen) in enumerate(zip(prepared.components, screen.components, strict=True)):
-        state = states[index] if states is not None else resident(component, config, claim_threads, reverse=reverse)
+        state = states[index]
         assert state is not None  # each supplied state is read once, before its slot is released below
         two = forward.component_m2(
             state.projection, state.terms, trios, component_screen.zero, component_screen.one, claim_threads
@@ -113,15 +113,14 @@ def score_chromosome(
                 pair_morgans,
             )
         )
-        if states is not None:
-            states[index] = None  # release the component's resident arrays
+        states[index] = None  # release the component's resident arrays
         del state
 
     def total(position):
         return np.sum(np.stack([part[position] for part in parts]), axis=0)
 
-    # Linked junction transmission (release 2.16) for every dyad the decision orients (both directions of each
-    # eligible edge): the child's chromosome-wide callable fraction thins the inherited junctions (as before).
+    # Linked junction transmission for every dyad the decision orients (both directions of each
+    # eligible edge): the child's chromosome-wide callable fraction thins the inherited junctions.
     own = total(7).astype(np.int64)
     total_bins = float(sum(component.n_bins for component in prepared.components))
     detection = np.minimum(1.0, total(8) / (2.0 * total_bins)) if total_bins > 0 else np.zeros(len(own))
@@ -136,7 +135,7 @@ def score_chromosome(
     return ChromosomeScores(
         contig=prepared.contig,
         zero=total(0),
-        one_floored=total(1) if one_values is None else one_values,
+        one_floored=one_values,
         two=total(2),
         edge_matched=total(3),
         edge_exposed=total(4),
@@ -161,7 +160,7 @@ def score_chromosome_selective(
     one: np.ndarray,
     trios: np.ndarray,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     claim_threads=lambda: None,
     *,
     reverse: bool | None = None,

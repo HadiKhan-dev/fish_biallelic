@@ -1,4 +1,4 @@
-"""Phase metrics of the released family phase against the simulated truth (evaluation only; release 3.2).
+"""Phase metrics of the released family phase against the simulated truth (evaluation only).
 
 Per sample, a released phase set is a maximal run of the sample's sites inside one painting component that none of the
 sample's released phase breaks separates (family phase's per-sample ``phase_breaks``: boundary i lies between sites
@@ -22,7 +22,7 @@ true allele.
 Released (truth-free) sets, what a reader of the exported phase sets sees: sets holding at least one called
 heterozygote released phased, spanning first to last such site (``released_phase_sets``, their N50).
 
-These are the definitions of the lab scorer the releases since 3.0 were judged with. Samples are scored one at a time;
+These definitions specify the released-phase evaluation metrics. Samples are scored one at a time;
 every count is an integer, so results do not depend on the thread count.
 """
 

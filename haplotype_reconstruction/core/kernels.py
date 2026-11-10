@@ -1,8 +1,8 @@
 """Declare Numba overloads without forcing signatures or changing lazy dispatch.
 
 A declaration records exact Numba argument types, including layout, read-only arrays,
-literals and optionals. The signature codec is the 3.5 kernel_manifest codec (P0
-ENG-28). Runtime code explicitly requests warm-up; importing a declaration compiles
+literals and optionals. The signature codec stores exact Numba types.
+Runtime code explicitly requests warm-up; importing a declaration compiles
 nothing and creates no files. The only registry is this small kernel inventory.
 """
 
@@ -23,8 +23,7 @@ from numba.core.serialize import dumps
 # id(), i.e. by address), followed by the mangled argument types: "__numba_parfor_gufunc_0x<address>...". Worker
 # processes started alike allocate alike, so two different kernels with the same argument types compiled in two
 # workers can receive the same symbol. A process that later loads both from the kernel cache links both callers to
-# one of the two loops and silently runs the wrong code (release 4.10's matrix: painting's forward and bin-reversed
-# structured emissions, after which the decode's posteriors collapsed in three of 39 cases). Each process therefore
+# one of the two loops and silently runs the wrong code. Each process therefore
 # hashes parfors with its own random salt and numba's per-process parfor counter: names differ between processes,
 # and within a process a reused address no longer repeats a name. Parfor equality and identity semantics are
 # unchanged (distinct parfors keep distinct hashes); no computed value depends on the name.
@@ -58,7 +57,6 @@ __all__ = [
     "kernel",
     "enable_caches",
     "declarations",
-    "warmup_requests",
     "encode_signature",
     "decode_signature",
     "manifest",
@@ -182,11 +180,6 @@ def declarations() -> tuple[KernelDeclaration, ...]:
     return tuple(_DECLARATIONS[key] for key in sorted(_DECLARATIONS))
 
 
-def warmup_requests() -> dict[tuple[str, str], set[tuple[Any, ...]]]:
-    """Return the 3.5 warm-up manifest's function-to-signatures shape, without compiling."""
-    return {(entry.module, entry.function): set(entry.overloads) for entry in declarations()}
-
-
 def encode_signature(signature: tuple[Any, ...]) -> dict[str, str]:
     """Encode exact trusted Numba types using the original base85 pickle format."""
     return {"text": str(signature), "pickle": base64.b85encode(dumps(signature)).decode("ascii")}
@@ -214,8 +207,8 @@ def manifest() -> dict:
 def requests_from_manifest(data: dict) -> tuple[dict, dict]:
     """Decode a trusted format-1 manifest; incompatible declarations raise instead of disappearing.
 
-    The engine decides how to report an incompatible toolchain. 3.5's silent skip
-    and diagnostic printing are release-tool behavior, not a numerical kernel rule.
+    The engine decides how to report an incompatible toolchain; this codec raises
+    decoding errors without choosing a reporting policy.
     """
     if data["format"] != 1:
         raise ValueError("unknown release manifest format")

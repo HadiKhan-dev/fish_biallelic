@@ -1,21 +1,21 @@
-"""Name carried scientific definitions and reported working-set estimates.
+"""Truth-evaluation metric definitions and execution estimates.
 
-Each value cites its P0 unit and frozen 3.5 source. No values are inferred
-from environment, worker count, clocks or filesystem state.
+Count thresholds define the reported metric; tiles and byte allowances only
+partition its computation. None of these values feeds inference.
 """
 
-LONG_SWITCH_MIN_RUN: int = 20  # OU36: B evaluation/metrics.py:34; metric definition.
-SEGMENT_SWITCH_COST: float = 20.0  # OU33: B evaluation/founders.py:38; exact metric definition.
-SITE_TILE: int = 65_536  # OU32: B evaluation/founders.py:33; integer counting work decomposition.
-IDENTITY_WINDOW_MARKERS: int = 100  # OU35: B evaluation/identity.py:36; truth-marker grid.
-LABEL_MIN_CALLS: int = 16  # OU35: B evaluation/identity.py:37.
-LABEL_MARGIN: int = 2  # OU35: B evaluation/identity.py:38.
-LABEL_ERROR_FRACTION: float = 0.05  # OU35: B evaluation/identity.py:94.
-LABEL_MIN_ERRORS: int = 1  # OU35: B evaluation/identity.py:94.
-COVERAGE_MIN_DISTANCE: int = 3  # OU35: B evaluation/identity.py:39.
-COVERAGE_MAX_GAP: int = 3  # OU35: B evaluation/identity.py:40.
-TASK_ALLOWANCE_BYTES: int = 256 << 20  # OU31: B evaluation/evaluate.py:69; scheduling estimate only.
-PHASE_METRIC: str = "released_phase_v3"  # OU36: B evaluation/evaluate.py:40; published definition version.
+LONG_SWITCH_MIN_RUN: int = 20  # Scored sites; minimum orientation run separating two long-switch errors.
+SEGMENT_SWITCH_COST: float = 20.0  # Allele-error units charged per founder-label switch and per split row.
+SITE_TILE: int = 65_536  # Sites per tile; bounds temporary storage for integer error counting.
+IDENTITY_WINDOW_MARKERS: int = 100  # Truth markers per window for copy-stratified identity evaluation.
+LABEL_MIN_CALLS: int = 16  # Called sites required to assign a reconstructed row a truth-founder label.
+LABEL_MARGIN: int = 2  # Error-count margin required between the best and next truth-founder labels.
+LABEL_ERROR_FRACTION: float = 0.05  # Fraction of called sites allowed as errors for a window label.
+LABEL_MIN_ERRORS: int = 1  # Errors; minimum allowance in the window-label error cutoff.
+COVERAGE_MIN_DISTANCE: int = 3  # Marker mismatches from other founders required for an eligible coverage window.
+COVERAGE_MAX_GAP: int = 3  # Windows; maximum gap bridged by continuity evaluation.
+TASK_ALLOWANCE_BYTES: int = 256 << 20  # Bytes of fixed allowance in the evaluation task working-set estimate.
+PHASE_METRIC: str = "released_phase_v3"  # Published identifier of the released-phase metric definition.
 
 __all__ = [
     "LONG_SWITCH_MIN_RUN",

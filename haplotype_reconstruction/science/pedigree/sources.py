@@ -2,7 +2,7 @@
 
 A sample's source chain is an HMM over ordered diplotypes (S^2 states, S = classes + BACKGROUND) with the
 painting's label-level Hamming transition, which is symmetric and depends only on how many founders change, and its
-tempered emissions; it leaves out painting's panel-error state (release 2.14), so it is not the marginal of the
+tempered emissions; it leaves out painting's panel-error state, so it is not the marginal of the
 painting's own chain.
 Its backward pass is stored compactly as initial probabilities and max-normalised right weights
 r_b (O(N B S^2)); the posterior chain kernel K_b(u, v) = A_b(u, v) r_b(v) / sum_w A_b(u, w) r_b(w)
@@ -10,7 +10,6 @@ and the per-bin marginals follow in O(S^2) per bin through row, column and total
 S^4 transition).
 
 Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-information-blocks
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations

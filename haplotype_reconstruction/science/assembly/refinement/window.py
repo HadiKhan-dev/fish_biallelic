@@ -3,21 +3,10 @@
 Owns mathematical window kernels and dimension constants; stage capabilities own evidence buffers.
 Method: docs/methods/founder_refinement.md#workspace (RC02–RC04).
 
-Owns window fill/read kernels, cost maps and partial-site fallback arithmetic.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#windows (RC02; RC04-RC08).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-
-
-Through 3.3 a component held its whole robust log evidence (float64 S x L x 7), a reversed copy and up
-to seven float32 switch-cost arrays: about 140 bytes per sample-site, all at once for the
-chromosome-wide components of the last levels. Every one of those values is a pure function of the
-component's float32 evidence, its site masks and the genetic map, so they are now produced where they
-are read:
+Holding all seven robust log-evidence codes (float64 S x L x 7), a reversed copy and seven
+float32 switch-cost arrays costs about 140 bytes per sample-site. Those values are pure functions
+of the component's float32 evidence, site masks and genetic map, so windows compute them where
+they are read:
 
 - a *window* holds, for a stretch of sites and a range of samples, the uncentred robust log evidence
   of pair codes 0-2 (float64), of codes 3-6 at its partial sites (sites where a prepared row of the
@@ -25,14 +14,14 @@ are read:
   one founder count K and one orientation (float32);
 - every kernel reads a sample-site through `locate` / `site_logs` / `site_cost`: from the window when it
   holds the site, otherwise computed on the spot by the same arithmetic (`site_values`, `cost_value`).
-  The values are bitwise those of 3.3's arrays wherever they come from, so windows change time and
-  memory only, never a result;
+  Both routes use the same operations in the same order, so windows change time and
+  memory only;
 - kernels `cover` the stretch they are about to read: a window that does not hold it is refilled
   (the overlap with what it held is moved, not recomputed).
 
 A component whose tables fit RESIDENT_BYTES keeps one resident window over all its sites and samples,
 shared by every search of the component (the switch costs per K and orientation cached, at most
-COST_ARRAYS), and reads exactly as before. A larger component gives each consumer (one search, or one
+COST_ARRAYS), with the same read arithmetic. A larger component gives each consumer (one search, or one
 count computation) its own window (Windows.view) of W = max(WINDOW_MIN_SITES, WINDOW_BYTES / (28 N)) sites,
 which takes 28 N W + 8 W + 32 N max(1, P_W) bytes (Windows.window_bytes; P_W the most partial sites in any
 W-site stretch): WINDOW_BYTES for codes 0-2 and costs, plus the partial sites' codes 3-6, up to as much again
@@ -50,7 +39,7 @@ Window tuple (the Numba argument of every kernel):
     ev       float32 (S, L, 3): the component's evidence (normalised genotype likelihoods), forward order
     kept     bool (L,): the objective's sites (kept, with a called prepared row)
     partial  bool (L,): sites where a prepared row is uncalled (pair codes 3-6 can be read there)
-    hazards  float64 (L,): physical-edge reset hazards (workspace.map_hazards)
+    hazards  float64 (L,): physical-edge reset hazards (component_workspace.map_hazards)
     logs     float64 (R, C, 3): codes 0-2 of rows (samples) meta[FIRST] .., columns (sites) meta[BASE] ..
     plogs    float64 (R, P, 4): codes 3-6 of the window's partial sites (slot pmap[column])
     pmap     int64 (C,): partial slot of a column, or -1
@@ -115,8 +104,7 @@ def informative_at(ev, kept, s, f):
 @kernel(overloads=overloads_for(__name__, "site_values"), inline="always", nogil=True)
 def site_values(ev, kept, partial, s, f, e):
     """e[0..6] = the uncentred robust log evidence of the seven pair codes of sample s at forward site f
-    (codes 3-6 only at partial sites); returns False (e untouched) where the site is skipped. The arithmetic
-    of 3.3's prepare_log_evidence."""
+    (codes 3-6 only at partial sites); returns False (e untouched) where the site is skipped."""
     if not kept[f]:
         return False
     informative, p0, p1, p2 = normalised_likelihoods(ev[s, f, 0], ev[s, f, 1], ev[s, f, 2])
@@ -146,7 +134,7 @@ def switch_cost(rho, founders):
 
 @kernel(overloads=overloads_for(__name__, "gap_cost"), inline="always", nogil=True)
 def gap_cost(mass, founders):
-    """float32 switch cost of a gap of reset hazard `mass` (3.3's map_switch_costs: rho = 1 - exp(-mass))."""
+    """float32 switch cost of a gap of reset hazard `mass` (rho = 1 - exp(-mass))."""
     return np.float32(switch_cost(-math.expm1(-mass), founders))
 
 
@@ -155,7 +143,7 @@ def cost_value(ev, kept, hazards, s, f, founders, reverse):
     """The switch cost of sample s at forward site f, computed alone: forward orientation, the cost entering f
     from the sample's previous informative site; reversed orientation, the cost entering its next informative
     site after f. +inf at a skipped site and without such a site. The hazards are summed from the earlier site
-    onwards, as 3.3's map_switch_costs did, so the value is bitwise its array's."""
+    onwards, using the same summation order as the window fill."""
     sites = len(kept)
     if not informative_at(ev, kept, s, f):
         return np.float32(np.inf)
@@ -336,7 +324,7 @@ def _fill_partial(ev, kept, partial, plogs, pmap, base, s0, s1, c0, c1):
 @kernel(overloads=overloads_for(__name__, "_fill_costs"), cache=True, parallel=True, nogil=True)
 def _fill_costs(ev, kept, hazards, costs, base, s0, s1, c0, c1, founders, reverse):
     """Switch costs of columns [c0, c1) (forward sites base + c) for samples [s0, s1) in either orientation,
-    bitwise 3.3's map_switch_costs: forward, the cost entering each informative site from the sample's previous
+    forward, the cost entering each informative site from the sample's previous
     informative site (the hazards summed onwards from it); reversed, the forward cost of its next informative
     site. A gap of one edge, the common case, reads the per-site cost table."""
     sites = len(kept)
@@ -524,8 +512,8 @@ def stretch_back(offsets, b0, b1, limit):
 @kernel(overloads=overloads_for(__name__, "boundary_costs"), cache=True, parallel=True, nogil=True)
 def boundary_costs(ev, kept, hazards, offsets, founders):
     """float64 (B + 1, S): the forward switch cost (K = founders) entering each sample's first informative site
-    at or after every block boundary (+inf when there is none, or it is the sample's first). 3.3 read it from
-    the whole cost array; here only those sites' costs are computed."""
+    at or after every block boundary (+inf when there is none, or it is the sample's first).
+    Only the costs of these boundary sites are computed."""
     blocks = len(offsets) - 1
     samples = ev.shape[0]
     K = float(founders)
@@ -603,7 +591,7 @@ def informative_samples(ev, kept):
 @kernel(overloads=overloads_for(__name__, "map_normalisers"), cache=True, parallel=True, nogil=True)
 def map_normalisers(ev, kept, hazards, founders):
     """float64 (S,) panel-independent terms of every sample's max-path score: -2 log K at its first informative
-    site (the uniform start), 2 log(1 - rho (1 - 1/K)) at every later one (0 without evidence); 3.3's arithmetic."""
+    site (the uniform start), 2 log(1 - rho (1 - 1/K)) at every later one (0 without evidence)."""
     samples, sites = ev.shape[0], ev.shape[1]
     out = np.zeros(samples)
     for s in prange(samples):
@@ -616,7 +604,7 @@ def map_normalisers(ev, kept, hazards, founders):
             if not informative_at(ev, kept, s, j):
                 continue
             if seen:
-                total += 2.0 * math.log1p(-(-math.expm1(-mass)) * (1.0 - 1.0 / founders))  # noqa: B002 - native arithmetic order
+                total += 2.0 * math.log1p(-(-math.expm1(-mass)) * (1.0 - 1.0 / founders))  # noqa: B002 - stay term
             else:
                 total = -2.0 * math.log(founders)
                 seen = True

@@ -89,7 +89,7 @@ def build_bins(positions: np.ndarray, snps_per_bin: int) -> PaintingBins:
     return PaintingBins(starts.astype(np.int64), stops.astype(np.int64), centers, edges)
 
 
-# Exact supported layouts from the frozen 3.5 release and typed stage-route census.
+# Supported layouts for typed stage routes.
 _OVERLOADS = {
     "_local_allele_keys_kernel": (
         (

@@ -4,21 +4,17 @@
 Page checks: local links and anchors; TOML blocks and `[section] key = value`
 spans against the settings schema; command lines and options against the CLI;
 constants cited as `Owner.field = value` against the parameter modules; no
-site-specific paths; no historical phrasing outside the changelog and the
-migration guide.
+site-specific paths; no historical phrasing outside the changelog.
 
 Whole-set checks: every generated reference equals what `docs/generate_docs.py`
 writes now; every environment variable the package reads is documented, and
-only the runtime (`engine/`) touches the process environment; every carried
-semantic unit of `docs/methods/coverage.json` has exactly one methods section
-with its anchor, implementation links, named parameters and cost; every
-documentation link in a package docstring resolves; every file the writers
-publish has an output-dictionary entry; the Snakemake example's commands exist,
-and its integration receipt is current and passed.
+only the runtime (`engine/`) touches the process environment; documentation links
+in package docstrings resolve; every file the writers publish has an output-dictionary
+entry; and the documented workflow commands exist. Release receipts and semantic
+coverage are checked by the external validation suite.
 
 Warnings fail the build. `--page` checks only the named pages. `--draft` lists
-the release-evidence gates (the workflow receipt) as pending instead of failing
-on them; a release build never uses it.
+the external release-validation gate as pending.
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ import argparse
 import ast
 import dataclasses
 import importlib
-import json
 import math
 import re
 import shlex
@@ -45,7 +40,6 @@ if str(DOCS) not in sys.path:
     sys.path.insert(0, str(DOCS))
 
 HISTORY_PAGES = ("CHANGELOG.md",)
-MIGRATION_PAGES = ("docs/user/migration.md",)
 HISTORY_PHRASES = re.compile(
     r"\b(previously|no longer|as before|used to|formerly|restores the earlier|was removed|were removed|"
     r"has been removed|now replaced|earlier (?:release|version)s?|in (?:release |version )?3\.\d+)\b",
@@ -576,7 +570,6 @@ class Checker:
         span = span.strip()
         if not checks:
             return
-        migration = page.name in MIGRATION_PAGES
         if span.startswith("haplotypes ") or span.startswith("python -m haplotype_reconstruction "):
             self.check_command(page, number, span)
             return
@@ -597,13 +590,11 @@ class Checker:
             return
         flag = re.fullmatch(r"(--[a-z][\w-]*)(?:[ =].*)?", span)
         if flag:
-            if migration and flag.group(1) in {"--process-contigs", "--batch-queue"}:
-                return
             if flag.group(1) not in self.all_flags:
                 self.error(page, number, f"no command has the option {flag.group(1)}")
             return
         match = MODULE_FILE_SPAN.match(span)
-        if match and not migration:
+        if match:
             relative = match.group(1)
             if not ((PACKAGE / relative).exists() or (SOURCE / relative).exists()):
                 self.error(page, number, f"no such file: {span} (module paths are relative to the package)")
@@ -649,7 +640,7 @@ class Checker:
     # ---------------------------------------------------------------------------------------------- pages
     def check_page(self, page: Page):
         history = page.name in HISTORY_PAGES
-        migration = page.name in MIGRATION_PAGES
+        historical_links = False
         methods = page.name.startswith("docs/methods/")
         fence = None
         language = ""
@@ -658,9 +649,12 @@ class Checker:
         directive = None
         pending_directive = None
         in_comment = False
-        headers: list[str] = []
         for number, line in enumerate(page.lines, 1):
             stripped = line.strip()
+            if history and stripped.startswith("## "):
+                # Published release notes retain the paths that existed then.
+                # Candidate notes and all current guides still check live links.
+                historical_links = " candidate:" not in stripped
             if SITE_PATH.search(line) and fence:
                 self.error(page, number, "site-specific text in code block")
             if fence:
@@ -694,27 +688,13 @@ class Checker:
             site = SITE_PATH.search(line)
             if site:
                 self.error(page, number, f"site-specific path: {site.group(0)}")
-            # Table columns: cells under an "old" or "3.5" header of the migration guide are not checked.
-            cells = None
-            if stripped.startswith("|"):
-                cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-                following = page.lines[number] if number < len(page.lines) else ""
-                if re.match(r"^\|?\s*:?-{3,}", following.strip()):
-                    headers = [cell.lower() for cell in cells]
-            else:
-                headers = []
             segments = [(line, True)]
-            if cells is not None and migration and headers:
-                segments = [
-                    (cell, not (headers[i].startswith(("old", "3.5"))) if i < len(headers) else True)
-                    for i, cell in enumerate(cells)
-                ]
             for text, checked in segments:
                 checks = checked and not history
                 for span_match in CODE_SPAN.finditer(text):
                     self.check_span(page, number, span_match.group(2), checks)
                 without_code = CODE_SPAN.sub("", text)
-                if checks and not migration:
+                if checks:
                     phrase = HISTORY_PHRASES.search(without_code)
                     if phrase:
                         self.warn(page, number, f"history phrasing: {phrase.group(0)!r}")
@@ -724,10 +704,11 @@ class Checker:
                             number,
                             f"release history in a methods page: {METHODS_VERSION.search(without_code).group(0)!r}",
                         )
-                for target in LINK.findall(without_code):
-                    self.check_link(page, number, target)
+                if not historical_links:
+                    for target in LINK.findall(without_code):
+                        self.check_link(page, number, target)
             reference = REFERENCE_LINK.match(line)
-            if reference:
+            if reference and not historical_links:
                 self.check_link(page, number, reference.group(1))
         if fence:
             self.error(page, block_start, "unclosed code block")
@@ -755,12 +736,23 @@ class Checker:
     def check_whole_set(self):
         self.check_generated()
         self.check_environment()
-        self.check_methods()
-        self.check_ledger()
         self.check_docstring_links()
         self.check_outputs()
-        self.check_examples()
-        self.check_workflow()
+        self.check_workflow_commands()
+
+    def check_workflow_commands(self):
+        """Validate the current example’s CLI syntax without importing test tooling."""
+        path = DOCS / "examples/Snakefile"
+        if not path.exists():
+            self.errors.append("docs/examples/Snakefile: missing example")
+            return
+        page = Page(path, str(path.relative_to(SOURCE)), path.read_text().splitlines())
+        for number, line in enumerate(page.lines, 1):
+            match = re.search(r'shell:\s*"(.*)"', line)
+            if match:
+                self.check_command(page, number, re.sub(r"\{[^}]+\}", "PLACEHOLDER", match.group(1)))
+        if self.draft:
+            self.pending.append("release validation is checked by the external suite")
 
     def check_generated(self, pages: dict[str, str] | None = None):
         """Every committed generated reference equals the generators' current output."""
@@ -793,88 +785,6 @@ class Checker:
                 self.errors.append(f"{row['source']}:{row['line']}: environment read {row['name']} is undocumented")
         for access in environment_access(package):
             self.errors.append(f"haplotype_reconstruction/{access}: only the runtime may use the process environment")
-
-    def check_methods(self, coverage: dict | None = None, manifest: list[dict] | None = None):
-        """Each carried P0 unit has exactly one methods section, with its anchor and required parts."""
-        if coverage is None:
-            coverage = json.loads((DOCS / "methods/coverage.json").read_text())
-        if manifest is None:
-            manifest = json.loads((DOCS / "methods/units.json").read_text())["units"]
-        carried = {(row["area"], row["unit"]): row for row in coverage["carried"]}
-        removed = {(row["area"], row["unit"]) for row in coverage.get("removed", [])}
-        counts = Counter((row["area"], row["unit"]) for row in manifest)
-        for key in sorted(carried):
-            if counts[key] != 1:
-                self.errors.append(f"docs/methods/units.json: carried unit {'/'.join(key)} has {counts[key]} sections")
-        for key in sorted(set(counts) - set(carried)):
-            reason = "a removed unit" if key in removed else "not a carried unit"
-            self.errors.append(f"docs/methods/units.json: {'/'.join(key)} is {reason}")
-        accretions = (DOCS / "developer/accretions.md").read_text()
-        for row in manifest:
-            key = (row["area"], row["unit"])
-            page_path = DOCS / row["page"]
-            label = f"docs/{row['page']}#{row['anchor']}"
-            if not page_path.exists():
-                self.errors.append(f"{label}: page missing for unit {row['unit']}")
-                continue
-            if row["classification"] != carried.get(key, row)["classification"]:
-                self.errors.append(f"{label}: classification differs from coverage.json")
-            section = self.section(page_path, row["anchor"])
-            if section is None:
-                self.errors.append(f"{label}: no section anchored for unit {row['unit']}")
-                continue
-            heading = next((line for line in section if line.startswith("#")), "")
-            if row["unit"].lower() not in heading.lower():
-                self.errors.append(f"{label}: section heading does not name unit {row['unit']}")
-            text = "\n".join(section)
-            for part in ("Implementation:", "Parameters", "Cost and scope:"):
-                if part not in text:
-                    self.errors.append(f"{label}: section lacks {part!r}")
-            for source in row["sources"]:
-                if not (PACKAGE / source).exists():
-                    self.errors.append(f"{label}: implementation source {source} does not exist")
-            for name in row["parameters"]:
-                if name not in self.parameter_names:
-                    self.errors.append(f"{label}: parameter {name!r} is not a declared parameter or setting")
-            named = re.search(r"^Parameters by name: (.*)$", text, re.M)
-            for name in CODE_SPAN.findall(named.group(1)) if named else ():
-                if name[1].split(".")[-1] not in self.parameter_names:
-                    self.errors.append(f"{label}: parameter `{name[1]}` is not a declared parameter or setting")
-            if row["classification"].startswith("Accretion") and "**Accretion:**" not in text:
-                self.errors.append(f"{label}: accretion unit is not marked as such")
-            if "Accretion" in row["classification"] and f"#{row['anchor']})" not in accretions:
-                self.errors.append(f"{label}: accretion (or accretion part) missing from docs/developer/accretions.md")
-        for _area, unit in sorted(removed):
-            for page_path in sorted((DOCS / "methods").glob("*.md")):
-                if unit.lower() in self.anchors(page_path):
-                    self.errors.append(f"{page_path.relative_to(SOURCE)}: removed unit {unit} has a methods section")
-
-    def check_ledger(self, ledger: Path = SOURCE / "tests/oracle/ledger.toml"):
-        """Each numerical-ledger entry has a row in the tie guide whose linked methods sections name it."""
-        page = DOCS / "developer/ties.md"
-        rows = {}
-        for line in page.read_text().splitlines():
-            match = re.match(r"^\| (L\d+) \|", line)
-            if match:
-                rows[match.group(1)] = line
-        if ledger.exists():  # the oracle ships with the source tree, not necessarily with a distribution
-            import tomllib
-
-            for entry in tomllib.loads(ledger.read_text())["entry"]:
-                top = re.match(r"L\d+", entry["id"]).group(0)
-                if top not in rows:
-                    self.errors.append(f"docs/developer/ties.md: ledger entry {entry['id']} has no ledger row {top}")
-        for entry, line in rows.items():
-            links = re.findall(r"\]\(\.\./methods/([\w]+\.md)#([\w-]+)\)", line)
-            if not links:
-                self.errors.append(f"docs/developer/ties.md: ledger row {entry} links no methods section")
-            for target, anchor in links:
-                section = self.section(DOCS / "methods" / target, anchor)
-                if section is None or not re.search(rf"\b{entry}\b", "\n".join(section)):
-                    self.errors.append(
-                        f"docs/developer/ties.md: {entry} links methods/{target}#{anchor}, "
-                        f"which does not describe {entry}"
-                    )
 
     def section(self, path: Path, anchor: str) -> list[str] | None:
         """Lines from an explicit anchor up to the next explicit anchor or same-or-higher heading."""
@@ -914,69 +824,21 @@ class Checker:
         for key, where in undefined_evaluation_keys((SOURCE / OUTPUT_DICTIONARY[0]).read_text(), package):
             self.errors.append(f"haplotype_reconstruction/{where}: evaluation field {key} is not defined in D7")
 
-    def check_examples(self, receipt: Path = DOCS / "examples/vcf_headers.json"):
-        """Captured VCF headers are the files their receipt hashes (observed output, never hand-edited)."""
-        import hashlib
-
-        entries = json.loads(receipt.read_text())["files"]
-        listed = {entry["file"] for entry in entries}
-        for entry in entries:
-            path = receipt.parent / entry["file"]
-            if not path.exists():
-                self.errors.append(f"docs/examples/{entry['file']}: listed in vcf_headers.json but missing")
-            elif hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
-                self.errors.append(f"docs/examples/{entry['file']}: differs from its recorded capture hash")
-        # Plain-text names: the repository ignores *.vcf (no data files), and these header-only captures are docs.
-        for path in sorted(receipt.parent.glob("*.header.vcf.txt")):
-            if path.name not in listed:
-                self.errors.append(f"docs/examples/{path.name}: header capture without a receipt entry")
-
-    def check_workflow(self, receipt_path: Path | None = None):
-        """The Snakemake example's commands exist; its integration receipt is current and passed."""
-        import workflow_receipt
-
-        path = DOCS / "examples/Snakefile"
-        if not path.exists():
-            self.errors.append("docs/examples/Snakefile: missing example")
-            return
-        text = path.read_text()
-        page = Page(path, str(path.relative_to(SOURCE)), text.splitlines())
-        templates = workflow_receipt.rule_commands(text)
-        if tuple(templates) != workflow_receipt.RULES:
-            self.errors.append(f"{page.name}: rules are {tuple(templates)}, expected {workflow_receipt.RULES}")
-        for number, line in enumerate(page.lines, 1):
-            match = re.search(r'shell:\s*"(.*)"', line)
-            if match:
-                self.check_command(page, number, re.sub(r"\{[^}]+\}", "PLACEHOLDER", match.group(1)))
-        receipt_path = receipt_path or workflow_receipt.RECEIPT
-        name = receipt_path.relative_to(SOURCE) if receipt_path.is_relative_to(SOURCE) else receipt_path
-        if not receipt_path.exists():
-            problems = [f"missing; the integration test {workflow_receipt.WORKFLOW_TEST} must pass and be projected"]
-        else:
-            problems = workflow_receipt.validate(json.loads(receipt_path.read_text()), path)
-        for problem in problems:
-            if self.draft:
-                self.pending.append(f"{name}: {problem}")
-            else:
-                self.errors.append(f"{name}: {problem}")
-
 
 def evaluation_stages(path: Path = PACKAGE / "evaluation/evaluate.py") -> set[str]:
-    """Stage names from the results vocabulary and evaluation tuples, without numerical imports."""
-    tuples: dict[str, list[str]] = {}
-    for source in (path.parent.parent / "results/panels.py", path):
-        for node in ast.parse(source.read_text()).body:
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
-                names: list[str] = []
-                for item in node.value.elts:
-                    if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                        names.append(item.value)
-                    elif isinstance(item, ast.Starred) and isinstance(item.value, ast.Name):
-                        names += tuples[item.value.id]
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        tuples[target.id] = names
-    return {*tuples["EVALUATION_STAGES"], "available", "all"}
+    """Read published evaluation labels from the data-only stage table without numerical imports."""
+    source = path.parent.parent / "stages/catalog.py"
+    table = next(
+        node.value
+        for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "STAGES" for t in node.targets)
+    )
+    labels = {"available", "all"}
+    for row in table.values:
+        for keyword in row.keywords:
+            if keyword.arg in ("panels", "evaluation"):
+                labels.update(ast.literal_eval(keyword.value))
+    return labels
 
 
 def default_pages() -> list[Path]:

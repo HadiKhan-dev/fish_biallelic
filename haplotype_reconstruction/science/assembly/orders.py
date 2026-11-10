@@ -1,7 +1,7 @@
-"""Assembly content orders for the refinement pilot, using core tie mechanisms.
+"""Content orders of founder paths and panels, shared by the join and refinement.
 
-Owns canonical founder-path ordering, not search trajectories or storage.
-Method: docs/methods/founder_refinement.md#ties (RS09, RS12).
+Owns canonical founder-path ordering and vectorised path tie classes, not search or storage.
+Method: docs/methods/refinement.md#rs09 and #rs12; docs/methods/assembly.md#u14.
 """
 
 import numpy as np
@@ -185,7 +185,7 @@ def path_class_order(
     reverse: bool = False,
 ):
     """Vectorised tie classes of ``values`` with the lexicographic ``paths`` (int[n, B]) as content keys, the same
-    rules as maths.ties.tie_classes (single-linkage classes over the exactly sorted values, content order inside a
+    rules as core.ties.tie_classes (single-linkage classes over the exactly sorted values, content order inside a
     class, value order inside a class wider than WIDE_CLASS_QUANTA x q).
 
     Returns (order int64[n] in decision order, classes int64[n] per element (0 = best), wide classes, boundary gaps)."""
@@ -217,8 +217,8 @@ def path_class_order(
     spans = np.where(np.isfinite(spans), spans, 0.0)
     wide = spans > ties.WIDE_CLASS_QUANTA * quantum_value
     value_key = np.where(wide[class_sorted], ordered, 0.0)
-    # Content order inside a class: lexicographic paths, reversed under reverse (release 2.2
-    # convention reversal; classes and values are not reversed).
+    # Content order inside a class: lexicographic paths, reversed under the convention
+    # reversal; classes and values are not reversed.
     direction = -1 if reverse else 1
     if codes is not None:
         content = (direction * codes[exact],)
@@ -238,12 +238,12 @@ def path_class_order(
 
 
 def linkage_order(result: ties.TieClasses, links, contents, kind: str = "beam", *, reverse: bool = False) -> list:
-    """Decision order of a tie-class decision with a data criterion inside the classes (release 2.2): inside every
+    """Decision order of a tie-class decision with a data criterion inside the classes : inside every
     class of ``result`` (not wider than WIDE_CLASS_QUANTA x q; those keep value order) the members are ordered by
     tie classes of ``links`` (descending; quantum ``kind`` at the largest |link| of the class) and only then by the
     content key (reversed under the convention reversal). links: the batch linker's log-probability of each
     candidate's paths (join/beam.path_linkage), the population linkage the sample likelihood could not use to
-    separate them. Returns element indices in decision order; symmetric_winner(result, links, order) tells whether
+    separate them. Returns element indices in decision order; symmetric_members(result, links) tells whether
     the winner was still decided by content (a fully symmetric tie, counted and flagged by the callers)."""
     order = [int(i) for i in result.order]
     if links is None or len(order) < 2:
@@ -278,7 +278,7 @@ def symmetric_members(result: ties.TieClasses, links, kind: str = "beam", *, rev
     """The elements a tie-class decision's winner is still tied with once the data criteria are used: the members
     of its class (not wider than WIDE_CLASS_QUANTA x q) that are also tied with it on the linker score (all of them
     without links). Empty when the data decide. A non-empty list is a fully symmetric decision, decided by the
-    content key (release 2.2: counted as kind "<decision>.symmetric" and its alternatives released in the events)."""
+    content key (counted as kind "<decision>.symmetric" with alternatives released in the events)."""
     if not result.tied_winner:
         return []
     c = int(result.classes[result.winner])

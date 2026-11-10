@@ -3,7 +3,7 @@
 Owns the pure U03-U07 transition, block/link task inputs and working-set estimates.
 Must not create pools, reserve resources, read storage, log or inspect execution policy.
 Method: docs/methods/assembly.md#completion.
-Identity: block and boundary results are assembled by index; all original normalization,
+Invariant: block and boundary results are assembled by index; all original normalization,
 fold, likelihood, release and occupancy orders are retained. A caller may provide an
 ordered task map; the default evaluates the same tasks sequentially.
 """
@@ -111,7 +111,7 @@ def block_memory_bytes(samples: int, founders: int, sites: int, config: Completi
     scores with their prefix and suffix sums (bins x N x K(K+1)/2 each); the cross-fit's pair-state
     scores and posteriors (N x K(K+1)/2). Measured in process at K = 30, N = 320, 200 sites: 591 MB
     (estimate 601 MB); on 300 tropheops chr8 / actm3 chr13 blocks (N 116): peak - estimate <= 1.2 MB.
-    The stage task adds its declared pool overhead; ``config``: CompletionConfig.
+    The stage task adds its declared pool overhead; ``config``: CompletionParameters.
     """
     pairs = founders * (founders + 1) // 2
     width = min(sites, config.cavity.snps_per_bin)
@@ -122,12 +122,6 @@ def block_memory_bytes(samples: int, founders: int, sites: int, config: Completi
         + 3 * 8 * bins * samples * pairs
         + 8 * 8 * samples * pairs
     )
-
-
-def link_memory_bytes(samples: int, founders: int) -> int:
-    """Upper estimate of one boundary link's working memory: both blocks' carrier profiles and class
-    summaries (a few N x K float64 arrays) and K x K cost and rank matrices."""
-    return int(16 * 8 * samples * founders + 8 * 8 * founders * founders)
 
 
 def _unknown_mass_veto(panel: LocalPanel, maximum_mass: float) -> bool:
@@ -450,5 +444,4 @@ __all__ = [
     "complete_block",
     "complete_boundary",
     "block_memory_bytes",
-    "link_memory_bytes",
 ]

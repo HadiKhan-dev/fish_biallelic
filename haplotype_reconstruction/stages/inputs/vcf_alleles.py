@@ -2,7 +2,7 @@
 
 Owns the shared biallelic-SNP predicate and OU01/OU02 protocol views. The VCF source
 supplies its freshly read ContigPayload; this module never repeats the loader policy.
-Method: docs/methods/export.md#sites; B export/sites.py:103-160. AD availability is
+Method: docs/methods/export.md#sites. AD availability is
 record-level, including usable zero-depth AD; GT contributes only where AD is absent.
 """
 

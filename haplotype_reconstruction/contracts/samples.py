@@ -16,7 +16,7 @@ INPUT_ORDER_KEY = "input_sample_ids"
 
 def recorded_input_order(manifest: Mapping | None) -> tuple[str, ...] | None:
     """The input sample order a run manifest records (``manifest["source"]["input_sample_ids"]``), or None for
-    runs without the canonical order (release 2.0: their records are in input order)."""
+    runs without the canonical order (their records are in input order)."""
     source = (manifest or {}).get("source") or {}
     ids = source.get(INPUT_ORDER_KEY)
     return None if ids is None else tuple(str(name) for name in ids)

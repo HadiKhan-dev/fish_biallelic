@@ -1,11 +1,11 @@
 """Declare observations and consumed-source fields independently of their reader (EC01/03).
 
-Owns ContigReads and ObservationSource, including OU1's allele/provenance methods.
+Owns ContigReads and ObservationSource, including allele and provenance methods.
 No file, storage, engine or science calls belong here. Sample identifiers name rows
 only. Positions are 1-based bp; missing AD contributes zero counts. Payload identity
 binds positions, REF/ALT, AD, record-level AD availability, fallback GT only where AD
 is unusable, header length and loader drops (schema 2); it never binds input FILTER.
-Method: docs/methods/evidence.md; CONTRACTS_40 §1 and WP_OU1 §6.1.
+Method: docs/methods/evidence.md.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ __all__ = [
     "DROPPED_REASONS",
 ]
 
-# EC01: loader drops, carried from model/evidence.py:28-31.
+# Loader omissions, counted before site-quality filtering.
 DROPPED_NOT_SNP = "not_snp"
 DROPPED_MULTIALLELIC = "multiallelic"
 DROPPED_DUPLICATE_POSITION = "duplicate_position"

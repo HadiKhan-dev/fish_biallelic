@@ -3,13 +3,13 @@
 Owns LS08-LS14: drop/merge/add starts, two-sided merge bounds, whole-class refit
 cuts, winner/continuation rules and exact completion precedence. Must not release
 calls, schedule work, read storage or inspect process state.
-Method: docs/methods/local_selection.md#search (WP_SE2 sections 4.1-4.7).
+Method: docs/methods/selection.md#ls08.
 Proposals keep first equal-frequency occurrences; only complete tie classes enter
 the refit budget. The same-panel kind representative is not convention-reversed.
-Accretion (LS13): whole-search reuse excludes the incumbent from its key. Packed
+Whole-search reuse excludes the incumbent from its key. Packed
 memos are scientific state: fresh and restored fits can carry different posterior
 last bits, so hit order and completion precedence must be retained exactly.
-The context-coded screening's O(K^5) cost is an approved 0c exemption.
+The context-coded screen costs O(K^5) when the number of context founders scales with K.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from .parameters import (
     DECISION_MOTION,
     KIND_ORDER,
     PROPOSAL_FREQUENCY_TIE,
-    PathSearchConfig,
+    PathSearchParameters,
 )
 from .path_model import FLIPS, PathWorkspace, PreparedBlock, WorkspaceBuffers, log_likelihood
 
@@ -76,9 +76,9 @@ def merge_consensus(
 ) -> np.ndarray:
     """A merge's consensus row: ALT where the occupancy-weighted ALT probability exceeds 1/2, row
     i's allele within CONSENSUS_TIE of 1/2 (an exact 1/2, e.g. at a site without information, must
-    not be decided by its last bits: a band at a mathematical tie, design A-7). Row i is the
+    not be decided by its last bits: a band at a mathematical tie). Row i is the
     lexicographically smaller row: a content-order convention (row j's allele under
-    maths.ties.reverse_conventions)."""
+    core.ties.reverse_conventions)."""
     kept = (
         panel_j
         if (panel_j is not None and fixed_policy("selection.merge.consensus", CONSENSUS_TIE, reverse=reverse).reverse)
@@ -225,12 +225,11 @@ def double_removal_merges(
     """Merges scored exactly besides their EM bounds: for every row k, the best-bounded merge of k with
     one of its nearest rows, and the best-bounded merge (i, j), k not in {i, j}, whose consensus is
     nearest row k. The fixed-posterior bound credits no re-routing of carriers, so it can rank such
-    merges far below their exact scores. Release 2.17: within each nearest-distance class only its
-    representative is scored exactly (the best of the class's EM bounds, tie classes of
+    merges far below their exact scores. Within each nearest-distance class only its representative is scored
+    exactly (the best of the class's EM bounds, tie classes of
     ``tolerance`` broken by content; a choice inside a tie class is counted as
     ``ls.rank.merge_representative``), so at most 2K merges are scored exactly per screen and the
-    likelihood screening stays O(N L K^3); before, a distance tie admitted the whole class (up to
-    K(K - 1)/2 merges; a K30 census of screens with incomplete context inputs found 76-277 of about 400).
+    likelihood screening stays O(N L K^3).
     The other members keep their bounds. Tied bounds do not imply tied exact scores: the choice is
     deterministic for a fixed tie convention, not invariant to it."""
     if len(panel) < 2 or not merges:
@@ -406,7 +405,7 @@ def search_input_key(
     start: np.ndarray,
     bank: np.ndarray,
     prepared: PreparedBlock,
-    search_config: PathSearchConfig,
+    search_config: PathSearchParameters,
     founders: np.ndarray | None,
 ) -> str:
     """Exact deterministic-search inputs: start, bank, data, model and search settings, context
@@ -423,8 +422,8 @@ def search_input_key(
 
 
 def tied_cut(classes, limit: int, cap: int) -> tuple[int, bool]:
-    """(how many proposals of tie-class order ``classes.order`` (maths.ties.TieClasses) are
-    refitted, overflow). Release 2.2: whole tie classes only, in class order, until at least
+    """(how many proposals of tie-class order ``classes.order`` (core.ties.TieClasses) are
+    refitted, overflow). whole tie classes only, in class order, until at least
     ``limit``; a class that would take the total past ``cap`` is left out whole (overflow: its
     tied members are not refitted, and the caller counts and flags it). Order-invariant: no
     member of a class is preferred to another."""
@@ -452,14 +451,14 @@ def _selection(context):
 
 
 def _context_key(context) -> bytes:
-    """Memo-key suffix: a context-aware fit depends on the context (release 2.12)."""
+    """Memo-key suffix: a context-aware fit depends on the context rows and called masks."""
     return b"" if context is None else content_key(context.founders, context.called)
 
 
 def fitted_start(
     start: np.ndarray,
     prepared: PreparedBlock,
-    search_config: PathSearchConfig,
+    search_config: PathSearchParameters,
     memo: LikelihoodMemo,
     context: ContextFounders | None = None,
     *,
@@ -491,7 +490,7 @@ def search_panel(
     start: np.ndarray,
     bank: np.ndarray,
     prepared: PreparedBlock,
-    search_config: PathSearchConfig,
+    search_config: PathSearchParameters,
     *,
     incumbent: SearchOutcome | None = None,
     founders: np.ndarray | None = None,
@@ -506,7 +505,7 @@ def search_panel(
     better by more than the decision tolerance; reuses the incumbent's whole search when the
     inputs are identical. ``founders``: the assembled context's founders in this block (context
     rounds); None codes every row as free. ``ties``: counts the decisions taken inside a tie class
-    (and guard events); ``census_key``: the block's key for the valley census (maths.ties)."""
+    (and guard events); ``census_key``: the block's key for the valley census (core.ties)."""
     tolerance = search_config.decision_tolerance
     ties = TieCounter() if ties is None else ties
     collect = census_key is not None and census_enabled(sink=census_sink)
@@ -734,8 +733,8 @@ def search_panel(
         winner = int(classes.order[0])
         # Refits that reached the winning panel from different proposals are one answer (their fits
         # differ by EM residuals only): the refit of the proposal with the smallest (kind, proposal
-        # panel) label represents it (release 2.2: a label of the same answer, stable under noise
-        # and not a convention reversed by maths.ties; 2.1 took the trial order inside the class).
+        # panel) label represents it: this names the same answer independently of noise-scale
+        # trial ordering and is not reversed by the tie convention.
         panel_key = trials[winner][0].panel.tobytes()
         same = [
             n

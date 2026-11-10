@@ -1,8 +1,8 @@
 """Accumulate the optional pairwise IBD report independently of family fitting.
 
-Accretion (P0 RL04): report only, quadratic in samples and linear in thinned sites.
+Report only, quadratic in samples and linear in thinned sites.
 Owns pair state and final means; no storage, family model, environment or clocks.
-Method: docs/methods/relatedness.md#pairwise-ibd. Contigs stay in bound order.
+Method: docs/methods/relatedness.md#rl04. Contigs stay in bound order.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from .parameters import AlleleFrequencyParameters
 
 _DEFAULT_FREQUENCY = AlleleFrequencyParameters()
 _DEFAULT_IBD = PairwiseIbdParameters()
-_NORMALIZE_BATCH = 262144  # 3.5 stage.py:145; storage batching only.
+_NORMALIZE_BATCH = 262144  # Pairs normalized per storage batch; does not change their arithmetic.
 
 __all__ = ["PairwiseIbdState", "new_pairwise_ibd", "accumulate_pairwise_ibd", "finish_pairwise_ibd", "RelatednessPairs"]
 

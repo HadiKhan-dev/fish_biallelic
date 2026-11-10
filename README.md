@@ -14,7 +14,7 @@ or more at 0.25x).
 The 4.0 implementation separates scientific models, typed products, checkpoint
 storage, execution and output formatting. Repeated commands reuse compatible
 published records. Changed consumed inputs or incompatible scientific settings
-refuse reuse. Version 4.0 cannot resume a 3.5 checkpoint root.
+refuse reuse. A run requires a checkpoint root with the current layout.
 
 Start with the [installation guide](docs/user/installation.md) and the
 [synthetic quick start](docs/user/quickstart.md). Linux x86_64 and Python 3.14 or
@@ -35,7 +35,7 @@ Snakemake example.
 - [Run a cross](docs/user/running.md): observations, maps, presets, resources and resume.
 - [Output dictionary](docs/user/outputs.md): files, encodings, schemas and readers.
 - [Limitations](docs/user/limitations.md): demonstrated envelope and model approximations.
-- [Migration from 3.5](docs/user/migration.md) and [changes](CHANGELOG.md).
+- [Release notes](CHANGELOG.md).
 - [Methods](docs/methods/index.md): ordered scientific rules by semantic unit.
 - [Developer guide](docs/developer/architecture.md): architecture, contracts and tests.
 - Generated [settings](docs/reference/settings.md), [parameters](docs/reference/parameters.md)

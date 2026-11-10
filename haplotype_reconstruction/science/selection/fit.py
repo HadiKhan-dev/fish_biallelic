@@ -1,30 +1,27 @@
 """Fixed-K GEM fit of a panel and its frequencies under the copying model.
 
 Owns LS05-LS07; does not access files, clocks, environment or execution resources.
-Method: docs/methods/local_selection.md#fixed-k-fit.
-A frequency-only tail still checks flips on every iterate (A35-4). Intermediate rows
+Method: docs/methods/selection.md#ls05.
+A frequency-only tail checks flips on every iterate. Intermediate rows
 stay in trajectory order; posterior arrays are evaluated before output canonicalization.
 
 The first update is a frequency EM step. After it, while the current E-step has positive expected
-complete-emission flip gains, an update is one joint GEM step from that E-step (release 4.6): the
+complete-emission flip gains, an update is one joint GEM step from that E-step: the
 frequency M-step (MAP with one extra count spread uniformly) together with, at each site, the flip
 of the founder with the largest gain (at most one founder per site; a tied site keeps its alleles).
 Otherwise an update is a frequency EM step (kept
 when the objective does not drop by more than the tolerance) followed by the flip check at the new
 frequencies and, at a GEM stationary point, the exact conditional one-bit escapes. The fit stops at
 a conditional fixed point; a flip that would duplicate a row stops it (a K change belongs to the
-outer search). The update backstop is reported (termination "update_backstop"). Release 4.5 and
-earlier flipped one founder per update after a separate frequency trial (two E-steps per update).
+outer search). The update backstop is reported (termination "update_backstop").
 
-Release 2.1 (noise stability): a fit is returned with its rows in canonical (lexicographic) order
-(frequencies and per-row posteriors permuted with them). GEM flips move rows past one another, so
-2.0's final row order depended on the trajectory: two fits ending at the same founders and
-frequencies were different panels to every byte-keyed comparison, tie-break and record.
+A fit is returned with its rows in canonical (lexicographic) order, with frequencies and per-row
+posteriors permuted together. GEM flips can move rows past one another, so canonical output makes
+row-set identity independent of the trajectory for byte-keyed comparisons, ties and records.
 
-Release 2.2: founders (or single exact flips) whose gains lie within FLIP_TIE (relative) of the
-largest are compared by the exact objective after each flip; a remaining tie between different
-panels stops the ascent (keep-current, a stated prior: termination "tied_flips" /
-"tied_exact_flips"). 2.1 took the first candidate in row, then site order (a convention).
+Founders (or single exact flips) whose gains lie within FLIP_TIE (relative) of the largest are
+compared by the exact objective after each flip. A remaining tie between different panels stops
+the ascent (keep-current, a stated prior: termination "tied_flips" / "tied_exact_flips").
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ from scipy.special import expit
 from ...contracts.selection import PathFit
 from ...core.ties import TieCensus, census
 from .objective import ContextFounders, edit_ball_code, regularizer
-from .parameters import EXACT_FIRST_UPDATE_MAX_K, FLIP_TIE, PathSearchConfig
+from .parameters import EXACT_FIRST_UPDATE_MAX_K, FLIP_TIE, PathSearchParameters
 from .path_model import COUNTS, EXACT, FLIPS, PathState, PathWorkspace, PreparedBlock, WorkspaceBuffers
 
 __all__ = [
@@ -110,9 +107,8 @@ def unique_rows(
 ) -> NDArray[np.integer] | tuple[NDArray[np.integer], ...]:
     """``np.unique(matrix, axis=0, ...)`` of a 2-D integer matrix (rows in lexicographic order; index
     = first occurrence; inverse 1-D), computed with a stable lexsort. numpy 2.4's ``axis=0`` path
-    builds a new structured dtype on every call and never frees it (~56 KB per call at 200 sites):
-    called in every GEM update, it grew a worker's memory by ~0.2 GB per AulStu block and exhausted
-    the node in base's AulStu run."""
+    builds a new structured dtype on every call and never frees it (~56 KB per call at 200 sites).
+    Stable lexsort avoids accumulating that allocation on every GEM update."""
     rows = np.asarray(matrix)
     n = rows.shape[0]
     if n == 0 or rows.shape[1] == 0:
@@ -169,11 +165,19 @@ def fit_posteriors(
     return posteriors(workspace.state(panel, frequencies, EXACT), panel)
 
 
+def _map_frequencies(state, founders):
+    """MAP founder frequencies from copy/redraw counts, excluding the unknown state.
+
+    One extra count is spread uniformly over the founder rows.
+    """
+    counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
+    return (counts + 1.0 / founders) / (counts.sum() + 1.0)
+
+
 def _frequency_step(panel, frequencies, workspace):
     """One MAP EM step of the frequencies at a fixed panel (one extra count spread uniformly)."""
     state = workspace.state(panel, frequencies, COUNTS)
-    counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
-    return (counts + 1.0 / len(panel)) / (counts.sum() + 1.0)
+    return _map_frequencies(state, len(panel))
 
 
 def refit_frequencies(panel, frequencies, score, value_of, workspace, tolerance, backstop):
@@ -221,8 +225,8 @@ def _site_flips(positive: NDArray[np.float64]) -> NDArray[np.bool_] | None:
     where a gain does not exceed the tolerance): at each site the founder with the largest gain. Complete-data
     gains add over sites but not over founders at one site, so at most one founder flips per site and the step's
     complete-data gain is the sum of the chosen gains: the largest gain at each untied site, positive whenever a
-    mask is returned (release 4.11 wording: tied sites are left out, so it need not reach a single founder's
-    whole-row gain). A site whose two largest gains lie within FLIP_TIE (relative) of each other keeps its alleles
+    mask is returned. Tied sites are left out, so the gain need not reach a single founder's whole-row gain. A site
+    whose two largest gains lie within FLIP_TIE (relative) of each other keeps its alleles
     (no row-order choice).
     None when no site has an untied positive gain."""
     k, length = positive.shape
@@ -306,7 +310,7 @@ def _batch_snaps(panel, frequencies, proposals, top, value, tolerance, workspace
 
 
 def _context_snaps(panel, frequencies, score, workspace, context, selection, search_config):
-    """Selection-aware one-bit completion of a context round's fit (release 2.12).
+    """Selection-aware one-bit completion of a context round's fit.
 
     The GEM climbs the context-free objective, so an allele the data do not inform (exact one-bit likelihood gain
     ~0) stays wherever the trajectory left it, although the selection objective prefers it to agree with the claiming
@@ -321,7 +325,7 @@ def _context_snaps(panel, frequencies, score, workspace, context, selection, sea
     rises. Flips that would make two rows equal are not proposed (changing K belongs to the outer search). Each step
     solves one matching and scores one panel, O(K^3 + K L), plus O(K L log K) per tie-class member.
 
-    Release 4.6: the proposals are taken together when they can be, at most one per site (the largest bound; a site
+    The proposals are taken together when they can be, at most one per site (the largest bound; a site
     whose two largest bounds lie within the tolerance keeps its alleles): the bounds of different sites add for the
     edit code (one matched pair's savings grow as its distance falls) but not for the likelihood, so the batch is
     judged by the recomputed selection value and kept only when its rise reaches the largest single bound; otherwise
@@ -414,7 +418,7 @@ def fit_fixed(
     panel: NDArray[np.int64],
     frequencies: NDArray[np.float64] | None,
     prepared: PreparedBlock,
-    search_config: PathSearchConfig,
+    search_config: PathSearchParameters,
     buffers: WorkspaceBuffers | None = None,
     census_key: str | None = None,
     selection: Callable[[NDArray[np.int64], NDArray[np.float64], float], float] | None = None,
@@ -463,12 +467,11 @@ def fit_fixed(
             if sums.max() > 0:
                 if census_key is not None and len(sums) > 1:
                     _census_top("ls.gem.founder", f"{census_key}/u{update}", sums, census_sink)
-                # Joint GEM step (release 4.6): the frequency M-step and the allele flips from this one E-step.
+                # Joint GEM step: the frequency M-step and the allele flips from this one E-step.
                 # The fixed-K objective separates into a frequency part and an allele part, so the step raises it
                 # by at least the chosen flips' complete-data gain (EM's bound) and needs no separate trial of the
                 # frequencies.
-                counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
-                trial_frequencies = (counts + 1.0 / len(panel)) / (counts.sum() + 1.0)
+                trial_frequencies = _map_frequencies(state, len(panel))
                 mask = _site_flips(positive)
                 if mask is not None:
                     trial = panel.copy()
@@ -491,7 +494,7 @@ def fit_fixed(
                                     best = (value, panel.copy(), frequencies.copy(), score, update)
                             continue
                 # Every gaining site tied, a row collision, or (rounding) no rise: the single-founder GEM step at
-                # fixed frequencies. Tied founders (release 2.2): the data decide by the exact objective after each
+                # fixed frequencies. Tied founders: the data decide by the exact objective after each
                 # founder's flip; a remaining tie between different panels stops the ascent here (keep-current, a
                 # stated prior), never a row-order choice.
                 founders = tied_within(sums)
@@ -526,13 +529,12 @@ def fit_fixed(
                         best = (value, panel.copy(), frequencies.copy(), score, update)
                 continue
         # A state without positive expected flip gains: a frequency EM step, then the flip check at the new
-        # frequencies (A35-4: a frequency-only tail checks flips after every iterate). The step's E-step computes the
+        # frequencies; a frequency-only tail checks flips after every iterate. The step's E-step computes the
         # exact one-bit gains in the same pass (a stationary state needs them; a FLIPS pass would be redone at
         # EXACT), except at the first update of a panel with more than EXACT_FIRST_UPDATE_MAX_K founders. Every level
         # computes its lower statistics identically, so the level choice changes no value, only which passes run.
         state = workspace.state(panel, frequencies, COUNTS)
-        counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
-        trial_frequencies = (counts + 1.0 / len(panel)) / (counts.sum() + 1.0)
+        trial_frequencies = _map_frequencies(state, len(panel))
         level = EXACT if (update or len(panel) <= EXACT_FIRST_UPDATE_MAX_K) else FLIPS
         trial_score = workspace.state(panel, trial_frequencies, level)["log_likelihood"]
         trial_objective = trial_score + regularizer(panel, trial_frequencies)

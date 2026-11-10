@@ -78,3 +78,22 @@ def load_index(file: CheckpointFile) -> None:
         index.next_seq = document["next_seq"]
         index.records = records
         file._check_header(index)
+
+
+def completed_stages(file: CheckpointFile) -> list[str]:
+    """Read completion certificates from one append-only header snapshot, without writing status."""
+    # mark_complete validates the derivations before appending its certificate.
+    # In an append-only container, referenced records at or before that sequence
+    # are the same committed versions it checked. A later replacement invalidates
+    # this status certificate conservatively; scientific resume still checks the
+    # independently expected derivations. Snapshot once, avoiding a stat per key.
+    index = file._records()
+    complete = []
+    for key, info in sorted(index.items()):
+        if not key.startswith("complete/"):
+            continue
+        hint = file._read(info, 1, items=("records",))
+        records = hint.get("records", {})
+        if records and all(name in index and index[name].seq <= info.seq for name in records):
+            complete.append(key)
+    return complete

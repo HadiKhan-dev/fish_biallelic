@@ -1,4 +1,4 @@
-"""Apply and validate genotype likelihoods while preserving the EC23 arithmetic."""
+"""Apply the observed-allele-depth model and validate normalized genotype likelihoods."""
 
 import numpy as np
 from numba import prange, types
@@ -89,7 +89,7 @@ def likelihoods_into(counts, error, heterozygote, het_inverse, lookup_depth, out
     nogil=True,
 )
 def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth):
-    """Allocate the original dense result, then fill it with likelihoods_into."""
+    """Allocate the dense result, then fill it with likelihoods_into."""
     n, length = counts.shape[:2]
     out = np.empty((n, length, 3), np.float64)
     likelihoods_into(counts, error, heterozygote, het_inverse, lookup_depth, out)

@@ -1,11 +1,10 @@
 """Score and aggregate relative-proxy contrasts on prepared chromosome inputs.
 
-Second-degree and full-sib forward models share PE1's resident projection and
+Second-degree and full-sib forward models share the prepared resident projection and
 public kernels. Availability gates only the candidate parent. Component order
 is fixed; report aggregation uses the declared configured-contig sum.
 
 Method: docs/methods/pedigree.md#relative-proxy-contrasts-of-released-edges
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from ...core.numerics import ordered_sum
 from . import resident
 from .forward import apply_bridge, apply_excursion, apply_null, model_arguments, score_path, site_likelihood
 from .kernels.signatures import OVERLOADS
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 
 __all__ = ["aggregate", "component_contrasts", "PROXY_MODEL"]
 PROXY_MODEL = "relative-proxy-v1"
@@ -490,7 +489,7 @@ def _m1_pairs(
 
 def component_contrasts(
     component: PreparedComponent,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     pairs: np.ndarray,
     claim_threads: Callable[[], int | None] = lambda: None,
     *,

@@ -53,9 +53,8 @@ def state_layout(k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 FitResult = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None]
 _T = TypeVar("_T")
 
-# Release 2.1: NLL comparisons use the block's ``nll`` tie quantum (BlockQuanta.nll; the old absolute
-# NLL_TOLERANCE = 1e-10 sat at the 1e-9-noise scale). Duplicates keep the first fit seen unless the
-# other is better by more than the quantum.
+# NLL comparisons use the block's ``nll`` tie quantum (BlockQuanta.nll). Duplicates keep the first fit seen
+# unless another is better by more than that quantum.
 
 
 @dataclass(frozen=True)
@@ -73,7 +72,7 @@ class FixedKSolution:
     fixed_point: the fitter proved haplotypes an A(H), H(A) fixed point in this workspace.
     key: canonical key (int8 bytes of the rows).
     quanta: the block's BlockQuanta the solution was fitted under (None for solutions built outside a
-        workspace); orders of solutions use tie classes of kind ``nll`` with them (maths.ties).
+        workspace); orders of solutions use tie classes of kind ``nll`` with them (core.ties).
     """
 
     haplotypes: np.ndarray = record_field("state", axes=("K", "L"), dtype="int64")
@@ -333,7 +332,7 @@ def subset_ties(solution: FixedKSolution, samples: np.ndarray) -> tuple[np.ndarr
 
 
 def solution_tie_mask(solution: FixedKSolution) -> np.ndarray:
-    """Full winning-category membership, including singletons; old fixtures use their pair."""
+    """Full winning-category membership, including singletons; fixtures without explicit membership use their assignment pair."""
     return assignment_tie_mask(solution.assignments, solution.k, solution.tie_offsets, solution.tie_states)
 
 
@@ -499,7 +498,7 @@ def unknown_alleles(
     assignments: np.ndarray, observed: np.ndarray, k: int, tie_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """bool[K, L]: True where no sample assigned to the founder (either copy; K = unknown copy) observes the site
-    (exact integer counts): the founder's allele there is unknown (release 2.2)."""
+    (exact integer counts): the founder's allele there is unknown."""
     assignments = np.asarray(assignments, dtype=np.int64)
     observed = np.asarray(observed, dtype=np.bool_)
     if tie_mask is not None:
@@ -532,13 +531,13 @@ def _known_content_bytes(haplotypes, unknown):
     for row in range(k):
         for site in range(length):
             masked[row, site] = np.uint8(255) if unknown[row, site] else np.uint8(haplotypes[row, site])
-    # Unsigned byte order is the original bytes order, including unknown (-1 -> 255).
+    # Unsigned byte order is the panel bytes order, including unknown (-1 -> 255).
     order = lexicographic_row_order(masked)
     result = np.empty(k * length + max(0, k - 1), dtype=np.uint8)
     position = 0
     for index in range(k):
         if index:
-            result[position] = 124  # the existing b"|" row separator
+            result[position] = 124  # the b"|" row separator
             position += 1
         for site in range(length):
             result[position] = masked[order[index], site]

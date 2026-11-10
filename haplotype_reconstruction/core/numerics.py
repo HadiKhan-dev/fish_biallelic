@@ -1,14 +1,14 @@
 """Provide stable natural-log sums with explicit, worker-independent reduction order.
 
-log_add relocates the live pedigree.family._logaddexp scalar primitive; log_sum
-relocates pedigree.alternatives.logsumexp_finite on a contiguous float64 vector.
-The unused maths/logspace module is not carried. No tolerance, model or search rule
-is selected here. Callers own the scientific order of their input vector.
+Scalar log addition and contiguous-vector log sums handle non-finite inputs
+explicitly. No tolerance, model or search rule is selected here. Callers own the
+scientific order of their input vector.
 """
 
 from __future__ import annotations
 
 import math
+from typing import overload
 
 import numba
 import numpy as np
@@ -19,20 +19,17 @@ __all__ = [
     "log_add",
     "log_sum",
     "ordered_sum",
-    "chromosome_sum",
-    "weighted_chromosome_sum",
     "expansion_sum",
-    "contiguous_axis_sum",
     "max_range",
 ]
 
-# The live 3.5 pedigree primitive skips exp(-gap) only after float64 underflow.
+# Skip exp(-gap) only beyond float64 underflow; the gap is in natural-log units.
 _EXP_UNDERFLOW = 750.0
 
 
 @kernel(overloads=((numba.float64, numba.float64),), cache=True, nogil=True, inline="always")
 def log_add(a: float, b: float) -> float:
-    """Return log(exp(a) + exp(b)) for finite/-inf nats, propagating NaN as in 3.5."""
+    """Return log(exp(a) + exp(b)) for finite/-inf nats, propagating NaN."""
     if a == -math.inf:
         return b
     if b == -math.inf:
@@ -45,7 +42,7 @@ def log_sum(values: np.ndarray) -> float:
     """Return log(sum(exp(values))) over a float64 vector, or -inf when empty.
 
     Non-finite maxima are returned unchanged, as in the pedigree scorer. A C-order
-    copy fixes the reduction independently of a caller's array strides (ledger L2).
+    copy fixes the reduction independently of a caller's array strides.
     Inputs are never mutated.
     """
     values = np.ascontiguousarray(values, dtype=np.float64)
@@ -57,70 +54,32 @@ def log_sum(values: np.ndarray) -> float:
     return maximum + math.log(float(np.sum(np.exp(values - maximum))))
 
 
-def ordered_sum(values: np.ndarray) -> float:
-    """Accurately sum float64 values in natural C index order, independent of batching.
-
-    This is the shared fsum form already used for block scales and phase gains in
-    3.5. Replacing a batch-dependent reduction with it is ledger L2; the caller must
-    report any decision boundary crossed by that replacement.
-    """
-    return math.fsum(np.asarray(values, dtype=np.float64).ravel(order="C").tolist())
+@overload
+def ordered_sum(values: np.ndarray, *, axis: None = None) -> float: ...
 
 
-def chromosome_sum(values: np.ndarray) -> np.ndarray:
-    """Fold float64[C,...] in configured contig order, returning float64[...].
-
-    This is the pedigree pilot's declared L2 left fold, promoted unchanged. It is
-    distinct from fsum: each output keeps the original ordered float64 additions.
-    Callers bind contig order and report boundary flips when adopting it.
-    """
-    values = np.asarray(values, dtype=np.float64)
-    result = np.zeros(values.shape[1:], dtype=np.float64)
-    for row in values:
-        result += row
-    return result
+@overload
+def ordered_sum(values: np.ndarray, *, axis: int) -> np.ndarray: ...
 
 
-@kernel(
-    overloads=tuple(
-        (
-            numba.types.Array(numba.float64, 1, "C", readonly=weights_readonly),
-            numba.types.Array(numba.float64, 2, layout, readonly=values_readonly),
-            numba.float64[::1],
-        )
-        for weights_readonly in (False, True)
-        for layout in ("C", "F", "A")
-        for values_readonly in (False, True)
-    ),
-    cache=True,
-    nogil=True,
-)
-def _weighted_fold(weights, values, result):
-    """result[m] = (...((0 + w0 v0m) + w1 v1m) ...): each product rounded, then added, as NumPy's row loop does."""
-    for contig in range(values.shape[0]):
-        weight = weights[contig]
-        for item in range(values.shape[1]):
-            product = weight * values[contig, item]
-            result[item] = result[item] + product
+def ordered_sum(values: np.ndarray, *, axis: int | None = None) -> float | np.ndarray:
+    """Accurately sum float64 values, retaining contributions lost by ordinary addition.
 
-
-def weighted_chromosome_sum(weights: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """Fold weights[C] times values[C,...] in configured contig order (ledger L2).
-
-    Zero weights still multiply their row, preserving IEEE non-finite behavior.
-    This is the pedigree pilot's helper, independent of C/F strides. A two-axis input
-    runs the same per-element products and additions in one compiled pass (no
-    temporary per contig; ped40c PERF: 9 % of each resampling fit at N = 2,503).
+    With axis=None, return one scalar; otherwise reduce that axis and retain the
+    remaining axes. Scalar sums use math.fsum; axis sums use its expansion algorithm
+    in a compiled loop with shared scratch, independently of layout or batching.
+    Finite sums are independent of input order. Empty reductions return positive
+    zero; non-finite values and intermediate overflow follow math.fsum. Inputs are
+    never mutated.
     """
     values = np.asarray(values, dtype=np.float64)
-    if values.ndim == 2 and len(values):
-        result = np.zeros(values.shape[1], dtype=np.float64)
-        _weighted_fold(np.ascontiguousarray(weights, dtype=np.float64), values, result)
-        return result
-    result = np.zeros(values.shape[1:], dtype=np.float64)
-    for index, row in enumerate(values):
-        result += weights[index] * row
-    return result
+    if axis is None:
+        return math.fsum(values.ravel(order="C").tolist())
+    rows = np.moveaxis(values, axis, -1)
+    shape = rows.shape[:-1]
+    count = math.prod(shape)
+    rows = rows.reshape(count, rows.shape[-1])
+    return _axis_sum(rows).reshape(shape)
 
 
 @kernel(
@@ -140,7 +99,7 @@ def expansion_sum(values, partials=None):
     cluster reductions independent of sample order, including cancellation of log odds.
     Values are finite float64; they are not mutated. Optional float64 scratch must
     have at least len(values) elements and is overwritten. A single -0.0 stays
-    negative, as in 3.5 discovery.residual_births._accurate_sum (P0 DI1/DI2).
+    negative.
     """
     if partials is None:
         partials = np.empty(len(values), dtype=np.float64)
@@ -181,14 +140,49 @@ def expansion_sum(values, partials=None):
     return hi
 
 
-def contiguous_axis_sum(values: np.ndarray) -> np.ndarray:
-    """Reduce float64[C,n] along a contiguous C axis using NumPy's fixed blocking.
+@kernel(
+    overloads=tuple(
+        (numba.types.Array(numba.float64, 2, layout, readonly=readonly),)
+        for layout in ("C", "F", "A")
+        for readonly in (False, True)
+    ),
+    cache=True,
+    nogil=True,
+)
+def _axis_sum(rows):
+    """Exactly sum each row, reusing expansion scratch; match math.fsum's special values.
 
-    This reproduces 3.5 selective_m1's advanced-indexing gather, including its
-    pairwise rounding. It is dimension-fixed, not a left fold (WP_PE2 §4). The
-    numerical-policy identity binds NumPy's version. Inputs are never mutated.
+    The finite path uses expansion_sum unchanged. An exceptional row is split at
+    its non-finite values: fsum resets its finite partials there, but still raises
+    on intermediate overflow in any finite segment or on opposing infinities.
     """
-    return np.add.reduce(np.asfortranarray(values, dtype=np.float64), axis=0)
+    result = np.empty(rows.shape[0], dtype=np.float64)
+    partials = np.empty(rows.shape[1], dtype=np.float64)
+    for item in range(rows.shape[0]):
+        row = rows[item]
+        total = expansion_sum(row, partials)
+        if math.isfinite(total):
+            # fsum starts at +0.0, whereas expansion_sum preserves a single -0.0.
+            result[item] = total if total != 0.0 else 0.0
+            continue
+        special_sum = 0.0
+        inf_sum = 0.0
+        start = 0
+        for index in range(len(row)):
+            value = row[index]
+            if not math.isfinite(value):
+                if not math.isfinite(expansion_sum(row[start:index], partials)):
+                    raise OverflowError("intermediate overflow in fsum")
+                special_sum += value
+                if math.isinf(value):
+                    inf_sum += value
+                start = index + 1
+        if not math.isfinite(expansion_sum(row[start:], partials)):
+            raise OverflowError("intermediate overflow in fsum")
+        if math.isnan(inf_sum):
+            raise ValueError("-inf + inf in fsum")
+        result[item] = special_sum
+    return result
 
 
 @kernel(

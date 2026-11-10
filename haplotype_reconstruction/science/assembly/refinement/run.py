@@ -1,6 +1,6 @@
 """Refine one component through count choice and optional fixed-K polish.
 
-Relocated AS8 component policy. Inputs and capabilities are supplied by the stage;
+Inputs and capabilities are supplied by the stage;
 no files, runtime configuration, clocks or live resource admission occur here.
 """
 
@@ -20,12 +20,14 @@ from haplotype_reconstruction.contracts.panels import CountCall, CountStepDecisi
 from haplotype_reconstruction.core import ties
 from haplotype_reconstruction.core.ties import TieCensus
 
-from .. import count_rule
 from .. import orders as tie_rules
+from ..count_rule import criterion as count_criterion
+from ..count_rule import geometry as count_geometry
+from ..count_rule.parameters import CountRuleParameters
 from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
-from .configuration import FounderRefinementConfig
 from .count import _terminal_family, count_pass
 from .fit import SweepEngine
+from .parameters import RefinementParameters
 from .reductions import panel_objective
 from .work_limit import WindowWorkLimit
 
@@ -37,11 +39,10 @@ MacroContext = tuple[list[tuple[int, int]], list[NDArray[np.int64]]]
 
 @dataclass(frozen=True)
 class RefinementSettings:
-    config: FounderRefinementConfig
+    config: RefinementParameters
     min_sites_per_bin: int
     cost_scale: float
-    additions: bool
-    count_rule: count_rule.CountRuleConfig
+    count_rule: CountRuleParameters
     level: int = 0
     genetic_map: ChromosomeGeneticMap | None = None
     reverse: bool = False
@@ -57,7 +58,7 @@ def _tie_record(counter):
     }
 
 
-def bin_floor(level: int, prepared, config: FounderRefinementConfig) -> int:
+def bin_floor(level: int, prepared, config: RefinementParameters) -> int:
     """The level's minimum surrogate bin: levels 1-2 share the chromosome's resolution
     max(proposal_min_sites_per_bin, ceil(chromosome sites / proposal_max_bins)), so the many small
     early components do not each get a chromosome's bin budget; later levels use the minimum."""
@@ -123,7 +124,7 @@ def _refinement_inputs(component, incoming):
 
 
 def _polish(engine, result, budget):
-    """The polish refit (FounderRefinementConfig.polish) of the count pass's decided
+    """The polish refit (RefinementParameters.polish) of the count pass's decided
     panel and of its same-K equal-F alternatives (converge(polish=True): beam escapes and bridges at
     every ordinary fixed point). The best polished fit (tie classes of F, content order) and its
     equal-F family follow the count pass's own terminal rule (count._terminal_family). K is never
@@ -210,8 +211,8 @@ def _count_call(refinement: ComponentRefinement) -> CountCall:
         founders=refinement.founders,
         founders_before=refinement.founders_before,
         ambiguous=refinement.ambiguous,
-        count_cycle=refinement.count_cycle,
-        cycle_undecided=refinement.cycle_undecided,
+        count_cycle=False,
+        cycle_undecided=False,
         decisions=tuple(
             CountStepDecision(
                 kind=d.kind,
@@ -245,8 +246,7 @@ def refine_component(
     panels: its prepared panels; workspace supplies its float32 (S, L_c, 3) evidence; context: its L1
     context (macro_context); fit_records: its fit-state scope or None. Returns (refined
     FounderComponent with its count call, ComponentRefinement). The refined founders are in
-    canonical order (rows sorted lexicographically, design 5.1)."""
-    started = 0.0
+    canonical order (rows sorted lexicographically)."""
     start_rows = np.asarray(component.rows, np.int64)
     founders, blocks = start_rows.shape
     if blocks < 2 or founders < 2:
@@ -258,7 +258,6 @@ def refine_component(
             reason="single_block_or_founder",
             founders_before=int(founders),
             founders=int(founders),
-            elapsed_seconds=0.0 - started,
             release_alternatives=tuple(incoming),
             input_alternatives=tuple(incoming),
         )
@@ -280,11 +279,11 @@ def refine_component(
             source_start=component.start,
             reverse=settings.reverse,
         )
-    geometry = count_rule.RowGeometry.from_panels(panels, reverse=settings.reverse)
+    geometry = count_geometry.RowGeometry.from_panels(panels, reverse=settings.reverse)
     # S = the component's informative samples: founder-excluded (uniform) samples and samples
     # without evidence at a complete site score exactly 0 for every panel.
     cost = float(
-        count_rule.founder_cost(
+        count_criterion.founder_cost(
             [panel.sites for panel in panels],
             cast(ComponentWorkspaceView, workspace).count_sample_count,
             settings.cost_scale,
@@ -293,7 +292,6 @@ def refine_component(
     # Deterministic bootstrap streams per component and decision (positions, size).
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks), int(founders)]
     alternative_starts, retained = _refinement_inputs(component, incoming)
-    count_started = 0.0
     try:
         with engine.memoized_windows(enabled=len(alternative_starts) > 1):
             result = count_pass(
@@ -304,7 +302,6 @@ def refine_component(
                 settings.count_rule,
                 budget,
                 seed_key,
-                settings.additions,
                 counter=counter,
                 alternative_starts=alternative_starts,
             )
@@ -316,7 +313,6 @@ def refine_component(
         domains, work = (stop.domain,), stop.work
         domains = tuple(asdict(cast("WindowDomain", domain)) for domain in domains)
         work = asdict(work)
-        window_seconds = 0.0
         family = dict(
             start=int(component.start),
             stop=int(component.stop),
@@ -342,36 +338,27 @@ def refine_component(
             bin_size=int(cast(ComponentWorkspaceView, workspace).bin_size),
             coarse_units=engine.windows.coarse_units,
             cost=cost,
-            elapsed_seconds=0.0 - started,
             branch_evaluations=0,
             branch_status="window_work_bound",
             input_alternatives=tuple(incoming),
             release_alternatives=(*incoming, family),
-            phase_seconds=dict(
-                engine._phase_seconds, count_step=0.0 - count_started, window_work_attempts=window_seconds
-            ),
             work_counters=dict(engine._work_counters, selected_count_decisions=0, selected_fits=0, **work),
         )
         return replace(component, count_call=_count_call(refinement)), refinement
-    count_seconds = 0.0 - count_started
-    polish_seconds = 0.0
     polish: dict[str, Any] = dict(status="off")
     stop = None
     if engine.beam is not None:
-        polish_started = 0.0
         try:
             result, record = _polish(engine, result, budget)
             polish = dict(status="done", **record)
         except WindowWorkLimit:
             # The component's window-work account ran out during the polish: the count pass's complete,
             # decided panel stands unpolished (declared policy: the polish is a separate stage after the count
-            # pass, whose decisions never depend on it; FounderRefinementConfig.window_work_coefficient).
+            # pass, whose decisions never depend on it; RefinementParameters.window_work_coefficient).
             stop = engine.windows.work.stop_record()
             polish = dict(
                 status="window_work_bound", from_fit=result.final_fit, F_before=float(result.F), count_reevaluated=False
             )
-
-        polish_seconds = 0.0 - polish_started
     rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(
@@ -390,28 +377,20 @@ def refine_component(
         cost=cost,
         decisions=result.decisions,
         fits=result.fits,
-        count_cycle=result.count_cycle,
-        cycle_undecided=result.cycle_undecided,
-        count_limit=result.count_limit,
-        count_limit_reached=result.count_limit_reached,
         ambiguous=result.ambiguous,
         final_fit=result.final_fit,
         best_f_replacement=result.best_f_replacement,
         weak_label_junctions=result.weak_junctions,
-        elapsed_seconds=0.0 - started,
         tie_events=_tie_record(counter),
         alternatives=_final_alternatives(result),
         release_alternatives=(*retained, *_release_alternatives(result, component, settings.level)),
         input_alternatives=tuple(incoming),
         branch_evaluations=result.branch_evaluations,
         branch_reused_fits=result.branch_reused_fits,
-        branch_seconds=result.branch_seconds,
         branch_status=result.branch_status,
         selected_branch=result.selected_branch,
         count_continuations=result.count_continuations,
         count_branch_evaluations=result.count_branch_evaluations,
-        count_branch_seconds=result.count_branch_seconds,
-        phase_seconds=dict(count_step=count_seconds, polish=polish_seconds, **engine._phase_seconds),
         polish=polish,
         window_stop=stop,
         work_counters=dict(
@@ -422,9 +401,9 @@ def refine_component(
     return refined, refinement
 
 
-def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds) -> LevelSummary:
+def summarise(level, min_sites_per_bin, refinements, elapsed_seconds) -> LevelSummary:
     """The level census from its components' refinements."""
-    fits = nonconverged = limits = cycles = undecided = replacements = 0
+    fits = nonconverged = replacements = 0
     without_sequence = sequence_rejected = hidden = weak = fallbacks = 0
     sweeps, frontiers, ambiguous = [], [], []
     for item in refinements:
@@ -434,9 +413,6 @@ def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds)
             sweeps.append(int(fit.sweeps))
             frontiers.append(int(fit.max_frontier))
             fallbacks += int(fit.frontier_fallbacks)
-        limits += int(item.count_limit_reached)
-        cycles += int(item.count_cycle)
-        undecided += int(item.cycle_undecided)
         weak += len(item.weak_label_junctions)
         for decision in item.decisions:
             without_sequence += int(bool(decision.without_sequence) and decision.kind == "deletion")
@@ -473,7 +449,6 @@ def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds)
                 )
     return LevelSummary(
         level=int(level),
-        additions=bool(additions),
         min_sites_per_bin=int(min_sites_per_bin),
         elapsed_seconds=float(elapsed_seconds),
         components=len(refinements),
@@ -483,19 +458,12 @@ def summarise(level, additions, min_sites_per_bin, refinements, elapsed_seconds)
         mean_sweeps=float(np.mean(sweeps)) if sweeps else 0.0,
         max_frontier=max(frontiers or [0]),
         frontier_fallbacks=fallbacks,
-        count_limit_hits=limits,
-        count_cycles=cycles,
-        count_cycles_undecided=undecided,
         best_f_replacements=replacements,
         weak_label_junctions=weak,
         deletions_without_sequence=without_sequence,
         decided_by_sequence_part=sequence_rejected,
         hidden_sequence_failures=hidden,
         ambiguous_count_calls=tuple(ambiguous),
-        phase_seconds={
-            name: sum(item.phase_seconds.get(name, 0.0) for item in refinements)
-            for name in ("count_step", "polish", "messages", "refinement_windows", "acceptance", "guarded_acceptance")
-        },
         work_counters={
             name: sum(item.work_counters.get(name, 0) for item in refinements)
             for name in (

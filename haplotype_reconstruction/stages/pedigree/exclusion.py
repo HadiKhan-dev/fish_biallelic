@@ -17,14 +17,13 @@ from ...contracts.evidence import ContigEvidence
 from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.observations import dense_observed
 from ...contracts.payload import from_payload, to_payload
-from ...contracts.pedigree import ExclusionEvidence, ExclusionRequest
+from ...contracts.pedigree import ExclusionEvidence
 from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError, InvariantError
-from ...engine.runtime import task_team
-from ...engine.scheduler import claim_threads
+from ...engine.cpu import claim_threads, thread_team
 from ...science.pedigree import exclusion_bound
-from ...science.pedigree.parameters import ExclusionConfig
+from ...science.pedigree.parameters import ExclusionParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy
@@ -53,7 +52,7 @@ class ExclusionAdapter:
 
 
 def derivation(
-    parameters: ExclusionConfig,
+    parameters: ExclusionParameters,
     evidence_identity: str,
     dyads: np.ndarray,
     sample_ids: tuple[str, ...],
@@ -74,7 +73,7 @@ def run(
     contig: str,
     evidence: ContigEvidence,
     dyads: np.ndarray,
-    parameters: ExclusionConfig,
+    parameters: ExclusionParameters,
     configured_contigs: int,
     sample_count: int,
     *,
@@ -94,7 +93,7 @@ def run(
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
             return previous
-    with task_team(threads):
+    with thread_team(default=threads):
         product, _ = exclusion_bound.score_contig(
             contig,
             gather_likelihoods(evidence.likelihoods, slice(None)),
@@ -116,7 +115,7 @@ def task(
     contig: str,
     evidence: ContigEvidence,
     dyads: np.ndarray,
-    parameters: ExclusionConfig,
+    parameters: ExclusionParameters,
     configured_contigs: int,
     sample_count: int,
     *,
@@ -139,24 +138,4 @@ def task(
         resources=ResourceRequest(max_cores=cores),
         affinity=contig,
         thread_argument="threads",
-    )
-
-
-def tasks(
-    request: ExclusionRequest, evidence: Mapping[str, ContigEvidence], parameters: ExclusionConfig, *, cores: int = 1
-) -> tuple[Task, ...]:
-    """One task per configured contig for targets, guard-only requests, or no tasks."""
-    if not len(request.dyads):
-        return ()
-    return tuple(
-        task(
-            contig,
-            evidence[contig],
-            request.dyads,
-            parameters,
-            len(request.contigs),
-            len(request.sample_ids),
-            cores=cores,
-        )
-        for contig in request.contigs
     )

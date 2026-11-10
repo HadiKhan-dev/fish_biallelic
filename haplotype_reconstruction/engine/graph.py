@@ -5,13 +5,13 @@ The same graph runs in process or through forkserver workers. Results are placed
 by task key, never completion order; worker exceptions/deaths propagate promptly.
 Working-set and scratch estimates are declarations only and never block admission.
 Scheduler owns expansion, admission, elastic shares and resident affinity; this
-module owns frozen contracts and dependency validation only (P0 ENG-20/22).
+module owns task declarations, result references and dependency validation (ENG-20/22).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import Any
 
 from ..core.errors import SettingsError
@@ -22,6 +22,9 @@ __all__ = [
     "RecordKey",
     "ResourceRequest",
     "ResultRef",
+    "PackedCall",
+    "RELEASED_RESULT",
+    "resolve_results",
     "Task",
     "dependency_order",
     "run_graph",
@@ -122,9 +125,25 @@ class Expansion:
     gather: Task
 
 
+@dataclass(frozen=True)
+class PackedCall:
+    """A child task's call (function, arguments) pickled once by the worker that expanded it, or for an affinity
+    task's gather kept there (``kept``, _kept_gather), plus the transport segments it refers to and the results it
+    reads (``refs``, its gather's children). The coordinator forwards the bytes unread (it neither unpickles nor
+    re-pickles them, nor walks them for references), holds those segments while the child is pending or running, and
+    sends the referenced results beside the bytes."""
+
+    payload: bytes
+    names: tuple[str, ...]
+    refs: tuple[TaskKey, ...] = ()
+    kept: str | None = None  # the call stayed in the worker that expanded it (_kept_gather): no payload
+
+
 def _references(value):
     if isinstance(value, ResultRef):
         yield value.task
+    elif isinstance(value, PackedCall):
+        yield from value.refs
     elif isinstance(value, (tuple, list)):
         for item in value:
             yield from _references(item)
@@ -255,7 +274,7 @@ def _readonly(value):
 def run_graph(
     tasks: Sequence[Task], *, cores: int = 1, in_process: bool = True, max_workers: int | None = None, **options: Any
 ) -> dict[TaskKey, Any]:
-    """Run the full E1 scheduler, including expansion and affinity residency.
+    """Run the graph scheduler, including expansion and affinity residency.
 
     Public task records stay stable. The lazy forwarding import avoids a cycle
     between these contracts and the implementation of their single authority.
@@ -263,3 +282,27 @@ def run_graph(
     from .scheduler import run_graph as execute
 
     return execute(tasks, cores=cores, in_process=in_process, max_workers=max_workers, **options)
+
+
+RELEASED_RESULT = object()
+
+
+def resolve_results(value: Any, results: Mapping[TaskKey, Any]) -> Any:
+    if isinstance(value, ResultRef):
+        result = results[value.task]
+        if result is RELEASED_RESULT:
+            raise SettingsError(f"{value.task}: expansion-local result already consumed; use retain_intermediates=True")
+        return result
+    if isinstance(value, tuple):
+        return tuple(resolve_results(item, results) for item in value)
+    if isinstance(value, list):
+        return [resolve_results(item, results) for item in value]
+    if is_dataclass(value) and (not isinstance(value, type)):
+        if not any(_references(value)):
+            return value
+        return replace(
+            value, **{f.name: resolve_results(getattr(value, f.name), results) for f in fields(value) if f.init}
+        )
+    if isinstance(value, Mapping):
+        return {key: resolve_results(item, results) for key, item in value.items()}
+    return value

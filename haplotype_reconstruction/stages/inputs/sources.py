@@ -3,7 +3,7 @@
 Owns source construction and ordering; science never sees input-header order or
 reads the convention environment. VCF payloads are permuted with their counts;
 simulation keeps its realised-seed identity and never constructs a VCF payload.
-Method: docs/methods/evidence.md#sample-order; B evidence/sample_order.py:31-94.
+Method: docs/methods/evidence.md#sample-order.
 """
 
 from __future__ import annotations
@@ -187,7 +187,7 @@ def observation_source(
 ) -> CanonicalOrderSource:
     """Construct a canonical source from resolved settings; simulation parameters are stage-resolved.
 
-    The simulation argument is the typed SimulationConfig owned by SI1, kept out
+    The simulation argument is the typed SimulationConfig owned by template generation, kept out
     of this module's imports so importing a VCF reader does not initialise simulation.
     """
     if settings.input.kind == "vcf":

@@ -3,7 +3,7 @@
 Owns LS14-LS16 and LS23-LS24: fewest-founder start filtering, outcome selection,
 strict incumbent replacement, release reuse and tied-panel consensus. Must not
 assemble context, schedule work, read records or inspect process state.
-Method: docs/methods/local_selection.md#rounds (WP_SE2 sections 4.7 and 4.10).
+Method: docs/methods/selection.md#ls23.
 The fewest fitted K filter precedes start-key deduplication. Equal panel and
 frequency arrays reuse the incumbent release. Shared rows retain only calls
 agreed by every tied alternative. The next incumbent uses the named convention.
@@ -38,7 +38,7 @@ __all__ = ["BlockTask", "select_block", "block_task_bytes", "select_task"]
 class BlockTask:
     """Inputs of one block's selection (columns: contig site indices of its discovery sites;
     label: "contig/round/i<index>", the block's key in diagnostics and the valley census;
-    alternatives: discovery's NLL-tied alternative latent panels, release 2.2)."""
+    alternatives: discovery's NLL-tied alternative latent panels)."""
 
     index: int = record_field("state", dtype="int")
     block: int = record_field("state", dtype="int")
@@ -71,7 +71,7 @@ def _best_outcome(outcomes, tolerance, ties, *, reverse: bool) -> tuple[SearchOu
     the selection objectives, fewer founders inside it (a stated prior); the distinct panels still
     tied (one outcome each, the representative included; empty when one panel remains). The
     smallest canonical key represents them (a convention: tie_classes reverses it under
-    maths.ties.reverse_conventions; the release keeps only what all of them agree on)."""
+    core.ties.reverse_conventions; the release keeps only what all of them agree on)."""
     if len(outcomes) == 1:
         return outcomes[0], []
     classes = tie_classes(
@@ -99,7 +99,7 @@ def _best_outcome(outcomes, tolerance, ties, *, reverse: bool) -> tuple[SearchOu
 def _consensus_panel(
     task, outcome, path_release, alternatives, prepared, release_config, context=None, *, census_sink=None
 ):
-    """The LocalPanel released for tied alternative panels (release 2.2), and the founder rows it
+    """The LocalPanel released for tied alternative panels, and the founder rows it
     withholds. A founder row that every alternative contains keeps a call where all alternatives'
     releases of that row agree (-1 elsewhere), their mean ALT probability and their smallest
     support; the other rows are withheld (calls -1, ALT probability 1/2, support 0); unknown slots
@@ -275,10 +275,10 @@ def select_block(
             )
     outcome = incumbent if retained else attempted
     assert outcome is not None
-    # Context snaps decided inside a tie class (by content), for the selected fit (release 2.12).
+    # Context snaps decided inside a tie class (by content), for the selected fit.
     ties.note("ls.snap.tie", inside_tie=bool(getattr(outcome.fit, "snap_ties", 0)))
     # The release is a function of the selected (panel, frequencies) and the block data, and in a feedback round
-    # also of the round's context witnesses (release 2.12): an incumbent's release is reused when they are equal and
+    # also of the round's context witnesses: an incumbent's release is reused when they are equal and
     # the round has no witnesses and the incumbent's release used none (it may have seen another round's context).
     reuse = (
         incumbent is not None
@@ -394,7 +394,7 @@ def select_task(
     census_sink=None,
     threads: int | Callable[[], int] = 1,
 ) -> BlockSelection:
-    """Select a block from immutable contig arrays, making the exact private 3.5 evidence copy.
+    """Select a block from immutable contig arrays, making a private missing-neutral evidence copy.
 
     Inputs are float64[N,L,3] GL and bool[N,L] observed. Only columns in block.columns
     are read. Missing cells become the literal uniform value before both fitting and

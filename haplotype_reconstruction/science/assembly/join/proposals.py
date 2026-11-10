@@ -18,8 +18,8 @@ every kernel reduces per sample in a fixed order, so proposals do not depend on 
 
 Owns: tier-1 proposal generators and proxy truncation.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.5; AJ15–AJ16.
-Identity: Candidate kinds and order are native; proposal cuts preserve or drop whole classes by the native budget.
+Method: docs/methods/assembly.md#aj15.
+Invariant: Candidate kinds have fixed order; proposal budgets keep or drop whole tie classes.
 Hot compiled loops remain whole to preserve the recurrence and its arithmetic update order.
 """
 
@@ -220,11 +220,6 @@ def replacement_candidates(gains, eligible):
     return ScoredEdits(gains[:, eligible].ravel(), edits, "replace")
 
 
-def replacement_proposals(gains, eligible, quota, *, reverse: bool):
-    """Top replacement proxy classes, keeping the complete leading class even if oversized."""
-    return replacement_candidates(gains, eligible).ranked(quota, reverse=reverse)
-
-
 def local_candidates(fields, local):
     """All one-block proxies; numeric storage follows the same layout in both paintings."""
     scores, edits = [], []
@@ -234,11 +229,6 @@ def local_candidates(fields, local):
         scores.append(values[keep])
         edits.append(np.column_stack((founder[keep], np.full(np.count_nonzero(keep), block), hap[keep])))
     return ScoredEdits(np.concatenate(scores), np.concatenate(edits), "local")
-
-
-def local_proposals(fields, local, quota, *, reverse: bool):
-    candidates = local_candidates(fields, local)
-    return candidates.ranked(quota, reverse=reverse), len(candidates)
 
 
 def boundary_proposals(gains, boundary, quota, kind, *, reverse: bool):
@@ -421,7 +411,7 @@ def static_replacement_gains(local, candidates, *, totals, workspace):
 def cycle_permutations(preference) -> list:
     """The distinct cycle permutations of the best-target graph under both tie conventions (equal preferences
     resolved to the lowest index, then to the highest): their union does not depend on the index order
-    (release 2.2). Proposal generation only; each is scored exactly."""
+    Proposal generation only; each is scored exactly."""
     found: list[np.ndarray] = []
     for highest in (False, True):
         permutation = cycle_permutation(preference, highest=highest)
@@ -432,7 +422,7 @@ def cycle_permutations(preference) -> list:
 
 def greedy_permutations(weights) -> list:
     """greedy_permutation under both tie conventions (equal weights in flat index order, then reversed),
-    distinct results (release 2.2: an order-invariant union; proposal generation only)."""
+    distinct results (an order-invariant union; proposal generation only)."""
     found: list[np.ndarray] = []
     for highest in (False, True):
         permutation = greedy_permutation(weights, highest=highest)
@@ -527,9 +517,7 @@ __all__ = [
     "candidate_novelty",
     "ScoredEdits",
     "replacement_candidates",
-    "replacement_proposals",
     "local_candidates",
-    "local_proposals",
     "boundary_proposals",
     "conditional_fields",
     "fixed_paint_delta",

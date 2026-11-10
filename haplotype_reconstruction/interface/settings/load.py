@@ -1,6 +1,6 @@
 """Loading the run configuration: preset, TOML file, command-line options and `--set` overrides, strictly.
 
-Precedence (later wins): schema defaults < preset (config/presets/<name>.toml) < the TOML file < command-line
+Precedence (later wins): schema defaults < preset (interface/settings/presets/<name>.toml) < TOML file < command-line
 options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones (a section removed
 from the schema names its removal: REMOVED_SECTIONS); values are type-checked by their field kind; relative paths
 resolve against the working directory. The resolved configuration is written back as TOML (`settings_text`) to
@@ -219,7 +219,9 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
         mapping = _merge(tomllib.loads(text), mapping)
     settings = _build(Settings, mapping, (), Path.cwd() if cwd is None else Path(cwd))
     if settings.version != 4:
-        raise SettingsError(f"settings version {settings.version!r} is not 4; use haplotypes migrate-config")
+        raise SettingsError(
+            f"settings version {settings.version!r} is not 4; current TOML settings require version = 4"
+        )
     return settings
 
 

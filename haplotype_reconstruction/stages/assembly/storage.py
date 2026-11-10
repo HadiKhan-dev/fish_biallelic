@@ -15,23 +15,18 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from haplotype_reconstruction.contracts.assembly import RefinementProblem
 from haplotype_reconstruction.science.assembly.refinement.component_workspace import frozen
 from haplotype_reconstruction.science.assembly.refinement.window import (
     COST_ARRAYS,
     PARTIAL_SITE_BYTES,
-    RESIDENT_BYTES,
     WINDOW_BYTES,
     WINDOW_SITE_BYTES,
     _fill_costs,
     _fill_logs,
     refill,
-    resident_bytes,
-    window_sites,
 )
-from haplotype_reconstruction.science.assembly.refinement.workspace import SweepWorkspace
 
-__all__ = ["StoragePlan", "make_workspace"]
+__all__ = ["StoragePlan", "Windows"]
 
 # Exact kernel capability: evidence, masks, hazards, log buffers, map, costs, metadata.
 WindowBuffers = tuple[
@@ -61,27 +56,6 @@ class StoragePlan:
     message_step: int | None = None
 
 
-def make_workspace(problem: RefinementProblem, storage: StoragePlan) -> SweepWorkspace:
-    """Create caller-owned buffers; immutable problem arrays remain borrowed."""
-    samples, sites = problem.evidence.shape[:2]
-    resident = (
-        resident_bytes(samples, sites, int(problem.partial.sum())) <= RESIDENT_BYTES
-        if storage.resident is None
-        else storage.resident
-    )
-    capacity = window_sites(samples) if storage.capacity is None else storage.capacity
-    windows = Windows(
-        problem.evidence, problem.kept, problem.partial, problem.hazards, resident=resident, capacity=capacity
-    )
-    founders, blocks = problem.rows.shape
-    arrays = 4 if problem.context is not None else 2
-    bytes_per_boundary = arrays * 8 * samples * founders * (founders + 1) // 2
-    step = 16 if (blocks + 1) * bytes_per_boundary > max(512 << 20, (blocks + 1) * (1 << 20)) else 1
-    if storage.message_step is not None:
-        step = storage.message_step
-    return SweepWorkspace(problem, windows, step)
-
-
 class Windows:
     """The windows of one component (ComponentWorkspace.windows): its resident window, or every consumer's own.
 
@@ -90,7 +64,7 @@ class Windows:
     lives as long as the caller holds it. A consumer that runs many kernels (a search) holds a lease, so they
     share its window and refill it only where they move.
 
-    Every window tuple has one argument type, whichever route built the component (stage, sweep or replay): the
+    Every window tuple has one argument type, whichever route built the component (stage or replay): the
     evidence frozen (C-contiguous, read-only, shared), the masks and hazards the windows' own C-contiguous writable
     copies, then the windows' scratch. This is the type the refinement kernels declare and the warm-up compiles.
     """

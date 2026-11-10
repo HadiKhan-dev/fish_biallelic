@@ -33,7 +33,6 @@ __all__ = [
     "Adapter",
     "write",
     "load",
-    "load_summary",
 ]
 PAINTING = "painting"
 SUMMARY = "painting/summary"
@@ -42,6 +41,34 @@ DIAGNOSTICS = "painting/diagnostics"
 IDENTITY = "identity/painting"
 SCHEMA = 1
 Assembly = tuple[tuple[PreparedPanel, ...], tuple[FounderComponent, ...]]
+
+
+from ...science.painting.parameters import PaintingParameters
+from ...store.identity import code_dependency_identity
+from ...store.protocol import Derivation
+
+
+def derivation(
+    parameters: PaintingParameters,
+    *,
+    contig: str,
+    sample_ids: tuple[str, ...],
+    assembly_identity: str,
+    evidence_identity: str,
+    payload_identity: str,
+    map_identity: str,
+    ties: TieSettings = TieSettings(),
+    numerical_policy: NumericalPolicy | None = None,
+) -> str:
+    """Bind scientific inputs and convention; exclude cache, batches and thread counts."""
+    return Derivation(
+        code_dependency_identity(("science.painting", "stages.painting.tasks", "stages.painting.records")),
+        dict(parameters=parameters, contig=contig, sample_ids=sample_ids),
+        numerical_policy or NumericalPolicy.current(),
+        dict(assembly_final=assembly_identity, evidence=evidence_identity, payload=payload_identity, map=map_identity),
+        tie_reverse=ties.reverse,
+        tie_keep=ties.keep,
+    ).identity
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:
@@ -109,11 +136,6 @@ def load(
     return Adapter().decode(payload, assembly=assembly)
 
 
-def load_summary(file: CheckpointFile, identity: str) -> PaintingSummary | None:
-    record = resume(file, SUMMARY, identity)
-    return None if record is None else from_payload(PaintingSummary, record.payload)
-
-
 @dataclass(frozen=True)
 class TieSource:
     """The explicit painting group of the shared diagnostic report protocol."""
@@ -174,14 +196,12 @@ class Reader:
         return painting
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
     product: str,
     contig: str | None = None,
-    panels: bool = True,
-    emissions: bool = True,
 ) -> Reader | None:
     """Rebuild painting identity from checked assembly/evidence requests and run settings.
 
@@ -191,15 +211,12 @@ def result_reader(
     from ...science.painting.parameters import PaintingParameters
     from ..assembly import records as assembly_records
     from ..evidence import records as evidence_records
-    from .tasks import identity
 
     if contig is None or contig not in manifest["contigs"]:
         raise InputError("painting reader requires a bound contig")
     if product not in ("painting", "summary", "tie_sources", "painting_report"):
         raise InputError(f"unsupported painting reader product {product!r}")
     file = store.contig(contig)
-    if not file.has(PAINTING):
-        return None
     assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
     evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     if assembled is None or evidence is None:
@@ -211,7 +228,7 @@ def result_reader(
         raise InvariantError("painting upstream publication is incomplete")
     parameters = from_payload(PaintingParameters, manifest["parameters"]["painting"])
     settings = manifest["ties"]
-    expected = identity(
+    expected_identity = derivation(
         parameters,
         contig=contig,
         sample_ids=tuple(manifest["sample_ids"]),
@@ -219,11 +236,34 @@ def result_reader(
         evidence_identity=evidence.identity,
         payload_identity=bound_payload_identity(file),
         map_identity=manifest["map_identities"][contig],
-        ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings.get("keep", ()))),
+        ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings["keep"])),
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
+    return Reader(expected_identity, product, key=SUMMARY if product == "summary" else PAINTING)
+
+
+def result_reader(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+    panels: bool = True,
+    emissions: bool = True,
+) -> Reader | None:
+    """Attach requested panel/cache views to the shared expected publication."""
+    from ..assembly import records as assembly_records
+    from ..evidence import records as evidence_records
+
+    file = store.contig(contig)
+    if not file.has(PAINTING):
+        return None
+    request = expected(store, manifest, product=product, contig=contig)
+    expected_identity = request.identity
     if product == "summary":
-        return Reader(expected, product, key=SUMMARY)
+        return request
+    assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
+    evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     assembly = None
     if (panels and product == "painting") or product == "painting_report":
         assembly_record = resume(file, assembled.key, assembled.identity)
@@ -233,7 +273,7 @@ def result_reader(
         assembly = (tuple(value.prepared), tuple(value.components))
     packed = None
     if emissions and product == "painting":
-        cache = resume(file, CACHE, expected)
+        cache = resume(file, CACHE, expected_identity)
         if cache is not None:
             require_schema(cache.payload, SCHEMA)
             packed = tuple(cache.payload["packed_emissions"])
@@ -256,7 +296,7 @@ def result_reader(
                 raise InvariantError("painting report search history is incomplete")
             histories.append(cast(tuple[tuple[int, int, int, JoinSummaryView], ...], request.decode(saved.payload)))
         return Reader(
-            expected,
+            expected_identity,
             product,
             assembly,
             positions=arrays["positions"],
@@ -264,7 +304,7 @@ def result_reader(
             searches=histories[0],
             feedback_searches=histories[1] + histories[2],
         )
-    return Reader(expected, product, assembly, packed)
+    return Reader(expected_identity, product, assembly, packed)
 
 
 __all__ += ["Reader", "TieSource", "PaintingReport", "result_reader"]

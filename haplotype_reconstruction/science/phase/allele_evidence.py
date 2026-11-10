@@ -1,4 +1,4 @@
-"""Capped empirical-Bayes per-copy uncertainty conditional on fitted carriers and panel (3.4).
+"""Capped empirical-Bayes per-copy uncertainty conditional on fitted carriers and panel.
 
 The release gives each homologue a flip probability d_x relative to its selected panel allele. It removes the
 sample's direct own likelihood term while holding the fitted carriers, panel and empirical prior fixed. This is
@@ -18,26 +18,23 @@ influence those fitted quantities. The selected allele also determines which dis
 - The site model flips the two copies independently per homologue, including (x, x). It is not exact integration
   over one shared latent allele.
 
-Gate 1 assessed min(p, 1-p) on mapped single-row labels, whereas release uses capped disagreement with the selected
-allele. Pooled and unmapped labels are unvalidated. Correlated carrier identity errors remain a failure mode;
-well-carried classes were 3-9 times overconfident on four designs. These limits are separate from the improved
-measured downstream genotype-score calibration.
+Validation of min(p, 1-p) on mapped single-row labels does not establish calibration of the released capped
+disagreement with the selected allele. Pooled and unmapped labels are unvalidated. Correlated carrier identity errors
+remain a failure mode; well-carried classes were 3-9 times overconfident on four validation designs. Downstream
+genotype-score calibration does not establish calibration of these allele uncertainties.
 
 Evidence costs O(N m) per component and solve (chunked temporaries); a sample's own terms cost O(m).
 """
 
 from __future__ import annotations
 
-from typing import Literal, overload
-
 import numpy as np
 
-from .diagnostics import DecisionTrace, PhaseTrace
 from .parameters import EVIDENCE_CHUNK, FLIP_CEILING, FLIP_NEGLIGIBLE, LOGIT_LIMIT, PRIOR_BOUNDS
 
 
 def allele_prior(ones: int, called: int) -> float:
-    """CAL2 empirical logit from exact contig-wide counts; mutate nothing (P0 FP14)."""
+    """Empirical allele logit from exact contig-wide counts; mutate nothing (FP14)."""
     share = ones / called if called else 0.5
     share = min(max(share, PRIOR_BOUNDS[0]), PRIOR_BOUNDS[1])
     return float(np.log(share / (1.0 - share)))
@@ -79,9 +76,9 @@ def allele_evidence(
     sites. X int64 [N, 2, B] (the solve's MAP labels), site_bin int64 [m], alleles int8 [S, m], site_gl float32
     [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the robust mixture.
 
-    Release 4.10: each EVIDENCE_CHUNK of sites sums its carrier terms in kernels.evidence_terms (the same terms in the
-    same order as the previous bincount; numpy held the GIL, so the two solves' evidence ran one sample of CPU at a
-    time); ``map_work(function, items)`` (ordered, optional) runs the fixed chunks concurrently."""
+    Each EVIDENCE_CHUNK of sites sums carrier terms in kernels.evidence_terms, in homologue-then-sample order.
+    The kernel releases the GIL; ``map_work(function, items)`` (ordered, optional) runs disjoint fixed chunks
+    concurrently."""
     from .kernels import evidence_terms
 
     S, m = alleles.shape
@@ -115,41 +112,15 @@ def allele_evidence(
     return out
 
 
-@overload
-def flip_probabilities(
-    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: Literal[False] = False
-) -> np.ndarray: ...
-
-
-@overload
-def flip_probabilities(
-    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: Literal[True]
-) -> PhaseTrace: ...
-
-
-@overload
-def flip_probabilities(
-    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: bool
-) -> np.ndarray | PhaseTrace: ...
-
-
-def flip_probabilities(
-    evidence: np.ndarray, alleles: np.ndarray, logit_prior: float, *, trace: bool = False
-) -> np.ndarray | PhaseTrace:
+def flip_probabilities(evidence: np.ndarray, alleles: np.ndarray, logit_prior: float) -> np.ndarray:
     """float64 [S, m]: capped empirical-Bayes per-copy disagreement with the selected allele [S, m] (-1: 0).
     Evidence [S, m] may have the sample's direct term removed; carrier/panel selection stays conditioned upon."""
     p_one = 1.0 / (1.0 + np.exp(-np.clip(logit_prior + evidence, -LOGIT_LIMIT, LOGIT_LIMIT)))
     flips = np.where(alleles == 1, 1.0 - p_one, p_one)
-    audit = DecisionTrace(extended=True) if trace else None
-    if audit is not None:
-        audit.difference("cal2_cap", flips, FLIP_CEILING, flips > FLIP_CEILING)
     flips = np.minimum(flips, FLIP_CEILING)
-    if audit is not None:
-        audit.difference("cal2_negligible", flips, FLIP_NEGLIGIBLE, flips < FLIP_NEGLIGIBLE)
-        audit.emit("cal2_unknown", alleles < 0, alleles)
     flips[(flips < FLIP_NEGLIGIBLE) | (alleles < 0)] = 0.0
     value = np.ascontiguousarray(flips)
-    return PhaseTrace(value, tuple(audit.rows)) if audit is not None else value
+    return value
 
 
 def own_terms(

@@ -2,7 +2,7 @@
 
 Owns: landmark selection (LandmarkSet, select) and the landmark-bounded K = 1 seed groups and residual groups.
 Must not: change the likelihood, priors or scores; read storage, the environment or a clock; or log.
-Method: docs/methods/discovery.md, unit di12 (P0 DI12).
+Method: docs/methods/discovery.md, unit di12.
 Identity: anchors are taken by whole probability-q distance classes within the landmark budget; an oversized class
 stops selection whole.
 
@@ -30,11 +30,11 @@ from .diagnostics import BlockDiagnostics
 from .parameters import RESIDUAL_GEOMETRY_SLACK
 
 if TYPE_CHECKING:
-    from .parameters import ResidualBirthConfig
+    from .parameters import ResidualBirthParameters
 
 __all__ = ["LandmarkSet", "select", "seed_groups", "residual_groups"]
 
-# Intended lazy overloads: base40 execution/kernel_manifest.json (3.5.0).
+# Supported lazy overloads for the declared kernel routes.
 _FLOAT64_3C = types.Array(types.float64, 3, "C", readonly=False)
 _UINT64_2C = types.Array(types.uint64, 2, "C", readonly=False)
 _INT8_2C = types.Array(types.int8, 2, "C", readonly=False)
@@ -42,8 +42,8 @@ _BOOLEAN_2C = types.Array(types.boolean, 2, "C", readonly=False)
 _INT64_1C = types.Array(types.int64, 1, "C", readonly=False)
 
 
-# Gap and half band of landmark fractions: the probability tie quantum of maths.ties (2^-15 since 2.13, placed against
-# 1e-6 relative GL noise; 2^-20 before).
+# Gap and half band of landmark fractions: the probability tie quantum of core.ties, placed above the 1e-6
+# relative GL-noise scale.
 QUANTUM = tie_quantum(0.0, "probability")
 
 
@@ -229,7 +229,7 @@ def _select(rows, budget, *, kind, minimum_joint=1, omissions=None, scope="globa
     """O(R log R * L + A*R log R + R*A*L) work; linear-in-R live arrays.
 
     Selection computes each unique-record/anchor distance once. Hamming distances
-    use packed words; genotype agreement uses the original fixed site/genotype sum.
+    use packed words; genotype agreement uses the fixed site/genotype sum.
     The Cauchy-Schwarz self-agreement maximum supplies the K1 distance offset.
     No R-by-R array is constructed, including when unique count is <= A.
     """
@@ -315,7 +315,7 @@ def _select(rows, budget, *, kind, minimum_joint=1, omissions=None, scope="globa
 def seed_groups(
     likelihoods: np.ndarray, budget: int, min_cluster_size: int, omissions: list[dict] | None = None
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
-    """K = 1 sample clusters on at most ``budget`` agreement landmarks (P0 DI12, DI13).
+    """K = 1 sample clusters on at most ``budget`` agreement landmarks.
 
     ``likelihoods``: float64[N, L, 3]. Level-wise HDBSCAN* on the landmark agreement distances, each cluster lifted
     back to every sample whose nearest anchor it holds; returns (int64 sample-index arrays in sorted group order,
@@ -338,7 +338,7 @@ def residual_groups(
     hard_calls: np.ndarray,
     budget: int,
     minimum_joint: int,
-    config: ResidualBirthConfig,
+    config: ResidualBirthParameters,
     omissions: list[dict] | None = None,
     scope: str = "global",
     cache: dict[Any, Any] | None = None,
@@ -347,7 +347,7 @@ def residual_groups(
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
 ) -> tuple[tuple[tuple[int, ...], ...], bool, dict[str, Any]]:
-    """Residual record groups on at most ``budget`` Hamming landmarks (P0 DI12, DI18).
+    """Residual record groups on at most ``budget`` Hamming landmarks.
 
     ``hard_calls``: int8[R, L] called residual strands. Density groups plus the content-ordered edge-clique cover of
     the landmark graph (``config.max_cluster_hamming``, ``config.max_alternative_groups``), lifted to original

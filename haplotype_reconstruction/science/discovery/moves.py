@@ -5,7 +5,7 @@ Owns: the K = 1 initial starts, death, gauge-rewire, data-birth, soft-birth and 
 generators, their growth tables (GrowthInputs) and the maximum-cut cache.
 Must not: score or select panels (the cavity score and search.py decide), read storage, the environment or a clock,
 or log.
-Method: docs/methods/discovery.md, units di13-di16 and di19-di20 (P0 DI13-DI16, DI19, DI20).
+Method: docs/methods/discovery.md, units di13-di16 and di19-di20.
 Identity: generator families are admitted whole through twice ``max_proposals_per_expansion``, never by a byte
 prefix; data births consume whole excess/coverage tie groups (budgets ``data_birth_attempts``,
 ``data_birth_children``, ``data_birth_tie_budget_factor``); gauge rewires use exact maximum cuts up to
@@ -22,14 +22,12 @@ prefix; data births consume whole excess/coverage tie groups (budgets ``data_bir
 * Soft births: K + 1 starts from soft-residual consensus rows (residual_births.py).
 * Birth-delete replacements: a birth followed by deleting any row (same K).
 
-Release 2.1 (noise stability, design/DESIGN.md 3.3): no proposal order is decided by rounding,
-perturbation-level differences or array layout. K = 1 similarities are computed in one fixed
-summation order (no BLAS layout), exactly symmetric; consensus and dosage rows treat values within
-the ``probability`` quantum of 1/2 as exactly 1/2 (population ALT fraction, then REF); gauge
-rewires need a gain above the ``nll`` quantum; data births rank samples by tie classes of their
-excess NLL (kind ``sample``; an all-unknown sample's excess is its exact value 2 lambda n_obs), then
-observed sites, then canonical sample order, and consume tied samples as whole groups; replacements
-follow births in tie-class order.
+Proposal order does not use rounding-level differences, perturbation-level differences or array layout. K = 1
+similarities use one fixed summation order and are exactly symmetric. Consensus and dosage rows treat values
+within the ``probability`` quantum of 1/2 as exactly 1/2 (population ALT fraction, then REF); gauge rewires
+need a gain above the ``nll`` quantum. Data births rank samples by tie classes of excess NLL (kind ``sample``;
+an all-unknown sample's excess is exactly 2 lambda n_obs), then observed sites, then canonical sample order,
+consuming tied samples as whole groups. Replacements follow births in tie-class order.
 """
 
 from __future__ import annotations
@@ -70,7 +68,7 @@ from .panel import (
     whole_class_cut,
 )
 from .parameters import COUNT_CHUNK as _COUNT_CHUNK
-from .parameters import MAX_CUT_CACHE_ENTRIES, DiscoveryConfig, SearchConfig
+from .parameters import MAX_CUT_CACHE_ENTRIES, DiscoveryParameters, SearchParameters
 from .residual_births import (
     HALF_BAND,
     alt_fraction_families,
@@ -106,7 +104,7 @@ __all__ = [
     "collect_birth_starts",
 ]
 
-# Intended lazy overloads: base40 execution/kernel_manifest.json (3.5.0).
+# Supported lazy overloads for the declared kernel routes.
 _INT64_2C = types.Array(types.int64, 2, "C", readonly=False)
 _BOOLEAN_1C = types.Array(types.boolean, 1, "C", readonly=False)
 _INT64_1C = types.Array(types.int64, 1, "C", readonly=False)
@@ -125,9 +123,8 @@ _TINY = np.finfo(np.float64).tiny
 # ---------------------------------------------------------------------------------------------
 @kernel(overloads=((_FLOAT64_3C,),), cache=True, parallel=True, nogil=True)
 def expected_agreement(likelihoods):
-    """S[i, j] = mean over sites of sum_g P_i(g) P_j(g), each entry summed over sites (then
-    genotypes 0, 1, 2) in one fixed order and stored in both triangles: the values do not depend
-    on the sample order, threads, BLAS layout or CPU type (2.0 used three BLAS Gram matrices)."""
+    """S[i, j] = mean over sites of sum_g P_i(g) P_j(g), each entry summed over sites (then genotypes 0, 1, 2) in
+    one fixed order and stored in both triangles, independently of sample order, threads and BLAS layout."""
     n, n_sites, _ = likelihoods.shape
     similarity = np.empty((n, n), dtype=np.float64)
     for i in prange(n):
@@ -287,7 +284,7 @@ def initial_solutions(
     workspace: FixedKWorkspace,
     likelihoods: np.ndarray,
     active: np.ndarray,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     counter: TieCounter | None = None,
     omissions: list[dict] | None = None,
     *,
@@ -741,7 +738,7 @@ def growth_inputs(
     reverse: bool = False,
     keep: tuple[str, ...] = (),
 ) -> GrowthInputs:
-    """The block's per-sample growth tables, computed once per search (P0 DI13, DI16).
+    """The block's per-sample growth tables, computed once per search.
 
     ``likelihoods``: float64[N, L, 3] genotype likelihoods; ``observed``: bool[N, L]. Returns GrowthInputs: each
     sample's sitewise genotype-oracle NLL (float64[N]) and decisiveness, the extremal dosage families, one dosage
@@ -784,7 +781,7 @@ def _data_seed_keys(growth, sample, parent_rows):
     seed at that cell comes from the population hardening family.
     """
     # The same integer subtraction/clip for all parent rows in one array operation;
-    # retain dosage-then-parent order before the existing exact union.
+    # retain dosage-then-parent order before the exact union.
     seeds = [row for dosage in growth.dosages for row in np.clip(dosage[sample][None, :] - parent_rows, 0, 1)]
     seeds.extend(rows[sample] for rows in growth.seed_rows)
     return sorted({np.asarray(row, dtype=np.int8).tobytes() for row in seeds})
@@ -857,7 +854,7 @@ def collect_birth_starts(
     The attempt budget is checked between groups. A class crossing the hard cap is omitted whole;
     no sample, founder-row or seed enumeration order can select a privileged prefix.
     ``key_of`` also accepts deferred starts: omitted classes need their identities only.
-    ``count_rest(items, seen) -> int`` (optional; release 3.5): once collection has stopped, the number of
+    ``count_rest(items, seen) -> int`` (optional): once collection has stopped, the number of
     distinct start keys of ``items`` (the rest of ``order``) not in ``seen``, computed in bulk. The omitted
     classes are only counted (the ranked-truncation diagnostic), and the count is the size of the same union,
     so it equals the group-by-group enumeration it replaces.
@@ -903,10 +900,10 @@ def data_births(
     solution: FixedKSolution,
     growth: GrowthInputs,
     max_iterations: int,
-    search: SearchConfig,
+    search: SearchParameters,
     counter: TieCounter | None = None,
 ) -> DataBirths:
-    """K + 1 children of a panel from its most misfit samples (``search``: SearchConfig).
+    """K + 1 children of a panel from its most misfit samples (``search``: SearchParameters).
 
     The parent is first refitted to its complete schedule family (unless the workspace
     certified both schedules fixed). Parent/sample pairs with depth are ranked together by excess NLL over their
@@ -971,7 +968,7 @@ def data_births(
     def count_rest(pairs, seen_keys) -> int:
         """Distinct start keys of the stopped pairs not in ``seen_keys``: the union of seeds_of over ``pairs``
         (a parent's own rows excluded; its earlier yields are in ``seen_keys``), in sample chunks of whole
-        int8 row arrays instead of one Python generator per sample (release 3.5; the same count)."""
+        int8 row arrays instead of one Python generator per sample."""
         if width == 0:
             return 0
         pairs = np.asarray(pairs, dtype=np.int64)
@@ -1047,7 +1044,7 @@ def data_births(
         return DataBirths(tuple(children), tie_cut, sum(item["count"] for item in omissions), tuple(omissions))
     fallbacks = [canonical_solution(fit, workspace) for fit in cast(list[FitResult], fit_starts(workspace, fitted, 0))]
     ordered = list(deduplicate((child for child in fallbacks if has_distinct_rows(child)), reverse=workspace.reverse))
-    # The relocated 3.5 body reuses ``classes`` for the fallback's class indices (int64 array).
+    # The fallback reuses ``classes`` for its int64 class indices.
     classes = tie_classes(  # type: ignore[assignment]
         [child.nll for child in ordered],
         fixed_policy("discovery.data_birth", workspace.quanta.nll, reverse=workspace.reverse).quantum(),
@@ -1100,7 +1097,7 @@ def soft_births(
     solution: FixedKSolution,
     likelihoods: np.ndarray,
     residual_inputs: ResidualInputs,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     cache: dict[tuple[bytes, bytes], SoftBirths],
     counter: TieCounter | None = None,
 ) -> SoftBirths:
@@ -1144,17 +1141,17 @@ def replacements(
     workspace: FixedKWorkspace,
     parent: FixedKSolution,
     births: Iterable[FixedKSolution],
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     limit: int | None = None,
     omissions: list[dict] | None = None,
 ) -> tuple[tuple[FixedKSolution, ...], int]:
     """Same-K starts: every K + 1 birth with any one row deleted, distinct by the remaining rows, taken by whole
     NLL tie classes of the births (best first) while at most ``limit`` (default ``max_replacement_children``)
     starts are taken. Any straddling class is admitted through 2 x limit starts. A larger class is omitted
-    whole, and lower-ranked classes are counted separately (P0 DI20).
+    whole, and lower-ranked classes are counted separately.
 
     ``parent``: the K-founder panel; ``births``: its fitted K + 1 children (others are ignored); ``config``:
-    DiscoveryConfig. The starts are refitted with ``workspace`` (fit_panels), which updates the workspace's fit
+    DiscoveryParameters. The starts are refitted with ``workspace`` (fit_panels), which updates the workspace's fit
     cache and its fit-schedule, evaluation and sweep counters. Returns (the distinct fitted K-founder children, the
     number of omitted starts). Appends whole-class omissions to ``omissions``; mutates nothing else.
     """
@@ -1220,7 +1217,7 @@ def ordinary_moves(
     growth: GrowthInputs,
     ceiling: int,
     cuts: MaximumCuts,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     counter: TieCounter | None = None,
 ) -> OrdinaryMoves:
     """Whole death and gauge proposal families, in that search-priority order, then births.
@@ -1234,8 +1231,8 @@ def ordinary_moves(
     if solution.k > 1:
         buckets[-1].extend(death_starts(solution))
         weights = assignment_graph(solution.assignments, solution.k)
-        # The historical effective budget is 4 x max_cut_ties. Its single tied class may extend
-        # through twice that effective budget; probe one further cut to detect whole-class omission.
+        # The effective budget is 4 x max_cut_ties. A complete tied family may extend through twice that
+        # budget; probe one further cut to detect whole-family omission.
         cap = 4 * search.max_cut_ties
         partitions = cuts.partitions(weights, 2 * cap + 1)
         if len(partitions) > 2 * cap:

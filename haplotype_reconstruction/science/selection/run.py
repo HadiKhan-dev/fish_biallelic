@@ -2,7 +2,7 @@
 
 Owns the pure LS23/LS25 round schedule and discovery-site projections.
 Must not assemble context, read records, schedule workers or inspect runtime state.
-Method: docs/methods/local_selection.md (LS23-LS25, WP_SE2 sections 4.10-4.12).
+Method: docs/methods/selection.md#ls25.
 Earlier released calls remain candidates; the newest context founders retain their
 multiplicity and witness mask. Memos survive exactly the initial and l1 rounds.
 """

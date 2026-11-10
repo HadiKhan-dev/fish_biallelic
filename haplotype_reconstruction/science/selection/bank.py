@@ -3,12 +3,12 @@
 Owns LS17-LS20: nearest-donor completion, discovery endpoint families, nested
 cavity/BIC classes and whole-family budget admission. Must not schedule workers,
 read storage or choose the final path-search outcome.
-Method: docs/methods/local_selection.md#candidate-bank (WP_SE2 sections 4.8-4.9).
+Method: docs/methods/selection.md#ls17.
 Donors overwrite only unknown sites before deduplication and the variant cap;
 every completion enters the bank. Both fixed-K usage schedules remain. Starts
 retain first/last enumeration under the explicit convention; admitted endpoint
-families keep their complete membership. Accretion (LS20): all historical start,
-score and round backstops remain identity-affecting, reported state.
+families keep their complete membership. Start, score and round backstops affect
+result identity and are reported.
 """
 
 from __future__ import annotations
@@ -43,20 +43,23 @@ from ..discovery.api import (
 )
 from .fit import canonical as canonical_start
 from .fit import unique_rows as unique_integer_rows
+from .parameters import RACE_KEEP, RACE_MIN_STARTS, RACE_PROBE_ITERATIONS, CandidateBankParameters
 
 __all__ = ["complete_proposals", "nested_tie_set", "candidate_bank"]
 
 
-def complete_proposals(original_latent, proposal_panels, variant_cap: int = 8):
+def complete_proposals(
+    original_latent, proposal_panels, variant_cap: int = CandidateBankParameters.completion_variant_cap
+):
     """(sources, bank rows, missing cells, overflow): the latent panel and each proposal panel's
     completed rows as search sources, and every distinct completion as a bank row.
 
-    A partial row takes the alleles of its nearest latent rows on its uncalled sites. Release 2.2:
-    when equally near donors give different completions, the panel makes one source per
+    A partial row takes the alleles of its nearest latent rows on its uncalled sites. When equally near
+    donors give different completions, the panel makes one source per
     combination of its tied rows' completions (no donor is preferred; the cavity tie sets and the
     path objective decide). A panel with more than ``variant_cap`` combinations keeps only the rows
     with a unique completion as its source (overflow: counted, the tied completions stay bank
-    rows). 2.1 completed every row from the first tied donor in content order (a convention)."""
+    rows)."""
     original = unique_rows(original_latent).astype(np.int64)
     sources: list[np.ndarray] = [original]
     bank: list[np.ndarray] = [original]
@@ -101,12 +104,6 @@ def complete_proposals(original_latent, proposal_panels, variant_cap: int = 8):
         if alternatives:
             bank.append(np.asarray(alternatives))
     return tuple(sources), unique_rows(np.vstack(bank)).astype(np.int64), missing, overflow
-
-
-# A neighbour round with more novel starts than this races them (_race); smaller rounds fit every start.
-RACE_MIN_STARTS = 24
-RACE_PROBE_ITERATIONS = 3
-RACE_KEEP = 16
 
 
 def _race(workspace, starts, selection_score):
@@ -289,8 +286,7 @@ def _bic_search(
 
     def select(round_label):
         """The BIC-selected tie set over everything admitted: the best class of -selection_score,
-        inside it the best class of the NLL, then the prior fewer founders (release 2.2: every
-        member, not one picked by the canonical key)."""
+        inside it the best class of the NLL, then the prior fewer founders; retain every member."""
         entries = list(scored.values())
         if not entries:
             return ()
@@ -338,7 +334,7 @@ def _bic_search(
         if len(novel) > start_limit:
             state["budget_bound"] = True
             # Budget-bound: the first starts in enumeration order (a convention; the last ones
-            # under maths.ties.reverse_conventions).
+            # under core.ties.reverse_conventions).
             if reverse:
                 novel, dropped = novel[len(novel) - start_limit :], novel[: len(novel) - start_limit]
             else:
@@ -492,8 +488,8 @@ def candidate_bank(
     panels in canonical key order; the search runs from each and its objective decides), and the
     bank adds the raw latent rows, the starts and every member of the BIC tie set. An incumbent
     (the previous round's selected panel) contributes all its rows. ``ties``: a
-    maths.ties.TieCounter for the bank's tie decisions; ``census_key``: the block's census key.
-    ``alternatives``: discovery's NLL-tied alternative latent panels (release 2.2): extra starts
+    core.ties.TieCounter for the bank's tie decisions; ``census_key``: the block's census key.
+    ``alternatives``: discovery's NLL-tied alternative latent panels: extra starts
     and bank rows in the initial round, extra sources in context rounds.
     """
     original_latent = np.asarray(original_latent, dtype=np.int64)

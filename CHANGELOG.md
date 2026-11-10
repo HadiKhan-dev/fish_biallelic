@@ -1,5 +1,73 @@
 # Changelog
 
+## 4.12.0 (10 November 2026)
+
+This release reworks the package's structure after an architecture review of the whole code base (twelve reviews by
+two models), retires code kept only to reproduce 3.5's bits or to compare with it, and widens the contig lanes.
+Scientific decisions are unchanged except where stated below (the shadow-family rule, which changed no released
+result on the saved units compared).
+
+4.12 does not read or resume earlier checkpoints or exports. Re-run earlier runs with 4.12 in a new output root.
+Checkpoint layout markers, invocation records, export manifests and VCF/BCF headers now identify release 4.12;
+mismatched or unversioned earlier artifacts fail before payload decoding. Kept-site sample VCFs now have a single
+VCFv4.2 declaration, matching all other current VCF exports. The long-superseded `migrate-config` command is retired in
+4.12. Earlier release notes below describe their original commands and document locations. A derivation's code identity
+covers the engine and store modules its code imports, so execution changes such as the lane width also recompute earlier
+checkpoints, by design.
+
+**Wider contig lanes, largest first.** A run now gives each concurrently processed contig a lane of 16 cores (8 in
+4.11), so a 76-CPU node runs four contigs at a time instead of nine, and contigs start in decreasing order of their
+size estimate. On the N = 320 depth-5 simulation on single 76-CPU nodes, the whole run took 3 h 52 min with nine
+lanes, 4 h 19 min with four, and 4 h 02 min and 4 h 04 min under 4.11.0; repeated runs of one configuration differed
+by about 9% between nodes. Every evaluation summary was identical.
+
+**One shadow-family rule.** Assembly join and founder refinement share the total-gated join rule. Shadow
+families are enumerated only after the total test passes; passing over-budget
+families keep their conventional incumbent and count_unverified. Opposed shadow
+verdicts withhold without forcing bootstrap ambiguity. The refinement-only
+shadow-envelope certificate is removed. Join shadow-family representative_prior
+changes from `smaller_K_then_exact_minimum_switches` to `smaller_k+nearest_shadow`,
+the existing refinement spelling. Other minimum-switch continuation priors retain
+their names; this vocabulary does not enable reading earlier run checkpoints. The join incumbent follows
+RowGeometry.reverse, matching refinement; only reversed-convention runs can
+change due to this incumbent correction. Exact ties among enumerated shadows
+also follow the reversal convention: both previous callers always selected the
+first canonical member. Scoring order remains canonical. Policy selection used 2,193 matched
+saved units with identical released results and truth scores for both policies.
+
+**Retired code.** Final-level founder additions (off since 4.9) are removed with their setting. So are the decision
+traces that every acceptance pass built and discarded, the phase and recombination trace instrumentation, the test-only
+fixed-K sweep route (fitting has one route), the supplied-evidence pedigree pilot, the unused storage framework and the
+summation replicas kept to reproduce 3.5's rounding. Decisions that need order-independent operands use an exactly
+rounded sum; other reductions use one declared expression. Decision-level replays of the changed reductions on saved
+inputs compared about 530,000 decisions and none changed. Comparisons with 3.5, validation-only reference
+implementations and the workflow receipt moved to the test suite, outside the package.
+
+**Structure.** The scheduler is split by state ownership into the scheduler, the memory governor, the CPU authority,
+the contig lanes and the thread maps. Stage tasks live in their stages (`stages/<stage>/tasks.py`) instead of the
+command runner, with one identity per product, and painting's checkpoint logic moved from science into its stage.
+Each stage has one parameter record (`*Parameters`), without mirrors in the contracts; every parameter value is
+unchanged. Science creates no thread pools of its own: it uses the engine's thread maps. Comments and parameter
+provenance state current meaning, units and rationale instead of history (the generated parameter reference shows
+them). Timing fields that were always zero are removed from the refinement and join records.
+
+**Execution.** The store releases its append lock before the final fsync of a publication and groups the
+acknowledgements, so concurrent publishers to one contig no longer queue behind each other's fsync. Run records give
+each task's publication lock wait and fsync time, with at most one contention warning per contig. Assembly refinement
+re-reads its live CPU share at every phase boundary, so cores freed by finished siblings reach long refinement tails;
+run records show each refinement unit's threads over time.
+
+**Configuration.** The AulStu example configuration (`configs/astcal.toml`) lists its 22 autosomes; it named a preset
+that 4.0 removed.
+
+Validation: the test suite (3,737 tests), the stage tier (345 tests in four shards; 2 skipped) and the documentation
+check pass, and a reduced end-to-end matrix of six cases was compared with 4.11.0's. The five simulations (k30, std,
+backcross, a reversed run and a sample-order permutation) have identical truth metrics. On TroMau the released pedigree
+(all three tiers, 116 samples), founder panels, phase and recombination are identical and the VCF records are
+byte-identical; 27 founder segments instead of 32 carry a count_unverified flag (the shared shadow-family rule settles
+five at its total test), and pedigree log-evidence values differ by at most 1e-11 relative. The architecture review's
+findings, the structural changes and the shadow-family rule were reviewed adversarially.
+
 ## 4.11.0 (9 November 2026)
 
 This release follows an independent review of every change since 4.4.0 that had not been reviewed (4.4.0's late fixes
@@ -506,7 +574,6 @@ change identities, as before.
 - The workflow guide adds the shared-root multi-node recipe.
 
 **Review fixes before release.**
-- The pedigree adapter path now gathers resampling batches correctly with more than one worker.
 - Per-chromosome tie collectors wait for founder refit as well as painting, so refit tie events are never omitted.
 - Progress and failure bookkeeping can no longer fail a run or mask its error.
 - Warm-up now covers every kernel overload a run dispatches. Results are unchanged.

@@ -40,7 +40,7 @@ Cost and scope: O(T) dependency scheduling plus stage work; keyed gather retains
 <a id="eng-04"></a>
 ## eng-04 Run modes: stop points, shards, serial mode, max_contigs
 
-Implement run, workflow steps, stop points, serial mode and contig limits as cuts of the same graph. Serial visits contigs in bound order; a contig limit counts pending contigs and stops cleanly. Workflow scatter commands consume checked prerequisites after init. Removed shards and helper queues are replaced by these explicit steps. Every mode retains identical derivation checks.
+Implement run, workflow steps, stop points, serial mode and contig limits as cuts of the same graph. Serial visits contigs in bound order; a contig limit counts pending contigs and stops cleanly. Workflow scatter commands consume checked prerequisites after init. Explicit workflow steps define the scatter and gather boundaries. Every mode retains identical derivation checks.
 
 Implementation: [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
@@ -62,7 +62,7 @@ Cost and scope: Resident state scales with decoded discovery/evidence and assemb
 <a id="eng-06"></a>
 ## eng-06 Stage and code identities
 
-Compute derivation identities from explicit parameters, upstream bindings, input construction, adapter/codec code closure, numerical policy and tie settings. Bind consumed source content rather than timestamps. Distinguish the parent-edge conditioning digest from its product derivation. Resource allocations, output paths and output selections do not enter scientific identities.
+Compute derivation identities from explicit parameters, upstream bindings, input construction, adapter/codec code closure, numerical policy and tie settings. Bind consumed source content rather than timestamps. Distinguish the parent-edge conditioning digest from its product derivation. Resource allocation values, output paths and output selections do not enter scientific identities. The static code closure follows imports into engine and store modules, so edits to their source, including scheduling-only edits such as the contig-lane width, change derivation identities by design: earlier checkpoints are recomputed rather than reused.
 
 Implementation: [core/digest.py](../../haplotype_reconstruction/core/digest.py), [store/identity.py](../../haplotype_reconstruction/store/identity.py).
 
@@ -95,9 +95,9 @@ Cost and scope: Required-key/index checks per task or command cut.
 <a id="eng-09"></a>
 ## eng-09 Configuration loading and validation
 
-Load schema defaults, selected preset, TOML, ordinary CLI values and explicit overrides in declared precedence. Resolve paths against the invocation directory, reject unknown keys and validate types plus cross-key constraints. Translate supported older configurations exactly or refuse them with a reason. The current schema, not an old prose example, defines accepted settings.
+Load schema defaults, selected preset, TOML, ordinary CLI values and explicit overrides in declared precedence. Resolve paths against the invocation directory, reject unknown keys and validate types plus cross-key constraints. Require the current TOML settings format (`version = 4`) and refuse unsupported versions with a clear format message. The current schema, not an old prose example, defines accepted settings.
 
-Implementation: [interface/settings/migrate.py](../../haplotype_reconstruction/interface/settings/migrate.py), [interface/settings/load.py](../../haplotype_reconstruction/interface/settings/load.py).
+Implementation: [interface/settings/load.py](../../haplotype_reconstruction/interface/settings/load.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -152,7 +152,7 @@ Cost and scope: Parser and command dispatch overhead; selected graph work is sep
 <a id="eng-14"></a>
 ## eng-14 Checkpoint container: append-only records, crash safety, concurrency
 
-Append checkpoint records under the container’s lock and commit envelope/trailer protocol. Recover only a recognisable torn tail; refuse other corruption. Readers scan complete records and refresh their index when the file changes. Scientific publication rejects a conflicting existing derivation, while explicitly designated output snapshots may be superseded. Atomic record publication is distinct from workflow completion.
+Append checkpoint records under the container’s lock and commit envelope/trailer protocol. Make payload and trailer durable before writing the validating header. Release the append lock before the final fsync; group complete headers behind a process-local sync barrier, capturing the covered prefix before the sync starts. Each publisher, including a duplicate, waits until its header is durable before returning. Separate processes retain independent sync acknowledgements and cluster-wide file locking. Recover only a recognisable torn tail; refuse other corruption. Readers scan complete records and refresh their index when the file changes. Scientific publication rejects a conflicting existing derivation, while explicitly designated output snapshots may be superseded. Atomic record publication is distinct from workflow completion.
 
 Implementation: [store/protocol.py](../../haplotype_reconstruction/store/protocol.py), [store/container.py](../../haplotype_reconstruction/store/container.py).
 
@@ -218,29 +218,29 @@ Cost and scope: Process/bootstrap and code-closure overhead; compilation runs be
 <a id="eng-20"></a>
 ## eng-20 CPU budget tree and the fair-share rule
 
-Allocate claimed teams within one total core budget. Open the startup gate under its declared worker/admission conditions, split contenders fairly and distribute remainders by the prescribed rules. Rebalance at each task-owned kernel call or independent section, never inside a running native kernel. `engine.scheduler.kernel_team(max_threads=useful_width)` refreshes and applies the live authority; its cap describes useful parallel work rather than the task’s initial integer thread count. Claims protect running teams until the next boundary, so completed peers’ CPUs can be lent to work already executing without oversubscription. Contig leases may borrow free cores when peers are satisfied and lend while waiting. A task's declared range reaches the whole allocation (`engine.graph.ALL_CORES`; the scheduler grants min(cores, max_cores)); no stage holds a fixed thread cap. A long single task re-reads its share at its own step boundaries (relatedness's family search at every search step and contig term), so a task that starts beside discovery on one CPU grows into the CPUs finished tasks free. Every kernel releases the interpreter lock (`nogil`): stages run kernels from concurrent threads of one process (the pedigree screen's chromosome tasks, assembly's component team, concurrent refits, the evidence pools), and a kernel holding the lock would run alone. Resources cannot select scientific candidates.
+Allocate claimed teams within one total core budget. Open the startup gate under its declared worker/admission conditions, split contenders fairly and distribute remainders by the prescribed rules. Rebalance at each task-owned kernel call or independent section, never inside a running native kernel. `engine.cpu.thread_team(cap=useful_width)` refreshes and applies the live authority; its cap describes useful parallel work rather than the task’s initial integer thread count. Claims protect running teams until the next boundary, so completed peers’ CPUs can be lent to work already executing without oversubscription. Contig leases may borrow free cores when peers are satisfied and lend while waiting. A task's declared range reaches the whole allocation (`engine.graph.ALL_CORES`; the scheduler grants min(cores, max_cores)); no stage holds a fixed thread cap. A long single task re-reads its share at its own step boundaries (relatedness's family search at every search step and contig term), so a task that starts beside discovery on one CPU grows into the CPUs finished tasks free. Every kernel releases the interpreter lock (`nogil`): stages run kernels from concurrent threads of one process (the pedigree screen's chromosome tasks, assembly's component team, concurrent refits, the evidence pools), and a kernel holding the lock would run alone. Resources cannot select scientific candidates.
 
-Implementation: [engine/graph.py](../../haplotype_reconstruction/engine/graph.py), [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
+Implementation: [engine/cpu.py](../../haplotype_reconstruction/engine/cpu.py), [engine/threadmaps.py](../../haplotype_reconstruction/engine/threadmaps.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
 Cost and scope: O(workers). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="eng-21"></a>
-## eng-21 BudgetedPool (process pools)
+## eng-21 Process graph tasks
 
-Dispatch independent process tasks through the shared authority, with queued admission followed by a worker CPU seat before running. Consume results only while holding a seat, preserve keyed output placement and release all tokens/resources on failure. Recycle only under the declared safe conditions. Worker exceptions and unexpected exits stop the run while preserving complete published records.
+Dispatch independent process tasks through the shared authority, with queued admission followed by a worker CPU seat before running. Preserve keyed output placement and release all tokens/resources on failure. Eager kernel warm-up runs ordinary overload graph tasks, followed after a cold compile by a second graph with fresh workers that verifies the full signature union. Recycle only under the declared safe conditions. Worker exceptions and unexpected exits stop the run while preserving complete published records.
 
 Implementation: [engine/workers.py](../../haplotype_reconstruction/engine/workers.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: Process startup, task dispatch and one shared-input copy per pool; scientific task costs dominate.
+Cost and scope: Process startup, task dispatch and shared-input transport; scientific task costs dominate.
 
 <a id="eng-22"></a>
 ## eng-22 ChromosomeExecutor (persistent per-chromosome workers)
 
-Retain contig state on its affinity worker across consecutive tasks. Partition by declared weights or use the longest-first queue, placing results by key. Reloadable identity-keyed caches may be evicted on an idle worker under measured pressure; explicit retained references and expansion continuations remain pinned. A worker with pinned live state cannot recycle; an announced retirement returns its continuation position before replacement. Unexpected exit is a failure, including an unannounced successful process exit.
+Retain contig state on its affinity worker across consecutive tasks. Use the longest-first queue in production, placing results by key; static weighted placement remains exercised by executor tests. Reloadable identity-keyed caches may be evicted on an idle worker under measured pressure; explicit retained references and expansion continuations remain pinned. A worker with pinned live state cannot recycle; an announced retirement returns its continuation position before replacement. Unexpected exit is a failure, including an unannounced successful process exit.
 
 Implementation: [engine/workers.py](../../haplotype_reconstruction/engine/workers.py).
 
@@ -251,9 +251,9 @@ Cost and scope: O(tasks). These terms describe the unit’s work/storage dimensi
 <a id="eng-23"></a>
 ## eng-23 Contig lanes and the straggler floor
 
-Plan concurrent contig lanes from pending work and the configured lane limit. Use declared task costs (or learned per-kind wall cost), the contig cost order and straggler floor with the upper median of positive weights; update remaining work only when whole tasks finish. Borrow unused cores at safe boundaries. On a contig failure cancel sibling work and preserve already committed records. These scheduling heuristics affect latency, not graph semantics.
+Plan concurrent contig lanes from pending work and the configured lane limit. Automatic planning targets one lane per 16 allocated CPUs (`CONTIG_LANE_CORES`), bounded by the worker count and with at least one lane. This target chooses lane count; a lane may borrow spare CPUs beyond it. `STRAGGLER_RATIO = 2.0` identifies chains at least twice the upper median positive weight for a proportional CPU floor. Use declared task costs (or learned per-kind wall cost), the contig cost order and straggler floor with the upper median of positive weights; update remaining work only when whole tasks finish. Borrow unused cores at safe boundaries. On a contig failure cancel sibling work and preserve already committed records. These scheduling heuristics affect latency, not graph semantics.
 
-Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
+Implementation: [engine/lanes.py](../../haplotype_reconstruction/engine/lanes.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -275,7 +275,7 @@ Cost and scope: O(D) copying/attachment for shared bytes plus process-liveness c
 
 Admit outer work from measured process-group memory pressure, maintaining queued, running, waiting, suspended and resident states. Nested continuations retain progress guarantees; only running/queued work blocks a forced progress grant. The token, waiter and label tables double under the interprocess lock when full; attached processes remap before their next ledger operation, preserving slot indices and statistics. Initial table sizes are not execution caps. Working-set estimates are diagnostics, not planned-peak reservations. Outer starts are unrestricted through 90% measured use. Above that point their spacing increases continuously as headroom vanishes: with p = (used − 0.9 limit)/(0.1 limit), delay = sample interval × p/(1 − p). Pressure is refreshed at most every half second; paced starts may share a sample, avoiding a second throughput cliff at the onset of pressure. At the measured limit, only a forced drain can start. Recently polled deeper/older waiters have precedence; an ineligible queue head expires after two poll periods, so a request awaiting its affinity or CPU cannot deadlock other ready work. Idle workers release reloadable caches and trim their heaps before replacement; pinned continuations continue to have a progress grant. Flexible buffers may change batch shape only on a proven value-equivalent route; scientific budgets never depend on free memory.
 
-Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
+Implementation: [engine/memory.py](../../haplotype_reconstruction/engine/memory.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -286,7 +286,7 @@ Cost and scope: O(tokens). These terms describe the unit’s work/storage dimens
 
 Watch admission progress with the declared polling and stall interval. Reset the baseline when grants/starts/releases, process membership, sustained worker CPU activity (at least 0.05 core) or physical I/O changes, or measurements become unavailable. Coordinator admission polling is excluded from CPU activity; owner CPU counts only while an in-process task is executing. A useful serial or fractional-core worker and physical I/O still reset the baseline. Samples and launch-delay expiry are not progress. At the first sustained idle interval, request executor-side idle-state recovery and allow one further interval; only a second idle interval with no progress can fail. Recovery is requested without taking a potentially stuck ledger lock. Idle-worker maintenance is issued once per task boundary, so pressure alone cannot create a replacement loop that masks a hang. Fail only after the sustained low-activity condition is rechecked. This watchdog diagnoses stalled execution; it is not a scientific timeout that returns partial calls.
 
-Implementation: [engine/scheduler.py](../../haplotype_reconstruction/engine/scheduler.py).
+Implementation: [engine/memory.py](../../haplotype_reconstruction/engine/memory.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -319,7 +319,7 @@ Cost and scope: Linear in declared/audited signatures and code-closure entries.
 <a id="eng-30"></a>
 ## eng-30 Run records, run log, stage timers, published-table hook and status
 
-Record invocation/task timing, progress, errors and provenance outside scientific products. Render tables from checked results on each requested report pass and inspect payload-free completion where supported. Published CSV/VCF/JSON files are outputs only and are never read back as inference inputs. Log verbosity and status polling do not alter a derivation.
+Record invocation/task timing, progress, errors and provenance outside scientific products. Each task log retains seconds at each claimed CPU count (`thread_seconds`), their time-weighted mean (`threads_mean`), and seconds at one CPU (`threads_one_seconds`). These count allocated CPUs, including claims retained by running children; they do not measure busy native threads. Render tables from checked results on each requested report pass and inspect payload-free completion where supported. Published CSV/VCF/JSON files are outputs only and are never read back as inference inputs. Log verbosity and status polling do not alter a derivation.
 
 Implementation: [engine/records.py](../../haplotype_reconstruction/engine/records.py), [interface/status.py](../../haplotype_reconstruction/interface/status.py).
 

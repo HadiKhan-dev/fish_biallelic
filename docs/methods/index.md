@@ -176,7 +176,6 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [AJ32](assembly.md#aj32) — Core
 - [AJ33](assembly.md#aj33) — Core
 - [AJ34](assembly.md#aj34) — Core
-- [AJ35](assembly.md#aj35) — Accretion
 - [AJ36](assembly.md#aj36) — Core
 
 ## [Founder refinement](refinement.md)

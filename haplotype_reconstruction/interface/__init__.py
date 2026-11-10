@@ -1,1 +1,1 @@
-"""The CLI, settings (schema, presets, loader, 3.5 migration), the Python API, status and examples."""
+"""The CLI, settings (schema, presets, loader), the Python API, status and examples."""

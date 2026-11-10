@@ -25,7 +25,7 @@ class SimulationDesign:
     backcross (a member of the previous cohort with one of its actual parents) instead of a cross
     of two previous-cohort members. observe_cohorts: cohorts whose members are sequenced (empty:
     all); observed_fraction: random fraction of those kept (seeded, after the pedigree is made).
-    pedigree (release 2.17): an explicit pedigree table (:func:`read_pedigree_table`) that replaces
+    pedigree: an explicit pedigree table (:func:`read_pedigree_table`) that replaces
     the cohort sizes and the random matings; its ``observed`` column chooses who is sequenced
     (founders may be), so the observation options above must keep their defaults.
     """

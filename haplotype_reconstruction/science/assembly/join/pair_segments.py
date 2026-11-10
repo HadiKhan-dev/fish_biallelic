@@ -5,8 +5,8 @@ forwards when their estimated complete work is smaller. See choose_segments.
 
 Owns: exact segment bounds and the direct-versus-segment work model.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.7; AJ17.
-Identity: Route selection uses the original dimension model; both routes retain their native recurrences.
+Method: docs/methods/assembly.md#aj17.
+Invariant: Route selection compares dimension-based work estimates; both routes compute exact segment maxima.
 Hot compiled loops remain whole to preserve the recurrence and its arithmetic update order.
 """
 

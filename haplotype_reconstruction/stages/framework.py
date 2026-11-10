@@ -2,7 +2,7 @@
 
 Stages declare units, dependencies and stored products; engine.graph executes them.
 Adapters alone translate frozen domain records to codec payloads. There is no stage
-registry, inheritance framework or implicit settings lookup (ARCHITECTURE_40 §1/§4).
+registry, inheritance framework or implicit settings lookup.
 """
 
 from __future__ import annotations

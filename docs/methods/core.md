@@ -29,7 +29,7 @@ Cost and scope: O(K L). These terms describe the unit’s work/storage dimension
 <a id="ec30"></a>
 ## ec30 Tie quanta: kinds, noise motions, noise_quantum, BlockQuanta, block_scale
 
-Construct named tie quanta from their noise motion, scale and floor, rounding as each policy declares. Compute a block scale once from its evidence. The policy catalogue distinguishes NLL, allele-step, improvement, sample, cell and probability comparisons; one generic epsilon cannot replace them.
+Construct named tie quanta from their noise motion, scale and floor, rounding as each policy declares. Compute a block scale once from its evidence. The policy catalogue distinguishes NLL, allele-step, improvement, sample, cell and probability comparisons; one generic epsilon cannot replace them. Shared and assembly policies use one power-of-two ceiling expression, while retaining their distinct handling of non-finite scales. The adopted relative-coefficient multiplier is 1024; it is separate from the 1000-fold noise-amplitude scaling of the shared motions.
 
 Implementation: [core/ties.py](../../haplotype_reconstruction/core/ties.py).
 
@@ -62,7 +62,8 @@ Cost and scope: O(1). These terms describe the unit’s work/storage dimensions;
 <a id="ec33"></a>
 ## ec33 Convention reversal  and the conv_* helpers
 
-Pass TieSettings into declared convention policies (L8). Reverse only arbitrary content/index/incumbent conventions that the policy permits, retaining model priors and fixed preferences. Store the setting in the relevant derivation; no scientific function reads environment switches.
+Pass TieSettings into declared convention policies. Reverse only arbitrary content/index/incumbent conventions that the policy permits, retaining model priors and fixed preferences. Store the setting in the relevant derivation; no scientific function reads environment switches.
+
 
 Implementation: [core/ties.py](../../haplotype_reconstruction/core/ties.py), [store/identity.py](../../haplotype_reconstruction/store/identity.py).
 

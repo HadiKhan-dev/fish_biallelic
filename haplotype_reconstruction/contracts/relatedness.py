@@ -1,6 +1,6 @@
 """Separate family calls, optional pair reports, and their immutable reader view.
 
-WP_RL1's split prevents optional pair reporting from changing the family product.
+Separate products prevent optional pair reporting from changing the family product.
 Only record definitions and the preserved inclusive supported_family view live here.
 No relatedness estimation, canonicalisation, storage, or optional-report imports.
 """
@@ -18,7 +18,7 @@ from .roles import freeze_record_arrays, record_field, schema_field
 
 @dataclass(frozen=True)
 class RelatednessFamilies:
-    """Full-sib families with aligned parent/support and half-sib tables (WP_RL1 §5).
+    """Full-sib families with aligned parent/support and half-sib tables.
 
     Families are numbered by smallest member; half_sib and gains share one sorted
     row order. NaN parent support denotes a latent slot, and search_margin may be
@@ -118,8 +118,7 @@ class Relatedness:
 def supported_family(families: RelatednessFamilies | Relatedness, sample: int, minimum: float) -> NDArray[np.int64]:
     """Inclusive support rule, preserving NaN exclusion and ascending sample indices.
 
-    An unsupported focal sample (including NaN) returns its singleton. This is the
-    3.5 relatedness.records:75–81 rule; no numbering or support is recomputed here.
+    An unsupported focal sample (including NaN) returns its singleton. No numbering or support is recomputed here.
     """
     if not families.member_support[sample] >= minimum:
         return np.asarray([sample], dtype=np.int64)

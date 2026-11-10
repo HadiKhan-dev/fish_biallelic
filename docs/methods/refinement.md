@@ -4,7 +4,7 @@ Refinement optimises a maximum-path copying objective at fixed founder count, th
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
-Every deletion is decided by the ordinary count rule; there is no separate zero-gain cleanup, and addition seeds are not ranked before fitting. Count-rule settings and count-decision records are schema 2.
+Every deletion is decided by the ordinary count rule; there is no separate zero-gain cleanup. Count-rule settings and count-decision records are schema 2.
 
 <a id="rc01"></a>
 ## rc01 Component workspace: objective site mask, informative samples, coded leaves, map hazards, normalisers
@@ -40,9 +40,9 @@ Parameters by name: `proposal_max_bins`, `proposal_min_sites_per_bin`. Values an
 Cost and scope: O(N L R_b^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rc04"></a>
-## rc04 Evidence windows: resident or streamed route (3.4), leases, cover, exact fallback
+## rc04 Evidence windows: resident or streamed route, leases, cover, exact fallback
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** Windows bound evidence storage while preserving the site recurrence.
 
 Choose resident or streamed evidence from the fixed dimension rule. Resident logs are immutable and cost arrays are cached by count/orientation. Streamed leases are private to a thread and founder count; nested leases reuse buffers, and reverse views share the same storage. Cover a requested stretch before a kernel reads it and compute an exact fallback outside the held window. Buffer capacity changes storage only; retained views obey their lease lifetime.
 
@@ -68,16 +68,16 @@ Cost and scope: O(N L (Q + K)). These terms describe the unit’s work/storage d
 
 Construct reversed stored boundaries by clamping the forward recursion with the entering transition cost and its original normaliser. Apply the same clamp on dense and reconstructed boundaries, including checkpoint boundaries. Carry the lexicographic secondary state through that transition. A reverse search discards its backward half before the next sweep; replacing the clamp with a mathematically equivalent backward recursion changes rounding.
 
-Implementation: [science/assembly/refinement/checkpoints.py](../../haplotype_reconstruction/science/assembly/refinement/checkpoints.py), [science/assembly/refinement/messages.py](../../haplotype_reconstruction/science/assembly/refinement/messages.py), [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [science/assembly/refinement/checkpoints.py](../../haplotype_reconstruction/science/assembly/refinement/checkpoints.py), [science/assembly/refinement/messages.py](../../haplotype_reconstruction/science/assembly/refinement/messages.py), [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `order_breakpoints`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N B Q). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rc07"></a>
-## rc07 SW5 message storage route: dense or block checkpoints; reconstruction reader and view lifetimes
+## rc07 Message storage route: dense or block checkpoints; reconstruction reader and view lifetimes
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** Sparse boundary messages trade storage for reconstruction work.
 
 Select dense or checkpointed messages once per fixed-count search from declared dimensions, reserving the guarded layout even during a plain sweep. Reconstruct checkpoint segments by the same normalised block recurrences. Each reconstruction slot has a bounded view lifetime; indexed access copies, and parallel flank requests receive private copies. Reverse readers share underlying immutable boundaries. The routes must preserve all gains and decisions.
 
@@ -99,20 +99,22 @@ Parameters by name: `GUARD_TOLERANCE`. Values and provenance are in the [generat
 Cost and scope: O(width_sites x affected samples x Q); O(width x K); O(E^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rc09"></a>
-## rc09 Count pass skeleton: start fit, deletion rounds, addition rounds, stops and count limit
+## rc09 Count pass skeleton: start fit, deletion rounds and stops
 
-Converge the start, then run ordinary count-deletion rounds until a round retains the larger panel or the minimum count is reached. Only at the addition-enabled level (the final level, when `final_additions` is set), test successive additions until rejection, a bound skip or the count limit; do not rerun deletion after an accepted addition. Since 4.9 `final_additions` is off by default: across 42 validation runs (418 chromosomes) no final-level addition was accepted, while an addition round's refits and decision took about two thirds of a whole-chromosome component's refinement (chromosome 1 at 0.5x: 251 s -> 80 s with the same panel). Refit every eligible candidate, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives.
+Converge the start, then run ordinary count-deletion rounds until a round retains the larger panel or the minimum count is reached. **Refinement never increases K.** Fixed-K fitting preserves the founder count, and count rounds only remove founders; there is no final-level addition route or setting. Refit every eligible candidate, expand tied endpoints, evaluate the symmetric null and record ancestry in that order. Restore the best same-count fit before constructing terminal alternatives. Restored-panel diagnostics can compare an already-computed adjacent larger fit from an earlier deletion round; that comparison preserves count ambiguity and does not propose or accept a founder addition.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
-Parameters by name: `COUNT_LIMIT_MULTIPLE`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+
+The minimum count is two founders; there is no addition count limit.
 
 Cost and scope: O(N L K³) per round for O(K) quadratic candidate fits; at most (accepted deletions + 1) deletion rounds and O(N L K⁴) worst-case count-refit work per pass. Additional fixed-K search, shadows and continuation histories are separate factors. See [costs](../developer/costs.md#natural-domain-count-refits).
 
 <a id="rc10"></a>
 ## rc10 Optimistic count bounds and round skipping
 
-Build blockwise free-panel bounds with independent cohort-best and per-sample-best deletion options. Test deletion only when all founders have private cells; test addition by the total bound before its per-sample bound. The deletion test sums its bound over samples at one option per block, because a K − 1 panel lacks the same row at a block for all its samples. For weights w ≥ 0, sum_s w_s F_s(Y) ≤ sum_b max_o sum_s w_s σ_s(b, o) + sum_s w_s n_s for every K − 1 panel and shadow Y. This bounds the point margin (w = 1), the leave-one-sample-out margin (w = 1 − e_t, minimised over t) and every bootstrap replicate (w = its draw counts from the decision’s own stream). The form is never looser than the per-sample one it replaces, which let each sample drop a different row. If a best-F restore later reads the adjacent K − 1 fit, a skipped round’s refits run before that comparison, under the round’s label. A certified skip is a recorded rejection, never unverified evidence for changing the count.
+Build blockwise free-panel scores for every deletion option. Test the deletion bound only when all founders have private cells. The deletion test sums its bound over samples at one option per block, because a K − 1 panel lacks the same row at a block for all its samples. For weights w ≥ 0, sum_s w_s F_s(Y) ≤ sum_b max_o sum_s w_s σ_s(b, o) + sum_s w_s n_s for every K − 1 panel and shadow Y. This bounds the point margin (w = 1), the leave-one-sample-out margin (w = 1 − e_t, minimised over t) and every bootstrap replicate (w = its draw counts from the decision’s own stream). The form is never looser than the per-sample one it replaces, which let each sample drop a different row. If a best-F restore later reads the adjacent K − 1 fit, a skipped round’s refits run before that comparison, under the round’s label. A certified skip is a recorded rejection, never unverified evidence for changing the count.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
@@ -123,22 +125,22 @@ Cost and scope: O(N L R_b^2 x (R_b if constrained)). These terms describe the un
 <a id="rc11"></a>
 ## rc11 Natural-domain admission and refit choice
 
-Refit every eligible deletion candidate: founders without a private cell when present, otherwise every founder. For additions, refit every duplicate seed unless the existing optimistic bound proves the entire round unneeded. Compare converged endpoint F with the incumbent’s scale and origin content, taking the content-smallest member of the best tie class before the existing tied-verdict resolution. Direction endpoints, symmetric nulls, bootstrap streams, shadow families and decision tie census kinds are unchanged. No unrefitted margin or copy-response ranking limits admission; worker completion order cannot select a candidate.
+Refit every eligible deletion candidate: founders without a private cell when present, otherwise every founder. Compare converged endpoint F with the incumbent’s scale and origin content, taking the content-smallest member of the best tie class before the existing tied-verdict resolution. Direction endpoints, symmetric nulls, bootstrap streams, shadow families and decision tie census kinds are unchanged. No unrefitted margin or copy-response ranking limits admission; worker completion order cannot select a candidate.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
 Parameters by name: `COUNT_FANOUT_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(K) candidate fits, O(N L K³) per count round under the quadratic fixed-K work model. A pass has at most (accepted deletions + 1) deletion rounds, hence a quartic worst case; fit iterations, canonical programmes and continuation histories are additional factors. The 4.0 saved-output census found 25 deletion rounds in 25 k30 passes (one each), 1,268 in 1,157 TroMau passes (1,066 with one, 77 with two, 11 with three and three with five), and 1,359 in 1,347 std passes (1,335 with one and 12 with two). These are recorded component passes, not independent biological replicates or a bound on future inputs. See [costs](../developer/costs.md#natural-domain-count-refits).
+Cost and scope: O(K) candidate fits, O(N L K³) per count round under the quadratic fixed-K work model. A pass has at most (accepted deletions + 1) deletion rounds, hence a quartic worst case; fit iterations, canonical programmes and continuation histories are additional factors. See [costs](../developer/costs.md#natural-domain-count-refits).
 
 <a id="rc12"></a>
-## rc12 Symmetric sequence null: death class, nearest-row shadow families, budget overflow and certificate
+## rc12 Symmetric sequence null and shared nearest-shadow family rule
 
-Build the larger panel’s death class, preferring founders without private cells. For each member, evaluate the complete nearest-row shadow product when it fits the scientific budget; otherwise evaluate only the conventional shadow and mark the count unverified. Share one round stream across members, refits and shadows. Opposed evaluated verdicts favour the smaller count; overflow alone supplies no count evidence. L5’s dimension-admitted proof may clear an unverified flag without changing the decision.
+Build the larger panel’s death class, preferring founders without private cells. For each member use the [shared shadow-family rule](assembly.md#aj33): evaluate the complete nearest-row product only when the total test passes and the product fits the budget; otherwise evaluate the conventional incumbent. A passing total with budget overflow records count_unverified. Share one round stream across members, refits and shadows. Opposed shadow verdicts withhold the larger count while preserving the selected bootstrap band; disagreement between death-class references retains its independent ambiguity rule. Prefix-sharing scores admitted complete families in canonical order. Exact decision-key ties use the shared convention when reducing those scores. The shadow-family prior is `smaller_k+nearest_shadow`.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
-Parameters by name: `shadow_combinations`, `bootstrap_resamples`, `bootstrap_level`, `FAMILY_BYTES`, `PAIR_TABLE_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `shadow_combinations`, `bootstrap_resamples`, `bootstrap_level`, `FAMILY_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -211,7 +213,7 @@ Cost and scope: One single-direction polish fit per distinct live start and term
 <a id="rc20"></a>
 ## rc20 Level orchestration: scheduling, worker pools, memory admission
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** Dimension-based admission governs resources independently of scientific search limits.
 
 Construct component tasks from shared level settings and checked records. Execute independent components through the supplied team and storage capabilities, then assemble by component number. Runtime memory pressure governs task admission and cancellation; it does not alter candidate budgets, work accounts, component results or output order. Scientific code receives no worker-pool or memory-governor decision.
 
@@ -237,7 +239,7 @@ Cost and scope: One product per component plus declared saved fit/sweep records;
 
 Score every evidence sample under a per-homologue founder-switch maximum-path chain, reduced to unordered founder pairs. Promote the stored switch costs for the recurrence, retain the no-transition first informative site, and add the count-dependent normalisers only when scoring a whole panel. Fused and unfused steps preserve the same arithmetic. Missing evidence contributes zero; this objective is not a posterior probability.
 
-Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/objective.py](../../haplotype_reconstruction/science/assembly/refinement/objective.py), [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/reductions.py](../../haplotype_reconstruction/science/assembly/refinement/reductions.py), [science/assembly/refinement/search.py](../../haplotype_reconstruction/science/assembly/refinement/search.py).
+Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/objective.py](../../haplotype_reconstruction/science/assembly/refinement/objective.py), [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/reductions.py](../../haplotype_reconstruction/science/assembly/refinement/reductions.py), [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `reset_rate`, `map_probability_floor`, `genotype_error`, `PAIR_TABLE_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -290,7 +292,7 @@ Cost and scope: O(W S R (b K + b^2)); O(S (b K + b^2)); O(children x kept x S x 
 <a id="rs06"></a>
 ## rs06 Window-programme frontier cap and memory-budget retry schedule
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** A fixed frontier cap and deterministic retries bound each window programme.
 
 Start at the dimension-derived first programme budget and increase it by the fixed growth schedule up to the scientific frontier cap. Retry only pending focal problems, preserving their order and the same template work account. The final frontier fallback retains the incumbent. Available machine memory may delay execution but cannot change this schedule or its charged retries.
 
@@ -303,9 +305,10 @@ Cost and scope: Retries repeat pending programme work; the frontier-byte cap fix
 <a id="rs07"></a>
 ## rs07 Per-template window work account and whole-component stop
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** Per-template work accounts bound the search independently of live memory.
 
-Allocate one work account per template, scaled from all evidence rows, window dimensions and the founder/alphabet size. Debit focal solves, retries, restarts, dominance, dual and canonical-fixing work in the declared integer order. Exhaustion discards every focal result of the template and propagates the component stop. L9 records deterministic logical-prefix work witnesses; physical work performed concurrently is separate. The bound is per template, not a whole-component complexity guarantee.
+Allocate one work account per template, scaled from all evidence rows, window dimensions and the founder/alphabet size. Debit focal solves, retries, restarts, dominance, dual and canonical-fixing work in the declared integer order. Exhaustion discards every focal result of the template and propagates the component stop. The work ledger records deterministic logical-prefix work witnesses; physical work performed concurrently is separate. The bound is per template, not a whole-component complexity guarantee.
+
 
 Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py), [science/assembly/refinement/work_limit.py](../../haplotype_reconstruction/science/assembly/refinement/work_limit.py).
 
@@ -327,11 +330,12 @@ Cost and scope: O(B N K^3); O(N l K^2); O(B). These terms describe the unit’s 
 <a id="rs09"></a>
 ## rs09 Acceptance tie rules (tie classes of exact gains, content order, convention)
 
-Filter gains strictly above the acceptance threshold, then form chained gain classes. A wide class orders unequal gains by value; exact equalities still use content. Exchange keys compare the resulting pair of paths; content keys compare resulting path, founder slot and proposal index in pass order. Reverse only declared content conventions. L3 resolves identical-content, identical-gain exchanges by the smallest enumerated pair under both conventions.
+Filter gains strictly above the acceptance threshold, then form chained gain classes. A wide class orders unequal gains by value; exact equalities still use content. Exchange keys compare the resulting pair of paths; content keys compare resulting path, founder slot and proposal index in pass order. Reverse only declared content conventions. Identical-content, identical-gain exchanges use the smallest enumerated pair under both conventions.
+
 
 Implementation: [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py), [science/assembly/refinement/gains.py](../../haplotype_reconstruction/science/assembly/refinement/gains.py), [science/assembly/refinement/acceptance.py](../../haplotype_reconstruction/science/assembly/refinement/acceptance.py).
 
-Parameters by name: `WIDE_QUANTA`, `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n^2); O(B); O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -360,7 +364,8 @@ Cost and scope: O(N L K^2). These terms describe the unit’s work/storage dimen
 <a id="rs12"></a>
 ## rs12 Best-of-two fit selection, minimum-switch prior and canonical fit
 
-Reuse fits only for their full start identity. Run both direction starts, except the single-direction polish route, and compare their F values in the named tie policy. When distinct panels share the winning class, minimise switch count within that class and retain the other tied variant. Canonicalise founder rows after choosing. Branch replay can explicitly force a retained tied panel; it cannot invent an unrecorded alternative. The named tie policy receives the run's reversal convention explicitly (L8).
+Reuse fits only for their full start identity. Run both direction starts, except the single-direction polish route, and compare their F values in the named tie policy. When distinct panels share the winning class, minimise switch count within that class and retain the other tied variant. Canonicalise founder rows after choosing. Branch replay can explicitly force a retained tied panel; it cannot invent an unrecorded alternative. The named tie policy receives the run's reversal convention explicitly.
+
 
 Implementation: [contracts/assembly.py](../../haplotype_reconstruction/contracts/assembly.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py), [science/assembly/refinement/__init__.py](../../haplotype_reconstruction/science/assembly/refinement/__init__.py), [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
@@ -434,13 +439,13 @@ Cost and scope: O(#windows x N x 8 blocks x K^2); O(N K^3). These terms describe
 <a id="rs18"></a>
 ## rs18 Weak label junctions (diagnostic)
 
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
+**Accretion:** Weak junctions are diagnostics and do not select moves.
 
 Report junctions whose best exchange gain is strictly above the negative weak-junction margin. Keep this diagnostic separate from the acceptance threshold and from released panel state. No downstream scientific decision reads the report.
 
 Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
-Parameters by name: `WEAK_JUNCTION_MARGIN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `SWITCH_PENALTY`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

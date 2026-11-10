@@ -1,7 +1,7 @@
 """Bind pedigree products to every scientific upstream derivation and explicit axis.
 
-Owns PE5's keys, checked dependency reads and identity construction; no scientific computation.
-Method: docs/methods/pedigree.md#products-and-published-tables (PD27; WP_PE5 §7).
+Owns pedigree's keys, checked dependency reads and identity construction; no scientific computation.
+Method: docs/methods/pedigree.md#products-and-published-tables (PD27.
 The relatedness input is families, never the optional pairwise-IBD report selection.
 """
 
@@ -19,7 +19,7 @@ from ...core.concurrency import threaded_each
 from ...core.digest import json_digest
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieCounts
-from ...science.pedigree.parameters import PedigreeConfig
+from ...science.pedigree.parameters import PedigreeParameters
 from ...store.container import CheckpointFile
 from ...store.identity import CodeIdentity, code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items
@@ -39,7 +39,7 @@ __all__ = [
     "FLOORED_SCORES",
     "EXCLUSION",
     "PedigreeDependencies",
-    "derivation",
+    "expected",
     "BoundInputs",
     "bound_inputs",
     "request_dependencies",
@@ -69,8 +69,8 @@ class PedigreeDependencies:
     evidence: tuple[tuple[str, str], ...] = ()
 
 
-def derivation(
-    parameters: PedigreeConfig,
+def expected(
+    parameters: PedigreeParameters,
     sample_ids: tuple[str, ...],
     contigs: tuple[str, ...],
     informative_contigs: tuple[str, ...],
@@ -115,7 +115,6 @@ def derivation(
     closure = code or code_dependency_identity(
         (
             "stages.pedigree.decision",
-            "stages.pedigree.adapter",
             "stages.pedigree.execution",
             "stages.pedigree.codec",
             "stages.pedigree.records",
@@ -143,7 +142,7 @@ def derivation(
 class BoundInputs:
     """Small checked descriptors; no prepared components or chromosome score arrays."""
 
-    parameters: PedigreeConfig
+    parameters: PedigreeParameters
     policy: NumericalPolicy
     sample_ids: tuple[str, ...]
     contigs: tuple[str, ...]
@@ -174,7 +173,7 @@ def _header(
 
 
 def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundInputs:
-    """Rebuild PE1–PE3 causes from the bound manifest, validating every publication.
+    """Rebuild pedigree preparation–pedigree scoring causes from the bound manifest, validating every publication.
 
     Only omission/summary headers and the run panel are decoded here. Original
     genotype/map sources are never reopened. A cached product's own derivation is
@@ -182,7 +181,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     excluded by the families owner's reader.
     """
     parameters = replace(
-        from_payload(PedigreeConfig, manifest["parameters"]["pedigree"]),
+        from_payload(PedigreeParameters, manifest["parameters"]["pedigree"]),
         reverse_conventions=bool(manifest["ties"]["reverse"]),
     )
     policy = NumericalPolicy(**manifest["numerical_policy"])
@@ -211,7 +210,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
             raise InputError("prepared header contig differs from its configured axis")
         return prepared_identity, evidence.identity, header
 
-    # Release 4.10: each contig's upstream chain (evidence, painting and through it assembly, selection and discovery
+    # each contig's upstream chain (evidence, painting and through it assembly, selection and discovery
     # readers: header reads and decodes) is independent of the others; contig after contig, this binding took most of
     # an export check and of the run's completion step (chr3's export manifest check: 55 s on one CPU).
     bound = threaded_each(bind, contigs)
@@ -284,7 +283,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
 def request_dependencies(
     inputs: PedigreeDependencies,
     request: ExclusionRequest,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     policy: NumericalPolicy | None,
 ) -> PedigreeDependencies:
     """Bind the ordered request, including guard-only dyads, to every evidence record."""
@@ -361,7 +360,7 @@ def result_reader(
 
 def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product: str) -> Reader:
     bound = bound_inputs(store, manifest)
-    request_id = derivation(
+    request_id = expected(
         bound.parameters,
         bound.sample_ids,
         bound.contigs,
@@ -377,7 +376,7 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
     inputs = request_dependencies(bound.dependencies, request, bound.parameters, bound.policy)
     for c, identity in inputs.exclusion:
         _header(store.contig(c), EXCLUSION, identity)
-    identity = derivation(
+    identity = expected(
         bound.parameters,
         bound.sample_ids,
         bound.contigs,

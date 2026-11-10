@@ -11,7 +11,7 @@ Construct neutral founder-visible evidence in float64 and the declared scoring v
 
 When every discovery site is kept and no founder sample is excluded, the evidence contract already makes every unobserved raw GL triple exactly 1/3. For dense raw inputs the contig adapter borrows read-only GL and observation views in this case, and owns only the float32 scoring copy. Coded inputs expand directly to the active consumer's neutral, scoring and observation arrays. Other inputs use the original masking/copy route; generic likelihood callers keep that route by default. A consumer's release of its neutral field cannot invalidate another view or the raw evidence.
 
-The application chain caches count-free raw/founder evidence and exact depth keys. It hashes identity-checked count windows one sample at a time, discarding each row after use. An `AssemblyEvidenceSource` carries only immutable inputs and keys through selection; the assembly consumer constructs its own view on demand. Scoring and masked-neutral arrays are not kept in the chain cache between consumers. The paired evidence-v2 checkpoint reconstructs coded counts and masks from its GL pair table/code stream; only fallback rows retain those dense fields. Exact reconstructed count rows and founder-mask rows enter the original depth-key hash unchanged.
+The application chain caches count-free raw/founder evidence and exact depth keys. It hashes identity-checked count windows in bounded sample batches, discarding each decoded batch after use. An `AssemblyEvidenceSource` carries only immutable inputs and keys through selection; the assembly consumer constructs its own view on demand. Scoring and masked-neutral arrays are not kept in the chain cache between consumers. The paired evidence-v2 checkpoint reconstructs coded counts and masks from its GL pair table/code stream; only fallback rows retain those dense fields. Exact reconstructed count rows and founder-mask rows enter the depth-key hash in canonical little-endian order.
 
 Implementation: [science/assembly/evidence.py](../../haplotype_reconstruction/science/assembly/evidence.py).
 
@@ -22,9 +22,9 @@ Cost and scope: O(N L). These terms describe the unit’s work/storage dimension
 <a id="u02"></a>
 ## u02 Roles, identity binding, level loop, stop rule and refinement hand-off
 
-Complete panels, initialise one component per block, then run hierarchy levels. Evaluate stop reasons on the unrefined hierarchy output in precedence order: single component, no count reduction after the initial level, requested context depth, then final minimum-depth/all-breaks condition. Final-role refinement follows every level; additions are enabled only at the terminal level. Carry refined and unrefined first-level context to later refinement.
+Complete panels, initialise one component per block, then run hierarchy levels. Evaluate stop reasons on the unrefined hierarchy output in precedence order: single component, no count reduction after the initial level, requested context depth, then final minimum-depth/all-breaks condition. Final-role refinement follows every level and never increases K; its count rounds only remove founders. Carry refined and unrefined first-level context to later refinement.
 
-Implementation: [science/assembly/run.py](../../haplotype_reconstruction/science/assembly/run.py).
+Implementation: [science/assembly/run.py](../../haplotype_reconstruction/science/assembly/run.py) (stop rules and context transitions) and [stages/assembly/final.py](../../haplotype_reconstruction/stages/assembly/final.py) (level orchestration for final and context roles).
 
 Parameters by name: `minimum_levels`, `batch_size`, `min_boundary_informative_samples`, `selection`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -154,7 +154,7 @@ Cost and scope: O(N x proxy sites). These terms describe the unit’s work/stora
 <a id="u14"></a>
 ## u14 Assembly tie rules (per-kind quanta and motions, tie-class orders, truncation, counters, canonical order)
 
-Use named scale-aware assembly policies for likelihoods, proxy gains, beams, refinement and count decisions. Build anchored classes with explicit motion/width guards, then apply linkage, count or content secondary rules as that decision declares. Scientific priors remain fixed under reversal; stable exact-duplicate ordering implements L3 where specified.
+Use named scale-aware assembly policies for likelihoods, proxy gains, beams, refinement and count decisions. Build anchored classes with explicit motion/width guards, then apply linkage, count or content secondary rules as that decision declares. Scientific priors remain fixed under reversal; stable exact-duplicate ordering applies where specified.
 
 Implementation: [core/ties.py](../../haplotype_reconstruction/core/ties.py), [science/assembly/orders.py](../../haplotype_reconstruction/science/assembly/orders.py).
 
@@ -332,7 +332,7 @@ Cost and scope: O(n S m K^2). These terms describe the unit’s work/storage dim
 <a id="aj13"></a>
 ## aj13 Panel-search main loop (phase order, certification flags)
 
-Run tier one, then death/birth count work at a stall. Extend the pool and repeat count work only if its content changes (L7), then run tier two and duplicate-seed count work. Escalate the saturation ladder, then terminal plateau continuation. Preserve the sweep/count/quota state and exact stop/certification branches; event counters advance only for work that runs.
+Run tier one, then death/birth count work at a stall. Extend the pool and repeat count work only if its content changes, then run tier two and duplicate-seed count work. Escalate the saturation ladder, then terminal plateau continuation. Preserve the sweep/count/quota state and exact stop/certification branches; event counters advance only for work that runs.
 
 Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
 
@@ -477,7 +477,8 @@ Cost and scope: One symmetric shadow-family evaluation per final path; its combi
 <a id="aj26"></a>
 ## aj26 Pool extension and the saturation ladder
 
-Extend endpoint quotas using current multiplicities, retaining original-pool order before new beam paths. Test only newly added paths on each saturation rung and preserve quota/ladder progression. Compare pool content for repeated work (L7), so cache identity and eviction cannot create extra count decisions.
+Extend endpoint quotas using current multiplicities, retaining original-pool order before new beam paths. Test only newly added paths on each saturation rung and preserve quota/ladder progression. Compare ordered pool content for repeated work, so cache identity and eviction cannot create extra count decisions.
+
 
 Implementation: [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
 
@@ -552,11 +553,11 @@ Parameters by name: `near_identity`. Values and provenance are in the [generated
 Cost and scope: O(L_b); O(B); O(K^2 B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="aj33"></a>
-## aj33 Join sequence-shadow family decision
+## aj33 Shared sequence-shadow family decision
 
-Construct the complete sequence-shadow choice product when it fits the budget and the total test passes; otherwise evaluate only the declared incumbent shadow and mark completeness honestly. Reduce decisions in the specified reject/margin order. Join-side unverified counts remain diagnostics and do not trigger an unrequested proof route.
+Construct the complete sequence-shadow choice product when it fits the budget and the total test passes; otherwise evaluate only the declared incumbent shadow and mark completeness honestly. Reduce decisions in the specified reject/margin order. Both join and refinement use this rule. The conventional incumbent follows RowGeometry.reverse (lowest nearest row normally, highest under reversal). Only a passing total with budget overflow is count_unverified. Opposed evaluated verdicts withhold without forcing bootstrap ambiguity. The published shadow prior is `smaller_k+nearest_shadow`. Scores and diagnostic arrays follow canonical Cartesian order; exact ties in (accept_larger, margin, sequence LOSO margin) select the first canonical member normally and the last under reversal. Strictly smaller decision keys always take precedence. Verification depends on enumeration admission alone.
 
-Implementation: [science/assembly/count_rule/geometry.py](../../haplotype_reconstruction/science/assembly/count_rule/geometry.py), [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py).
+Implementation: [science/assembly/count_rule/shadow_family.py](../../haplotype_reconstruction/science/assembly/count_rule/shadow_family.py), [science/assembly/count_rule/geometry.py](../../haplotype_reconstruction/science/assembly/count_rule/geometry.py), [science/assembly/join/count_step.py](../../haplotype_reconstruction/science/assembly/join/count_step.py), [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
 Parameters by name: `shadow_combinations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -572,19 +573,6 @@ Implementation: [science/assembly/count_rule/criterion.py](../../haplotype_recon
 Parameters by name: `tolerance`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(shadow_combinations S m K²) for the bounded family scoring route.
-
-<a id="aj35"></a>
-## aj35 Shadow-envelope proof certificate (verification metadata)
-
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
-
-Attempt the shadow-envelope proof by deterministic dimensions: local combination/work limits and dosage-table limit (L5). Build the envelope and certify domination only when every required total-test field matches the incumbent. Live memory/admission never decides whether the proof is scientifically attempted; verification diagnostics report any changed proof outcome.
-
-Implementation: [science/assembly/count_rule/__init__.py](../../haplotype_reconstruction/science/assembly/count_rule/__init__.py), [science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py), [science/assembly/count_rule/shadow_bounds.py](../../haplotype_reconstruction/science/assembly/count_rule/shadow_bounds.py).
-
-Parameters by name: `shadow_combinations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: Local shadow products sum over units of the product of option counts; the dimension rule bounds proof-table admission, not the full search.
 
 <a id="aj36"></a>
 ## aj36 Join record key and schema (joins/<digest>)

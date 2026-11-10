@@ -8,17 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...engine.runtime import task_team
+from ...engine.cpu import thread_team
 from ...science.relatedness.ibd import accumulate_pairwise_ibd, finish_pairwise_ibd, new_pairwise_ibd
 from ...science.relatedness.ibd_parameters import PairwiseIbdParameters
 from ...science.relatedness.parameters import AlleleFrequencyParameters
 from ...store.protocol import claim
 from ...store.store import CheckpointStore
-from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from . import pairs_records as records
-from .evidence_pass import EvidenceArrays, EvidenceInput, evidence_pass
+from .evidence_pass import upstream_identities, bound_inputs, EvidenceArrays, EvidenceInput, evidence_pass
 
-__all__ = ["run", "tasks"]
+__all__ = ["run", "run_stage"]
 _DEFAULT_FREQUENCY = AlleleFrequencyParameters()
 
 
@@ -33,12 +32,24 @@ def run(
     team: int = 1,
 ) -> str:
     """Compute/publish once or reuse the same scientific record; return its derivation."""
-    derivation = records.identity(inputs, sample_ids, parameters, frequency, reverse=reverse)
+    from ...contracts.payload import to_payload
+    from ...store.protocol import NumericalPolicy
+
+    store = CheckpointStore(root, nthreads=team)
+    manifest = dict(
+        contigs=tuple(item.contig for item in inputs), sample_ids=sample_ids,
+        parameters={"pairwise_ibd": to_payload(parameters), "allele_frequency": to_payload(frequency)},
+        ties={"reverse": reverse}, numerical_policy=to_payload(NumericalPolicy.current()),
+    )
+    # These inputs have already been checked by evidence_pass; the reader derives the same named map/evidence set.
+    derivation = records.expected(
+        store, manifest, product="pairs", upstream=upstream_identities(inputs)
+    ).identity
     file = CheckpointStore(root, nthreads=team).run
     with claim(file, records.KEY, derivation) as compute:
         if not compute:
             return derivation
-        with task_team(team):
+        with thread_team(default=team):
             state = new_pairwise_ibd(len(sample_ids))
 
             def consume(item: EvidenceInput, evidence: EvidenceArrays) -> None:
@@ -50,31 +61,7 @@ def run(
     return derivation
 
 
-def tasks(
-    root: str | Path,
-    inputs: tuple[EvidenceInput, ...],
-    sample_ids: tuple[str, ...],
-    parameters: PairwiseIbdParameters,
-    frequency: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
-    *,
-    maximum_cores: int = ALL_CORES,
-    depends_on: tuple[TaskKey, ...] = (),
-    reverse: bool = False,
-    selected: bool = False,
-) -> tuple[Task, ...]:
-    """Declare one independent run task only when pairs are selected."""
-    if not selected:
-        return ()
-    return (
-        Task(
-            key=TaskKey("relatedness", "pairs"),
-            function=run,
-            args=(str(root), inputs, sample_ids, parameters, frequency),
-            kwargs={"reverse": reverse},
-            depends_on=depends_on,
-            inputs=tuple(RecordKey(item.contig, "evidence") for item in inputs),
-            outputs=(RecordKey("run", records.KEY),),
-            resources=ResourceRequest(min_cores=1, max_cores=maximum_cores),
-            thread_argument="team",
-        ),
-    )
+def run_stage(root, resolved, maps, *, reverse=False, team=1):
+    """Construct bound evidence inputs for the production graph entry."""
+    inputs = bound_inputs(root, resolved, maps, team=team)
+    return run(root, inputs, resolved.sample_ids, resolved.parameters.pairwise_ibd, reverse=reverse, team=team)

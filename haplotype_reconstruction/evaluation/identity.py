@@ -1,4 +1,4 @@
-"""Truth-only founder identity evaluation (release 2.17): copy-count strata and continuity assertions.
+"""Truth-only founder identity evaluation: copy-count strata and continuity assertions.
 
 Copy counts. c[f, l] is the number of sampled homologues that carry true founder haplotype f at marker l (both
 homologues of a sample count). A truth allele falls in the stratum absent (c = 0), single (c = 1) or multi

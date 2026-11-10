@@ -8,6 +8,11 @@ resource models live here; scientific functions receive explicit settings only.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..configure import ResolvedConfiguration
+
 import math
 import time
 from collections.abc import Sequence
@@ -24,10 +29,9 @@ from ...science.discovery.parameters import PROBABILITY_BAND, DiscoveryParameter
 from ...science.discovery.release import DiscoveredBlock
 from ...science.discovery.run import BlockEvidence, discover_block
 from ...store.container import CheckpointFile
-from ...store.protocol import NumericalPolicy, claim, mark_complete, publish, resume
+from ...store.protocol import claim, mark_complete, publish, resume
 from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
 from .records import PLAN, BlockAdapter, PlanAdapter, block_key, diagnostic_key
-from .records import identities as record_identities
 
 __all__ = [
     "discovery_tasks",
@@ -38,14 +42,14 @@ __all__ = [
     "block_task_bytes",
 ]
 
-# Resource-only provenance: B/discovery/stage.py TASK_BASE_BYTES.
+# Fixed worker allowance in bytes for the discovery working-set estimate; execution only.
 _TASK_BASE_BYTES = 1280 << 20
 _DEFAULT_TIES = TieSettings()
 _DEFAULT_DIAGNOSTICS = DiagnosticOptions()
 
 
 def block_task_bytes(evidence: BlockEvidence, parameters: DiscoveryParameters, *, founders: int = 32) -> int:
-    """Report the baseline working-set model as a function of K; never limit science."""
+    """Report the working-set estimate as a function of K; never limit science."""
     n, sites = evidence.likelihoods.shape[:2]
     kept = int(np.count_nonzero(evidence.kept))
     threshold = float(parameters.residual_births.min_soft_responsibility) - PROBABILITY_BAND
@@ -97,9 +101,9 @@ def execute_block(
             return adapter.decode(record.payload).result
         collector = BlockDiagnostics(diagnostics)
         wall, cpu = time.perf_counter(), time.process_time()
-        # Release 4.9: the block reads its task's live share at every kernel choice (a heavy block that started on
+        # the block reads its task's live share at every kernel choice (a heavy block that started on
         # one CPU beside its siblings ran serially to the end, 50 s for chr1 0.5x block 287; 11 s on 32 threads).
-        from ...engine.scheduler import live_threads
+        from ...engine.cpu import share_reader
 
         result = discover_block(
             evidence,
@@ -107,7 +111,7 @@ def execute_block(
             reverse=ties.reverse,
             keep=ties.keep,
             diagnostics=collector,
-            threads=live_threads(),
+            threads=share_reader(),
         )
         measured = replace(
             collector.snapshot(), wall_seconds=time.perf_counter() - wall, cpu_seconds=time.process_time() - cpu
@@ -132,7 +136,7 @@ def complete_contig(file: CheckpointFile, identities: dict[str, str]) -> None:
 
 
 def complete_contig_receipt(file: CheckpointFile, contig: str, identities: dict[str, str]) -> dict[RecordKey, str]:
-    """complete_contig, replying with the records it checked (release 4.10): mark_complete has verified every
+    """complete_contig, replying with the records it checked: mark_complete has verified every
     record's envelope against ``identities``, so the run's completion step takes the receipt instead of deriving and
     checking the whole block domain again in the coordinator (one contig at a time, after the graph)."""
     complete_contig(file, identities)
@@ -145,8 +149,7 @@ def discovery_tasks(
     parameters: DiscoveryParameters,
     *,
     file: CheckpointFile,
-    evidence_identity: str,
-    numerical_policy: NumericalPolicy,
+    identities: dict[str, str],
     ties: TieSettings = _DEFAULT_TIES,
     diagnostics: DiagnosticOptions = _DEFAULT_DIAGNOSTICS,
     dependencies: tuple[TaskKey, ...] = (),
@@ -163,14 +166,6 @@ def discovery_tasks(
         raise InvariantError("discovery tasks require the complete ordered block domain")
     if max_cores < 1:
         raise InvariantError("discovery max_cores must be positive")
-    identities = record_identities(
-        parameters,
-        contig=contig,
-        blocks=len(blocks),
-        evidence_identity=evidence_identity,
-        numerical_policy=numerical_policy,
-        ties=ties,
-    )
     plan_identity = identities[PLAN]
     plan_key = TaskKey("discovery", "plan", contig)
     tasks = [
@@ -216,3 +211,63 @@ def discovery_tasks(
         )
     )
     return tuple(tasks)
+
+
+from ..inputs.products import task_inputs, required_product
+from ..context import StageRun
+
+
+def run(
+    root: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, cores: int = 1
+) -> Expansion:
+    """Expand a contig into discovery's plan, independent block tasks and checked gather."""
+    from ...engine.graph import Expansion
+    from ...science.discovery.run import block_evidence
+    from ..discovery.tasks import discovery_tasks
+    from ..evidence import records
+
+    reader, store = task_inputs(root)
+    from ..discovery import records as discovery_records
+    from ..discovery.tasks import complete_contig_receipt
+    from ..framework import RecordKey, Task, TaskKey
+
+    # A contig with a checked plan and every block published under the expected identities needs only
+    # its completion step. Expanding it would schedule one resume task per block, decoding stored results
+    # only to return them. No completion marker substitutes for the envelope checks.
+    done = discovery_records.result_reader(store, reader.manifest, product="discovery", contig=contig)
+    if done is not None:
+        identities = dict(done.identities)
+        return Expansion(
+            (),
+            Task(
+                TaskKey("discovery", "complete", contig),
+                complete_contig_receipt,
+                (store.contig(contig), contig, identities),
+                inputs=tuple(RecordKey(contig, key) for key in identities),
+                affinity=contig,
+            ),
+        )
+    evidence = required_product(reader, records, "evidence", contig)
+    founder = evidence.founder_view()
+    blocks = tuple(block_evidence(founder, index) for index in range(len(founder.block_spans)))
+    tasks = discovery_tasks(
+        contig,
+        blocks,
+        resolved.parameters.discovery,
+        file=store.contig(contig),
+        identities=discovery_records.expected(store, reader.manifest, product="discovery", contig=contig).identities,
+        ties=ties,
+        max_cores=cores,
+    )
+    return Expansion(tasks[:-1], tasks[-1])
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare discovery's production contig entry and its expanding block graph."""
+    return Task(
+        key, run,
+        (context.root, key.scope, context.resolved, context.ties),
+        kwargs={"cores": context.cores},
+        inputs=(RecordKey(key.scope, "evidence"),),
+        resources=ResourceRequest(1, context.cores),
+    )

@@ -12,11 +12,11 @@ and sample-switch tables of one painted chromosome.
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.csv          painted switches per sample relative to the cohort median
   label_continuity.csv         every accepted label-continuity move with its winners' switch directions and
-                               whether the founder identity across its link is identified (release 2.14)
+                               whether the founder identity across its link is identified
   sample_segments.csv          the released painting per sample: runs of bins with one release (status, named
-                               founder row, candidate rows), switch intervals included (release 2.2)
+                               founder row, candidate rows), switch intervals included
   painting_model.csv           per component: the estimated copying model (ancestry-change rate, panel-error
-                               entry and exit, the emissions' site correlation; release 2.14)
+                               entry and exit, the emissions' site correlation)
 
 Carrier support uses released named painting tracks intersected with positive read depth: it is
 painting-dependent, not independent lineage evidence or a phasing probability, and samples are correlated.
@@ -52,8 +52,8 @@ def feedback_searches(results, contig: str):
 
 def _count_calls(searches, first: int, last: int):
     """(count cycles, undecided cycles, band-straddling count decisions) of the join searches overlapping
-    [first, last]; (None, None, None) when no join search covers the span. Each search counts once (base summed
-    its per-level listings, which repeat a pass-through component's earlier search at every later level)."""
+    [first, last]; (None, None, None) when no join search covers the span. Each search counts once,
+    even when a pass-through component lists that search at several levels."""
     cycles = undecided = ambiguous = 0
     recorded = False
     for _, start, end, summary in searches:
@@ -344,7 +344,7 @@ def sample_switch_table(painting, input_ids=None):
         )
     )
     if input_ids is not None:
-        # Release 2.1: the records hold the canonical sample order; SampleIndex is the input (VCF) position.
+        # the records hold the canonical sample order; SampleIndex is the input (VCF) position.
         from .tables import frame_in_input_order
 
         position = {str(name): index for index, name in enumerate(input_ids)}
@@ -476,13 +476,13 @@ MODEL_COLUMNS = (
     ErrorRunBinsKeepingLabel: 1 / ErrorExit; empty when ErrorExit is zero (bins).
     SiteCorrelation: fitted within-site emission correlation (1).
     EligibleSamples: eligible samples (1).
-    ContinuityBudgetReached: label continuity's search ended at its per-iteration check budget (release 4.7):
+    ContinuityBudgetReached: label continuity's search ended at its per-iteration check budget:
         candidates ranked below the budget were not checked (bool).
 """
 
 
 def painting_model_rows(painting) -> list[tuple]:
-    """One row per component with bins (release 2.14): the copying model painting estimated from all its samples
+    """One row per component with bins: the copying model painting estimated from all its samples
     (painting.fidelity.estimate_chain): rho, the panel-error chain's entry a and exit b (ErrorRunBinsKeepingLabel =
     1 / b, the mean length of a run that keeps its label; a at its floor 1e-6 is a boundary fit: no support for error
     runs) and the site correlation r of the emissions' design effect."""
@@ -514,7 +514,7 @@ def painting_model_rows(painting) -> list[tuple]:
 
 
 def label_continuity_rows(painting) -> list[tuple]:
-    """One row per accepted label-continuity move (release 2.14): Identity is 'two_way' when winners switch in both
+    """One row per accepted label-continuity move: Identity is 'two_way' when winners switch in both
     directions (a label exchange of two founders' carriers) and 'ambiguous' otherwise (consistent with one shared
     recombinant lineage: the relabelling is kept, the founder identity across the link is not identified)."""
     rows = []
@@ -542,7 +542,7 @@ def label_continuity_rows(painting) -> list[tuple]:
 
 
 def segment_rows(painting: Painting, input_ids=None) -> list[dict]:
-    """The released painting as segments (release 2.2): one row per sample, component, track and run of bins with
+    """The released painting as segments: one row per sample, component, track and run of bins with
     one release (status, label and candidate rows), in sample, component, track and position order.
 
     Columns: SampleID, Component, Track (0/1, the painting's gauge: which homologue is track 0 carries no meaning),

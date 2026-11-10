@@ -3,11 +3,6 @@
 Owns whole-template work receipts and component-stop domains.
 Must not choose K, read storage or configure runtime.
 Method: docs/methods/founder_refinement.md#work-account (RS07).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
 
 
 The numerical solver owns credit/debits. This layer records its completed window
@@ -101,7 +96,7 @@ class WindowWorkState:
         return values
 
     def reused(self, ordinal, solved=None):
-        """Retain the logical native account; a memo hit adds no physical work.
+        """Retain the logical work account; a memo hit adds no physical work.
 
         Every dispatched problem has the same logical account whether obtained by
         solving or exact reuse. Cache scheduling therefore cannot change the prefix.
@@ -121,11 +116,11 @@ class WindowWorkState:
                 raise WindowWorkLimit("window work lies after the provisional logical stop")
 
     def finish(self, solved, panel, kind, spans, sizes, alphabets, convention):
-        """Record a standalone native wrapper invocation (no concurrent driver)."""
+        """Record a standalone solver invocation (no concurrent driver)."""
         return self._finish(None, solved, panel, kind, spans, sizes, alphabets, convention)
 
     def finish_bound(self, ordinal, solved, panel, kind, spans, sizes, alphabets, convention):
-        """Record one bound template's cumulative native account and whole domain."""
+        """Record one bound template's cumulative work account and whole domain."""
         return self._finish(ordinal, solved, panel, kind, spans, sizes, alphabets, convention)
 
     def _finish(self, ordinal, solved, panel, kind, spans, sizes, alphabets, convention):
@@ -221,13 +216,13 @@ class WindowWorkState:
             return self._totals([self._receipts[key] for key in self._physical])
 
     def receipt_snapshot(self):
-        """Return bound ordinals and full native accounts, retaining per-account quanta."""
+        """Return bound ordinals and full work accounts, retaining per-account quanta."""
         with self._lock:
             return tuple((key, *self._receipts[key]) for key in sorted(self._receipts))
 
     @staticmethod
     def account(diagnostic):
-        """The native cumulative integer account, with its own scaling quantum."""
+        """The cumulative integer work account, with its own scaling quantum."""
         if diagnostic is None:
             return None
         diagnostic = (

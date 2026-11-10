@@ -1,20 +1,16 @@
 """A step: every sample's best diploid state for a fixed panel H.
 
-States: row pairs (i, j), i <= j, row-major; a row with an unknown copy (k, U), k ascending; both copies unknown
-(U, U). A state's cost is minus its summed binned log emission (uncapped). The tie band (release 2.1) is
-[cheapest, cheapest + the block's ``sample`` tie quantum]: costs that differ by rounding or by perturbation-level
-amounts do not decide. Inside the band the category with the fewest unknown copies wins (a stated preference: row
-pairs, then (k, U), then (U, U)). Release 2.2 (the meet rule; replaces the 2.1 convention D1, which took the first
-tied state in row order): the sample is assigned the multiset intersection of the founder pairs of the winning
-category's tied states, a copy that differs between them being an unknown copy U. One tied state is assigned as it
-is; {(i, j), (i, j')} gives (i, U); {(1, 1), (1, 2), (2, 2)} or {(0, 1), (2, 3)} give (U, U). The intersection
-depends only on the tied set, so the assignment is invariant to row order, sample order and the convention reversal:
-the data cannot tell which tied founder supplies a copy, and only the founders every tied explanation shares receive
-the sample's evidence.
-The reported per-sample cost is minus the best binned switching-Viterbi log likelihood over all
-states (switch penalty between adjacent bins), the model's NLL. Samples without any observed
-site are set to (U, U) afterwards (their emissions are all zero, so ties would otherwise pick a
-row pair and change the H step's founder order).
+States: row pairs (i, j), i <= j, row-major; a row with an unknown copy (k, U), k ascending; both copies
+unknown (U, U). A state's cost is minus its summed binned log emission (uncapped). The tie band is [cheapest,
+cheapest + the block's ``sample`` tie quantum]: costs that differ by rounding or perturbation-level amounts do
+not decide. Inside the band the category with the fewest unknown copies wins (row pairs, then (k, U), then (U,
+U)). The sample receives the multiset intersection of the founder pairs of that category's tied states; a copy
+that differs between explanations remains unknown. One tied state is assigned as it is; {(i, j), (i, j')}
+gives (i, U); {(1, 1), (1, 2), (2, 2)} or {(0, 1), (2, 3)} give (U, U). Only founders shared by every
+explanation receive the sample's evidence, so the meet is invariant to row order, sample order and convention
+reversal. The reported per-sample cost is minus the best binned switching-Viterbi log likelihood over all
+states, with a switch penalty between adjacent bins. Samples without an observed site receive (U, U): their
+zero emissions must not select a row pair and change the H step's founder order.
 """
 
 from __future__ import annotations
@@ -644,7 +640,7 @@ def _tie_mask_kernel(
 def tie_mask(workspace: FixedKWorkspace, haplotypes: np.ndarray) -> np.ndarray:
     """uint8[N, states] of a panel (states in the A step's order: row pairs row-major, (k, U), (U, U)): every sample's
     tied states T in the winning category (one state when the band holds one); samples without any observed site
-    hold (U, U) only. The cavity score counts a tied sample 1/|T| at each state of T (release 2.2)."""
+    hold (U, U) only. The cavity score counts a tied sample 1/|T| at each state of T."""
     k = haplotypes.shape[0]
     first, second = pair_indices(k)
     row_patterns, pair_patterns = haplotype_patterns(

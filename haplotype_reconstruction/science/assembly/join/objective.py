@@ -21,12 +21,12 @@ the join score of a panel is its sum over all samples) and :func:`paint` (the tr
 sample is computed by one thread; panel totals sum the per-sample vector in sample order
 (:func:`column_sums` for matrices), so no result depends on the thread count. Maxima use
 :func:`max_range` (exact; eight independent chains let comparisons overlap); no kernel is compiled
-with fast-math (B10).
+with fast-math, preserving the stated reduction and comparison rules.
 
 Owns: max-path likelihood, covers, traceback and minimum-switch recurrences.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §§4.1–4.2; AJ02–AJ04.
-Identity: Likelihood and bound reductions retain their distinct native orders; painting keeps its band policy.
+Method: docs/methods/assembly.md#aj02.
+Invariant: Likelihood and bound reductions use distinct orders; painting applies its explicit band policy.
 Hot compiled loops remain whole to preserve the recurrence and its arithmetic update order.
 """
 
@@ -247,8 +247,8 @@ def score_samples(flat, block_start, block_haps, block_bins, rows, penalty, samp
 def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop, relative, reverse=False):
     """Viterbi paintings of samples start .. stop - 1: per bin the state a * K + c (a <= c) of the
     maximising sequence (the traceback of :func:`forward`'s recursion; same values). Tie rules within
-    the band b = relative x max(1, |the bin's best score|) (release 2.1; relative 0 gives base's exact
-    rules): the switch source is the first state in pair order within b of the maximum, a state stays
+    the band b = relative x max(1, |the bin's best score|) (relative 0 uses exact comparisons): the switch source
+    is the first state in pair order within b of the maximum, a state stays
     when stay >= switch - b, the last bin's state is the first within b of the maximum. The recursion's
     values stay exact maxima; a traceback choice inside the band costs the painted sequence at most b,
     and near-equal sequences (equal scores reached through different summation orders, which a tiny

@@ -5,33 +5,25 @@ K = 1 grouping, residual grouping with its edge-clique cover, the soft consensus
 population-half hardening rules shared with moves.py.
 Must not: fit or score panels, read storage, the environment (the clique statistics are an explicit
 BlockDiagnostics option) or a clock, or log.
-Method: docs/methods/discovery.md, units di11 and di17-di19 (P0 DI11, DI17-DI19).
+Method: docs/methods/discovery.md, units di11 and di17-di19.
 Identity: global groups first, then the sorted partner routes, merged in source order; emission order as below;
-``max_cluster_hamming``, ``max_alternative_groups`` and the size-class budgets are unchanged.
+``max_cluster_hamming`` bounds group diameter; ``max_alternative_groups`` and size-class budgets bound admission.
 
-For a fitted complete panel, every sample's diplotype posterior over unordered row pairs (a
-softmax of the summed log genotype likelihood of each hard pair, uniform pair prior) gives each
-row an expected copy count. Every row with at least ``min_soft_responsibility`` expected copies
-in a sample is *subtracted* from that sample: the residual strand's ALT probability at an
-observed site is P(GL | subtracted allele + residual allele), normalised over the residual
-allele. Residual strands are called at ``residual_call_probability``, clustered by missing-aware
-Hamming distance (release 2.2: the level-wise HDBSCAN's clusters plus, as alternative groups, an edge clique cover of
-its noise, of wider clusters and of the tied stragglers of multi-way merges; every group's diameter at
-most ``max_cluster_hamming``), globally and within each (subtracted row, dominant partner)
-route. Each cluster's consensus pools its samples' responsibility-weighted log odds with one
-capped vote per sample; a consensus is emitted when enough distinct and effective samples
-support it, enough of it is called, and it is no duplicate of the panel or an earlier emission.
-Emission order (release 2.1): more distinct supporting samples first, then the consensus's hardened
-0/1 row (> 1/2 is ALT; within the ``probability`` quantum of 1/2 the population ALT fraction decides,
-as the search hardens it), then source order -- exact discrete keys (2.0 sorted by a digest of the
-probabilities rounded to 12 decimals, which 1e-12 GL noise reshuffled). The order decides which of
-two near-duplicate consensus rows is kept, so the better supported one is (measured on stress_n80:
-fewer blocks losing a founder than with the hardened row first, design A-6). Every record enters all dominant-partner
-routes within the existing relative ``probability``
-band of its largest partner mass. It remains one observation in global clustering and has its
-original weight once within each route; convention order cannot select a route. The candidates are soft (ALT
-probabilities); the search hardens them into birth
-starts and its cavity score decides.
+For a fitted complete panel, each sample's diplotype posterior over unordered row pairs (a softmax of summed
+log genotype likelihoods, uniform pair prior) gives each row an expected copy count. Every row with at least
+``min_soft_responsibility`` expected copies in a sample is subtracted from that sample: the residual strand's
+ALT probability is P(GL | subtracted allele + residual allele), normalized over the residual allele. Residual
+strands are called at ``residual_call_probability`` and clustered by missing-aware Hamming distance, globally
+and within each (subtracted row, dominant partner) route. Groups include level-wise HDBSCAN clusters and an
+edge clique cover of noise, wider clusters and tied stragglers of multi-way merges; every group's diameter is
+at most ``max_cluster_hamming``. Each consensus pools responsibility-weighted log odds with one capped vote
+per sample. Emission requires distinct and effective sample support, sufficient call coverage and no duplicate
+of the panel or an earlier emission. Emission order is decreasing distinct-sample support, then the hardened
+0/1 row (> 1/2 is ALT, with the population ALT fraction deciding within the ``probability`` band), then source
+order. This prefers the better-supported row when near-duplicates compete. Every record enters all
+dominant-partner routes within the relative ``probability`` band of its largest partner mass. It remains one
+global observation with its weight counted once within each route. Candidates are soft ALT probabilities; the
+search hardens them into birth starts and its cavity score decides.
 """
 
 from __future__ import annotations
@@ -49,7 +41,7 @@ from haplotype_reconstruction.core.ties import conv_key, rev, tie_quantum
 
 from ._cliques import lift_groups, screened_components
 from .diagnostics import BlockDiagnostics
-from .parameters import LOG_ODDS_MAX, LOG_ODDS_MIN, RESIDUAL_GEOMETRY_SLACK, ResidualBirthConfig
+from .parameters import LOG_ODDS_MAX, LOG_ODDS_MIN, RESIDUAL_GEOMETRY_SLACK, ResidualBirthParameters
 from .parameters import PREDICTIVE_CHUNK_BYTES as _PREDICTIVE_CHUNK_BYTES
 
 if TYPE_CHECKING:
@@ -74,7 +66,7 @@ __all__ = [
     "level_hdbscan_labels",
 ]
 
-# Intended lazy overloads: base40 execution/kernel_manifest.json (3.5.0).
+# Supported lazy overloads for the declared kernel routes.
 _FLOAT64_1C = types.Array(types.float64, 1, "C", readonly=False)
 _FLOAT64_2C = types.Array(types.float64, 2, "C", readonly=False)
 _INT64_1C = types.Array(types.int64, 1, "C", readonly=False)
@@ -87,21 +79,18 @@ _BOOLEAN_1C = types.Array(types.boolean, 1, "C", readonly=False)
 _BOOLEAN_2C = types.Array(types.boolean, 2, "C", readonly=False)
 
 
-# Bands of posterior-mass decisions (probability-kind quantum): the dominant-partner choice (relative to
-# max(1, mass)), and the record-weight and effective-support thresholds, where symmetric evidence puts masses
-# exactly at the threshold (e.g. a posterior split exactly in half, effective support exactly 1.5): values within
-# the band count as at the threshold, which passes (2.0's decision at exact equality; 2.0 used a 1e-12 fuzz, the
-# 1e-12-noise scale).
+# Probability-kind bands govern the dominant-partner choice (relative to max(1, mass)), record weights and
+# effective support. Values within the band of a threshold count as exactly at that threshold, which passes,
+# including symmetric masses at 1/2 and effective support at 1.5.
 PARTNER_BAND = tie_quantum(0.0, "probability")
 MASS_BAND = tie_quantum(0.0, "probability")
-# Values within this band of 1/2 are 1/2 (probability-kind quantum; 2.0 compared exactly or with 1e-12, the 1e-12-noise
-# scale). Inside the band a consensus row takes the population ALT fraction, and a population ALT fraction itself
-# inside the band takes the rule's decision at exactly 1/2 (2.0's: REF for "> 1/2" rules, ALT for ">= 1/2").
+# Values within this band of 1/2 count as 1/2. A consensus in the band uses the population ALT fraction; a
+# population fraction also in the band takes the exact-equality decision: REF for "> 1/2", ALT for ">= 1/2".
 HALF_BAND = tie_quantum(0.0, "probability")
 
 
 def note_band(counter: TieCounter | None, kind: str, values: ArrayLike, threshold: float, band: float) -> None:
-    """Count one batch of threshold decisions for the stage records (counter: maths.ties.TieCounter or None):
+    """Count one batch of threshold decisions for the stage records (counter: core.ties.TieCounter or None):
     decisions = the values compared, inside_tie = those strictly inside the band (0 < |value - threshold| <= band:
     where the band, not the exact comparison, decided)."""
     if counter is None:
@@ -168,8 +157,8 @@ def sample_sum(values: np.ndarray) -> np.ndarray:
 
 
 def hardening_fallback(likelihoods: np.ndarray, *, reverse: bool = False, keep: tuple[str, ...] = ()) -> np.ndarray:
-    """The ALT/REF row hardening uses within HALF_BAND of 1/2: the population ALT fraction of all
-    samples >= 1/2 (ALT within HALF_BAND of 1/2, 2.0's decision at exactly 1/2)."""
+    """ALT/REF row hardening uses the population ALT fraction when within HALF_BAND of 1/2; a population fraction
+    within HALF_BAND of 1/2 chooses ALT under the >= 1/2 rule."""
     marginal = sample_sum(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]) / len(likelihoods)
     return alt_fraction_rule(marginal, True, reverse=reverse, keep=keep)
 
@@ -182,12 +171,9 @@ def hardening_fallbacks(
     return alt_fraction_families(marginal, True, reverse=reverse, keep=keep)
 
 
-# Elementary functions (release 2.1): discovery takes log and exp from the C library's scalar functions (math.log /
-# math.exp in Numba kernels), never from NumPy's float64 ufuncs. NumPy picks those ufuncs' SIMD code paths at run time
-# from the CPU (AVX-512 vs AVX2 kernels), and they differ from the scalar function by an ulp in ~0.3% (log) and ~5%
-# (exp) of values, so the same evidence gave different soft-residual candidates on different CPUs (actm3 chr8:204 under
-# env_haswell). The scalar functions, element-wise arithmetic and fixed-order sums give the same bits on every x86-64
-# CPU with FMA (e.g. Intel Ice Lake and Sapphire Rapids); discovery makes no BLAS calls.
+# Residual kernels use scalar math.log / math.exp, element-wise arithmetic and fixed-order sums. NumPy can
+# select CPU-dependent SIMD ufunc paths with different rounding; scalar evaluation keeps residual candidates
+# independent of those paths. Discovery makes no BLAS calls.
 @kernel(
     overloads=(
         (
@@ -254,7 +240,7 @@ def exact_hdbscan_labels(
     distance: np.ndarray, min_cluster_size: int, min_samples: int, allow_single_cluster: bool
 ) -> np.ndarray:
     """int64 HDBSCAN labels (-1 = noise) of a precomputed float64 distance matrix that depend neither on the order of
-    the records nor on the order of equal-weight links (release 2.2): :func:`level_hdbscan`."""
+    the records nor on the order of equal-weight links: :func:`level_hdbscan`."""
     return level_hdbscan(distance, min_cluster_size, min_samples, allow_single_cluster)[0]
 
 
@@ -263,13 +249,12 @@ def level_hdbscan(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, ...]]]:
     """(labels int64[n], stragglers bool[n], tree_groups) of HDBSCAN* on a precomputed float64 distance matrix.
 
-    Mutual reachability (core distance: the distance to the min_samples-th nearest record) and a minimum spanning tree
-    as in the hdbscan package (metric "precomputed", alpha 1); then the hierarchy merges all links of one weight at
-    once, as HDBSCAN* is defined (Campello, Moulavi and Sander 2013; Campello et al. 2015: edges of equal weight are
-    removed simultaneously), so it is the unique set of connected components of the links of at most each weight and
-    no merge order enters (:func:`level_hdbscan_labels`). The package's binary dendrogram orders equal-weight links by
-    NumPy's unstable argsort (CPU-dependent; release 2.1 by a fixed content key). Stragglers are the points whose
-    grouping a binary merge order would decide; :func:`_cluster` offers them as alternative groups.
+    Mutual reachability uses the distance to the min_samples-th nearest record and a minimum spanning tree
+    (precomputed metric, alpha 1). The hierarchy merges all links of one weight simultaneously, as in HDBSCAN*
+    (Campello, Moulavi and Sander 2013; Campello et al. 2015). Thus each level is the connected components of
+    links up to that weight, independent of binary merge order (:func:`level_hdbscan_labels`). Stragglers are
+    points whose grouping a binary merge order would decide; :func:`_cluster` offers them as alternative
+    groups.
     """
     from hdbscan._hdbscan_linkage import mst_linkage_core
 
@@ -346,7 +331,7 @@ def level_hierarchy(
         groups: dict[int, set[int]] = {}
         for point, old in previous.items():
             groups.setdefault(find(point), set()).add(old)
-        # The relocated 3.5 body reuses ``olds``: the merged component set, then its sorted list.
+        # ``olds`` is reused for the merged component set and then its sorted list.
         olds: Any
         for root, olds in groups.items():
             node = n + len(children)
@@ -445,7 +430,7 @@ def level_hdbscan_labels(
     selected = [False] * n_clusters
     for cluster in candidates:
         selected[cluster] = True
-    # The relocated 3.5 body reuses ``subtree``: a stability sum here, the member lists of each cluster below.
+    # ``subtree`` holds a stability sum here and cluster-member lists below.
     subtree: Any
     for cluster in candidates:
         subtree = math.fsum(stability[child] for child in child_clusters[cluster])
@@ -484,11 +469,9 @@ def level_hdbscan_labels(
 
 # Residual strand hard-call sentinel.
 _UNCALLED = -1
-# Bounds of a residual strand's log odds: release 2.0 clipped the ALT probability to [tiny, 1 - eps] before taking
-# log(p) - log1p(-p), so its log odds lay in [log tiny, log((1 - eps) / eps)]. 2.1 computes the log odds exactly as
-# log(residual ALT mass) - log(residual REF mass) within the same bounds: from p itself they lost all precision as
-# p -> 1 (1 - p carries ~1e-16 absolute error), and 1e-12 GL noise moved a record's log odds by 0.15 nats there
-# (TroMau chr7:665, chr17:425), flipping near-cancelling consensus sites.
+# Residual log odds use log(ALT mass) - log(REF mass), clipped to [log tiny, log((1 - eps) / eps)]. Computing
+# from the two masses avoids the cancellation in 1 - p when p is near one, which can move near-cancelling
+# consensus sites.
 _LOG_ODDS_MAX = LOG_ODDS_MAX
 _LOG_ODDS_MIN = LOG_ODDS_MIN
 # Bound of the largest temporary of the diplotype responsibility (bytes).
@@ -606,15 +589,13 @@ def _residual_records(
 ):
     """Residual strands of every (sample, subtracted row) with enough expected copies.
 
-    Returns sample, subtracted row, a reporting-only partner label, weight min(1, expected
-    copies), the residual ALT probability per site (0.5 where unobserved), hard calls (-1
-    uncalled), the compatible mask (observed sites with positive residual mass) and the residual
-    ALT log odds log(r1) - log(r0) at compatible sites within [_LOG_ODDS_MIN, _LOG_ODDS_MAX] (0
-    elsewhere), and the complete dominant-partner membership mask. A record needs
-    weight + mass_band >= minimum_responsibility. Partners within
-    partner_band * max(1, global maximum mass) of that maximum all receive the same
-    original record. The legacy reverse argument cannot change this class; the lower
-    member is retained only as a reporting label, never as a routing decision.
+    Returns sample, subtracted row, reporting-only partner label, weight min(1, expected copies), residual ALT
+    probabilities (0.5 where unobserved), hard calls (-1 uncalled), the compatible mask (observed sites with
+    positive residual mass), residual log odds log(r1) - log(r0) within [_LOG_ODDS_MIN, _LOG_ODDS_MAX] (zero
+    elsewhere), and the full dominant-partner membership mask. A record needs weight + mass_band >=
+    minimum_responsibility. Every partner within partner_band * max(1, global maximum mass) receives the same
+    record. The reverse argument cannot change this class; its lower member is a reporting label, never a
+    routing decision.
     """
     n_samples, n_states = responsibility.shape
     n_sites = haplotypes.shape[1]
@@ -791,8 +772,8 @@ def _cluster(
 
     Every compatible alternative pair shares a group before size screening. A
     larger complete-linkage subgroup need not be contained in any cover member.
-    Core density groups, lifting and sample weights are unchanged. The existing
-    size-class rule applies separately to each alternative graph component.
+    Density groups are lifted with their sample weights. The size-class rule
+    applies separately to each alternative graph component.
     With lifted=(membership_bits, record_count), sizes/identities use original
     records. Content keys are the hard-call descriptors on the distance axis.
     """
@@ -1034,7 +1015,7 @@ def _closest(candidate, existing, minimum_joint, n_sites, known_probability):
     (rounded ALT probabilities beyond ``known_probability``); ties within 1e-12 prefer the
     larger joint-called fraction (a stated preference: more shared evidence). Returns (found, distance, joint
     fraction, coverage, coverage), the coverage being the smaller of the candidate's and the row's call coverage,
-    maximised over the rows tied at the nearest (distance, joint fraction): no row order decides (release 2.2)."""
+    maximised over the rows tied at the nearest (distance, joint fraction): no row order decides."""
     lower = 1.0 - known_probability + RESIDUAL_GEOMETRY_SLACK
     upper = known_probability - RESIDUAL_GEOMETRY_SLACK
     candidate_known = np.zeros(n_sites, dtype=np.bool_)
@@ -1111,19 +1092,15 @@ def _residual_pool_groups(
     cluster_cache,
     landmark_cache,
     *,
-    isolated=False,
     reverse: bool = False,
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
 ):
-    """One pool, sharing caches inline or returning isolated worker deltas.
+    """Evaluate one pool using caches shared in source order.
 
-    This helper performs no scheduling. The source-order caller shares its caches,
-    including entries just computed by earlier pools. An isolated call instead
-    returns pure cache deltas without mutating the supplied cache dictionaries.
+    Entries computed for earlier pools are available to later pools. Scheduling
+    independent blocks belongs to the stage.
     """
-    local_cluster = dict(cluster_cache) if isolated else cluster_cache
-    local_landmarks = dict(landmark_cache) if isolated else landmark_cache
     size = len(hard_calls) if pool is None else len(pool)
     details: list[dict] = []
     if config.landmark_budget and size > config.landmark_budget:
@@ -1137,7 +1114,7 @@ def _residual_pool_groups(
             config,
             details,
             "global residuals" if pool is None else "partner residual route",
-            local_landmarks,
+            landmark_cache,
             reverse=reverse,
             keep=keep,
             diagnostics=diagnostics,
@@ -1152,7 +1129,7 @@ def _residual_pool_groups(
         groups, overflow = _cluster_cached(
             local_distance,
             config.max_cluster_hamming,
-            local_cluster,
+            cluster_cache,
             content_keys,
             config.max_alternative_groups,
             details,
@@ -1160,15 +1137,7 @@ def _residual_pool_groups(
             keep=keep,
             diagnostics=diagnostics,
         )
-    if not isolated:
-        return groups, overflow, details, None, None
-    return (
-        groups,
-        overflow,
-        details,
-        {key: value for key, value in local_cluster.items() if key not in cluster_cache},
-        {key: value for key, value in local_landmarks.items() if key != "bytes" and key not in landmark_cache},
-    )
+    return groups, overflow, details
 
 
 def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, omissions):
@@ -1184,7 +1153,7 @@ def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, om
     if tasks:
         results = {}
         for route, pool in tasks:
-            groups, overflow, details, _, _ = _residual_pool_groups(
+            groups, overflow, details = _residual_pool_groups(
                 pool,
                 hard_calls,
                 distance,
@@ -1205,13 +1174,13 @@ def _residual_pool_results(hard_calls, routes, minimum_joint, config, inputs, om
 def soft_candidates(
     haplotypes: np.ndarray,
     inputs: ResidualInputs,
-    config: ResidualBirthConfig,
+    config: ResidualBirthParameters,
     counter: TieCounter | None = None,
     limit: int | None = None,
     omissions: list[dict] | None = None,
 ) -> np.ndarray:
     """float64[C, L] soft birth candidates of a complete binary panel, in emission order
-    (``config``: ResidualBirthConfig; the block's sites are all kept; ``counter``: optional TieCounter of the
+    (``config``: ResidualBirthParameters; the block's sites are all kept; ``counter``: optional TieCounter of the
     band decisions, kinds discovery.residual.half_band and discovery.residual.mass_band, and of the order-invariant
     bounds, discovery.residual.group_overflow and discovery.residual.emission_overflow; ``limit``: at most this many
     candidates, by whole support classes)."""
@@ -1304,11 +1273,10 @@ def soft_candidates(
             )
         prepared.append((cached, source_index))
     prepared.sort(key=lambda item: (-item[0][1], conv_key((item[0][0], item[1]), reverse=inputs.reverse)))
-    # Support classes, most supported first (a stated preference). A candidate is a near-duplicate only of a panel
-    # row or of a candidate of a MORE supported class: equally supported near-duplicates are all kept, since no order
-    # may decide between them, and exact duplicates are one candidate (release 2.2; 2.1 kept the first by content
-    # key). A straddling class fits through 2*limit; beyond that it is omitted whole.
-    # Lower support classes are counted as ranked truncation, separately from tie-class omissions.
+    # Support classes are processed most supported first. A candidate is a near-duplicate only of a panel row
+    # or a MORE supported candidate class; equally supported near-duplicates all remain, and exact duplicates
+    # are one candidate. A straddling class fits through 2*limit; larger classes are omitted whole. Lower
+    # support classes are counted as ranked truncation, separately from tie-class omissions.
     panel_rows = [np.asarray(row, dtype=np.float64) for row in rows]
     emitted: list[np.ndarray] = []
     emitted_bytes: set[bytes] = set()

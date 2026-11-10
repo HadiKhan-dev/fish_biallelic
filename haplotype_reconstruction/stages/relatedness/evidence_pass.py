@@ -28,7 +28,7 @@ from ..evidence.records import result_reader as evidence_reader
 
 __all__ = ["EvidenceInput", "EvidenceArrays", "evidence_pass", "upstream_identities", "bound_upstream"]
 T = TypeVar("T")
-_EVIDENCE_KEY = "evidence"  # EV3/D1 published record. Adapter is an explicit code-identity root.
+_EVIDENCE_KEY = "evidence"  # evidence/record codec published record. Adapter is an explicit code-identity root.
 
 
 @dataclass(frozen=True)
@@ -110,7 +110,7 @@ def evidence_pass(
 
 
 def bound_upstream(store: CheckpointStore, manifest: Mapping[str, Any]) -> dict[str, str]:
-    """Verify upstream evidence against EV3's independently derived bound-input identity."""
+    """Verify upstream evidence against evidence's independently derived bound-input identity."""
     upstream = {}
     for name in manifest["contigs"]:
         reader = evidence_reader(store, manifest, product="evidence", contig=name)
@@ -123,3 +123,20 @@ def bound_upstream(store: CheckpointStore, manifest: Mapping[str, Any]) -> dict[
         upstream[f"evidence/{name}"] = reader.identity
         upstream[f"genetic_map/{name}"] = manifest["map_identities"][name]
     return upstream
+
+
+def bound_inputs(root, resolved, maps, *, team=1):
+    """Bind the configured evidence and map axes before the relatedness computation."""
+    from ...core.errors import SettingsError
+    from ..evidence import records
+
+    store = CheckpointStore(root, nthreads=team)
+    manifest = store.manifest("run")
+
+    def evidence_identity(contig):
+        request = records.result_reader(store, manifest, product="evidence", contig=contig)
+        if request is None:
+            raise SettingsError(f"{contig}: evidence is not published")
+        return request.identity
+
+    return tuple(EvidenceInput(c, evidence_identity(c), maps.for_contig(c)) for c in resolved.contigs)

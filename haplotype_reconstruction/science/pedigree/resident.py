@@ -1,6 +1,5 @@
 """Resident source masses, transmitted projection and child terms, in dependency order.
 Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-information-blocks
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import numpy as np
 
 from ...contracts.pedigree import PreparedComponent
 from . import forward, projection, sources
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 
 
 @dataclass
@@ -26,7 +25,7 @@ class ResidentComponent:
 
 def resident(
     component: PreparedComponent,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     claim_threads: Callable[[], int | None] = lambda: None,
     *,
     reverse: bool | None = None,

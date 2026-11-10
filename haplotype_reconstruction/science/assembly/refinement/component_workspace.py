@@ -37,9 +37,9 @@ from haplotype_reconstruction.science.shared.emissions import (
 
 from ..pairs import emission_pair_index as pair_index
 from .capabilities import EvidenceWindows
-from .configuration import DEFAULT_GENOTYPE_ERROR, DEFAULT_RESET_RATE, MAP_PROBABILITY_FLOOR
 from .objective import SWITCH_PENALTY
 from .overloads import overloads_for
+from .parameters import DEFAULT_GENOTYPE_ERROR, DEFAULT_RESET_RATE, MAP_PROBABILITY_FLOOR
 from .window import (
     informative_samples,
     map_normalisers,
@@ -135,10 +135,10 @@ class ComponentWorkspace:
         row where uncalled (objective.pair_code7); every likelihood reads them. offsets: int64 (B + 1)
         block site offsets. kept: bool (L_c), the objective's sites: kept sites with at least one
         called local row (candidate-independent). partial: bool (L_c), kept sites where a local row is
-        uncalled (the only sites where pair codes 3-6 occur). windows: window.Windows over them, the
+        uncalled (the only sites where pair codes 3-6 occur). windows: stages.assembly.storage.Windows over them, the
         robust log evidence of the seven pair codes and the switch costs (resident or streamed).
     count_samples: int64 evidence rows of the informative samples (informative_samples), the
-        samples the count rule reads (count_rule.founder_cost's S); None when every sample is
+        samples the count rule reads (count_rule.criterion.founder_cost's S); None when every sample is
         informative (or, degenerate, none is: every score is then 0 and every row is kept).
     bin_size: surrogate bin (sites) = max(min_sites_per_bin, ceil(L_c / max_bins)).
     emissions: per block float64 (S, R_b(R_b + 1)/2, bins_b) binned surrogate emissions.

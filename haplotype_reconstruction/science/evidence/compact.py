@@ -1,6 +1,6 @@
 """Choose exact joint evidence storage from actual byte costs, without a setting.
 
-The existing dense GL kernels also fill bounded sample/site projections. Packing
+The dense GL kernels also fill bounded sample/site projections. Packing
 copies their bits. A repeated depth pair with different GL bits forces dense.
 """
 
@@ -14,9 +14,9 @@ from .likelihoods import _ROW_SUM_TOLERANCE, _invalid_likelihood_cells, likeliho
 
 # Storage policy only. GL + two int32 depths + bool mask cost 33 bytes/cell.
 ROW_METADATA_BYTES = 17
-# Sites per window of the exact-value check and code writing (memory bound only; results never depend on it):
-# about 3 MB of float64 GLs per window per thread. 8,192 (to 4.7) left per-window Python overhead dominant, which
-# serialises samples encoded in parallel on the GIL (chr1 0.5x, 112 threads: 3.7 s; 131,072: 1.0 s).
+# Sites per window of exact-value checking and code writing (memory bound only): about 3 MB of float64 GLs per
+# thread. Large windows amortize Python overhead under the GIL: on chr1 at 0.5x with 112 threads, 8,192 sites
+# took 3.7 s versus 1.0 s at 131,072.
 CHECK_SITES = 131_072
 
 
@@ -61,39 +61,14 @@ def _sample_plan(counts, size):
     return table_keys, first
 
 
-def _sample_map(function, samples, threads):
-    """``[function(s) for s in samples]`` on up to ``threads`` threads (release 4.8), each sample independent.
-
-    The work per sample (NumPy sorts and searches, the nogil likelihood kernels) releases the GIL. Each thread runs
-    its kernels on one Numba thread: the task's CPUs go to samples, never to nested teams. Exceptions propagate."""
-    samples = list(samples)
-    threads = max(1, min(int(threads), len(samples)))
-    if threads == 1:
-        return [function(sample) for sample in samples]
-    import numba
-    from concurrent.futures import ThreadPoolExecutor
-
-    def one(sample):
-        previous = numba.get_num_threads()
-        numba.set_num_threads(1)  # per thread
-        try:
-            return function(sample)
-        finally:
-            numba.set_num_threads(previous)
-
-    with ThreadPoolExecutor(max_workers=threads) as pool:
-        return list(pool.map(one, samples))
-
-
-def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None, threads=1):
+def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None, map_work=map):
     """Losslessly encode dense projections supplied by fill(samples, out, columns).
 
     Choose each sample before allocating final storage. Retain only cardinalities
     and widths across samples, then rebuild one sample plan at a time while filling
     final arrays. No N-sample plans or duplicate float64 tables survive allocation
-    (at most ``threads`` plans exist at once: samples are planned and filled on up to
-    ``threads`` threads, release 4.8). The exact-value safety check uses bounded site
-    windows. Dense fallback uses the original output, after planning scratch dies.
+    (the caller bounds concurrent items in ``map_work``). The exact-value safety
+    check uses bounded site windows. Dense fallback reuses the dense output, after planning scratch dies.
     """
     n, sites = counts.shape[:2]
     widths = np.zeros(n, np.uint8)
@@ -119,7 +94,7 @@ def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None, thre
         return distinct, width, False
 
     nonconstant = []
-    for sample, (distinct, width, mismatch) in enumerate(_sample_map(choose, range(n), threads)):
+    for sample, (distinct, width, mismatch) in enumerate(map_work(choose, range(n))):
         sizes[sample] = distinct
         widths[sample] = width
         if mismatch:
@@ -174,14 +149,14 @@ def encode_likelihoods(counts, fill, *, statistics=None, dense_result=None, thre
         else:
             fill(slice(sample, sample + 1), arrays["dense"][row : row + 1], slice(None))
 
-    _sample_map(write, range(n), threads)
+    list(map_work(write, range(n)))
     for array in arrays.values():
         declare_immutable(array)
     return CodedLikelihoods(sites, **arrays)
 
 
-def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *, statistics=None, threads=1):
-    """Use the existing lookup/direct arithmetic on explicit dense projections.
+def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *, statistics=None, map_work=map):
+    """Use the lookup/direct arithmetic on explicit dense projections.
 
     The table's first-occurrence sites include every depth pair, hence the same
     maximum depth and prefix/lookup bounds as the original sample. Safety windows
@@ -195,12 +170,11 @@ def build_likelihoods(counts, error, heterozygote, het_inverse, lookup_depth, *,
             raise ValueError("invalid genotype likelihoods")
 
     def dense_result():
-        # Keep 4.3's original Numba output allocator as well as its arithmetic.
-        # This is the same dense path at high depth, not a second GL allocation.
+        # Reuse the dense Numba output allocation at high depth; this path creates no second GL array.
         out = likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth)
         if _invalid_likelihood_cells(out, counts, _ROW_SUM_TOLERANCE):
             raise ValueError("invalid genotype likelihoods")
         out.flags.writeable = False
         return out
 
-    return encode_likelihoods(counts, fill, statistics=statistics, dense_result=dense_result, threads=threads)
+    return encode_likelihoods(counts, fill, statistics=statistics, dense_result=dense_result, map_work=map_work)

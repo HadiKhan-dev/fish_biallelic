@@ -1,6 +1,6 @@
 """Translate declared stored fields to plain payloads and rebuild typed records without I/O.
 
-Owns the generic codec for ordinary dataclasses (WP_D1 §4.7). Field annotations
+Owns the generic codec for ordinary dataclasses. Field annotations
 supply nested types; no class names, registry or package instances enter payloads.
 Products put schema first. Derived fields are supplied by the stage adapter and
 are never encoded. Products with hoisted items, such as Painting, have explicit

@@ -21,11 +21,10 @@ from ...contracts.roles import require_schema
 from ...core.concurrency import threaded_each
 from ...core.digest import json_digest
 from ...core.errors import InputError
+from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResultRef
-from ...engine.runtime import task_team
-from ...engine.scheduler import TASK_THREADS
 from ...science.pedigree import prepare as science
-from ...science.pedigree.parameters import PedigreeConfig, PreparationConfig
+from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
@@ -50,7 +49,7 @@ class PreparedAdapter:
 
 
 def derivation(
-    parameters: PreparationConfig,
+    parameters: PreparationParameters,
     upstream: Mapping[str, str],
     *,
     rate_is_measured: bool = False,
@@ -73,7 +72,7 @@ def run(
     painting: Painting,
     evidence: ContigEvidence,
     chromosome_map: ChromosomeGeneticMap,
-    parameters: PreparationConfig,
+    parameters: PreparationParameters,
     *,
     rate_is_measured: bool = False,
     threads: int = 1,
@@ -89,7 +88,7 @@ def run(
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
             return previous
-    with task_team(threads):
+    with thread_team(default=threads):
         product = science.prepare_chromosome(
             painting, evidence, chromosome_map, parameters, rate_is_measured=rate_is_measured
         )
@@ -97,34 +96,6 @@ def run(
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)
     return adapter.decode(adapter.encode(product))
-
-
-def task(
-    painting: Painting,
-    evidence: ContigEvidence,
-    chromosome_map: ChromosomeGeneticMap,
-    parameters: PreparationConfig,
-    *,
-    file: CheckpointFile | None = None,
-    identity: str | None = None,
-    rate_is_measured: bool = False,
-    cores: int = 1,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> Task:
-    """Declare one contig task with painting/evidence affinity and explicit inputs."""
-    contig = painting.contig
-    return Task(
-        TaskKey("pedigree", "prepare", contig),
-        run,
-        args=(painting, evidence, chromosome_map, parameters),
-        kwargs=dict(file=file, identity=identity, rate_is_measured=rate_is_measured),
-        depends_on=depends_on,
-        inputs=(RecordKey(contig, "painting"), RecordKey(contig, "evidence")),
-        outputs=(RecordKey(contig, KEY),),
-        resources=ResourceRequest(max_cores=cores),
-        affinity=contig,
-        thread_argument="threads",
-    )
 
 
 @dataclass(frozen=True)
@@ -156,7 +127,7 @@ def prepare_stored(
     root: str,
     manifest: Mapping[str, Any],
     chromosome_map: ChromosomeGeneticMap,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     *,
     threads: int = 1,
@@ -213,7 +184,7 @@ def _bound_stored(
     root: str,
     reference: PreparedReference,
     screen_identity: str,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     *,
     threads: int = 1,
@@ -245,7 +216,7 @@ def _scores_stored(
     screen_identity: str,
     panel_identity: str,
     sample_ids: tuple[str, ...],
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     *,
     threads: int = 1,
@@ -287,7 +258,7 @@ def _after_bounds(
     manifest: Mapping[str, Any],
     references: tuple[PreparedReference, ...],
     screen_identity: str,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     maximum_cores: int,
     *,
@@ -348,7 +319,7 @@ def _after_prepared(
     references: tuple[PreparedReference, ...],
     root: str,
     manifest: Mapping[str, Any],
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     maximum_cores: int,
     *,
@@ -370,9 +341,8 @@ def _after_prepared(
     store = CheckpointStore(root, nthreads=threads)
     cached = read_items(store.run, screen.SCREEN, identity, ("schema",))
     if cached is None:
-        # Release 4.10: the contigs' prepared records read on this task's share, one per thread (one after another
-        # before). Release 4.11: each thread decodes on its own budget (TASK_THREADS: one CPU inside the map), with
-        # Blosc's GIL release on, so the decodes overlap (a store with the task's width ran them one at a time).
+        # Read prepared contigs concurrently on the task's share. Each reader uses TASK_THREADS
+        # (one CPU inside the map), with Blosc's GIL release enabled so independent decodes overlap.
         readers = CheckpointStore(root, nthreads=TASK_THREADS)
         prepared = tuple(threaded_each(partial(_required_prepared, readers), informative))
         screen.run(prepared, eligibility, parameters, threads=threads, nested=True, file=store.run, identity=identity)
@@ -413,7 +383,7 @@ def _after_prepared(
 
 
 def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] | None, maximum_cores: int) -> Expansion:
-    """Expand checked painting inputs through scores and the terminal PE4/PE5 action.
+    """Expand checked painting inputs through scores and the terminal pedigree decision/pedigree action.
 
     Each contig task returns only a completion descriptor. Bounds are streamed per
     child at the panel barrier. Stored inputs are decoded by their owning adapters;
@@ -428,7 +398,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
     parameters = replace(
-        from_payload(PedigreeConfig, manifest["parameters"]["pedigree"]),
+        from_payload(PedigreeParameters, manifest["parameters"]["pedigree"]),
         reverse_conventions=bool(manifest["ties"]["reverse"]),
     )
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
@@ -459,21 +429,3 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
         thread_argument="threads",
     )
     return Expansion(tasks, gather)
-
-
-def pipeline_task(
-    root: str,
-    maps: GeneticMapSet,
-    manifest: Mapping[str, Any] | None = None,
-    *,
-    cores: int = 1,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> Task:
-    """Construct the complete G1 pedigree/run action without reading its future inputs."""
-    return Task(
-        TaskKey("pedigree", "run"),
-        pipeline_start,
-        args=(root, maps, manifest, cores),
-        depends_on=depends_on,
-        resources=ResourceRequest(max_cores=cores),
-    )

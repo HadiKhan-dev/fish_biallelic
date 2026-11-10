@@ -11,18 +11,19 @@ Expand released painting labels onto sites and form untempered robust genotype e
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py), [science/painting/release.py](../../haplotype_reconstruction/science/painting/release.py).
 
-Parameters by name: `robustness_epsilon`, `REFIT_TIE_QUANTUM`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `robustness_epsilon`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fr02"></a>
 ## fr02 Refit coordinate ascent: flip and two-row phases, rounds, interaction, sweeps, hysteresis gains
 
-Within each site, run the named sweep schedule with flip rounds before two-row rounds. Rank qualified moves, withhold conflicting tied alternatives, otherwise apply independent moves and rescore affected candidates. Limit each row’s changes as declared. Use the single direct two-row gain for qualification and recheck (L10).
+Within each site, run the named sweep schedule with flip rounds before two-row rounds. Rank qualified moves, withhold conflicting tied alternatives, otherwise apply independent moves and rescore affected candidates. Limit each row’s changes as declared. Use the same direct two-row gain for qualification and recheck. The minimum gain is per-move hysteresis per changed cell, not a fixed prior on the assembled allele.
+
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py).
 
-Parameters by name: `minimum_gain_nats`, `coordinate_sweeps`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_gain_nats`, `coordinate_sweeps`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K^2); O(P); O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -33,7 +34,7 @@ Sort exact gains stably, form carrier-scaled tie components and identify wide cl
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py).
 
-Parameters by name: `REFIT_TIE_QUANTUM`, `REFIT_TIE_QUANTUM_PER_CARRIER`, `WIDE_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `REFIT_TIE_QUANTUM`, `REFIT_TIE_QUANTUM_PER_CARRIER`, `WIDE_CLASS_QUANTA`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -55,7 +56,7 @@ After the coordinate sweeps, visit alleles that were already unknown in the pain
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py).
 
-Parameters by name: `minimum_gain_nats`, `fill_min_supporters`, `REFIT_TIE_QUANTUM`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_gain_nats`, `fill_min_supporters`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -66,6 +67,6 @@ Publish refit component panels and diagnostics under evidence/painting/parameter
 
 Implementation: [stages/refit/tasks.py](../../haplotype_reconstruction/stages/refit/tasks.py), [science/refit/run.py](../../haplotype_reconstruction/science/refit/run.py), [stages/refit/records.py](../../haplotype_reconstruction/stages/refit/records.py), [contracts/refit.py](../../haplotype_reconstruction/contracts/refit.py).
 
-Parameters by name: `SITE_TILE`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `SITE_TILE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Per-contig evidence and painting inputs, label expansion and O(K L) refit/gain arrays.

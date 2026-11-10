@@ -26,16 +26,16 @@ from ...contracts.pedigree import (
 )
 from ...contracts.roles import require_schema
 from ...core.errors import InputError, InvariantError
-from ...engine.runtime import task_team
-from ...engine.scheduler import TaskSession, claim_threads, current_budget
+from ...engine.cpu import claim_threads, current_budget, thread_team
+from ...engine.scheduler import TaskSession
 from ...engine.workers import ResidentRef, release_resident, resident_value, retain
 from ...science.pedigree import forward, m1, pair_bound, panel, selective_m1, selective_screen
 from ...science.pedigree.compact_m1 import CompactBuilder, CompactM1
-from ...science.pedigree.parameters import PedigreeConfig
+from ...science.pedigree.parameters import PedigreeParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, open_windows
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey, load_product, publish_product
+from ..framework import ResourceRequest, Task, TaskKey, load_product, publish_product
 
 SCREEN = "pedigree/selective_screen"
 BOUNDS = "pedigree/pair_bounds"
@@ -53,7 +53,7 @@ class ScreenAdapter:
 
 
 class PairBoundsAdapter:
-    """Schema-1 storage uses [1,P] so ST1's bounded two-axis windows can stream P.
+    """Schema-1 storage uses [1,P] so the store protocol's bounded two-axis windows can stream P.
 
     The singleton is a storage axis, removed by the adapter. Values are never cast
     or recomputed. This avoids retaining every contig's large bound vector.
@@ -104,7 +104,7 @@ def _reread_share() -> None:
 def setup(
     prepared: PreparedChromosome,
     eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     reverse: bool | None = None,
 ) -> ContigState:
@@ -161,7 +161,7 @@ class ResidentContig:
 def setup_resident(
     prepared: PreparedChromosome,
     eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     reverse: bool | None = None,
 ) -> ResidentContig:
@@ -183,8 +183,7 @@ class _ThreadPhases:
     """Share contig state inside an executing graph task under its engine budget.
 
     The enclosing worker already owns an admission. Each phase runs its contigs as the engine's nested concurrent
-    tasks, each on its live fair share of the task's CPUs (3.5's screen phases ran one worker per contig with a third
-    of the node each; one thread per contig left the run-level screen at three busy CPUs). No worker pool or second
+    tasks, each on its live fair CPU share, so ready contigs can use the enclosing admission. No worker pool or second
     TaskSession is opened; returned batch arrays are discarded by the caller.
     """
 
@@ -223,7 +222,7 @@ class _ThreadPhases:
 def run(
     prepared: tuple[PreparedChromosome, ...],
     eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     threads: int = 1,
     reverse: bool | None = None,
@@ -333,7 +332,7 @@ def run(
 def bound_run(
     prepared: PreparedChromosome,
     compact: CompactM1,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     threads: int = 1,
     reverse: bool | None = None,
@@ -349,7 +348,7 @@ def bound_run(
         previous = load_product(file, BOUNDS, identity, adapter)
         if previous is not None:
             return previous
-    with task_team(threads):
+    with thread_team(default=threads):
         product = PairBounds(
             prepared.contig, pair_bound.chromosome_bounds(prepared, compact, parameters, claim_threads, reverse=reverse)
         )
@@ -409,7 +408,7 @@ def panel_run(
     screen: ScreenRecord,
     bounds: StoredBounds | ArrayBounds,
     eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     file: CheckpointFile | None = None,
     identity: str | None = None,
@@ -433,7 +432,7 @@ def panel_run(
 
 
 def screen_derivation(
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     eligibility_identity: str,
     prepared_identities: Sequence[tuple[str, str]],
     *,
@@ -457,7 +456,7 @@ def screen_derivation(
 
 
 def bound_derivation(
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     prepared_identity: str,
     screen_identity: str,
     *,
@@ -500,28 +499,3 @@ def panel_derivation(
         inputs,
         reverse,
     ).identity
-
-
-def task(
-    prepared: tuple[PreparedChromosome, ...],
-    eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
-    *,
-    cores: int = 1,
-    reverse: bool | None = None,
-    file: CheckpointFile | None = None,
-    identity: str | None = None,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> Task:
-    """Declare the run-wide certified-screen barrier."""
-    return Task(
-        TaskKey("pedigree", "screen"),
-        run,
-        args=(prepared, eligibility, parameters),
-        kwargs=dict(file=file, identity=identity, reverse=reverse, nested=True),
-        depends_on=depends_on,
-        inputs=tuple(RecordKey(p.contig, "pedigree/prepared") for p in prepared),
-        outputs=(RecordKey("run", SCREEN),),
-        resources=ResourceRequest(max_cores=cores),
-        thread_argument="threads",
-    )

@@ -3,25 +3,26 @@
 Owns the public Results object. Adapters recompute their expected derivation from
 the bound manifest and recorded upstream products; the reader checks it with the
 store protocol before invoking a decoder. There is no science or original-input
-I/O here (WP_I1 section 4.5; WP_OU1 section 6.1; WP_EVA1 section 4.5).
+I/O here. Each stage owns its product decoder and expected derivation.
 """
 
 from __future__ import annotations
 
-import copy
 import json
+import importlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from ..contracts.roles import require_schema
 from ..core.digest import json_digest
 from ..core.errors import InputError, InvariantError, SettingsError
 from ..store.container import CheckpointMismatch
-from ..store.protocol import read_items, resume
-from ..store.store import CheckpointStore
+from ..store.protocol import read_items
 from .order import recorded_input_order
+from .protocol import ProductInputs, ProductReader
+from ..stages.catalog import STAGES
 from .panels import FOUNDER_STAGES, StagePanel
 from .paths import RunPaths
 
@@ -42,28 +43,6 @@ if TYPE_CHECKING:
     from ..stages.inputs.simulation_records import ContigTruth, SimulationManifest
 
 __all__ = ["Results", "ProductReader", "RelatednessView"]
-
-Product = TypeVar("Product", covariant=True)
-
-
-class ProductReader(Protocol[Product]):
-    """A stage-supplied read request; constructing it verifies manifest dependencies.
-
-    The expected identity must be computed from the bound configuration and inputs,
-    never copied from the product's own publication envelope. Stage adapters may
-    implement this structural protocol with their own ordinary frozen dataclasses.
-    """
-
-    @property
-    def key(self) -> str: ...
-
-    @property
-    def identity(self) -> str: ...
-
-    @property
-    def schema(self) -> int: ...
-
-    def decode(self, payload: dict[str, Any]) -> Product: ...
 
 
 @dataclass(frozen=True)
@@ -142,7 +121,7 @@ class TieSource:
     count_calls: tuple[object, ...] = ()
 
 
-class Results:
+class Results(ProductInputs):
     """Lazy, read-only access to an initialized run, including unfinished contigs.
 
     Construction reads layout and the small manifest only. Product methods return
@@ -157,55 +136,20 @@ class Results:
         self.checkpoints = paths.checkpoints if checkpoints is None else Path(checkpoints).expanduser().resolve()
         if not self.checkpoints.is_dir():
             raise SettingsError(f"{self.root}: run has not been initialized; use haplotypes init")
-        self._store = CheckpointStore(self.checkpoints, nthreads=nthreads)
-        self._store.check_layout()
-        manifest = self._store.manifest("run")
-        if manifest is None:
-            raise SettingsError(f"{self.root}: run has not been initialized; use haplotypes init")
-        require_schema(manifest, 1)
-        self._manifest = manifest
-
-    @property
-    def manifest(self) -> dict[str, Any]:
-        """Return a private copy of the bound run manifest; callers cannot mutate reader state."""
-        return copy.deepcopy(self._manifest)
-
-    @property
-    def contigs(self) -> tuple[str, ...]:
-        """The manifest's bound processing order, including contigs with no products yet."""
-        return tuple(self._manifest.get("contigs", ()))
+        super().__init__(self.checkpoints, nthreads=nthreads)
 
     @property
     def input_sample_ids(self) -> tuple[str, ...] | None:
         """Original source columns, for rendering only; scientific records keep canonical order."""
         return recorded_input_order(self._manifest)
 
-    def _file(self, contig: str | None) -> Any:
-        if contig is None:
-            return self._store.run
-        if contig not in self.contigs:
-            raise SettingsError(f"contig {contig!r} is not in the run manifest: {', '.join(self.contigs)}")
-        return self._store.contig(contig)
 
-    def read(self, request: ProductReader[Product], contig: str | None = None) -> Product | None:
-        """Check a stage adapter's expected identity and schema, then decode its immutable product."""
-        items = getattr(request, "items", None)
-        record = (
-            resume(self._file(contig), request.key, request.identity)
-            if items is None
-            else read_items(self._file(contig), request.key, request.identity, tuple(dict.fromkeys(("schema", *items))))
-        )
-        if record is None:
-            return None
-        require_schema(record.payload, request.schema)
-        return request.decode(record.payload)
-
-    def _has(self, contig: str | None, *prefixes: str) -> bool:
+    def _has(self, contig: str | None, prefix: str) -> bool:
         file = self._file(contig)
-        return any(file.has(prefix) or file.keys(prefix + "/") for prefix in prefixes)
+        return bool(file.has(prefix) or file.keys(prefix + "/"))
 
     def _read(self, adapter: Any, product: str, contig: str | None = None, **options: Any) -> Any | None:
-        request = adapter.result_reader(self._store, self.manifest, product=product, contig=contig, **options)
+        request = self.request(adapter, product, contig, **options)
         return None if request is None else self.read(request, contig)
 
     def evidence_summary(self, contig: str) -> EvidenceDecisions | None:
@@ -242,7 +186,7 @@ class Results:
 
     def phase(self, contig: str) -> PhasedSamples | None:
         """Read PhasedSamples on its recorded site and sample axes."""
-        if not self._has(contig, "phase", "family_phase"):
+        if not self._has(contig, "phase"):
             return None
         from ..stages.phase import records
 
@@ -256,29 +200,21 @@ class Results:
 
         return self._read(records, "recombination", contig)
 
-    def released_sites(self, contig: str) -> ReleasedSites | None:
+    def sites(self, contig: str) -> ReleasedSites | None:
         """Read the option-independent ReleasedSites product for output rendering."""
-        if not self._has(contig, "sites", "released_sites"):
+        if not self._has(contig, "sites"):
             return None
-        from ..stages.inputs import sites_records as sites
+        from ..stages.sites import records as sites
 
-        return self._read(sites, "released_sites", contig)
+        return self._read(sites, "sites", contig)
 
-    def founder_release(self, contig: str) -> FounderRelease | None:
-        """Read AS6's FounderRelease segments and identity flags, including left-partner ownership."""
-        if not self._has(contig, "release", "founder_release"):
+    def release(self, contig: str) -> FounderRelease | None:
+        """Read assembly's FounderRelease segments and identity flags, including left-partner ownership."""
+        if not self._has(contig, "release"):
             return None
-        from ..stages.assembly import records
+        from ..stages.release import records
 
-        return self._read(records, "founder_release", contig)
-
-    def release_timings(self, contig: str) -> dict[str, float] | None:
-        """Read measured AS6 release subphase seconds through the checked release derivation."""
-        if not self._has(contig, "release/timings"):
-            return None
-        from ..stages.assembly import records
-
-        return self._read(records, "release_timings", contig)
+        return self._read(records, "release", contig)
 
     def relatedness(self) -> RelatednessView | None:
         """Apply the current output selection and expose pairs only when selected and recorded."""
@@ -300,49 +236,33 @@ class Results:
             pairs = self._read(pairs_records, "pairs")
         return RelatednessView(families, pairs)
 
+    def stage_request(self, stage, contig=None, *, round_name="", pairs=False, **options):
+        """Ask the data table's record owner for a header-only workflow request."""
+        spec = STAGES[stage]
+        adapter, product = (spec.pair_records, "pairs") if pairs else (spec.records, spec.product)
+        if stage == "selection" and round_name:
+            options["stage"] = "local_selection_" + round_name
+        elif stage == "assembly" and round_name:
+            options["round_name"] = round_name.removeprefix("context.")
+        elif stage == "painting":
+            options.update(panels=False, emissions=False)
+        elif stage == "refit":
+            options["panels"] = False
+        return self.request(importlib.import_module("haplotype_reconstruction." + adapter), product, contig, **options)
+
     def _panel_request(self, contig: str, stage: str) -> ProductReader[Any] | None:
-        """Ask the owning adapter for the exact founder stage, retaining its original axes."""
-        adapter: Any
-        request: ProductReader[Any] | None
+        """Read a published evaluation panel label through its one owning stage."""
         if stage not in FOUNDER_STAGES:
             raise SettingsError(f"unknown founder stage {stage!r}; valid: {', '.join(FOUNDER_STAGES)}")
-        if stage == "discovery":
-            if not self._has(contig, "discovery"):
-                return None
-            from ..stages.discovery import records as discovery_records
-
-            adapter = discovery_records
-        elif stage.startswith("local_selection_"):
-            if not self._has(contig, "selection", "local_selection"):
-                return None
-            from ..stages.selection import records as selection_records
-
-            adapter = selection_records
-        elif stage.startswith("assembly_l") or stage == "founder_refinement":
-            if not self._has(contig, "assembly"):
-                return None
-            from ..stages.assembly import records as assembly_records
-
-            adapter = assembly_records
-        elif stage == "painting":
-            if not self._has(contig, "painting"):
-                return None
-            from ..stages.painting import records as painting_records
-
-            request = painting_records.result_reader(
-                self._store, self.manifest, product="painting", contig=contig, panels=True, emissions=False
-            )
+        name, spec = next((name, spec) for name, spec in STAGES.items() if stage in spec.panels)
+        if not self._has(contig, spec.prefix):
+            return None
+        adapter = importlib.import_module("haplotype_reconstruction." + spec.records)
+        if name in ("painting", "refit"):
+            options = {"panels": True, **({"emissions": False} if name == "painting" else {})}
+            request = self.request(adapter, spec.product, contig, **options)
             return None if request is None else PanelReader(request, stage)
-        else:
-            if not self._has(contig, "refit", "founder_refit"):
-                return None
-            from ..stages.refit import records as refit_records
-
-            request = refit_records.result_reader(
-                self._store, self.manifest, product="refit", contig=contig, panels=True
-            )
-            return None if request is None else PanelReader(request, stage)
-        return adapter.result_reader(self._store, self.manifest, product="stage_panels", contig=contig, stage=stage)
+        return self.request(adapter, "stage_panels", contig, stage=stage)
 
     def stage_panels(self, contig: str, stage: str) -> tuple[StagePanel, ...]:
         """Read original component/row axes before withholding, segmentation or export names."""
@@ -368,42 +288,24 @@ class Results:
             request = self._panel_request(contig, stage)
             if request is None:
                 return False
-            record = read_items(self._file(contig), request.key, request.identity, ("schema",))
-            if record is None:
-                return False
-            require_schema(record.payload, request.schema)
-            return True
-        if stage == "family_phase":
-            return self.phase(contig) is not None
-        if stage == "recombination":
-            return self.recombination(contig) is not None
+            return self.receipt(request, contig) is not None
+        name = next((name for name, spec in STAGES.items() if spec.status and stage in spec.evaluation), None)
+        if name is not None:
+            return self.receipt(self.stage_request(name, contig), contig) is not None
         raise SettingsError(f"unknown evaluation stage {stage!r}")
 
-    @property
-    def synthetic(self) -> bool:
-        """Whether the bound observation source is explicitly simulated."""
-        return self._manifest.get("source", {}).get("kind") == "simulation"
 
     def output_selection(self) -> Mapping[str, Any] | None:
         """Refresh the latest output-only choice; it is never a scientific binding."""
-        from ..store.protocol import read_output
-
         path = self.root / "output_selection.json"
-        if path.is_file():
-            payload = json.loads(path.read_text())
-            require_schema(payload, 1)
-            return payload
-        # Read older output directories without changing their archived checkpoint root.
-        record = read_output(self._store.run, "outputs/selection", identity=json_digest)
-        if record is None:
+        if not path.is_file():
             return None
-        require_schema(record.payload, 1)
-        if record.identity != json_digest(record.payload):
-            raise CheckpointMismatch("outputs/selection content differs from its selection identity")
-        return record.payload
+        payload = json.loads(path.read_text())
+        require_schema(payload, 1)
+        return payload
 
     def simulation_manifest(self) -> SimulationManifest | None:
-        """Read SI1's seed/truth metadata and check it against init's source binding."""
+        """Read template generation's seed/truth metadata and check it against init's source binding."""
         if not self.synthetic:
             return None
         from ..stages.inputs import simulation_records as simulation
@@ -432,7 +334,7 @@ class Results:
         return simulation.load_truth(file, identity)
 
     def painting_report(self, contig: str) -> Any | None:
-        """Expose recorded painting and ordered search summaries for OU2 formatting."""
+        """Expose recorded painting and ordered search summaries for painting reports formatting."""
         if not self._has(contig, "painting"):
             return None
         from ..stages.painting import records
@@ -440,7 +342,7 @@ class Results:
         return self._read(records, "painting_report", contig)
 
     def tie_sources(self, contig: str) -> tuple[Any, ...]:
-        """Collect only explicitly declared stage tie views in the baseline report order."""
+        """Collect only explicitly declared stage tie views in the published report order."""
         sources: list[Any] = []
         if self._has(contig, "evidence"):
             from ..stages.evidence import records as evidence_records
@@ -452,7 +354,7 @@ class Results:
             from ..stages.discovery import records as discovery_records
 
             sources.extend(self._read(discovery_records, "tie_sources", contig) or ())
-        if self._has(contig, "selection", "local_selection"):
+        if self._has(contig, "selection"):
             from ..stages.selection import records as selection_records
 
             sources.extend(self._read(selection_records, "tie_sources", contig) or ())
@@ -464,7 +366,7 @@ class Results:
             from ..stages.painting import records as painting_records
 
             sources.extend(self._read(painting_records, "tie_sources", contig) or ())
-        if self._has(contig, "refit", "founder_refit"):
+        if self._has(contig, "founder_refit"):
             from ..stages.refit import records as refit_records
 
             sources.extend(self._read(refit_records, "tie_sources", contig) or ())
@@ -485,7 +387,7 @@ class Results:
         return tuple(
             row
             for c in self.contigs
-            if self._has(c, "refit", "founder_refit")
+            if self._has(c, "founder_refit")
             if (row := self._read(records, "summary", c)) is not None
         )
 
@@ -496,13 +398,13 @@ class Results:
         return tuple(
             row
             for c in self.contigs
-            if self._has(c, "phase", "family_phase")
+            if self._has(c, "phase")
             if (row := self._read(records, "phase_summary", c, elapsed_seconds=(elapsed_seconds or {}).get(c)))
             is not None
         )
 
     def record_bytes(self, contig: str, product: str) -> int:
-        """Return checked decoded bytes for EVA1's worker estimate.
+        """Return checked decoded bytes for evaluation's worker estimate.
 
         The target read is header-only. Owner request construction is responsible
         for checking its upstream identity without materialising large products.
@@ -521,63 +423,24 @@ class Results:
             record = read_items(file, key, identity, ())
             return 0 if record is None else record.info.decoded_bytes
         if product in FOUNDER_STAGES:
-            request = self._panel_request(contig, product)
+            name = next(name for name, spec in STAGES.items() if product in spec.panels)
+            request = self.stage_request(name, contig) if name in ("painting", "refit") else self._panel_request(contig, product)
         else:
-            if product == "family_phase":
-                from ..stages.phase import records as phase_records
-
-                adapter = phase_records
-                name = "phase"
-            elif product == "recombination":
-                from ..stages.recombination import records as recombination_records
-
-                adapter = recombination_records
-                name = "recombination"
-            else:
+            name = next((name for name, spec in STAGES.items() if spec.status and product in spec.evaluation), None)
+            if name is None:
                 raise SettingsError(f"unknown evaluation product {product!r}")
-            request = adapter.result_reader(self._store, self.manifest, product=name, contig=contig)
-        if request is None:
-            return 0
-        record = read_items(file, request.key, request.identity, ("schema",))
-        if record is None:
-            return 0
-        require_schema(record.payload, request.schema)
-        return record.info.decoded_bytes
+            request = self.stage_request(name, contig)
+        record = self.receipt(request, contig)
+        return 0 if record is None else record.info.decoded_bytes
 
     def product_identity(self, product: str, contig: str | None = None) -> str | None:
-        """Return a manifest-derived publication identity after checking its schema/header.
-
-        This exposes scientific derivation identities for output-task dependencies,
-        never physical record tokens. Missing products return None.
-        """
-        adapter: Any
+        """Return an output dependency's manifest-derived identity after its shared receipt check."""
         if contig is None:
             raise SettingsError(f"{product}: a contig is required")
-        if product == "released_sites":
-            if not self._has(contig, "sites", "released_sites"):
-                return None
-            from ..stages.inputs import sites_records as sites
-
-            adapter = sites
-        elif product == "founder_release":
-            if not self._has(contig, "release", "founder_release"):
-                return None
-            from ..stages.assembly import records as assembly_records
-
-            adapter = assembly_records
-        elif product == "phase":
-            if not self._has(contig, "phase", "family_phase"):
-                return None
-            from ..stages.phase import records as phase_records
-
-            adapter = phase_records
-        else:
+        if product not in ("sites", "release", "phase"):
             raise SettingsError(f"unsupported output dependency product {product!r}")
-        request = adapter.result_reader(self._store, self.manifest, product=product, contig=contig)
-        if request is None:
+        spec = STAGES[product]
+        if not self._has(contig, spec.prefix):
             return None
-        record = read_items(self._file(contig), request.key, request.identity, ("schema",))
-        if record is None:
-            return None
-        require_schema(record.payload, request.schema)
-        return request.identity
+        request = self.stage_request(product, contig)
+        return None if self.receipt(request, contig) is None else request.identity

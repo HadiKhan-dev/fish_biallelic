@@ -1,6 +1,6 @@
 """Build simulation founder templates with fixed-error evidence and window discovery.
 
-Accretion OU20: windows overlap by the carried physical stride; evidence disables
+Accretion OU20: windows overlap by the declared physical stride; evidence disables
 site/sample QC and read calibration. Default discovery searches informative windows,
 then the naive linker chains its released probabilities. No simulation or inference
 stage consumes builder intermediates. Method: docs/methods/simulation.md#templates.
@@ -45,6 +45,7 @@ __all__ = [
 
 def fixed_error_evidence(reads: ContigReads, budget: int = 1, *, reverse: bool = False) -> Any:
     """Return unchanged fixed-error evidence with every QC/calibration switch off."""
+    from ...engine.cpu import CpuBudget
     from ...science.evidence.parameters import EvidenceParameters
     from ...science.evidence.run import prepare_contig
 
@@ -55,7 +56,8 @@ def fixed_error_evidence(reads: ContigReads, budget: int = 1, *, reverse: bool =
         sample_quality=replace(config.sample_quality, enabled=False),
         read_model=replace(config.read_model, enabled=False),
     )
-    return prepare_contig(reads, config, int(budget), reverse=reverse).evidence
+    map_work = map if min(int(budget), reads.n_samples) <= 1 else CpuBudget.fixed(int(budget)).thread_map
+    return prepare_contig(reads, config, int(budget), map_work=map_work, reverse=reverse).evidence
 
 
 def window_ranges(positions: np.ndarray, length_bp: int) -> list[tuple[int, int]]:
@@ -74,9 +76,9 @@ def _discover_window(index: int, evidence: Any, config: Any, reverse: bool) -> t
 
 
 def window_bytes(window: Any) -> int:
-    """Report the carried discovery working-set estimate; it never changes search budgets."""
+    """Report the discovery working-set estimate; it never changes search budgets."""
     # Kernels materialise these dense logical windows, even when declarations
-    # borrow codes/pairs. Preserve the original dense working-set estimate.
+    # borrow codes/pairs. Report those dense arrays in the working-set estimate.
     dense = int(np.prod(window.likelihoods.shape)) * 8 + int(np.prod(window.observed.shape))
     return WINDOW_EVIDENCE_FACTOR * (window.positions.nbytes + window.kept.nbytes + dense) + WINDOW_ALLOWANCE_BYTES
 
@@ -85,10 +87,10 @@ def discover_windows(
     evidence: Any, ranges: list[tuple[int, int]], budget: int = 1, *, reverse: bool = False
 ) -> list[Any]:
     """Discover informative windows independently; restore window order after execution."""
-    from ...science.discovery.parameters import DiscoveryConfig
+    from ...science.discovery.parameters import DiscoveryParameters
     from ...science.discovery.run import BlockEvidence
 
-    config = DiscoveryConfig()
+    config = DiscoveryParameters()
     tasks = []
     for index, (first, stop) in enumerate(ranges):
         if stop <= first:

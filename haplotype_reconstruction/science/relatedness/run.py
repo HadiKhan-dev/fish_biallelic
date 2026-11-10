@@ -1,7 +1,7 @@
 """Build bound-order family terms and fit the full-sib partition.
 
 Owns family entries, never the optional IBD report. No storage or runtime policy.
-Method: docs/methods/relatedness.md (P0 RL01, RL03, RL05, RL14, RL16).
+Method: docs/methods/relatedness.md.
 The site axis and every reduction follow the supplied contig order.
 """
 
@@ -16,6 +16,7 @@ from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
 from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
 from ...contracts.observations import PairArray
 from ...contracts.relatedness import RelatednessFamilies
+from ...core.concurrency import ThreadSource
 from ...core.errors import InputError
 from .frequency import allele_frequency
 from .parameters import AlleleFrequencyParameters, FamilyParameters
@@ -82,10 +83,10 @@ def contig_terms(
     family_parameters: FamilyParameters,
     frequency_parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     *,
-    map_work=None,
+    map_work=map,
 ) -> ContigTerms:
     """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and support boundaries; mutate nothing. ``map_work`` (ordered,
-    optional): the allele frequencies' site windows concurrently (release 4.10)."""
+    optional): the allele frequencies' site windows concurrently."""
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         n = len(evidence.sample_ids)
@@ -134,11 +135,11 @@ def concatenate_terms(
 
 
 def fit_families(
-    terms: FamilyTerms, parameters: FamilyParameters = _DEFAULT_FAMILY, *, claim_threads=None
+    terms: FamilyTerms, parameters: FamilyParameters = _DEFAULT_FAMILY, *, threads: ThreadSource = 1
 ) -> RelatednessFamilies:
-    """Fit both bounded searches from input terms; no report selection or input mutation. ``claim_threads``: an
-    optional step-boundary hook that re-reads the caller's CPU share for the parallel kernels (values never depend
-    on the team)."""
+    """Fit both bounded searches from input terms; no report selection or input mutation. ``threads`` is a
+    fixed count or caller-owned live source, read at every batch/search/sweep boundary.
+    A live source may refresh the ambient kernel team; values never depend on its size."""
     fitted = fit(
         terms.child,
         terms.log_prior,
@@ -146,7 +147,7 @@ def fit_families(
         terms.ranges,
         max_sweeps=parameters.max_sweeps,
         parameters=parameters,
-        claim_threads=claim_threads,
+        threads=threads,
     )
 
     return publish_families(terms, fitted)

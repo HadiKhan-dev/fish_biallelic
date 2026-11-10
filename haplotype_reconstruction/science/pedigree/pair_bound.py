@@ -1,8 +1,9 @@
 """Valid upper bounds on the M2 likelihood of every pair of a child's genome-retained parents.
 
-The M2 panel (``panel.bounded_panel``) admits a pair only when this bound can reach the child's best known
-configuration, so no pair whose M2 could be best (or within the panel window of the best) is left out, while the
-exact M2 forward (``forward.score_pairs``) runs only on the admitted pairs.
+The M2 panel (``panel.bounded_panel``) first uses this bound to screen retained-parent pairs for relevance to the
+child's best known configuration, then applies the configured per-child pair cap. Only relevance rejection proves
+a pair cannot compete within the margin; the cap can discard competitive pairs and flags incomplete panels.
+The exact M2 forward (``forward.component_m2``) runs on the resulting panel.
 
 The bound relaxes the M2 forward of one component (``forward.score_path`` mode 2; both views) by STATE AGGREGATION.
 Each parent's states at each bin are grouped: every state with transmitted-state mass pi >= ``high_mass`` is its own
@@ -33,7 +34,6 @@ indexed by the batch's listed children. Per child the work is linear in its numb
 per-site work per pair.
 
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -792,7 +792,7 @@ def component_context(projection, terms, high_mass: float, claim_threads=lambda:
     )
     background = np.ascontiguousarray(projection.candidate_alt[:, :, -1])
     # The range holds every BACKGROUND ALT probability a slot can transmit: each available candidate's (conditioned on
-    # its reads) and, where an evidence-free candidate makes a pair fall back to M1/M0 (forward.score_pairs), the null
+    # its reads) and, where an evidence-free candidate makes a pair fall back to M1/M0 (forward.component_m2), the null
     # chain's unconditional frequency state_alt[-1]. Without evidence-free candidates the narrower box is kept.
     null_background = np.asarray(projection.state_alt[-1], dtype=np.float64)
     if np.any(projection.available):

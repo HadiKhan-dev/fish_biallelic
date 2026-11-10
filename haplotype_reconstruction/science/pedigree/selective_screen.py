@@ -1,6 +1,5 @@
 """Pure resident components for certified M1 queries; stages own scheduling.
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 from collections.abc import Callable
@@ -10,7 +9,7 @@ import numpy as np
 
 from ...contracts.pedigree import ParentEligibility, PreparedChromosome
 from . import forward, resident
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .selective_bounds import Geometry
 
 
@@ -52,7 +51,7 @@ class Component:
 def prepare(
     prepared: PreparedChromosome,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     claim: Callable[[], None] = _claim,
     *,
     reverse: bool | None = None,

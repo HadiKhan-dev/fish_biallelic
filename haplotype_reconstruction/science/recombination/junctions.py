@@ -22,8 +22,8 @@ changes; this module adds:
   ends of a displaced or inverted segment switch in the same meioses: the pairing statistic compares y at a
   second locus predicted from the first (up to a discordance probability e) with independent switching there,
   takes the smaller of the two directions and subtracts log(number of locus pairs tested on the chromosome).
-  Likelihood ratios are conditional on the calls, not calibrated posterior odds. Under the convention reversal
-  (HAPLOTYPES_TIE_REVERSE, maths.ties.reverse_conventions) the report's exact ties (best paired locus, profile
+  Likelihood ratios are conditional on the calls, not calibrated posterior odds. Under the explicit convention
+  reversal (the ``reverse`` argument; core.ties) the report's exact ties (best paired locus, profile
   maximum on the switch grid, nearest supplied breakpoint) go to the last candidate instead of the first; the
   positive-score and flag thresholds are kept.
 """
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numba import types
@@ -43,8 +43,7 @@ from ...contracts.recombination import JunctionLocus
 from ...core.kernels import kernel
 from ...core.ties import conv_argmax
 from ..shared.recombination import haldane_fraction
-from .diagnostics import RecombinationTrace, Traced
-from .parameters import JunctionParameters
+from .parameters import DISCORDANCE_GRID_SPEC, SWITCH_GRID_SPEC, JunctionParameters
 
 if TYPE_CHECKING:
     from numbers import Real
@@ -62,10 +61,9 @@ if TYPE_CHECKING:
 
 REVERSED_SEGMENT = "reversed_segment"
 
-# Profile grids. The flip symmetry makes q and 1 - q equivalent, so q <= 1/2. The discordance floor (0.5%) keeps
-# one discordant meiosis (a call error or a crossover inside a displaced segment) from erasing pairing evidence.
-SWITCH_GRID = np.linspace(0.001, 0.5, 500)
-DISCORDANCE_GRID = np.linspace(0.005, 0.25, 50)
+# Instantiate the fixed inclusive profile specifications from the parameter module.
+SWITCH_GRID = np.linspace(*SWITCH_GRID_SPEC)
+DISCORDANCE_GRID = np.linspace(*DISCORDANCE_GRID_SPEC)
 
 
 _OVERLOADS = {
@@ -124,57 +122,17 @@ def breakpoint_intervals(breakpoints):
     return intervals
 
 
-@overload
 def split_at_breakpoints(
     positions: NDArray[np.int64],
     components: NDArray[np.int32],
     breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
     bin_edges: Sequence[NDArray[np.int64]],
-    *,
-    trace: Literal[False] = False,
-    audit: RecombinationTrace | None = None,
-) -> tuple[np.ndarray, np.ndarray, int]: ...
-
-
-@overload
-def split_at_breakpoints(
-    positions: NDArray[np.int64],
-    components: NDArray[np.int32],
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
-    bin_edges: Sequence[NDArray[np.int64]],
-    *,
-    trace: Literal[True],
-    audit: RecombinationTrace | None = None,
-) -> Traced[tuple[np.ndarray, np.ndarray, int]]: ...
-
-
-@overload
-def split_at_breakpoints(
-    positions: NDArray[np.int64],
-    components: NDArray[np.int32],
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
-    bin_edges: Sequence[NDArray[np.int64]],
-    *,
-    trace: bool,
-    audit: RecombinationTrace | None = None,
-) -> tuple[np.ndarray, np.ndarray, int] | Traced[tuple[np.ndarray, np.ndarray, int]]: ...
-
-
-def split_at_breakpoints(
-    positions: NDArray[np.int64],
-    components: NDArray[np.int32],
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]],
-    bin_edges: Sequence[NDArray[np.int64]],
-    *,
-    trace: bool = False,
-    audit: RecombinationTrace | None = None,
-) -> tuple[np.ndarray, np.ndarray, int] | Traced[tuple[np.ndarray, np.ndarray, int]]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     """(segment ids int32 [L], segment -> component int32, masked sites) of the axis split at breakpoints.
 
     Sites inside a breakpoint interval, or inside a painting bin overlapping it, get segment -1; a new segment
     starts after each excluded zone. Segment ids are consecutive in axis order.
     """
-    audit = RecombinationTrace() if trace and audit is None else audit
     intervals = breakpoint_intervals(breakpoints)
     excluded = np.zeros(len(positions), dtype=bool)
     cuts = []
@@ -182,8 +140,6 @@ def split_at_breakpoints(
         lo, hi = int(start), int(end) + 1
         for edges in bin_edges:
             overlap = edges[0] < hi and edges[-1] > lo
-            if audit is not None:
-                audit.emit("split.overlap", overlap, first=int(edges[0]), last=int(edges[-1]), lo=lo, hi=hi)
             if overlap:
                 first = cast("int | np.integer", max(np.searchsorted(edges, lo, side="right") - 1, 0))
                 last = cast("int | np.integer", min(np.searchsorted(edges, hi, side="left"), len(edges) - 1))
@@ -202,23 +158,18 @@ def split_at_breakpoints(
             origin.append(int(components[index]))
         segments[index] = len(origin) - 1
     result = segments, np.asarray(origin, dtype=np.int32), int(excluded.sum())
-    if audit is not None:
-        audit.axis = dict(segments=result[0].copy(), origin=result[1].copy(), masked=result[2])
-    return Traced(result, cast(RecombinationTrace, audit)) if trace else result
+    return result
 
 
-def in_reversed_segment(crossovers, breakpoints, *, trace=False, audit=None):
+def in_reversed_segment(crossovers, breakpoints):
     """bool (n,): whether each called crossover lies inside a supplied reversed segment."""
-    audit = RecombinationTrace() if trace and audit is None else audit
     segments = np.zeros((0, 2), dtype=np.int64) if breakpoints is None else breakpoints[1]
     result = []
     for left, right, *_ in crossovers:
         inside = bool(np.any((segments[:, 0] <= left) & (right <= segments[:, 1])))
         result.append(inside)
-        if audit is not None:
-            audit.emit("reversed", inside, left=float(left), right=float(right), segments=segments.copy())
     value = np.asarray(result, dtype=bool)
-    return Traced(value, audit) if trace else value
+    return value
 
 
 def mixture_terms(counts, grid):
@@ -343,7 +294,6 @@ def _hotspot_ceiling(left, right, config, chromosome_map):
     return point + background - 2.0 * point * background
 
 
-@overload
 def detect_junctions(
     contig: str,
     names: Sequence[str],
@@ -359,74 +309,9 @@ def detect_junctions(
     breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
     *,
     reverse: bool = False,
-    trace: Literal[False] = False,
-    audit: RecombinationTrace | None = None,
-) -> tuple[JunctionLocus, ...]: ...
-
-
-@overload
-def detect_junctions(
-    contig: str,
-    names: Sequence[str],
-    parents: np.ndarray,
-    children: np.ndarray,
-    crossovers: np.ndarray,
-    crossover_offsets: np.ndarray,
-    reported: np.ndarray,
-    callable_spans: np.ndarray,
-    callable_offsets: np.ndarray,
-    config: JunctionParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
-    *,
-    reverse: bool = False,
-    trace: Literal[True],
-    audit: RecombinationTrace | None = None,
-) -> Traced[tuple[JunctionLocus, ...]]: ...
-
-
-@overload
-def detect_junctions(
-    contig: str,
-    names: Sequence[str],
-    parents: np.ndarray,
-    children: np.ndarray,
-    crossovers: np.ndarray,
-    crossover_offsets: np.ndarray,
-    reported: np.ndarray,
-    callable_spans: np.ndarray,
-    callable_offsets: np.ndarray,
-    config: JunctionParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
-    *,
-    reverse: bool = False,
-    trace: bool,
-    audit: RecombinationTrace | None = None,
-) -> tuple[JunctionLocus, ...] | Traced[tuple[JunctionLocus, ...]]: ...
-
-
-def detect_junctions(
-    contig: str,
-    names: Sequence[str],
-    parents: np.ndarray,
-    children: np.ndarray,
-    crossovers: np.ndarray,
-    crossover_offsets: np.ndarray,
-    reported: np.ndarray,
-    callable_spans: np.ndarray,
-    callable_offsets: np.ndarray,
-    config: JunctionParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    breakpoints: tuple[NDArray[np.int64], NDArray[np.int64], tuple[str, ...]] | None = None,
-    *,
-    reverse: bool = False,
-    trace: bool = False,
-    audit: RecombinationTrace | None = None,
-) -> tuple[JunctionLocus, ...] | Traced[tuple[JunctionLocus, ...]]:
+) -> tuple[JunctionLocus, ...]:
     """Junction loci of one chromosome (module docstring); per-edge tables are packed with offsets. Exact ties of
     the report go to the last candidate under the convention reversal (module docstring)."""
-    audit = RecombinationTrace() if trace and audit is None else audit
     rev = bool(reverse)
     edges = len(parents)
     members_of = sorted(
@@ -438,8 +323,6 @@ def detect_junctions(
     index: int | np.integer
     for lo, hi, edge, index in members_of:
         overlaps = bool(groups and lo <= groups[-1][1])
-        if audit is not None and groups:
-            audit.emit("locus.overlap", overlaps, lo=lo, hi=groups[-1][1])
         if overlaps:
             groups[-1][1] = max(groups[-1][1], hi)
             groups[-1][2].append((edge, index))
@@ -448,13 +331,6 @@ def detect_junctions(
     loci: list[_Locus] = []
     for left, right, members in groups:
         parent_count = len({int(parents[edge]) for edge, _ in members})
-        if audit is not None:
-            audit.emit(
-                "locus.parents",
-                parent_count >= config.minimum_parents,
-                count=parent_count,
-                cutoff=config.minimum_parents,
-            )
         if parent_count < config.minimum_parents:
             continue
         decoded = np.asarray([crossovers[index, :2] for _, index in members])
@@ -481,18 +357,6 @@ def detect_junctions(
                 ]
             ),
         )
-        if audit is not None:
-            for edge in range(edges):
-                a, b = callable_offsets[edge : edge + 2]
-                audit.emit(
-                    "locus.decidable",
-                    decidable[edge],
-                    has_call=edge in with_calls,
-                    spans=callable_spans[a:b].copy(),
-                    first=first,
-                    last=last,
-                    locus_edge=edge,
-                )
         loci.append(dict(left=left, right=right, first=first, last=last, members=members, odd=odd, decidable=decidable))
     rows: list[dict[str, Any]] = []
     # Integer counts per parent need one pass over edges per locus. Stable CSR
@@ -518,8 +382,6 @@ def detect_junctions(
                 children_text.extend(names[child] for child in children[edges_here[odd_decidable[edges_here]]])
                 mixed += k < n
                 whole = k == n and n >= 2
-                if audit is not None:
-                    audit.emit("locus.all_or_none", whole, k=k, n=n)
                 all_or_none += whole
         counts = np.asarray(counts, dtype=np.int64).reshape(-1, 2)
         ceiling = _hotspot_ceiling(locus["left"], locus["right"], config, chromosome_map)
@@ -533,25 +395,9 @@ def detect_junctions(
                 gap = max(int(start) - locus["right"], locus["left"] - int(end), 0)
                 # The first nearest interval (the last under the reversal); distance starts as NaN.
                 closer = (not gap > distance) if rev else (not gap >= distance)
-                if audit is not None:
-                    audit.emit(
-                        "tie.nearest", closer, gap=gap, distance=distance, reverse=rev, start=int(start), end=int(end)
-                    )
                 if closer:
                     nearest, distance = f"{start}-{end}", gap
         fraction_index = conv_argmax(mixture, reverse=rev)
-        if audit is not None:
-            audit.emit("tie.fraction", fraction_index, scores=mixture.copy(), reverse=rev)
-            audit.profiles.append(
-                dict(
-                    counts=counts.copy(),
-                    mixture=mixture.copy(),
-                    bounded=bounded.copy(),
-                    ceiling=ceiling,
-                    odd=locus["odd"].copy(),
-                    decidable=locus["decidable"].copy(),
-                )
-            )
         rows.append(
             dict(
                 contig=contig,
@@ -589,22 +435,10 @@ def detect_junctions(
         if len(loci) > 1
         else None
     )
-    if audit is not None and scores is not None:
-        audit.pairing.append(
-            dict(
-                scores=scores.copy(),
-                parents=parents.copy(),
-                decidable=np.asarray([x["decidable"] for x in loci]),
-                odd=np.asarray([x["odd"] for x in loci]),
-            )
-        )
     for i, locus in enumerate(loci):
         # The best pairing is the first locus with the largest positive score (the last under the reversal).
         j = -1 if scores is None else conv_argmax(scores[i], reverse=rev)
         positive = j >= 0 and cast(np.ndarray, scores)[i, j] > 0.0
-        if audit is not None and scores is not None:
-            audit.emit("tie.pairing", j, scores=scores[i].copy(), reverse=rev)
-            audit.emit("locus.pairing", positive, score=float(scores[i, j]))
         if positive:
             other = loci[j]
             both = locus["decidable"] & other["decidable"]
@@ -619,32 +453,15 @@ def detect_junctions(
         adjusted = row["pairing_log_lr"] - (math.log(row["pairing_tests"]) if row["pairing_tests"] else 0.0)
         row["junction_log_lr"] = max(row["mixing_log_lr"], adjusted, 0.0)
         row["flagged"] = bool(row["junction_log_lr"] >= config.flag_log_likelihood_ratio)
-        if audit is not None:
-            audit.emit(
-                "locus.flag", row["flagged"], score=row["junction_log_lr"], cutoff=config.flag_log_likelihood_ratio
-            )
         if row["flagged"]:
             row["interpretation"] = "junction"
         elif row["all_or_none_parents"] and row["flip_adjusted_switch_fraction"] <= row["hotspot_ceiling"]:
             row["interpretation"] = "parent_frame_flips"
         else:
             row["interpretation"] = "recombination_or_unresolved"
-        if audit is not None:
-            interpretation = {"junction": 0, "parent_frame_flips": 1, "recombination_or_unresolved": 2}[
-                row["interpretation"]
-            ]
-            audit.emit(
-                "locus.interpretation",
-                interpretation,
-                score=row["junction_log_lr"],
-                cutoff=config.flag_log_likelihood_ratio,
-                all_or_none=row["all_or_none_parents"],
-                fraction=row["flip_adjusted_switch_fraction"],
-                ceiling=row["hotspot_ceiling"],
-            )
         result.append(JunctionLocus(**row))
     value = tuple(result)
-    return Traced(value, cast(RecombinationTrace, audit)) if trace else value
+    return value
 
 
 def contig_breakpoints(

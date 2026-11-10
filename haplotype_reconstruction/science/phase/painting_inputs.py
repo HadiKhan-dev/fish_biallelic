@@ -1,7 +1,7 @@
 """Inputs the family-phase stage reads from the painting product: bins, tie boundaries and coverage.
 
-tie_boundaries finds the marker boundaries where the painting's track order was set by a tie rather than data
-(release 2.2 semantics, unchanged): a sample whose order is not anchored by a linked parent or by enough children
+tie_boundaries finds the marker boundaries where the painting's track order was set by a tie rather than data: a
+sample whose order is not anchored by a linked parent or by enough children
 releases its phase sets broken there. Coverage is the span of every component in which a sample was painted
 (eligible); recombination decodes meioses inside coverage only. A component without painted sites uses
 EMPTY_COMPONENT_BIN_SITES-site bins over its panel positions.
@@ -12,7 +12,6 @@ from __future__ import annotations
 import numpy as np
 
 from ...contracts.painting import PaintedChunk, coalesce_chunks
-from .diagnostics import DecisionTrace, PhaseTrace
 from .parameters import EMPTY_COMPONENT_BIN_SITES
 
 
@@ -50,7 +49,7 @@ def _track_changes(before, after, local_keys, bin_index, n_classes, class_of):
     return 1, 1
 
 
-def tie_boundaries(painting, positions, samples, *, trace=False, audit=None):
+def tie_boundaries(painting, positions, samples):
     """{sample: int64 marker boundaries (i = between sites i and i + 1) where a painting tie set the track order}.
 
     Diploid painting emissions are symmetric in track order and the label transitions after a boundary are
@@ -60,10 +59,6 @@ def tie_boundaries(painting, positions, samples, *, trace=False, audit=None):
     (local allele-class keys); a boundary is a tie unless the scaffold's continuation is lexicographically
     strictly better than the swapped one.
     """
-    if trace:
-        audit = DecisionTrace(extended=True)
-        value = tie_boundaries(painting, positions, samples, audit=audit)
-        return PhaseTrace(value, tuple(audit.rows))
     pos = np.asarray(positions, dtype=np.int64)
     found = {int(sample): [] for sample in samples}
     for painted in painting:
@@ -111,8 +106,6 @@ def tie_boundaries(painting, positions, samples, *, trace=False, audit=None):
                     )
                     for swapped in (False, True)
                 )
-                if audit is not None:
-                    audit.emit("painting_tie", not direct < crossed, *direct, *crossed)
                 if direct < crossed:
                     continue
                 index = int(np.searchsorted(pos, right.start, side="left"))

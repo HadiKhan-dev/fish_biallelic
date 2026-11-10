@@ -1,4 +1,4 @@
-"""Build explicit refinement capabilities and run one AS8 component task.
+"""Build explicit refinement capabilities and run one final refinement component task.
 
 The caller supplies immutable component data, a declared team and record scope.
 The stage chooses evidence/message storage and measures elapsed component time.
@@ -15,8 +15,8 @@ from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import ComponentRefinement, JoinedLevel, RefinedLevel
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
+from haplotype_reconstruction.engine.cpu import current_budget
 from haplotype_reconstruction.engine.graph import Expansion, ResultRef
-from haplotype_reconstruction.engine.scheduler import current_budget
 from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
 from haplotype_reconstruction.science.assembly.refinement.capabilities import RefinementExecution, RefinementRecords
 
@@ -102,10 +102,10 @@ def refine_component(
 def refine(
     *, session: AssemblySession, state: HierarchyState, joined: JoinedLevel, cores: int = 1
 ) -> RefinedLevel | Expansion:
-    """AS6 callback: resume components or expand independent AS8 component tasks.
+    """assembly callback: resume components or expand independent final refinement component tasks.
 
     Results and continuation families return in genomic component order. Each
-    component's identity binds its exact ordered coarse context and final flag.
+    component's identity binds its exact ordered coarse context.
     The native fit-record threshold is an I/O policy; direct replay may force it.
     """
     from haplotype_reconstruction.engine.graph import ResourceRequest, Task
@@ -121,7 +121,6 @@ def refine(
         config,
         bin_floor(state.level, state.prepared, config),
         float(parameters.cost_scale),
-        joined.record.stop_reason is not None and config.final_additions,
         parameters.count_rule,
         state.level,
         session.inputs.genetic_map,
@@ -149,7 +148,6 @@ def refine(
                 level=state.level,
                 context=context,
                 parameters=settings,
-                additions=settings.additions,
             )
             bound = RecordCapability(records.file, records.prefix, identity)
             saved = bound.load(name)
@@ -271,7 +269,7 @@ def _gather_level(
     components = tuple(item[0] for item in results)
     refinements = tuple(item[1] for item in results)
     summary = summarise(
-        settings.level, settings.additions, settings.min_sites_per_bin, refinements, perf_counter() - started
+        settings.level, settings.min_sites_per_bin, refinements, perf_counter() - started
     )
     from .refinement_diagnostics import refinement_diagnostics
 

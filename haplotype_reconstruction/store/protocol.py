@@ -1,10 +1,10 @@
 """Publish complete results once and resume only by deterministic derivation identity.
 
-The container remains the checked, append-only 3.5 format (P0 ENG-14/15); its random
+The checked, append-only container (ENG-14/15) uses a random
 physical record token is never a scientific upstream identity. A single append binds
 payload and derivation. Per-result flock claims disappear on process death, and
 completion markers are consequences of record checks, never evidence of completion.
-ARCHITECTURE_40 §4.3 additionally binds contig payloads, code closure and library policy.
+Derivation identity binds contig payloads, code closure and numerical-library policy.
 """
 
 from __future__ import annotations
@@ -33,12 +33,10 @@ __all__ = [
     "PublishedRecord",
     "PublicationMetadata",
     "publication_metadata",
-    "numerical_policy_identity",
     "derivation_identity",
     "payload_identity",
     "bind_payload_identity",
     "cached_payload_identity",
-    "verify_payload_identity",
     "publish",
     "resume",
     "read_items",
@@ -51,7 +49,7 @@ __all__ = [
 ]
 
 _PUBLICATION_SCHEMA = 1
-# The corrected payload boundary binds GT fallback/header/drop counts, not input FILTER.
+# The payload boundary binds GT fallback/header/drop counts, not input FILTER.
 _PAYLOAD_SCHEMA = 2
 
 
@@ -109,11 +107,6 @@ class Derivation:
         return derivation_identity(self)
 
 
-def numerical_policy_identity(policy: NumericalPolicy) -> str:
-    """Hash both numerical settings and Python/NumPy/SciPy/Numba/llvmlite versions."""
-    return json_digest(policy)
-
-
 def derivation_identity(derivation: Derivation) -> str:
     """Hash a resolved derivation using the single canonical digest encoding."""
     return json_digest(derivation)
@@ -121,22 +114,22 @@ def derivation_identity(derivation: Derivation) -> str:
 
 @dataclass(frozen=True)
 class ContigPayload:
-    """Bind the source values 3.5 inference and export consume for one contig.
+    """Bind the source values inference and export consume for one contig.
 
     positions: int64[L] bp before site-quality filtering; counts: int32[N,L,2]
     loader AD (missing/negative values contribute zero); ref/alt: length-L alleles.
     sample_ids: length-N canonical identifiers. ad_usable: bool[L], a record-level
     flag from the original AD field, not a positive-depth test. False means AD is
-    absent or is HTSlib's single all-negative column (B/export/sites.py:148).
+    absent or is HTSlib's single all-negative column.
     gt_types: int8[N,L] cyvcf2 genotype classes (0 HOM_REF, 1 HET, 2 UNKNOWN,
     3 HOM_ALT); only columns with ad_usable=False enter the identity. It may be
-    None when all AD records are usable. GT phase/order is not consumed by 3.5.
+    None when all AD records are usable. GT phase/order is not consumed.
     contig_length: header length in bp, or None when unspecified. dropped: the
     loader's per-reason record counts, before site-quality rules.
 
-    Input FILTER is not read by 3.5 and has no field here. Export derives FILTER
+    Input FILTER is not consumed and has no field here. Export derives FILTER
     from site-quality rules. Identity is independent of filename/compression/strides.
-    The future source adapter supplies this record; it must not infer ad_usable
+    Source adapters supply this record; they must not infer ad_usable
     from counts, since zero AD is usable and must not trigger GT fallback.
     """
 
@@ -237,13 +230,6 @@ def bound_payload_identity(file: CheckpointFile) -> str:
     return identity
 
 
-def verify_payload_identity(file: CheckpointFile, actual: str) -> None:
-    """Verify export's re-read payload against the immutable input binding."""
-    expected = bound_payload_identity(file)
-    if actual != expected:
-        raise CheckpointMismatch(f"{file.label}: input payload {actual} differs from bound {expected}")
-
-
 @dataclass(frozen=True)
 class PublishedRecord:
     """A complete decoded product and its scientific identity; physical info is diagnostic."""
@@ -294,8 +280,9 @@ def publish(file: CheckpointFile, key: str, identity: str, payload: Any) -> Reco
     """Atomically publish payload and derivation; an identical duplicate is a no-op.
 
     A conflicting derivation raises CheckpointMismatch without changing the file.
-    The append lock is also the container's writer lock; crashes retain the original
-    torn-tail recovery behavior. Identical identities promise identical computation,
+    The append lock is also the container's writer lock; successful lock exit waits
+    for header durability, including duplicates. Crashes use the container's
+    torn-tail recovery. Identical identities promise identical computation,
     so this protocol does not redundantly hash all scientific outputs.
     """
     envelope = dict(publication_schema=_PUBLICATION_SCHEMA, derivation=identity, payload=payload)
@@ -333,7 +320,7 @@ def read_items(
 
     Missing records return None; absent fields are omitted. An identity mismatch
     raises CheckpointMismatch before any payload buffer group is decompressed (checked
-    on the same metadata decode, release 4.8). ``out`` receives matching selected arrays
+    on the same metadata decode). ``out`` receives matching selected arrays
     in place; inputs are not mutated. ``reader``: a CheckpointFile.batch() reader of ``file``.
     """
     source = file if reader is None else reader
@@ -449,8 +436,7 @@ def _ensure_directory(path: Path) -> None:
     """mkdir -p for a directory many processes create at once.
 
     pathlib's exist_ok re-raises EEXIST when its follow-up status check fails, and on a shared filesystem under a
-    burst of metadata requests that check can fail for an existing directory (release 4.10: a resumed N = 320 run's
-    concurrent block claims stopped the run with FileExistsError on checkpoints/contigs). The entry's existence is then
+    burst of metadata requests that check can fail for an existing directory. The entry's existence is then
     confirmed by its own status, retried briefly, before the error is raised.
     """
     import stat

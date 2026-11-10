@@ -1,6 +1,6 @@
 """Compose the pedigree decision, exclusion request and release without executing tasks.
 
-Owns PD27's pure transitions. PE2 scores the requested dyads; PE3 supplies relatives.
+Owns PD27's pure transitions. Exclusion scoring supplies the requested dyads; relative scoring supplies reports.
 No engine, store, filesystem or logging belongs here.
 Method: docs/methods/pedigree.md#products-and-published-tables (PD17, PD22–PD27).
 Identity: guard before count; target prefix only; original edges and both guard passes
@@ -39,17 +39,13 @@ from ...contracts.pedigree import (
     SupportRecord,
 )
 from ...core.errors import InputError, InvariantError
-from . import api, count, decision, guard, views
-from .calibration import CalibrationExecutor
+from . import api, count, decision, exclusion, guard
 from .eligibility import ParentEligibility
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .resampling import minimum_contigs_for_tier
-from .slots import ParentOrientation
 
 __all__ = [
     "precheck",
-    "prepare_decision",
-    "prepare_full_fit",
     "start_full_fit",
     "finish_full_fit",
     "complete_decision",
@@ -60,12 +56,12 @@ __all__ = [
 
 
 def precheck(
-    n_samples: int, contigs: int, parameters: PedigreeConfig, *, basis: str = "informative"
+    n_samples: int, contigs: int, parameters: PedigreeParameters, *, basis: str = "informative"
 ) -> PedigreePrecheck:
     """Reject N<3 or C<ceil(exposure units); report the configured tier-reach warning.
 
     Workflow callers apply the configured check only when they will reach pedigree;
-    prepare_decision applies the informative check after PE1's omitted-contig filter.
+    start_full_fit applies the informative check after preparation omits uninformative contigs.
     """
     if n_samples < 3:
         raise InputError(f"pedigree requires at least 3 samples; received {n_samples}")
@@ -76,44 +72,28 @@ def precheck(
     return PedigreePrecheck(n_samples, contigs, minimum, tier_minimum, contigs < tier_minimum, basis)
 
 
-def prepare_decision(
-    scores: GenomeScores, parameters: PedigreeConfig, executor: CalibrationExecutor | None = None
-) -> Decision:
-    """Fit the once-floored scores and resamples (serially) before requesting full-marker exclusion."""
-    precheck(len(scores.sample_ids), len(scores.contigs), parameters)
-    return decision.decide_floored(scores, ParentEligibility.unrestricted(scores.sample_ids), parameters, executor)
-
-
-def prepare_full_fit(
-    scores: GenomeScores, parameters: PedigreeConfig, executor: CalibrationExecutor | None = None
-) -> decision.FullFit:
-    """prepare_decision up to its resampling: the stage then runs resampling.plan's tasks independently."""
-    precheck(len(scores.sample_ids), len(scores.contigs), parameters)
-    return decision.fit_full(scores, ParentEligibility.unrestricted(scores.sample_ids), parameters, executor)
-
-
-def start_full_fit(scores: GenomeScores, parameters: PedigreeConfig) -> decision.FitStart:
-    """prepare_full_fit up to its evidence-scale search (calibration.solve on ``.calibration``)."""
+def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FitStart:
+    """Prepare the full fit and its evidence-scale search (calibration.solve on ``.calibration``)."""
     precheck(len(scores.sample_ids), len(scores.contigs), parameters)
     return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids), parameters)
 
 
 def finish_full_fit(
-    started: decision.FitStart, fitted: tuple[float, CalibrationRecord], parameters: PedigreeConfig
+    started: decision.FitStart, fitted: tuple[float, CalibrationRecord], parameters: PedigreeParameters
 ) -> decision.FullFit:
-    """prepare_full_fit after its evidence-scale search."""
+    """Finish the full fit after its evidence-scale search."""
     return decision.finish_fit(started, fitted, parameters)
 
 
-def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeConfig) -> Decision:
-    """prepare_decision after its resampling: support, tiers, views and candidate sets."""
+def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeParameters) -> Decision:
+    """Complete the decision after resampling: support, tiers, views and candidate sets."""
     return decision.decide_resampled(state, resampled, parameters)
 
 
 def exclusion_request(
-    decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeConfig
+    decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeParameters
 ) -> ExclusionRequest:
-    """Order targets first, then sorted supported-family extras; freeze the exact PE2 query."""
+    """Order targets first, then sorted supported-family extras; freeze the exact exclusion query."""
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
     dyads = count.target_dyads(decided.tier_b, rows, decided.eligibility)
     before = api.edges(decided.partial_b, sample_ids)
@@ -138,7 +118,7 @@ def release_decision(
     evidence: Sequence[ExclusionEvidence],
     relatedness: GuardRelatedness,
     observed_counts: np.ndarray,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
 ) -> ReleasedDecision:
     """Combine configured evidence, guard/count, orient and check the second guard; no scoring."""
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
@@ -163,7 +143,7 @@ def release_decision(
                 raise InvariantError(f"exclusion evidence axes differ on {contig}")
             if value.log_e_upper is not None and value.log_e_upper.shape != (len(scored),):
                 raise InvariantError(f"exclusion upper endpoint axis differs on {contig}")
-        lower, upper, observed = api.combine_exclusion(evidence)
+        lower, upper, observed = exclusion.combine(evidence)
         chromosomes = [
             dict(contig=value.contig, markers=value.markers, pattern_fallback_samples=value.pattern_fallback_samples)
             for value in evidence
@@ -250,29 +230,21 @@ def release_decision(
 def assemble(
     released: ReleasedDecision,
     omitted: dict[str, str],
-    parameters: PedigreeConfig,
-    reports: PedigreeReportInputs | None = None,
+    parameters: PedigreeParameters,
+    reports: PedigreeReportInputs,
 ) -> PedigreeResult:
-    """Assemble retained state and numeric views; only a report-complete product may publish.
-
-    With ``reports`` the views are built once, report-complete (api.complete_reports' views).
-    """
+    """Assemble retained state and complete numeric report views for publication."""
     decided = released.decision
-    if reports is None:
-        orientation = ParentOrientation(released.orientation_ranks, reverse=parameters.reverse_conventions)
-        numeric = views.build(decided, released.count_release, (), (), parameters)
-        numeric = views.apply_guard(views.orient(numeric, orientation), released.guard)
-    else:
-        numeric = api.report_views(
-            decided,
-            released.count_release,
-            released.orientation_ranks,
-            released.guard,
-            decided.scores.sample_ids,
-            released.request.contigs,
-            reports,
-            parameters,
-        )
+    numeric = api.report_views(
+        decided,
+        released.count_release,
+        released.orientation_ranks,
+        released.guard,
+        decided.scores.sample_ids,
+        released.request.contigs,
+        reports,
+        parameters,
+    )
     product = Pedigree(
         decided.scores.sample_ids,
         released.request.contigs,
@@ -293,7 +265,7 @@ def assemble(
         guard_summary=guard_summary(released.guard),
         exclusion=released.exclusion,
         retained=PedigreeRetained(decided, released.count_release, released.orientation_ranks, released.request),
-        reports_complete=reports is not None,
+        reports_complete=True,
     )
     return PedigreeResult(product, decided, released.count_release, released.orientation_ranks, released.exclusion)
 
@@ -301,7 +273,7 @@ def assemble(
 def relative_request(released: ReleasedDecision) -> RelativeRequest:
     """PD26 request: sorted pairs from post-count Tier B, partial B and complete, before guard.
 
-    View membership follows baseline insertion order; duplicate memberships are
+    View membership follows insertion order; duplicate memberships are
     retained. Slot orientation cannot change the pair set or membership order.
     """
     rows = released.decision.inputs.alternatives.rows
@@ -323,7 +295,7 @@ def relative_request(released: ReleasedDecision) -> RelativeRequest:
 
 
 def guard_summary(value) -> GuardSummary:
-    """Project baseline guard.apply's summary directly from the final typed votes."""
+    """Summarize the final typed guard votes."""
     return GuardSummary(
         "family-exclusion-v2",
         len(value.votes),

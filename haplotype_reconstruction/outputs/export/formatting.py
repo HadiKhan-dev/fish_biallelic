@@ -1,13 +1,11 @@
-"""Release 4.10: native text of the sample-phase VCF and its BGZF block boundaries.
+"""Format sample-phase VCF records and their BGZF block boundaries.
 
-samples.write_sample_phase built every cell as a Python string and joined each record's cells: on chr3 of the N = 320
-simulation at 0.5x (1.5 million records) that formatting was most of the export, on one CPU. ``sample_lines`` writes a
-chunk of records as bytes with the same text: each record's prefix (CHROM .. FORMAT, formatted by the caller), then one
-GT:PS cell per sample, tab-separated. A cell is the genotype of allele codes (".", "0", "1"): phased "a|b:PS" with the
-set's first position ("." beyond int32, as htslib writes it), unphased (no set) "lo/hi:." with the alleles in
-ascending text order, missing first, as the previous genotype tables; a removed (filtered) record is "./.:." in
-every sample. ``block_cuts`` gives the positions where htslib's record writer starts a new BGZF block (vcf_write's
-bgzf_flush_try), so the compressed file is the same.
+Writing GT:PS cells directly into byte buffers avoids allocating a Python string per sample-site cell.
+Each record contains its prefix (CHROM .. FORMAT, supplied by the caller), then one tab-separated cell
+per sample. Allele codes are (".", "0", "1"): phased cells are "a|b:PS" with the set's first position
+("." beyond int32, as htslib writes it). Unphased cells are "lo/hi:." in ascending text order, missing first.
+A filtered record is "./.:." in every sample. ``block_cuts`` follows htslib's record-writer flush rule
+(vcf_write's bgzf_flush_try), preserving record boundaries in the compressed stream.
 """
 
 from __future__ import annotations

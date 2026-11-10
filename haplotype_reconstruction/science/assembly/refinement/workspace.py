@@ -1,4 +1,4 @@
-"""Hold a sweep's immutable arrays and caller-supplied numerical storage capabilities.
+"""Hold a component's immutable arrays and caller-supplied numerical storage capabilities.
 
 Owns the numeric workspace view and the sample-range order (RS01, RC04–RC07).
 Must not choose storage routes, inspect memory, or configure runtime threads.
@@ -10,13 +10,12 @@ of the same segment parity. Proposal flanks are copied before parallel workers r
 import numpy as np
 from numba.typed import List
 
-from haplotype_reconstruction.contracts.assembly import RefinementProblem
 from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD, sample_team
 
-from .capabilities import ComponentWorkspaceView, EvidenceWindows, RefinementExecution, SweepWorkspaceView
+from .capabilities import ComponentWorkspaceView, RefinementExecution
 from .objective import selected_alleles
 
-__all__ = ["Orientation", "SweepWorkspace", "sample_ranges", "sample_threads"]
+__all__ = ["Orientation", "sample_ranges", "sample_threads"]
 
 # A search's messages and per-sample scores run over consecutive sample ranges and re-read its thread share before
 # each range, so a search whose share grows while it computes them (its peers finished) takes the freed threads
@@ -51,7 +50,7 @@ class Orientation:
     a private int16[K,L] materialisation; window returns a workspace-owned view.
     """
 
-    def __init__(self, workspace: SweepWorkspaceView | ComponentWorkspaceView, reverse: bool):
+    def __init__(self, workspace: ComponentWorkspaceView, reverse: bool):
         sites = int(workspace.offsets[-1])
         self.reverse = reverse
         self.workspace = workspace
@@ -70,20 +69,3 @@ class Orientation:
     def window(self, founders):
         """Read K's evidence/cost capability; its view lifetime is the workspace lease."""
         return self.workspace.windows.view(founders, self.reverse)
-
-
-class SweepWorkspace:
-    """Borrow immutable problem arrays and caller-owned windows for one sweep.
-
-    message_step is the stage's declared dense/checkpoint capability. leaves is a
-    typed list of existing int16[R_b,L_b] arrays; it owns references, not copies.
-    Only window buffers and messages created during the sweep mutate.
-    """
-
-    def __init__(self, problem: RefinementProblem, windows: EvidenceWindows, message_step: int):
-        self.leaves = List(list(problem.leaves))
-        self.offsets = problem.offsets
-        self.samples = problem.evidence.shape[0]
-        self.normalisers = problem.normalisers
-        self.windows = windows
-        self.message_step = message_step

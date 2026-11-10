@@ -29,6 +29,7 @@ import numba
 import numpy as np
 from numba import prange
 
+from ....core.concurrency import ThreadSource
 from ....core.errors import InvariantError
 from ....core.kernels import kernel
 from ....core.ties import BlockQuanta
@@ -43,7 +44,7 @@ from ..panel import (
     panel_key,
     unique_rows,
 )
-from ..parameters import FixedKModelConfig
+from ..parameters import FixedKModelParameters
 from .assign import assign, haplotype_patterns, meet_pairs, pair_indices
 from .update import (
     _fractional_usage_commutes,
@@ -73,7 +74,7 @@ def _readonly(*arrays):
 def _assignment_record(assignments, cost, unknown_slots, mask):
     """Immutable A(H) record: (assignments, per-sample cost, unknown slots, total NLL)."""
     _readonly(assignments, cost, unknown_slots)
-    # The exactly rounded total: independent of sample order and summation layout (release 2.1).
+    # The exactly rounded total is independent of sample order and summation layout.
     offsets, states = compact_ties(mask)
     return (assignments, cost, unknown_slots, math.fsum(cost.tolist()), offsets, states)
 
@@ -484,7 +485,6 @@ def _batched_assignments(workspace, batch):
         tile_width,
         workspace.a_policy.quantum(),
     )
-    # The full transition historically applied this correction in _update_frontier.
     # A-only results need the same neutral (U,U) membership as scalar assign.
     inactive = workspace.uninformative
     if np.any(inactive):
@@ -780,10 +780,10 @@ def fit_starts(
     quanta: BlockQuanta | None = None,
     schedule_reverse: bool = False,
 ) -> list[FitResult] | list[tuple[FitResult, FitResult]]:
-    """Explicit single-schedule fit primitive; max_iterations=0 is unchanged exact A(H).
+    """Explicit single-schedule fit primitive; max_iterations=0 computes exact A(H) without an H step.
 
-    Biological discovery and bank consumers use fit_families. The optional legacy schedule
-    default remains for reference callers; it never chooses a production family endpoint.
+    Biological discovery and bank consumers use fit_families. The optional schedule default serves reference
+    callers; it never chooses a production family endpoint.
     """
     reverse = bool(schedule_reverse)
     return _scheduled_starts(workspace, starts, max_iterations, with_initial, quanta, reverse)[0]
@@ -995,11 +995,11 @@ def _check_quanta(workspace, quanta):
 def prepare_workspace(
     likelihoods: np.ndarray,
     observed: np.ndarray,
-    model: FixedKModelConfig,
+    model: FixedKModelParameters,
     quanta: BlockQuanta | None = None,
     *,
     reverse: bool = False,
-    threads: int = 1,
+    threads: ThreadSource = 1,
 ) -> FixedKWorkspace:
     """A block's fixed-K workspace with uniform winning-category tie evidence in every path."""
     return FixedKWorkspace(likelihoods, observed, model, quanta, reverse=reverse, threads=threads)

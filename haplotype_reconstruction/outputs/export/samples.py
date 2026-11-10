@@ -2,8 +2,8 @@
 
 Released calls only: an unknown allele stays `.` (no imputation). Sites inside a supported component are phased
 (`|`) with PS = the position of the first site of the sample's phase set, so phase sets never cross a component
-boundary; sites between components are unphased (`/`, PS `.`). Release 2.2 (family phase's released ambiguity,
-when its record carries it): a sample's phase set also restarts at the first site after each of its phase breaks
+boundary; sites between components are unphased (`/`, PS `.`). With family phase's released ambiguity,
+a sample's phase set also restarts at the first site after each of its phase breaks
 (marker boundaries where the displayed phase of the right side relative to the left is not determined by the data),
 and a site whose displayed frame is undetermined (an unplaceable switch inside an uninformative stretch) is written
 unphased (`/`, PS `.`) without breaking the phase set around it. REF/ALT are the input VCF's alleles at each
@@ -20,26 +20,15 @@ import numpy as np
 
 from ...contracts.phase import DISPLAYED_UNDETERMINED
 from ...core.errors import InvariantError
+from ...core.release import CURRENT_RELEASE
 from .formatting import sample_line_bytes, sample_lines
 from .records import SiteTable
-from .vcf import FILEFORMAT, LEGACY_FILEFORMAT, RecordWriter, contig_line, site_header_lines
+from .vcf import FILEFORMAT, RecordWriter, contig_line, site_header_lines
 
-_ALLELES = (".", "0", "1")
 # Sites formatted at once: CHUNK_SITES, fewer with many samples so that a chunk holds at most CHUNK_CELLS cells (its
 # int64 codes, phase sets and their unique-inverse, and its cell texts are each 8 bytes per cell: 8 MiB at the limit).
 CHUNK_SITES = 4096
 CHUNK_CELLS = 1 << 20
-
-
-def _genotype_table(separator: str, phase_set: str) -> list[str]:
-    """The 9 genotype strings, indexed by 3 * (first allele + 1) + (second allele + 1).
-
-    Unphased ("/") genotypes are written in ascending allele order, missing first: their order carries no information,
-    and the internal order of a cell whose frame is undetermined can follow numerically negligible motion (ledger L15).
-    """
-    if separator == "/":
-        return [min(a, b) + separator + max(a, b) + ":" + phase_set for a in _ALLELES for b in _ALLELES]
-    return [a + separator + b + ":" + phase_set for a in _ALLELES for b in _ALLELES]
 
 
 def phase_set_starts(components: np.ndarray, breaks) -> list[np.ndarray] | None:
@@ -80,10 +69,10 @@ def write_sample_phase(
     ``sites``) with the rows of ``sites`` to ``path`` (format "bcf" or "vcf").
 
     ``names`` are the written sample columns in order; ``sample_rows`` (int64 [N], optional) the row of ``calls``
-    written in each column (the run's canonical sample order mapped back to the input order, release 2.1), applied
+    written in each column (the run's canonical sample order mapped back to the input order), applied
     chunk by chunk (no reordered copy of the calls). ``phase_breaks`` (per call row, int64 marker boundaries) and
     ``frame_undetermined`` (int8 [N, L], bit DISPLAYED_UNDETERMINED) are family phase's released phase ambiguity
-    (release 2.2; None = none)."""
+    (None = none)."""
     positions = np.asarray(positions)
     calls = np.asarray(calls)
     components = np.asarray(components)
@@ -99,8 +88,9 @@ def write_sample_phase(
         raise InvariantError(f"{contig}: final phase sites differ from the kept sites of the export")
     length = int(sites.positions[-1]) if synthetic else sites.contig_length
     header = (
-        (FILEFORMAT if sites.full_length else LEGACY_FILEFORMAT)
+        FILEFORMAT
         + "##source=haplotype-reconstruction\n"
+        + f"##haplotype_reconstruction_release={CURRENT_RELEASE}\n"
         + contig_line(contig, length)
         + '##FORMAT=<ID=GT,Number=1,Type=String,Description="Released genotype; no imputation">\n'
         '##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the position of its first site; it '
@@ -143,7 +133,7 @@ def write_sample_phase(
                 phase_sets[(np.asarray(frame_undetermined)[:, selected] & DISPLAYED_UNDETERMINED) != 0] = -1
             if sample_rows is not None:
                 phase_sets = phase_sets[sample_rows]
-            # Release 4.10: the records' text as bytes (formatting.sample_lines: each cell the genotype table's text of
+            # the records' text as bytes (formatting.sample_lines: each cell the genotype table's text of
             # its phase set, the unphased table for -1; "./.:." throughout a removed record), not Python cell strings.
             prefixes = [
                 f"{contig}\t{rows[row]}\t.\t{refs[row]}\t{alts[row]}\t.\t{filters[row]}\t.\tGT:PS\t".encode()

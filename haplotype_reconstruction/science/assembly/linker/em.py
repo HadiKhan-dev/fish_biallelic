@@ -1,5 +1,4 @@
-"""The linker: dense haploid founder transitions between the input components of one joined batch (base
-linking.py).
+"""The linker: dense haploid founder transitions between the input components of one joined batch.
 
 For every gap g = 1 .. G (G = n - 1, or the beam's maximum gap), the batch's blocks split into g independent
 residue-class chains (blocks i, i + g, i + 2g, ...). Each chain is a hidden Markov model of a sample's ordered

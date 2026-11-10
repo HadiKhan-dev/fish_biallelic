@@ -1,6 +1,6 @@
 # Configuration
 
-See [running a cross](user/running.md), the generated [settings reference](reference/settings.md) and [migration](user/migration.md).
+See [running a cross](user/running.md), the generated [settings reference](reference/settings.md).
 
 Resampling task grain is operational, outside the scientific configuration.
 `stages.pedigree.execution.RESAMPLING_BATCH_WORK` is 250,000 alternative-row scans;

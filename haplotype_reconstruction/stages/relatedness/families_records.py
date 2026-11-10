@@ -21,7 +21,7 @@ from ...store.store import CheckpointStore
 from ..framework import load_product, publish_product
 from .evidence_pass import EvidenceInput, bound_upstream, upstream_identities
 
-__all__ = ["KEY", "SCHEMA", "CODE_ROOTS", "Adapter", "identity", "write", "load", "Reader", "result_reader"]
+__all__ = ["KEY", "SCHEMA", "CODE_ROOTS", "Adapter", "identity", "write", "load", "Reader", "expected", "result_reader"]
 KEY = "relatedness/families"
 SCHEMA = 1
 CODE_ROOTS = (
@@ -110,17 +110,17 @@ class Reader(Adapter):
     key: str = KEY
 
 
-def result_reader(
-    store: CheckpointStore, manifest: Mapping[str, Any], *, product: str, contig: str | None = None
-) -> Reader | None:
+def expected(
+    store: CheckpointStore, manifest: Mapping[str, Any], *, product: str, contig: str | None = None, upstream: Mapping[str, str] | None = None
+) -> Reader:
     """Rebuild this run record's derivation without opening original evidence or map files."""
     if product != "families" or contig is not None:
         raise InputError("invalid relatedness reader request")
-    if not store.run.has(KEY):
-        return None
     contigs = tuple(manifest["contigs"])
-    upstream = bound_upstream(store, manifest)
+    upstream = bound_upstream(store, manifest) if upstream is None else upstream
     parameters = FamilyParameters(**manifest["parameters"]["relatedness"])
+    # A run manifest records only configurable stage parameters; allele-frequency estimation is not configurable,
+    # so a run-level request rebuilds the derivation with its defaults (task manifests record them explicitly).
     frequency = AlleleFrequencyParameters(**manifest["parameters"].get("allele_frequency", {}))
     reverse = bool(manifest["ties"]["reverse"])
     return Reader(
@@ -134,3 +134,10 @@ def result_reader(
             numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
         )
     )
+
+
+def result_reader(store, manifest, *, product, contig=None):
+    """Request the expected publication when its commit record exists."""
+    if not store.run.has(KEY):
+        return None
+    return expected(store, manifest, product=product, contig=contig)

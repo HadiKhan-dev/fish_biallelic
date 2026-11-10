@@ -1,4 +1,4 @@
-"""Cubic kernels of the linker's EM between two blocks (base macro_hmm + edge_counts + M-step smoothing).
+"""Cubic kernels of the linker's EM between two blocks (pair propagation, edge counts and M-step smoothing).
 
 A sample's diploid state at a block boundary is an ordered founder pair; the two homologues move
 independently through the same haploid transition matrix T (K_left x K_right), so a boundary message is

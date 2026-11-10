@@ -6,6 +6,11 @@ The per-site driver preserves sample order and its three scientific sweeps.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..configure import ResolvedConfiguration
+
 import time
 
 from ...contracts.evidence import ContigEvidence
@@ -16,36 +21,13 @@ from ...core.ties import TieSettings
 from ...science.refit.parameters import RefitParameters
 from ...science.refit.run import refit_chromosome, summary
 from ...store.container import CheckpointFile
-from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, publish
-from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
+from ...store.protocol import claim, mark_complete, publish
+from ..framework import RecordKey, ResourceRequest, Task
 from . import records
 
 _DEFAULT_TIES = TieSettings()
 
-__all__ = ["identity", "run_contig", "refit_task"]
-
-
-def identity(
-    parameters: RefitParameters,
-    *,
-    contig: str,
-    sample_ids: tuple[str, ...],
-    painting_identity: str,
-    evidence_identity: str,
-    payload_identity: str,
-    ties: TieSettings = _DEFAULT_TIES,
-    numerical_policy: NumericalPolicy | None = None,
-) -> str:
-    return Derivation(
-        code_dependency_identity(("science.refit", "stages.refit.tasks", "stages.refit.records")),
-        dict(parameters=parameters, contig=contig, sample_ids=sample_ids),
-        numerical_policy or NumericalPolicy.current(),
-        dict(painting=painting_identity, evidence=evidence_identity, payload=payload_identity),
-        tie_reverse=ties.reverse,
-        tie_keep=ties.keep,
-        schema=records.SCHEMA,
-    ).identity
+__all__ = ["run_contig", "task"]
 
 
 def run_contig(
@@ -100,58 +82,39 @@ def run_contig(
         return result
 
 
-def refit_task(
-    contig: str,
-    *,
-    file: CheckpointFile,
-    painting: Painting,
-    evidence: ContigEvidence,
-    parameters: RefitParameters,
-    painting_identity: str,
-    evidence_identity: str,
-    payload_identity: str,
-    ties: TieSettings = _DEFAULT_TIES,
-    numerical_policy: NumericalPolicy | None = None,
-    dependencies: tuple[TaskKey, ...] = (),
-    max_cores: int = ALL_CORES,
-) -> Task:
-    """Declare one affinity-scoped contig task; no live resources enter identity."""
-    if max_cores < 1:
-        raise InvariantError("refit max_cores must be positive")
-    expected = identity(
-        parameters,
-        contig=contig,
-        sample_ids=tuple(evidence.sample_ids),
-        painting_identity=painting_identity,
-        evidence_identity=evidence_identity,
-        payload_identity=payload_identity,
+from ..inputs.products import task_inputs, required_product, required_dense_evidence
+from ..context import StageRun
+
+
+def run(
+    root: str, contig: str, resolved: ResolvedConfiguration, ties: TieSettings, *, team: int = 1
+) -> str:
+    """Pass the checked immutable painting and evidence to founder refit's one contig action."""
+    from ..painting import records as painting_records
+    from ..refit.tasks import run_contig
+    from ..refit import records
+
+    reader, store = task_inputs(root)
+    painting = required_product(reader, painting_records, "painting", contig)
+    evidence = required_dense_evidence(reader, contig)
+    expected = records.expected(store, reader.manifest, product="refit", contig=contig).identity
+    run_contig(
+        store.contig(contig),
+        expected,
+        painting,
+        evidence,
+        resolved.parameters.founder_refit,
+        payload_identity=evidence.payload_identity,
         ties=ties,
-        numerical_policy=numerical_policy,
+        threads=team,
     )
-    if any(c.panel is None for c in painting.components):
-        raise InvariantError("refit resources require painted panels")
-    working = max(
-        (
-            4 * len(evidence.sample_ids) * len(c.panel.positions) + 48 * c.panel.founders**2 * max_cores
-            for c in painting.components
-            if c.panel is not None
-        ),
-        default=0,
-    )
+    return expected
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare the production founder-refit action and its published record spellings."""
     return Task(
-        TaskKey("refit", "contig", contig),
-        run_contig,
-        (file, expected, painting, evidence, parameters),
-        kwargs=dict(
-            payload_identity=payload_identity,
-            painting_identity=painting_identity,
-            evidence_identity=evidence_identity,
-            ties=ties,
-        ),
-        depends_on=dependencies,
-        inputs=(RecordKey(contig, "painting"), RecordKey(contig, "evidence")),
-        outputs=(RecordKey(contig, records.FOUNDER_REFIT), RecordKey(contig, records.SUMMARY)),
-        resources=ResourceRequest(1, max_cores, (512 << 20) + working),
-        affinity=contig,
-        thread_argument="threads",
+        key, run, (context.root, key.scope, context.resolved, context.ties),
+        outputs=tuple(RecordKey(key.scope, name) for name in ("founder_refit", "founder_refit/summary", "identity/founder_refit")),
+        resources=ResourceRequest(1, context.cores), thread_argument="team",
     )

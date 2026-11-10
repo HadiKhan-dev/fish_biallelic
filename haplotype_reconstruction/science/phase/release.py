@@ -25,7 +25,7 @@ alternatives.
 - Forced breaks (``break_bins``, chosen by the stage): a sample without a linked parent breaks its phase sets at its
   painting tie boundaries (the painting's track order there is a convention), and every sample breaks at the junction
   candidates where it carries both junction labels, unless the parental homologue it copies there is pinned by the
-  parent's own reads (model.withheld_joins). A break is recorded at its own bin, never moved to the next anchor,
+  parent's own reads (junctions.withheld_joins). A break is recorded at its own bin, never moved to the next anchor,
   and no phase is released across it. A sample anchored by its children takes its orientation from their chains on
   both sides of a painting tie, so it keeps a tie break (one that is not also a withheld join) only where that
   orientation is uncertain beside it: where the orientation certainty above, under its children-anchored posterior,
@@ -37,7 +37,7 @@ alternatives.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -45,7 +45,6 @@ from ...contracts.phase import ReleaseTables, SampleRelease
 from ...contracts.roles import record_field
 from . import release_kernels as kernels
 from .allele_evidence import own_terms
-from .diagnostics import DecisionTrace, PhaseTrace
 from .model import LabelModel
 from .parameters import RELEASE_WINDOW, PhaseParameters
 from .window import site_windows
@@ -53,10 +52,10 @@ from .window import site_windows
 
 @dataclass(frozen=True)
 class ReleaseInputs:
-    """One sample's site release inputs (P0 FP14-FP19), borrowed without mutation.
+    """One sample's site release inputs (FP14-FP19), borrowed without mutation.
 
-    Site axes contain only released component sites. GLs are float32[L,3] as in
-    the recorded 3.5 release; all uncertainty and decision arithmetic is float64.
+    Site axes contain only released component sites. GLs are float32[L,3] to match the evidence input precision;
+    all uncertainty and decision arithmetic is float64.
     """
 
     config: PhaseParameters = record_field("state", units="1", dtype="PhaseParameters", stored=False)
@@ -73,11 +72,7 @@ class ReleaseInputs:
     windowed: bool = record_field("diagnostic", units="1", dtype="bool", stored=False, default=True)
     scores: bool = record_field("diagnostic", units="1", dtype="bool", stored=False, default=False)
     chain: bool = record_field("diagnostic", units="1", dtype="bool", stored=False, default=True)
-    audit: DecisionTrace | None = record_field(
-        "diagnostic", units="1", dtype="DecisionTrace | None", stored=False, default=None
-    )
-    # Release 4.10: the solve's per-window contiguous copies of site_alleles and flips (shared_windows), made once
-    # for all its samples instead of in every sample's every window.
+    # The solve's per-window contiguous copies of site_alleles and flips (shared_windows), shared by all samples.
     shared_windows: dict | None = record_field("diagnostic", units="1", dtype="dict | None", stored=False, default=None)
 
 
@@ -123,25 +118,9 @@ def label_pair_posterior(post, labs0, labs1, S):
     return kernels.label_pairs(post, labs0, labs1, int(S))
 
 
-def _bin_orientation(ordered, site_bin, tau_g, B, *, trace=False, audit=None):
-    """float64 [B]: per bin, the median over its sites (``site_bin``) with P(heterozygous) >= tau_g under the ordered
-    allele posteriors ``ordered`` (kernels.site_posteriors) of the orientation certainty max(P01, P10) / (P01 + P10);
-    NaN in a bin without such a site (no evidence that the orientation is lost). The audit and the trace see the site
-    selection beside the values (kernels.orientation)."""
-    out = kernels.orientation(ordered, site_bin, float(tau_g), int(B))
-    if audit is None and not trace:
-        return out
-    het = ordered[1] + ordered[2]
-    selected = het >= tau_g
-    if audit is not None:
-        audit.difference("orientation_het", het, tau_g, selected)
-    return (
-        dict(
-            values=out, P01=ordered[1].copy(), P10=ordered[2].copy(), cutoff=np.full(len(het), tau_g), selected=selected
-        )
-        if trace
-        else out
-    )
+def bin_orientation(ordered, site_bin, tau_g, B):
+    """Per-bin median orientation certainty over confidently heterozygous sites; NaN without such a site."""
+    return kernels.orientation(ordered, site_bin, float(tau_g), int(B))
 
 
 def _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo=0, hi=None, shared=None):
@@ -176,28 +155,28 @@ def sample_flips(model, n, ctx):
 
 
 def _orientation_certainty(
-    post, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin, hi_bin, B, windowed=True, *, audit=None
+    post, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin, hi_bin, B, windowed=True
 ):
-    """_bin_orientation of the bins in [lo_bin, hi_bin) under the label-pair posteriors ``post``; NaN elsewhere."""
+    """bin_orientation of the bins in [lo_bin, hi_bin) under the label-pair posteriors ``post``; NaN elsewhere."""
     lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
     hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
     if hi <= lo:
         return np.full(B, np.nan)
     if not windowed:
         ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo, hi)
-        return _bin_orientation(ordered, site_bin[lo:hi], tau_g, B, audit=audit)
+        return bin_orientation(ordered, site_bin[lo:hi], tau_g, B)
     orientation = np.full(B, np.nan)
     for left, right in site_windows(site_bin, lo, hi, window=RELEASE_WINDOW):
         bins = site_bin[left:right]
         ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, left, right)
-        local = _bin_orientation(ordered, bins, tau_g, B, audit=audit)
+        local = bin_orientation(ordered, bins, tau_g, B)
         orientation[bins[0] : bins[-1] + 1] = local[bins[0] : bins[-1] + 1]
     return orientation
 
 
-def _bridged_ties(ties, orientation, tau_s, *, audit=None):
+def _bridged_ties(ties, orientation, tau_s):
     """The painting-tie cuts (bins) that a sample anchored by its children bridges: those where the orientation
-    certainty (``orientation``, _bin_orientation under its children-anchored posterior) at the nearest bin with a
+    certainty (``orientation``, bin_orientation under its children-anchored posterior) at the nearest bin with a
     confidently heterozygous site on each side (before the cut's bin, and at or after it) reaches tau_s. A cut without
     such a bin on one side is kept."""
     informative = np.flatnonzero(~np.isnan(orientation))
@@ -207,23 +186,12 @@ def _bridged_ties(ties, orientation, tau_s, *, audit=None):
         if 0 < k < len(informative):
             value = min(orientation[informative[k - 1]], orientation[informative[k]])
             bridged = value >= tau_s
-            if audit is not None:
-                audit.difference("bridge", value, tau_s, bridged)
             if bridged:
                 out.add(int(c))
     return out
 
 
-def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, trace: bool = False) -> SampleRelease | PhaseTrace:
-    """Release one sample; trace observes this same producer with private ordered operands."""
-    if trace:
-        audit = DecisionTrace(extended=True)
-        value = _release_sample(model, n, replace(ctx, audit=audit))
-        return PhaseTrace(value, tuple(audit.rows))
-    return _release_sample(model, n, ctx)
-
-
-def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRelease:
+def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRelease:
     """One sample's release over the component's released sites.
 
     ctx: site_bin int64 [m] (bin of each site), site_alleles int8 [S, m] (painting-state alleles at the sites),
@@ -238,7 +206,6 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
     are borrowed; arrays in the returned record are owned by this sample call.
     """
     config = ctx.config
-    audit = ctx.audit
     windowed = ctx.windowed
     tau_g, tau_p, tau_s = config.genotype_posterior, config.phase_posterior, config.set_posterior
     B, S = model.B, model.S
@@ -264,8 +231,6 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
         posts = np.zeros((B, S, S))  # bins of a partition without an anchor: no phase
         het_conf = 1.0 - np.einsum("bxx->b", gposts)  # P(the label pair is heterozygous)
         candidates = [int(b) for b in het_bins if het_conf[b] >= tau_p]
-        if audit is not None:
-            audit.difference("anchor", het_conf[het_bins], tau_p, het_conf[het_bins] >= tau_p)
         start = 0
         while start < B:
             if start > 0:
@@ -278,19 +243,12 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
             mask = labs0[anchor][:, None] < labs1[anchor][None, :]
             lp = label_pair_posterior(kernels.forward_backward(em, T0, T1, TG, anchor, mask), labs0, labs1, S)
             orientation = _orientation_certainty(
-                lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, anchor, hard, B, windowed, audit=audit
+                lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, anchor, hard, B, windowed
             )
             stop = next(
                 (int(b) for b in het_bins if anchor < b < hard and het_conf[b] >= tau_g and orientation[b] < tau_s),
                 hard,
             )
-            if audit is not None:
-                for b in het_bins:
-                    if anchor < b < hard and b <= stop:
-                        included = het_conf[b] >= tau_g
-                        audit.difference("stop_het", het_conf[b], tau_g, included)
-                        if included:
-                            audit.difference("stop_orientation", orientation[b], tau_s, orientation[b] < tau_s)
             posts[start:stop] = lp[start:stop]
             start = stop
     else:
@@ -301,12 +259,12 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
     if children and not anchored_by_parent and len(ties):
         orientation = (
             _orientation_certainty(
-                posts, site_bin, alleles, gl, config.site_deviation, flips, tau_g, 0, B, B, audit=audit
+                posts, site_bin, alleles, gl, config.site_deviation, flips, tau_g, 0, B, B
             )
             if windowed
-            else _bin_orientation(ordered, site_bin, tau_g, B, audit=audit)
+            else bin_orientation(ordered, site_bin, tau_g, B)
         )
-        bridged = _bridged_ties(ties, orientation, tau_s, audit=audit)
+        bridged = _bridged_ties(ties, orientation, tau_s)
         set_breaks = [c for c in cuts if c not in bridged]
     # Only a single sample's result survives these site windows. The stage consumes completed samples immediately.
     calls = np.full((len(site_bin), 2), -1, dtype=np.int8)
@@ -325,25 +283,17 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
         )
         pg = np.stack([genotype[0], genotype[1] + genotype[2], genotype[3]])
         g = pg.argmax(axis=0)
-        if audit is not None:
-            audit.argmax(pg, g)
         maximum_genotype = pg.max(axis=0)
         called = maximum_genotype >= tau_g
-        if audit is not None:
-            audit.difference("genotype", maximum_genotype, tau_g, called)
         assert ordered is not None
         p01, p10 = ordered[1], ordered[2]
         het = called & (g == 1)
         phase_confident = np.maximum(p01, p10) >= tau_p
         phased = het & phase_confident
-        if audit is not None:
-            audit.difference("phase", np.maximum(p01, p10), tau_p, phase_confident)
         local_calls = calls[left:right]
         hom = called & (g != 1)
         local_calls[hom, 0] = local_calls[hom, 1] = (g[hom] // 2).astype(np.int8)
         one_first = p10 > p01
-        if audit is not None:
-            audit.difference("orientation", p10, p01, one_first)
         local_calls[het, 0] = np.where(one_first[het], 1, 0)
         local_calls[het, 1] = np.where(one_first[het], 0, 1)
         undetermined[left:right] = het & ~phased
@@ -359,8 +309,4 @@ def _release_sample(model: LabelModel, n: int, ctx: ReleaseInputs) -> SampleRele
     return SampleRelease(calls, undetermined, tuple(set_breaks), scores, chain)
 
 
-__all__ = ["ReleaseInputs", "release_tables", "label_pair_posterior", "sample_flips", "release_sample"]
-
-
-# Public producer hook; the leading-underscore spelling remains for existing callers.
-bin_orientation = _bin_orientation
+__all__ = ["ReleaseInputs", "release_tables", "label_pair_posterior", "sample_flips", "release_sample", "bin_orientation"]

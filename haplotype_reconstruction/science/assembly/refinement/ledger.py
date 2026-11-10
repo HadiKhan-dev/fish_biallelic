@@ -1,7 +1,7 @@
 """Keep completed fits and branch-local count choices with explicit lifetimes.
 
 Owns mutable in-component search state, never persistence or scientific ordering.
-Method: docs/methods/founder_refinement.md#count-continuation; WP_AS8 §5.
+Method: docs/methods/founder_refinement.md#count-continuation.
 Shared caches retain exact values for the immutable component. Fit scores are
 consumed on read by SweepEngine; each continuation has fresh selection state.
 """

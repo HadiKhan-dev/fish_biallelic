@@ -1,11 +1,10 @@
 """Read-supported junction pinning of the final two phase solves (FP10)."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
 from ...contracts.roles import record_field
-from .diagnostics import DecisionTrace, PhaseTrace
 from .parameters import PhaseParameters
 
 
@@ -18,7 +17,6 @@ class JunctionInputs:
     E: np.ndarray = record_field("evidence", units="nats", dtype="float64", stored=False)
     par: np.ndarray = record_field("call", units="1", dtype="int64", stored=False)
     config: PhaseParameters = record_field("state", units="1", dtype="PhaseParameters", stored=False)
-    audit: DecisionTrace | None = record_field("diagnostic", units="1", dtype="object", stored=False, default=None)
 
     @property
     def N(self) -> int:
@@ -29,14 +27,10 @@ class JunctionInputs:
         return self.X.shape[2]
 
 
-def junction_candidates(model: JunctionInputs, *, trace: bool = False) -> list[tuple[int, int, int, int]] | PhaseTrace:
+def junction_candidates(model: JunctionInputs) -> list[tuple[int, int, int, int]]:
     """(samples, edge bin j, a, b), strongest first (ties: later edge, then larger labels first): bin edges where
     free or not-a-copy tracks of at least ``junction_min_samples`` distinct samples switch between labels a and b
     (a copied homologue's switch is its parent's or a crossover, so it is not counted)."""
-    if trace:
-        audit = DecisionTrace(extended=True)
-        value = junction_candidates(replace(model, audit=audit))
-        return PhaseTrace(value, tuple(audit.rows))
     X, V, par = model.X, model.V, model.par
     who: dict[tuple[int, int, int], set[int]] = {}
     for n in range(model.N):
@@ -47,14 +41,6 @@ def junction_candidates(model: JunctionInputs, *, trace: bool = False) -> list[t
                     continue
                 a, b = int(x[j - 1]), int(x[j])
                 who.setdefault((int(j), min(a, b), max(a, b)), set()).add(n)
-    if model.audit is not None and model.audit.extended:
-        for samples in who.values():
-            model.audit.difference(
-                "junction_count",
-                len(samples),
-                model.config.junction_min_samples,
-                len(samples) >= model.config.junction_min_samples,
-            )
     return sorted(
         ((len(s), j, a, b) for (j, a, b), s in who.items() if len(s) >= model.config.junction_min_samples),
         reverse=True,
@@ -62,8 +48,8 @@ def junction_candidates(model: JunctionInputs, *, trace: bool = False) -> list[t
 
 
 def withheld_joins(
-    model: JunctionInputs, candidates: list[tuple[int, int, int, int]], *, trace: bool = False
-) -> dict[int, list[int]] | PhaseTrace:
+    model: JunctionInputs, candidates: list[tuple[int, int, int, int]]
+) -> dict[int, list[int]]:
     """{sample: sorted bins}: at each candidate junction (j, a, b), the samples whose two homologues carry a and b
     on both sides of edge j and whose relative phase across j is not pinned. Their phase across j depends on
     whether the two rows continue there, and a count of relatives is no evidence of that (a relative without
@@ -72,10 +58,6 @@ def withheld_joins(
     alternative (``homologue_pinned``); the sample's own pair then fixes its other homologue. Children are not
     used: a child's copy rules out the alternative only through a meiosis switch at exactly edge j, whose odds
     depend on the interval (none at a protected reset) and on uncertainty the children share."""
-    if trace:
-        audit = DecisionTrace(extended=True)
-        value = withheld_joins(replace(model, audit=audit), candidates)
-        return PhaseTrace(value, tuple(audit.rows))
     X, V, par = model.X, model.V, model.par
     out: dict[int, set[int]] = {}
     for _, j, a, b in candidates:
@@ -120,7 +102,7 @@ def _flanks_pinned(
     best partner label), over up to ``junction_pin_bins`` bins while p's labels stay put, by at least
     ``junction_pin_nats``. The partner is free because a pair alternative can fit the same unphased reads (two
     rows exchanged together): holding it fixed would mistake that ambiguity for evidence. A flank with no
-    alternative to x (x not in the map, or mapped to itmodel) passes when ``unaffected_passes`` and fails
+    alternative to x (x not in the map, or mapped to itself) passes when ``unaffected_passes`` and fails
     otherwise."""
     X, E, B = model.X, model.E, model.B
     window = model.config.junction_pin_bins
@@ -137,8 +119,6 @@ def _flanks_pinned(
             if int(X[p, h, t]) != x or int(X[p, 1 - h, t]) != y:
                 break
             llr += E[p, x, y, t] - E[p, z, :, t].max()
-        if model.audit is not None:
-            model.audit.difference("pin", llr, model.config.junction_pin_nats, llr >= model.config.junction_pin_nats)
         if llr < model.config.junction_pin_nats:
             return False
     return True

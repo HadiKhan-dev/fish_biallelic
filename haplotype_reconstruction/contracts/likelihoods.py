@@ -16,7 +16,7 @@ from numba import prange, types
 from ..core.kernels import kernel
 from .roles import freeze_record_arrays, record_field
 
-# A resident coded gather of at least this many sample-site cells runs as one parallel kernel (release 4.7.1); smaller
+# A resident coded gather of at least this many sample-site cells runs as one parallel kernel; smaller
 # ones keep the per-sample loop, whose cost is below a parallel region's start-up.
 PARALLEL_GATHER_CELLS = 1 << 14
 
@@ -47,7 +47,7 @@ def _coded_overloads(table: Any, table_ndim: int, dense: Any, dense_ndim: int, o
 
 def readonly(array: np.ndarray, dtype: Any) -> np.ndarray:
     """A read-only, C-contiguous view of ``array`` as ``dtype`` (a copy only when the layout or dtype differs), so that
-    a kernel sees one argument type whatever its caller's arrays (release 4.7.1)."""
+    a kernel sees one argument type whatever its caller's arrays."""
     view = np.ascontiguousarray(array, dtype=dtype).view()
     view.flags.writeable = False
     return view

@@ -1,8 +1,8 @@
 """Join one batch and compose terminal alternatives on its common evidence domain.
 
 Owns materialisation, canonical composition and the bounded parent comparison.
-AS3 fits transitions and AS4 searches each input. Execution resources are supplied
-by the caller; storage, clocks and worker attachment belong to stages (P0 U12).
+The linker fits transitions and the join searches each input. Execution resources are supplied
+by the caller; storage, clocks and worker attachment belong to stages (U12).
 Method: docs/methods/assembly.md#hierarchy.
 """
 
@@ -16,6 +16,7 @@ from numba import prange, types
 
 from haplotype_reconstruction.contracts.assembly import JoinInputs, JoinRecord, JoinSummaryView, JoinTask, ReleaseFamily
 from haplotype_reconstruction.contracts.panels import materialise
+from haplotype_reconstruction.core.digest import json_digest
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.core.ties import SharedCounter, TieSettings
 
@@ -30,6 +31,7 @@ from ..alternatives import (
     SAME_K_EQUAL_LL,
     SMALLER_K_THEN_EXACT_MINIMUM_SWITCHES,
 )
+from ..parameters import MAX_BRANCHES
 
 
 @kernel(
@@ -87,37 +89,38 @@ def join_inputs(task: JoinTask, scoring: np.ndarray) -> JoinInputs:
     return JoinInputs(blocks=blocks, gl=gl, offsets=offsets, samples=task.samples)
 
 
-def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=4) -> JoinRecord:
+def _run_single(
+    task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=MAX_BRANCHES
+) -> JoinRecord:
     """Join one batch (see the module docstring); results never depend on the budget.
 
     The joined component's founders are returned in canonical order (lexicographic order of their prepared-row
-    index paths, design 5.1), so every later level's slot and row-index tie-breaks are content rules."""
-    from ..count_rule.parameters import CountRuleParameters
+    index paths), so every later level's slot and row-index tie-breaks are content rules."""
     from ..join import beam as join_beam
     from ..join import search as join_search
     from ..linker import em as linker_em
     from ..orders import canonical_rows
-    from ..parameters import JoinParameters, LinkerParameters
 
     settings = task.settings
     ties = TieSettings(reverse=settings.reverse, keep=settings.tie_keep, census=settings.census)
-    linker_parameters = LinkerParameters(**asdict(settings.linker))
-    join_parameters = JoinParameters(**asdict(settings.join))
-    from haplotype_reconstruction.contracts.roles import require_schema
-
-    require_schema(settings.count_rule, 2)
-    count_parameters = CountRuleParameters(**{k: v for k, v in asdict(settings.count_rule).items() if k != "schema"})
+    linker_parameters = settings.linker
+    join_parameters = settings.join
+    count_parameters = settings.count_rule
 
     def ordered_map(function, items, task_bytes=0):
         return budget.thread_map(function, items) if budget is not None else tuple(map(function, items))
 
     workspace = linker_em.LinkerWorkspace(
-        map_tasks=ordered_map, lane_threads=None if budget is None else budget.threads
+        map_tasks=ordered_map, lane_threads=None if budget is None else budget.threads, census=settings.census
     )
     inputs = join_inputs(task, scoring)
-    phase_seconds = {}
     # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
-    label = None
+    label = (
+        f"join/{task.prepared[0].positions[0]}-{task.prepared[-1].positions[-1]}/"
+        + json_digest([component.rows.tolist() for component in task.components])
+        if settings.census is not None
+        else None
+    )
     gap = (
         None
         if settings.level_one
@@ -159,8 +162,6 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
         report_switches=report_switches,
         max_branches=max_branches,
     )
-    # Count work is an inclusive subset of join_search, not an additional phase.
-    phase_seconds["count_step"] = float(outcome.summary.phase_seconds.get("count_step", outcome.summary.count.seconds))
     paths = np.asarray(outcome.paths, dtype=np.int64)
     rows = np.concatenate([block.rows[paths[:, j]] for j, block in enumerate(inputs.blocks)], axis=1).astype(np.int32)
     rows, _ = canonical_rows(rows)
@@ -187,7 +188,6 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
     )
     summary = replace(
         outcome.summary,
-        phase_seconds=phase_seconds,
         work_counters=work_counters,
         events=(linker_event, *outcome.summary.events),
     )
@@ -196,7 +196,6 @@ def _run_single(task: JoinTask, scoring: np.ndarray, budget, *, report_switches=
         rows=rows,
         log_likelihood=float(outcome.log_likelihood),
         summary=summary,
-        seconds=0.0,
         release_alternatives=tuple(ReleaseFamily.from_mapping(f) for f in release_alternatives),
         minimum_switches=outcome.minimum_switches,
     )
@@ -260,31 +259,24 @@ def run_batch(task: JoinTask, scoring: np.ndarray, budget) -> JoinRecord:
         common_usable_sites=sum(int(mask.sum()) for mask in task.common_usable),
         lost_usable_sites=task.common_usable_lost,
         usable_site_reference="union_of_input_alternatives",
-        branch_seconds=[result.seconds for result in results],
         branch_K=[len(result.rows) for result in results],
         branch_LL=[result.log_likelihood for result in results],
         survivors=len(survivors),
         resolved=len(survivors) == 1 and not families,
-        additional_seconds=0.0,
     )
     # Every completed branch comes from _run_single, which always supplies its summary.
     summaries = tuple(cast(JoinSummaryView, result.summary) for result in results)
     chosen_summary = cast("JoinSummary", chosen.summary)
-    phase_seconds: dict[str, float] = {}
     work_counters: dict[str, int] = {}
     for branch_summary in summaries:
-        for name, value in branch_summary.phase_seconds.items():
-            phase_seconds[name] = phase_seconds.get(name, 0.0) + value
         for name, value in branch_summary.work_counters.items():
             work_counters[name] = work_counters.get(name, 0) + value
     summary = replace(
         chosen_summary,
-        phase_seconds=phase_seconds,
         work_counters=work_counters,
         total_full_scores=sum(item.total_full_scores for item in summaries),
         count_exact_scores=sum(item.count_exact_scores for item in summaries),
         count_exact_sample_scores=sum(item.count_exact_sample_scores for item in summaries),
-        beam_seconds=sum(item.beam_seconds for item in summaries),
         events=(
             *(
                 dict(event, input_branch=index)
@@ -299,7 +291,6 @@ def run_batch(task: JoinTask, scoring: np.ndarray, budget) -> JoinRecord:
     return replace(
         chosen,
         summary=summary,
-        seconds=0.0,
         release_alternatives=tuple(ReleaseFamily.from_mapping(f) for f in families),
         shadow=diagnostic,
     )

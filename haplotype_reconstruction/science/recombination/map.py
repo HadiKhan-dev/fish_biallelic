@@ -1,7 +1,7 @@
 """Map bins, interval-censored event mass and the aggregated recombination map of one chromosome.
 
 Rates are expected crossovers per observable meiosis-bp, given the switch probabilities of the meioses' marker
-intervals (in release 3.0 the parity of consecutive released chain bins); bins without exposure have NaN rates, not
+intervals (the parity of consecutive released chain bins); bins without exposure have NaN rates, not
 zero recombination. No event or exposure crosses an assembly break (map bins are split at component edges).
 """
 
@@ -14,7 +14,6 @@ from numba import types
 
 from ...contracts.recombination import RecombinationMap
 from ...core.kernels import kernel
-from .diagnostics import RecombinationTrace, Traced
 
 _OVERLOADS = {
     "add_genetic_interval": (
@@ -71,6 +70,11 @@ _OVERLOADS = {
     ),
 }
 
+_OVERLOADS["posterior_intervals"] += tuple(
+    tuple(types.none if isinstance(t, types.Omitted) else t for t in signature)
+    for signature in _OVERLOADS["posterior_intervals"][1:]
+)
+
 
 def map_bins(positions, components, bin_bp):
     """Map bin edges (bp, float64): every bin_bp from the first site, split at component (segment) edges."""
@@ -116,17 +120,9 @@ def add_genetic_interval(bins, totals, left, right, density, map_positions_bp, m
         index += 1
 
 
-@kernel(
-    overloads=tuple(
-        tuple(types.none if isinstance(t, types.Omitted) else t for t in sig) + (receipt,)
-        for sig in _OVERLOADS["posterior_intervals"]
-        for receipt in (types.none, types.Array(types.float64, 2, "C"))
-    ),
-    cache=True,
-    nogil=True,
-)
-def _posterior_intervals(
-    positions, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
+@kernel(overloads=_OVERLOADS["posterior_intervals"], cache=True, nogil=True)
+def posterior_intervals(
+    positions, resets, switch, bins, rate, genetic=None, map_positions_bp=None, map_genetic_morgans=None
 ):
     """Per bin expected crossovers and exposure between consecutive released markers of one meiosis.
 
@@ -149,52 +145,12 @@ def _posterior_intervals(
         odd_mean = lam / tangent if positive else 1.0
         expected = lam * tangent + switch[i] * (odd_mean - lam * tangent)
         uniform = genetic is None or lam <= 0
-        if receipt is not None:
-            receipt[i, 0] = 1.0
-            receipt[i, 1] = left
-            receipt[i, 2] = right
-            receipt[i, 3] = lam
-            receipt[i, 4] = positive
-            receipt[i, 5] = not uniform
         if uniform:
             add_interval(bins, counts, left, right, expected / distance)
         else:
             add_genetic_interval(bins, counts, left, right, expected / lam, map_positions_bp, map_genetic_morgans)
         add_interval(bins, exposure, left, right, 1.0)
     return counts, exposure
-
-
-def posterior_intervals(
-    positions,
-    resets,
-    switch,
-    bins,
-    rate,
-    genetic=None,
-    map_positions_bp=None,
-    map_genetic_morgans=None,
-    *,
-    trace=False,
-    audit=None,
-):
-    """Conditional parity map, optionally retaining actual compiled branch operands.
-
-    One compact row per visited marker interval records lambda and the two
-    branches. Expanding those rows preserves the kernel's odd-mean/spread order.
-    No numerical expression is repeated in the observer.
-    """
-    audit = RecombinationTrace() if trace and audit is None else audit
-    receipt = np.zeros((len(positions), 6)) if audit is not None else None
-    value = _posterior_intervals(
-        positions, resets, switch, bins, rate, genetic, map_positions_bp, map_genetic_morgans, receipt
-    )
-    if audit is not None:
-        for row in receipt:
-            if row[0]:
-                args = dict(lam=float(row[3]), has_map=genetic is not None, left=float(row[1]), right=float(row[2]))
-                audit.emit("lambda.odd_mean", bool(row[4]), **args)
-                audit.emit("lambda.spread", bool(row[5]), **args)
-    return Traced(value, audit) if trace else value
 
 
 def aggregate_map(bins, crossovers, callable_spans, expected, exposure, knots, knot_genetic):

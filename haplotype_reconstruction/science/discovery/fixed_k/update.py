@@ -8,7 +8,7 @@ its carriers, in ascending sample order within each bucket: homozygous carriers 
 2), carriers with a known partner j (genotype H[j, l] vs H[j, l] + 1, reading partners already
 updated in this sweep) and carriers with an unknown copy (the row-unknown costs); every cost is
 capped at the cell's unknown-unknown cost. The allele changes when the two sums differ by at
-least the block's ``h_step`` tie quantum (ties keep the current allele; release 2.1, was 1e-9).
+least the block's ``h_step`` tie quantum (ties keep the current allele).
 Sites are independent, so the sweep runs site-parallel
 (several threads) or founder-outer over site-contiguous tables (one thread) with the same terms
 in the same order.
@@ -780,9 +780,9 @@ def fractional_sweep_one_thread(
     tie,
     cost_bound=np.inf,
 ):
-    # Each site's Gauss-Seidel order is unchanged. Moving independent sites inside
-    # the sample loop reads the cost and founder rows contiguously, and reuses the
-    # expansion-sum scratch instead of allocating it for every founder/site pair.
+    # Independent sites inside the sample loop keep cost/founder rows contiguous
+    # while preserving each site's Gauss-Seidel order. One expansion-sum workspace
+    # serves all founder/site pairs.
     # Ordinary sums vectorize across sites; near an H-step boundary the expansion
     # reference decides the allele using terms recomputed only for that site.
     # cost_bound=np.inf requests that reference throughout.

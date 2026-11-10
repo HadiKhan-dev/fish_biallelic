@@ -1,14 +1,20 @@
-"""Independent record reads of several containers, results in item order (release 4.10).
+"""Ordered maps for independent items, supplied by the caller to science and readers.
 
-Checks that derive and verify publications contig after contig (identity chains, completion checks) spend their time
-opening, reading and decoding record headers on a shared filesystem. They are independent per item. With the engine
-loaded (a run's coordinator and its workers), ``ordered_map`` is the engine's budgeted one-thread map on the caller's
-CPU budget (installed by engine.scheduler): a task's reads stay within its claim, a failure propagates as from any task
-map, and a map inside one of its items gets a one-CPU budget and runs serially, so nested checks never multiply
-threads. Without the engine (a library reader), the items run one after another.
+A scientific ``map_work(function, items)`` has Python map's input/output ordering and
+propagates item exceptions. Its caller owns the concurrency bound and Numba teams;
+science consumes its results before reducing values or releasing shared scratch.
+Python's ``map`` is the serial default. Stages may pass ``threaded_each`` to use the
+engine's budgeted map, whose concurrent items each have one CPU and one Numba thread.
+Nested maps stay within that one-CPU budget. Single-item calls use the calling thread;
+without the engine, ``threaded_each`` is serial.
 
-``live_threads()`` is the CPUs the caller may use now: its engine share (installed by engine.scheduler; e.g. an output
-writer's compression threads), 1 without the engine.
+A ``ThreadSource`` is a count or a caller-owned callable, read with
+``thread_count`` at numerical work boundaries. A live source may refresh the
+caller's ambient kernel team as well as report its count; the caller owns that
+policy and refresh cadence. An integer only describes the team/layout and never
+configures it. Forward sources unchanged through whole searches.
+
+``live_threads()`` returns the caller's engine CPU allowance, or 1 without the engine.
 """
 
 from __future__ import annotations
@@ -16,11 +22,19 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
-__all__ = ["live_threads", "threaded_each"]
+__all__ = ["ThreadSource", "thread_count", "live_threads", "threaded_each"]
 
-# Installed by engine.scheduler: (function, items) -> [function(item) ...] in item order on the caller's budget.
+ThreadSource = int | Callable[[], int]
+
+
+def thread_count(source: ThreadSource) -> int:
+    """Read a fixed or live caller-owned thread count at this work boundary."""
+    return max(1, int(source() if callable(source) else source))
+
+
+# Installed at the engine runtime boundary: (function, items) -> [function(item) ...] in item order on the caller's budget.
 ordered_map: Callable[[Callable[[Any], Any], list[Any]], list[Any]] | None = None
-# Installed by engine.scheduler: () -> the calling thread's live CPU allowance.
+# Installed at the engine runtime boundary: () -> the calling thread's live CPU allowance.
 allowance: Callable[[], int] | None = None
 
 

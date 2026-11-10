@@ -1,6 +1,6 @@
 """Expose founder stage calls and row paths before export's withholding or renaming.
 
-Owns the StagePanel reader view required by WP_EVA1 section 4.5. No genotype
+Owns the StagePanel reader view of recorded founder calls and row paths. No genotype
 threshold or release rule is applied here: calls are those already released by
 the original stage on its own component, founder row and site axes.
 """
@@ -14,22 +14,12 @@ from numpy.typing import NDArray
 
 from ..contracts.roles import record_field
 from ..core.errors import InvariantError
+from ..stages.catalog import STAGES
 
 __all__ = ["StagePanel", "FOUNDER_STAGES"]
 
-FOUNDER_STAGES = (
-    "discovery",
-    "local_selection_initial",
-    "local_selection_l1",
-    "local_selection_l2",
-    "assembly_l1",
-    "assembly_l2",
-    "assembly_l3",
-    "assembly_l4",
-    "founder_refinement",
-    "painting",
-    "founder_refit",
-)
+FOUNDER_STAGES = tuple(name for stage in STAGES.values() for name in stage.panels)
+EVALUATION_STAGES = (*FOUNDER_STAGES, *(name for stage in STAGES.values() for name in stage.evaluation))
 
 
 @dataclass(frozen=True)

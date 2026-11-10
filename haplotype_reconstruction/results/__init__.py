@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
     from .reader import Results
 
-__all__ = ["Results", "StagePanel", "RelatednessView", "recorded_input_order", "store_input_order", "open_results"]
+__all__ = ["Results", "StagePanel", "RelatednessView", "recorded_input_order", "open_results"]
 
 
 def __getattr__(name: str):
@@ -21,7 +21,7 @@ def __getattr__(name: str):
         from .panels import StagePanel
 
         return StagePanel
-    if name in ("recorded_input_order", "store_input_order"):
+    if name == "recorded_input_order":
         from . import order
 
         return getattr(order, name)

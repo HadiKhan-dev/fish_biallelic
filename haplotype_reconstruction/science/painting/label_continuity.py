@@ -17,7 +17,7 @@ unchanged. The painting state space (trajectory classes plus BACKGROUND) is
 renamed, not changed, so each emission of the painting HMM is unchanged except
 in the one bin that straddles j, whose sites left of j keep their labels. Only
 which ordered state sequences count as continuous changes. The search uses the
-component's copying model, estimated before it (painting.stage.component_model)
+component's copying model, estimated before it (painting.run.component_model)
 and fixed throughout. A transposition t at j is screened with the Viterbi
 objective of the model's label-level copying process (painting.transitions: the
 estimated rate, tempered emissions, no panel-error state), for every sample s,
@@ -35,9 +35,7 @@ switch that sat anywhere inside a stretch of identical rows vanishes when the
 relabelling makes the haplotype continuous. Gains are measured in units u of
 one track change (the median log-probability cost of a change against staying,
 PaintingTransitions.switch_unit), so a gain approximates a fall in painted
-switches; the screen only ranks and admits candidates (release 2.14: it leaves
-out painting's panel-error state, whose mixture is not a sum over a straddling
-bin's parts), and every decision is made on the painted switches of the full
+switches; the screen only ranks and admits candidates, and every decision is made on the painted switches of the full
 model.
 
 Acceptance uses no pedigree, generation label or truth. Candidates are ranked
@@ -60,34 +58,21 @@ first acceptable candidate is applied, every message is recomputed, and the
 search repeats until no candidate is acceptable; each accepted move lowers the
 painted switch total, so the search terminates. When another acceptable candidate
 of the same tie class would relabel differently (a competing repair the gains
-cannot order), neither is applied and the search goes on with the next class
-(release 2.14). Only singleton, anchored
+cannot order), neither is applied and the search goes on with the next class. Only singleton, anchored
 trajectory classes move; pooled duplicate rows and BACKGROUND keep their
 labels, and a candidate that would change which of the two classes is called
-anywhere (their panel-error states) is not accepted (release 2.14). The
+anywhere (their panel-error states) is not accepted. The
 relabelled component is kept only when repainting it with the painting
 functions also lowers the total and leaves those states unchanged.
 
-Cost. A transposition t of rows a and b fixes every state that involves
-neither, so the swapped maximum at a link is the larger of the best unaffected
-identity term (the first entry outside rows and columns a and b of the
-identity terms, sorted once per link and sample) and the 4S - 4 affected states
-evaluated under t: O(links N S^3) per iteration, with the same maxima as a scan
-over all S^2 states. A candidate check re-decodes every eligible sample under
-the candidate labels with the chain, O(N S'^2 B) (release 2.14). Before, samples whose best unaffected state
-beat every affected one were skipped: a relabelling maps the optimal paths one
-to one, but it can change which of several exactly co-optimal paths a traceback
-convention selects, and so the selected switch count, so the shortcut was not a
-certificate. Equivalent placements of one transposition (the same per-site panel
-data, see _leftmost_equivalent_link) are checked once, and a check keeps only its
-per-sample count changes. Memory: the search holds about 20-28 N S^2 B bytes
-plus a chain decode's 12 N S'^2 B (part and relabelled emissions, a Viterbi decode, messages and link scores;
-relabel_bytes) when it runs on every sample at once (tens of GB for a long
-chromosome at K = 30, N = 290-320). It therefore runs in contiguous sample
-batches selected from the stage's declared dimensions and thread team: every quantity is per sample except the summed
-gains, which each batch adds in sample order, so
-results are bitwise identical for any batch size; a batched search recomputes
-the batch's part emissions in each pass instead of keeping them.
+Cost. A transposition of rows a and b fixes states involving neither. At each link, compare the best
+unaffected identity term (from one sorted list per sample) with the 4S - 4 affected states: O(links N S^3) per
+iteration, with the maxima of a full S^2 scan. Every candidate check re-decodes all eligible samples under the
+full chain, O(N S'^2 B). An unaffected optimal score alone cannot certify its traceback switch count when
+paths tie. Equivalent placements of a transposition are checked once and retain per-sample count changes. The
+workspace can reach tens of GB at K = 30, N = 290-320, so contiguous sample batches bound memory. Quantities
+are per sample except summed gains, accumulated in sample order; batching preserves their arithmetic. Uncached
+batches rebuild their part emissions in each pass.
 """
 
 from __future__ import annotations
@@ -104,11 +89,11 @@ from ...core import ties
 from ...core.kernels import kernel
 from . import emissions as evidence_windows
 from . import fidelity, hmm
-from .parameters import LABEL_CONTINUITY_BASE_BYTES, PaintingParameters
+from .parameters import PaintingParameters
 from .states import build_bins, build_states
 from .transitions import copying_transitions, edge_morgans
 
-# Exact supported layouts from the frozen 3.5 release and typed stage-route census.
+# Supported layouts for typed stage routes.
 _OVERLOADS = {
     "_centre": ((types.Array(types.float64, 1, "C", readonly=False, aligned=True),),),
     "_link_messages": (
@@ -287,7 +272,7 @@ def _relabelled_emissions(part_emissions, samples, part_bin, part_segment, state
 
 @kernel(overloads=_OVERLOADS["_stacked_relabelled_emissions"], cache=True, parallel=True, nogil=True)
 def _stacked_relabelled_emissions(part_emissions, samples, part_bin, part_segment, state_maps, n_bins):
-    """_relabelled_emissions under each of several labellings at once (release 4.7.1): row g * len(samples) + r holds
+    """_relabelled_emissions under each of several labellings at once: row g * len(samples) + r holds
     sample samples[r] under state_maps[g], each computed from its own sample alone, in the same order."""
     _, n_diplotypes, n_parts = part_emissions.shape
     n_rows = len(samples)
@@ -448,8 +433,7 @@ def relabel_component(
 ) -> tuple[ComponentPanel, LabelContinuity]:
     """Return (painted panel, outcome): the relabelled panel when that lowers painted switches.
 
-    ``reverse``: the caller's TieSettings reversal, required (3.5's rank reversed inside tie classes under its
-    reversed conventions, ``maths/ties.py`` tie_classes, so it is never defaulted here).
+    ``reverse``: the caller's required TieSettings reversal; determines ranking inside tie classes.
 
     ``likelihoods``/``observed`` are the chromosome evidence (all samples) and
     ``evidence_sites`` int64[L] the evidence index of each panel position; ``model`` the component's copying model
@@ -499,40 +483,6 @@ def relabel_component(
 # Bookkeeping of one search beyond its per-sample arrays.
 
 
-def relabel_bytes(
-    n_samples: int,
-    n_states: int,
-    n_bins: int,
-    n_links: int,
-    n_sites: int,
-    *,
-    gathered: bool = True,
-    n_track: int | None = None,
-) -> int:
-    """Peak bytes of a label-continuity search over ``n_samples`` samples at once (one batch), plus
-    LABEL_CONTINUITY_BASE_BYTES. Per sample (D = S^2 ordered states, float64 unless noted): the gathered
-    evidence (25 L, unless ``gathered`` is False: views of the evidence) and part emissions (8 D (B + links))
-    held throughout, plus the largest of a painted-switch
-    count (relabelled emissions 8 D B, their reversed copy 8 D B, the chain's expanded emissions 8 S'^2 B and int32
-    Viterbi back-pointers 4 S'^2 B, S' = ``n_track`` track states; also the final verification), the
-    link messages (relabelled emissions + forward/backward 16 D slots) and the link scores (messages + left/right
-    16 D links); slots <= links. (The search before batching also kept the current and the accepted trial
-    emissions: K30's 36 N S^2 B.)"""
-    squares = n_states * n_states
-    # A painted-switch count re-decodes with the class x fidelity chain (release 2.14): relabelled emissions 8 S^2 B,
-    # their reversed copy 8 S^2 B (the mirrored convention), structured emissions 8 S'^2 B and int32 back-pointers
-    # 4 S'^2 B, S' track states (at most 2 S - 1).
-    tracks = (2 * n_states - 1) if n_track is None else n_track
-    kept = 8 * squares * (n_bins + n_links) + (25 * n_sites if gathered else 0)
-    working = max(
-        16 * squares * n_bins + 12 * tracks * tracks * n_bins,
-        8 * squares * n_bins + 16 * squares * n_links,
-        32 * squares * n_links,
-    )
-    # 1/8 margin: measured peaks reach 0.98-1.00 of the array sum (K30 synthetic 2,373 of 2,431 MiB; std_n80 chr8).
-    return n_samples * (kept + working) * 9 // 8 + LABEL_CONTINUITY_BASE_BYTES
-
-
 class _SampleBatches:
     """Contiguous sample batches. A batch's part emissions and eligibility are kept for the whole search when they fit
     the caller's budget, else rebuilt when used: from the resident copy of the component's evidence where it covers
@@ -565,7 +515,7 @@ class _SampleBatches:
         n_samples = likelihoods.shape[0]
         self.spans = [(start, min(start + size, n_samples)) for start in range(0, n_samples, size)]
         self._kept = {}
-        # Release 4.7.1: batches are kept while their part emissions (8 S^2 bytes per part and sample) fit
+        # batches are kept while their part emissions (8 S^2 bytes per part and sample) fit
         # ``keep_bytes``, those outside the resident copy first (their rebuilds read the stored evidence), each group
         # in sample order. One batch holding every sample is always kept.
         per_sample = 8 * states.n_states**2 * len(part_start)
@@ -581,7 +531,7 @@ class _SampleBatches:
         self.all_kept = len(keep) == len(self.spans)
         # The budget the kept emissions leave, for decoding more samples or candidates in one call.
         self.spare_bytes = max(0, int(keep_bytes) - used)
-        # Every batch kept (release 4.7.1): their part emissions share one array over all samples, so that decoding
+        # Every batch kept: their part emissions share one array over all samples, so that decoding
         # can take wider runs of samples than a batch.
         self.combined = None
 
@@ -616,10 +566,9 @@ class _SampleBatches:
         return value
 
     def units(self, width):
-        """(start, stop, part emissions of samples start..stop) for each batch, built as the caller reaches it (release
-        4.11: a list built every uncached batch before the first was used, so their emissions all lived at once,
-        whatever ``keep_bytes``), or, when every batch is kept, runs of up to ``width`` samples of their shared array
-        (one decoding call each). Callers iterate once."""
+        """(start, stop, part emissions of samples start..stop) for each batch, built as iteration reaches it so
+        only the current uncached batch's emissions are live. Fully cached batches provide runs of up to
+        ``width`` samples from their shared array, one decoding call each. Callers iterate once."""
         if not (self.all_kept and len(self.spans) > 1) or width <= self.spans[0][1] - self.spans[0][0]:
             return ((start, stop, self.part_emissions(start, stop)) for start, stop in self.spans)
         for start, stop in self.spans:
@@ -656,9 +605,8 @@ def _leftmost_equivalent_link(panel, offsets, links, perms, row_of_class, first,
     return link
 
 
-# The look-ahead's walk (release 4.7.1): the same function under a second name. A look-ahead walk only chooses
-# which candidates to decode early and never decides anything, so the record of the decision's own placement
-# walks (_leftmost_equivalent_link, as the painting witnesses observe it) leaves it out.
+# The look-ahead uses the same placement walk under a second name. It only chooses candidates to decode early;
+# it does not decide a repair, so decision-placement diagnostics leave these speculative walks out.
 _lookahead_equivalent_link = _leftmost_equivalent_link
 
 
@@ -705,7 +653,7 @@ def _relabel_linked(
     part_bin = np.asarray(part_bins, dtype=np.int64)
     part_segment = np.searchsorted(link_sites, part_start, side="right").astype(np.int64)
     size = max(1, int(batch))
-    # Release 4.7.1: when the budget cannot keep every batch's part emissions, the component's selected evidence is
+    # when the budget cannot keep every batch's part emissions, the component's selected evidence is
     # read once into a compact resident copy (codes and dictionaries, far smaller than the emissions) charged to the
     # same budget: of every sample when it fits, else of the largest leading run of batches that fits. A rebuild of a
     # batch it covers is a parallel in-memory gather and emission kernel, never a serial read of the stored evidence.
@@ -846,7 +794,7 @@ def _relabel_linked(
         )
 
     row_of_class = np.asarray([members[0] for members in classes], dtype=np.int64)
-    # Error capabilities (release 2.14): a class has a panel-error state when it is called at a selected site. A suffix
+    # Error capabilities: a class has a panel-error state when it is called at a selected site. A suffix
     # exchange can move every call of a row into the other row (both classes keep their rows, the alphabet of error
     # states changes), which the model fixed before the search does not describe: such candidates are not accepted.
     # called_in[c, g] = the original class c is called at a selected site of segment g (between consecutive links).
@@ -870,8 +818,7 @@ def _relabel_linked(
 
     def decoded_changes(trials, current):
         """Painted-switch changes of every trial labelling against ``current``; each batch's part emissions are
-        obtained once for all of them (release 4.7.1: one rebuild of a batch the budget does not keep serves several
-        candidates)."""
+        obtained once for all of them."""
         trial_maps = [_state_maps(trial, n_states) for trial in trials]
         changes = [np.zeros_like(current) for _ in trials]
         # Several candidates of a batch are decoded in one call (their relabelled emissions stacked along the sample
@@ -919,9 +866,8 @@ def _relabel_linked(
             left, right = link_scores(start, stop, maps, parts)
             _add_transposition_gains(total, left, right, eligible[start:stop], pairs, n_states)
             del left, right
-        # Rank by the score gain in tie classes (release 2.1: gains equal up to rounding, e.g. one transposition at
-        # two link points inside a stretch where both rows are identical, keep the leftmost link, then the pair
-        # order, instead of the order their rounding gives); accept on exact per-sample painted switches.
+        # Rank score gains in tie classes, keeping the leftmost equivalent link and then pair order within a
+        # class; rounding does not decide equivalent placements. Accept on exact per-sample painted switches.
         flats = np.flatnonzero(total.ravel() >= minimum_gain * unit)
         values = total.ravel()[flats]
         candidates = []
@@ -987,11 +933,10 @@ def _relabel_linked(
         def evaluate(
             key, results=results, perms=perms, current=current, ahead=ahead, width=width, candidates=candidates
         ):
-            """(acceptable, change, winners, losers) of the relabelling ``key`` = (pair, link), computed once per
-            iteration: every eligible sample is re-decoded under it (release 2.14). When some batches are rebuilt for
-            each use, a miss also decodes the next candidates in ranked order (1, then 2, 4, ... per iteration, within
-            the remaining check budget) from the same rebuilt part emissions (release 4.7.1); their changes wait in
-            ``ahead`` and count as checks only when evaluated, so every decision and count is unchanged."""
+            """(acceptable, change, winners, losers) of ``key`` = (pair, link), computed once per iteration by
+            re-decoding every eligible sample. For uncached batches, a miss also decodes following ranked
+            candidates (1, then 2, 4, ... within the remaining main-loop budget) from the same rebuilt
+            emissions. Their changes wait in ``ahead`` and count as checks when evaluated."""
             nonlocal checked
             if key not in results:
                 pair, link = key
@@ -1035,7 +980,7 @@ def _relabel_linked(
             return results[key]
 
         # The first acceptable candidate in ranked order is applied, unless another acceptable candidate of its tie
-        # class would relabel differently (release 2.14): competing repairs that this policy does not order leave the
+        # class would relabel differently: competing repairs that this policy does not order leave the
         # assembled labels in place, and the search goes on with the next class. Equivalent placements of one
         # transposition (canonical) are evaluated once.
         accepted = None
@@ -1044,9 +989,9 @@ def _relabel_linked(
         while index < len(candidates):
             key = canonical(index)
             if key not in results and checked - checked_before >= budget:
-                # Release 4.7 (owner, 8 Nov 2026): an iteration re-decodes at most `budget` candidates in ranked order;
-                # reaching it without an acceptable one ends the search (flagged), so the final iteration, which
-                # otherwise re-decodes every screened candidate, stays bounded.
+                # The main ranked loop stops when checked candidates reach budget without an acceptable
+                # repair, and flags the outcome. Certification against tied peers can perform additional
+                # checks; it preserves whole-class ambiguity.
                 budget_reached = True
                 break
             if not evaluate(key)[0]:
@@ -1064,12 +1009,12 @@ def _relabel_linked(
         pair, link = accepted
         acceptable, change, winners, losers = results[accepted]
         first, second = (int(value) for value in pairs[pair])
-        # Tied suffix transpositions (release 2.14): where the two rows carry identical founder-axis data over the
+        # Tied suffix transpositions: where the two rows carry identical founder-axis data over the
         # stretch between two consecutive link points, transposing at either point gives the same per-site panel
         # data, painting and switches; the move is placed at the leftmost such point, a stated rule that the
         # convention reversal does not change.
         gain = float(total[link, pair] / unit)
-        # Identity evidence (release 2.14): a label exchange of two founders' rows makes the carriers of either founder
+        # Identity evidence: a label exchange of two founders' rows makes the carriers of either founder
         # switch at the link (both directions); one shared recombinant lineage switches one way only.
         forward, reverse = winner_directions(
             winners, maps, first, second, int(np.searchsorted(bins.starts, links[link][0], side="right") - 1)

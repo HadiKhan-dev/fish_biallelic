@@ -1,9 +1,9 @@
-"""OUTPUT/ties/: the decisions a run took inside a tie, and the ambiguity its stages recorded (release 2.1).
+"""OUTPUT/ties/: the decisions a run took inside a tie, and the ambiguity its stages recorded.
 
 Where the data do not separate alternatives (equal values, or values closer than the decision kind's tie quantum),
-release 2.1 decides by fixed deterministic conventions; docs/methods/ties.md lists them per stage, as conventions
-under review for release 2.2. The stages count those decisions in the ``tie_events`` fields of their records
-(``maths.ties.TieCounter``: per decision kind, decisions made, ``inside_tie`` decisions taken by the convention,
+stages decide by fixed deterministic conventions listed per stage in docs/methods/ties.md. The stages count
+those decisions in the ``tie_events`` fields of their records
+(``core.ties.TieCounts``: per decision kind, decisions made, ``inside_tie`` decisions taken by the convention,
 ``wide`` and ``boundary`` guard events). Kinds named ``...band`` count threshold comparisons instead: a value inside
 the band around a threshold is given the threshold's fixed side. This report sums the counts when the run completes,
 decoding only the summary entries of the records; it never feeds back into inference.
@@ -282,7 +282,7 @@ def write_ties(
     return written
 
 
-# Provenance: B discovery/search.py:119-122, fixed order of the published backstop counts.
+# Fixed display order of the published discovery backstop counts.
 BACKSTOP_COLUMNS = (
     "expansion_backstop",
     "exact_score_backstop",
@@ -312,7 +312,7 @@ def _backstops(search) -> dict[str, int]:
 
 
 class TieSource(Protocol):
-    """One typed results source retaining its original 3.5 record-group label."""
+    """One typed results source with its published record-group label."""
 
     record_group: str
     counters: tuple[TieCounts, ...]
@@ -321,8 +321,8 @@ class TieSource(Protocol):
     count_calls: tuple[object, ...]
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
+# Published report column schemas.
+# Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
 DECISION_COLUMNS = ("contig", "stage", "records", "kind", "decisions", "inside_tie", "wide", "boundary")
 """Columns in published order.

@@ -7,7 +7,7 @@ Neither metric rematches founder labels at individual markers. A separate
 segment-wise score does (at a fixed switch cost), splitting nearest-founder
 errors into wrong alleles and charges for chimeric row segments.
 
-Splitting and relabelling (release 3.2). Rows carry no identity across a component boundary, so every
+Splitting and relabelling. Rows carry no identity across a component boundary, so every
 component-wise count (nearest-founder, one-to-one, truth-to-panel, segment-wise, strata) can fall when a component is
 cut without changing an allele: each piece re-matches its labels. ``split_charged_segment_cost`` cannot: it is the
 segment-wise cost (mismatches + SEGMENT_SWITCH_COST per label switch) plus SEGMENT_SWITCH_COST for every row of every
@@ -325,8 +325,8 @@ def _compare_counts(counts, missing, represented_counts, sites, order=None):
     k, f = counts.shape[:2]
     errors = counts[:, :, 0]
     called = sites - missing
-    # Release 3.2: solve on the rows in content order (``order``), so that exact ties of the assignment are broken
-    # by content, never by row label; matches are then listed by row as before.
+    # solve on the rows in content order (``order``), so that exact ties of the assignment are broken
+    # by content, never by row label; matches are then listed in the requested row order.
     order = np.arange(k) if order is None else np.asarray(order, dtype=np.int64)
     predicted, actual = linear_sum_assignment((errors + missing[:, None])[order])
     predicted = order[predicted]
@@ -435,7 +435,7 @@ def evaluate_founders(
         # Split nearest-founder errors into wrong alleles under segment-wise
         # labels and the remainder charged for chimeric row segments.
         segment_errors, segment_switches = map(int, segments[component])
-        # Release 3.2: the segment-wise cost, with one label switch per row charged at every component start after the
+        # the segment-wise cost, with one label switch per row charged at every component start after the
         # chromosome's first (module docstring).
         switches = segment_switches + (len(calls_list[component]) if component else 0)
         rows.append(

@@ -8,7 +8,7 @@ truth. Every contig read seed is drawn before any completed contig is skipped.
 The mutable run manifest binds the realised seed before generation and changes to
 complete only after all configured reads exist. Contig payloads use the checked,
 immutable publication protocol. Identity includes resolved design, file contents,
-realised seed and code closure, never the inference tie convention (ledger L8).
+realised seed and code closure, never the inference tie convention.
 """
 
 from __future__ import annotations
@@ -96,13 +96,13 @@ READ_BLOCKS_PER_CORE = 2
 
 
 def _contig_reads(root: str, task: ContigSimulation, identity: str, cores: int) -> str | Expansion:
-    """Simulate one contig's reads as blocks of samples on all CPUs, then publish TRUTH and READS (release 4.8).
+    """Simulate one contig's reads as blocks of samples on all CPUs, then publish TRUTH and READS.
 
-    The haplotypes and shared factors are shared read-only once (ENG-24 transport); each block writes its samples'
-    counts into one shared int32 [N, L, 2] array owned by this contig's affinity (engine.workers.share_output; release
-    4.10: nothing returns through the coordinator, which carried every count twice before, as a reply and as the
-    gather's argument); the gather on this affinity publishes the records from it with the run's CPUs compressing
-    them, then releases it (a failure before then releases it with the affinity's other shared values)."""
+    The haplotypes and shared factors are shared read-only once; each block writes its samples'
+    counts into one shared int32 [N, L, 2] array owned by this contig's affinity (engine.workers.share_output).
+    The gather publishes directly from that array with the run's CPUs compressing the records, avoiding
+    coordinator copies of the counts. It then releases the array; failure releases it with the other affinity values.
+    """
     file = CheckpointStore(root, nthreads=1).contig(task.contig)
     if is_complete(file, {READS: identity}):
         return task.contig
@@ -316,8 +316,8 @@ class SimulationSource:
                     f"{store.root}: recorded simulation was made for another configuration; use a new output root"
                 )
             if manifest.state == COMPLETE:
-                # Release 4.10: every contig's reads checked without decoding their counts (each decoded in full,
-                # one after another, before; the evidence stage decodes and checks them).
+                # Check every contig's read envelope without decoding counts; the evidence stage
+                # performs the full count decode and validation.
                 threaded_each(lambda c: check_reads(store.contig(c), self.payload_identity(c)), self.contigs())
                 self._manifest = manifest
                 return manifest
@@ -332,12 +332,11 @@ class SimulationSource:
             self._identity = None
             manifest = SimulationManifest(IN_PROGRESS, self.config.seed, self._seed, self.contigs(), self.identity())
             store.run.put(MANIFEST, manifest.record())
-        # Release 4.10: the contigs' templates read and checked, and their founders drawn (each contig its own
-        # stream), concurrently (one after another before).
+        # Read and check templates concurrently; each contig's founder draws use its own stream.
         templates = tuple(threaded_each(partial(_read_template, self.config), self.contigs()))
         maps = load_genetic_maps(self.config.generating_map, self.config.generating_rate_cm_per_mb)
         rows = None if self.config.design.pedigree is None else read_pedigree_table(self.config.design.pedigree)
-        # Release 4.10: one worker group for every meiosis round and the reads (a new group each before).
+        # Reuse one worker group across every meiosis round and the reads.
         with TaskSession(team, in_process=team == 1, preload=(__name__,)) as session:
             plan = prepare_simulation(
                 self.config,

@@ -22,7 +22,7 @@ Iterate the Hardy–Weinberg allele-frequency EM for its fixed schedule, using t
 
 Implementation: [science/relatedness/frequency.py](../../haplotype_reconstruction/science/relatedness/frequency.py).
 
-Parameters by name: `iterations`, `clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `iterations`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(6 · N · L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -33,7 +33,7 @@ For family sites, apply the inclusive minor-frequency gate and compare the float
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
 
-Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`, `ibd_site_step`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`, `ibd_site_step`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -46,7 +46,7 @@ For each selected sample pair, run the three-state IBD chain along each contig w
 
 Implementation: [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
 
-Parameters by name: `ibd_switch_rate`, `ibd_site_step`, `initial`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `ibd_switch_rate`, `ibd_site_step`, `initial`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(P · L/ibd_site_step · c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -64,11 +64,12 @@ Cost and scope: O(27 N M_c). These terms describe the unit’s work/storage dime
 <a id="rl06"></a>
 ## rl06 Composite full-sib family likelihood, half-sib link likelihood and the objective
 
-For each family/site, add the parent terms to its member-sum state, log-sum over parent genotypes, then sum sites in order. Use one family-likelihood function for predicted and realised member updates (L13). Half-sib scores integrate the shared latent parent under their own composite rule; the objective is not a joint pedigree likelihood.
+For each family/site, add the parent terms to its member-sum state, log-sum over parent genotypes, then sum sites in order. Use one family-likelihood function for predicted and realised member updates. Half-sib scores integrate the shared latent parent under their own composite rule; the objective is not a joint pedigree likelihood.
+
 
 Implementation: [science/relatedness/family_kernels.py](../../haplotype_reconstruction/science/relatedness/family_kernels.py).
 
-Parameters by name: `initial`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `initial`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(9 M); O(18 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -156,7 +157,7 @@ Agglomerate, save the starting partition, then run parent assignment, best-impro
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-Parameters by name: `max_sweeps`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_sweeps`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Two bounded searches, each up to the named sweep cap, with member/parent/slot scans per sweep.
 
@@ -178,7 +179,7 @@ Divide measured map length into support units and map cuts to the first site at 
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-Parameters by name: `support_unit_morgans`, `rate_is_measured`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `support_unit_morgans`, `rate_is_measured`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M_c log M_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -209,11 +210,12 @@ Cost and scope: O(18 M); O(F_lat² M). These terms describe the unit’s work/st
 <a id="rl19"></a>
 ## rl19 Product, identity, barrier placement, reuse, shard consumption and published tables
 
-Publish family fitting separately from the optional pair chain. Canonicalise family IDs as dense ranks by smallest member (L6); keep membership and parent/support axes aligned. Schedule the family gather after all evidence, while independent reconstruction may overlap it. Persist pair selection outside scientific identities and render only selected, checked pair products.
+Publish family fitting separately from the optional pair chain. Canonicalise family IDs as dense ranks by smallest member; keep membership and parent/support axes aligned. Schedule the family gather after all evidence, while independent reconstruction may overlap it. Persist pair selection outside scientific identities and render only selected, checked pair products.
+
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
-Parameters by name: `member_support`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `member_support`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Family products scale with N; optional pair products have N(N−1)/2 rows and O(N² L) chain work.
 

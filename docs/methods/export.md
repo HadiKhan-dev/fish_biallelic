@@ -9,7 +9,7 @@ The sections below identify semantic units, not separately configurable pipeline
 
 Build ReleasedSites through the ObservationSource contract, binding source alleles, positions and contig metadata. Require every evidence position to occur exactly once on the admitted source axis and require applied filter bits to agree with kept-site membership. Emit full-length FILTER names in rule order; kept-only rows use the specified missing FILTER encoding. Duplicate-position loader drops remain separate from scientific site filters. Export formatting reads this product through results.
 
-Implementation: [contracts/release.py](../../haplotype_reconstruction/contracts/release.py), [outputs/export/records.py](../../haplotype_reconstruction/outputs/export/records.py), [stages/inputs/sites.py](../../haplotype_reconstruction/stages/inputs/sites.py), [stages/inputs/vcf_alleles.py](../../haplotype_reconstruction/stages/inputs/vcf_alleles.py).
+Implementation: [contracts/release.py](../../haplotype_reconstruction/contracts/release.py), [outputs/export/records.py](../../haplotype_reconstruction/outputs/export/records.py), [stages/sites/tasks.py](../../haplotype_reconstruction/stages/sites/tasks.py), [stages/inputs/vcf_alleles.py](../../haplotype_reconstruction/stages/inputs/vcf_alleles.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -20,7 +20,7 @@ Cost and scope: O(M). These terms describe the unit’s work/storage dimensions;
 
 At sites removed only by r5, choose the common allele from summed nonnegative AD counts, using GT only when AD is absent or wholly missing in its sentinel form. Use the exact integer majority rule. Fill every eligible founder column with the same common allele, but suppress fill for release-withheld rows. A site failing another rule gets no fill; this fallback carries no founder-specific evidence.
 
-Implementation: [stages/inputs/sites.py](../../haplotype_reconstruction/stages/inputs/sites.py), [stages/inputs/vcf_alleles.py](../../haplotype_reconstruction/stages/inputs/vcf_alleles.py).
+Implementation: [stages/sites/tasks.py](../../haplotype_reconstruction/stages/sites/tasks.py), [stages/inputs/vcf_alleles.py](../../haplotype_reconstruction/stages/inputs/vcf_alleles.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -31,7 +31,7 @@ Cost and scope: O(#r5-only sites x N_counted); O(M). These terms describe the un
 
 Before founder segmentation, withhold a called allele unless an eligible painted carrier supplies observed support through a named or pooled candidate row. Check both tracks, ignore out-of-range members and preserve sample/site alignment. This scientific release rule is computed upstream of formatting. It uses refit calls when available, so a painting support report need not predict every final withheld allele.
 
-Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py), [stages/assembly/release.py](../../haplotype_reconstruction/stages/assembly/release.py), [outputs/export/run.py](../../haplotype_reconstruction/outputs/export/run.py), [interface/cli.py](../../haplotype_reconstruction/interface/cli.py), [science/painting/release.py](../../haplotype_reconstruction/science/painting/release.py).
+Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py), [stages/release/compute.py](../../haplotype_reconstruction/stages/release/compute.py), [outputs/export/run.py](../../haplotype_reconstruction/outputs/export/run.py), [interface/cli.py](../../haplotype_reconstruction/interface/cli.py), [science/painting/release.py](../../haplotype_reconstruction/science/painting/release.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
@@ -51,7 +51,8 @@ Cost and scope: O(M · (C + K_active)). These terms describe the unit’s work/s
 <a id="ou05"></a>
 ## ou05 Sample phase VCF: GT:PS encoding, phase sets, unphased and filtered sites
 
-Restore input sample order and encode released genotype alleles with GT:PS. A phased set begins at its first kept site, not necessarily a heterozygote; unphased sites use a missing PS without terminating the set. Component/set boundaries determine later PS values. Filtered rows are wholly missing. An unphased genotype is written in ascending allele order, missing first (`0/1`, `./1`), because its order conveys no phase assertion; 3.5 wrote its internal order, which for a frame-undetermined cell could follow numerically negligible motion (ledger L15). Phased cells keep their released allele order.
+Restore input sample order and encode released genotype alleles with GT:PS. A phased set begins at its first kept site, not necessarily a heterozygote; unphased sites use a missing PS without terminating the set. Component/set boundaries determine later PS values. Filtered rows are wholly missing. An unphased genotype is written in ascending allele order, missing first (`0/1`, `./1`), because its order conveys no phase assertion. Phased cells keep their released allele order.
+
 
 Implementation: [outputs/export/run.py](../../haplotype_reconstruction/outputs/export/run.py), [outputs/export/samples.py](../../haplotype_reconstruction/outputs/export/samples.py).
 
@@ -66,7 +67,7 @@ Cost and scope: O(N · M). These terms describe the unit’s work/storage dimens
 
 Render duplicate-partner identity changes from the released typed flags. Associate a flag with the segment holding its right block and translate rows through that segment’s source-row map. At a release boundary, name left partners using the left segment. Report the left block’s last marker and right block’s first marker; skip flags whose right block has no release segment. Flags qualify identity continuity, not allele correctness.
 
-Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py), [stages/assembly/release.py](../../haplotype_reconstruction/stages/assembly/release.py), [outputs/export/founders.py](../../haplotype_reconstruction/outputs/export/founders.py).
+Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py), [stages/release/compute.py](../../haplotype_reconstruction/stages/release/compute.py), [outputs/export/founders.py](../../haplotype_reconstruction/outputs/export/founders.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 

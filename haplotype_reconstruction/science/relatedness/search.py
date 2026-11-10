@@ -1,7 +1,6 @@
 """Fit full-sib families with both production searches.
 
-Owns the relocated search units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md.
 """
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ...core.concurrency import ThreadSource, thread_count
 from .family_kernels import (
     family_loglik_parallel,
     full_sib_gains,
@@ -115,7 +115,7 @@ def _agglomerate(part: _Partition):
     when positive and larger than its half-sib link gain.
 
     Only such gains are candidates, so the gain matrix keeps those (else -inf), and each row's maximum is kept and
-    updated with the entries a merge changes. A screen (kernels.screen_all, screen_one: the full-sib gain in the
+    updated with the entries a merge changes. A screen (family_kernels.screen_all, screen_one: the full-sib gain in the
     linear domain, in float32) sets aside the pairs whose gain is below 0 by more than its error bound; only the
     others are evaluated exactly (_agglomeration_entries)."""
     N, M = part.N, part.M
@@ -130,10 +130,10 @@ def _agglomerate(part: _Partition):
     screen = dict(pi=np.exp(part.logpi), y=y, Y=Y, half_base=y.sum(axis=1) - part.ll[:N])
     # The screen writes directly into the packed table. Replace each bounded batch by exact gains (or -inf)
     # before the search starts; batching changes storage only, never arithmetic or candidate selection.
-    part.claim_threads()
+    thread_count(part.threads)
     screen_all(part.S, W, m, A, full_base, N, part.parameters.screen_tile, gain.values)
     for lo in range(0, len(gain.values), part.parameters.pair_batch):
-        part.claim_threads()
+        thread_count(part.threads)
         hi = min(len(gain.values), lo + part.parameters.pair_batch)
         pairs = pair_indices(N, lo, hi)
         first, second = pairs[:, 0], pairs[:, 1]
@@ -153,7 +153,7 @@ def _agglomerate(part: _Partition):
             row = gain.row(r)
             tied.extend((int(r), int(r + 1 + c)) for c in np.flatnonzero((row > 0) & (row >= bound)))
         f, g = tied[0] if len(tied) == 1 else max(tied, key=lambda pair: part.pair_key(*pair))
-        part.claim_threads()
+        thread_count(part.threads)
         part.merge(f, g, np.array([-1, -1]))
         # family g is gone: rows whose maximum was in column g are scanned again
         previous = np.arange(g, dtype=np.int64)
@@ -285,7 +285,7 @@ def _moves(part: _Partition) -> int:
     everyone = part.everyone
     changed = 0
     for _ in range(N):
-        part.claim_threads()
+        thread_count(part.threads)
         live = part.live()
         part.sync_estimates(live)
         part.sync_leave(everyone)
@@ -364,7 +364,7 @@ def _content_moves(part: _Partition) -> int:
     batch = part.parameters.prefetch_batch
     for i, c in enumerate(order):
         if i % batch == 0:
-            part.claim_threads()
+            thread_count(part.threads)
             part.prefetch_near_best(order[i : i + batch])
         gain, target = part.best_placement(int(c))
         if gain > part.parameters.gain_tolerance:
@@ -380,7 +380,7 @@ def _sweeps(part: _Partition, moves, penalty: float, max_sweeps: int, keep_versi
     """Sweeps of parent assignment, ``moves`` and one merge until a sweep changes nothing; (sweeps, converged)."""
     sweeps, changed = 0, 1
     while changed and sweeps < max_sweeps:
-        part.claim_threads()
+        thread_count(part.threads)
         changed = _assign_parents(part, penalty, keep_versions) + moves(part) + _merge_one(part)
         sweeps += 1
     return sweeps, not changed
@@ -420,7 +420,7 @@ def _merge_one(part: _Partition) -> int:
         else:
             out[t] = value
     if missing_list:
-        part.claim_threads()
+        thread_count(part.threads)
         missing = np.asarray(missing_list, dtype=np.int64)
         fresh = np.empty((len(missing), 2))
         merge_gains(
@@ -468,7 +468,7 @@ def fit(
     *,
     max_sweeps: int,
     parameters: FamilyParameters = _DEFAULT_FAMILY,
-    claim_threads=None,
+    threads: ThreadSource = 1,
 ) -> FamilyFit:
     """Families over the samples of C [N, M, 9] (child terms), logpi [M, 3], logpost [N, M, 3]; ``ranges``: each
     support unit's site range (lo, hi). Two bounded production searches; screens use exact fallback gains."""
@@ -477,7 +477,7 @@ def fit(
     C = C if C.flags.writeable else C.copy()
     logpi = logpi if logpi.flags.writeable else logpi.copy()
     logpost = logpost if logpost.flags.writeable else logpost.copy()
-    part = _Partition(C, logpi, logpost, parameters, claim_threads)
+    part = _Partition(C, logpi, logpost, parameters, threads)
     penalty = float(np.log(part.N))
     _agglomerate(part)
     # Two order-free searches from the agglomeration, and the higher objective is kept (the first on a
@@ -505,7 +505,7 @@ def fit(
     pairs = np.stack([latent[a], latent[b]], axis=1).astype(np.int64).reshape(-1, 2)
     gains = np.empty(len(pairs))
     if len(pairs):
-        part.claim_threads()
+        thread_count(part.threads)
         half_sib_gains(part.S, part.ll, np.ascontiguousarray(live[pairs]), part.logpi, gains)
     linked = gains > penalty
     return FamilyFit(

@@ -1,6 +1,6 @@
 """Distinguish input, settings, resource and scientific invariant failures at task boundaries.
 
-These categories implement ARCHITECTURE_40 §8 and the CLI exit-code contract.
+These categories define the CLI exit-code contract.
 They carry ordinary exception messages and impose no logging or recovery policy.
 """
 

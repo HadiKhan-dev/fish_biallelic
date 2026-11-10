@@ -1,4 +1,4 @@
-"""Build component rates and refit-state alleles (P0 FP02, FP13)."""
+"""Build component rates and refit-state alleles (FP02, FP13)."""
 
 import numpy as np
 

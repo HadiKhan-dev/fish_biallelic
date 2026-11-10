@@ -1,6 +1,6 @@
 """Build the exact founder-visible evidence used throughout assembly.
 
-Owns masking, float32 casting and depth-row content keys (P0 U01).
+Owns masking, float32 casting and depth-row content keys (U01).
 Memory allocation/attachment and record decoding belong to the stage adapter.
 Method: docs/methods/assembly.md#evidence. Exact neutral inputs may be borrowed; scoring is owned.
 """
@@ -47,38 +47,28 @@ def _fill_views(likelihoods, observed, kept, neutral, scoring, seen):
                 scoring[sample, site, genotype] = value
 
 
-def _depth_keys(counts, observed, kept, threads=1):
+def depth_row_keys(counts, observed, kept, *, map_work=map):
     """Unseeded SHA256 of each founder-visible int64 total-depth vector, for the rows of ``counts`` int[n, L, 2].
 
     Non-discovery and unobserved cells are zero. Canonical little-endian bytes make the exact
     integer content independent of machine byte order. Neither likelihoods nor sample labels enter.
-    Release 4.8: depths of up to _DEPTH_ROWS rows at once (bounded scratch), hashed on up to ``threads`` threads
-    (hashing releases the GIL).
+    Depths are summed DEPTH_ROWS rows at a time to bound scratch storage; the caller
+    supplies the ordered map over independent row hashes.
     """
     excluded = ~np.asarray(kept, dtype=bool)
     keys: list[bytes] = []
-    pool = None
-    if threads > 1 and observed.shape[0] > 1:
-        from concurrent.futures import ThreadPoolExecutor
-
-        pool = ThreadPoolExecutor(max_workers=min(int(threads), _DEPTH_ROWS, observed.shape[0]))
-    try:
-        for first in range(0, observed.shape[0], _DEPTH_ROWS):
-            stop = min(observed.shape[0], first + _DEPTH_ROWS)
-            depth = np.asarray(counts[first:stop]).sum(axis=2, dtype=np.int64).astype("<i8", copy=False)
-            depth[~np.asarray(observed[first:stop], dtype=bool)] = 0
-            depth[:, excluded] = 0
-            rows = [np.ascontiguousarray(row) for row in depth]
-            hashed = map(_sha256, rows) if pool is None else pool.map(_sha256, rows)
-            keys.extend(hashed)
-            del depth, rows
-    finally:
-        if pool is not None:
-            pool.shutdown()
+    for first in range(0, observed.shape[0], DEPTH_ROWS):
+        stop = min(observed.shape[0], first + DEPTH_ROWS)
+        depth = np.asarray(counts[first:stop]).sum(axis=2, dtype=np.int64).astype("<i8", copy=False)
+        depth[~np.asarray(observed[first:stop], dtype=bool)] = 0
+        depth[:, excluded] = 0
+        rows = [np.ascontiguousarray(row) for row in depth]
+        keys.extend(map_work(_sha256, rows))
+        del depth, rows
     return tuple(keys)
 
 
-_DEPTH_ROWS = 32  # rows per depth batch in _depth_keys (scratch bound only)
+DEPTH_ROWS = 32  # rows per evidence batch (scratch bound only)
 
 
 def _sha256(row):
@@ -163,12 +153,12 @@ class AssemblyEvidence:
             if borrow_mask:
                 seen.flags.writeable = False
             if depth_keys is None and counts is not None:
-                depth_keys = _depth_keys(counts, observed, kept)
-            # Release 4.9: _DEPTH_ROWS samples per gather and fill (the kernel is parallel over samples; one sample per
-            # call ran it serially, 4-8 s per chain step for chr1 at N = 320); the caller sets the Numba team.
+                depth_keys = depth_row_keys(counts, observed, kept)
+            # Gather and fill DEPTH_ROWS samples at a time so the sample-parallel kernel has
+            # work for its team while the decoded slice stays small.
             kept_c = np.ascontiguousarray(kept)
-            for first in range(0, likelihoods.shape[0], _DEPTH_ROWS):
-                stop = min(likelihoods.shape[0], first + _DEPTH_ROWS)
+            for first in range(0, likelihoods.shape[0], DEPTH_ROWS):
+                stop = min(likelihoods.shape[0], first + DEPTH_ROWS)
                 values = likelihoods.gather(slice(first, stop), slice(None))
                 flags = (
                     np.empty((stop - first, likelihoods.shape[1]), dtype=np.bool_)
@@ -194,7 +184,7 @@ class AssemblyEvidence:
         kept = np.ascontiguousarray(kept, dtype=np.bool_)
         observed = np.ascontiguousarray(observed, dtype=np.bool_)
         if depth_keys is None and counts is not None:
-            depth_keys = _depth_keys(counts, observed, kept)
+            depth_keys = depth_row_keys(counts, observed, kept)
         if borrow_neutral:
             neutral, seen = likelihoods.view(), observed.view()
             neutral.flags.writeable = seen.flags.writeable = False

@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numpy.typing import NDArray
 
+from haplotype_reconstruction.science.evidence.quality.parameters import SampleQualityParameters
+
 from ..core.ties import TieCounts
 from .likelihoods import CodedLikelihoods
 from .observations import PairArray
@@ -204,12 +206,11 @@ class StationaryStart:
 
 @dataclass(frozen=True)
 class SharedFitDetails:
-    """Shared-binomial fit details from read_model.fit:664–677 and WP_EV1 §5.
+    """Shared-binomial fit endpoints, distances, warnings and fallbacks.
 
     fit_diagnostics records every start and distance, including successful fits
-    without warnings. The empty default represents older recorded 3.5 payloads
-    which did not persist these operands; current producers supply them explicitly.
-    shared_fit_diagnostics retains the distinct 3.5 warning/fallback evidence.
+    without warnings. Producers supply these operands explicitly; the empty default
+    represents absent diagnostics. shared_fit_diagnostics retains warning/fallback evidence.
     """
 
     message: str = record_field("diagnostic", axes=(), units="1", dtype="str")
@@ -396,39 +397,6 @@ class InheritedSegment:
 
 
 @dataclass(frozen=True)
-class SampleQualitySettings:
-    """Per-sample, per-contig quality exclusion from founder construction (``evidence/sample_quality.py``).
-
-    Runs only where the site filter is applied (it uses the r1-r4-passing SNPs, r3's clean error rate and r4's clean
-    heterozygote balance h0, widened to r4's two component means when r4 records an unresolved fit). Per library, a
-    mixture over its eligible cells (no other library carries the minor allele) tests for a foreign-like minor-read
-    component above ``minimum_foreign_fraction`` / 2, with a common share within the non-artefact mixture, against the
-    library's own errors (any distribution below that amplitude), its own heterozygotes (beta-binomial, the same in
-    both orientations) and local artefacts (a free share per region, each with its own fraction); the library is
-    flagged on a contig when the statistic reaches the working threshold. A flag is a quality exclusion, not a
-    contamination diagnosis: elevated library error, dispersed variable-fraction artefacts and biased private alleles
-    can flag too, even in a short tract if other regions have little eligible information.
-    Flagged samples leave founder construction on that contig
-    (``ContigEvidence.founder_view``) and the r5 carrier count. Heterozygous near-private alleles (inherited segments)
-    are reported.
-    """
-
-    enabled: bool = record_field("state", axes=(), units="1", dtype="bool", default=True)
-    carrier_tail_level: float = record_field("state", axes=(), units="1", dtype="float", default=0.05)
-    minimum_foreign_fraction: float = record_field("state", axes=(), units="1", dtype="float", default=0.01)
-    heterozygote_floor_ratio: float = record_field("state", axes=(), units="1", dtype="float", default=0.5)
-    heterozygote_depth_classes: int = record_field("state", axes=(), units="1", dtype="int", default=4)
-    minimum_samples: int = record_field("state", axes=(), units="1", dtype="int", default=20)
-    artefact_regions: int = record_field("state", axes=(), units="1", dtype="int", default=16)
-    fragment_bp: int = record_field("state", axes=(), units="bp", dtype="int", default=1000)
-    segment_gap_bp: int = record_field("state", axes=(), units="bp", dtype="int", default=1000000)
-    segment_minimum_events: float = record_field("state", axes=(), units="1", dtype="float", default=3.0)
-
-    def __post_init__(self) -> None:
-        freeze_record_arrays(self)
-
-
-@dataclass(frozen=True)
 class SampleQualityDecision:
     """One contig's quality exclusion over the analysed samples (arrays of length N).
 
@@ -476,8 +444,8 @@ class SampleQualityDecision:
     segments: tuple[InheritedSegment, ...] = record_field(
         "report", axes=(), units="1", dtype="tuple[InheritedSegment, ...]", default=()
     )
-    config: SampleQualitySettings = record_field(
-        "report", axes=(), units="1", dtype="SampleQualitySettings", default_factory=SampleQualitySettings
+    config: SampleQualityParameters = record_field(
+        "report", axes=(), units="1", dtype="SampleQualityParameters", default_factory=SampleQualityParameters
     )
     tie_events: TieCounts = record_field(
         "diagnostic", axes=(), units="1", dtype="TieCounts", default_factory=lambda: TieCounts(())
@@ -526,7 +494,7 @@ class HeterogeneityCore:
 
 @dataclass(frozen=True)
 class ErrorMSteps:
-    """Counts of r3 Newton outcomes; omitted 3.5 counters mean zero occurrences."""
+    """Counts of r3 Newton outcomes; omitted counters mean zero occurrences."""
 
     stationary: int = record_field("report", dtype="int", units="count", default=0)
     precision: int = record_field("report", dtype="int", units="count", default=0)
@@ -616,7 +584,7 @@ class BalanceMixture:
 
 
 @dataclass(frozen=True)
-class SiteQualityParameters:
+class SiteQualityFit:
     """Fitted site-quality records; absent fits remain None, never invented estimates."""
 
     records: int | None = record_field("report", axes=(), units="1", dtype="int | None", default=None)
@@ -656,8 +624,8 @@ class SiteQualityDecision:
     removed_only_by: Mapping[str, int] = record_field(
         "report", axes=(), units="1", dtype="Mapping[str, int]", default_factory=dict
     )
-    parameters: SiteQualityParameters = record_field(
-        "state", axes=(), units="1", dtype="SiteQualityParameters", default_factory=SiteQualityParameters
+    parameters: SiteQualityFit = record_field(
+        "state", axes=(), units="1", dtype="SiteQualityFit", default_factory=SiteQualityFit
     )
     r5_excluded_samples: int = record_field("report", axes=(), units="1", dtype="int", default=0)
     version: str = record_field("report", axes=(), units="1", dtype="str", default="self-calibrated-site-quality-v4")

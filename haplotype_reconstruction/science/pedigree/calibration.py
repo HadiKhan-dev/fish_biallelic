@@ -15,7 +15,7 @@ rows, combined training over all valid rows, and test over test-kept rows, befor
 M1 aggregation. This centering is objective identity, not a normalization. The
 33-point log-scale grid, every Brent success flag, safeguarded 60-step refiner,
 nearest-unit tie winner, and strict positive-gain/interior/tempering predicates
-remain the baseline rules. Per-child terms use C layout; the final child fold is
+define the scale search. Per-child terms use C layout; the final child fold is
 serial in input order even when the executor evaluates terms concurrently.
 
 Method: docs/methods/pedigree.md#cross-chromosome-evidence-calibration.
@@ -32,11 +32,11 @@ from scipy.special import logsumexp
 
 from ...contracts.pedigree import CalibrationRecord, GenomeScores, edge_index
 from ...core import ties
-from ...core.numerics import chromosome_sum
+from ...core.numerics import ordered_sum
 from .alternatives import Alternatives
-from .parameters import CALIBRATION_NUMERICS, PedigreeConfig
+from .parameters import CALIBRATION_NUMERICS, PedigreeParameters
 
-__all__ = ["fit_scale", "CalibrationExecutor", "CalibrationProblem", "problem", "solve", "uses_executor"]
+__all__ = ["CalibrationExecutor", "CalibrationProblem", "problem", "solve", "uses_executor"]
 
 
 class CalibrationExecutor(Protocol):
@@ -74,22 +74,8 @@ class CalibrationProblem:
     reverse: bool
 
 
-def fit_scale(
-    scores: GenomeScores,
-    alternatives: Alternatives,
-    config: PedigreeConfig,
-    executor: CalibrationExecutor | None = None,
-) -> tuple[float, CalibrationRecord]:
-    """Applied scale and typed diagnostics; use scale 1 when disabled or unidentified.
-
-    Independent child terms may run through the supplied stage executor. Their
-    final fold always follows child order, including every adaptive objective call.
-    """
-    return solve(problem(scores, alternatives, config), executor)
-
-
-def problem(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfig) -> CalibrationProblem:
-    """Folds, centred terms and reciprocal masks of the PD03 objective (fit_scale's first part)."""
+def problem(scores: GenomeScores, alternatives: Alternatives, config: PedigreeParameters) -> CalibrationProblem:
+    """Prepare folds, centred terms and reciprocal masks for the PD03 scale objective."""
     report = dict(
         mode=config.evidence_calibration,
         scale=1.0,
@@ -111,7 +97,7 @@ def problem(scores: GenomeScores, alternatives: Alternatives, config: PedigreeCo
 def solve(
     calibration: CalibrationProblem, executor: CalibrationExecutor | None = None
 ) -> tuple[float, CalibrationRecord]:
-    """The scale search on a prepared problem (fit_scale's second part); terms may run through ``executor``."""
+    """Search a prepared calibration problem; evaluate child terms through ``executor`` when supplied."""
     report = dict(calibration.report)
     if calibration.prepared is None:
         return 1.0, CalibrationRecord(**report)
@@ -205,7 +191,7 @@ def _maximize(prediction, derivatives=None, predictions=None, *, reverse=False):
         ranked = ties.tie_classes(values_only, quantum, descending=True)
         tied = [candidates[index] for index in ranked.members(0)]
         # Prior: the scale nearest 1 (smallest |log scale|); then the smaller scale by convention (the larger under
-        # the convention reversal, release 2.2).
+        # the convention reversal).
         best, log_scale = min(tied, key=lambda item: (abs(item[1]), ties.conv_key(item[1], reverse=reverse)))
     else:
         best, log_scale = max(candidates, key=lambda item: (item[0], ties.conv_key(item[1], reverse=reverse)))
@@ -243,8 +229,8 @@ def _reciprocal_dominant_mask(
     ``one`` float64 [C, E] per eligible edge; ``slots`` from ``_reciprocal_slots``.
     """
     with np.errstate(invalid="ignore"):
-        one_total = chromosome_sum(one[contigs])
-        zero_total = chromosome_sum(zero[contigs])
+        one_total = ordered_sum(one[contigs], axis=0)
+        zero_total = ordered_sum(zero[contigs], axis=0)
     mask = np.zeros(n_rows, dtype=np.float64)
     for present, child, parent, forward, reverse in slots:
         with np.errstate(invalid="ignore"):
@@ -372,7 +358,7 @@ class _Objective:
 def _prepare(
     scores: GenomeScores,
     alternatives: Alternatives,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> tuple[dict, list]:
     folds = np.arange(len(scores.contigs)) % 4
     groups = [np.flatnonzero(folds == i) for i in range(4)]
@@ -390,10 +376,10 @@ def _prepare(
         return report, []
     rows, states = alternatives.rows, alternatives.states
     likelihoods = alternatives.log_likelihoods
-    held = np.stack([chromosome_sum(likelihoods[folds == i]) for i in range(3)])
-    training = np.stack([chromosome_sum(likelihoods[(folds < 3) & (folds != i)]) for i in range(3)])
-    testing = chromosome_sum(likelihoods[folds == 3])
-    all_training = chromosome_sum(likelihoods[folds < 3])
+    held = np.stack([ordered_sum(likelihoods[folds == i], axis=0) for i in range(3)])
+    training = np.stack([ordered_sum(likelihoods[(folds < 3) & (folds != i)], axis=0) for i in range(3)])
+    testing = ordered_sum(likelihoods[folds == 3], axis=0)
+    all_training = ordered_sum(likelihoods[folds < 3], axis=0)
     prior = np.log(np.asarray(config.selection.state_priors)[states])
     prior -= np.log(np.maximum(1, alternatives.full_counts[rows[:, 0], states]))
     slots = _reciprocal_slots(rows, scores.edges, len(scores.sample_ids))
@@ -461,7 +447,7 @@ def _select(prediction, derivatives, predictions=None, *, reverse=False) -> dict
         scale=float(np.exp(log_scale)) if selected else 1.0,
         fitted_scale=float(np.exp(log_scale)),
         selected=selected,
-        # Release 2.1: without predictive gain the optimum is unidentified and its location (boundary or not) is
+        # Without predictive gain the optimum is unidentified and its location (boundary or not) is
         # rounding- and noise-driven on the flat objective, so the gain test comes before the boundary label.
         status=(
             "selected"

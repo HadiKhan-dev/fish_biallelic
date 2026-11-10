@@ -70,8 +70,9 @@ def log_emissions(likelihoods: np.ndarray, robustness: float, codes: np.ndarray)
 
     likelihoods: float32[S, L, 3] genotype likelihoods of the batch's informative samples (the neutral view:
         exactly 1/3 where a sample is unobserved; not renormalised). robustness r: each class's predictive
-        likelihood is mixed with a uniform genotype, (1 - r) P + r / 3 (no further log floor: the mixture keeps
-        incompatible observations finite while preserving their evidence). codes: 3 for a fully called block,
+        likelihood is mixed with a uniform genotype, (1 - r) P + r / 3, then bounded below by
+        LINKER_EMISSION_FLOOR before taking the log. The mixture keeps incompatible observations
+        finite while preserving their evidence. codes: 3 for a fully called block,
         7 otherwise (the first three classes are identical in both).
     """
     samples, sites, _ = likelihoods.shape

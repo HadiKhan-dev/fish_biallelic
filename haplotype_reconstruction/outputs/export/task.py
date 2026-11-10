@@ -1,13 +1,12 @@
 """Declare one formatting-only export task for each released contig.
 
 Owns output resume and stale-file replacement (OU08), using results readers only.
-Method: docs/methods/export.md. The interface publishes the returned output record;
+Method: docs/methods/export.md. The export stage publishes the returned output record;
 no scientific identity, record or inference is changed by this task.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -32,8 +31,8 @@ class ExportResults(Protocol):
     @property
     def manifest(self) -> dict: ...
 
-    def released_sites(self, contig: str) -> ReleasedSites | None: ...
-    def founder_release(self, contig: str) -> FounderRelease | None: ...
+    def sites(self, contig: str) -> ReleasedSites | None: ...
+    def release(self, contig: str) -> FounderRelease | None: ...
     def phase(self, contig: str) -> PhasedSamples | None: ...
 
 
@@ -45,7 +44,6 @@ def write(
     identity: str,
     previous: ExportRecord | None = None,
     *,
-    release_phase_seconds: Mapping[str, float] | None = None,
     map_work=None,
 ) -> ExportRecord:
     """Return the matching record or render and remove files superseded by this export.
@@ -61,19 +59,18 @@ def write(
         destination,
         contig,
         settings=settings,
-        sites=results.released_sites(contig) if products & {"founders", "samples"} else None,
-        founders=results.founder_release(contig) if products & {"founders", "tracks"} else None,
+        sites=results.sites(contig) if products & {"founders", "samples"} else None,
+        founders=results.release(contig) if products & {"founders", "tracks"} else None,
         phase=results.phase(contig) if "samples" in products else None,
         input_sample_ids=results.input_sample_ids,
         synthetic=results.manifest["source"]["kind"] == "simulation",
-        release_phase_seconds=release_phase_seconds,
         map_work=map_work,
     )
     if previous is not None:
         kept = set(entry["files"])
         for name in set(previous.entry["files"]) - kept:
             # The other index of a data file this render kept was retired by its placement, under the file's lock
-            # (release 4.11); removing it here, after the lock, could remove a later writer's current index.
+            #; removing it here, after the lock, could remove a later writer's current index.
             if any(str(name) == f"{data}{index}" for data in kept for index in (".tbi", ".csi")):
                 continue
             (destination / str(name)).unlink(missing_ok=True)
@@ -91,7 +88,6 @@ def make_task(
     depends_on: tuple[TaskKey, ...] = (),
     working_set_bytes: int = 0,
     max_cores: int = 1,
-    release_phase_seconds: Mapping[str, float] | None = None,
     map_work=None,
 ) -> Task:
     """Declare a contig writer with bounded parallel files; the interface supplies release/sites/phase dependencies."""
@@ -107,7 +103,7 @@ def make_task(
         TaskKey("export", "contig", scope=contig),
         write,
         args=(results, destination, contig, settings, identity, previous),
-        kwargs={"release_phase_seconds": release_phase_seconds, "map_work": map_work},
+        kwargs={"map_work": map_work},
         depends_on=depends_on,
         inputs=tuple(inputs),
         outputs=(RecordKey(contig, "export"),),

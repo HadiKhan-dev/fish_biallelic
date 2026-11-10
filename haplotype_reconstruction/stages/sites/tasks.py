@@ -2,29 +2,27 @@
 
 Owns OU01 kept masks and OU02 r5-only common alleles; never reads truth or export
 options. Method: docs/methods/export.md#sites. Rules and exact integer comparisons
-are relocated from B export/sites.py:178-262; there is no random stream or tie band.
+use strict majority among the non-excluded samples; there is no random stream or tie band.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 import numpy as np
 
 from ...core.errors import InvariantError
-from .sites_records import SitesAdapter, identity
-from .sites_records import result_reader as result_reader
+from .records import SitesAdapter
 
 if TYPE_CHECKING:
     from ...contracts.evidence import ContigEvidence, EvidenceDecisions
     from ...contracts.release import ReleasedSites
-    from ...engine.graph import Task, TaskKey
     from ...store.container import CheckpointFile
 
 __all__ = ["SiteEvidence", "SiteSource", "SiteDecisions", "build", "evidence_sites"]
-# Provenance: B export/sites.py:37, bit k denotes applied rule rk.
+# Bit k denotes applied site-quality rule rk.
 R5_ONLY = np.uint8(1 << 5)
 
 
@@ -63,7 +61,7 @@ class SiteEvidence:
 
 @dataclass(frozen=True)
 class SiteDecisions:
-    """Exact operands of OU1 kept and common-allele decisions, on all input rows."""
+    """Exact operands of outputs kept and common-allele decisions, on all input rows."""
 
     removed_bits: np.ndarray
     ref_total: np.ndarray
@@ -157,7 +155,7 @@ def build(
 
 
 def from_evidence(evidence: ContigEvidence, report: EvidenceDecisions, *, synthetic: bool = False) -> SiteEvidence:
-    """Project EV3's typed evidence/report onto the source-site boundary; no dictionary walk."""
+    """Project evidence's typed evidence/report onto the source-site boundary; no dictionary walk."""
     quality = report.site_quality
     return SiteEvidence(
         contig=evidence.contig,
@@ -175,12 +173,12 @@ def from_evidence(evidence: ContigEvidence, report: EvidenceDecisions, *, synthe
     )
 
 
-def run(
+def publish_sites(
     file: CheckpointFile,
     source: VerifiedSource,
     evidence: SiteEvidence,
     *,
-    evidence_identity: str,
+    expected: str,
     payload_identity: str,
     team: int = 1,
 ) -> ReleasedSites:
@@ -193,36 +191,44 @@ def run(
     from ..framework import load_product, publish_product
 
     view = source.verified_view(evidence.contig, payload_identity, team=team)
-    derivation = identity(evidence_identity, payload_identity, synthetic=evidence.synthetic)
     adapter = SitesAdapter()
-    previous = load_product(file, "sites", derivation, adapter)
+    previous = load_product(file, "sites", expected, adapter)
     if previous is not None:
         return previous
     result = build(view, evidence)
-    publish_product(file, "sites", derivation, result, adapter)
+    publish_product(file, "sites", expected, result, adapter)
     return result
 
 
-def make_task(
-    file: CheckpointFile,
-    source: VerifiedSource,
-    evidence: SiteEvidence,
-    *,
-    evidence_identity: str,
-    payload_identity: str,
-    depends_on: Sequence[TaskKey] = (),
-    working_set_bytes: int = 0,
-) -> Task:
-    """Declare the one-core option-free sites node; dependency keys are supplied by the graph."""
-    from ...engine.graph import RecordKey, ResourceRequest, Task, TaskKey
+from ..inputs.products import task_inputs, required_product
+from ..context import StageRun
+from ..framework import Task, TaskKey, RecordKey, ResourceRequest
 
-    return Task(
-        TaskKey("sites", "contig", scope=evidence.contig),
-        run,
-        args=(file, source, evidence),
-        kwargs={"evidence_identity": evidence_identity, "payload_identity": payload_identity},
-        depends_on=tuple(depends_on),
-        inputs=(RecordKey(evidence.contig, "evidence"),),
-        outputs=(RecordKey(evidence.contig, "sites"),),
-        resources=ResourceRequest(working_set_bytes=working_set_bytes),
+
+def run(root: str, contig: str, source: Any, *, team: int = 1) -> str:
+    """Publish the option-independent site product after checked evidence."""
+    from ..evidence import records
+    from . import records as sites_records
+
+    reader, store = task_inputs(root)
+    evidence = required_product(reader, records, "evidence", contig)
+    report = required_product(reader, records, "summary", contig)
+    view = from_evidence(evidence, report, synthetic=reader.synthetic)
+    expected = sites_records.expected(store, reader.manifest, product="sites", contig=contig)
+    publish_sites(
+        store.contig(contig),
+        source,
+        view,
+        expected=expected.identity,
+        payload_identity=evidence.payload_identity,
+        team=team,
     )
+    return expected.identity
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare the production option-independent site publisher."""
+    return Task(key, run, (context.root, key.scope, context.source),
+                depends_on=(TaskKey("evidence", "contig", key.scope),),
+                inputs=(RecordKey(key.scope, "evidence"),), outputs=(RecordKey(key.scope, "sites"),),
+                resources=ResourceRequest(1, context.cores), thread_argument="team")

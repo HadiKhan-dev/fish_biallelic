@@ -3,16 +3,6 @@
 Owns fixed-order message recurrences and their clamped reverse views; no storage or thread admission.
 Method: docs/methods/founder_refinement.md#messages (RC05–RC07).
 
-Owns dense forward/backward messages and carried block chains.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#messages (RC04-RC06).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-
-
 For every sample F_s is a max-plus chain, so for any panel edit confined to blocks [a, c) the exact
 change of F is
 
@@ -365,8 +355,8 @@ def max_lead(row):
 @kernel(overloads=overloads_for(__name__, "forward_chain"), cache=True, parallel=True, nogil=True)
 def forward_chain(haps, win, offsets, start, a, c):
     """Carried forward messages at boundaries a..c (index 0..c-a) from start at a, and per block
-    the maximum before the block's normalisation and its first state. (Release 2.8: the candidate
-    kernels are dense, so the per-site leaders of 2.6's fast path are empty (S x 0) arrays.)"""
+    the maximum before the block's normalisation and its first state. The candidate kernels
+    use all states, so the per-site leader fields are empty (S x 0) arrays."""
     founders = len(haps)
     first, second = unordered_pairs(founders)
     states = len(first)

@@ -1,6 +1,6 @@
 """Locate a run's checkpoint root without reopening its original observations.
 
-The resolved config is routing metadata only (P0 ENG-02/ENG-30). Reading results
+The resolved config is routing metadata only. Reading results
 must continue to work when an input VCF or a template directory has moved.
 """
 
@@ -25,8 +25,11 @@ class RunPaths:
 
     @classmethod
     def from_directory(cls, run: str | Path) -> RunPaths:
-        """Read only checkpoint routing from RUN/config.toml, defaulting to RUN/checkpoints."""
+        """Check current-run provenance and read routing, defaulting to RUN/checkpoints."""
         output = Path(run).expanduser().resolve()
+        from ..store.releases import check_directory_release
+
+        check_directory_release(output)
         checkpoints = output / "checkpoints"
         resolved = output / "config.toml"
         if resolved.is_file():

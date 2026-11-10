@@ -29,14 +29,14 @@ from ...contracts.pedigree import (
 )
 from ...core.errors import InputError
 from ...core.kernels import kernel
-from ...core.numerics import weighted_chromosome_sum
+from ...core.numerics import ordered_sum
 from . import alternatives as alternatives_module
 from . import family, graph
 from .alternatives import Alternatives, softmax_finite
 from .kernels.signatures import OVERLOADS
 from .orientation import Orientation
 from .orientation import fit as fit_orientation
-from .parameters import ExposureConfig, PedigreeConfig
+from .parameters import ExposureParameters, PedigreeParameters
 from .ties import magnitude, unique_finite_winner
 
 __all__ = ["map_units", "testable", "fit_scores", "select", "fit", "build_exposure"]
@@ -74,7 +74,7 @@ def _units_present(packed, weights, units):
     return totals
 
 
-def map_units(morgans, config: ExposureConfig) -> np.ndarray:
+def map_units(morgans, config: ExposureParameters) -> np.ndarray:
     """float64: map units of measured map lengths ``morgans`` (Morgans; any shape), max(1, length / unit_morgans) (1
     where the length is unknown): an unlinked chromosome counts once however short, a long one by its length."""
     morgans = np.asarray(morgans, dtype=np.float64)
@@ -83,14 +83,14 @@ def map_units(morgans, config: ExposureConfig) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------- gate and scores
-def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureConfig) -> np.ndarray:
+def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParameters) -> np.ndarray:
     """bool [A]: configurations testable on the weighted chromosomes (M0 always): every edge (and an M2 pair) exposed
     in enough bins, enough of the fit's painted bins and on chromosomes holding enough map units."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
-    edge_exposed = weighted_chromosome_sum(weights, exposure.edge_exposed)
-    pair_exposed = weighted_chromosome_sum(weights, exposure.pair_exposed)
-    total_bins = float(weighted_chromosome_sum(weights, exposure.total_bins))
+    edge_exposed = ordered_sum(weights[:, None] * exposure.edge_exposed, axis=0)
+    pair_exposed = ordered_sum(weights[:, None] * exposure.pair_exposed, axis=0)
+    total_bins = float(ordered_sum(weights * exposure.total_bins, axis=0))
     edge_fraction = np.divide(edge_exposed, total_bins, out=np.zeros_like(edge_exposed), where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed), where=total_bins > 0.0)
     # Exposed chromosomes count by their map units (a short chromosome once), not one each.
@@ -122,17 +122,17 @@ def fit_scores(
     weights: np.ndarray,
     inputs: DecisionInputs,
     orientation: Orientation,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     trace: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(state scores, identity scores) [A] of one weighted fit, family terms included.
 
-    The chromosome fold multiplies every row, including zero weights; IEEE nonfinite
+    The chromosome sum multiplies every row, including zero weights; IEEE nonfinite
     propagation differs from the panel-admission fold that omits zero-weight rows.
     """
     alternatives = inputs.alternatives
     aggregate = alternatives_module.mix_m0(
-        weighted_chromosome_sum(weights, alternatives.log_likelihoods),
+        ordered_sum(weights[:, None] * alternatives.log_likelihoods, axis=0),
         alternatives,
         config.selection.m0_contamination_probability,
     )
@@ -171,7 +171,7 @@ def select(
     alternatives: Alternatives,
     priors: tuple[float, float, float],
     orientation: Orientation,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     *,
     counter=None,
 ) -> Selection:
@@ -271,7 +271,7 @@ def select(
 
 
 def fit(
-    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeConfig, trace: dict | None = None, *, counter=None
+    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeParameters, trace: dict | None = None, *, counter=None
 ) -> tuple[Selection, Orientation, tuple[np.ndarray, np.ndarray]]:
     """One weighted fit with the configured priors: (selection, orientation, (state, identity))."""
     orientation = fit_orientation(inputs.junctions, weights)
@@ -282,7 +282,7 @@ def fit(
     return selection, orientation, scores
 
 
-def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: ExposureConfig) -> ExposureEvidence:
+def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: ExposureParameters) -> ExposureEvidence:
     """Derive exposure from scored contigs; absent map lengths count one unit per chromosome."""
     edges, edge_exposed, pair_exposed = scores.edges, scores.edge_exposed, scores.pair_exposed
     total_bins = scores.total_bins

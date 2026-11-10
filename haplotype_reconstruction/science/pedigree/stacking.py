@@ -29,7 +29,7 @@ def stack(
 ) -> GenomeScores:
     """Own C-contiguous [C,E]/[C,T] arrays; chromosome inputs remain borrowed and unchanged.
 
-    Eligible edges and junction dyads are canonical C layout. L2's fixed contig
+    Eligible edges and junction dyads are canonical C layout. The fixed contig
     reductions, rather than this incidental layout, define all sums downstream.
     Every ChromosomeScores.one_floored is consumed verbatim.
     """

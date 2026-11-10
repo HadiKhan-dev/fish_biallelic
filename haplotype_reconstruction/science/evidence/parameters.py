@@ -1,4 +1,4 @@
-"""Declare unchanged evidence parameters with their 3.5 provenance (EC01-24)."""
+"""Read-support, quality, calibration and blocking controls for evidence."""
 
 from __future__ import annotations
 
@@ -19,11 +19,17 @@ class DiscoverySiteRule:
     """
 
     minimum_total_depth: int = field(
-        default=5, metadata={"provenance": "B/evidence/config.py: minimum_total_depth; P0 evidence-core.parameters.csv"}
+        default=5,
+        metadata={
+            "provenance": (
+                "Minimum total reads across analysed samples at a discovery site (reads); keeps "
+                "sites with insufficient support out of allele fitting."
+            ),
+        },
     )
 
     def threshold(self) -> int:
-        """The unchanged discovery support floor, independent of cohort size."""
+        """The discovery support floor, independent of cohort size."""
         return self.minimum_total_depth
 
 
@@ -33,27 +39,53 @@ class EvidenceParameters:
 
     # Discovery block width in sites (consecutive, non-overlapping windows of the site axis).
     block_sites: int = field(
-        default=200, metadata={"provenance": "B/evidence/config.py: block_sites; P0 evidence-core.parameters.csv"}
+        default=200,
+        metadata={
+            "provenance": (
+                "Consecutive kept sites per discovery block (sites); fixes the non-overlapping "
+                "discovery windows."
+            ),
+        },
     )
     discovery_sites: DiscoverySiteRule = field(
         default_factory=DiscoverySiteRule,
-        metadata={"provenance": "B/evidence/config.py: discovery_sites; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Read-support rule for discovery (parameter group); retains low-support sites on "
+                "the evidence axis for later inference."
+            ),
+        },
     )
     site_quality: SiteQualityParameters = field(
         default_factory=SiteQualityParameters,
-        metadata={"provenance": "B/evidence/config.py: site_quality; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Contig-calibrated site-filter controls (parameter group); sets classification, "
+                "posterior and identifiability rules."
+            ),
+        },
     )
     sample_quality: SampleQualityParameters = field(
         default_factory=SampleQualityParameters,
-        metadata={"provenance": "B/evidence/config.py: sample_quality; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Per-library founder-exclusion controls (parameter group); separates foreign-like "
+                "read evidence from own alleles and local artefacts."
+            ),
+        },
     )
     read_model: ReadModelParameters = field(
         default_factory=ReadModelParameters,
-        metadata={"provenance": "B/evidence/config.py: read_model; P0 evidence-core.parameters.csv"},
+        metadata={
+            "provenance": (
+                "Observed-allele-depth read-model controls (parameter group); governs held-out "
+                "calibration and likelihood application."
+            ),
+        },
     )
 
 
-# Provenance: B/evidence/stage.py:29, EC23; absolute probability validation tolerance.
+# Absolute normalized genotype-probability row-sum tolerance (probability).
 ROW_SUM_TOLERANCE = 1e-12
 
 __all__ = ["DiscoverySiteRule", "EvidenceParameters"]

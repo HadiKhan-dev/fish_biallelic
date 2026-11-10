@@ -108,13 +108,12 @@ phased sites reuse its PS. Each set has an independent orientation; relative pha
 slot assignment and parental origin are different claims. Parent slots carry no
 sex labels.
 
-Header order is file format, htslib PASS, source, contig, GT, PS, then full-length
+Header order is file format, htslib PASS, source, writer release, contig, GT, PS, then full-length
 FILTER/site-set/omission lines, the simulation note when appropriate, and columns.
 Observed [full sample](../examples/full.samples.header.vcf.txt) and
 [kept sample](../examples/kept.samples.header.vcf.txt) headers are captured from real
-produced files. In the kept sample file, htslib's VCFv4.2 line precedes the writer's
-VCFv4.3 line; both occur. The [header receipt](../examples/vcf_headers.json) hashes
-these captures and their produced source files. htslib's inserted line is
+produced files. Full and kept files each have one VCFv4.2 declaration and an
+explicit `haplotype_reconstruction_release=4.12` header. htslib's inserted line is
 `##FILTER=<ID=PASS,Description="All filters passed">`.
 
 ## VCF and BCF indexes
@@ -234,27 +233,39 @@ record holds `total_full_scores`, `final_panel_size`, `final_likelihood` (join l
 likelihood, nats), `initialization` (the anchor panels scored at the start),
 `selected_initial_anchor`, `sweeps`, `tier1_sweeps`, `sweep_backstop`,
 `tier2_passes`, `tier2_accepted`, `saturation_steps`, `saturation_accepted`, `quota`,
-`ladder_top`, `ladder_extended`, `quota_backstop`, `beam_seconds`, `count` (the
+`ladder_top`, `ladder_extended`, `quota_backstop`, `count` (the
 count step's tallies), `count_exact_scores`, `count_exact_sample_scores`,
 `pool_sizes` (original, final, largest), `certified`, `backstop_reached`,
-`pool_backstop`, `tie_events`, `phase_seconds`, `work_counters`. `sweeps` counts
+`pool_backstop`, `tie_events`, `work_counters`. `sweeps` counts
 tier-1 sweeps plus accepted tier-2 moves; `certified` means that no move improves
 the panel and the count rule is quiescent at every rung; `backstop_reached` and
 `pool_backstop` mean that the search stopped at a backstop and is not certified.
 The search and count rules are described from [AJ14](../methods/assembly.md#aj14)
-to [AJ25](../methods/assembly.md#aj25). List and dictionary values are JSON. Times and work counters are diagnostics. Feedback
-searches belong to selection's context assemblies.
+to [AJ25](../methods/assembly.md#aj25). List and dictionary values are JSON. Work counters are diagnostics; measured whole-join
+and component durations remain in assembly records, and task durations in run records.
+Feedback searches belong to selection's context assemblies.
+
+Checkpoint layout markers, invocation records, export manifests and VCF/BCF
+headers identify the writer release. 4.12 refuses earlier checkpoints and exports;
+re-run their original inputs with 4.12 in a new output root. The published
+format-1 kernel manifest and standalone payload-file codecs remain available.
 
 Task resource detail is retained in `run_records/*.tasks.jsonl`, including after
 success or failure. The matching invocation JSON holds `task_count` and
 `task_summaries`, one aggregate per stage: task outcomes, summed measured task
-wall and CPU seconds, maximum measured task peak bytes, maximum starting and
-peak thread counts, and known task failures. Missing measurements for failed
+wall and CPU seconds, `publish_lock_wait_seconds`, `publish_fsync_seconds`,
+maximum measured task peak bytes, maximum starting and peak thread counts, and
+known task failures. Publish wait includes the process append lock, cross-process
+file lock and grouped durability barrier. Fsync seconds measure calls made by the
+task, including container creation; a task covered by another publisher's fsync
+records the barrier wait instead. Each task row carries both publish fields;
+failed tasks retain measured publish times when their exception reaches the
+coordinator, or null when the worker dies without reporting them. Missing measurements for failed
 tasks are not estimated. Nested stage timers retain inclusive and exclusive
 wall time separately; summed task wall time can exceed invocation wall time.
-Readers also accept legacy invocation JSON containing an embedded `tasks` list.
-Status does not read legacy live task logs without aggregates; it reports their
-published task count and stage timers.
+Invocation JSON records identify release 4.12 and use the current `run-record-v5`
+schema. Readers use the retained task log for detail and the bounded aggregates
+for status. Earlier invocation formats are refused.
 
 ### Collection tables
 
@@ -503,7 +514,7 @@ Assembly-search columns are the first-seen union across contigs as well as
 records. Its prefix is always present. The closing-record fields and their
 meaning are listed above; event-specific columns are:
 
-`accepted`, `additional_seconds`, `alternatives`, `branch_k`, `branch_ll`, `certified`, `change`, `changes`, `complete`, `continued`, `cycle_excluded`, `cycle_excluded_panels`, `exact`, `kind`, `minimum_switches`, `objective`, `observed_panels`, `panel`, `panel_size`, `panels`, `proposed_paths`, `reason`, `replay_choices`, `representative_prior`, `represented_paths`, `resolution_seconds`, `resolved`, `source`, `source_choices`, `source_decision`, `source_replay_complete`, `source_search_certified`, `stage`, `status`, `survivors`, `unresolved_search`, `values`.
+`accepted`, `alternatives`, `branch_k`, `branch_ll`, `certified`, `change`, `changes`, `complete`, `continued`, `cycle_excluded`, `cycle_excluded_panels`, `exact`, `kind`, `minimum_switches`, `objective`, `observed_panels`, `panel`, `panel_size`, `panels`, `proposed_paths`, `reason`, `replay_choices`, `representative_prior`, `represented_paths`, `resolved`, `source`, `source_choices`, `source_decision`, `source_replay_complete`, `source_search_certified`, `stage`, `status`, `survivors`, `unresolved_search`, `values`.
 
 Each event keeps its recorded operand value; a field absent from a record is an
 empty cell. Nested object keys inside these CSV cells retain their original names.

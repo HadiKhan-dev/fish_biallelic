@@ -1,7 +1,6 @@
 """Evaluate independent pairwise three-state IBD chains.
 
-Owns the relocated ibd_kernels units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md#rl04.
 """
 
 from __future__ import annotations
@@ -114,7 +113,7 @@ def pair_ibd(gl, observed, p, stay, pairs, masks, posterior, loglik):
 def _pair_chain(gl, observed, p, stay, i, j, masks, M, L, em, alpha, scale, posterior, loglik):
     """pair_ibd for one pair (i, j), in the buffers em, alpha [L, 3] and scale [L]; accumulates into its rows
     posterior [4] and loglik [M]. The emissions, the full chain's forward pass and the masked chains run
-    in one pass over the sites (each chain's arithmetic and order as before; independent chains overlap)."""
+    in one pass over the sites; each chain keeps its site order while independent chains overlap."""
     a = np.zeros((M, 3))
     allowed = np.zeros(M, dtype=np.int64)
     for m in range(M):

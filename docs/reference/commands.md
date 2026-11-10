@@ -18,7 +18,7 @@ Initialize if needed, then run or resume the graph.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -44,7 +44,7 @@ Validate inputs and initialize the run manifest.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -70,7 +70,7 @@ Record one contig's evidence.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -97,7 +97,7 @@ Gather relatedness from every contig's evidence.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -123,7 +123,7 @@ Reconstruct and refit one contig.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -150,7 +150,7 @@ Gather the genome-wide pedigree.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -176,7 +176,7 @@ Phase, map and export one contig.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -203,7 +203,7 @@ Publish tables from available records.
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
-| `--memory-limit` | 1 | `—` | — | Memory the run may plan to use at once, e.g. 200G ([execution] memory_limit; default: available at start minus headroom). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
 | `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
 | `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
 | `--serial` | 0 | `—` | — | [execution] serial. |
@@ -214,16 +214,6 @@ Publish tables from available records.
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
 | `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
-
-## migrate-config
-
-Translate a 3.5 TOML file with an explicit per-key audit.
-
-| Argument | Arity | Default | Choices | Help |
-|---|---|---|---|---|
-| `-h, --help` | 0 | `—` | — | show this help message and exit |
-| `CONFIG` | 1 | `—` | — |  |
-| `-o, --output` | 1 | `—` | — |  |
 
 ## status
 
@@ -270,7 +260,7 @@ Write a finished run's founder VCF and phased sample VCF (the files of the run's
 | `-h, --help` | 0 | `—` | — | show this help message and exit |
 | `RUN_DIRECTORY` | 1 | `—` | — |  |
 | `DESTINATION` | 1 | `—` | — | New or empty directory. |
-| `--products` | + | `['founders', 'samples']` | founders, samples, tracks | founders: per-contig founder VCF (haploid GT, one column c<component>_H<row> per founder row); samples: phased sample VCF (GT:PS); tracks: per-component founder-track TSV.gz (CHROM POS H0 H1 ...). |
+| `--products` | + | `['founders', 'samples']` | founders, samples, tracks | founders: per-contig founder VCF (haploid GT, one column c<component>_H<row> per founder row); samples: phased sample VCF (GT:PS); tracks: per-contig founder-track CSV.gz (contig, component, pos, h0, h1, ...). |
 | `--format` | 1 | `'vcf'` | vcf, bcf | vcf: bgzipped VCF with a tabix index (CSI beyond 2^29 bp); bcf: BCF with a CSI index. |
 | `--full-length, --no-full-length` | 0 | `True` | — | Write every input biallelic SNP that reached the site filter (FILTER PASS for kept sites, the rule codes r1-r5 for removed ones); --no-full-length writes the kept sites only. |
 | `--contigs` | + | `—` | — |  |

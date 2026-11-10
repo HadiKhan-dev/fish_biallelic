@@ -1,14 +1,14 @@
 # AulStu cross (AsAc BCF), whole genome: `haplotypes run configs/astcal.toml`.
-# The aulstu preset supplies the 22 autosomes. Inference reads only the BCF and the genetic map (no sample metadata):
+# The 22 autosomes are listed below. Inference reads only the BCF and the genetic map (no sample metadata):
 # every sequenced sample is a candidate parent of every other. Paths are relative to the working directory. Large-K
 # data: expect long, memory-paced runs; use full nodes and resume from checkpoints.
-preset = "aulstu"
-
 [run]
 output = "work/runs/astcal"
 
 [input]
 kind = "vcf"
+contigs = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12",
+           "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr22", "chr23"]
 vcf = "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
 
 # [execution]

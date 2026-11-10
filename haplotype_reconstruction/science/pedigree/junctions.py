@@ -10,7 +10,6 @@ the observed haplotype-bin labels are counted alongside, so incomplete paintings
 shallow ancestry.
 
 Method: docs/methods/pedigree.md#exposure-and-junction-counts
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -178,7 +177,7 @@ def junction_counts(
     return _minimum_switches(pooled, trajectories)
 
 
-# --------------------------------------------------------------------------- linked transmission (release 2.16)
+# --------------------------------------------------------------------------- linked transmission
 @kernel(overloads=OVERLOADS["junctions._trace_schedule"], cache=True, nogil=True)
 def _trace_schedule(labels, trajectories, costs, reverse):
     """One sample's minimum-switch unordered trajectory pair per bin (int64 [B, 2]), by traceback through the

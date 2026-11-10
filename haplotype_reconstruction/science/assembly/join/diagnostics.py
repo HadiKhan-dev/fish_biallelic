@@ -1,19 +1,19 @@
 """Typed join outcomes and ordered diagnostic records (AJ14, AJ21–25).
 
 Owns immutable snapshots of one search. Arrays retain the original sample and
-canonical founder order. Pure record encoders preserve the native payload schema;
-timing fields are populated by callers outside science, never by a local clock.
+canonical founder order. Pure record encoders preserve the payload schema;
+The stage measures whole-join duration; the phase timing fields here are unmeasured zero placeholders.
 
 Owns: typed outcomes, count census and ordered per-refit event snapshots.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §5 and WP_AS5 §9.3; AJ14, AJ21–AJ25.
-Identity: Only cross-refit scheduling interleaving is removed; every within-refit event remains ordered.
+Method: docs/methods/assembly.md#aj14.
+Invariant: Only cross-refit scheduling interleaving is removed; every within-refit event remains ordered.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from dataclasses import fields as dataclass_fields
@@ -62,8 +62,8 @@ class CountCensus:
     most chimera-trap indicators of one birth step; seed_refits: duplicate-seed refits run;
     ladder_births: births accepted at a pool-saturation rung; final_paths_failing_death_test:
     final paths that would fail their own death test (None when the search stopped at the sweep
-    backstop); seconds, seed_seconds: wall time of the count steps and of their seed refits.
-    state_revisits (release 2.1): count steps that would have returned to a panel this search already
+    backstop).
+    state_revisits: count steps that would have returned to a panel this search already
     held after a count change (a count cycle through births, deaths and seed swaps; births and seed
     swaps then stop); count_backstop_reached: the search reached COUNT_BACKSTOP count changes and
     stopped births and seed swaps (reported, never expected).
@@ -87,8 +87,6 @@ class CountCensus:
     final_paths_failing_death_test: int | None = record_field(
         "state", axes=(), units="1", dtype="int | None", default=None
     )
-    seconds: float = record_field("diagnostic", axes=(), units="s", dtype="float64", default=0.0)
-    seed_seconds: float = record_field("diagnostic", axes=(), units="s", dtype="float64", default=0.0)
     state_revisits: int = record_field("state", axes=(), units="1", dtype="int64", default=0)
     count_backstop_reached: bool = record_field("state", axes=(), units="1", dtype="bool", default=False)
 
@@ -112,12 +110,12 @@ class JoinSummary:
     (tier-1 sweeps + accepted tier-2 moves), tier1_sweeps, sweep_backstop, tier2_passes,
     tier2_accepted, saturation_steps, saturation_accepted: work and moves by phase; quota: the
     endpoint quota reached, ladder_top / quota_backstop: the saturation ladder's top and its
-    backstop (ladder_extended: the ladder climbed beyond 256); beam_seconds: wall time of beam
-    re-runs; count: the count step's tallies; count_exact_scores / count_exact_sample_scores:
+    backstop (ladder_extended: the ladder climbed beyond 256);
+    count: the count step's tallies; count_exact_scores / count_exact_sample_scores:
     exact scores the count step made; pool_original / pool_final / pool_largest: candidate pool
     sizes; certified: no move improves the panel and the count rule is quiescent at every rung;
     backstop_reached / pool_backstop: the search stopped at a backstop (not certified).
-    tie_events: maths.ties.TieCounter record of the join's tie-class decisions (beam cuts and search choices):
+    tie_events: core.ties.TieCounter record of the join's tie-class decisions (beam cuts and search choices):
     {kind: {decisions, inside_tie, wide, boundary}}.
     events: the search's records in order (tier-1 sweeps, count deaths / seeds / births, tier-2
     passes, pool-saturation rungs), plain JSON dicts as the reports table lists them.
@@ -140,7 +138,6 @@ class JoinSummary:
     quota: int = record_field("state", axes=(), units="1", dtype="int64")
     ladder_top: int = record_field("state", axes=(), units="1", dtype="int64")
     quota_backstop: int = record_field("state", axes=(), units="1", dtype="int64")
-    beam_seconds: float = record_field("diagnostic", axes=(), units="s", dtype="float64")
     count: CountCensus = record_field("state", axes=(), units="1", dtype="CountCensus")
     count_exact_scores: int = record_field("diagnostic", axes=(), units="1", dtype="int64")
     count_exact_sample_scores: int = record_field("diagnostic", axes=(), units="1", dtype="int64")
@@ -153,8 +150,6 @@ class JoinSummary:
     events: tuple[dict, ...] = record_field("state", axes=(), units="1", dtype="tuple[dict, ...]", default=())
     # A fresh search holds its TieCounter record (TieCounts); a decoded summary holds its plain dict.
     tie_events: TieCounts | dict = record_field("diagnostic", axes=(), units="1", dtype="dict", default_factory=dict)
-    # Count time is included in join_search; counters never decide scientific results.
-    phase_seconds: dict = record_field("diagnostic", axes=(), units="s", dtype="dict", default_factory=dict)
     work_counters: dict = record_field("diagnostic", axes=(), units="1", dtype="dict", default_factory=dict)
 
     @property
@@ -192,7 +187,6 @@ class JoinSummary:
             ladder_top=self.ladder_top,
             ladder_extended=self.ladder_extended,
             quota_backstop=self.quota_backstop,
-            beam_seconds=self.beam_seconds,
             count={item.name: getattr(self.count, item.name) for item in dataclass_fields(CountCensus)},
             count_exact_scores=self.count_exact_scores,
             count_exact_sample_scores=self.count_exact_sample_scores,
@@ -201,7 +195,6 @@ class JoinSummary:
             backstop_reached=self.backstop_reached,
             pool_backstop=self.pool_backstop,
             tie_events=_plain(self.tie_events),
-            phase_seconds=_plain(self.phase_seconds),
             work_counters=_plain(self.work_counters),
         )
 
@@ -237,7 +230,6 @@ class JoinSummary:
             quota=int(record["quota"]),
             ladder_top=int(record["ladder_top"]),
             quota_backstop=int(record["quota_backstop"]),
-            beam_seconds=float(record["beam_seconds"]),
             count=CountCensus(
                 **{
                     item.name: record["count"][item.name]
@@ -255,7 +247,6 @@ class JoinSummary:
             pool_backstop=bool(record["pool_backstop"]),
             events=tuple(_plain(event) for event in record.get("events", ())),
             tie_events=_plain(record.get("tie_events", {})),
-            phase_seconds=_plain(record.get("phase_seconds", {})),
             work_counters=_plain(record.get("work_counters", {})),
         )
 
@@ -289,7 +280,7 @@ class JoinOutcome:
 
 
 def join_family(value: Mapping | ReleaseFamily, blocks: int) -> ReleaseFamily:
-    """Type a sparse join-local family while retaining native field presence.
+    """Type a sparse join-local family while retaining its supplied field presence.
 
     The hierarchy supplies the final component span. Local records own [0,B);
     absent span keys remain absent from their source-provenance mapping view.
@@ -300,97 +291,11 @@ def join_family(value: Mapping | ReleaseFamily, blocks: int) -> ReleaseFamily:
     return replace(result, _present=tuple(value))
 
 
-def summarise(summaries: Sequence[JoinSummary]) -> dict:
-    """Totals over a level's join searches (the census log lines' counts)."""
-    summary = dict(
-        searched=0,
-        certified=0,
-        changed=0,
-        tier2_accepted=0,
-        saturation_accepted=0,
-        tier2_passes=0,
-        backstop_reached=0,
-        pool_backstop=0,
-        extended_ladders=0,
-        largest_pool=0,
-        births=0,
-        deaths=0,
-        pure_mosaic_deaths=0,
-        ambiguous=0,
-        frozen=0,
-        cycles_undecided=0,
-        most_decisions=0,
-        start_rows=0,
-        final_rows=0,
-        seed_births=0,
-        seed_swaps=0,
-        seed_refits=0,
-        ladder_births=0,
-        trap_blocks=0,
-        failing_final=0,
-        state_revisits=0,
-        count_backstops=0,
-    )
-    for item in summaries:
-        count = item.count
-        summary["searched"] += 1
-        summary["certified"] += bool(item.certified)
-        summary["changed"] += item.tier2_accepted + item.saturation_accepted > 0
-        summary["tier2_accepted"] += item.tier2_accepted
-        summary["saturation_accepted"] += item.saturation_accepted
-        summary["tier2_passes"] += item.tier2_passes
-        summary["backstop_reached"] += bool(item.backstop_reached)
-        summary["pool_backstop"] += bool(item.pool_backstop)
-        summary["extended_ladders"] += bool(item.ladder_extended)
-        summary["largest_pool"] = max(summary["largest_pool"], item.pool_largest)
-        summary["births"] += count.births
-        summary["deaths"] += count.deaths
-        summary["pure_mosaic_deaths"] += count.pure_mosaic_deaths
-        summary["ambiguous"] += count.ambiguous
-        summary["frozen"] += bool(count.births_frozen)
-        summary["cycles_undecided"] += count.cycles_undecided
-        summary["most_decisions"] = max(summary["most_decisions"], count.decisions)
-        summary["start_rows"] += count.start_size
-        summary["final_rows"] += item.final_panel_size
-        summary["seed_births"] += count.seed_births
-        summary["seed_swaps"] += count.seed_swaps
-        summary["seed_refits"] += count.seed_refits
-        summary["ladder_births"] += count.ladder_births
-        summary["trap_blocks"] += count.trap_indicators > 0
-        summary["failing_final"] += count.final_paths_failing_death_test or 0
-        summary["state_revisits"] += count.state_revisits
-        summary["count_backstops"] += bool(count.count_backstop_reached)
-    return summary
-
-
-def census_lines(summaries: Sequence[JoinSummary]) -> list[str]:
-    """The level's two census log lines (panel search; join count rule), or [] when no batch was
-    searched."""
-    summary = summarise(summaries)
-    if not summary["searched"]:
-        return []
-    return [
-        "  Panel search: {searched} searched, {certified} certified, {changed} changed "
-        "by tier 2 or pool saturation ({tier2_accepted} tier-2 and {saturation_accepted} "
-        "saturation moves), {tier2_passes} tier-2 passes, sweep backstop hits "
-        "{backstop_reached}, saturation ladders extended beyond 256 {extended_ladders}, "
-        "pool backstop hits {pool_backstop}, largest pool {largest_pool}".format(**summary),
-        "  Join count rule: rows {start_rows} at the start -> {final_rows}; {births} births, "
-        "{deaths} deaths ({pure_mosaic_deaths} without a private cell), {ambiguous} "
-        "ambiguous calls, births frozen by a count cycle in {frozen} super-blocks "
-        "({cycles_undecided} undecided cycles), at most {most_decisions} decisions in one "
-        "super-block; duplicate seeds: {seed_refits} refits, {seed_births} births, {seed_swaps} "
-        "swaps; {ladder_births} saturation births; {trap_blocks} super-blocks with chimera-trap "
-        "indicators; {failing_final} final paths fail their own death test; {state_revisits} count-state "
-        "revisits, {count_backstops} count backstops".format(**summary),
-    ]
-
-
 def append_event(search, record: dict, source: str | None = None) -> None:
     """Append to a seed's ordered trace while that count step is collecting refits.
 
     Callers hold the search lock. The source is routing information, not an extra
-    scientific record field; the native event payload remains unchanged.
+    scientific record field; the event payload contains only the decision record.
     """
     buffers = getattr(search, "refit_events", None)
     match = None if source is None else re.match(r"(c[0-9]+/seed[0-9]+)(?:/|$)", source)
@@ -419,8 +324,6 @@ __all__ = [
     "JoinSummary",
     "JoinOutcome",
     "join_family",
-    "summarise",
-    "census_lines",
     "append_event",
     "ordered_refit_events",
 ]

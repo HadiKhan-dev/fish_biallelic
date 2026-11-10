@@ -8,7 +8,7 @@ Draw order: founders use SeedSequence([seed, 2000000]).spawn(C)[c]; pedigree
 uses the master stream (one initial Python structure seed for random cohorts only),
 then a contig-major child-seed block per cohort/depth. Observation uses its separate
 SeedSequence stream. Read seeds are drawn for EVERY contig before any resume skip;
-each read worker consumes its whole [N,L] tensor, never sample chunks.
+read workers consume sample blocks with independently indexed per-sample streams.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from ..core.errors import InputError
 from ..core.random import read_seeds, stream
 from .design import PedigreeRow, ReadModel, SimulationConfig, observed_indices
 from .pedigree import PedigreeTable, materialise_founders, pair_founders, simulate_explicit_pedigree, simulate_pedigree
-from .reads import ReadInputs, read_inputs, read_rows
+from .reads import ReadInputs, read_inputs
 from .truth import ContigTruth, TruthCrossovers, truth_crossovers, truth_painting
 
 if TYPE_CHECKING:
@@ -40,7 +40,6 @@ __all__ = [
     "ContigSimulation",
     "SimulationPlan",
     "prepare_simulation",
-    "generate_contig",
     "contig_read_inputs",
     "contig_result",
 ]
@@ -80,8 +79,10 @@ class ContigSimulation:
     """A whole-contig reads task with its already drawn seed and observed truth.
 
     Offspring is [N][2] int8[L]; ancestry is [N][2] lists of float-bp segments.
-    No field is mutated by generate_contig. Since release 4.8 each sample draws its reads from its own
-    stream (simulation/reads.py), so the sample axis may be split into blocks simulated anywhere.
+    ``contig_read_inputs`` prepares read factors; sample tasks generate counts and
+    ``contig_result`` combines counts with unchanged truth. These operations do not mutate
+    this record. Each sample has its own stream (simulation/reads.py), so the sample
+    axis may be split into independently simulated blocks.
     """
 
     contig: str = record_field("obs", axes=(), units="1", dtype="str")
@@ -124,7 +125,7 @@ def prepare_simulation(
     Explicit rows override cohorts and retain table observation. Input axes are not
     mutated; unequal founder counts across contigs raise InputError before draws.
     The runner executes independent child batches and returns indexed results.
-    ``map_work(function, items)`` (ordered, optional; release 4.10) draws the contigs' founders concurrently, each
+    ``map_work(function, items)`` (ordered, optional) draws the contigs' founders concurrently, each
     from its own stream, so the founders are the same.
     """
     if len(templates) != len(config.contigs) or len(chromosome_maps) != len(config.contigs):
@@ -195,15 +196,3 @@ def contig_result(
         crossovers=task.crossovers,
     )
     return cast("_ContigReadsFactory", ContigReads)(task.contig, task.sample_ids, task.positions, counts), truth
-
-
-def generate_contig(task: ContigSimulation) -> tuple[ContigReads, ContigTruth]:
-    """Return reads int32[N,L,2] and unchanged truth for one whole contig, serially.
-
-    Maternal and paternal arrays preserve the observed pedigree row order. Mutation,
-    map crossover positions and integer truth-painting truncation are retained.
-    The only mutable objects are the task-local PCG64 streams. The simulation stage
-    simulates blocks of samples in parallel (stages/inputs/simulation.py) with the same result.
-    """
-    inputs = contig_read_inputs(task)
-    return contig_result(task, inputs, read_rows(inputs, 0, inputs.hap0.shape[0]))

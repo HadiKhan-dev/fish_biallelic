@@ -34,8 +34,7 @@ as declared, never inferred from a field name.
 
 A counter that determines whether a scientific budget binds is state, even if it
 looks like a diagnostic. A proof-status field can be diagnostic only when the
-specified decision is already independent of it. The oracle map declares exact
-roles and comparison rules per field; a generic name-based exclusion is unsafe.
+specified decision is already independent of it. Field roles must be explicit; a generic name-based classification is unsafe.
 
 ## ObservationSource and readers
 

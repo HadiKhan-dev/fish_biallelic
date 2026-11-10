@@ -1,7 +1,7 @@
 """Expose the discovery science that local selection reuses.
 
-Owns only the declared selection-to-discovery boundary (WP_DI3 section 4.6).
-Methods: docs/methods/discovery.md, DI03-DI10 and DI26. The fitter retains ordered
+Owns only the declared selection-to-discovery boundary.
+Method: docs/methods/discovery.md. The fitter retains ordered
 workspace history; the cavity scorer and allele release read the final membership.
 This module must not schedule work, read records or introduce a second implementation.
 """

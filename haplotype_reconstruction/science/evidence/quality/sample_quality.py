@@ -83,13 +83,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import asdict
 
 import numpy as np
 from numba import prange, types
 from scipy.stats import binom, chi2
 
-from haplotype_reconstruction.contracts.evidence import InheritedSegment, SampleQualityDecision, SampleQualitySettings
+from haplotype_reconstruction.contracts.evidence import InheritedSegment, SampleQualityDecision
 from haplotype_reconstruction.core import ties
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.core.ties import TieCount, TieCounts
@@ -152,14 +151,6 @@ from .parameters import (
 from .parameters import (
     SAMPLE_WEIGHT_START as _WEIGHT_START,
 )
-
-# Numerical settings of the fit, not scientific thresholds.
-# Own-heterozygote latent dispersion grid (rho; latent SD sqrt(h (1 - h) rho), at most 0.1 at h = 1/2): a bounded
-# working nuisance, the same in both orientations.
-# Applicability: the foreign range must reach this multiple of a_min, and the cohort's clean error must stay below
-# a_min / this, so that errors (fitted up to a_min) and foreign alleles (above it) can separate.
-# Reasons r4 records when its h0 is ambiguous (unresolved class labels, no certified fit): own heterozygotes then
-# span both of r4's component means.
 
 
 def balance_support(balance: Mapping) -> tuple[tuple[float, float], str | None]:
@@ -911,7 +902,7 @@ def _profiles(
     """Per library (a range of distinct (orientation, depth, minor reads) bins, and its region-bin pairs): the null
     maximum, and per foreign fraction the alternative maximum and its contamination share, with the artefact
     components; mix_out holds the null's component weights (class-major; error rates, then own heterozygotes); with
-    The unsupported artefact-free branch is omitted (P0 EC38)."""
+    The unsupported artefact-free branch is omitted."""
     G = len(fractions)
     E = len(errors)
     V = len(balances)
@@ -1329,7 +1320,7 @@ def _assess(
         carrier_level=float(level),
         artefact_regions=int(collector.regions),
         segments=_segments(n_samples, cells, flagged, config),
-        config=SampleQualitySettings(**asdict(config)),
+        config=config,
         tie_events=TieCounts(tuple(TieCount(kind, **values) for kind, values in minor_allele.items())),
     )
 

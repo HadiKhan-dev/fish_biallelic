@@ -7,7 +7,6 @@ certify completion. Stage progress adapters supply index-only summaries.
 
 from __future__ import annotations
 
-import importlib
 import json
 import re
 from collections.abc import Sequence
@@ -17,10 +16,12 @@ from typing import Any
 from ..core.errors import InputError, SettingsError
 from ..engine.records import task_summaries
 from ..results.paths import RunPaths
+from ..stages.catalog import STAGES
+from ..store.status_index import completed_stages
 
 __all__ = ["run_status", "format_status"]
 
-_CONTIG_STAGES = ("evidence", "discovery", "selection", "assembly", "painting", "refit", "phase", "recombination")
+_CONTIG_STAGES = tuple(name for name, stage in STAGES.items() if stage.status)
 
 
 def _natural_key(name: str) -> list[Any]:
@@ -41,10 +42,9 @@ def _records(directory: Path) -> list[dict[str, Any]]:
                 host=data.get("host"),
                 pid=data.get("pid"),
                 wall_seconds=data.get("wall_seconds"),
-                peak_memory_bytes=data.get("peak_memory_bytes", data.get("peak_rss_bytes")),
                 memory=data.get("memory", {}),
                 peak_live_use_bytes=data.get("memory", {}).get("peak_live_use_bytes"),
-                task_count=data.get("task_count", sum(row["tasks"] for row in summaries.values())),
+                task_count=data["task_count"],
                 task_summaries=summaries,
                 task_wall_seconds={name: row["wall_seconds"] for name, row in sorted(summaries.items())},
                 updated_utc=data.get("updated_utc"),
@@ -59,27 +59,13 @@ def _records(directory: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _completion(file: Any) -> list[str]:
-    # mark_complete validates the derivations before appending its certificate.
-    # In an append-only container, referenced records at or before that sequence
-    # are the same committed versions it checked. A later replacement invalidates
-    # this status certificate conservatively; scientific resume still checks the
-    # independently expected derivations. Snapshot once, avoiding a stat per key.
-    index = file._records()
-    complete = []
-    for key, info in sorted(index.items()):
-        if not key.startswith("complete/"):
-            continue
-        hint = file._read(info, 1, items=("records",))
-        records = hint.get("records", {})
-        if records and all(name in index and index[name].seq <= info.seq for name in records):
-            complete.append(key)
-    return complete
 
 
 def _progress(stage: str, file: Any) -> Any:
-    module = importlib.import_module(f"haplotype_reconstruction.stages.{stage}.records")
-    return module.progress(file)
+    import importlib
+
+    records = importlib.import_module("haplotype_reconstruction." + STAGES[stage].records)
+    return records.progress(file)
 
 
 def _configuration(directory: Path, manifest: dict[str, Any], store: Any) -> None:
@@ -103,7 +89,7 @@ def _configuration(directory: Path, manifest: dict[str, Any], store: Any) -> Non
 
     # The immutable configuration record is a small control binding, like the
     # run manifest. Status compares that choice without reconstructing products.
-    # Results independently derives RC's scientific identity before decoding it.
+    # Results independently derives recombination's scientific identity before decoding it.
     for contig in resolved.contigs:
         file = store.contig(contig)
         if file.has("configuration/recombination"):
@@ -148,18 +134,18 @@ def run_status(
         if not directory.is_dir() or not root.is_dir():
             raise OSError(f"{directory}: no initialized run directory")
         store = CheckpointStore(root)
+        store.check_layout()
         from ..store.status_index import load_index
 
         load_index(store.run)
         for name in store.contig_names():
             load_index(store.contig(name))
-        store.check_layout()
         manifest = store.manifest("run")
         if manifest is None:
             raise OSError(f"{directory}: run has not been initialized; use haplotypes init")
         require_schema(manifest, 1)
         _configuration(directory, manifest, store)
-        report["run"] = dict(complete=_completion(store.run), contigs=manifest.get("contigs"), manifest=manifest)
+        report["run"] = dict(complete=completed_stages(store.run), contigs=manifest.get("contigs"), manifest=manifest)
         report["markers"] = [str(path.relative_to(root)) for path in sorted((root / "markers").glob("*.done"))]
         names = (
             list(contigs)
@@ -170,9 +156,9 @@ def run_status(
             file = store.contig(name)
             row: dict[str, Any] = dict(size_bytes=file.size(), stages={}, complete=[], work=[])
             try:
-                row["complete"] = _completion(file)
+                row["complete"] = completed_stages(file)
                 for stage in _CONTIG_STAGES:
-                    prefix = {"refit": "founder_refit"}.get(stage, stage)
+                    prefix = STAGES[stage].prefix
                     if file.keys(prefix + "/") or file.has(prefix):
                         row["stages"][stage] = _progress(stage, file)
             except (OSError, ValueError, RuntimeError, ImportError, AttributeError) as error:
@@ -206,7 +192,7 @@ def _describe(stage: str, progress: Any) -> str:
 
 
 def format_status(report: dict[str, Any]) -> str:
-    """Render the compact 3.5 status vocabulary plus record-checked completion."""
+    """Render compact run status and record-checked completion."""
     lines = [f"Run records: {len(report['records'])} in {report['output']}/run_records"]
     for row in report["records"]:
         lines.append(

@@ -1,6 +1,6 @@
 """Collect discovery work counts without affecting a scientific decision.
 
-Owns typed diagnostic options, clique records and block receipts (P0 DI29).
+Owns typed diagnostic options, clique records and block receipts.
 Must not read clocks, environment or files; stage tasks supply elapsed times.
 Method: docs/methods/discovery.md#search-status. Counts never select a panel.
 """
@@ -24,7 +24,6 @@ __all__ = [
     "CliqueStatistic",
     "DiscoveryDiagnostics",
     "BlockDiagnostics",
-    "backstop_counts",
 ]
 
 
@@ -37,7 +36,7 @@ class DiagnosticOptions:
 
 @dataclass(frozen=True)
 class CliqueStatistic:
-    """One residual pool's packed intersection work, preserving the DI29 TSV quantities."""
+    """Packed residual-pool intersection work for the diagnostic tables."""
 
     pool: int = record_field("diagnostic", dtype="int", units="index")
     work: int = record_field("diagnostic", dtype="int", units="intersections")
@@ -107,21 +106,3 @@ class BlockDiagnostics:
             fit_schedule_counts=self.fit_schedule_counts,
             endpoint_family_counts=self.endpoint_family_counts,
         )
-
-
-def backstop_counts(summary) -> dict[str, int]:
-    """Return exact block indicators for ranked truncations and omitted tied classes (DI25)."""
-    get = summary.get if isinstance(summary, Mapping) else lambda key, default=None: getattr(summary, key, default)
-    causes = {item["cause"] if isinstance(item, Mapping) else item.cause for item in get("omissions", ())}
-    expansion_ranked = "expansion_ranked_truncation" in causes
-    expansion_tied = "expansion_tie_class_at_budget" in causes
-    score_ranked = "exact_score_ranked_truncation" in causes
-    score_tied = "exact_score_tie_class_at_budget" in causes
-    return dict(
-        expansion_backstop=int(get("stop_reason") == "expansion_backstop" or expansion_ranked or expansion_tied),
-        exact_score_backstop=int(score_ranked or score_tied),
-        expansion_ranked_truncation=int(expansion_ranked),
-        expansion_tie_class_at_budget=int(expansion_tied),
-        exact_score_ranked_truncation=int(score_ranked),
-        exact_score_tie_class_at_budget=int(score_tied),
-    )

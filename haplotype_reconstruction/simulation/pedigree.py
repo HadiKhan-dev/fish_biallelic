@@ -1,7 +1,6 @@
 """Founders, pedigree structure and meiosis of a known-pedigree simulation.
 
-Random streams (fixed so that a configuration and seed always give the same data, at any worker
-count, and the same data as the base release 92b3daf):
+Random streams are keyed so that a configuration and seed give the same data at any worker count:
 
 * founder haplotypes of contig c: ``default_rng(SeedSequence([seed, 2_000_000]).spawn(C)[c])``
   resolves exact probability ties of the templates (``materialise_founders``);
@@ -246,7 +245,7 @@ class SimulatedContig:
 
 
 class _TaskRunner:
-    """Relocation runner: execute the unchanged independent child batches in order."""
+    """Execute independent child batches and collect results in input order."""
 
     def __init__(self, runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None) -> None:
         self.runner = runner
@@ -264,7 +263,7 @@ class _TaskRunner:
 
 
 def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
-    """Children per pool task: as base, each contig's cohort is split over ~processes / contigs tasks."""
+    """Children per pool task: split each contig's cohort over approximately processes / contigs tasks."""
     per_contig = max(1, processes // max(1, min(n_contigs, processes)))
     return max(1, (n_children + per_contig - 1) // per_contig)
 
@@ -272,8 +271,8 @@ def _children_per_task(n_children: int, n_contigs: int, processes: int) -> int:
 def _child_tasks(parent_pairs, seeds, haplotypes_by_contig, ancestries_by_contig, per_task, common_by_contig):
     """Pool tasks (_simulate_children) of every contig's children in batches of ``per_task``.
 
-    Release 4.8: a task carries only the parents its own children use, with their pairs renumbered (4.7 sent each
-    task every parent of the cohort: about 4.4 GB pickled serially by the coordinator for one 112-CPU contig).
+    A task carries only the parents its own children use, with their pairs renumbered,
+    to bound coordinator serialisation by the batch's actual inputs.
     The children, their seeds and every draw are unchanged."""
     tasks = []
     for c, (haplotypes, ancestries) in enumerate(zip(haplotypes_by_contig, ancestries_by_contig, strict=True)):
@@ -421,7 +420,7 @@ def simulate_explicit_pedigree(
     budget: int = 1,
     runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None,
 ) -> tuple[PedigreeTable, list[SimulatedContig]]:
-    """Simulate an explicit pedigree table (design.read_pedigree_table rows) on every contig (release 2.17).
+    """Simulate an explicit pedigree table (design.read_pedigree_table rows) on every contig.
 
     Founder rows take the template founders in table order (their numbers must agree). Children are simulated by
     depth (a founder has depth 0, a child one more than its deeper parent); each depth draws from the master stream

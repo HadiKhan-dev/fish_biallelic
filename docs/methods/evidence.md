@@ -46,7 +46,7 @@ Compute site genotype likelihood terms, initialise the genotype-frequency mixtur
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `classification_error`, `classification_heterozygote_alt`, `site_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `classification_error`, `classification_heterozygote_alt`, `site_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N M_in x iterations); O(sum of depths); O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -57,7 +57,7 @@ Choose the empirical histogram range and width, smooth its density, select the d
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `core_posterior_level`, `histogram_smoothing_bins`, `site_quality`, `clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `core_posterior_level`, `histogram_smoothing_bins`, `site_quality`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M log M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -90,7 +90,7 @@ Fit clean Poisson wrong-allele counts against a negative-binomial artefact class
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `clean_posterior_level`, `minimum_artefact_separation`, `site_quality`, `clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `clean_posterior_level`, `minimum_artefact_separation`, `site_quality`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -101,7 +101,7 @@ On sites passing r1–r3, fit the two-component beta-binomial balance mixture fr
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `minimum_artefact_separation`, `clean_posterior_level`, `site_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_artefact_separation`, `clean_posterior_level`, `site_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -112,7 +112,7 @@ Reject sites whose expected non-major-genotype carrier count is strictly below t
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `drop_uninformative_sites`, `minimum_expected_carriers`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `drop_uninformative_sites`, `minimum_expected_carriers`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: An additional site-mixture fit on unflagged samples when the rule requires it.
 
@@ -123,7 +123,7 @@ If filtering is disabled or calibration is inapplicable, retain all sites and re
 
 Implementation: [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py).
 
-Parameters by name: `enabled`, `minimum_calibration_sites`, `site_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `enabled`, `minimum_calibration_sites`, `site_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N M_in); O(M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -134,7 +134,7 @@ Construct carrier thresholds from the clean error law, identify eligible/minor c
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `carrier_tail_level`, `fragment_bp`, `artefact_regions`, `initial`, `sample_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `carrier_tail_level`, `fragment_bp`, `artefact_regions`, `initial`, `sample_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N M_pass). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -145,7 +145,7 @@ Fit a per-library null mixture, then warm-start alternatives in ascending foreig
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `minimum_foreign_fraction`, `heterozygote_floor_ratio`, `heterozygote_depth_classes`, `sample_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_foreign_fraction`, `heterozygote_floor_ratio`, `heterozygote_depth_classes`, `sample_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(G I (B Q^2 + (J Q)^3 + R_B S_b)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -156,7 +156,7 @@ Check minimum sample/cell and fraction-separation applicability first. Profile f
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `minimum_samples`, `carrier_tail_level`, `enabled`, `sample_quality`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_samples`, `carrier_tail_level`, `enabled`, `sample_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -167,7 +167,7 @@ Identify paired near-private carriers, classify heterozygote-like cells, then so
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `segment_gap_bp`, `segment_minimum_events`, `fragment_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `segment_gap_bp`, `segment_minimum_events`, `fragment_bp`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(near-private cells log). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -189,7 +189,7 @@ Admit calibration cells within the declared depth range, count depth/ALT histogr
 
 Implementation: [science/evidence/read_model/calibrate.py](../../haplotype_reconstruction/science/evidence/read_model/calibrate.py).
 
-Parameters by name: `maximum_fit_depth`, `fold_window_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `maximum_fit_depth`, `fold_window_bp`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -200,7 +200,7 @@ Sort sample histograms by content, fit all declared shared-binomial starts, and 
 
 Implementation: [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py).
 
-Parameters by name: `em_starts`, `em_maximum_iterations`, `em_tolerance_per_observation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `em_starts`, `em_maximum_iterations`, `em_tolerance_per_observation`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N C). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -211,7 +211,7 @@ Fit sample-local binomial coordinates, estimate diagonal curvature/variance, and
 
 Implementation: [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py).
 
-Parameters by name: `polish`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `polish`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -222,7 +222,7 @@ Start from pooled local effects and jointly fit a shared heterozygote concentrat
 
 Implementation: [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py).
 
-Parameters by name: `initial_heterozygote_concentration`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `initial_heterozygote_concentration`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N C). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -233,7 +233,7 @@ Sum held-out log-predictive gains by physical stretch in sample order, discard u
 
 Implementation: [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [science/evidence/read_model/calibrate.py](../../haplotype_reconstruction/science/evidence/read_model/calibrate.py).
 
-Parameters by name: `selection_z`, `selection_minimum_blocks`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `selection_z`, `selection_minimum_blocks`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L); O(M C N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -244,7 +244,7 @@ Use the fixed binomial model when calibration is disabled, folds lack admitted e
 
 Implementation: [science/evidence/read_model/calibrate.py](../../haplotype_reconstruction/science/evidence/read_model/calibrate.py), [science/evidence/read_model/fit.py](../../haplotype_reconstruction/science/evidence/read_model/fit.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py).
 
-Parameters by name: `fixed_error`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `fixed_error`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Constant rule construction plus the represented diagnostic fields.
 
@@ -253,7 +253,7 @@ Cost and scope: Constant rule construction plus the represented diagnostic field
 
 Build per-sample prefix tables and a bounded-depth lookup; evaluate deeper cells with the same expression. Require zero-depth likelihoods to be exactly neutral and observed likelihoods finite, nonnegative and normalised. The lookup depth changes cost, not the emission model or observation mask.
 
-GL storage is chosen automatically for each sample and contig. Under the fixed/shared binomial, sample-binomial and sample-joint models, the fitted error and heterozygote parameters are fixed within a sample/contig. A site's normalised triple therefore depends only on its integer REF/ALT depth pair. There are no site-specific emission parameters or genotype priors; `(0, 0)` has the literal float64 `1/3` triple. Storage fills triples from the unchanged dense kernel at their first-occurrence sites, including the existing lookup/direct path, and checks them independently against bounded windows of original sites.
+GL storage is chosen automatically for each sample and contig. Under the fixed/shared binomial, sample-binomial and sample-joint models, the fitted error and heterozygote parameters are fixed within a sample/contig. A site's normalised triple therefore depends only on its integer REF/ALT depth pair. There are no site-specific emission parameters or genotype priors; `(0, 0)` has the literal float64 `1/3` triple. Storage fills triples from the dense kernel at their first-occurrence sites, including the lookup/direct path, and checks them independently against bounded windows of original sites.
 
 For `D` distinct depth pairs and `L` sites, choose the smallest unsigned index type whose zero-based codes represent `D - 1`: uint8 through 256 pairs, uint16 through 65,536, then uint32 through 4,294,967,296. The automatic byte-cost rule strictly requires `32*D + width*L + 17 < 33*L`. A dense cell contains three float64 GLs (24 bytes), two int32 counts (8 bytes) and a bool mask (1 byte). A table entry is the exact float64 triple and int32 pair (32 bytes); maps add 17 bytes per sample and one final eight-byte offset per contig. Actual aggregate container bytes must also beat the joint dense total. There is no user setting, depth cap, saving-margin requirement or construction-admission threshold.
 
@@ -261,12 +261,12 @@ Each coded pair recovers its counts exactly; `(0,0)` is unobserved. The same cod
 
 Planning retains only distinct-pair cardinalities and widths across samples. Safety checks and final filling rebuild one sample's integer key/first-site plan at a time, preventing N simultaneous plans or duplicated float64 tables. Every proposed codebook is checked against all source GL bits in bounded windows. A repeated pair with different triples forces dense storage. Dense fallback uses the original dense kernel and output allocator. Site/sample QC, model calibration and discovery-depth classification still consume their dense input counts before final encoding; this changes storage, not their kernels or decisions.
 
-Explicit gathers materialise identical ordered GL, count and mask slices. Discovery block/window declarations are lazy for both GL and mask. Relatedness frequency and pedigree availability use bounded site gathers; painting uses checkpoint windows. Assembly, pedigree exclusion, refit, phase and legacy painting-report APIs keep consumer-local dense projections where the existing boundary requires them. No full coded count/mask rows are stored alongside their codebook.
+Explicit gathers materialise identical ordered GL, count and mask slices. Discovery block/window declarations are lazy for both GL and mask. Relatedness frequency and pedigree availability use bounded site gathers; painting uses checkpoint windows. Assembly, pedigree exclusion, refit, phase and painting-report APIs keep consumer-local dense projections where the consumer boundary requires them. No full coded count/mask rows are stored alongside their codebook.
 
 
 Implementation: [science/evidence/likelihoods.py](../../haplotype_reconstruction/science/evidence/likelihoods.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [science/evidence/read_model/emission.py](../../haplotype_reconstruction/science/evidence/read_model/emission.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py).
 
-Parameters by name: `lookup_depth`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `lookup_depth`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: likelihood cell evaluation is O(N L) plus per-sample depth-prefix/lookup work. Joint encoding sorts L integer keys per sample and plans/checks/fills codes with searchsorted: O(N L log L + sum_n L log D_n) work, where D_n <= L is that sample's distinct-pair count. Planning scratch is O(L + D_n) for one sample at a time; final joint storage must be strictly smaller than 33 N L bytes. GL/mask projections use an 8 MiB workspace target, at most 2048 sites per tile, with at least one site even when the sample axis alone exceeds that target. Tile size is independent of GL-only storage savings.
 
@@ -277,7 +277,7 @@ Use exact integer depth sums and the inclusive discovery-site threshold. Partiti
 
 Implementation: [science/evidence/blocks.py](../../haplotype_reconstruction/science/evidence/blocks.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py), [science/evidence/parameters.py](../../haplotype_reconstruction/science/evidence/parameters.py).
 
-Parameters by name: `minimum_total_depth`, `block_sites`, `discovery_sites`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_total_depth`, `block_sites`, `discovery_sites`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -299,7 +299,7 @@ Derive the evidence identity from the consumed source and scientific parameters,
 
 New evidence publications use schema 2. Non-observation fields and decisions/diagnostics are unchanged. A dense contig stores `gl_encoding="dense"` and its original arrays. The accepted GL-only v2 layout (`gl_encoding="coded"`) remains readable. New joint publications use `gl_encoding="paired"`, flat numeric `gl_*` fields, `counts_dense[Ndense,L,2]` and `observed_dense[Ndense,L]`; whole-contig `counts` and `observed` fields are omitted. Existing numeric checkpoint and worker transport formats carry these arrays without expansion or another copy of the shared code stream.
 
-The adapter reads schema 1, dense/GL-only schema 2, and joint schema 2 under an explicitly expected derivation. `load` preserves resident GL and mask sources and includes a count source only when requested. The mask never retains dense fallback counts. `open_arrays` exposes the three logical names over shared physical code/pair handles and only the dictionary rows requested by each window. `load_arrays` and `load_dense` stream explicit dense projections directly into one final destination, including caller-owned destinations. For a sample window of W sites, dictionary lookup sorts/deduplicates W codes (O(W log W) work, O(W) scratch), decodes at most min(D, W) rows in consecutive runs, and restores the requested order. Interleaved sample batches do not reread whole D-row dictionaries. Over a complete pass, requested dictionary bytes are O(N L), with O(N L log W) lookup work; physical compressed-chunk reads additionally depend on the store's bounded shared cache and code locality. Identity validation remains separate from format compatibility; public readers rebuild current derivations, so schema-1 format support is not transparent 4.3 resume compatibility (see the [migration guide](../user/migration.md#migrating-from-43-to-44)).
+The adapter reads schema 1, dense/GL-only schema 2, and joint schema 2 under an explicitly expected derivation. `load` preserves resident GL and mask sources and includes a count source only when requested. The mask never retains dense fallback counts. `open_arrays` exposes the three logical names over shared physical code/pair handles and only the dictionary rows requested by each window. `load_arrays` and `load_dense` stream explicit dense projections directly into one final destination, including caller-owned destinations. For a sample window of W sites, dictionary lookup sorts/deduplicates W codes (O(W log W) work, O(W) scratch), decodes at most min(D, W) rows in consecutive runs, and restores the requested order. Interleaved sample batches do not reread whole D-row dictionaries. Over a complete pass, requested dictionary bytes are O(N L), with O(N L log W) lookup work; physical compressed-chunk reads additionally depend on the store's bounded shared cache and code locality. Identity validation remains separate from format compatibility; public readers rebuild current derivations, so schema-1 format support is not transparent 4.3 resume compatibility.
 
 
 Implementation: [stages/evidence/records.py](../../haplotype_reconstruction/stages/evidence/records.py), [contracts/evidence.py](../../haplotype_reconstruction/contracts/evidence.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py), [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [outputs/reports/evidence.py](../../haplotype_reconstruction/outputs/reports/evidence.py).
@@ -325,5 +325,6 @@ Cost and scope: O(M_in). These terms describe the unit’s work/storage dimensio
 **Sample quality:** see [EC12](#ec12).
 
 <a id="stage"></a>
+<a id="stage.4"></a>
 
 **Stage:** see [EC26](#ec26).

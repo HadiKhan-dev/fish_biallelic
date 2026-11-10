@@ -6,7 +6,6 @@ the two aligned block partitions preserves validity. Length eight is a workspace
 choice, never a biological threshold: uncertified scores are evaluated exactly.
 
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 import hashlib
@@ -78,9 +77,9 @@ class Geometry:
                 j = max(first, 1)
                 target = slice(j - first, stop - first)
                 source = slice(j - 1, stop - 1)
-                # Release 4.10: every parent's distance to its group's reference at once (each sum over the last
-                # axis is the same reduction as for one group's members), then the groups' maxima (exact in any
-                # order); the per-group Python loop dominated the screen set-up of a long chromosome.
+                # Compute every parent's distance to its group's reference in one array operation, then group maxima.
+                # Each distance reduces its last axis independently. Batching avoids one Python dispatch per
+                # group, which dominates screen setup on long chromosomes.
                 distance = 0.5 * np.abs(normal[parents, source] - normal[refs[inverse], source]).sum(-1)
                 order = np.argsort(inverse, kind="stable")
                 starts = np.searchsorted(inverse[order], np.arange(groups))

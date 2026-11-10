@@ -3,11 +3,6 @@
 Owns exact exchange/content gain recurrences with sample-order reduction.
 Must not choose K, read storage or configure runtime.
 Method: docs/methods/founder_refinement.md#gains (RS08-RS09).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
 
 
 A content move replaces founder k's rows on blocks [p1, p2); its exact per-sample gain is
@@ -16,10 +11,9 @@ normalisers, from the current messages at its two ends (messages.py). A suffix e
 founders a < b at a junction relabels the suffix states (the per-homologue transition is
 founder-symmetric), so its gain needs the messages at the junction only.
 
-Release 2.8: under the per-homologue transition every state's switch term reads the founder maxima
-R[x], which include the moved founder's states, so 2.6's background fast path (only the K focal
-states advance while the leader is a background state) does not carry over; the candidate kernels
-run the all-state recursion (O(Q + K) per site).
+Under the per-homologue transition every state's switch term reads the founder maxima R[x],
+which include the moved founder's states. The candidate kernels therefore run the all-state
+recursion (O(Q + K) per site).
 """
 
 from __future__ import annotations

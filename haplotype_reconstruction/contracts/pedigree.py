@@ -1,6 +1,6 @@
 """Carry decision inputs and released pedigree calls across the fit-to-release seam.
 
-Owns the decision records of P0 PD01-PD27. No storage access or scoring is performed.
+Owns the pedigree decision records (PD01-PD27). No storage access or scoring is performed.
 Method: docs/methods/pedigree.md#products-and-published-tables. Inputs are borrowed read-only; results own their arrays.
 Ordered axes and roles are field metadata.
 Stage decoding freezes arrays; scientific entry points never mutate borrowed inputs.
@@ -32,7 +32,7 @@ class CandidatePanel:
     trios:         int64 [T, 3] rows (child, first, second), first < second, sorted by child then pair;
                    the canonical retained pairs from the bounded genome-wide selective search.
     screen_scores: float64 [N, N] robust screen utility [child, parent]; -inf off the eligible edges.
-    capped_children: the children whose admitted pairs exceeded PanelConfig.max_pairs_per_child (ascending); their
+    capped_children: the children whose admitted pairs exceeded PanelParameters.max_pairs_per_child (ascending); their
                    panel rows are the best pairs by bound gap, whole tie classes kept.
     """
 
@@ -63,7 +63,7 @@ class GenomeScores:
     contigs: informative contigs (C); arrays carry a leading contig axis C.
     edges:   int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending
              (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [C, E] on this
-             axis (release 2.16): the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure
+             axis: the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure
              of non-edges and self coverage) are never read by the decision or the report.
     zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C];
     informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
@@ -110,7 +110,7 @@ class ExclusionEvidence:
 
     dyads:          int64 [D, 2] (child, candidate parent) in target order.
     log_e:          float64 [D] exact log E, or a certified lower endpoint.
-    log_e_upper:    optional float64 [D] upper endpoint; None means legacy exact evidence.
+    log_e_upper:    optional float64 [D] upper endpoint; None means exact evidence without a separate upper endpoint.
     observed_sites: int64 [D] sites observed in both samples.
     markers:        markers of the contig; pattern_fallback_samples: samples scored without the
                     exact repeated-pattern cache (more than its cap of distinct GL triples).
@@ -176,7 +176,7 @@ class TierReach:
     """What the chromosome resampling can release with this many informative chromosomes.
 
     A non-M0 configuration is testable in a fit only when its edges are exposed on chromosomes holding at least
-    ExposureConfig.minimum_exposed_units map units (release 3.2), which caps the achievable support:
+    ExposureParameters.minimum_exposed_units map units, which caps the achievable support:
     max_bootstrap_support = fraction of this run's bootstrap draws whose distinct chromosomes hold that many units;
     max_loco_support = fraction of the leave-one-out fits that do. ``minimum_exposed_contigs`` is the number of
     chromosomes shorter than one unit that the gate needs; ``minimum_contigs_tier_*`` count such chromosomes too
@@ -243,7 +243,7 @@ class JunctionEvidence:
                    smaller index) like the old [child, parent] (parent < child) triangle.
     pair_log_odds: float64 [C, U] per-chromosome log odds of pair_parent -> pair_child against the reverse;
                    ``compared`` bool [C, U] marks entries with evidence. Computed once; resamples only reweight
-                   it. Stored per dyad (release 2.16), not as [C, N, N] triangles.
+                   it. Stored per dyad, not as [C, N, N] triangles.
     """
 
     junctions: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
@@ -370,8 +370,7 @@ class GraphSelection:
 @dataclass(frozen=True)
 class EdgeCounts:
     """Integer counts per (child, parent) edge named by some configuration row, read as ``counts[child, parent]``
-    (0 for an edge no row names). keys int64 [E] sorted child * N + parent; values int64 [E] (release 2.16: per
-    edge, not a dense [N, N] array)."""
+    (0 for an edge no row names). keys int64 [E] sorted child * N + parent; values int64 [E] (one value per edge)."""
 
     keys: np.ndarray = record_field("call", axes=("Q",), units="1", dtype="int64")
     values: np.ndarray = record_field("call", axes=("Q",), units="1", dtype="int64")
@@ -596,7 +595,7 @@ class Decision:
     carry the evidence scale); full / orientation / adjusted (state, identity scores) / trace: the
     full-data fit and its per-row terms; sensitivity: (priors, selection) per alternative prior;
     informative: int64 [N] chromosomes whose own evidence picks a unique state; informative_units: float64 [N]
-    their map units (release 3.2: the tier rules read these).
+    their map units (read by the tier rules).
     """
 
     scores: GenomeScores = record_field("state", axes=(), units="1", dtype="GenomeScores")
@@ -647,7 +646,7 @@ class EdgeFamily:
 
 @dataclass(frozen=True)
 class GuardVote:
-    """One edge's final witnesses and irreversible withdrawal (P0 PD23)."""
+    """One edge's final witnesses and irreversible withdrawal (PD23)."""
 
     family: EdgeFamily = record_field("state", axes=(), units="1", dtype="EdgeFamily")
     excluded: int | float = record_field("state", axes=(), units="1", dtype="int | float")
@@ -686,27 +685,9 @@ class GuardRelatedness:
 
 
 @dataclass(frozen=True)
-class PedigreeInput:
-    """Frozen scoring outputs and count evidence for one genome-wide decision.
-
-    Scores are already genome-floored, exactly once. Configured contigs also order
-    the exclusion evidence and observed_counts int64[C, N]. No scoring is performed.
-    """
-
-    scores: GenomeScores = record_field("evidence", axes=(), units="1", dtype="GenomeScores")
-    contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
-    omitted: dict[str, str] = record_field("evidence", axes=(), units="1", dtype="dict[str, str]")
-    relatedness: GuardRelatedness = record_field("evidence", axes=(), units="1", dtype="GuardRelatedness")
-    exclusion: tuple[ExclusionEvidence, ...] = record_field(
-        "evidence", axes=(), units="1", dtype="tuple[ExclusionEvidence, ...]"
-    )
-    observed_counts: np.ndarray = record_field("obs", axes=("C", "N"), units="1", dtype="int64")
-
-
-@dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 3 (4.2: columnar
-    exclusion evidence)."""
+    """Complete released pedigree and retained numerical state, published atomically as schema 3 with columnar
+    exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -733,7 +714,7 @@ class Pedigree:
 
 @dataclass(frozen=True)
 class PedigreeResult:
-    """Released science plus explicit pre-guard state needed by the 3.5 report mapping."""
+    """Released science plus explicit pre-guard state used by report projections."""
 
     pedigree: Pedigree = record_field("state", axes=(), units="1", dtype="Pedigree")
     decision: Decision = record_field("state", axes=(), units="1", dtype="Decision")
@@ -891,7 +872,7 @@ class CalibrationRecord(SummaryMapping):
 
 @dataclass(frozen=True)
 class FamilySolveRecord(SummaryMapping):
-    """The full solve and abstaining-resample diagnostics (P0 PD10/PD16)."""
+    """The full solve and abstaining-resample diagnostics (PD10/PD16)."""
 
     iterations: int = record_field("state", axes=(), units="1", dtype="int")
     residual: float = record_field("state", axes=(), units="nats", dtype="float")
@@ -956,7 +937,7 @@ class RelativeContrasts:
 
 @dataclass(frozen=True)
 class DecisionTrace(SummaryMapping):
-    """Full-fit factors and the actual final reciprocal solve (P0 PD05/PD08-PD10)."""
+    """Full-fit factors and the actual final reciprocal solve (PD05/PD08-PD10)."""
 
     genetic: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
     structural_state: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
@@ -1404,7 +1385,7 @@ class PedigreeRetained:
 
 @dataclass(frozen=True)
 class PedigreeReportInputs:
-    """PE2/PE3 report results supplied after count release and before guard application."""
+    """Report results supplied after count release and before guard application."""
 
     search: tuple[SearchDiagnosticView, ...] = record_field("report", dtype="tuple[SearchDiagnosticView, ...]")
     chromosomes: tuple[ChromosomeSummaryView, ...] = record_field("report", dtype="tuple[ChromosomeSummaryView, ...]")
@@ -1413,7 +1394,7 @@ class PedigreeReportInputs:
 
 @dataclass(frozen=True)
 class ExclusionRequest:
-    """PE5's canonical target prefix followed by guard-only dyads, for every configured contig."""
+    """Canonical target prefix followed by guard-only dyads, for every configured contig."""
 
     sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
@@ -1443,7 +1424,7 @@ class PedigreePrecheck:
 
 @dataclass(frozen=True)
 class ReleasedDecision:
-    """Pure post-count/slot/guard state awaiting PE2/PE3 report inputs and publication."""
+    """Pure post-count/slot/guard state awaiting report inputs and publication."""
 
     decision: Decision = record_field("state", dtype="Decision")
     request: ExclusionRequest = record_field("state", dtype="ExclusionRequest")
@@ -1458,7 +1439,7 @@ class ReleasedDecision:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary")
 
 
-# PE1–PE3 contract boundary, integrated by pp40; pe40a owns the producers.
+# Pedigree report and publication boundary.
 
 
 @dataclass(frozen=True)
@@ -1508,7 +1489,7 @@ class PreparedComponent:
     robustness_epsilon: painting emission robustness weight (uniform genotype mixture).
     selector_switch_probability: float64 [B-1] meiotic switch probability per boundary (pedigree map).
     measured_morgans:  float64 [B-1] measured map length (Morgans) between adjacent bin centres
-                       (prepare.measured_coordinates; release 3.2): 0 where no supplied map or stated rate
+                       (PreparedComponent.measured_coordinates): 0 where no supplied map or stated rate
                        measures it.
     genotype_likelihoods: float64 [N, M, 3] normalised raw GLs at the selected markers.
     observed:          bool [N, M] read depth > 0 at the selected markers.
@@ -1587,13 +1568,12 @@ class ChromosomeScores:
     junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every
         eligible edge, in row-major order (the same for every chromosome of a run).
     junction_log_cdf: float64 [D] log P(the junctions that c inherits from p and detects are at most c's own
-        count) under linked transmission (pedigree.junctions.linked_log_cdf, release 2.16).
-    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (release 3.2;
-        PreparedComponent.measured_morgans, each interval at most ExposureConfig.unit_morgans; 0 without a
-        measured map; NaN in earlier records).
+        count) under linked transmission (science.pedigree.junctions.linked_log_cdf).
+    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans;
+        0 without a measured map).
     edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length
         over which the pair (child and both panel parents) is exposed: each measured interval between adjacent
-        bins counts as far as it is exposed at both ends (release 3.2; None in earlier records)."""
+        bins counts as far as it is exposed at both ends."""
 
     contig: str = record_field("state", axes=(), units="1", dtype="str")
     zero: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
@@ -1622,7 +1602,7 @@ class ChromosomeScores:
 
 @dataclass(frozen=True)
 class CompactM1:
-    """Fixed genome-profile retained scores and the counted default floor (PE2 PS12).
+    """Fixed genome-profile retained scores and the counted default floor.
 
     Rows are child-major; parents ascend within child. values/ chromosome_reference
     only gather the already-floored evidence and never apply the genome profile twice.
@@ -1666,7 +1646,7 @@ class CompactM1:
         return output
 
     def chromosome_reference(self, chromosome: int, eligibility: ParentEligibility) -> np.ndarray:
-        """One dense chromosome for the unchanged score/exposure migration API."""
+        """One dense chromosome's score and exposure arrays."""
         output = np.full((self.n_samples, self.n_samples), -np.inf)
         for child in np.flatnonzero(eligibility.children):
             parents = np.flatnonzero(eligibility.parents[child])
@@ -1754,7 +1734,7 @@ class RelativeRequest:
 
 @dataclass(frozen=True)
 class GuardSummary:
-    """The exact family-exclusion-v2 summary printed by 3.5, computed before publication."""
+    """Family-exclusion summary computed before publication."""
 
     model: str = record_field("report", dtype="str")
     edges: int = record_field("report", dtype="int64")

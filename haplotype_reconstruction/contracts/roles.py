@@ -1,7 +1,7 @@
 """Make field meaning inspectable by comparators and contract tests without a registry.
 
 Frozen product dataclasses use ordinary dataclasses.field metadata: role, axes,
-units, dtype and stored (CONTRACTS_40 §0; WP_D1 §4.7). Stored defaults to True.
+units, dtype and stored. Stored defaults to True.
 Adapters encode only stored fields; derived fields and views declare stored=False
 and are never written. Their record documentation names the reconstruction inputs.
 Products carry a stored integer schema field; readers check supported versions.
@@ -74,7 +74,7 @@ def record_field(
 ) -> Any:
     """Declare field meaning using standard dataclass metadata; invalid roles raise ValueError.
 
-    Axes follow CONTRACTS_40 §0 (N, L, B, K, ...); fixed sizes may be strings such as
+    Axes name dimensions (N, L, B, K, ...); fixed sizes may be strings such as
     '2'. Dtype is an explicit storage type or a documented structured type name.
     stored=False marks derived fields/views that adapters must omit from payloads;
     it does not remove their comparison metadata. Defaults retain ordinary dataclass

@@ -1,4 +1,4 @@
-"""Painting emissions and design effect reused by family phase (P0 PR04, FP01).
+"""Painting emissions and design effect reused by family phase.
 
 Parallel loops own independent sample/pair cells; the caller supplies the thread
 team through the runtime. Site sums retain ascending order inside whole bins.
@@ -13,9 +13,9 @@ from numba import prange, types
 from ...contracts.likelihoods import gather_likelihoods, readonly
 from ...contracts.painting import state_alt_probabilities
 from ...core.kernels import kernel
-from .parameters import INFORMATIVE_SPREAD, PaintingParameters
+from .parameters import EMISSION_RESCALE_BELOW, INFORMATIVE_SPREAD, PaintingParameters
 
-# Baseline release-manifest signatures; all calls remain lazily compiled.
+# Supported lazy kernel signatures.
 _OVERLOADS = {
     "informative_sites": (
         (
@@ -188,7 +188,7 @@ def design_effect(
 ) -> np.ndarray:
     """float64[N, B]: 1 + (n - 1) r for the n informative sites (informative_sites) of each sample in each bin (1 when
     n <= 1), r = ``correlation``; ``likelihoods``/``observed`` are gathered at the component's selected sites and
-    ``bin_starts`` are the bins' first selected sites (release 2.14). The variance inflation of a sum of n
+    ``bin_starts`` are the bins' first selected sites. The variance inflation of a sum of n
     equal-variance terms with common correlation r (Kish's design effect), used as a tuned working weight of a bin's
     log emission: under that assumption the bin counts as n / (1 + (n - 1) r) variance-equivalent sites. Not an
     estimated dependence correction; the weight tends to 1 as n -> 1, and a bin without informative sites has 1."""
@@ -227,9 +227,6 @@ def gather_sites(
     return _gather_kernel(likelihoods[samples], observed[samples], sites)
 
 
-# The running product of a bin's site probabilities is folded into its log below this value (no underflow: every
-# factor is at least min(1, e^floor) and factors below this value are logged directly).
-_RESCALE_BELOW = 1e-150
 
 
 @kernel(overloads=_OVERLOADS["_pair_bin_score"], cache=True, inline="always", nogil=True)
@@ -273,14 +270,14 @@ def _pair_bin_score(
             likelihoods[sample, site, 0] * p0 + likelihoods[sample, site, 1] * p1 + likelihoods[sample, site, 2] * p2
         )
         probability = (1.0 - robustness_epsilon) * likelihood + robustness_epsilon / 3.0
-        if probability < floor_probability:  # also p <= 0; NaN propagates, as before
+        if probability < floor_probability:  # also p <= 0; NaN propagates
             probability = floor_probability
         count += 1
-        if probability < _RESCALE_BELOW:
-            logs += math.log(probability)  # only under a floor below log(_RESCALE_BELOW)
+        if probability < EMISSION_RESCALE_BELOW:
+            logs += math.log(probability)  # only under a floor below log(EMISSION_RESCALE_BELOW)
             continue
         product *= probability
-        if product < _RESCALE_BELOW:
+        if product < EMISSION_RESCALE_BELOW:
             logs += math.log(product)
             product = 1.0
     return logs + math.log(product) - count * uniform_log
@@ -303,8 +300,8 @@ def _emission_kernel(
     n_bins = len(bin_starts)
     result = np.empty((n_samples, n_states * n_states, n_bins), dtype=np.float64)
     uniform_log = max(math.log(1.0 / 3.0), log_floor)
-    # One log per bin (release 4.7): the clamped site probabilities are multiplied and the product's log taken once,
-    # rescaled before it can underflow; log(max(p, e^floor)) summed over sites, in another rounding.
+    # One log per bin: multiply clamped site probabilities and take the product log once, rescaling before
+    # underflow. This evaluates the sum of floored log emissions with product accumulation.
     floor_probability = math.exp(log_floor)
     for task in prange(n_samples * n_pairs):
         sample = task // n_pairs
@@ -362,7 +359,7 @@ def _tempered_into(
     informative,
     sample_offset,
 ):
-    """tempered_window of one whole-bin window, written in place (release 4.7.1: one kernel, no serial steps).
+    """tempered_window of one whole-bin window, written in place.
 
     ``values``/``seen`` hold the window's GL rows and flags, site s being the batch's selected site ``left`` + s.
     Parts [first_part, last_part) and whole bins [first_bin, last_bin) carry the batch's indices; a part's emission is

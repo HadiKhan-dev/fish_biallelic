@@ -38,7 +38,7 @@ from ..painting.api import (
     state_alt_probabilities,
     unpack_emissions,
 )
-from .agreement import _agreement, _edge_chains, _set_start_bins
+from .agreement import agreement, edge_chains, set_start_bins
 from .allele_evidence import allele_evidence, allele_prior, flip_probabilities
 from .inputs import _state_alleles, edge_rates
 from .junctions import JunctionInputs, junction_candidates, withheld_joins
@@ -55,7 +55,7 @@ class PhaseWorkspace:
     """Explicit release storage capability: whole arrays or complete-bin projections.
 
     Site evidence is a supplied ndarray (possibly memory mapped); the stage owns
-    its lifetime. CAL2 always uses its fixed EVIDENCE_CHUNK boundaries. The optional
+    its lifetime. Carrier evidence always uses its fixed EVIDENCE_CHUNK boundaries. The optional
     map capability returns results in input order; it cannot choose arithmetic order.
     """
 
@@ -67,19 +67,19 @@ class PhaseWorkspace:
     map_work: Callable[..., list[Any]] | None = record_field(
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
     )
-    # Release 4.10: ``concurrent(functions)`` runs each function(map_work) at once, each with a map over its own CPU
-    # share, and returns their results in order (both solves, each running its blocks in waves).
+    # ``concurrent(functions)`` runs each function(map_work) at once, each with a map over its own CPU share, and
+    # returns their results in order: the two solves run side by side, each running its blocks in waves.
     concurrent: Callable[..., list[Any]] | None = record_field(
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
     )
 
 
 def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False, windowed: bool = False) -> np.ndarray:
-    """Return float64[N,S,S,M] tempered emissions; mutate no input (P0 FP01).
+    """Return float64[N,S,S,M] tempered emissions; mutate no input (FP01).
 
     The painting's packed cache is optional. Without it (or with recompute) the same complete bins are recomputed
-    with the painting's own kernel and design effect. Resident: all samples and sites at once. Windowed (3.5
-    stage.py:121-145, SW8): one sample at a time, in runs of whole bins spanning at most SITE_WINDOW sites (a bin
+    with the painting's own kernel and design effect. Resident: all samples and sites at once. Windowed: one sample
+    at a time, in runs of whole bins spanning at most SITE_WINDOW sites (a bin
     longer than that is read whole), so only one sample's window of evidence is ever copied. Every bin's emission
     and design effect depend only on that sample's sites in that bin, so both routes give the same values.
     """
@@ -108,7 +108,7 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
 
 
 def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
-    """float64[N, S*S, M] emissions recomputed one sample and one run of whole bins at a time (3.5 SW8 order)."""
+    """float64[N, S*S, M] emissions recomputed one sample and one run of whole bins at a time."""
     painted = inputs.painting
     samples = len(inputs.observations.sample_ids)
     starts, stops = painted.bins.starts, painted.bins.stops
@@ -147,8 +147,8 @@ def _solve_one(model, map_work=None):
     return model
 
 
-def _solve_models(inputs, parameters, emissions, rates, audit=None, map_work=None, concurrent=None):
-    """Default then mirror, with the original sample and pairing search orders (FP05-FP09)."""
+def _solve_models(inputs, parameters, emissions, rates, map_work=None, concurrent=None):
+    """Default then mirror, with the specified sample and pairing search orders (FP05-FP09)."""
     parents = np.full((len(inputs.observations.sample_ids), 2), -1, dtype=np.int64)
     edges = inputs.pedigree
     for parent, child, slot in zip(edges.parents, edges.children, edges.slots, strict=False):
@@ -163,25 +163,24 @@ def _solve_models(inputs, parameters, emissions, rates, audit=None, map_work=Non
             rates.beta,
             parameters,
             reverse=reverse,
-            decision_audit=audit,
         )
         for reverse in (False, True)
     )
-    if map_work is None or audit is not None:
+    if map_work is None:
         for model in models:
             model.solve()
     elif concurrent is not None:
-        # Release 4.10: both solves at once, each running its blocks in conflict-free waves on its CPU share.
+        # Both solves at once, each running its blocks in conflict-free waves on its CPU share.
         models = tuple(concurrent([partial(_solve_one, model) for model in models]))
     else:
         models = tuple(map_work(_solve_one, models))
     return models, parents
 
 
-def _forced_breaks(inputs, models, parents, bin_edges, audit=None):
-    """Union junctions, D2 ambiguity and painting ties; only isolated ties may bridge (FP10-FP12)."""
+def _forced_breaks(inputs, models, parents, bin_edges):
+    """Union junctions, parental-pairing ambiguity and painting ties; only isolated ties may bridge (FP10-FP12)."""
     model, mirror = models
-    final = [JunctionInputs(m.X, m.V, m.E, m.par, m.config, audit) for m in models]
+    final = [JunctionInputs(m.X, m.V, m.E, m.par, m.config) for m in models]
     junctions = [junction_candidates(state) for state in final]
     withheld = withheld_joins(final[0], junctions[0])
     for sample, bins in withheld_joins(final[1], junctions[1]).items():
@@ -216,7 +215,10 @@ def _release_sites(inputs, bin_edges, bins):
 
 
 def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, map_work=None):
-    """CAL2 with the original chunk and carrier addition order (FP14); ``map_work`` runs its chunks concurrently."""
+    """Allele uncertainty with fixed chunk and carrier addition order (FP14).
+
+    ``map_work`` runs the fixed chunks concurrently.
+    """
     epsilon = inputs.painting.robustness_epsilon
     excluded = inputs.observations.excluded
     evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon, map_work=map_work)
@@ -228,16 +230,16 @@ def _release_one(arguments):
     return release_sample(*arguments)
 
 
-def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, workspace, audit=None):
+def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, workspace):
     """Release independent samples from the fixed solves (default, then mirror), each solve's samples in run order
     (FP15-FP19); one release tuple per solve. The releases of both solves are independent and form one map, so the
     mirror's releases do not wait for the default solve's slowest sample."""
     jobs = [
-        _release_arguments(solved, inputs, sites, breaks, uncertainty, parameters, workspace, audit)
+        _release_arguments(solved, inputs, sites, breaks, uncertainty, parameters, workspace)
         for solved, uncertainty in zip(solves, uncertainties, strict=True)
     ]
     work = [arguments for job in jobs for arguments in job]
-    if workspace.map_work is not None and audit is None:
+    if workspace.map_work is not None:
         released = workspace.map_work(_release_one, work)
     else:
         released = [_release_one(arguments) for arguments in work]
@@ -245,11 +247,11 @@ def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, w
     return tuple(released[end - len(job) : end] for job, end in zip(jobs, ends.tolist(), strict=True))
 
 
-def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, workspace, audit=None):
+def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, workspace):
     """Every sample's release inputs from one fixed solve, in run order."""
     site_bins, alleles, site_gl = sites
     break_bins, tie_cuts = breaks
-    # Release 4.10: the solve's window copies of its alleles and flips, made once for all its samples.
+    # The solve's window copies of its alleles and flips, made once and shared by all its samples.
     shared = shared_windows(site_bins, alleles, uncertainty.flips) if workspace.windowed else None
     values = []
     for sample in range(model.N):
@@ -268,7 +270,6 @@ def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, wo
             workspace.windowed,
             workspace.scores,
             True,
-            audit,
             shared_windows=shared,
         )
         values.append((model, sample, context))
@@ -279,8 +280,6 @@ def phase_component(
     inputs: PhaseComponentInputs,
     parameters: PhaseParameters,
     workspace: PhaseWorkspace | None = None,
-    *,
-    audit=None,
 ) -> PhaseComponentState:
     """Solve and release one painted component with at least one bin (FP01-FP21).
 
@@ -293,19 +292,19 @@ def phase_component(
     emissions = component_emissions(inputs, windowed=workspace.windowed)
     rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
     models, parents = _solve_models(
-        inputs, parameters, emissions, rates, audit, workspace.map_work, workspace.concurrent
+        inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent
     )
     model, mirror = models
     bin_edges = component_bin_edges(inputs.painting, inputs.refit.positions)
-    junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges, audit)
+    junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges)
     site_indices, site_bins, site_alleles = _release_sites(inputs, bin_edges, model.B)
     site_gl = (
         np.ascontiguousarray(inputs.observations.likelihoods[:, site_indices], dtype=np.float32)
         if workspace.prepare_likelihoods is None
         else workspace.prepare_likelihoods(inputs.observations, site_indices, site_bins)
     )
-    # Release 4.10: each solve's evidence chunks run concurrently (a serial numpy tail before).
-    chunks = workspace.map_work if audit is None else None
+    # Each solve's fixed evidence chunks run concurrently; chunk boundaries, not the worker count, fix the sums.
+    chunks = workspace.map_work
     uncertainty = tuple(
         _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, map_work=chunks) for solved in models
     )
@@ -317,19 +316,18 @@ def phase_component(
         uncertainty,
         parameters,
         workspace,
-        audit,
     )
     pairs = list(zip(*releases, strict=False))
-    if workspace.map_work is not None and audit is None:
-        # Release 4.10: samples' agreements are independent (sample after sample they were a serial tail).
-        agreed = workspace.map_work(lambda pair: _agreement(pair[0], pair[1], site_bins), pairs)
+    if workspace.map_work is not None:
+        # Samples' agreements are independent of one another.
+        agreed = workspace.map_work(lambda pair: agreement(pair[0], pair[1], site_bins), pairs)
     else:
-        agreed = [_agreement(first, second, site_bins) for first, second in pairs]
-    if workspace.map_work is not None and audit is None:
-        starts = tuple(workspace.map_work(lambda value: _set_start_bins(value.set_starts, site_bins, model.B), agreed))
+        agreed = [agreement(first, second, site_bins) for first, second in pairs]
+    if workspace.map_work is not None:
+        starts = tuple(workspace.map_work(lambda value: set_start_bins(value.set_starts, site_bins, model.B), agreed))
     else:
-        starts = tuple(_set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)
-    chains = _edge_chains(
+        starts = tuple(set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)
+    chains = edge_chains(
         model,
         mirror,
         [value.chain for value in releases[0]],
@@ -337,7 +335,6 @@ def phase_component(
         rates.theta_m,
         starts,
         parameters.phase_posterior,
-        audit=audit,
     )
     result = PhaseComponentResult(
         cast(

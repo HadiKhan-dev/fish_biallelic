@@ -1,12 +1,12 @@
 """Format released contract records into per-contig files and the export manifest.
 
-Owns P0 OU04/OU05/OU08 formatting; never computes release or reads source observations.
-Method: docs/methods/export.md. The 3.5 formatting order and manifest text are retained.
+Owns founder, sample and manifest formatting; never computes release or reads source observations.
+Method: docs/methods/export.md. Products use the input sample order and published column schemas.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from ...contracts.samples import input_rows
+from ...core.release import CURRENT_RELEASE
 from .founders import component_record, write_founder_tracks, write_founder_vcf
 from .records import COMMON_ALLELE_RULE, RULE_DESCRIPTIONS, ExportConfig
 from .samples import write_sample_phase
@@ -34,8 +35,7 @@ SCHEMA = "released-allele-export-v4"
 
 
 def _writer_threads() -> int:
-    """The CPUs this writer may use now (release 4.10: the export task's map gives each writer a live share; its
-    BGZF compression and index threads come from it)."""
+    """The live CPU share available to this writer for BGZF compression and indexing."""
     return live_threads()
 
 
@@ -66,9 +66,9 @@ def export_contig(
 
     ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
     (sample_ids, positions, component_ids, calls int8 [N, L, 2]) as family_phase.records.load_calls returns;
-    ``sites``: the export.sites table of the VCF rows (default: the phase positions as kept sites, REF/ALT from
-    ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi); ``input_sample_ids``: the run's input
-    sample order (the sample columns are written in it; the records hold the canonical order, release 2.1), None
+    ``sites``: a ReleasedSites projection, required for founder and sample VCF rows;
+    ``index``: write each VCF/BCF's index (.tbi / .csi); ``input_sample_ids``: the run's input
+    sample order (the sample columns are written in it; the records hold the canonical order), None
     to write the records' order; ``withheld``: founder alleles withheld per component as unobserved
     (unobserved_founder_alleles; recorded in the manifest entry and the founder VCF header); ``founder_release``:
     assembly release metadata per segment (source axes, ambiguity and r5 exclusions); ``phase_ambiguity``:
@@ -201,11 +201,13 @@ def write_manifest(
     contigs: list[dict],
     settings: ExportConfig | None = None,
 ) -> dict:
-    """DEST/manifest.json (written last, atomically); returns the manifest. ``settings`` (the CLI and the export
-    stage) describe the VCF products (schema v3); without them the manifest is the v1 one of founder tracks and
-    kept-site sample phase."""
+    """Write this release's DEST/manifest.json last, atomically, and return it.
+
+    ``settings`` describes optional VCF products; track-only callers may omit it.
+    """
     manifest = dict(
         schema=SCHEMA,
+        release=CURRENT_RELEASE,
         checkpoint_root=str(Path(checkpoint_root).resolve()),
         coordinate_system="1-based input SNP positions",
         unknown_allele=".",
@@ -256,8 +258,7 @@ def write_manifest(
                 "continuity; unmatched evaluated final local content is withheld. "
                 "Computational count overflow is count_unverified; unperformed source continuation is "
                 "continuation_unverified. Both preserve calls and record the unperformed scope. "
-                "Uncertainty intervals use observed 1-based SNP positions; old assembly "
-                "records without alternatives have legacy_unknown coverage"
+                "Uncertainty intervals use observed 1-based SNP positions"
             ),
         )
         if settings.full_length:
@@ -295,7 +296,6 @@ def export_records(
     input_sample_ids: Sequence[str] | None = None,
     synthetic: bool = False,
     index: bool = True,
-    release_phase_seconds: Mapping[str, float] | None = None,
     map_work=None,
 ) -> dict:
     """Render contract records and the product-dependent manifest entry.
@@ -358,7 +358,6 @@ def export_records(
         entry["files"].append("founder_identity.csv")
         entry["founder_identity_flags"] = len(founders.identity_flags)
         entry.update(
-            assembly_release_phase_seconds=dict(release_phase_seconds or {}),
             assembly_release_work_counters=dict(founders.work_counters),
             founder_continuity_breaks=int(founders.founder_continuity_breaks),
             assembly_ambiguous_alleles=int(founders.assembly_ambiguous_alleles),
@@ -375,7 +374,7 @@ def write_founder_identity(destination: Path, results, contigs, products, *, col
         return None
 
     def record(contig):
-        release = results.founder_release(contig)
+        release = results.release(contig)
         if release is None:
             raise InvariantError(f"{contig}: missing released founder identity flags")
         return contig, "founder_refit", release.identity_flags

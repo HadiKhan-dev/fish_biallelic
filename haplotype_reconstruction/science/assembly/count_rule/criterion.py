@@ -1,7 +1,7 @@
 """Founder-count decisions between two panels that differ by one founder row.
 
 The criterion compares a larger panel X+ with a smaller panel X- (one row fewer) through
-per-sample scores (founder refinement: each sample's robust max-path score F_s, founder_refinement/objective.py; the
+per-sample scores (founder refinement: each sample's robust max-path score F_s, refinement/objective.py; the
 assembly join: its per-sample panel likelihood) and the per-founder cost c of
 :func:`founder_cost`, c = scale x (mean sites per block / 200) x S x B. S counts the informative
 samples only, the samples whose score can depend on the panel (the join's batch samples; in
@@ -33,15 +33,14 @@ additions created, the deletion stands (births then stop). A cycle whose closing
 ambiguous and that began with a decided deletion is undecided: the data could not tell the two
 counts apart, and the call is flagged.
 
-The bound tests (:func:`deletion_bound_excludes`, :func:`addition_bound_excludes`,
-:func:`addition_per_sample_bound_excludes`) let founder refinement skip a round whose decision AND
+The bound test (:func:`deletion_bound_excludes`) lets founder refinement skip a round whose decision AND
 non-ambiguity optimistic scores already prove for every candidate, so a skipped round's
 ``ambiguous = False`` is a proven statement, not a default.
 
 Owns: effective-carrier tests, bootstrap bands, cycle origin and safe count bounds.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS5 §§4.1–4.2, 4.8, 4.10; AJ24, AJ30–AJ31, AJ34.
-Identity: Strict zero tests and native sample order remain; one keyed PCG64 draw matrix is shared within a decision.
+Method: docs/methods/assembly.md#aj30.
+Invariant: strict zero tests use input sample order; one keyed PCG64 draw matrix is shared within a decision.
 """
 
 from __future__ import annotations
@@ -53,8 +52,7 @@ import numpy as np
 from haplotype_reconstruction.contracts.roles import record_field
 from haplotype_reconstruction.core.random import bootstrap_seed, resampled_individuals
 
-from .parameters import REFERENCE_SITES, TOP_SAMPLES
-from .parameters import CountRuleParameters as CountRuleConfig
+from .parameters import REFERENCE_SITES, TOP_SAMPLES, CountRuleParameters
 
 CRITERION = "effective_carrier+sequence"
 
@@ -202,7 +200,7 @@ def decide(
     cost: float,
     *,
     kind: str,
-    config: CountRuleConfig,
+    config: CountRuleParameters,
     seed_key,
 ) -> CountDecision:
     """The pipeline's count decision: the effective-carrier test on the total gain AND on its
@@ -258,7 +256,7 @@ class ShadowDecisionFamily:
     """
 
     def __init__(
-        self, per_sample_larger, per_sample_smaller, cost: float, *, kind: str, config: CountRuleConfig, seed_key
+        self, per_sample_larger, per_sample_smaller, cost: float, *, kind: str, config: CountRuleParameters, seed_key
     ):
         self.larger = np.asarray(per_sample_larger, np.float64)
         differences = self.larger - np.asarray(per_sample_smaller, np.float64)
@@ -339,44 +337,6 @@ def pre_cycle_count(history, larger: int, structural=frozenset()) -> int:
     return origin
 
 
-def smallest_threshold(samples: int) -> float:
-    """Smallest charge (units of c) that any one-row decision can require of its margin."""
-    # n_eff >= 1 whenever any sample gains; with no gain the margin is <= 0 anyway.
-    return 1.0 / (2.0 * samples)
-
-
-def addition_bound_excludes(optimistic_score, score, cost, samples, *, tolerance) -> bool:
-    """True iff an optimistic K+1 score proves that no addition passes the criterion.
-
-    An accepted addition needs a gain G with G / c > n_eff / (2S) >= 1 / (2S), so the bound must
-    exclude that smallest threshold: (U - F) - c / (2S) < -tolerance / 2. (Base wrote it as
-    2 (U - F) - 2 c / (2S) < -tolerance; the same inequality.)
-    """
-    gain = 2.0 * (optimistic_score - score) - 2.0 * smallest_threshold(samples) * cost
-    return gain < -tolerance
-
-
-def addition_per_sample_bound_excludes(per_sample_optimistic, per_sample_score, cost, *, tolerance):
-    """True iff per-sample optimistic scores prove every addition rejected and not ambiguous.
-
-    For every larger panel X+ the per-sample gain d_s = F_s(X+) - F_s(X) is at most
-    u_s = U_s - F_s(X) (``per_sample_optimistic`` U bounds F_s of every panel with one row more per
-    block; ``per_sample_score`` is F_s(X)). Let M = max_s d_s and P = sum_s d_s+. If P = 0,
-    m = sum_s d_s / c <= 0; otherwise sum_s (d_s+)^2 <= M P, so n_eff >= P / M and
-    m <= P (1/c - 1/(2 S M)) < 0 whenever M < c / (2S). A bootstrap replicate is a length-S vector
-    of entries of d (maximum <= M, divided by the same S), so its margin is <= 0 as well: the
-    band's upper end is <= 0, the call is not ambiguous and the addition is rejected, whatever
-    the sequence part. Hence max_s u_s + tolerance < c / (2S) proves the decision; the tolerance
-    covers the rounding of the computed scores, and a NaN never passes this form. Only the
-    maximum over all samples is exact: the leave-one-sample-out margin m' is not what the
-    bootstrap resamples, so a bound on it cannot fix the band.
-    Returns (excluded, max_s u_s, its sample).
-    """
-    gains = np.asarray(per_sample_optimistic, np.float64) - np.asarray(per_sample_score, np.float64)
-    bound = float(np.max(gains))
-    return bool(bound + tolerance < cost / (2.0 * len(gains))), bound, int(np.argmax(gains))
-
-
 def _block_chunks(option_starts, options, width):
     """Consecutive block ranges [b0, b1) whose options times width stay near _CHUNK_ENTRIES (at least one block)."""
     blocks = len(option_starts)
@@ -403,7 +363,8 @@ def _summed_optimum(option_scores, option_starts, weights):
 
 
 def deletion_bound_excludes(
-    per_sample_score, option_scores, option_starts, normalisers, cost, *, tolerance, config: CountRuleConfig, seed_key
+    per_sample_score, option_scores, option_starts, normalisers, cost,
+    *, tolerance, config: CountRuleParameters, seed_key
 ):
     """Whether optimistic K-1 scores prove that every deletion keeps the larger panel and that the
     call is not ambiguous. Returns (excluded, band_bound).
@@ -412,7 +373,7 @@ def deletion_bound_excludes(
     at most K-1 distinct prepared rows per block. Every Y in P_{K-1} fixes at every block b an
     option o_b(Y): a row Y lacks at a block with K rows, otherwise the block's only option, which
     is all its rows. The option is the same for every sample, and F_s(Y) <= sum_b sigma_s(b, o_b(Y)) + n_s
-    for every sample s (count.upper_bound's relaxation: each block is scored as a free panel of the
+    for every sample s (count.option_scores' relaxation: each block is scored as a free panel of the
     option's rows, with every sample's chain started afresh). ``option_scores`` holds sigma for the
     informative samples, one row per option; block b owns rows option_starts[b] up to
     option_starts[b+1] (or the end); ``normalisers`` holds n_s. For any weights w >= 0:
@@ -489,8 +450,5 @@ __all__ = [
     "decide",
     "ShadowDecisionFamily",
     "pre_cycle_count",
-    "smallest_threshold",
-    "addition_bound_excludes",
-    "addition_per_sample_bound_excludes",
     "deletion_bound_excludes",
 ]

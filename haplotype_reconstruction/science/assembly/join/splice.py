@@ -13,8 +13,8 @@ orders from a full forward scan; they represent the same objective in float64.
 
 Owns: the exact splice score table.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.7; AJ19.
-Identity: The table preserves the original splice state order; the selected move is rescored by the caller.
+Method: docs/methods/assembly.md#aj19.
+Invariant: The table preserves the original splice state order; the selected move is rescored by the caller.
 Hot compiled loops remain whole to preserve the recurrence and its arithmetic update order.
 """
 

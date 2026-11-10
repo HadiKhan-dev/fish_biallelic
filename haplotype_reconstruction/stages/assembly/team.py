@@ -18,16 +18,15 @@ import numba
 from haplotype_reconstruction.core.kernels import enable_caches
 from haplotype_reconstruction.science.assembly.refinement.capabilities import RefinementExecution
 
+from ...engine.cpu import fair_claim
+
 __all__ = ["RefinementTeam"]
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
 
-# While a team's coordinating thread waits for its concurrent children or mapped templates, its boundary recurs this
-# often: it re-reads the team's live share (growing into CPUs peers have freed, returning them when a peer is short),
-# as 3.5's concurrent and thread_map re-read their budget while tasks ran. Without it a component that started beside
-# busy peers kept its starting share for its whole refinement while the node emptied (chr8's last level: 424 s on
-# about 8 of 112 CPUs).
+# Re-read the live CPU share at this interval while waiting for children or mapped templates.
+# This lets unfinished refinement use CPUs freed by peers while retaining claims for running kernels.
 SHARE_POLL_SECONDS = 0.2
 
 
@@ -51,9 +50,7 @@ class RefinementTeam:
     @property
     def cores(self) -> int:
         """This team's CPUs now. Given the enclosing task's live allowance (``budget``, the engine's current_budget()),
-        its share re-read at this boundary: it grows as peer tasks finish, as 3.5 re-read its lease at every boundary,
-        instead of keeping the share the task started with (a component started beside many peers otherwise ran its
-        whole refinement on one or two threads while their CPUs idled). Without one, the declared count. While
+        its share is re-read at this boundary so it grows as peer tasks finish. Without one, the declared count. While
         templates or children run, the claim keeps the CPUs they use (CpuBudget.allowance: a running kernel cannot be
         stopped) and the count returned, which bounds what starts next, may already be smaller."""
         if self.budget is None:
@@ -94,8 +91,7 @@ class RefinementTeam:
 
         def run(item: _T) -> _R:
             # A fixed one-thread mask that restores without reading the live share: the map's coordinating thread alone
-            # resizes the team (a template's exit read the share from a helper thread and could return CPUs while the
-            # coordinator was still admitting templates on the old allowance).
+            # resizes the team, so no helper returns CPUs while the coordinator admits work against that allowance.
             previous = numba.get_num_threads()
             numba.set_num_threads(1)
             try:
@@ -147,7 +143,7 @@ class RefinementTeam:
         item_bytes: Sequence[int] | None = None,
         label: str = "",
     ) -> list[_R]:
-        """Compatibility during relocation: ordered one-thread template tasks.
+        """Run ordered one-thread template tasks under the enclosing admission.
 
         Byte estimates accompany the enclosing task's reservation; the numerical
         solver cannot make live-memory admission decisions.
@@ -168,8 +164,7 @@ class RefinementTeam:
     ) -> Iterator[tuple[int, _R]]:
         """Run ordered child tasks on live fair shares, joining every child on failure.
 
-        Each running child holds its fair share of this team among the running children (3.5's slot rule,
-        execution/budget.py `_Slots.allocation`): survivors take the CPUs of finished peers at their next
+        Each running child holds its fair share of this team: survivors take the CPUs of finished peers at their next
         boundary, and a child only ever takes free CPUs, so the claims never sum above the team. Kernel thread
         counts never decide a result (refinement is exact across 1/4/16 threads), so shares are a schedule, not
         science. Results are yielded in index order.
@@ -185,7 +180,7 @@ class RefinementTeam:
         # The children split this team's LIVE count, which this coordinating thread re-reads at every completion and
         # every SHARE_POLL_SECONDS while it waits (its boundary) and publishes to them (shares.limit): the team grows
         # into freed CPUs and returns them when a peer is short, and a nested team grows when its own siblings finish
-        # (3.5's `_Slots.allocation` re-read the enclosing budget at every boundary). The team's claim keeps the CPUs
+        # The team's claim keeps the CPUs
         # its running children hold until they shrink at their own boundaries or finish.
         shares = _Shares(self.cores)
 
@@ -252,7 +247,7 @@ class RefinementTeam:
 
 
 class _Shares:
-    """Live fair shares of one team among its running concurrent children (3.5 `_Slots.allocation`).
+    """Live fair shares of one team among its running concurrent children.
 
     A child's share is the team's live CPU count (``limit``, published by the team's coordinating thread at its
     boundaries) divided among the running children, the remainder to the lowest indices; for a nested team that count
@@ -302,11 +297,9 @@ class _Shares:
             cores = max(1, int(self.limit))
             count = max(1, len(self.claims)) + self.waiting
             rank = sum(other < index for other in self.claims)
-            want = max(1, cores // count + int(rank < cores % count))
             mine = self.claims.get(index, 1)
             free = cores - sum(value for other, value in self.claims.items() if other != index)
-            claim = max(1, min(want, free)) if want < mine else max(mine, min(want, free))
-            self.claims[index] = max(claim, min(int(hold), mine))
+            claim, self.claims[index] = fair_claim(cores, count, rank, mine, free, hold=hold)
             return claim
 
 

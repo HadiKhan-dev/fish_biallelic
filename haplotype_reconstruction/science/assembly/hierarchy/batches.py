@@ -1,7 +1,7 @@
 """Break-aware batch partition of one hierarchy level.
 
 At every level the current components are cut into batches of at most ``batch_size`` adjacent components,
-orientation-symmetrically (release 2.2, :func:`symmetric_ranges`: mirroring the chromosome mirrors the partition).
+orientation-symmetrically (:func:`symmetric_ranges`: mirroring the chromosome mirrors the partition).
 A batch never crosses a phase break: a boundary between two adjacent components where fewer than
 ``min_boundary_informative_samples`` samples are informative on both sides (a sample is informative
 for a component when its evidence is non-uniform at one of the component's informative linking-proxy
@@ -101,8 +101,8 @@ class LevelPartition:
 
 
 def symmetric_ranges(breaks, batch_size: int) -> list:
-    """Orientation-symmetric batches (release 2.2; 2.1 grouped left-anchored, so mirroring the chromosome changed the
-    partition): the components between phase breaks (breaks[i]: a break after component i) form segments; a segment
+    """Orientation-symmetric batches: the components between phase breaks (breaks[i]: a break after component i)
+    form segments; a segment
     of L components is cut into m = ceil(L / batch_size) consecutive batches, one more when L is odd and m even (an
     even number of batches has an even total when sizes mirror), with sizes as equal as possible and the larger ones
     placed in mirrored pairs from both ends (one in the middle when the remainder is odd). The size sequence is a

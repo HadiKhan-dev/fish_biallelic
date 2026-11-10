@@ -31,7 +31,7 @@ def setting(default: Any, kind: str, doc: str, choices: tuple = (), *, affects_r
             doc=doc,
             choices=tuple(choices),
             affects_results=affects_results,
-            provenance="P0 ENG-09/ENG-10; WP_I1 section 4.1",
+            provenance=doc,
         ),
     )
 
@@ -79,7 +79,7 @@ class ExecutionSection:
     contig_lanes: int | str = setting(
         "auto",
         "cores",
-        "Contigs reconstructed concurrently; auto = one lane per 8 "
+        "Contigs reconstructed concurrently; auto = one lane per 16 "
         "cores, paced by measured memory pressure; 1 = one contig at a time with all cores.",
         affects_results=False,
     )
@@ -88,7 +88,7 @@ class ExecutionSection:
         "memory",
         "Capacity for measured job memory pressure: a size such as "
         '"200G" (binary units), or auto = job cgroup capacity. SOFT/HARD '
-        "thresholds and sampling interval are in execution/config.py; affects scheduling only.",
+        "thresholds and sampling interval are in engine/memory.py; affects scheduling only.",
         affects_results=False,
     )
     serial: bool = setting(
@@ -292,16 +292,6 @@ class Settings:
     def serial(self) -> bool:
         """Contigs one at a time ([execution] serial, implied by max_contigs > 0)."""
         return self.execution.serial or self.execution.max_contigs > 0
-
-    def site_filter(self) -> bool:
-        """The site filter after resolving auto (on for VCF input, off for simulations)."""
-        value = self.quality.site_filter
-        return self.input.kind == "vcf" if value == "auto" else value == "on"
-
-    def sample_filter(self) -> bool:
-        value = self.quality.sample_filter
-        return self.input.kind == "vcf" if value == "auto" else value == "on"
-
 
 def schema_fields(cls) -> list:
     """The configuration fields of a section class, in declaration order."""

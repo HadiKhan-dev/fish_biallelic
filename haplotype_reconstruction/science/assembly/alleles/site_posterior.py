@@ -50,20 +50,18 @@ The constants reach the kernels through their ``settings`` argument
 on-disk cache does not notice a changed imported global, so a cached kernel
 could otherwise keep a stale value.
 
-Release 2.1 (noise stability, design A-1/A-2/A-7): among ascent moves and ball
-recentrings the first (fixed order) within SITE_IMPROVEMENT of the best is taken, so
-moves that are equal by symmetry (exchangeable founders) go by founder order; a flip,
-a ball recentring and the complement start's optimum must raise the log posterior by more than
-SITE_IMPROVEMENT (the declared improvement policy; 2.0's 1e-12 sat at
-the rounding and 1e-12-noise scale, so mathematically zero gains of exchangeable
-founders were taken or not by their last bits). In the context refit's carrier
+Among ascent moves and ball recentrings, take the first in fixed order within
+SITE_IMPROVEMENT of the best, so symmetry-equivalent moves use founder order.
+A flip, ball recentring or complement-start optimum must raise the log posterior by more
+than SITE_IMPROVEMENT; this separates improvement from rounding-scale motion at zero gain.
+In the context refit's carrier
 support, a sample whose carrier probability is exactly 1/2 by symmetry (the refit's
 founder prior is uniform) is not counted within SITE_HALF_BAND (the declared half-band policy)
 of 1/2, and ``site_release_marginals`` returns the count and the mass
 separately so that a mass sitting exactly at the support threshold (a sum of halves)
 is decided by the caller's conservative band.
 
-Owns the exact/core posterior kernels and named diagnostic indices (P0 U09-U10).
+Owns the exact/core posterior kernels and named diagnostic indices (U09-U10).
 Must not read environment, storage, clocks or execution policy.
 Method: docs/methods/assembly.md#founder-allele-posteriors.
 Long kernels remain whole to preserve their recurrence and arithmetic order.
@@ -446,9 +444,9 @@ def _logistic(x):
 def _loopy_bp(constants, unaries, couplings, use, prior, settings):
     """Belief log-odds from damped flooding loopy BP, one factor per sample.
 
-    Accretion (P0 U09; AS2-X5): the executed absent term subtracts the
-    remaining pairwise expectation. It is not the conditional-expectation
-    formula. This sign decides the BP start and is preserved. O(m^2) per sample.
+    The absent term subtracts the remaining pairwise expectation. This signed
+    expression determines the BP start; it differs from a conditional-expectation
+    update. O(m^2) per sample.
     """
     n, m = unaries.shape
     damping = settings[SETTING_BP_DAMPING]
@@ -629,7 +627,7 @@ def _flip_gains(couplings, use, prior, b, base, field, single, pair):
 def _ascend(constants, unaries, couplings, use, prior, b, base, field, single, pair, settings):
     """Steepest single/pair-flip ascent of b in place; fields and gains end at b.
 
-    Release 2.1: a move must gain more than SITE_IMPROVEMENT, and among the moves the first (singles
+    A move must gain more than SITE_IMPROVEMENT, and among the moves the first (singles
     in founder order, then pairs in (i, j) order) within SITE_IMPROVEMENT of the largest gain is taken,
     so moves whose gains are equal by symmetry (exchangeable founders) are chosen by founder order,
     never by the last bits of their gains."""
@@ -1023,7 +1021,7 @@ def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, 
     while True:
         _ball_weights(couplings, use, prior, b, core, flips, sizes, base, field, log_likelihood, log_prior)
         # Recentre on the first configuration (ball order) within SITE_IMPROVEMENT of the best one
-        # when that beats the centre by more than SITE_IMPROVEMENT (release 2.1 tie rule).
+        # when that beats the centre by more than SITE_IMPROVEMENT (the declared improvement band).
         largest = 0.0
         for config in range(1, count):
             value = log_likelihood[config] + log_prior[config]

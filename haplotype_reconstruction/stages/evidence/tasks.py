@@ -2,25 +2,25 @@
 
 Owns payload caching, task resources and publication; all calculations live in
 science/evidence. Simulation identity is design plus realised seed, with no VCF
-payload. Method: docs/methods/evidence.md#stage; WP_EV3 section 4.4.
+payload. Method: docs/methods/evidence.md#stage.4.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
 from ...contracts.source import ContigReads
-from ...engine.runtime import task_team
+from ...core.concurrency import threaded_each
+from ...engine.cpu import thread_team
 from ...science.evidence.parameters import EvidenceParameters
 from ...science.evidence.run import prepare_contig
-from ...store.protocol import bind_payload_identity, cached_payload_identity, payload_identity
+from ...store.protocol import NumericalPolicy, bind_payload_identity, cached_payload_identity, payload_identity
 from ...store.store import CheckpointStore
-from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import RecordKey, ResourceRequest, Task
 from ..inputs.sources import CanonicalOrderSource
 from . import records
 
-__all__ = ["run_contig", "tasks"]
+__all__ = ["run_contig", "task"]
 
 
 def run_contig(
@@ -31,7 +31,8 @@ def run_contig(
     The source is already canonical and init has bound simulation seeds. A changed
     consumed payload refuses resume. Only this contig's capability is writable.
     """
-    file = CheckpointStore(root, nthreads=team).scatter_view(contig).contig
+    store = CheckpointStore(root, nthreads=team)
+    file = store.scatter_view(contig).contig
     decoded: list[ContigReads] = []
     if source.kind == "vcf":
 
@@ -43,7 +44,13 @@ def run_contig(
         consumed = cached_payload_identity(file, source.path, compute_identity)
     else:
         consumed = bind_payload_identity(file, source.payload_identity(contig))
-    derivation = records.identity(parameters, consumed, source.sample_ids(), reverse=source.reverse)
+    from ...contracts.payload import to_payload
+
+    manifest = dict(
+        contigs=(contig,), sample_ids=source.sample_ids(), parameters={"evidence": to_payload(parameters)},
+        ties={"reverse": source.reverse}, numerical_policy=to_payload(NumericalPolicy.current()),
+    )
+    derivation = records.expected(store, manifest, product="evidence", contig=contig).identity
     if records.complete(file, derivation):
         return derivation
     if decoded:
@@ -54,8 +61,8 @@ def run_contig(
         del payload
     else:
         reads = source.reads(contig, team)
-    with task_team(team):
-        prepared = prepare_contig(reads, parameters, team, reverse=source.reverse)
+    with thread_team(default=team):
+        prepared = prepare_contig(reads, parameters, team, map_work=threaded_each, reverse=source.reverse)
     # Pair-backed output no longer owns coded raw count rows. Release the input
     # before publication; dense fallback rows remain alive through prepared.
     del reads
@@ -63,27 +70,14 @@ def run_contig(
     return derivation
 
 
-def tasks(
-    root: str | Path,
-    source: CanonicalOrderSource,
-    parameters: EvidenceParameters,
-    *,
-    contigs: Sequence[str] | None = None,
-    maximum_cores: int = ALL_CORES,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> tuple[Task, ...]:
-    """Declare one evidence task per requested contig, with a bounded runtime team."""
-    selected = source.contigs() if contigs is None else tuple(contigs)
-    return tuple(
-        Task(
-            key=TaskKey("evidence", "contig", contig),
-            function=run_contig,
-            args=(str(root), source, contig, parameters),
-            depends_on=depends_on,
-            outputs=(RecordKey(contig, records.EVIDENCE),),
-            resources=ResourceRequest(min_cores=1, max_cores=maximum_cores),
-            affinity=contig,
-            thread_argument="team",
-        )
-        for contig in selected
-    )
+def task(key, context) -> Task:
+    """Declare one production evidence contig with its unchanged runtime team."""
+    from ...core.errors import SettingsError
+
+    if context.source is None:
+        raise SettingsError("evidence requires a checked observation source")
+    return Task(key, run_contig,
+                args=(context.root, context.source, key.scope, context.resolved.parameters.evidence),
+                outputs=(RecordKey(key.scope, records.EVIDENCE),),
+                resources=ResourceRequest(min_cores=1, max_cores=context.cores),
+                affinity=key.scope, thread_argument="team")

@@ -1,7 +1,6 @@
 """Build Mendelian child terms and parent laws.
 
-Owns the relocated terms units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md.
 """
 
 from __future__ import annotations

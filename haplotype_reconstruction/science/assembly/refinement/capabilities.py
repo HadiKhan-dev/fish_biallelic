@@ -1,7 +1,7 @@
 """Declare the execution and storage views consumed by the refinement science.
 
 Owns structural protocols, not scheduling, allocations or persistent records.
-Method: docs/methods/founder_refinement.md#workspace (RC01, RC04–RC07; AS8 §5).
+Method: docs/methods/founder_refinement.md#workspace (RC01, RC04–RC07).
 A scope controls kernel threads at the stage boundary; every map returns in input
 order and joins workers before propagating failure. Window reads borrow buffers.
 """
@@ -23,7 +23,6 @@ _R = TypeVar("_R")
 __all__ = [
     "RefinementExecution",
     "EvidenceWindows",
-    "SweepWorkspaceView",
     "ComponentWorkspaceView",
     "RefinementRecords",
 ]
@@ -64,17 +63,6 @@ class EvidenceWindows(Protocol):
     def lease(self, founders: int) -> AbstractContextManager[object]: ...
     def sample_slices(self, s0: int, s1: int) -> list[tuple[int, int]]: ...
     def window_bytes(self) -> int: ...
-
-
-class SweepWorkspaceView(Protocol):
-    """Immutable one-sweep arrays and declared evidence/message capabilities."""
-
-    leaves: Sequence[NDArray[np.int16]]
-    offsets: NDArray[np.int64]
-    samples: int
-    normalisers: NDArray[np.float64]
-    windows: EvidenceWindows
-    message_step: int
 
 
 class RefinementRecords(Protocol):

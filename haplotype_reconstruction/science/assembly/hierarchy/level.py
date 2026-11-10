@@ -1,7 +1,7 @@
 """Plan and compose one assembly level without storage or scheduling effects.
 
 Owns common-domain masks, symmetric partitioning and ordered family collection
-(P0 U11-U13). The stage executes returned JoinTasks and persists each result.
+(U11-U13). The stage executes returned JoinTasks and persists each result.
 Method: docs/methods/assembly.md#hierarchy. Borrowed inputs are never mutated.
 """
 
@@ -32,7 +32,7 @@ class LevelPlan:
 
 @dataclass(frozen=True)
 class LevelOutput:
-    """Composed components and source families in baseline collection order."""
+    """Composed components in batch order, with inherited families before joined families."""
 
     components: tuple[FounderComponent, ...]
     plan: tuple[tuple[int, int, str | None], ...]
@@ -64,7 +64,7 @@ def plan_level(
     min_informative: int,
     release_alternatives=(),
 ) -> LevelPlan:
-    """Choose common evidence domains before sampling each proxy (A40-8)."""
+    """Choose common evidence domains before sampling each proxy for comparable branch scores."""
     choices, consumable, inherited = component_choices(components, release_alternatives)
     shared_sites, lost_sites = common_site_masks(choices, prepared) if consumable else ((), ())
     masks = (
@@ -179,30 +179,3 @@ def compose_level(
     return LevelOutput(
         tuple(output), plan, tuple(joins), tuple(likelihoods), reused, split, tuple(families), tuple(shadows)
     )
-
-
-def run_level(
-    components,
-    prepared,
-    evidence,
-    settings: JoinSettings,
-    *,
-    batch_size: int,
-    min_informative: int,
-    budget,
-    release_alternatives=(),
-) -> LevelOutput:
-    """Execute a pure context level using the caller's explicit execution capability."""
-    from .batch import run_batch
-
-    planned = plan_level(
-        components,
-        prepared,
-        evidence,
-        settings,
-        batch_size=batch_size,
-        min_informative=min_informative,
-        release_alternatives=release_alternatives,
-    )
-    results = {task.index: run_batch(task, evidence.scoring, budget) for task in planned.tasks}
-    return compose_level(planned, results)

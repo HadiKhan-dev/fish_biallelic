@@ -1,21 +1,11 @@
-"""One exact Gauss-Seidel acceptance pass of a fixed-K search (compiled; search.py drives it).
+"""One exact Gauss-Seidel acceptance pass of a fixed-K search (compiled; fit.SweepEngine drives full fits).
 
 Owns Gauss-Seidel move order and guard verdicts; never logs or opens storage.
 The long junction kernel stays whole so exchange, full ranking, stale rescoring, message invalidation
 and advancement retain one explicit state transition order.
 Method: docs/methods/founder_refinement.md#acceptance (RS08–RS10).
 
-Owns the Gauss-Seidel acceptance transition and its decision receipts.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#acceptance (RS08-RS10).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-
-
-The pass walks the junctions p = 0 .. B - 1 of the panel X in one orientation (search.Orientation:
+The pass walks the junctions p = 0 .. B - 1 of the panel X in one orientation (workspace.Orientation:
 forward or reversed site order). At every junction every founder-pair suffix exchange is scored
 exactly from the carried forward and the current stored backward messages and the best is applied
 while its gain exceeds TOL (at most EXCHANGE_ROUNDS times); then the content candidates anchored
@@ -25,13 +15,12 @@ applied while its gain exceeds TOL (after CONTENT_FULL_ROUNDS acceptances the re
 the last full ranking's order); coarse candidates also pass the shared-junction guard (guard.py);
 then the forward message advances one block.
 
-Ties (release 2.1, design 5.3): "best" is the best tie class of the exact gains (anchored single
-linkage with the refinement quantum q_R = tie_rules.quantum("refine_F", F), maths.ties rules: a
+Ties: "best" is the best tie class of the exact gains (anchored single
+linkage with the refinement quantum q_R = tie_rules.quantum("refine_F", F), core.ties rules: a
 class chains consecutive gaps <= q; a class wider than 4q keeps value order), and inside a class
 the content-smallest move: an exchange by its resulting pair of founder paths (each pair sorted,
 compared lexicographically in the pass's block order), a content move by the moved founder's
-resulting path, then its slot, then proposal order (2.0: first np.argmax in pair order; decreasing
-gain, earliest on ties). The acceptance threshold TOL is a continuous threshold and unchanged; only
+resulting path, then its slot, then proposal order. The acceptance threshold TOL is a continuous threshold; only
 moves above it are ranked.
 
 Invariants: (i) the current panel equals sigma(start panel) on every block at or after `frontier`
@@ -55,8 +44,7 @@ from __future__ import annotations
 from collections import namedtuple
 
 import numpy as np
-from numba import prange, types
-from numba.typed import List
+from numba import prange
 
 from haplotype_reconstruction.core.errors import InvariantError
 from haplotype_reconstruction.core.kernels import kernel
@@ -101,7 +89,7 @@ JUNCTION_BATCH = 16
 # On reaching a junction the pass covers the blocks it reads first (the lookahead and a fine
 # window ahead of it), so a streaming window slides with the pass instead of jumping between its reads.
 JUNCTION_REACH = 16 + 8  # Streaming window reach, in blocks.
-# A tie class wider than this many quanta keeps value order (maths.ties.WIDE_CLASS_QUANTA).
+# A tie class wider than this many quanta keeps value order (core.ties.WIDE_CLASS_QUANTA).
 WIDE_QUANTA = WIDE_CLASS_QUANTA
 # K-independent bounds on rescoring at one junction, so a pass stays
 # O(K^3). Content candidates: the first CONTENT_FULL_ROUNDS acceptances rescore every remaining item
@@ -180,9 +168,8 @@ INTEGER_KEYS = frozenset(ACC_KEYS) - {"fine_gain", "coarse_gain", "exchange_gain
 # Exact current backward messages on boundaries [start, end] (with counts under the guard) and the
 # normalisers of blocks [start, end); valid only when ok.
 Chain = namedtuple("Chain", ["ok", "start", "end", "values", "counts", "scales"])
-# Exact current forward messages on boundaries [start, valid] with the forward chain's founder maxima
-# (messages.forward_chain(_lex): site_max = R1, site_lead = P1, site_cnt = R2, each S x sites x K) and
-# block leaders; counts only under the guard.
+# Exact current forward messages on boundaries [start, valid] and block leaders.
+# Per-site leader arrays are empty; counts are populated only under the guard.
 Ahead = namedtuple(
     "Ahead",
     ["ok", "start", "valid", "values", "counts", "site_max", "site_lead", "block_max", "block_lead", "site_cnt"],
@@ -578,7 +565,7 @@ def _score_items(
                 gain[i] = total
                 gains_s[i] = member_gains[m]
     if guarded and lex_item < 0:
-        # 3.4's count of lexicographic rescorings (ACC_KEYS), which the next sweep's mode reads.
+        # Count coarse items above TOL in guarded rounds; lex_items selects the next sweep's message mode.
         for i in range(n_items):
             if it_kind[i] == MOVE_COARSE and gain[i] > TOL:
                 acc[_A_LEX_ITEMS] += 1
@@ -709,7 +696,7 @@ def _uncredited_switches(
     return total, chain, ahead
 
 
-# ------------------------------------------------------------------ tie rules (design 5.3)
+# ------------------------------------------------------------------ tie rules
 
 
 @kernel(overloads=overloads_for(__name__, "_move_before"), cache=True, nogil=True)
@@ -811,7 +798,6 @@ def pass_chunk(
     tie_q,
     reverse,
     optimistic,
-    events,
 ):
     """Junctions [j0, j1) of one acceptance pass (module docstring); haps, X and lab are modified in
     place, acc (ACC_KEYS) accumulated.
@@ -827,7 +813,7 @@ def pass_chunk(
     rows cand_rows[cand_row_start[i]:] over [q, end)). Arrays of switch counts are one-element
     placeholders without the guard. exchanges_parallel: each junction's exchange gains run as one parallel
     region on the caller's team (gains.parallel_exchanges). tie_q: the tie quantum of the gains (module
-    docstring). reverse: the convention reversal (maths.ties.reverse_conventions(); content orders inverted). optimistic
+    docstring). reverse: the convention reversal (core.ties.reverse_conventions(); content orders inverted). optimistic
     (unguarded only): stop at the first coarse item whose gain exceeds TOL (the first
     point where a guarded pass reads switch costs) with acc[lex_abort] = 1; the caller discards the
     pass and runs it guarded.
@@ -866,21 +852,6 @@ def pass_chunk(
                     chain, p, p, frontier, haps, win, offsets, stored, stored_cnt, gperm, permuted, guarded, acc
                 )
                 gains = exchange_gains(f, np.ascontiguousarray(g), exchanges_parallel)
-                for ei in range(len(gains)):
-                    events.append(
-                        (
-                            0.0,
-                            float(p),
-                            float(pa[ei]),
-                            float(pb[ei]),
-                            float(p),
-                            float(blocks),
-                            float(ei),
-                            gains[ei],
-                            TOL,
-                            (1.0 if gains[ei] > TOL else 0.0),
-                        )
-                    )
                 if first_look:
                     # the junction's best gain (value) and its exchange by the tie rule (all pairs)
                     top, top_size, top_wide = _exchange_winner(gains, pa, pb, X, p, tie_q, -np.inf, reverse)
@@ -903,9 +874,6 @@ def pass_chunk(
                 if wide:
                     acc[_A_TIE_WIDE] += 1
                 a, b = pa[best], pb[best]
-                events.append(
-                    (3.0, float(p), float(a), float(b), float(p), float(blocks), float(best), gains[best], TOL, 1.0)
-                )
                 for x in range(p, blocks):
                     t = X[a, x]
                     X[a, x] = X[b, x]
@@ -1034,20 +1002,6 @@ def pass_chunk(
                 for i in range(n_act):
                     acc[_A_EVALUATED] += 1
                     evaluated[it_cand[i] - c0] = True
-                    events.append(
-                        (
-                            1.0,
-                            float(p),
-                            float(it_k[i]),
-                            -1.0,
-                            float(it_p1[i]),
-                            float(it_p2[i]),
-                            float(it_cand[i]),
-                            act_gain[i],
-                            TOL,
-                            (1.0 if act_gain[i] > TOL else 0.0),
-                        )
-                    )
                     if act_gain[i] > TOL:
                         order[n_ranked] = i
                         n_ranked += 1
@@ -1111,21 +1065,6 @@ def pass_chunk(
                         act_switch[i] = lex_switch[i]
                         act_gains_s[i] = lex_gains_s[i]
                         act_switches_s[i] = lex_switches_s[i]
-                    if guarded and it_kind[i] == MOVE_COARSE:
-                        events.append(
-                            (
-                                5.0,
-                                float(p),
-                                float(it_k[i]),
-                                -1.0,
-                                float(it_p1[i]),
-                                float(it_p2[i]),
-                                float(it_cand[i]),
-                                gain + act_switch[i],
-                                -GUARD_TOLERANCE,
-                                (1.0 if gain + act_switch[i] < -GUARD_TOLERANCE else 0.0),
-                            )
-                        )
                     if guarded and it_kind[i] == MOVE_COARSE and (gain + act_switch[i] < -GUARD_TOLERANCE):
                         # the move lowers the genotype fit E = F + switch cost
                         acc[_A_GUARD_TESTS] += 1
@@ -1158,20 +1097,6 @@ def pass_chunk(
                             acc,
                             reverse,
                         )
-                        events.append(
-                            (
-                                2.0,
-                                float(p),
-                                float(it_k[i]),
-                                -1.0,
-                                float(it_p1[i]),
-                                float(it_p2[i]),
-                                float(it_cand[i]),
-                                gain - shared,
-                                TOL,
-                                (1.0 if gain - shared > TOL else 0.0),
-                            )
-                        )
                         if not gain - shared > TOL:
                             acc[_A_GUARD_SWITCHES] += shared
                             acc[_A_GUARD_REJECTED] += 1
@@ -1190,20 +1115,6 @@ def pass_chunk(
                 gain = act_gain[i]
                 accepted[it_cand[i] - c0] = True
                 k, p1, p2 = it_k[i], it_p1[i], it_p2[i]
-                events.append(
-                    (
-                        4.0,
-                        float(p),
-                        float(k),
-                        float(it_kind[i]),
-                        float(p1),
-                        float(p2),
-                        float(it_cand[i]),
-                        gain,
-                        TOL,
-                        1.0,
-                    )
-                )
                 for x in range(p1, p2):
                     X[k, x] = cand_rows[it_rs[i] + x - p1]
                 _set_rows(haps, leaves, offsets, k, p1, cand_rows, it_rs[i], it_rs[i] + p2 - p1)
@@ -1299,16 +1210,16 @@ def accept_pass(
     reverse,
     optimistic=False,
 ):
-    """One exact acceptance pass on `orientation` (search.Orientation); X (K x B, that orientation's
+    """One exact acceptance pass on `orientation` (workspace.Orientation); X (K x B, that orientation's
     block order) is modified in place.
 
     stored, stored_cnt, stored_scale: the stored backward messages, switch costs (guard only) and
     normalisers of the pass's start panel in this orientation. window: the log evidence and switch
-    costs of the panel's K in this orientation (window.Windows.view; the pass covers the stretch
+    costs of the panel's K in this orientation (stages.assembly.storage.Windows.view; the pass covers the stretch
     ahead of its junction as it moves). props: the content proposals
     {junction: [(MOVE_FINE | MOVE_COARSE, end block, founder, rows)]}. guarded: the shared-junction
     guard applies to coarse moves (a search with an L1 context). exchanges=False scores and applies
-    content proposals only (an addition round's copy-only pass). start_fwd / start_fcnt: the
+    content proposals only. start_fwd / start_fcnt: the
     forward messages (and counts) of X itself in this orientation, if known; until the first
     accepted move the carried forward message is read from them. budget: the live thread share
     (the explicit stage team), re-read before every JUNCTION_BATCH junctions. scale: |F| of the pass's
@@ -1323,15 +1234,16 @@ def accept_pass(
     tie_q = policy("assembly.refine.accept", reverse=reverse).quantum(scale)
     founders, blocks = X.shape
     if stored.dense:
-        # Preserve the original pristine forward shortcut on the dense path.
+        # Use the pristine forward shortcut on the dense path.
         if start_fwd is not None:
             start_fwd = start_fwd.data
     else:
         start_fwd = start_fcnt = None
     stored.clear()
-    stored = stored.source()
-    samples, states = stored[0].shape[1], stored[0].shape[2]
-    haps = orientation.haps(X)
+    with budget.scope(sample_threads(stored.shape[1], budget)):
+        stored = stored.source()
+        samples, states = stored[0].shape[1], stored[0].shape[2]
+        haps = orientation.haps(X)
     cands = candidate_arrays(props, blocks)
     count2 = np.zeros((1, 1))
     count3 = np.zeros((1, 1, 1))
@@ -1343,7 +1255,6 @@ def accept_pass(
         local_cnt = np.empty((checkpoints, samples, states))
     else:
         local, local_cnt = np.zeros((1, 1, 1)), count3
-    events = List.empty_list(types.UniTuple(types.float64, 10))
     acc = np.zeros(len(ACC_KEYS))
     f = np.zeros((samples, states))
     fcnt = np.zeros((samples, states)) if guarded else count2
@@ -1408,7 +1319,6 @@ def accept_pass(
                 tie_q,
                 bool(reverse),
                 bool(optimistic and not guarded),
-                events,
             )
         pristine = pristine and not accepted
         junction_gain[p:stop] = jg
@@ -1420,7 +1330,6 @@ def accept_pass(
         key: (int(round(value)) if key in INTEGER_KEYS else float(value))
         for key, value in zip(ACC_KEYS, acc.tolist(), strict=True)
     }
-    record["decision_trace"] = np.asarray(list(events), dtype=np.float64).reshape(-1, 10)
     return record, junction_gain, junction_pair
 
 

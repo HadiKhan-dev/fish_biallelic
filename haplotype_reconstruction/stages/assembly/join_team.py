@@ -7,7 +7,7 @@ that width does not limit the number of independent refits the task can execute.
 from collections.abc import Callable, Iterable
 from typing import TypeVar, cast
 
-from haplotype_reconstruction.engine.scheduler import claim_threads, current_budget, kernel_team
+from haplotype_reconstruction.engine.cpu import claim_threads, current_budget, thread_team
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
@@ -39,7 +39,7 @@ class JoinTeam:
         results: list[_R | None] = [None] * len(items)
 
         def run(item: _T) -> _R:
-            with kernel_team(max_threads=self.sample_width):
+            with thread_team(cap=self.sample_width):
                 return function(item)
 
         for index, result in current_budget().concurrent(

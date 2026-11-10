@@ -16,7 +16,6 @@ calls or recombination rates.
 - [Output dictionary](outputs.md): exported genotypes, tables, diagnostics and evaluation metrics.
 - [Settings reference](../reference/settings.md): accepted TOML keys and their current defaults.
 - [Command reference](../reference/commands.md): every command and option.
-- [Migration from 3.5](migration.md): new runs, explicit configuration translation and output changes.
 - [Methods](../methods/index.md): models, decision rules and approximations by semantic unit.
 
 An unresolved parent or missing allele is a result, not an invitation to fill it

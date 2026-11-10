@@ -43,6 +43,14 @@ def inspect(path: str | Path) -> VcfHeader:
     """Read the header of an indexed VCF/BCF."""
     reader = VCF(str(path))
     try:
+        from ...store.releases import CURRENT_RELEASE, unsupported_release
+
+        lines = reader.raw_header.splitlines()
+        if any(line.startswith("##source=haplotype-reconstruction") for line in lines):
+            prefix = "##haplotype_reconstruction_release="
+            releases = [line[len(prefix) :] for line in lines if line.startswith(prefix)]
+            if releases != [CURRENT_RELEASE]:
+                raise unsupported_release(path, releases[0] if releases else None)
         try:
             lengths = dict(zip(reader.seqnames, map(int, reader.seqlens), strict=False))
         except AttributeError:  # cyvcf2: "no sequence lengths found in header"
@@ -62,7 +70,7 @@ def _decode_window(
 ):
     """One pass over the records starting in [start, stop): admit biallelic SNPs, decode and check their AD, then
     drop every member of each duplicate-position run. Returns (positions, counts int32[N, L, 2], metadata or None,
-    not_snp, multiallelic, duplicated). Malformed AD raises at duplicate positions too, as before filtering."""
+    not_snp, multiallelic, duplicated). Malformed AD raises even at duplicate positions, before filtering."""
     reader = VCF(str(path), lazy=True) if samples is None else VCF(str(path), samples=list(samples), lazy=True)
     try:
         n_samples = len(reader.samples)
@@ -112,7 +120,7 @@ def _decode_window(
         reader.close()
     positions = np.asarray(admitted, np.int64)
     # Equal positions always belong to the same physical window. Drop every member of each
-    # duplicate run, just as the former whole-contig unique/isin pass did.
+    # duplicate run, including the first copy, so no duplicate position enters the source axis.
     keep = np.ones(len(positions), bool)
     repeated = positions[1:] == positions[:-1]
     keep[1:] &= ~repeated

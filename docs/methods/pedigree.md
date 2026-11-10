@@ -40,7 +40,8 @@ Cost and scope: O(N ΣM). These terms describe the unit’s work/storage dimensi
 <a id="ps04"></a>
 ## ps04 Selector switch probabilities and measured map lengths
 
-Use the run map’s interval distance, including fallback tails, for Haldane selector-switch probabilities and apply the selector floor. L1 supplies the shared expm1 form. Separately compute measured interval lengths from the measured-coordinate view: clip to supplied knots unless the fallback rate is explicitly measured, and use zero measured support without either. Model transition distance is not measured exposure.
+Use the run map’s interval distance, including fallback tails, for Haldane selector-switch probabilities and apply the selector floor. The shared Haldane helper supplies the expm1 form. Separately compute measured interval lengths from the measured-coordinate view: clip to supplied knots unless the fallback rate is explicitly measured, and use zero measured support without either. Model transition distance is not measured exposure.
+
 
 Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
 
@@ -51,7 +52,7 @@ Cost and scope: O(B). These terms describe the unit’s work/storage dimensions;
 <a id="ps05"></a>
 ## ps05 Exact source chain: factors and posterior marginals
 
-Use painting’s tempered emissions and recorded label transitions for the ordered-diplotype source chain. Contract the transition through its Hamming structure, normalising backward right weights at each boundary. Symmetrise the initial law only; evidence-free samples use a uniform initial law and unit right weights. Available samples losing supported mass raise an invariant error. Preparation fills the original dense factor output in sample order. It unpacks cached emissions or gathers raw GL for one sample batch, runs the same independent candidate recurrences, then releases the batch before proceeding. No all-sample emission array, bin-major transpose or whole-component raw GL projection is retained. Error sample indices remain on the original contig axis. Save pair masses before projection consumes the marginal workspace.
+Use painting’s tempered emissions and recorded label transitions for the ordered-diplotype source chain. Contract the transition through its Hamming structure, normalising backward right weights at each boundary. Symmetrise the initial law only; evidence-free samples use a uniform initial law and unit right weights. Available samples losing supported mass raise an invariant error. Preparation fills the dense factor output in sample order. It unpacks cached emissions or gathers raw GL for one sample batch, runs the same independent candidate recurrences, then releases the batch before proceeding. No all-sample emission array, bin-major transpose or whole-component raw GL projection is retained. Error sample indices remain on the original contig axis. Save pair masses before projection consumes the marginal workspace.
 
 Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/sources.py](../../haplotype_reconstruction/science/pedigree/sources.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
@@ -106,7 +107,8 @@ Cost and scope: O(N B S). These terms describe the unit’s work/storage dimensi
 <a id="ps10"></a>
 ## ps10 Child emission and composite forward score of M0, M1 and M2
 
-Initialise M0, M1 and M2 from null or observed-parent source laws. At each boundary update the first slot then the second, bridge before excursion. Multiply observed-marker emissions in site order; recompute a whole unstable bin in log space. L12 uses correctly rounded division followed by the power on every probability/cache route, skipping the power at unit exponent. A zero exponent still runs normalisation and can have a rounding-sized increment. Pool full and tempered log scores at the fixed composite weight; this is not an independent-marker likelihood.
+Initialise M0, M1 and M2 from null or observed-parent source laws. At each boundary update the first slot then the second, bridge before excursion. Multiply observed-marker emissions in site order; recompute a whole unstable bin in log space. Emission normalization uses correctly rounded division followed by the power on every probability/cache route, skipping the power at unit exponent. A zero exponent still runs normalisation and can have a rounding-sized increment. Pool full and tempered log scores at the fixed composite weight; this is not an independent-marker likelihood.
+
 
 Implementation: [science/pedigree/forward.py](../../haplotype_reconstruction/science/pedigree/forward.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py).
 
@@ -163,7 +165,7 @@ Cost and scope: O(R² B G²); O(G³); O(K³). These terms describe the unit’s 
 <a id="ps15"></a>
 ## ps15 Bounded M2 panel admission
 
-For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent cap; it is a score-defined model approximation. A per-child pair cap (`max_pairs_per_child`) bounds it. A child with more admitted pairs keeps the best by its largest gap over the fits, with the whole tie class at the last kept gap and every NaN-gap pair. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel. The cap binds only at very low depth, where admitted pairs grow with the square of the eligible parents.
+For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent cap; it is a score-defined model approximation. A per-child pair cap (`max_pairs_per_child`) bounds it. A child with more admitted pairs keeps the best by its largest gap over the fits, with the whole tie class at the last kept gap and every NaN-gap pair. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel. Relevance rejection certifies that a pair is outside the competitive margin in every screened fit. The cap has no such guarantee: it can discard a competitive pair. Low depth can admit quadratically many pairs in the eligible-parent count, which motivates the cap.
 
 Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
 
@@ -207,11 +209,12 @@ Cost and scope: O(N B J²); O(J²). These terms describe the unit’s work/stora
 <a id="ps19"></a>
 ## ps19 Junction schedules and the linked junction log CDF
 
-Canonicalise trajectory content, trace the first minimum path in pair order or the last under reversal, and construct a junction schedule. Propagate the linked inheritance/count recurrence per ordered dyad, resetting the transmitted homologue law at each component. Drop counts above the child total and accumulate retained log mass. Zero retained mass yields negative infinity. Alternative equally parsimonious placements are not integrated; L8 declares the placement convention and L2 declares the C-order dyad layout.
+Canonicalise trajectory content, trace the first minimum path in pair order or the last under reversal, and construct a junction schedule. Propagate the linked inheritance/count recurrence per ordered dyad, resetting the transmitted homologue law at each component. Drop counts above the child total and accumulate retained log mass. Zero retained mass yields negative infinity. Alternative equally parsimonious placements are not integrated. The explicit tie convention determines placement, and dyad arrays have C layout.
+
 
 Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
 
-Parameters by name: `trace`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters: no additional parameters for this unit. The explicit tie convention determines the junction placement.
 
 Cost and scope: O(N B J²); O(D Σ_k B_k (J_c + 1)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -262,7 +265,8 @@ Cost and scope: O(N²). These terms describe the unit’s work/storage dimension
 <a id="pd02"></a>
 ## pd02 Decision input assembly: eligible-edge stacking and configuration rows
 
-Decode contig score records one at a time, copying eligible edges in child-major/ascending-parent order. Require identical junction-dyad order across contigs. For each child enumerate M0, ascending M1 identities and canonical panel M2 pairs in that order. Keep full and scored state multiplicities separate. L2 declares C-contiguous indexing arrays; apply the calibrated evidence scale once, after calibration.
+Decode contig score records one at a time, copying eligible edges in child-major/ascending-parent order. Require identical junction-dyad order across contigs. For each child enumerate M0, ascending M1 identities and canonical panel M2 pairs in that order. Keep full and scored state multiplicities separate. Indexing arrays are C-contiguous; apply the calibrated evidence scale once, after calibration.
+
 
 Implementation: [science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
@@ -284,7 +288,8 @@ Cost and scope: O(3 × terms); O(C E). These terms describe the unit’s work/st
 <a id="pd04"></a>
 ## pd04 Weighted genome likelihood with one M0 contamination mixture
 
-Aggregate chromosome likelihoods in configured-contig order with the declared float64 weighted left fold. Every row is multiplied, including zero weights, preserving IEEE nonfinite propagation; the separate panel-admission fold omits zero weights. L2 fixes this arithmetic independently of BLAS layout or workers. Apply the M0 contamination mixture once to M1/M2 aggregates; leave M0 unchanged. This robust composite transform does not make chromosomes independent observations.
+Aggregate chromosome likelihoods with an exact-rounded, order-independent sum of the float64 weighted values. Every row is multiplied, including zero weights, preserving IEEE nonfinite propagation; the separate panel-admission fold omits zero weights. The exact sum retains low contributions independently of array layout or workers. Apply the M0 contamination mixture once to M1/M2 aggregates; leave M0 unchanged. This robust composite transform does not make chromosomes independent observations.
+
 
 Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
 
@@ -363,7 +368,8 @@ Cost and scope: O(I (A + N²)); O(N + widest child rows). These terms describe t
 <a id="pd11"></a>
 ## pd11 Tie-aware winners, tie tolerance and the full-fit tie census
 
-Scan rows for the first strict finite maximum and runner-up. Abstain when their margin is within the magnitude-aware winner tolerance, including exact ties; never use row index to resolve a scientific winner. Rank-probability groups instead anchor at their first value. L8 passes the recorder explicitly and records the full-fit/state/informative census only; diagnostics never enter resampled selection.
+Scan rows for the first strict finite maximum and runner-up. Abstain when their margin is within the magnitude-aware winner tolerance, including exact ties; never use row index to resolve a scientific winner. Rank-probability groups instead anchor at their first value. The explicit recorder captures only the full-fit/state/informative census; diagnostics never enter resampled selection.
+
 
 Implementation: [science/pedigree/ties.py](../../haplotype_reconstruction/science/pedigree/ties.py).
 

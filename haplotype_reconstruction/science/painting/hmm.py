@@ -1,10 +1,9 @@
-"""Numerical kernels of the painting HMM: emissions, the label-level max-product step, track order and the
-switch intervals of decoded paths.
+"""Label-level max-product steps, track order and switch intervals of decoded painting paths.
 
 State of a sample in a bin: an ordered pair (x1, x2) of labels, flat
 index x1 * S + x2 (S = classes + BACKGROUND). Emissions are binned sums of
 robust per-site genotype log likelihoods, centred by log(1/3) so unobserved
-and flat sites are neutral (the decoder divides each sample's bin by its design effect, design_effect).
+and flat sites are neutral (painting.emissions builds these terms and their design effect).
 The label-level transition is the Hamming table of painting/transitions.py, so its
 max-product step contracts in O(S^2) per bin from the best and second-best entries
 of each row and column (label continuity). Painting's decoder, the class x fidelity
@@ -19,25 +18,17 @@ from numba import prange, types
 
 from ...core.kernels import kernel
 
-# Spread of a normalised GL row above which the row is informative (not flat).
-INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
-# Viterbi tie quantum (nats; release 2.1, design A-4): predecessors whose path scores are within this of the best are
-# tied, and the back-pointer then takes the fewest track changes (painting.fidelity: per track, staying, then the same
-# label, then a label change), then the smallest index; the final state is the smallest index within it of the best.
-# Since 2.14 the scores are of tempered emissions (divided by their design effect, design_effect), so the quantum sits
-# further above the GL-noise motion, and more near-ties take the fewest changes. Equal-score paths arise where two
-# switch placements cost the same (equal theta on a cold, zero-cM stretch of the map, and the states' emissions
-# identical in the bins between) and their sums differ only in rounding, which GL noise reorders. The path scores
-# themselves stay exact maxima. Census (TroMau chr18 painting, iid 1e-9; work/IE/census/viterbi_chr18_*): 4,980
-# decisions within 1e-2, gap motion <= 1.9e-9, genuine gaps from 1e-5 (2 in [1e-5, 3e-5), then >= 3e-4): 2^-20 = 9.5e-7
-# sat ~500x above that motion. Release 2.13 places it against 1e-6 relative GL noise (maths.ties.GL_NOISE; gap motion <=
-# 1.9e-6, the census times 10^3): noise_quantum = 2^-15 = 3.1e-5; gaps below it take the fewest track changes (a safety
-# margin over the motion; it also covers the census's genuine gaps in [1e-5, 3e-5)).
-# Candidate states of a track are int64 bit masks (painting switch intervals, release 2.2): S = classes + BACKGROUND
-# must fit 63 bits (K <= 30 founders gives S <= 31).
+from .parameters import INFORMATIVE_SPREAD as INFORMATIVE_SPREAD
+# Viterbi predecessor scores within the tie quantum are tied. Back-pointers prefer fewer track changes (per
+# track: staying, then the same label, then a label change), then the smallest index; the final state uses the
+# smallest index in its score band. Equal-score switch placements occur on cold map stretches with identical
+# emissions, so rounding must not choose extra switches. Scores use emissions tempered by
+# emissions.design_effect; the path scores remain exact maxima. Track interval candidates use int64 bit masks:
+# S = classes + BACKGROUND must fit 63 bits (K <= 30 gives S <= 31). The quantum and its noise-scale rationale
+# are declared in parameters.py.
 
 
-# Exact supported layouts from the frozen 3.5 release and typed stage-route census.
+# Supported layouts for typed stage routes.
 _OVERLOADS = {
     "_minimum_switch_counts": ((types.Array(types.int32, 3, "C", readonly=False, aligned=True),),),
     "hamming_max_values": (
@@ -400,8 +391,7 @@ def _minimum_switch_counts(paths):
 
 
 def minimum_switch_counts(paths: np.ndarray) -> np.ndarray:
-    """int64[N] minimum track changes of each path; a pure track swap counts as none (release 4.7.1: one
-    sample-parallel kernel, the same counts)."""
+    """int64[N] minimum track changes of each path; a pure track swap counts as none."""
     if paths.shape[2] < 2:
         return np.zeros(paths.shape[0], dtype=np.int64)
     return _minimum_switch_counts(np.ascontiguousarray(paths, dtype=np.int32))
@@ -453,7 +443,7 @@ def _distinguishable(
 
 @kernel(overloads=_OVERLOADS["switch_interval_masks"], cache=True, parallel=True, nogil=True)
 def switch_interval_masks(paths, named_alleles, observed, bin_starts, bin_stops, n_classes):
-    """int64[N, 2, B] candidate states of each track and bin as bit masks (release 2.2 switch intervals).
+    """int64[N, 2, B] candidate states of each track and bin as bit masks.
 
     A track change a -> b of the (gauge-fixed) Viterbi path at the edge after bin e can sit at any
     edge of the maximal run of bins around e in which a and b are indistinguishable for the sample
@@ -532,7 +522,7 @@ def _bit_count(value):
 @kernel(overloads=_OVERLOADS["combine_candidate_masks"], cache=True, parallel=True, nogil=True)
 def combine_candidate_masks(primary, secondary):
     """int64[N, 2, B]: per bin the smallest unordered cover of two decodings' candidate sets, in ``primary``'s
-    track order (release 2.2).
+    track order.
 
     ``primary`` and ``secondary`` are the candidate masks of two co-optimal Viterbi paths (the default and the
     mirrored traceback conventions, each with its switch intervals). Per bin the two track matchings give the
@@ -586,7 +576,7 @@ def _mask_change(previous, current, bin_index, local_keys, n_classes, n_states):
 @kernel(overloads=_OVERLOADS["canonical_track_order"], cache=True, parallel=True, nogil=True)
 def canonical_track_order(masks, local_keys, n_classes):
     """bool[N, B]: whether to exchange the two tracks of each bin, so that the track order (the H1/H2 gauge) is a
-    function of the unordered candidate pairs alone (release 2.14).
+    function of the unordered candidate pairs alone.
 
     The unordered pair of candidate masks of a bin does not depend on the traceback convention
     (:func:`combine_candidate_masks`); the order read from one convention's Viterbi path did (its final state and

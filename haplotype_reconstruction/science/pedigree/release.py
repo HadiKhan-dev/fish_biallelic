@@ -33,7 +33,7 @@ from ...contracts.pedigree import (
 from ...core import ties as tie_rules
 from .alternatives import Alternatives, softmax_finite
 from .eligibility import ParentEligibility
-from .parameters import PedigreeConfig, TierThresholds
+from .parameters import PedigreeParameters, TierThresholds
 from .resampling import Resampling
 from .selection import Selection
 
@@ -57,7 +57,7 @@ def _row_parents(rows: np.ndarray, row: int) -> np.ndarray:
     return result
 
 
-def orientation_cutoff(config: PedigreeConfig) -> float:
+def orientation_cutoff(config: PedigreeParameters) -> float:
     """Minimum full-data orientation log odds of a released inferred edge."""
     probability = config.release.orientation_reversal_probability
     return float(np.log1p(-probability) - np.log(probability))
@@ -70,7 +70,7 @@ def child_evidence(
     alternatives: Alternatives,
     informative: np.ndarray,
     orientation_log_odds: np.ndarray,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> ChildEvidence:
     """Collect the per-child support quantities of the full fit and the resampled fits."""
     rows, states = alternatives.rows, alternatives.states
@@ -157,7 +157,7 @@ def tier_calls(
     full: Selection,
     evidence: ChildEvidence,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> TierCalls:
     """Exact configuration calls of one tier ("tier_a" or "tier_b")."""
     n = len(full.local_state)
@@ -280,7 +280,7 @@ def partial_edges(
     calls: TierCalls,
     evidence: ChildEvidence,
     alternatives: Alternatives,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> PartialEdges:
     """Release stable parent edges of the full-data DAG one by one where the configuration is not.
 
@@ -350,8 +350,8 @@ def partial_edges(
 def coverage_rows(rows: np.ndarray, scores: np.ndarray, coverage: float, *, reverse=False) -> tuple[int, ...]:
     """Fewest rows, by descending softmax probability (ties by row), carrying ``coverage`` mass.
 
-    Probabilities in one tie class (probability quantum, ``maths.ties``) are tied: they are ordered by row and a
-    cut inside a class keeps the whole class (release 2.1; GL noise reorders near-equal probabilities)."""
+    Probabilities in one tie class (probability quantum, ``core.ties``) are tied: they are ordered by row and a
+    cut inside a class keeps the whole class (GL noise reorders near-equal probabilities)."""
     candidate_rows = np.asarray(rows, dtype=np.int64)
     probabilities = softmax_finite(scores[candidate_rows])
     positive = probabilities > 0.0
@@ -427,7 +427,7 @@ def candidate_sets(
     alternatives: Alternatives,
     resampling: Resampling,
     orientation_log_odds: np.ndarray,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> CandidateSets:
     """Tier-B candidate sets: supported singleton sides, side candidates, configuration sets."""
     thresholds = config.release.tier_b

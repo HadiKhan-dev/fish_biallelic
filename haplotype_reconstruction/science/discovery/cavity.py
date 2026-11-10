@@ -2,17 +2,17 @@
 
 Owns: the cavity score of a solution (PanelScore, score_solutions) and its workspace.
 Must not: select panels (search.py does), read storage, the environment or a clock, or log.
-Method: docs/methods/discovery.md, unit di10 (P0 DI10).
+Method: docs/methods/discovery.md, unit di10.
 Identity: the endpoint classes, floor-then-log order and the sample-order reduction below are carried exactly.
 
 For a complete panel H with assignments A (from the full data), each sample is held out in
 turn: its uniformly weighted tied-state counts are deleted from the Dirichlet state prior (concentration alpha over the
 row-pair, row-unknown and unknown-unknown states, prior base masses from
-``CavityScoreConfig``) and all its weighted likelihood terms are removed from the founder-allele Markov
+``CavityScoreParameters``) and all its weighted likelihood terms are removed from the founder-allele Markov
 random field; all distinct mean-field endpoints tied under the best converged training ELBO
 predict the held-out sample's genotype likelihood under every state. These likelihoods are
 averaged before the floor and logarithm; founder marginals are never averaged. Exact-distinct
-endpoints connected within the existing mean-field convergence tolerance form one equivalence
+endpoints connected within the mean-field convergence tolerance form one equivalence
 class. Classes have equal weight, with a uniform likelihood average inside each class. The
 sample's cavity log predictive is log sum over states of prior x predictive. The panel's score
 is the sum over samples plus the telescoping K prior -log K - log(K + 1) plus minus the code
@@ -21,9 +21,8 @@ length log C(2^L, K) of an unordered set of K distinct binary rows. Missing cell
 
 Scores are uncalibrated pseudo-scores: the panel and A were selected from the full data.
 
-Release 2.3 deliberately changes the approximate predictive functional in tied-endpoint cases.
-Eligibility and the solution's ``nll`` ELBO tie quantum are unchanged (``FixedKSolution.quanta``;
-the floors for solutions without quanta). No held-out evidence chooses the endpoint weights.
+Endpoint eligibility uses the solution's ``nll`` ELBO tie quantum (``FixedKSolution.quanta``; floors for
+solutions without quanta). Endpoint weights depend only on training evidence, never on the held-out sample.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ from .cavity_kernels import (
     _score_mode_cavity_kernel,
 )
 from .panel import FixedKSolution, log_haplotype_set_count, restricted, solution_tie_mask, state_layout
-from .parameters import CavityScoreConfig
+from .parameters import CavityScoreParameters
 
 __all__ = ["CavityWorkspace", "PanelScore", "score_solutions", "shared_likelihood_triples"]
 
@@ -62,7 +61,7 @@ def shared_likelihood_triples(likelihood: np.ndarray) -> np.ndarray:
     return shared
 
 
-def _state_geometry(k: int, config: CavityScoreConfig) -> tuple[np.ndarray, ...]:
+def _state_geometry(k: int, config: CavityScoreParameters) -> tuple[np.ndarray, ...]:
     """(kind, first, second, prior base) of the states: row pairs (kind 0, row-major), row with
     an unknown copy (kind 1), two unknown copies (kind 2); prior base normalised to one."""
     kind, first, second = state_layout(k)
@@ -81,7 +80,7 @@ def _state_geometry(k: int, config: CavityScoreConfig) -> tuple[np.ndarray, ...]
 class CavityWorkspace:
     """Evidence-only inputs of the cavity score of one block (the samples with depth)."""
 
-    def __init__(self, likelihood: np.ndarray, config: CavityScoreConfig) -> None:
+    def __init__(self, likelihood: np.ndarray, config: CavityScoreParameters) -> None:
         self.config = config
         self.likelihood = np.ascontiguousarray(likelihood, dtype=np.float64)
         floor = float(config.likelihood_floor)

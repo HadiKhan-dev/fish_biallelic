@@ -4,16 +4,22 @@ Owns LS23-LS31 orchestration: evidence slices, explicit CPU teams, independent
 work units, deterministic gathers, publication and the context-assembly boundary.
 Science never schedules or reads records. The engine owns admission and memory;
 working-set estimates below are declarations, never private scientific budgets.
-Method: docs/methods/local_selection.md; WP_SE2 sections 4.10-4.14 and 8.
+Method: docs/methods/local_selection.md.
 """
 
 from __future__ import annotations
 
-import math
-import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..configure import ResolvedConfiguration
+    from ...contracts.genetic_map import GeneticMapSet
+    from ...core.ties import TieSettings
+
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, cast
+from typing import Any
+from typing import Protocol, cast
 
 import numpy as np
 
@@ -24,12 +30,9 @@ from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
 from ...contracts.observations import PairArray, dense_observed
 from ...contracts.panels import ComponentPanel, LocalPanel, materialise
 from ...contracts.selection import ContextProposal, RefitSummary
-from ...core.errors import InvariantError
+from ...core.errors import InvariantError, SettingsError
 from ...core.ties import TieCount, TieCounts
-from ...engine.graph import run_graph
-from ...engine.runtime import task_team
-from ...science.assembly.evidence import AssemblyEvidence, AssemblyEvidenceSource
-from ...science.assembly.parameters import AssemblyParameters
+from ...engine.cpu import share_reader, thread_team
 from ...science.assembly.run import AssemblyResult
 from ...science.discovery.parameters import DiscoveryParameters
 from ...science.selection.context_refit import (
@@ -44,52 +47,32 @@ from ...science.selection.diagnostics import CensusSink
 from ...science.selection.parameters import SelectionParameters
 from ...science.selection.rounds import BlockSelection, BlockTask, block_task_bytes, select_task
 from ...science.selection.run import initial_tasks, round_tasks
-from ...store.protocol import NumericalPolicy, bound_payload_identity, claim
+from ...store.protocol import claim
 from ...store.store import CheckpointStore
 from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
-from .records import ROUNDS, SelectionRecords, context_assembly_prefix, round_identity
+from .records import ROUNDS, SelectionRecords
 
 __all__ = [
     "round_expansion",
     "context_expansion",
-    "run_round",
-    "run_context_refit",
-    "run_contig",
     "SelectionSession",
-    "selection_task",
     "selection_round_task",
 ]
 
 
 BlockSettings = tuple[SelectionParameters, DiscoveryParameters, float]
 CHUNK_BLOCKS = 8  # average blocks' cost per engine task in a selection round (execution only: results are per block)
-# Guided chunk sizes (release 4.8, execution only): a new chunk takes about the round's remaining cost / (this x CPUs),
+# Guided chunk sizes (execution only): a new chunk takes about the round's remaining cost / (this x CPUs),
 # capped by the CHUNK_BLOCKS average and floored at that average / CHUNK_FLOOR, so the last chunks of a round are small.
 CHUNK_WAVES = 2
 CHUNK_FLOOR = 8
 # At least this many tasks per CPU a round may use (execution only). Block costs in refit rounds are poorly predicted
 # (chr1 0.5x l2: five ~20 s blocks the cost model rated average shared one 104 s task that set the round's length);
-# 2 per CPU (to 4.7) made chunks of ~7 blocks.
+# Small chunks reduce the tail from a mispredicted heavy block.
 CHUNK_TASKS_PER_CPU = 8
 # A block re-reads its task's CPU share (an engine boundary) at most this often: its lane evaluations run thousands of
 # times, and a block that started on one thread beside hundreds of siblings grows as they finish.
 SHARE_REREAD_SECONDS = 0.1
-
-
-def live_share(interval: float = SHARE_REREAD_SECONDS) -> Callable[[], int]:
-    """The calling task's live CPU share, re-read (engine claim_threads: a boundary that also sets this thread's kernel
-    team) when ``interval`` seconds have passed since the last read."""
-    from ...engine.scheduler import claim_threads
-
-    read_at, share = [-math.inf], [1]
-
-    def read() -> int:
-        now = time.monotonic()
-        if now - read_at[0] >= interval:
-            read_at[0], share[0] = now, claim_threads()
-        return share[0]
-
-    return read
 
 
 class FounderEvidence(Protocol):
@@ -120,7 +103,7 @@ def _run_block(
         current = block
         if memo_scope is not None and current.memo is None:
             current = replace(current, memo=memo_scope.load_memo(current.index))
-        with task_team(threads):
+        with thread_team(default=threads):
             value = select_task(
                 current,
                 evidence.likelihoods,
@@ -128,7 +111,7 @@ def _run_block(
                 settings,
                 reverse=reverse,
                 census_sink=census_sink,
-                threads=live_share(),
+                threads=share_reader(SHARE_REREAD_SECONDS),
             )
         return value
 
@@ -160,7 +143,7 @@ def _run_blocks(
 ) -> tuple[BlockSelection, ...]:
     """Several blocks of one round in one engine task, in turn; each claims and publishes its own records exactly as
     a task of its own did, and re-reads the task's CPU share first (it grows into CPUs its peers free)."""
-    from ...engine.scheduler import current_budget
+    from ...engine.cpu import current_budget
 
     results = []
     for block in blocks:
@@ -211,7 +194,7 @@ def round_expansion(
 ) -> Expansion:
     """Declare only missing block tasks and a gather, in deterministic scientific order.
 
-    This is the G1 entry for an expanding selection round. It performs no fitting.
+    This is the graph entry for an expanding selection round. It performs no fitting.
     Complete blocks resume from their persisted records. Recorded graph rounds
     load the previous memo only at its block consumer and omit it from gathered
     results; direct callers retain the historical in-memory memo route by default.
@@ -236,11 +219,11 @@ def round_expansion(
         )
         return len(block.columns) * (size + 1) ** 2
 
-    # Heaviest first, as before; then consecutive blocks are grouped into engine tasks of about CHUNK_BLOCKS average
+    # Heaviest first; then consecutive blocks are grouped into engine tasks of about CHUNK_BLOCKS average
     # blocks' cost (a block at least that heavy stays alone), so the coordinator's fixed turnaround per task (reply,
     # bookkeeping, dispatch, send) is paid per chunk rather than per sub-second block. A round never has fewer tasks
     # than CHUNK_TASKS_PER_CPU times the CPUs it may use (or its block count): heavy blocks (K = 30, about a
-    # CPU-minute each) stay about one per task, so the round still fills the node. Release 4.8: guided sizes, so a
+    # CPU-minute each) stay about one per task, so the round still fills the node. guided sizes, so a
     # round ends on small chunks (equal chunks of 40-100 s left a minute-long tail at ~10 busy CPUs on chr1 0.5x),
     # and each task declares its chunk's cost, so the scheduler dispatches the heaviest first (it ordered
     # equal-cost tasks by block index).
@@ -280,9 +263,8 @@ def round_expansion(
                 # Grouped light blocks: one CPU (their fits ran at ~1.0 CPU-second per wall second whatever they
                 # claimed, and larger claims kept CPUs from lanes with work ready). A block alone in its task may grow
                 # to the task's threads (its path-model kernels spread its samples' lanes over them) as its siblings
-                # finish: the block re-reads its live share. Release 4.9 restores this for every lone block: 4.8 kept
-                # a lone block rated lighter than an average chunk on one CPU, and mispredicted ones ended each refit
-                # round alone on one thread for 13-25 s (chr1 0.5x).
+                # finish: the block re-reads its live share. Every lone block may grow, including one predicted
+                # lighter than an average chunk, because refit-round block costs are poorly predicted.
                 resources=ResourceRequest(
                     1,
                     max_threads if len(chunk) == 1 else 1,
@@ -306,43 +288,6 @@ def round_expansion(
     return Expansion(tuple(tasks), gather)
 
 
-def run_round(
-    blocks: Sequence[BlockTask],
-    settings: BlockSettings,
-    evidence: FounderEvidence,
-    *,
-    scope: SelectionRecords | None = None,
-    contig: str = "fixture",
-    round_name: str = "initial",
-    reverse: bool = False,
-    census_sink: CensusSink | None = None,
-    cores: int = 1,
-    threads: int = 1,
-    in_process: bool = True,
-) -> tuple[BlockSelection, ...]:
-    """Execute one declared round directly; composed graphs use round_expansion instead."""
-    expansion = round_expansion(
-        blocks,
-        settings,
-        evidence,
-        scope=scope,
-        contig=contig,
-        round_name=round_name,
-        reverse=reverse,
-        census_sink=census_sink,
-        max_threads=threads,
-    )
-    priorities = {task.key: float(len(expansion.subtasks) - i) for i, task in enumerate(expansion.subtasks)}
-    results = run_graph(
-        (*expansion.subtasks, expansion.gather),
-        cores=cores,
-        in_process=in_process,
-        priorities=priorities,
-        preload=(__name__,),
-    )
-    return results[expansion.gather.key]
-
-
 def _run_refit(
     task: ContextRefitTask,
     likelihoods: np.ndarray | CodedLikelihoods,
@@ -355,7 +300,7 @@ def _run_refit(
     """Gather one component's private evidence and finish it on its allocated team."""
     gl = gather_likelihoods(likelihoods, task.columns)
     seen = np.ascontiguousarray(observed[:, task.columns])
-    with task_team(threads):
+    with thread_team(default=threads):
         output = refit_component(
             task.h,
             gl,
@@ -369,7 +314,7 @@ def _run_refit(
             census_key=None if task.census_key is None else f"{task.census_key}/c{task.index}",
             reverse=reverse,
             census_sink=census_sink,
-            claim_threads=live_share(),  # re-read the share between kernels (refits start together, one per CPU)
+            claim_threads=share_reader(SHARE_REREAD_SECONDS),  # re-read the share between kernels (refits start together, one per CPU)
         )
     return finish_component(task, output, seen)
 
@@ -441,8 +386,8 @@ def context_expansion(
 ) -> Expansion:
     """Declare independent refit components after making the kept-site mask once.
 
-    Inputs are already materialised AS6 ComponentPanels. The observed mask is a
-    private copy; every member panel's kept mask is applied exactly as in 3.5.
+    Inputs are already materialised assembly ComponentPanels. The observed mask is a
+    private copy; every member panel's kept mask is applied.
     Partial component coverage is counted by pure refit_tasks, never completed here.
     """
     observed = (
@@ -486,141 +431,6 @@ def context_expansion(
     return Expansion(tasks, gather)
 
 
-def run_context_refit(
-    panels: Sequence[LocalPanel],
-    components: Sequence[ComponentPanel],
-    evidence: FounderEvidence,
-    genetic_map: ChromosomeGeneticMap,
-    parameters: SelectionParameters,
-    *,
-    scope: SelectionRecords | None = None,
-    contig: str = "fixture",
-    round_name: str = "l1",
-    reverse: bool = False,
-    census_sink: CensusSink | None = None,
-    cores: int = 1,
-    threads: int = 1,
-    in_process: bool = True,
-) -> tuple[tuple[ContextProposal, ...], RefitSummary]:
-    """Run a context fixture or stage cut; a composed graph uses context_expansion."""
-    expansion = context_expansion(
-        panels,
-        components,
-        evidence,
-        genetic_map,
-        parameters,
-        scope=scope,
-        contig=contig,
-        round_name=round_name,
-        reverse=reverse,
-        census_sink=census_sink,
-        max_threads=threads,
-    )
-    result = run_graph((*expansion.subtasks, expansion.gather), cores=cores, in_process=in_process, preload=(__name__,))
-    return result[expansion.gather.key]
-
-
-def run_contig(
-    store: CheckpointStore,
-    contig: str,
-    parameters: SelectionParameters,
-    discovery_parameters: DiscoveryParameters,
-    assembly_parameters: AssemblyParameters,
-    genetic_map: ChromosomeGeneticMap,
-    upstream: dict[str, str],
-    *,
-    load_inputs: Callable[[], tuple[Sequence, FounderEvidence, Any]],
-    assemble_context: Callable,
-    reverse: bool = False,
-    census_sink: CensusSink | None = None,
-    cores: int = 1,
-    threads: int = 1,
-    in_process: bool = True,
-) -> tuple[LocalPanel, ...]:
-    """Resume or execute the three rounds, calling AS6 only for missing context proposals.
-
-    load_inputs lazily returns discovered blocks, founder evidence and AS6's
-    evidence view. assemble_context receives panels, view, map, context parameters,
-    level and records prefix and returns AssemblyResult. IN1 supplies this explicit
-    AS6 boundary. An all-complete contig loads only the final panels.
-    """
-    file = store.contig(contig)
-    scopes = []
-    identities = dict(upstream)
-    for name in ROUNDS:
-        identity = round_identity(
-            name,
-            parameters,
-            discovery_parameters,
-            genetic_map,
-            identities,
-            assembly_parameters if name != "initial" else None,
-            reverse=reverse,
-        )
-        scopes.append(SelectionRecords(file, contig, name, identity))
-        identities = dict(identities, previous_round=identity)
-    first = next((i for i, scope in enumerate(scopes) if scope.selected() is None), len(ROUNDS))
-    if first == len(ROUNDS):
-        return scopes[-1].load_panels()
-    discovered, evidence, assembly_evidence = load_inputs()
-    initial = initial_tasks(discovered, genetic_map, label=contig)
-    selected_calls = [[panel.calls for panel in scope.load_panels()] for scope in scopes[:first]]
-    previous = None if first == 0 else scopes[first - 1].load_selections()
-    panels = None if previous is None else tuple(item.panel for item in previous)
-    settings = (parameters, discovery_parameters, parameters.model.redraw_rate_per_morgan)
-    for index in range(first, len(ROUNDS)):
-        scope, name = scopes[index], ROUNDS[index]
-        proposals = None
-        if index:
-            assert panels is not None
-            proposals = scope.load_proposals()
-            if proposals is None:
-                result = assemble_context(
-                    panels,
-                    assembly_evidence() if isinstance(assembly_evidence, AssemblyEvidenceSource) else assembly_evidence,
-                    genetic_map,
-                    assembly_parameters,
-                    level=parameters.context_levels[index - 1],
-                    records_prefix=context_assembly_prefix(name),
-                )
-                components = materialise(result.components, result.prepared)
-                proposals, _ = run_context_refit(
-                    panels,
-                    components,
-                    evidence,
-                    genetic_map,
-                    parameters,
-                    scope=scope,
-                    contig=contig,
-                    round_name=name,
-                    reverse=reverse,
-                    census_sink=census_sink,
-                    cores=cores,
-                    threads=threads,
-                    in_process=in_process,
-                )
-        blocks = round_tasks(initial, index, previous, selected_calls, proposals, label=contig)
-        previous = run_round(
-            blocks,
-            settings,
-            evidence,
-            scope=scope,
-            contig=contig,
-            round_name=name,
-            reverse=reverse,
-            census_sink=census_sink,
-            cores=cores,
-            threads=threads,
-            in_process=in_process,
-        )
-        panels = tuple(item.panel for item in previous)
-        selected_calls.append([panel.calls for panel in panels])
-    assert panels is not None
-    return panels
-
-
-# The composed route expands the three rounds into the application's one graph.
-# The direct run_contig/run_round helpers above remain useful for isolated seam replays.
 @dataclass(frozen=True)
 class SelectionSession:
     """An explicit contig capability; inputs load lazily after checking all three rounds."""
@@ -629,16 +439,14 @@ class SelectionSession:
     contig: str
     parameters: SelectionParameters
     discovery_parameters: DiscoveryParameters
-    assembly_parameters: AssemblyParameters
     genetic_map: ChromosomeGeneticMap
     upstream: dict[str, str]
     load_inputs: Callable[
-        [], tuple[Sequence[DiscoveredBlock | None], FounderEvidence, AssemblyEvidence | AssemblyEvidenceSource]
+        [], tuple[Sequence[DiscoveredBlock | None], FounderEvidence]
     ]
+    manifest: dict
     reverse: bool = False
-    tie_keep: tuple[str, ...] = ()
     max_threads: int = 1
-    numerical_policy: NumericalPolicy | None = None
     census_sink: CensusSink | None = None
 
 
@@ -650,43 +458,16 @@ class RoundState:
     scopes: tuple[SelectionRecords, ...]
     initial: tuple[BlockTask, ...]
     evidence: FounderEvidence
-    assembly_evidence: AssemblyEvidence | AssemblyEvidenceSource
     index: int
     previous: tuple[BlockSelection, ...] | None
     selected_calls: tuple[tuple[np.ndarray, ...], ...]
-    stop_after_round: bool = False
 
 
 def _scopes(session: SelectionSession) -> tuple[SelectionRecords, ...]:
-    identities = dict(session.upstream)
-    result = []
-    for name in ROUNDS:
-        expected = round_identity(
-            name,
-            session.parameters,
-            session.discovery_parameters,
-            session.genetic_map,
-            identities,
-            session.assembly_parameters if name != "initial" else None,
-            reverse=session.reverse,
-            tie_keep=session.tie_keep,
-            numerical_policy=session.numerical_policy,
-        )
-        result.append(SelectionRecords(session.store.contig(session.contig), session.contig, name, expected))
-        identities = dict(identities, previous_round=expected)
-    return tuple(result)
+    from .records import expected
 
-
-def _enter_contig(session: SelectionSession) -> tuple[LocalPanel, ...] | Expansion:
-    scopes = _scopes(session)
-    first = next((i for i, scope in enumerate(scopes) if scope.selected() is None), len(scopes))
-    if first == len(scopes):
-        return scopes[-1].load_panels()
-    discovered, evidence, assembly_evidence = session.load_inputs()
-    initial = initial_tasks(discovered, session.genetic_map, label=session.contig)
-    previous = None if first == 0 else scopes[first - 1].load_selections(memos=False)
-    earlier = _selected_calls(scopes[:first], previous)
-    return _advance_round(RoundState(session, scopes, initial, evidence, assembly_evidence, first, previous, earlier))
+    return expected(session.store, session.manifest, product="selected", contig=session.contig,
+                    upstream=session.upstream).scopes
 
 
 def _selected_calls(
@@ -699,59 +480,6 @@ def _selected_calls(
         assert previous is not None
         calls.append(tuple(item.panel.calls for item in previous))
     return tuple(calls)
-
-
-def _advance_round(state: RoundState) -> Expansion:
-    """Expand context assembly only when its proposals publication is absent."""
-    session, scope = state.session, state.scopes[state.index]
-    if state.index == 0:
-        return _expand_blocks(state, None)
-    proposals = scope.load_proposals()
-    if proposals is not None:
-        return _expand_blocks(state, proposals)
-    from ...core.digest import json_digest
-    from ...core.ties import TieSettings
-    from ...science.assembly.run import AssemblyInputs, Role
-    from ..assembly.final import assembly_task, bind_session
-
-    assert state.previous is not None
-    panels = tuple(item.panel for item in state.previous)
-    previous = state.scopes[state.index - 1]
-    upstream = dict(
-        panels=previous.derivation("selected"),
-        evidence=session.upstream["evidence"],
-        payload=bound_payload_identity(scope.file),
-        map=json_digest(session.genetic_map.identity()),
-    )
-    key = TaskKey("selection", "context_assembly", session.contig, scope.round_name)
-    assembly = bind_session(
-        AssemblyInputs(
-            panels,
-            state.assembly_evidence()
-            if isinstance(state.assembly_evidence, AssemblyEvidenceSource)
-            else state.assembly_evidence,
-            session.genetic_map,
-        ),
-        session.assembly_parameters,
-        file=scope.file,
-        upstream=upstream,
-        role=Role.CONTEXT,
-        levels=session.parameters.context_levels[state.index - 1],
-        records_prefix=context_assembly_prefix(scope.round_name),
-        parent=key,
-        max_cores=session.max_threads,
-        ties=TieSettings(reverse=session.reverse, keep=session.tie_keep, census=session.census_sink),
-        numerical_policy=session.numerical_policy,
-    )
-    child = assembly_task(assembly)
-    gather = Task(
-        TaskKey("selection", "context_materialise", session.contig, scope.round_name),
-        _expand_refit,
-        args=(state, ResultRef(child.key)),
-        depends_on=(child.key,),
-        affinity=session.contig,
-    )
-    return Expansion((child,), gather)
 
 
 def _expand_refit(state: RoundState, assembled: AssemblyResult | AssemblyProduct) -> Expansion:
@@ -807,45 +535,16 @@ def _expand_blocks(state: RoundState, proposals: Sequence[ContextProposal] | Non
     gather = Task(
         TaskKey("selection", "round_ready", session.contig, scope.round_name),
         _after_round,
-        args=(state, ResultRef(expansion.gather.key)),
+        args=(ResultRef(expansion.gather.key),),
         depends_on=(expansion.gather.key,),
         affinity=session.contig,
     )
     return Expansion((*expansion.subtasks, expansion.gather), gather)
 
 
-def _after_round(state: RoundState, selected: tuple[BlockSelection, ...]) -> tuple[LocalPanel, ...] | Expansion:
+def _after_round(selected: tuple[BlockSelection, ...]) -> tuple[LocalPanel, ...]:
     panels = tuple(item.panel for item in selected)
-    if state.stop_after_round or state.index == len(ROUNDS) - 1:
-        return panels
-    return _advance_round(
-        replace(
-            state,
-            index=state.index + 1,
-            previous=selected,
-            selected_calls=(*state.selected_calls, tuple(panel.calls for panel in panels)),
-        )
-    )
-
-
-def selection_task(
-    session: SelectionSession, *, key: TaskKey | None = None, depends_on: Sequence[TaskKey] = ()
-) -> Task:
-    """Standalone graph entry: a lazy contig action expanding all rounds and contexts.
-
-    The application owns the single run_graph call. load_inputs is an importable,
-    picklable callable supplying checked discovery blocks and both evidence views.
-    All-complete execution reads only selected panels and never calls load_inputs.
-    """
-    return Task(
-        key or TaskKey("selection", "contig", session.contig),
-        _enter_contig,
-        args=(session,),
-        depends_on=tuple(depends_on),
-        affinity=session.contig,
-        resources=ResourceRequest(1, 1),
-        # The terminal round gather owns publication; an expanding ancestor is not a second writer.
-    )
+    return panels
 
 
 def _enter_round(
@@ -861,18 +560,16 @@ def _enter_round(
     # Each earlier round's completion is verified here, once; the loads below then check only the records they read.
     if any(earlier.selected() is None for earlier in scopes[:index]):
         raise InvariantError(f"selection {round_name} requires all preceding selected rounds")
-    discovered, evidence, assembly_evidence = session.load_inputs()
+    discovered, evidence = session.load_inputs()
     previous = None if index == 0 else scopes[index - 1].load_selections(memos=False)
     state = RoundState(
         session,
         scopes,
         initial_tasks(discovered, session.genetic_map, label=session.contig),
         evidence,
-        assembly_evidence,
         index,
         previous,
         _selected_calls(scopes[:index], previous),
-        stop_after_round=True,
     )
     if index == 0:
         return _expand_blocks(state, None)
@@ -892,12 +589,12 @@ def selection_round_task(
     key: TaskKey | None = None,
     depends_on: Sequence[TaskKey] = (),
 ) -> Task:
-    """G1/IN1 action for exactly one of initial, l1 and l2.
+    """graph/workflow action for exactly one of initial, l1 and l2.
 
-    The caller's context.l1/context.l2 assembly node publishes the matching AS6
+    The caller's context.l1/context.l2 assembly node publishes the matching assembly
     product first. Its importable, picklable load_context callable verifies that
     product's independently derived identity and returns AssemblyProduct (or the
-    equivalent AssemblyResult from an executed AS6 task). This
+    equivalent AssemblyResult from an executed assembly task). This
     action refits that context and selects only the named round; it never starts
     another assembly or selection round. Complete rounds read panels lazily.
     """
@@ -910,4 +607,136 @@ def selection_round_task(
         depends_on=tuple(depends_on),
         affinity=session.contig,
         resources=ResourceRequest(1, 1),
+    )
+
+
+from ..inputs.products import task_inputs
+from ..context import StageRun
+from ..inputs.chain import _chain_input, _chain_evidence
+
+
+@dataclass(frozen=True)
+class SelectionInputs:
+    """Picklable capability loading checked discovery and evidence only when a round needs them."""
+
+    root: str
+    contig: str
+
+    def __call__(self) -> Any:
+        from ..discovery import records as discovery_records
+
+        reader, store = task_inputs(self.root)
+        request = discovery_records.result_reader(
+            store, reader.manifest, product="discovery", contig=self.contig
+        )
+        if request is None:
+            raise SettingsError(f"{self.contig}: required discovery publication is missing")
+        discovered = _chain_input(f"discovery/{request.identity}", lambda: reader.require(request, self.contig))
+        _, _, founder, view = _chain_evidence(reader, store, self.contig)
+        return discovered, founder
+
+
+@dataclass(frozen=True)
+class SelectionContext:
+    """Read the already published context assembly without creating a second assembly task."""
+
+    root: str
+    contig: str
+    round_name: str
+
+    def __call__(self) -> Any:
+        from ..assembly import records
+
+        reader, store = task_inputs(self.root)
+        request = records.result_reader(
+            store,
+            reader.manifest,
+            product="assembly",
+            contig=self.contig,
+            round_name=self.round_name,
+        )
+        context = None if request is None else reader.read(request, self.contig)
+        if context is None:
+            raise SettingsError(f"{self.contig}: selection needs published context {self.round_name}")
+        return context
+
+
+def _selected_result(root, contig, round_name):
+    """Return the checked selected publication after its round expansion."""
+    from . import records
+
+    reader, store = task_inputs(root)
+    request = reader.request(records, "selected", contig, stage="local_selection_" + round_name)
+    reader.require_receipt(request, contig)
+    return {RecordKey(contig, request.key): request.identity}
+
+
+def run(
+    root: str,
+    contig: str,
+    round_name: str,
+    resolved: ResolvedConfiguration,
+    maps: GeneticMapSet,
+    ties: TieSettings,
+    *,
+    cores: int = 1,
+) -> Expansion:
+    """Expand precisely one selection round, consuming the preceding context assembly."""
+    from ...engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
+    from ..discovery import records as discovery_records
+    from ..evidence import records as evidence_records
+    from ..selection.tasks import SelectionSession, selection_round_task
+
+    reader, store = task_inputs(root)
+    # A round whose completion is published under the identities this run derives (each promised block,
+    # memo and proposal record checked against its identity) is not expanded: its selected-record receipt is the
+    # gather's. Expanding would decode every panel before the gather checks that same record.
+    from ..selection import records as selection_records
+
+    done = selection_records.result_reader(
+        store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + round_name
+    )
+    if done is not None and done.scopes[done.round_index].selected(verify=True) is not None:
+        if reader.receipt(done, contig) is not None:
+            return {RecordKey(contig, done.key): done.identity}
+    upstream = {}
+    for name, adapter in (("evidence", evidence_records), ("discovery", discovery_records)):
+        request = reader.request(adapter, name, contig)
+        reader.require_receipt(request, contig)
+        upstream[name] = request.identity
+    session = SelectionSession(
+        store,
+        contig,
+        resolved.parameters.local_selection,
+        resolved.parameters.discovery,
+        maps.for_contig(contig),
+        upstream,
+        SelectionInputs(root, contig),
+        reverse=ties.reverse,
+        census_sink=ties.census,
+        max_threads=cores,
+        manifest=reader.manifest,
+    )
+    child = selection_round_task(
+        session,
+        round_name,
+        load_context=None if round_name == "initial" else SelectionContext(root, contig, round_name),
+        key=TaskKey("selection", "select", contig, round_name),
+    )
+    gather = Task(
+        TaskKey("selection", "published", contig, round_name),
+        _selected_result,
+        (root, contig, round_name),
+        depends_on=(child.key,),
+        affinity=contig,
+    )
+    return Expansion((child,), gather)
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare exactly one production selection round."""
+    return Task(
+        key, run,
+        (context.root, key.scope, key.round, context.resolved, context.maps, context.ties),
+        kwargs={"cores": context.cores}, resources=ResourceRequest(1, context.cores),
     )

@@ -1,4 +1,4 @@
-"""Partition kept sites into the fixed discovery blocks (EC24)."""
+"""Partition kept sites into the fixed discovery blocks."""
 
 import numpy as np
 

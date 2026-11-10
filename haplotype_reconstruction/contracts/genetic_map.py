@@ -4,8 +4,8 @@ Owns ChromosomeGeneticMap, GeneticMapSet and measured_coordinates; no I/O, engin
 or science imports. Inverse plateaus select the leftmost knot at equality and
 start strictly higher coordinates after the plateau's right edge. Tails use the
 same fallback slope in both directions; zero slope refuses unattainable values.
-Arithmetic and SHA-256 byte encoding are unchanged from model/genetic_map.py.
-Method: docs/genetic_maps.md; WP_D1 §4.3. Derived _morgans and _digest are rebuilt
+Map identity uses SHA-256 of the declared byte encoding.
+Method: docs/genetic_maps.md. Derived _morgans and _digest are rebuilt
 from copied positions_bp and map_cm and never stored.
 """
 
@@ -28,7 +28,7 @@ __all__ = [
     "DEFAULT_RATE_CM_PER_MB",
     "MAP_FORMAT",
 ]
-# EC27 parameter: model/genetic_map.py:28; rate in cM/Mb.
+# Default constant recombination rate in cM/Mb.
 DEFAULT_RATE_CM_PER_MB = 5.0
 MAP_FORMAT = "piecewise_linear_cm_v1"
 
@@ -194,7 +194,7 @@ class GeneticMapSet:
         )
 
 
-# CONTRACTS_40 uses this shorter name; the baseline class name remains public.
+# Both public names identify the same constant-rate map type.
 GeneticMap = ChromosomeGeneticMap
 
 

@@ -1,10 +1,10 @@
-"""Settings of local selection (internal model constants; base production values).
+"""Settings of local selection (internal model constants).
 
 Local selection refits every discovery block under a normalised diploid copying model (K
 founder rows plus a fixed-mass unknown state whose copies draw Bernoulli(1/2) alleles) and
 selects the panel by a drop / merge / add search, first from the raw discovery panel, then after
 each context round (assembly through L1, then L1+L2) with the context's refitted founders as
-candidates. None of these fields is user-visible (base never overrode one).
+candidates. These settings are internal to the selection model.
 """
 
 from __future__ import annotations
@@ -14,11 +14,13 @@ from dataclasses import dataclass, field
 from ...core.ties import NOISE_SCALE
 
 __all__ = [
-    "PathModelConfig",
-    "PathSearchConfig",
-    "CandidateBankConfig",
-    "PathReleaseConfig",
-    "ContextRefitConfig",
+    "CHAIN_LOW",
+    "CHAIN_HIGH",
+    "PathModelParameters",
+    "PathSearchParameters",
+    "CandidateBankParameters",
+    "PathReleaseParameters",
+    "ContextRefitParameters",
     "SelectionParameters",
     "FLIP_TIE",
     "EXACT_FIRST_UPDATE_MAX_K",
@@ -41,15 +43,18 @@ __all__ = [
     "TASK_WORKSPACE_BASE_BYTES",
     "SEARCH_GROWTH",
     "PARAMETER_PROVENANCE",
+    "RACE_MIN_STARTS",
+    "RACE_PROBE_ITERATIONS",
+    "RACE_KEEP",
 ]
 
 
 @dataclass(frozen=True)
-class PathModelConfig:
+class PathModelParameters:
     """The copying model of a block.
 
-    unknown_mass: fixed prior mass of the unknown state (base ``background_mass``; also the
-        background-state mass of the context refit's bin-level HMM).
+    unknown_mass: fixed prior mass of the unknown state (also the background-state mass of the context refit's
+    bin-level HMM).
 
     redraw_rate_per_morgan: founder-copy redraw intensity per Morgan for both the block
         path HMM and the context-refit HMM. The redraw probability is
@@ -60,79 +65,99 @@ class PathModelConfig:
 
     unknown_mass: float = field(
         default=0.01,
-        metadata={"provenance": "3.5 local_selection/config.py: PathModelConfig.unknown_mass; SE2 section 7"},
+        metadata={
+            "units": "probability",
+            "provenance": "Fixed unknown-state prior mass 0.01 permits unexplained founder copies.",
+        },
     )
     redraw_rate_per_morgan: float = field(
         default=3.0,
-        metadata={"provenance": "3.5 local_selection/config.py: PathModelConfig.redraw_rate_per_morgan; SE2 section 7"},
+        metadata={
+            "units": "1/Morgan",
+            "provenance": "Copy redraw intensity 3 gives redraw probability 1-exp(-3 times interval Morgans).",
+        },
     )
 
 
 @dataclass(frozen=True)
-class PathSearchConfig:
+class PathSearchParameters:
     """Drop / merge / add search with GEM refits (search.py, fit.py).
 
     refits_per_kind: top proposals per kind (drop, merge, add) refitted each round.
     round_backstop_base/_per_founder: reported round backstop, K of the current panel.
     update_backstop_base/_per_founder/_per_site: reported backstop of fixed-K GEM updates,
         base + per_founder K + per_site L.
-    refits_per_kind_cap: release 2.2: the proposal cut takes whole tie classes of the screened
+    refits_per_kind_cap: the proposal cut takes whole tie classes of the screened
         score (at decision_tolerance) until at least refits_per_kind; a class that would take the
         refits of a kind past this cap is left out whole (counted as an overflow; no member of a
         tie class is preferred to another).
     tolerance: the GEM fit's own tolerance (frequency-step acceptance, flip gains, convergence; nats).
     decision_tolerance: tie quantum of every decision between EM-fitted or screened objectives
-        (release 2.1): the proposal cut per kind, the round winner and the stop of the climb, the
+        for the proposal cut per kind, the round winner and the stop of the climb, the
         start-or-incumbent choice and the keep-incumbent rule between rounds; values chained within
         it are tied and decided by content (fewer founders, then the canonical panel bytes). A power
         of two far above EM convergence residuals and at least 16 times the typical motion of a
-        compared contrast under 1e-6 relative GL noise (release 2.13: a search round's gain moves by
-        about 5e-5 nats at the 99.9th percentile in the matched-history census of 1e-6 jitter runs;
-        2.1 placed it against 1e-9 noise), far below
-        genuine drop / merge / add differences (nats).
+        compared contrast under 1e-6 relative GL noise: a search round's gain moves by about
+        5e-5 nats at the measured 99.9th percentile. This keeps noise-scale contrasts inside
+        the band while separating larger drop / merge / add differences (nats).
     """
 
     refits_per_kind: int = field(
         default=8,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.refits_per_kind; SE2 section 7"},
+        metadata={
+            "units": "proposals/kind/round",
+            "provenance": "Target 8 GEM refits per proposal kind, admitting whole score tie classes.",
+        },
     )
     refits_per_kind_cap: int = field(
         default=16,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.refits_per_kind_cap; SE2 section 7"},
+        metadata={
+            "units": "proposals/kind/round",
+            "provenance": "Whole-class admission cap 16; classes that would exceed it are omitted and flagged.",
+        },
     )
     round_backstop_base: int = field(
         default=10,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.round_backstop_base; SE2 section 7"},
+        metadata={"units": "rounds", "provenance": "Base 10 in the reported round backstop 10+2K."},
     )
     round_backstop_per_founder: int = field(
         default=2,
         metadata={
-            "provenance": "3.5 local_selection/config.py: PathSearchConfig.round_backstop_per_founder; SE2 section 7"
+            "units": "rounds/founder",
+            "provenance": "Add 2 rounds per current founder to the reported search backstop.",
         },
     )
     update_backstop_base: int = field(
         default=20,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.update_backstop_base; SE2 section 7"},
+        metadata={"units": "updates", "provenance": "Base 20 in the fixed-K GEM backstop 20+4K+2L."},
     )
     update_backstop_per_founder: int = field(
         default=4,
         metadata={
-            "provenance": "3.5 local_selection/config.py: PathSearchConfig.update_backstop_per_founder; SE2 section 7"
+            "units": "updates/founder",
+            "provenance": "Add 4 updates per founder to the reported fixed-K GEM backstop.",
         },
     )
     update_backstop_per_site: int = field(
         default=2,
         metadata={
-            "provenance": "3.5 local_selection/config.py: PathSearchConfig.update_backstop_per_site; SE2 section 7"
+            "units": "updates/site",
+            "provenance": "Add 2 updates per block site to the reported fixed-K GEM backstop.",
         },
     )
     tolerance: float = field(
         default=1e-6,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.tolerance; SE2 section 7"},
+        metadata={"units": "nats", "provenance": "Fit acceptance, flip-gain and convergence tolerance 1e-6."},
     )
     decision_tolerance: float = field(
         default=2.0**-10,
-        metadata={"provenance": "3.5 local_selection/config.py: PathSearchConfig.decision_tolerance; SE2 section 7"},
+        metadata={
+            "units": "nats",
+            ("provenance"): (
+                "Decision quantum 2^-10 exceeds fit residuals and measured 5e-5-nat contrast motion under "
+                "1e-6 GL noise."
+            ),
+        },
     )
 
     def round_backstop(self, k: int) -> int:
@@ -143,59 +168,62 @@ class PathSearchConfig:
 
 
 @dataclass(frozen=True)
-class CandidateBankConfig:
+class CandidateBankParameters:
     """Candidate-bank search (bank.py): refits of the context proposals with discovery's
     fixed-K model, ranked by its binned-Viterbi BIC, K * complexity_scale * (L / 200) * N_active
     - 2 log L; K-scaled reported backstops with K the current panel's founder count: at most
     start_backstop(K) novel starts per call, score_backstop(K) admitted panels,
-    round_backstop(K) rounds. Release 2.1: the block's discovery tie quanta (maths.ties
+    round_backstop(K) rounds. The block's discovery tie quanta (core.ties
     BlockQuanta of the fixed-K workspace) order the BIC selection and the cavity-best endpoints
     (kind ``nll``) and stop the rounds (an improvement must exceed the ``improvement`` quantum).
 
-    completion_variant_cap: release 2.2: a proposal panel whose partial rows have tied completions
+    completion_variant_cap: a proposal panel whose partial rows have tied completions
         becomes one source per combination of them, up to this many; above it the panel's source
         keeps only its rows with a unique completion (counted as an overflow,
         "ls.bank.completion.overflow")."""
 
     round_backstop_base: int = field(
         default=8,
-        metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.round_backstop_base; SE2 section 7"
-        },
+        metadata={"units": "rounds", "provenance": "Base 8 in the reported bank-round backstop 8+ceil(K/2)."},
     )
     completion_variant_cap: int = field(
         default=8,
         metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.completion_variant_cap; SE2 section 7"
+            "units": "panels/source",
+            ("provenance"): (
+                "Keep whole tied-completion families through 8 variants; larger sources retain only "
+                "uniquely completed rows."
+            ),
         },
     )
     score_backstop_base: int = field(
         default=1024,
-        metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.score_backstop_base; SE2 section 7"
-        },
+        metadata={"units": "panels", "provenance": "Base 1024 in the reported scored-panel backstop 1024+128K."},
     )
     score_backstop_per_founder: int = field(
         default=128,
         metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.score_backstop_per_founder; SE2 section 7"
+            "units": "panels/founder",
+            "provenance": "Add 128 admitted panels per current founder to the scored-panel backstop.",
         },
     )
     start_backstop_base: int = field(
         default=512,
-        metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.start_backstop_base; SE2 section 7"
-        },
+        metadata={"units": "starts", "provenance": "Base 512 in the reported novel-start backstop 512+64K."},
     )
     start_backstop_per_founder: int = field(
         default=64,
         metadata={
-            "provenance": "3.5 local_selection/config.py: CandidateBankConfig.start_backstop_per_founder; SE2 section 7"
+            "units": "starts/founder",
+            "provenance": "Add 64 novel starts per current founder to the start backstop.",
         },
     )
     complexity_scale: float = field(
         default=0.5,
-        metadata={"provenance": "3.5 local_selection/config.py: CandidateBankConfig.complexity_scale; SE2 section 7"},
+        metadata={
+            "units": "dimensionless",
+            "provenance": "BIC founder-cost multiplier 0.5 times block sites/200 times active samples.",
+        },
     )
 
     def score_backstop(self, k: int) -> int:
@@ -209,39 +237,54 @@ class CandidateBankConfig:
 
 
 @dataclass(frozen=True)
-class PathReleaseConfig:
+class PathReleaseParameters:
     """Release of a selected panel's alleles (release.py): the one-bit conditional allele
     probability reaches ``min_call_probability`` and the favourable samples (whose own evidence
     favours the allele by more than ``favourable_margin`` nats) include ``min_supporters``
     carriers by count (posterior carrier probability above 1/2) or by expected carrier mass.
-    Release 2.1: ``favourable_margin`` is the ``cell`` tie quantum of maths.ties (2^-14 nats since
-    2.13, placed against 1e-6 relative GL noise; 2^-23 in 2.1-2.12; the 1e-9 of 2.0 sat at the motion
-    of 1e-9 GL noise, so a symmetric-evidence cell, whose gain is exactly 0, straddled it).
+    ``favourable_margin`` is the ``cell`` tie quantum of core.ties (2^-14 nats), separating
+    symmetric-evidence cells with exactly zero gain from favourable evidence under GL noise.
     ``unknown_count_band``: a site's MAP number of unknown copies (0, 1, 2; it feeds assembly
     completion's all-or-nothing veto) must win by more than this relative posterior margin, else the
-    smaller count (the ``probability`` tie quantum of maths.ties, 2^-15 since 2.13, 2^-20 before;
-    design A-7: an integer count whose posterior masses can tie exactly)."""
+    smaller count. The ``probability`` tie quantum of core.ties is 2^-15: posterior masses of
+    different integer counts can tie exactly."""
 
     min_call_probability: float = field(
         default=0.85,
-        metadata={"provenance": "3.5 local_selection/config.py: PathReleaseConfig.min_call_probability; SE2 section 7"},
+        metadata={
+            "units": "probability",
+            "provenance": "Release an allele only when its one-bit conditional posterior reaches 0.85.",
+        },
     )
     min_supporters: float = field(
         default=2.0,
-        metadata={"provenance": "3.5 local_selection/config.py: PathReleaseConfig.min_supporters; SE2 section 7"},
+        metadata={
+            "units": "samples or expected carrier mass",
+            ("provenance"): (
+                "Require favourable carrier count or mass at least 2 unless an explicit context witness rescues it."
+            ),
+        },
     )
     favourable_margin: float = field(
         default=2.0**-14,
-        metadata={"provenance": "3.5 local_selection/config.py: PathReleaseConfig.favourable_margin; SE2 section 7"},
+        metadata={
+            "units": "nats",
+            ("provenance"): (
+                "Favourable evidence must exceed the cell quantum 2^-14, separating symmetric evidence from support."
+            ),
+        },
     )
     unknown_count_band: float = field(
         default=2.0**-15,
-        metadata={"provenance": "3.5 local_selection/config.py: PathReleaseConfig.unknown_count_band; SE2 section 7"},
+        metadata={
+            "units": "relative probability",
+            "provenance": "Prefer the smaller unknown-copy count inside a relative posterior band of 2^-15.",
+        },
     )
 
 
 @dataclass(frozen=True)
-class ContextRefitConfig:
+class ContextRefitParameters:
     """Refit of a context component's founders from the block's own evidence (context_refit.py).
 
     posterior_threshold: a refitted allele is released at this site-posterior probability.
@@ -251,15 +294,24 @@ class ContextRefitConfig:
 
     posterior_threshold: float = field(
         default=0.99,
-        metadata={"provenance": "3.5 local_selection/config.py: ContextRefitConfig.posterior_threshold; SE2 section 7"},
+        metadata={
+            "units": "probability",
+            "provenance": "Release a context-refitted allele only when its site posterior reaches 0.99.",
+        },
     )
     min_support: float = field(
         default=2.0,
-        metadata={"provenance": "3.5 local_selection/config.py: ContextRefitConfig.min_support; SE2 section 7"},
+        metadata={
+            "units": "samples or expected carrier mass",
+            "provenance": "Require context carrier count or mass support of 2.",
+        },
     )
     emission_mix: float = field(
         default=0.01,
-        metadata={"provenance": "3.5 local_selection/config.py: ContextRefitConfig.emission_mix; SE2 section 7"},
+        metadata={
+            "units": "probability",
+            "provenance": "Uniform genotype mixture weight 0.01 in bin-level carrier emissions.",
+        },
     )
 
 
@@ -270,34 +322,47 @@ class SelectionParameters:
     context_levels: assembly levels of the context rounds, in order (rounds "l1", "l2").
     """
 
-    model: PathModelConfig = field(
-        default_factory=PathModelConfig,
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.model; SE2 section 7"},
+    model: PathModelParameters = field(
+        default_factory=PathModelParameters,
+        metadata={"units": "parameter record", "provenance": "Default normalised diploid copying-model settings."},
     )
-    search: PathSearchConfig = field(
-        default_factory=PathSearchConfig,
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.search; SE2 section 7"},
+    search: PathSearchParameters = field(
+        default_factory=PathSearchParameters,
+        metadata={"units": "parameter record", "provenance": "Default drop, merge and add search and GEM settings."},
     )
-    bank: CandidateBankConfig = field(
-        default_factory=CandidateBankConfig,
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.bank; SE2 section 7"},
+    bank: CandidateBankParameters = field(
+        default_factory=CandidateBankParameters,
+        metadata={"units": "parameter record", "provenance": "Default discovery-model candidate-bank settings."},
     )
-    release: PathReleaseConfig = field(
-        default_factory=PathReleaseConfig,
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.release; SE2 section 7"},
+    release: PathReleaseParameters = field(
+        default_factory=PathReleaseParameters,
+        metadata={
+            "units": "parameter record",
+            "provenance": "Default conditional-probability and favourable-carrier release gates.",
+        },
     )
-    context_refit: ContextRefitConfig = field(
-        default_factory=ContextRefitConfig,
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.context_refit; SE2 section 7"},
+    context_refit: ContextRefitParameters = field(
+        default_factory=ContextRefitParameters,
+        metadata={
+            "units": "parameter record",
+            "provenance": "Default block-evidence refit settings for assembled context founders.",
+        },
     )
     context_levels: tuple[int, ...] = field(
         default=(1, 2),
-        metadata={"provenance": "3.5 local_selection/config.py: LocalSelectionConfig.context_levels; SE2 section 7"},
+        metadata={
+            "units": "levels/round",
+            "provenance": "Context rounds assemble through levels 1 then 2, in that order.",
+        },
     )
 
 
-# Scientific constants preserve the exact baseline expressions. Provenance is kept
-# alongside resource and diagnostic constants, which do not alter decisions.
+# Scientific values, resource layout and diagnostic windows are named here;
+# PARAMETER_PROVENANCE describes their meaning, units and rationale.
+# Running products of one-bit likelihood ratios move into the log total outside these
+# dimensionless bounds; the same applies to a single ratio, preventing overflow and underflow.
+CHAIN_LOW = 2.0**-300
+CHAIN_HIGH = 2.0**300
 FLIP_TIE = 2.0**-20 * NOISE_SCALE
 EXACT_FIRST_UPDATE_MAX_K = 16
 DESCRIPTION_TIE = 1e-9
@@ -319,25 +384,40 @@ UNKNOWN_CENSUS_WINDOW = 1e-3
 TASK_WORKSPACE_BASE_BYTES = 2048 << 20
 SEARCH_GROWTH = 8
 
+# Candidate-bank neighbour rounds use short fits to admit a bounded family of starts.
+RACE_MIN_STARTS = 24
+RACE_PROBE_ITERATIONS = 3
+RACE_KEEP = 16
+
 PARAMETER_PROVENANCE = {
-    "FLIP_TIE": "3.5 fit.py:38; release 2.13 relative flip band scaled to 1e-6 GL noise",
-    "EXACT_FIRST_UPDATE_MAX_K": "3.5 fit.py:41; first-update exact-enumeration cap",
-    "DESCRIPTION_TIE": "3.5 objective.py shortest-description strict preference slack",
-    "MATCHING_SLACK": "3.5 objective.py reduced-cost matching rounding allowance",
-    "LOG_RATIO_NEAR": "3.5 path_model.py:50 _log_ratio close-ratio branch; not a decision tolerance",
-    "LANE_WIDTH": "3.5 path_model.py:35; resource layout, 64 lanes",
-    "LANE_ALIGN": "3.5 path_model.py:39; resource layout, align to 8 lanes",
-    "RELEASE_SAMPLE_BATCH": "3.5 path_model.py:41; resource-only release batch",
-    "COMBINE_TILE": "3.5 path_model.py:42; resource-only parallel reduction tile",
-    "CONSENSUS_TIE": "3.5 search.py:51; noise_quantum(3.9e-8) == 2**-20",
-    "PROPOSAL_FREQUENCY_TIE": "3.5 search.py:44; absolute duplicate-start frequency band",
-    "DECISION_MOTION": "3.5 search.py:55; diagnostic boundary motion measured at p99.9",
-    "CONSENSUS_CENSUS_WINDOW": "3.5 search.py:77; diagnostic census window",
-    "KIND_ORDER": "3.5 search.py:79; fixed same-panel representative preference",
-    "BACKGROUND_COUNT_BAND": "3.5 context_refit.py:43; probability quantum 2**-15",
-    "HALF_CENSUS_WINDOW": "3.5 context_refit.py:45; diagnostic census window",
-    "FAVOURABLE_CENSUS_WINDOW": "3.5 release.py:46; diagnostic census window",
-    "UNKNOWN_CENSUS_WINDOW": "3.5 release.py:49; diagnostic census window",
-    "TASK_WORKSPACE_BASE_BYTES": "3.5 rounds.py:259; resource-only workspace allowance",
-    "SEARCH_GROWTH": "3.5 rounds.py:261; resource-only founder growth allowance",
+    "CHAIN_LOW": "Lower dimensionless bound 2^-300 of the exact likelihood-ratio running product.",
+    "CHAIN_HIGH": "Upper dimensionless bound 2^300 of the exact likelihood-ratio running product.",
+    "RACE_MIN_STARTS": (
+        "In non-cavity neighbour rounds, race starts only above 24 novel starts; otherwise fit every start."
+    ),
+    "RACE_PROBE_ITERATIONS": "Probe each raced start for 3 fixed-K iterations before ranking its BIC endpoint.",
+    "RACE_KEEP": "Retain the top 16 short-fit starts and every tie at the cut for full fitting.",
+    "FLIP_TIE": "Relative flip-gain band scaled to 1e-6 relative genotype-likelihood noise.",
+    "EXACT_FIRST_UPDATE_MAX_K": (
+        "Founder-count threshold 16 for eagerly computing exact conditional statistics on the "
+        "first frequency update; controls work only."
+    ),
+    "DESCRIPTION_TIE": "Relative shortest-description preference slack 1e-9, scaled by max(1, absolute code in nats).",
+    "MATCHING_SLACK": "Reduced-cost matching rounding allowance 1e-12 nats.",
+    "LOG_RATIO_NEAR": "Dimensionless close-ratio boundary 0.5 for stable log-ratio evaluation.",
+    "LANE_WIDTH": "Resource layout: 64 sample lanes per likelihood block.",
+    "LANE_ALIGN": "Resource layout: align lane storage to multiples of 8 lanes.",
+    "RELEASE_SAMPLE_BATCH": "Resource layout: process 128 samples per release batch.",
+    "COMBINE_TILE": "Resource layout: 4096 elements per parallel reduction tile.",
+    "CONSENSUS_TIE": "Absolute allele-probability band 2^-20 around one half for merge consensus.",
+    "PROPOSAL_FREQUENCY_TIE": "Absolute frequency band 1e-12 for duplicate-start detection.",
+    "DECISION_MOTION": "Diagnostic contrast motion 5e-5 nats at the measured 99.9th percentile under 1e-6 GL noise.",
+    "CONSENSUS_CENSUS_WINDOW": "Diagnostic probability window 1e-3 around a merge-consensus boundary.",
+    "KIND_ORDER": "Dimensionless same-panel representative priority: drop, merge, then add.",
+    "BACKGROUND_COUNT_BAND": "Relative probability quantum 2^-15 for conservative background-copy counts.",
+    "HALF_CENSUS_WINDOW": "Diagnostic carrier-probability window 1e-3 around one half.",
+    "FAVOURABLE_CENSUS_WINDOW": "Diagnostic favourable-evidence window 1e-3 nats around zero.",
+    "UNKNOWN_CENSUS_WINDOW": "Diagnostic relative posterior-gap window 1e-3 for unknown-copy counts.",
+    "TASK_WORKSPACE_BASE_BYTES": "Resource-only base workspace allowance 2048 MiB per block task.",
+    "SEARCH_GROWTH": "Resource-only founder growth allowance of 8 rows when estimating search storage.",
 }

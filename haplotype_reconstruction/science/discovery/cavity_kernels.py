@@ -3,7 +3,7 @@
 Owns: the compiled held-out solves, the founder mean field and the predictive accumulation of the cavity score.
 Must not: allocate per-thread scientific state that depends on the thread count, read storage, the environment or
 a clock, or log.
-Method: docs/methods/discovery.md, unit di10 (P0 DI10).
+Method: docs/methods/discovery.md, unit di10.
 Identity: each sample accumulates in site and founder order and samples reduce in sample order, so results do not
 depend on threads or tiles.
 
@@ -17,21 +17,14 @@ held-out solve patches every weighted unary and edge of its sample (restored aft
 entropy terms are memoised per founder. Every sample accumulates its own predictions in site and
 founder order and samples are reduced in sample order, so results do not depend on threads.
 
-Release 2.3: the three mean-field starts of a held-out solve are compared by training ELBO with
-its unchanged ``nll`` quantum. All distinct winning converged endpoints (all starts when none
-converged) form equivalence classes at the existing mean-field convergence tolerance, after
-exact deduplication. Classes contribute equally to each state's predictive likelihood; their
-numerically distinct members are averaged internally. The floor and log follow both averages.
-Exact identity alone made a near-duplicate mode's weight depend on GL noise. The retained scalar _solve_cavity_site
-wrapper still returns the old directional representative
-for reference tests; production predictions use the full endpoint family. Release 2.1 chose the
-first winning start in the fixed order (q = H, q = 1 - H, q = 1/2). 2.0 compared with an
-absolute 1e-12 band and broke ties by the endpoints' values, so rounding- or perturbation-level ELBO
-differences between different endpoints (e.g. mirror-image modes) chose the endpoint. A founder
-update's logit within the same quantum of zero is zero (q = 1/2 exactly): symmetric evidence (equal
-REF and ALT reads) makes such logits exactly zero, and an exactly symmetric start then stays on its
-symmetric fixed point; GL noise broke that symmetry and let the start escape to another mode
-(TroMau chr18:375: a non-selected representative's score moved by 3.9 nats under 1e-12 noise).
+The three mean-field starts of a held-out solve are compared by training ELBO with the ``nll`` quantum. All
+distinct winning converged endpoints (all starts when none converged) form equivalence classes at the
+mean-field convergence tolerance, after exact deduplication. Classes contribute equally to each state's
+predictive likelihood; their numerically distinct members are averaged internally. The floor and log follow
+both averages, so near-duplicate endpoints do not receive extra mode weight merely because of GL noise. The
+scalar _solve_cavity_site wrapper also returns a directional representative used by reference tests and the
+single-endpoint prediction path. A founder update's logit within the same quantum of zero is zero (q = 1/2
+exactly), preserving a symmetric fixed point under symmetric evidence.
 """
 
 from __future__ import annotations
@@ -49,7 +42,7 @@ from .parameters import PREDICTION_TILE_BYTES, SIGMOID_SATURATION
 
 __all__ = ["grouped_cavity_predictions"]
 
-# Intended lazy overloads: base40 execution/kernel_manifest.json (3.5.0).
+# Supported lazy overloads for the declared kernel routes.
 _FLOAT64_3C = types.Array(types.float64, 3, "C", readonly=False)
 _INT64_1C = types.Array(types.int64, 1, "C", readonly=False)
 _FLOAT64_2C = types.Array(types.float64, 2, "C", readonly=False)
@@ -455,7 +448,7 @@ def _solve_cavity_site(
                     logit += (1.0 - qo) * (directed_difference_zero[founder, other])
                     logit += qo * (directed_difference_one[founder, other])
 
-                # Release 2.1: an exact zero by symmetry stays exactly zero.
+                # An exact zero by symmetry stays exactly zero.
                 if logit <= elbo_tie and logit >= -elbo_tie:
                     logit = 0.0
                 # The sigmoid is a pure function of the logit: an equal
@@ -617,7 +610,7 @@ def _solve_cavity_site(
     nogil=True,
 )
 def _eligible_endpoint_indices(endpoints, elbo, converged, elbo_tie):
-    """Distinct winning training endpoints, with the existing convergence/ELBO rules.
+    """Distinct winning training endpoints, under the convergence/ELBO rules.
 
     Exact duplicates carry one share regardless of how many starts reached them.
     This uses no held-out evidence. The returned order is immaterial to the mixture.
@@ -666,7 +659,7 @@ def _endpoint_class_labels(endpoints, indices, equivalence_scale=0.0):
     """Connected components at the stated endpoint equivalence scale.
 
     The helper's zero default exposes the exact-identity reference. Production
-    uses the solver's existing convergence tolerance: tiny endpoint differences
+    uses the solver's convergence tolerance: tiny endpoint differences
     otherwise change mode multiplicity under GL noise. This scale is never chosen
     from held-out evidence or endpoint predictions. Connected components avoid
     any dependence on the order in which close endpoints are encountered.
@@ -723,7 +716,7 @@ def _predictive_family_log_states(
     values = np.empty(count, dtype=np.float64)
     class_values = np.empty(count, dtype=np.float64)
     partials = np.empty(count, dtype=np.float64)
-    # State geometry is the unchanged RR upper triangle, RW, WW.
+    # State geometry is the RR upper triangle, RW, WW.
     state = 0
     for first in range(k):
         for second in range(first, k + 1):

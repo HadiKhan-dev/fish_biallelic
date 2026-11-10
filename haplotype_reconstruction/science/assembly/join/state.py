@@ -1,6 +1,6 @@
-"""The search state consumed by the count drivers (WP AS4 §6 / AS5 §4).
+"""The search state consumed by the count drivers.
 
-The contract is frozen before moving the drivers. PanelSearch owns the arrays and
+PanelSearch owns the arrays and
 caches; the drivers mutate only the census, history, tags and family lists below.
 A panel change always goes through set_panel, preserving canonical slot order.
 Concurrent work returns results in input order. Scores are float64[S], and rows
@@ -8,8 +8,8 @@ are int64[K,B]. Their sample, founder and block axes are never reordered here.
 
 Owns: the typed search-state protocol shared by count drivers.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §6 and WP_AS5 §6.
-Identity: Panel writes pass through set_panel; census/history/tag mutations keep the native driver order.
+Method: docs/methods/assembly.md#aj21.
+Invariant: Panel writes pass through set_panel; census, history and tags follow the driver decision order.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ U = TypeVar("U")
 def search_tie_policy(
     name: str, quantum_kind: Literal["join_ll", "join_ll_wide", "join_proxy"], settings: TieSettings
 ) -> ties.TiePolicy:
-    """AJ14/AJ21: retain the three native search scales with caller reversal."""
+    """Use the requested join decision scale with the caller's convention reversal."""
     if quantum_kind == "join_ll":
         return ties.policy(name, kind="join_ll", reverse=settings.reverse)
     if quantum_kind == "join_ll_wide":

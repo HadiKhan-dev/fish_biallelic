@@ -15,15 +15,11 @@ samples (pre-fill, held-out carrier profiles):
 Blocks whose local selection left unexplained copies (unknown-mass veto) and single-founder
 blocks release nothing. The released fills are a subset of the candidates.
 
-Ties (release 2.1, design A-4 / A-7): carrier probabilities of confident samples saturate at exactly 1.0, so the
-abundant sum of squares sits exactly on its integer threshold when exactly that many samples carry the row (21 of
-2,629 rows on actm3 chr13, 27 of 5,689 on TroMau chr7), and two neighbours' continuity scores are often both exactly
-1.0. Such comparisons are decided within a probability-kind band (``core.ties`` probability policy, relative to the
-threshold
-for the sum): a sum inside the band of its threshold takes the conservative side (not abundant), and neighbour
-scores in one tie class are tied; tied neighbours abstain only when their qualifying samples differ (the release
-depends only on those samples). 2.0 compared exactly, and 1e-9 GL noise flipped the "ambiguous" decision of 3 rows
-on 2 TroMau contigs (one perturbed run).
+Carrier probabilities can saturate at exactly 1.0, putting the abundant sum of squares on its
+integer threshold and making neighbours' continuity scores equal. Use the ``core.ties``
+probability band, relative to the threshold for the sum: a sum inside the threshold band takes
+the conservative side (not abundant). Neighbour scores in one class are tied; tied neighbours
+abstain only when their qualifying sample sets differ, because only those samples affect release.
 
 
 Owns the completion occupancy boundary (U07). Must not read files, clocks or
@@ -42,7 +38,7 @@ from haplotype_reconstruction.core import ties
 
 from .crossfit import CarrierProfiles
 from .links import BoundaryLink
-from .parameters import OccupancyConfig
+from .parameters import OccupancyParameters
 
 # U07 uses only the policy quantum: the conservative abundant rule and tied
 # neighbor abstention are scientific decisions, not reversible conventions.
@@ -125,9 +121,8 @@ def _decision(block, row, profiles, neighbors, links, rule, unknown_mass_veto, c
 
     # The best neighbour: most qualifying samples, then the highest continuity score; scores in one tie class
     # (probability quantum) are tied. The release depends only on the qualifying samples, so tied neighbours are
-    # ambiguous (abstain) only when their qualifying samples differ (release 2.1; 2.0 abstained on every exact score
-    # tie, which arises from probabilities saturating at 1.0 where exact arithmetic would have picked one neighbour,
-    # and took the larger of two scores that differed only in their last bits).
+    # Abstain only when tied neighbours have different qualifying samples. Carrier probabilities
+    # can saturate at 1.0, so an equal score alone does not establish ambiguity.
     qualifying_samples: tuple[int, ...] = ()
     ambiguous_best_neighbor = False
     if candidates:
@@ -168,7 +163,7 @@ def occupancy_gate(
     profiles: tuple[CarrierProfiles, ...],
     focal,
     links: tuple[BoundaryLink, ...],
-    rule: OccupancyConfig,
+    rule: OccupancyParameters,
     unknown_mass_veto,
     keys=None,
     *,
@@ -178,7 +173,7 @@ def occupancy_gate(
 
     candidates: bool[K_b, L_b] per block (cavity fills); profiles: per block; focal: bool[N, L_b] per
     block (observed discovery sites with non-uniform evidence); links: per boundary (B - 1);
-    rule: CompletionConfig.occupancy; unknown_mass_veto: bool per block; keys: optional stable decision keys
+    rule: CompletionParameters.occupancy; unknown_mass_veto: bool per block; keys: optional stable decision keys
     per block for the valley census (default: the block index).
     """
     row_counts = tuple(profile.carrier_probability.shape[1] for profile in profiles)

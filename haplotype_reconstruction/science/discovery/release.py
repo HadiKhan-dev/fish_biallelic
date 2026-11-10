@@ -2,9 +2,9 @@
 
 The selected panel's hard rows are latent: they are what local selection fits from. Its
 *released* alleles carry a capped fixed-assignment pseudo-probability and are called only where
-that probability reaches ``ReleaseRuleConfig.min_call_probability`` with at least
+that probability reaches ``ReleaseRuleParameters.min_call_probability`` with at least
 ``min_supporters`` informative carriers. The same rule releases the candidate bank's source
-endpoints in local selection (local_selection/bank.py), whose calls form the path-search start.
+endpoints in local selection (selection/bank.py), whose calls form the path-search start.
 """
 
 from __future__ import annotations
@@ -22,11 +22,10 @@ from ...core.ties import BlockQuanta, fixed_policy
 from .diagnostics import BlockDiagnostics
 from .panel import assignment_tie_mask, known_content_key, solution_tie_mask, state_layout, unknown_alleles
 from .panel import state_membership as _state_membership
-from .parameters import EMISSION_FLOOR, DiscoveryConfig, ReleaseRuleConfig
+from .parameters import EMISSION_FLOOR, DiscoveryParameters, ReleaseRuleParameters
 from .search import BlockSearch, SearchSummary
 
-# The cell band is a symmetric |NLL(0) - NLL(1)| <= cell test that orders nothing, so no convention reverses it
-# (3.5 discovery/release.py:93 reads quanta.cell with no rev()); only the quantum is taken from the policy.
+# The symmetric cell band orders no states; name its fixed forward convention for policy audits.
 _CELL_BAND_REVERSE = False
 
 
@@ -36,7 +35,7 @@ def release_alleles(
     assignments: np.ndarray,
     observed: np.ndarray,
     unknown_copy_penalty: float,
-    rule: ReleaseRuleConfig,
+    rule: ReleaseRuleParameters,
     quanta: BlockQuanta | None = None,
     tie_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -299,7 +298,7 @@ def materialise(
     likelihoods: np.ndarray,
     observed: np.ndarray,
     search: BlockSearch,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     diagnostics: BlockDiagnostics | None = None,
 ) -> DiscoveredBlock:
     """The DiscoveredBlock of a searched block: the selected panel released by the raw rule.

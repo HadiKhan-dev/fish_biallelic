@@ -264,15 +264,8 @@ def _step_back(nxt, T0b, T1b, TGb, G):
     return out
 
 
-_POSTERIOR_TRACE_OVERLOADS = tuple(
-    signature + (receipt,)
-    for signature in _OVERLOADS["forward_backward"]
-    for receipt in (types.none, types.Array(types.float64, 4, "C"))
-)
-
-
-@kernel(overloads=_POSTERIOR_TRACE_OVERLOADS, cache=True, nogil=True)
-def _forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, receipt):
+@kernel(overloads=_OVERLOADS["forward_backward"], cache=True, nogil=True)
+def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask):
     """Posteriors post[b, s0, s1] (gauge summed). If anchor_bin >= 0, the state at that bin is restricted to
     anchor_mask[s0, s1] (True = allowed). The gauge starts at 0, as in the Viterbi block."""
     B, n0, n1, G = em.shape
@@ -318,25 +311,10 @@ def _forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, receipt):
                 acc = 0.0
                 for g in range(G):
                     v = alpha[b, s0, s1, g] + beta[b, s0, s1, g] - z
-                    if receipt is not None:
-                        receipt[b, s0, s1, g] = v
                     if v > POSTERIOR_LOG_FLOOR:
                         acc += math.exp(v)
                 post[b, s0, s1] = acc
     return post
-
-
-def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, *, trace=False):
-    """Evaluate the real posterior recurrence; optionally retain operands at the -700 cut."""
-    if not trace:
-        return _forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, None)
-    receipt = np.empty(em.shape, dtype=np.float64)
-    post = _forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask, receipt)
-    return dict(
-        post=post,
-        log_posterior=receipt.reshape(-1),
-        indices=np.indices(em.shape, dtype=np.int64).reshape(4, -1).T.copy(),
-    )
 
 
 @kernel(overloads=_OVERLOADS["_flip_pair"], cache=True, nogil=True)
@@ -373,7 +351,7 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
     (their flips with the sample's direct own likelihood term removed). The selected allele determines the cap.
     The copies flip independently per homologue, including (x, x); this is not exact integration over one shared
     latent allele. Carrier and panel selection are not integrated out, and this is not a cross-fitted refit.
-    With every d = 0 this is the 3.3 model. The sample's own
+    With every d = 0 the selected panel alleles have no flip uncertainty. The sample's own
     site likelihood gl [m, 3] (P(reads | genotype), flat where unobserved) weighs the four ordered states given each
     pair, normalised per pair; the direct own term enters here, while indirect selection dependence remains:
     out[:, i] = sum over known pairs of

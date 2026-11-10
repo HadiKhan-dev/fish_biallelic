@@ -8,26 +8,34 @@ import numpy as np
 
 from ...core.ties import noise_quantum
 
-# Production bounds and fixed search schedule, 3.5 painting/fidelity.py:49–51,700,706 (P0 PR08).
+# Copying-rate bounds (per Morgan), entry/exit probability bounds and fixed search step counts.
+# A reached estimate bound is reported, not rejected: entry at 1e-6 indicates no support
+# for error runs under this model and estimation schedule, not a test of their absence.
 RATE_BOUNDS = (1e-2, 1e3)
 ENTRY_BOUNDS = (1e-6, 0.5)
 EXIT_BOUNDS = (1e-3, 0.999)
 RATE_GRID_POINTS = 241
 GOLDEN_STEPS = 60
-# 3.5 painting/transitions.py:40; finite cold-map transition logs (P0 PR05).
+# Smallest switch probability of a bin edge. Two bin centres inside a cold interval of the map (equal cumulative
+# cM) are 0 Morgans apart; they keep a negligible chance to switch instead of none, so every transition weight
+# stays finite (Viterbi, posteriors and pedigree's chains use the logs). Such edges carry no information about rho
+# (painting.fidelity.rate_update leaves them out).
 MINIMUM_SWITCH_PROBABILITY = 1e-15
-# 3.5 painting/hmm.py:21,47; observed normalized-GL spread and incumbent preference (PR04/PR09).
+# Normalized-GL spread threshold (probability) and Viterbi predecessor tie quantum (nats).
 INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
 VITERBI_TIE = noise_quantum(1.9e-6)
-# int64 interval-mask representation, 3.5 painting/hmm.py:50 (PR11); enforced at decode boundary.
+# int64 interval masks allow 63 labels; enforced at the decode boundary.
 MAXIMUM_MASK_STATES = 63
-# Dimension-only storage/execution budgets, WP_PA2 §7; these never enter scientific decisions.
-# Release 4.7: 8 GiB, so the largest chromosomes' estimation and label-continuity emissions stay resident (chr3 at
+# Dimension-only cache/window budgets (bytes); their values do not select scientific candidates.
+# 8 GiB, so the largest chromosomes' estimation and label-continuity emissions stay resident (chr3 at
 # N = 320: packed estimation emissions 1.0 GiB, label-continuity part emissions about 2.8 GB); a reported working
 # set, not a reservation (the memory governor acts on measured pressure).
 EMISSION_CACHE_MAX_BYTES = 8 << 30
 WINDOW_BYTES = 64 << 20
-LABEL_CONTINUITY_BASE_BYTES = 64 << 20
+
+# Probability-product floor (dimensionless): fold the product into its log below this value;
+# factors below it are logged directly, so bin aggregation never underflows.
+EMISSION_RESCALE_BELOW = 1e-150
 
 
 @dataclass(frozen=True)
@@ -40,7 +48,7 @@ class PaintingParameters:
     are their starting values and the estimation's fixed schedule, not the values used.
 
     emission_site_correlation: r; each sample's bin log emission is divided by 1 + (n - 1) r, n the sample's
-        informative sites in the bin (release 2.14; painting.hmm.design_effect): a tuned, equicorrelation-inspired
+        informative sites in the bin (painting.emissions.design_effect): a tuned, equicorrelation-inspired
         magnitude adjustment. The bin emission multiplies its per-site terms as if they were independent given the
         copying pair, which overstates the evidence of a bin (panel errors run along rows, reads and
         genotype-likelihood errors are correlated between nearby sites). Under an equal-variance, common-correlation
@@ -69,15 +77,18 @@ class PaintingParameters:
         the painted switch total by at least this many switches.
     label_continuity_maximum_loser_ratio: samples whose painted switches rise
         may be at most this fraction of the samples whose switches fall.
-    label_continuity_check_budget: candidates re-decoded per search iteration at most (release 4.7, owner 8 Nov
-        2026); an iteration that reaches it without an acceptable candidate ends the search, and the outcome is
-        flagged (LabelContinuity.check_budget_reached).
+    label_continuity_check_budget: ranked candidate checks before the main-loop guard ends an
+        unsuccessful iteration (LabelContinuity.check_budget_reached); tied-peer certification can add checks.
     """
 
     emission_site_correlation: float = field(
         default=0.1,
         metadata={
-            "provenance": "3.5 painting/config.py: emission_site_correlation; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Working within-bin correlation r (dimensionless); divides log emissions by "
+                "1+(n-1)r to temper correlated evidence, tuned on simulations and sparse-read "
+                "controls."
+            ),
             "role": "state",
             "axes": (),
             "units": "1",
@@ -88,10 +99,13 @@ class PaintingParameters:
     initial_switch_rate: float = field(
         default=2.0,
         metadata={
-            "provenance": "3.5 painting/config.py: initial_switch_rate; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Initial copying-change rate per track (per Morgan); starts component estimation "
+                "at two ancestry changes per Morgan."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "Morgan^-1",
             "dtype": "float64",
             "stored": True,
         },
@@ -99,7 +113,10 @@ class PaintingParameters:
     initial_error_entry: float = field(
         default=0.001,
         metadata={
-            "provenance": "3.5 painting/config.py: initial_error_entry; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Initial faithful-to-panel-error entry probability per edge (probability); starts "
+                "component chain estimation."
+            ),
             "role": "state",
             "axes": (),
             "units": "probability",
@@ -110,7 +127,10 @@ class PaintingParameters:
     initial_error_exit: float = field(
         default=0.25,
         metadata={
-            "provenance": "3.5 painting/config.py: initial_error_exit; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Initial panel-error exit probability per edge (probability); starts the mean "
+                "label-preserving error-run length at four bins."
+            ),
             "role": "state",
             "axes": (),
             "units": "probability",
@@ -121,10 +141,13 @@ class PaintingParameters:
     estimation_iterations: int = field(
         default=8,
         metadata={
-            "provenance": "3.5 painting/config.py: estimation_iterations; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Fixed EM updates of the copying rate and error chain (iterations); defines a "
+                "deterministic truncated estimator."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "count",
             "dtype": "int64",
             "stored": True,
         },
@@ -132,10 +155,13 @@ class PaintingParameters:
     estimate_grid: float = field(
         default=2.0 ** (-6),
         metadata={
-            "provenance": "3.5 painting/config.py: estimate_grid; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Rounding step for estimated parameters (natural-log units); limits sensitivity "
+                "to genotype-likelihood noise below the grid scale."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "nats",
             "dtype": "float64",
             "stored": True,
         },
@@ -143,7 +169,10 @@ class PaintingParameters:
     robustness_epsilon: float = field(
         default=0.01,
         metadata={
-            "provenance": "3.5 painting/config.py: robustness_epsilon; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Uniform genotype-error mixture mass per observed site (probability); bounds the "
+                "influence of discordant genotype evidence."
+            ),
             "role": "state",
             "axes": (),
             "units": "probability",
@@ -154,10 +183,13 @@ class PaintingParameters:
     snps_per_bin: int = field(
         default=100,
         metadata={
-            "provenance": "3.5 painting/config.py: snps_per_bin; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Target selected sites per emission bin (sites); sets near-equal consecutive bins "
+                "for the copying chain."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "sites",
             "dtype": "int64",
             "stored": True,
         },
@@ -165,7 +197,10 @@ class PaintingParameters:
     emission_log_floor: float = field(
         default=-50.0,
         metadata={
-            "provenance": "3.5 painting/config.py: emission_log_floor; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Lower bound of a site log emission (nats); limits a discordant observation "
+                "before bin aggregation."
+            ),
             "role": "state",
             "axes": (),
             "units": "nats",
@@ -176,7 +211,10 @@ class PaintingParameters:
     minimum_release_posterior: float = field(
         default=0.9,
         metadata={
-            "provenance": "3.5 painting/config.py: minimum_release_posterior; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Minimum faithful-copy pair posterior (probability); applies the predeclared "
+                "ten-percent posterior-error budget."
+            ),
             "role": "state",
             "axes": (),
             "units": "probability",
@@ -187,10 +225,13 @@ class PaintingParameters:
     label_continuity_minimum_switch_gain: float = field(
         default=2.0,
         metadata={
-            "provenance": "3.5 painting/config.py: label_continuity_minimum_switch_gain; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Minimum reduction in painted switches for a suffix relabelling (switches); also "
+                "sets the score-screen admission level in switch units."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "count",
             "dtype": "float64",
             "stored": True,
         },
@@ -198,10 +239,13 @@ class PaintingParameters:
     label_continuity_maximum_loser_ratio: float = field(
         default=0.1,
         metadata={
-            "provenance": "3.5 painting/config.py: label_continuity_maximum_loser_ratio; P0 PR08/PR13/PR17; WP_PA2 §7",
+            "provenance": (
+                "Maximum switch-loser to switch-winner sample ratio (dimensionless); protects "
+                "shared recombinant lineages during row relabelling."
+            ),
             "role": "state",
             "axes": (),
-            "units": "1",
+            "units": "share",
             "dtype": "float64",
             "stored": True,
         },
@@ -209,7 +253,11 @@ class PaintingParameters:
     label_continuity_check_budget: int = field(
         default=64,
         metadata={
-            "provenance": "4.7 (owner, 8 Nov 2026): bounds the final, unproductive search iteration at low depth",
+            "provenance": (
+                "Ranked candidate-check limit per search iteration (candidates); ends an "
+                "unsuccessful search at the main-loop guard, while tied-peer certification can "
+                "add checks."
+            ),
             "role": "state",
             "axes": (),
             "units": "count",
@@ -221,7 +269,10 @@ class PaintingParameters:
     viterbi_tie: float = field(
         default=VITERBI_TIE,
         metadata={
-            "provenance": "3.5 painting/hmm.py:47; noise_quantum(1.9e-6); P0 PR09; WP_PA2 §7",
+            "provenance": (
+                "Viterbi predecessor tie quantum (nats); noise_quantum(1.9e-6) places the "
+                "preference for fewer track changes above the measured score-gap noise scale."
+            ),
             "role": "state",
             "axes": (),
             "units": "nats",
@@ -233,6 +284,7 @@ class PaintingParameters:
 
 __all__ = [
     "PaintingParameters",
+    "EMISSION_RESCALE_BELOW",
     "RATE_BOUNDS",
     "ENTRY_BOUNDS",
     "EXIT_BOUNDS",
@@ -244,5 +296,4 @@ __all__ = [
     "MAXIMUM_MASK_STATES",
     "EMISSION_CACHE_MAX_BYTES",
     "WINDOW_BYTES",
-    "LABEL_CONTINUITY_BASE_BYTES",
 ]

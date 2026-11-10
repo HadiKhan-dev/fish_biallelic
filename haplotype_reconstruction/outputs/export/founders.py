@@ -23,6 +23,7 @@ import numpy as np
 
 from ...core.errors import InvariantError
 from ...core.files import atomic_path
+from ...core.release import CURRENT_RELEASE
 from ..reports.tables import write_text_table
 from .records import SiteTable
 from .vcf import FILEFORMAT, RecordWriter, common_allele_line, contig_line, site_header_lines
@@ -145,6 +146,7 @@ def write_founder_vcf(
     header = (
         FILEFORMAT
         + "##source=haplotype-reconstruction\n"
+        + f"##haplotype_reconstruction_release={CURRENT_RELEASE}\n"
         + contig_line(contig, length)
         + '##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown '
         "(withheld, or no painted carrier observes it) or outside the column's component; no imputation\">\n"

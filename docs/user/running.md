@@ -65,6 +65,12 @@ haplotypes status run
 haplotypes status run --json
 ```
 
+
+4.12 reads and resumes only checkpoints and exports written by 4.12. Earlier
+run directories and exports must be re-run with 4.12 in a new output root. A
+refusal names the recorded writer release; artifacts without that provenance
+are reported as having no recorded writer release.
+
 `run` initialises a new run automatically and resumes compatible publications on
 later invocations. An explicit `init` is needed before separate workflow step
 commands; see [workflow mode](workflow.md).
@@ -132,7 +138,7 @@ is active.
 
 Changing a scientific setting, map, contig order or numerical environment can
 invalidate the binding; use a fresh run/checkpoint root for a different analysis.
-A 4.0 command never resumes a 3.5 checkpoint root. Resume is at published-product
+Commands require a checkpoint root with the current layout. Resume is at published-product
 boundaries, not at an unrecorded intermediate family-phase iteration.
 
 `status` reports durable products and recorded progress without decoding large
@@ -147,14 +153,17 @@ appends; a missing, truncated or stale snapshot falls back to scanning headers.
 It writes nothing, so archived and read-only checkpoint roots remain usable.
 The status latency target is ten seconds for an N = 320 run with saved indexes.
 A long unpublished tail, missing indexes or slow storage can require a full
-header scan; legacy embedded task lists add a linear JSON read.
+header scan. Status reads only 4.12 invocation records and checkpoint layouts.
 
 The run log prints progress every ten minutes and at each chromosome/stage
 completion. It reports completed/known executor calls, running tasks, claimed CPU
 slots and the memory governor's sampled live memory. Known totals grow when a
 task expands into components or blocks; claims describe scheduler occupancy, not
 measured operating-system CPU utilisation. These observations never control
-scientific work. Refinement cap summaries appear once per chromosome and stage
+scientific work. Once per contig per invocation, a warning identifies checkpoint
+storage contention when publish lock waits exceed half the summed task wall time
+across the most recent completed tasks (up to 32, after at least 8). The task log
+retains publish lock-wait and fsync seconds for diagnosis. Refinement cap summaries appear once per chromosome and stage
 (count or polish), with totals and affected component-level unit counts. The full
 fit labels, individual counts and limits stay in component checkpoint records.
 

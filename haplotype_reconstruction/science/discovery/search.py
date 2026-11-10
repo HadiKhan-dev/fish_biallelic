@@ -5,13 +5,13 @@ archive, the cavity refresh with its exact-score backstop, selection of the winn
 expansion loop and the search status; natural_k_ceiling.
 Must not: read storage, the environment or a clock, log, choose routes or own an executor; the block runner
 (run.py) and the stage layer do that. Diagnostics go only to the BlockDiagnostics the caller passes.
-Method: docs/methods/discovery.md, units di21-di25 (P0 DI21-DI25).
+Method: docs/methods/discovery.md, units di21-di25.
 Identity: archive and parent classes cut whole at ``beam_width`` (straddling through twice it); refresh visits K in
 (|K - preferred K|, K) order, counts only cache misses and keeps the previous complete scored class when a new one
 cannot fit; first-scored PanelScore objects are kept and the archive's fitted-key memory is permanent; ordinary moves
 precede residual births, replacements come only after no improvement, the frozen K + 1 bridge family precedes its
 K + 2 children; ``exact_score_backstop`` and ``expansion_backstop`` (K-scaled) and ``max_replacement_children`` are
-unchanged budgets, tested at class boundaries.
+budgets tested at class boundaries.
 
 Every member of each K's leading NLL class is cavity-scored (memoized by panel key). The
 best cavity class, then the smaller-K prior, chooses a complete alternative set. Byte order
@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 import numpy as np
 
 from haplotype_reconstruction.contracts.roles import record_field
+from haplotype_reconstruction.core.concurrency import ThreadSource
 from haplotype_reconstruction.core.ties import (
     NOISE_MOTION,
     WIDE_CLASS_QUANTA,
@@ -58,7 +59,7 @@ from .moves import (
     soft_births,
 )
 from .panel import FixedKSolution, deduplicate, known_content_key, solution_tie_mask, unknown_alleles, whole_class_cut
-from .parameters import DiscoveryConfig, SearchConfig
+from .parameters import DiscoveryParameters, SearchParameters
 from .residual_births import ResidualInputs
 
 if TYPE_CHECKING:
@@ -73,7 +74,7 @@ __all__ = ["SearchState", "SearchSummary", "BlockSearch", "natural_k_ceiling", "
 
 
 class Omission(TypedDict):
-    """A whole-class budget decision, in production order (P0 DI25)."""
+    """A whole-class budget decision, in production order."""
 
     kind: str
     cause: str
@@ -116,7 +117,7 @@ class SearchSummary:
     ambiguous: the winning cavity class after the wide-class rule and smaller-K prior has alternatives.
     tied_alternatives: the number of other members of that complete fitted set.
     score_margin: the selected score minus the best other represented K's score (inf if none).
-    tie_events: maths.ties.TieCounter record {kind: {decisions, inside_tie, wide, boundary}}.
+    tie_events: core.ties.TieCounter record {kind: {decisions, inside_tie, wide, boundary}}.
     search_incomplete: a straddling tied class or whole candidate component was omitted.
     omissions: dictionaries with kind, cause, count, scope and count_kind (exact or lower_bound).
         kind is tie_class_at_budget or ranked_truncation. Ordinary lower-ranked truncations are
@@ -190,12 +191,12 @@ def select_scores(
     *,
     reverse: bool,
 ) -> tuple[PanelScore, TieClasses]:
-    """(representative, TieClasses): cavity classes, wide-class rule, then smaller K (P0 DI23).
+    """(representative, TieClasses): cavity classes, wide-class rule, then smaller K.
 
     ``values``: the scored panels; their ``log_score`` (nats) is ranked descending in tie classes of the fixed
     ``quantum`` (policy ``discovery.selection``, motion of kind ``nll``), then fewer founders (``k``), then
     ``content(solution)`` labels members. Returns the first panel in decision order and the TieClasses over
-    ``values``. Content labels the representative only; _Search.winning_scores retains every equally ranked panel.
+    ``values``. Content labels the representative only; SearchState.winning_scores retains every equally ranked panel.
     Mutates nothing; an empty ``values`` raises IndexError (no winner).
     """
     classes = tie_classes(
@@ -233,7 +234,7 @@ class _Archive:
         self.max_k = 0
 
     def known_key(self, solution) -> bytes:
-        """The panel's science (rows with alleles no assigned carrier observes masked; release 2.2)."""
+        """The panel's science (rows with alleles no assigned carrier observes masked)."""
         key = self.science.get(solution.key)
         if key is None:
             if self.observed is None or solution.assignments is None:
@@ -260,7 +261,7 @@ class _Archive:
             if previous is not None:
                 panels[:] = [entry for entry in panels if entry.key != solution.key]
             # Panels that differ only at alleles no assigned carrier observes are the same science: one archive
-            # entry, the lower NLL beyond the quantum, else the canonical (smaller) key -- a label (release 2.2).
+            # entry, the lower NLL beyond the quantum, else the canonical (smaller) key -- a label.
             science = self.known_key(solution)
             twin = next((entry for entry in panels if self.known_key(entry) == science), None)
             if twin is not None:
@@ -319,7 +320,7 @@ class _Archive:
 
 
 class SearchState:
-    """Mutable history of one block search in canonical sample order (P0 DI21–DI25).
+    """Mutable history of one block search in canonical sample order.
 
     The unbounded score cache and permanent fitted archive are scientific state:
     eviction changes cache-miss budgets and admissible trajectories. Arrays are
@@ -328,10 +329,10 @@ class SearchState:
 
     reverse: bool
     keep: tuple[str, ...]
-    threads: int
+    threads: ThreadSource
     diagnostics: BlockDiagnostics | None
-    config: DiscoveryConfig
-    search: SearchConfig
+    config: DiscoveryParameters
+    search: SearchParameters
     likelihood: np.ndarray
     observed: np.ndarray
     active: np.ndarray
@@ -361,12 +362,12 @@ class SearchState:
         self,
         likelihood: np.ndarray,
         observed: np.ndarray,
-        config: DiscoveryConfig,
+        config: DiscoveryParameters,
         *,
         reverse: bool = False,
         keep: tuple[str, ...] = (),
         diagnostics: BlockDiagnostics | None = None,
-        threads: int = 1,
+        threads: ThreadSource = 1,
     ) -> None:
         self.reverse = reverse
         self.keep = tuple(keep)
@@ -509,7 +510,7 @@ class SearchState:
 
     # ---------------------------------------------------------------------------------- moves
     def beam(self, k: int):
-        """The panels of K to expand: the archive's leading whole NLL classes up to the beam width (release 2.2)."""
+        """The panels of K to expand: the archive's leading whole NLL classes up to the beam width."""
         panels = list(self.archive.beams.get(k, ()))
         omissions: list[dict] = []
         kept, _ = whole_class_cut(
@@ -727,20 +728,15 @@ class SearchState:
         )
 
 
-# The frozen extractor instruments this private historical spelling.
-# Both names are the same state class; there is one implementation.
-_Search = SearchState
-
-
 def _search(
     likelihood: np.ndarray,
     observed: np.ndarray,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     *,
     reverse: bool = False,
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
-    threads: int = 1,
+    threads: ThreadSource = 1,
 ) -> BlockSearch:
     """The search of a block whose samples are in canonical order (see search_block)."""
     forward = SearchState(

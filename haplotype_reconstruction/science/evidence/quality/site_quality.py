@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import ctypes
 import math
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from numba import prange, typeof, types
@@ -42,11 +41,10 @@ from haplotype_reconstruction.contracts.evidence import (
     HeterogeneityCore,
     SampleQualityDecision,
     SiteQualityDecision,
-)
-from haplotype_reconstruction.contracts.evidence import (
-    SiteQualityParameters as FittedSiteQuality,
+    SiteQualityFit,
 )
 from haplotype_reconstruction.core import ties
+from haplotype_reconstruction.core.concurrency import ThreadSource, thread_count
 from haplotype_reconstruction.core.kernels import kernel
 
 from . import sample_quality
@@ -130,9 +128,6 @@ from .parameters import (
 )
 from .parameters import (
     SITE_MAXIMUM_TILE_SITES as _MAXIMUM_TILE_SITES,
-)
-from .parameters import (
-    SITE_MINIMUM_CHUNK_SITES as _MINIMUM_CHUNK_SITES,
 )
 from .parameters import (
     SITE_MIXTURE_ITERATIONS as _MIXTURE_ITERATIONS,
@@ -245,7 +240,7 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
     nogil=True,
 )
 def _leakage_terms(n, f, eps, h, binomial=None):
-    """Release 2.18: the expectation of a site's homozygote wrong-read statistic W under a clean site with error
+    """the expectation of a site's homozygote wrong-read statistic W under a clean site with error
     rate e, E[W] = lam + kap e, exact to first order in e. W weights each cell's reads by the classification's
     posteriors, w(a, d) = p0 a + p2 (d - a). A heterozygote's reads ~ Bin(d, h), so heterozygotes add
     f1 sum_a Bin(a; d, h) w(a, d) whatever e; an error-free homozygote adds w(0, d) (hom-ref) or w(d, d) (hom-alt),
@@ -306,7 +301,7 @@ def _leakage_terms(n, f, eps, h, binomial=None):
 
 @kernel(overloads=((types.float64,),), cache=True, nogil=True)
 def _depth_binomial(h):
-    """Read-model terms shared by every site's leakage calculation. Deeper cells use the original expression."""
+    """Read-model terms shared by every site's leakage calculation. Deeper cells use direct evaluation of the read-model terms."""
     width = 129
     out = np.zeros((width, width))
     lh, l1h = (math.log(h), math.log(1.0 - h))
@@ -372,8 +367,8 @@ def _genotype_counts_into(
         frequencies[i, 2] = f[2]
 
 
-def _genotype_expectations_counts(counts, samples, eps, h, iters, team=1):
-    """One live-budget queue, with direct-count tasks and disjoint output slices."""
+def _genotype_expectations_counts(counts, samples, eps, h, iters, team: ThreadSource = 1, *, map_work=map):
+    """Direct-count chunks with disjoint output slices, evaluated by the caller's ordered map."""
     L = counts.shape[1]
     values = (
         np.zeros((L, 3)),
@@ -388,7 +383,7 @@ def _genotype_expectations_counts(counts, samples, eps, h, iters, team=1):
     if L == 0:
         return values
     capacity = _tile_sites(counts.shape[0])
-    tasks = min(capacity, 4 * team)
+    tasks = min(capacity, 4 * thread_count(team))
     span = max(1, (L + tasks - 1) // tasks)
     chunks = [(start, min(start + span, L)) for start in range(0, L, span)]
     chunks.sort(key=lambda bounds: bounds[1] - bounds[0], reverse=True)
@@ -398,8 +393,7 @@ def _genotype_expectations_counts(counts, samples, eps, h, iters, team=1):
     def work(bounds):
         _genotype_counts_into(counts, samples, eps, h, iters, *bounds, *values, binomial)
 
-    with ThreadPoolExecutor(max_workers=team) as pool:
-        list(pool.map(work, chunks))
+    list(map_work(work, chunks))
     return values
 
 
@@ -523,25 +517,6 @@ def _negative_binomial_values(W, lam, kap, lw, rate, shape, gamma_shape, functio
             + W[i] * math.log(mu / (shape + mu))
         )
     return result
-
-
-class _Chunks:
-    """Mixture evaluation under the caller's live CPU allowance.
-
-    Native sitewise special-function kernels reclaim available CPUs at every objective
-    boundary. The vectorized chunk evaluator remains a reference path. Reductions retain
-    the original NumPy order; r4 eligibility still waits for the completed r3 decision.
-    """
-
-    def __init__(self, pool, size, team):
-        count = max(1, min(4 * team, size // _MINIMUM_CHUNK_SITES))
-        bounds = np.linspace(0, size, count + 1).astype(np.int64)
-        self.pool, self.size = (pool, size)
-        self.team = team
-        self.chunks = [(start, stop) for start, stop in zip(bounds[:-1], bounds[1:], strict=False) if stop > start]
-
-    def negative_binomial(self, W, lam, kap, lw, rate, shape):
-        return _negative_binomial_values(W, lam, kap, lw, rate, shape, special.gammaln(shape), _GAMMALN)
 
 
 @kernel(overloads=((types.float64,),), cache=True, nogil=True)
@@ -706,7 +681,7 @@ def _tally(statuses, status, gradient):
 
 
 def _clean_rate(W, lam, kap, wc, start):
-    """Release 2.18: the clean core's rate e0 in [_CLEAN_RATE_BOUNDS] maximising
+    """the clean core's rate e0 in [_CLEAN_RATE_BOUNDS] maximising
     sum wc (W log(lam + kap e) - kap e), concave in e (its gradient decreases). A boundary is returned when the
     gradient does not change sign inside; otherwise Newton steps from ``start`` (clipped into the bracket) keep a
     bracket of the root and fall back to bisection when a step leaves it. With lam = 0 the root is the closed form
@@ -739,10 +714,9 @@ def _clean_rate(W, lam, kap, wc, start):
     return e
 
 
-def _error_mixture(W, lam, kap, evaluate):
+def _error_mixture(W, lam, kap):
     """Clean: W ~ Poisson(lam + kap eps0). Artefact: W ~ NegBin(mean lam + kap eps1, shape k). Returns parameters
-    and P(clean). lam, kap: the clean-site expectation of W (release 2.18, _leakage_terms; 2.17 used lam = 0 and
-    the homozygote depth N for kap)."""
+    and P(clean). lam and kap describe the clean-site expectation of W from _leakage_terms."""
     pi = ERROR_INITIAL_CLEAN_WEIGHT
     e0 = float(
         np.clip(np.median(np.maximum(W - lam, 0.0) / kap) / 2, ERROR_INITIAL_RATE_FLOOR, ERROR_INITIAL_RATE_CEILING)
@@ -753,7 +727,7 @@ def _error_mixture(W, lam, kap, evaluate):
     m_steps = {}
 
     def artefact(rate, shape):
-        return evaluate.negative_binomial(W, lam, kap, lw, rate, shape)
+        return _negative_binomial_values(W, lam, kap, lw, rate, shape, special.gammaln(shape), _GAMMALN)
 
     for _iteration in range(_MIXTURE_ITERATIONS):
         wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, lam + kap * e0, lw), np.log1p(-pi) + artefact(e1, k))
@@ -1168,19 +1142,6 @@ def _tile_sites(n_samples):
     return max(1, min(_MAXIMUM_TILE_SITES, _SITE_TILE_CELLS // max(1, n_samples)))
 
 
-def peak_scratch_bytes(n_samples: int, n_input_sites: int) -> int:
-    """Conservative peak beyond input counts, including site fits and sample QC.
-
-    Site vectors and sparse near-private cells are O(M); dense work is at most one bounded
-    tile. The direct genotype queue admits at most min(live CPUs, tile) sample workspaces,
-    also covered by the tile allowance. No extra adaptive allocation is made. The fixed
-    allowance covers histogram/optimizer and allocator overhead.
-    This reservation does not include the input counts or the later kept-site/GL arrays.
-    """
-    tile = min(n_input_sites, _tile_sites(n_samples))
-    return int(512 * n_input_sites + 128 * n_samples * tile + 512 * n_samples + (16 << 20))
-
-
 def _count_tile(counts, start, stop, selected=None):
     counts = counts[:, start:stop, :]
     if selected is not None:
@@ -1190,8 +1151,8 @@ def _count_tile(counts, start, stop, selected=None):
     return (alt, dep)
 
 
-def _quality_flags(n_sites, n_samples, read_tile, config, *, team, counts=None, reverse=False):
-    """The original rule calculations with O(sites) summaries and bounded dense tiles."""
+def _quality_flags(n_sites, n_samples, read_tile, config, *, team, map_work=map, counts=None, reverse=False):
+    """Evaluate site-filter rules with O(sites) summaries and bounded dense tiles."""
     L, S = (n_sites, n_samples)
     tile = _tile_sites(S)
     D = np.empty(L)
@@ -1202,6 +1163,7 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, team, counts=None, 
         config.classification_heterozygote_alt,
         _SITE_EM_ITERATIONS,
         team=team,
+        map_work=map_work,
     )
     for start in range(0, L, tile):
         stop = min(start + tile, L)
@@ -1251,17 +1213,16 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, team, counts=None, 
     m3 = base & (N >= 1) & (SL > _LEAKAGE_SLOPE_FLOOR * N)
     r3 = np.zeros(L, bool)
     r4 = np.zeros(L, bool)
-    with ThreadPoolExecutor(team) as pool:
-        if m3.any():
-            error, clean = _error_mixture(W[m3], LK[m3], SL[m3], _Chunks(pool, int(m3.sum()), team))
-            error["applied"] = bool(error["eps1"] >= separation * error["eps0"])
-            if error["applied"]:
-                r3[np.where(m3)[0][clean < config.clean_posterior_level]] = True
-        else:
-            error = dict(
-                applied=False,
-                reason="no site with expected homozygote reads >= 1 and a leakage slope above 1e-9 of them",
-            )
+    if m3.any():
+        error, clean = _error_mixture(W[m3], LK[m3], SL[m3])
+        error["applied"] = bool(error["eps1"] >= separation * error["eps0"])
+        if error["applied"]:
+            r3[np.where(m3)[0][clean < config.clean_posterior_level]] = True
+    else:
+        error = dict(
+            applied=False,
+            reason="no site with expected homozygote reads >= 1 and a leakage slope above 1e-9 of them",
+        )
     m4 = base & ~r3 & (H >= 1)
     if m4.any():
         balance, clean = _balance_mixture(A[m4], H[m4], separation)
@@ -1284,8 +1245,8 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, team, counts=None, 
     return (dict(r1=r1, r2=r2, r3=r3, r4=r4, r5=r5), parameters)
 
 
-def _fitted_quality(values) -> FittedSiteQuality:
-    """Bind the unchanged transient fitted dictionaries to typed boundary records."""
+def _fitted_quality(values) -> SiteQualityFit:
+    """Bind the transient fitted dictionaries to typed boundary records."""
     error = dict(values["error"])
     if "m_steps" in error:
         error["m_steps"] = ErrorMSteps(**error["m_steps"])
@@ -1294,7 +1255,7 @@ def _fitted_quality(values) -> FittedSiteQuality:
         BalanceStart(**{**row, "start": tuple(row["start"]), "parameters": tuple(row["parameters"])})
         for row in balance.get("starts", ())
     )
-    return FittedSiteQuality(
+    return SiteQualityFit(
         records=values["records"],
         samples=values["samples"],
         snp=values["snp"],
@@ -1314,7 +1275,8 @@ def filter_sites(
     config: SiteQualityParameters,
     sample_config: SampleQualityParameters,
     *,
-    team: int,
+    team: ThreadSource,
+    map_work=map,
     reverse: bool = False,
 ) -> tuple[SiteQualityDecision, SampleQualityDecision | None]:
     """Decide the site filter (and, with it, the contamination QC) on one contig's SNPs.
@@ -1342,6 +1304,7 @@ def filter_sites(
         lambda start, stop: _count_tile(counts, start, stop),
         config,
         team=team,
+        map_work=map_work,
         counts=counts,
         reverse=reverse,
     )
@@ -1370,6 +1333,7 @@ def filter_sites(
                 config.classification_heterozygote_alt,
                 _SITE_EM_ITERATIONS,
                 team=team,
+                map_work=map_work,
             )
             flags["r5"] = covered * (1 - F.max(1)) < config.minimum_expected_carriers
     applied = RULES if config.drop_uninformative_sites else QUALITY_RULES
@@ -1397,4 +1361,4 @@ def filter_sites(
     ), samples
 
 
-__all__ = ["SiteQualityDecision", "peak_scratch_bytes", "filter_sites"]
+__all__ = ["SiteQualityDecision", "filter_sites"]

@@ -15,8 +15,8 @@ c's other sibs. For a released Tier-B edge p -> c (``ParentEdges`` before the gu
 
 The edge is tested when at least ``minimum_family`` - 1 members remain (|F| >= minimum_family counting c), and withheld
 when a strict majority of them are Mendelian-excluded from p: full-marker exclusion log E(p, s) >= log(2N/alpha), the
-evidence and threshold of the stage's count release (pedigree.exclusion, ExclusionConfig.alpha). Otherwise it is kept
-(tested) or untested. The guard reads the relatedness product (genotype likelihoods), the released edges and the
+evidence and threshold of the stage's count release (pedigree.exclusion, ExclusionParameters.alpha). Otherwise it is
+kept (tested) or untested. The guard reads the relatedness product (genotype likelihoods), the released edges and the
 exclusion evidence of the member dyads (genotype likelihoods); no painting, label or metadata.
 
 Cleaning uses only edges that remain. ``fixed_point`` repeatedly withdraws majority-vetoed edges, then reports
@@ -36,7 +36,7 @@ import numpy as np
 from ...contracts.pedigree import NO_PARENT, UNRESOLVED, EdgeFamily, GuardRecord, GuardVote, ParentEdges, PedigreeCalls
 from ...core.errors import InputError, InvariantError
 from . import exclusion
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 
 __all__ = ["edge_families", "guard_dyads", "decide", "withheld_edges", "fixed_point", "apply_calls"]
 
@@ -44,21 +44,10 @@ WITHHELD, KEPT, UNTESTED = "withheld", "kept", "untested"
 LINKED, HALF_SIB = "linked", "half_sib"
 STATUS = "tier_b_sibling_guard_withheld"
 STATUS_A = "tier_a_sibling_guard_withheld"
-COLUMNS = [
-    "Parent",
-    "Child",
-    "SupportedMembers",
-    "DroppedLinked",
-    "DroppedHalfSib",
-    "DroppedMembers",
-    "TestedMembers",
-    "ExcludedMembers",
-    "Call",
-]
 
 
 def edge_families(
-    sample_ids, parents, children, relatedness, config: PedigreeConfig, *, cleaning_edges=None
+    sample_ids, parents, children, relatedness, config: PedigreeParameters, *, cleaning_edges=None
 ) -> list[EdgeFamily]:
     """The members of every released edge p -> c (``parents``/``children``: the released edges before the guard, on
     the axis ``sample_ids``). ``cleaning_edges`` supplies the surviving premises, independently of which edges
@@ -94,7 +83,7 @@ def edge_families(
     return out
 
 
-def guard_dyads(families: list[EdgeFamily], config: PedigreeConfig, *, all_supported=False) -> np.ndarray:
+def guard_dyads(families: list[EdgeFamily], config: PedigreeParameters, *, all_supported=False) -> np.ndarray:
     """int64 [D, 2] (member, parent) dyads the guard needs exclusion evidence for (sorted, unique): the tested members
     of every edge with enough of them. ``all_supported`` scores the superset needed by fixed-point cleaning:
     a dropped member can return after its cleaning edge is withdrawn."""
@@ -112,7 +101,7 @@ def decide(
     dyads: np.ndarray,
     log_e: np.ndarray,
     log_e_upper: np.ndarray | None,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     sample_count: int,
 ) -> list[tuple[float, str]]:
     """(excluded members, NaN when untested; call) per family. ``dyads``/``log_e``/``log_e_upper``: the exclusion
@@ -158,13 +147,13 @@ def fixed_point(
     dyads: np.ndarray,
     log_e: np.ndarray,
     log_e_upper: np.ndarray | None,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> GuardRecord:
     """Contract the retained edge set in at most E+1 passes; withdrawals never reverse.
 
     Final votes describe the final premises. A prior veto that no longer has a
     majority remains an explicit abstention. Inputs are not mutated; a straddling
-    exclusion interval raises instead of inventing evidence (P0 PD23).
+    exclusion interval raises instead of inventing evidence (PD23).
     """
     initial = set(zip(edges.parents.tolist(), edges.children.tolist(), strict=False))
     retained = initial.copy()
@@ -203,7 +192,7 @@ def apply_calls(
     """Withdraw guard-vetoed Tier-B edges and the affected Tier-A/B count calls.
 
     Surviving marginal edges remain; affected count bounds become [survivors, 2].
-    The complete view is not a released view and is not changed (P0 PD23).
+    The complete view is not a released view and is not changed (PD23).
     """
     keep = np.asarray([vote.call != WITHHELD for vote in guard.votes], dtype=np.bool_)
     if np.all(keep):

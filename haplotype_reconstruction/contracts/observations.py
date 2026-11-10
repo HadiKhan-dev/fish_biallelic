@@ -138,8 +138,10 @@ class PairArray:
 
 
 def observation_counts(observed: Any, axis: int = 1, *, rows: tuple[int, int] | None = None) -> np.ndarray:
-    """Exact int64 positive-depth counts without a whole-contig mask projection. ``rows`` (first, stop; axis 1 only,
-    release 4.10): the totals of samples first..stop-1 only (independent sample ranges read concurrently)."""
+    """Exact int64 positive-depth counts without a whole-contig mask projection.
+
+    ``rows`` (first, stop; axis 1 only) restricts totals to samples first..stop-1.
+    Independent sample ranges can be read concurrently."""
     if rows is not None and axis != 1:
         raise ValueError("a sample range applies to per-sample totals (axis 1) only")
     first, stop = (0, observed.shape[0]) if rows is None else (int(rows[0]), int(rows[1]))
@@ -148,14 +150,13 @@ def observation_counts(observed: Any, axis: int = 1, *, rows: tuple[int, int] | 
     result = np.zeros(stop - first if axis == 1 else observed.shape[1], dtype=np.int64)
     if (
         isinstance(observed, PairArray)
-        and observed.kind == "observed"  # release 4.11: a counts-kind array keeps the row-at-a-time route below
+        and observed.kind == "observed"  # Counts-kind arrays use the row-at-a-time route below.
         and isinstance(observed.dense, np.ndarray)
         and isinstance(observed.source.pairs, np.ndarray)
         and resident_coded(observed.source)
     ):
-        # Release 4.10: a resident coded mask, every sample of a site window in one gather (the sample-parallel
-        # native kernel); one call per sample and window before (chr3: about 7,400 calls). Exact integer counts.
-        # At most 2^24 flags at once (release 4.11: no 1,024-site floor, which exceeded it beyond 16,384 samples).
+        # Gather all samples of a site window in one native call for exact integer counts.
+        # Target at most 2^24 flags of scratch, allowing one site when N exceeds that target.
         window = max(1, min(65536, (1 << 24) // max(1, stop - first)))
         for left in range(0, observed.shape[1], window):
             right = min(observed.shape[1], left + window)

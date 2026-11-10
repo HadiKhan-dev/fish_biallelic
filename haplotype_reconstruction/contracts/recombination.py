@@ -1,7 +1,7 @@
 """Plain-payload recombination calls and reports, conditional on fixed phase chains.
 
-The 3.5 product was a pickled object; 4.0 stores only these typed fields via the
-shared payload codec. Crossovers and exposure keep their working-value meanings,
+Products store these typed fields via the shared payload codec. Crossovers and
+exposure keep their working-value meanings,
 not posterior means. Elapsed time belongs in run records, outside this product.
 """
 

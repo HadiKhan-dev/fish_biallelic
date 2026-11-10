@@ -1,14 +1,14 @@
 """Genome-retained parent identities define the fixed M2 panel.
 
-The panel holds the bounded pairs of retained identities (``bounded_panel``): a pair enters when a valid
-upper bound on its joint M2 likelihood (``pedigree.pair_bound``) comes within ``PanelConfig.pair_relevance_margin`` of
-the child's best known configuration in the full-data fit or in a leave-one-chromosome-out fit. Pairs outside the
-panel contribute nothing to the M2 evidence (a lower bound), as pairs of non-retained identities already did. The
+The panel screens retained-parent pairs by a valid M2 likelihood upper bound (``pair_bound``), then applies
+``PanelParameters.max_pairs_per_child`` by largest bound gap across the full-data and leave-one-chromosome-out fits.
+Relevance screening rejects only pairs below the best known score by more than ``pair_relevance_margin`` in every
+fit. The cap can also drop competitive pairs; boundary ties and unknown gaps remain, and capped children are flagged.
+Pairs outside the panel contribute nothing to M2 evidence, which is therefore a lower bound. The
 robust M1 utility keeps all eligible identities, floor multiplicities and contamination; it is reported for
 diagnostics and does not select an arbitrary tied subset.
 
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from ...core import ties as tie_rules
 from ...core.errors import InvariantError
 from . import m1
 from .eligibility import ParentEligibility
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .ties import tied_rank_probabilities
 
 
@@ -35,7 +35,7 @@ class BoundsSource(Protocol):
     def __getitem__(self, key: tuple[slice, slice]) -> np.ndarray: ...
 
 
-def chromosome_weights(markers: np.ndarray, config: PedigreeConfig) -> np.ndarray:
+def chromosome_weights(markers: np.ndarray, config: PedigreeParameters) -> np.ndarray:
     """float64 [C]: sqrt(markers) / median, clipped to [1 / ratio, ratio], normalised to sum 1."""
     weights = np.sqrt(np.asarray(markers, dtype=np.float64))
     ratio = config.panel.maximum_contig_weight_ratio
@@ -49,7 +49,7 @@ def robust_screen_values(
     n_samples: int,
     markers: np.ndarray,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> np.ndarray:
     """robust_screen with each child's per-chromosome M1 scores [C, P] of its eligible parents from
     ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array."""
@@ -102,19 +102,20 @@ def bounded_panel(
     bounds: np.ndarray | BoundsSource,
     screen_scores: np.ndarray,
     eligibility: ParentEligibility,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
 ) -> tuple[CandidatePanel, dict]:
-    """The eligible retained pairs whose joint M2 bound reaches the child's best known configuration,
-    and counts for the log.
+    """Relevance-screened, capped retained-parent pairs, and counts for the log.
 
     ``compact`` the certified M1 profile (raw chromosome M1 of each child's retained parents), ``zero`` float64 [C, N]
     the chromosome M0 scores of the same screen, ``bounds`` [C, P] each chromosome's pair bounds in the canonical
     retained-pair order (``pair_bound.retained_batches``). A pair enters when, for some fit w of ``relevance_fits``,
-    w . bound >= max(w . M0, max_r w . M1_r) - margin, r over the child's retained parents: a pair left out has an M2
-    below the best configuration by more than the margin in every such fit (the bound is >= M2 on every chromosome
-    and w >= 0). Chromosomes a fit leaves out are omitted from its sums, and a pair whose bound sum is not a number is
-    kept (a numerical failure is never evidence for exclusion). Membership is a function of the scores only; rows are
-    serialized by child, then by ascending parent indices.
+    w . bound >= max(w . M0, max_r w . M1_r) - margin, r over the child's retained parents. Rejection at this step
+    proves the pair's M2 is below the best known configuration by more than the margin in every fit (the bound is
+    >= M2 on every chromosome and w >= 0). Chromosomes a fit leaves out are omitted from its sums. A pair with a
+    nonnumeric bound sum is kept (a numerical failure is never evidence for exclusion). After relevance screening,
+    the nominal per-child cap keeps the largest bound gaps over the fits, including all boundary ties and unknown
+    gaps. A capped child's panel is incomplete: this second step has no competitive-pair exclusion guarantee.
+    Membership depends only on scores and eligibility; rows are serialized by child, then by ascending parent indices.
     """
     margin = float(config.panel.pair_relevance_margin)
     cap = int(config.panel.max_pairs_per_child)
@@ -175,7 +176,7 @@ def search_diagnostics(
     convention = tie_rules.policy("pedigree.screen.rank", kind="probability", reverse=reverse)
     for child in range(len(eligibility.children)):
         parents = np.flatnonzero(eligibility.parents[child])
-        # Exact score ties by sample index (reversed under the convention reversal, release 2.2).
+        # Exact score ties by sample index (reversed under the convention reversal).
         index_key = -parents if convention.reverse else parents
         order = parents[np.lexsort((index_key, -scores[child, parents]))]
         rank = {int(parent): position + 1 for position, parent in enumerate(order)}

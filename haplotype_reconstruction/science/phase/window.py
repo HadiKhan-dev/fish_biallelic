@@ -1,4 +1,4 @@
-"""Whole-bin windows preserve phase orientation medians (P0 FP22)."""
+"""Whole-bin windows preserve phase orientation medians (FP22)."""
 
 import numpy as np
 

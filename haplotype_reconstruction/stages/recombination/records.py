@@ -149,7 +149,7 @@ class Reader:
         return RecombinationAdapter().decode(payload)
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
@@ -170,8 +170,6 @@ def result_reader(
     if product != "recombination" or contig is None or contig not in manifest["contigs"]:
         raise InputError("recombination reader requires a bound contig")
     file = store.contig(contig)
-    if not file.has(KEY) and not file.has(BINDING_KEY):
-        return None
     phase = phase_records.result_reader(store, manifest, product="phase", contig=contig)
     if phase is None:
         raise InvariantError("recombination requires a complete phase publication")
@@ -193,7 +191,15 @@ def result_reader(
         reverse=bool(manifest["ties"]["reverse"]),
         policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
-    return Reader(expected.identity)
+    return expected
+
+
+def result_reader(store, manifest, *, product, contig=None, parameters=None):
+    """Request the same expected derivation used by the production publisher."""
+    if contig is None or not (store.contig(contig).has(KEY) or store.contig(contig).has(BINDING_KEY)):
+        return None
+    request = expected(store, manifest, product=product, contig=contig, parameters=parameters)
+    return Reader(request.identity)
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:

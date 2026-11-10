@@ -3,19 +3,14 @@
 Owns unordered diplotype recurrences and exact panel scores.
 Must not choose K, read storage or configure runtime.
 Method: docs/methods/founder_refinement.md#objective (RS01; RC02).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
 
 
-Release 2.8: F(X) = sum over samples s of F_s(X), F_s a robust full-site Viterbi (max-path) score of
+F(X) = sum over samples s of F_s(X), F_s a robust full-site Viterbi (max-path) score of
 the sample's diplotype under a per-homologue founder-switch model on the panel X (log-probability-like:
 the emissions below are clipped and centred, so F_s is not a literal log probability)
 (K founder paths of prepared local rows). Each homologue follows its own K-state founder chain
 with transition T = (1 - rho) I + rho / K between consecutive informative sites of the sample,
-rho the map-derived reset probability of the gap (workspace.map_hazards: physical-edge hazards
+rho the map-derived reset probability of the gap (component_workspace.map_hazards: physical-edge hazards
 reset_rate x Morgans composed over the sites the sample skips). Relative to staying, a homologue
 that changes founder pays the cost c = log(1 - rho (1 - 1/K)) - log(rho / K) >= 0; the
 panel-independent constants (start -2 log K, per site 2 log(1 - rho (1 - 1/K))) are the sample's
@@ -30,7 +25,7 @@ O(Q + K) per site. The sites are the component's kept sites with at least one ca
 the prepared block (a candidate-independent mask, workspace.kept) where the sample's evidence is not
 exactly uniform. A pair's emission is that of its pair code (pair_code7): the dosage when both rows
 are called; otherwise the predictive class of the unknown allele(s) under a uniform allele prior
-(maths.emissions), one latent allele when both homologues copy the same uncalled row. Unobserved
+(science.shared.emissions), one latent allele when both homologues copy the same uncalled row. Unobserved
 sample calls and missing founder alleles are never imputed into the panel.
 
 Robust emission of dosage d: max(log(0.99 p_d + 0.01/3), -2) - log(1/3) with p the normalised
@@ -51,9 +46,9 @@ package is built on these inline steps, so the forward recursion of a message ke
 update, the score and the candidate kernels perform the same operations in the same order: their
 values are bitwise equal, which the message updates' early stops and the proposal cache rely on.
 
-Memory layout: a state's pair dosage haps[first[q], j] + haps[second[q], j] is the same for every
-sample, so kernels read it from a site-major int8 table shared by all samples and read a site's
-three emissions once per sample; every sample's chain is its own (samples run in parallel).
+Memory layout: a state's predictive pair code pair_code7(haps[first[q], j], haps[second[q], j])
+is the same for every sample, so kernels read it from a site-major int8 table shared by all
+samples. Every sample's chain is its own (samples run in parallel).
 """
 
 from __future__ import annotations
@@ -67,16 +62,14 @@ from .emissions import CENTER
 from .overloads import overloads_for
 from .window import capacity, cover, locate, site_cost, site_logs, sites_of
 
-# The binned surrogate's (proposals only) uniform cost of a diplotype state change. The exact
-# objective uses the map-derived per-homologue costs instead.
-SWITCH_PENALTY = 20.0
+from .parameters import SWITCH_PENALTY
 
 
 @kernel(overloads=overloads_for(__name__, "pair_code7"), inline="always", nogil=True)
 def pair_code7(x, y):
     """Pair code of two coded alleles (called allele 0/1, or -2 - prepared row when uncalled): dosage
     0-2 when both are called, 3 + the known allele when one is, else 6 when both copy the same
-    prepared row (one latent allele) and 5 when they do not (maths.emissions.pair_code)."""
+    prepared row (one latent allele) and 5 when they do not (science.shared.emissions.pair_code)."""
     if x >= 0 and y >= 0:
         return x + y
     if x >= 0:
@@ -110,7 +103,7 @@ def pair_founders(states):
 
 @kernel(overloads=overloads_for(__name__, "selected_alleles"), parallel=True, cache=True, nogil=True)
 def selected_alleles(leaves, offsets, selected):
-    """int8 (K, L) alleles of the panel `selected` (K x B prepared-row indices): founder k's
+    """int16 (K, L) coded alleles of the panel `selected` (K x B prepared-row indices): founder k's
     alleles on block b are row selected[k, b] of leaves[b].
 
     One task per block, which reads its leaf from the typed List once: a List element read inside
@@ -128,8 +121,8 @@ def selected_alleles(leaves, offsets, selected):
 
 @kernel(overloads=overloads_for(__name__, "pair_dosages"), cache=True, parallel=True, nogil=True)
 def pair_dosages(haps, first, second, lo, hi):
-    """Site-major pair dosages of sites [lo, hi): out[j - lo, q] = haps[first[q], j] +
-    haps[second[q], j] (int8)."""
+    """Site-major predictive pair codes at sites [lo, hi): out[j - lo, q] =
+    pair_code7(haps[first[q], j], haps[second[q], j]) (int8)."""
     states = len(first)
     out = np.empty((hi - lo, states), np.int8)
     for j in prange(lo, hi):
@@ -778,8 +771,8 @@ def score_switches_direct(haps, win, s0, s1):
 
 
 def score_panel(haps, win, ranges, table_bytes, team):
-    """Per-sample F_s of the panel with alleles haps (int8 K x L) through the window win (forward
-    orientation, the panel's K: window.Windows.view).
+    """Per-sample F_s of the panel with coded alleles haps (int16 K x L) through the window win (forward
+    orientation, the panel's K: stages.assembly.storage.Windows.view).
 
     ranges: consecutive sample ranges (s0, s1, threads) covering every sample
     (workspace.sample_ranges), each scored by its own call at its thread count (a sample's score

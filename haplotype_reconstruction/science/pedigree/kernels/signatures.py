@@ -1573,8 +1573,8 @@ OVERLOADS = {
             types.int64,
             types.none,
         ),
-        # Relative contrasts (relatives._pair_scores) pass writable prepared emissions/powers (args 15, 20) with
-        # literal mode arguments; observed by in2c's full-workflow C2 audit (warm_up_receipt_fix_r3).
+        # Relative contrasts (relatives._m1_pairs) pass writable prepared emissions/powers (args 15, 20)
+        # with literal mode arguments, requiring these literal-specialized declarations.
         (
             types.int64,
             types.int64,

@@ -1,7 +1,7 @@
 """The local selection objective: fitted log likelihood plus a coding regularizer.
 
 Owns LS03/LS04; no environment, storage, clocks or diagnostics side effects.
-Method: docs/methods/local_selection.md#objective.
+Method: docs/methods/selection.md#ls03.
 Selection.objective.description prefers the largest matching within its relative band;
 matching relaxations are strict and canonical matching order is a stated rule, never reversed.
 
@@ -66,7 +66,7 @@ class ContextFounders:
 
     ``founders`` holds one local row per assembled founder of the covering component (this round's
     context proposals repeated by their multiplicities; -1 = no call): founders whose local rows are
-    equal are separate claimers (release 2.12). Founders without a called site claim no row.
+    equal are separate claimers. Founders without a called site claim no row.
 
     Any founder may claim any panel row; a claimed row is coded by reference to its founder plus its
     edits, log V(n_f, d) with V(n, d) = sum_{j<=d} C(n, j) for d differing sites among the founder's
@@ -79,10 +79,6 @@ class ContextFounders:
     uncalled sites carry no code (a context-reuse penalty, not a complete code). Distances are cached
     per distinct row.
 
-    History: releases 2.1-2.11 let each founder claim only its nearest rows, maximised the number of
-    claims before their cost, coded a claim by the shell code log C(n_f, d), and merged founders with
-    equal local rows into one claimer; 2.0 let a founder equidistant to several rows claim the lowest
-    of them in the fit's row order.
     """
 
     def __init__(self, founders: NDArray[np.int64], *, reverse: bool = False) -> None:
@@ -139,13 +135,13 @@ class ContextFounders:
         return self._description(distance, k, length)[:3]
 
     def _description(self, distance, k, length, n_called=None):
-        """(claimed mask, free-row count, edit code) of the panel's shortest description (release 2.12):
+        """(claimed mask, free-row count, edit code) of the panel's shortest description:
         any founder may claim any row at the monotone edit-ball code of their distance, and the number
         of claimed rows m is chosen to minimise the summed edit codes plus the free rows' dictionary
         term. Minimum edit costs of every matching size come from one successive-shortest-augmenting-path pass
         (O(min(F, K) (F + K)^2)). For a fixed set of claimers and called masks, one changed call moves the code by
         at most its edit-ball increment, never by a whole free row; founders with equal local rows stay separate
-        claimers (release 2.12), so a call making two founders' rows equal keeps that bound."""
+        claimers, so a call making two founders' rows equal keeps that bound."""
         f_count = len(self.founders)
         n_called = self.n_called if n_called is None else n_called
         cost = np.empty((f_count, k))

@@ -1,4 +1,4 @@
-"""Append-only checkpoint containers (format of 92b3daf, unchanged).
+"""Append-only checkpoint containers (container format 1).
 
 A container is one file holding a sequence of immutable records, each a key and one encoded payload
 (store.codec). Committed bytes are never modified: a newer record supersedes an older one with the same key
@@ -10,12 +10,14 @@ then records of
     payload  store.codec payload
     trailer  magic, sequence, record length, header CRC, trailer CRC
 
-A record is valid only once its trailer is complete, so an interrupted writer can only leave an incomplete last
-record: readers ignore it, and the next writer truncates it (with one warning) before appending.
+A record is valid only once its trailer and validating header are complete. An interruption can leave an
+unacknowledged suffix: readers ignore it, and the next writer truncates it (with one warning) before appending.
 
 Appends are serialised by a per-process thread lock plus ``flock`` on the file (coherent across nodes on a shared
 filesystem whose locks are cluster-wide), so threads, processes and nodes may append to one file. Inside the lock a
-writer refreshes its index, truncates a torn tail, encodes and appends its record, and fsyncs it. Readers take no
+writer refreshes its index, truncates a torn tail, and appends its pre-encoded record. The payload fsync
+precedes the validating header; the final fsync runs outside the append lock, grouping complete headers when
+possible. Every publisher waits for a sync covering its header before returning. Readers take no
 lock: they index complete records only, by scanning record headers and trailers (never payloads), and refresh
 incrementally from the last indexed end. Indexes are cached per process.
 """
@@ -117,18 +119,66 @@ class RecordInfo:
         return self.payload_offset + self.stored_bytes
 
 
+@dataclass
+class PublishTiming:
+    """Task-local checkpoint time in seconds; lock waits include append, flock and sync locks."""
+
+    lock_wait_seconds: float = 0.0
+    fsync_seconds: float = 0.0
+
+
+_PUBLISH_TIMING = threading.local()
+
+
+@contextmanager
+def capture_publish_timing():
+    """Collect this thread's checkpoint waits/fsyncs without inheriting a parent's task after fork."""
+    previous = getattr(_PUBLISH_TIMING, "active", None)
+    timing = PublishTiming()
+    _PUBLISH_TIMING.active = (os.getpid(), timing)
+    try:
+        yield timing
+    finally:
+        _PUBLISH_TIMING.active = previous
+
+
+def _record_publish_time(field, seconds):
+    active = getattr(_PUBLISH_TIMING, "active", None)
+    if active is not None and active[0] == os.getpid():
+        timing = active[1]
+        setattr(timing, field, getattr(timing, field) + seconds)
+
+
+@contextmanager
+def _timed_lock(lock):
+    start = time.perf_counter()
+    with lock:
+        _record_publish_time("lock_wait_seconds", time.perf_counter() - start)
+        yield
+
+
+def _fsync(fd):
+    start = time.perf_counter()
+    try:
+        os.fsync(fd)
+    finally:
+        _record_publish_time("fsync_seconds", time.perf_counter() - start)
+
+
 class _Index:
     """Per-process index of one container: the latest complete record per key."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.append_lock = threading.Lock()
+        self.sync_lock = threading.Lock()
         self.reset(None)
 
     def reset(self, inode):
         self.inode = inode
         self.end = 0
         self.next_seq = 1
+        self.durable_end = 0
         self.records = {}
         self.header = None
 
@@ -292,26 +342,40 @@ def _torn(fd, offset, size):
     if len(fixed) < _RECORD.size:
         return False
     magic, seq, _, stored, _decoded, _metadata, _buffers, _identity, key_length = _RECORD.unpack(fixed)
-    # The final small write can itself be interrupted. The durable trailer gives
-    # an independent length/sequence/CRC witness; a complete stored CRC must never
-    # turn ordinary header corruption into a truncatable tail.
+    # A partial header's durable trailer witnesses its length/sequence/CRC.
+    # A later appender may have begun before this header's final sync, so that
+    # trailer need not be at EOF. Its possible positions span only the key limit.
+    # A complete stored CRC must never make ordinary header corruption truncatable.
     trailer_size = _TRAILER.size + _U32.size
-    tail = window.read(size - trailer_size, trailer_size) if size - offset >= trailer_size else None
-    if magic == _RECORD_MAGIC and stored > 0 and tail is not None:
-        end_magic, end_seq, length, expected_crc = _TRAILER.unpack(tail[: -_U32.size])
-        header_size = size - offset - trailer_size - stored
-        if (
-            end_magic == _TRAILER_MAGIC
-            and end_seq == seq
-            and length == size - offset
-            and zlib.crc32(tail[: -_U32.size]) == _U32.unpack(tail[-_U32.size :])[0]
-            and _RECORD.size + _U32.size < header_size <= _RECORD.size + _MAX_KEY_BYTES + _U32.size
-        ):
-            header = window.read(offset, header_size)
-            expected = _U32.pack(expected_crc)
-            actual = header[-_U32.size :]
-            if actual != expected and any(actual == expected[:n] + bytes(_U32.size - n) for n in range(_U32.size)):
-                return True
+    first = offset + _RECORD.size + _U32.size + stored
+    if magic == _RECORD_MAGIC and stored > 0 and first < size:
+        candidates = window.read(first, min(_MAX_KEY_BYTES + trailer_size, size - first))
+        position = candidates.find(_TRAILER_MAGIC)
+        while position >= 0:
+            tail = candidates[position : position + trailer_size]
+            header_size = first + position - offset - stored
+            if len(tail) == trailer_size:
+                end_magic, end_seq, length, expected_crc = _TRAILER.unpack(tail[: -_U32.size])
+                if (
+                    end_magic == _TRAILER_MAGIC
+                    and end_seq == seq
+                    and length == header_size + stored + trailer_size
+                    and zlib.crc32(tail[: -_U32.size]) == _U32.unpack(tail[-_U32.size :])[0]
+                    and _RECORD.size + _U32.size < header_size <= _RECORD.size + _MAX_KEY_BYTES + _U32.size
+                ):
+                    header = window.read(offset, header_size)
+                    expected = _U32.pack(expected_crc)
+                    actual = header[-_U32.size :]
+                    if actual != expected and any(
+                        actual == expected[:n] + bytes(_U32.size - n) for n in range(_U32.size)
+                    ):
+                        following = first + position + trailer_size
+                        if following < size and any(window.read(following, min(_RECORD.size, size - following))):
+                            # A later nonzero header follows a successful payload sync,
+                            # which also made this header durable: this is corruption.
+                            return False
+                        return True
+            position = candidates.find(_TRAILER_MAGIC, position + 1)
     rest = window.read(offset + _RECORD.size, key_length + _U32.size)
     if (
         fixed[:8] != _RECORD_MAGIC
@@ -488,7 +552,7 @@ class CheckpointFile:
 
     @contextmanager
     def batch(self):
-        """A reader of many records through one index snapshot and one open handle (release 4.8).
+        """A reader of many records through one index snapshot and one open handle.
 
         Each info() refreshes the index (a stat) and each read opens the file: per record, two opens and a stat of a
         network filesystem, for thousands of records per selection round (seconds to tens of seconds on a compute
@@ -547,7 +611,7 @@ class CheckpointFile:
         try:
             try:
                 _pwrite_all(fd, _file_header(self.kind, self.name, os.urandom(16)), 0)
-                os.fsync(fd)
+                _fsync(fd)
             finally:
                 os.close(fd)
             try:
@@ -559,35 +623,64 @@ class CheckpointFile:
 
     @contextmanager
     def _append_lock(self):
-        """Hold this process's append lock and the file's flock; yield (fd, index).
+        """Yield a current, recovered index under append locks; make successful publications durable on exit.
 
-        Inside, the index is current and any incomplete tail is truncated.
+        Payload durability precedes the header inside the lock. Header durability
+        follows outside it, so the next appender can work during the final fsync.
+        Duplicate publications also wait: a visible header may still be syncing.
         """
         index = _index(self.path)
-        with index.append_lock:
-            if not os.path.exists(self.path):
-                self._create()
-            fd = os.open(self.path, os.O_RDWR)
-            try:
+        fd = None
+        try:
+            with _timed_lock(index.append_lock):
+                if not os.path.exists(self.path):
+                    self._create()
+                fd = os.open(self.path, os.O_RDWR)
+                start = time.perf_counter()
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                with index.lock:
-                    size = self._refresh(index, fd)
-                    if size > index.end:
-                        if not _torn(fd, index.end, size):
-                            raise ValueError(
-                                f"{self.path}: corrupt checkpoint container at byte {index.end} "
-                                "(not an interrupted append); refusing to truncate"
+                _record_publish_time("lock_wait_seconds", time.perf_counter() - start)
+                try:
+                    with index.lock:
+                        size = self._refresh(index, fd)
+                        if size > index.end:
+                            if not _torn(fd, index.end, size):
+                                raise ValueError(
+                                    f"{self.path}: corrupt checkpoint container at byte {index.end} "
+                                    "(not an interrupted append); refusing to truncate"
+                                )
+                            os.ftruncate(fd, index.end)
+                            warnings.warn(
+                                f"{self.path}: discarded an incomplete record "
+                                f"({size - index.end} bytes) left by an interrupted writer",
+                                RuntimeWarning,
+                                stacklevel=2,
                             )
-                        os.ftruncate(fd, index.end)
-                        warnings.warn(
-                            f"{self.path}: discarded an incomplete record "
-                            f"({size - index.end} bytes) left by an interrupted writer",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-                yield fd, index
-            finally:
-                os.close(fd)  # also releases the flock
+                    yield fd, index
+                    with index.lock:
+                        end = index.end
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            self._sync(fd, index, end)
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _sync(self, fd, index, end):
+        """Acknowledge only complete headers present before this fsync started.
+
+        A process-local barrier can cover several waiting publishers. Other
+        processes sync independently; flock still orders every append across nodes.
+        """
+        with _timed_lock(index.sync_lock):
+            with index.lock:
+                if index.durable_end >= end:
+                    return
+                covered = index.end
+                inode = index.inode
+            _fsync(fd)
+            with index.lock:
+                if index.inode == inode:
+                    index.durable_end = max(index.durable_end, covered)
 
     def _append(self, fd, index, key, payload, nthreads, clevel):
         key_bytes = str(key).encode()
@@ -634,11 +727,10 @@ class CheckpointFile:
             handle.write(trailer + _U32.pack(zlib.crc32(trailer)))
             # Payload and trailer are durable before the header can validate them.
             handle.flush()
-            os.fsync(fd)
+            _fsync(fd)
             handle.seek(offset)
             handle.write(header + _U32.pack(header_crc))
             handle.flush()
-        os.fsync(fd)
         info = RecordInfo(
             key=key_bytes.decode(),
             seq=seq,
@@ -660,7 +752,10 @@ class CheckpointFile:
         return info
 
 
-__all__ = ["CheckpointMismatch", "RecordInfo", "CheckpointFile", "CONTAINER_KINDS"]
+__all__ = [
+    "CheckpointMismatch", "RecordInfo", "CheckpointFile", "CONTAINER_KINDS",
+    "PublishTiming", "capture_publish_timing",
+]
 
 
 class _BatchReader:

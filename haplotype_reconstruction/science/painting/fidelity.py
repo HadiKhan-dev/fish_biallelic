@@ -1,4 +1,4 @@
-"""Painting's copying chain with panel errors (release 2.14): class x fidelity track states.
+"""Painting's copying chain with panel errors: class x fidelity track states.
 
 Model (docs/methods/painting.md). A track state is (label, fidelity): the label a trajectory class or BACKGROUND
 (state S - 1 of the S labels), the fidelity faithful (0) or panel error (1; anchored classes only). A faithful track
@@ -17,7 +17,7 @@ ancestry changes (an excursion) to escape a locally wrong row. Painted switches 
 changes only.
 
 Emissions are the robust bin emissions, each sample's bin divided by its design effect 1 + (n - 1) r
-(painting.hmm.design_effect, PaintingConfig.emission_site_correlation), the composite-likelihood adjustment of the
+(painting.emissions.design_effect, PaintingParameters.emission_site_correlation), the composite-likelihood adjustment of the
 per-site product.
 
 The first bin's prior is the chain's stationary law (labels uniform; an anchored label's fidelity error with
@@ -46,11 +46,6 @@ from ...core.numerics import ordered_sum
 from . import hmm
 from .parameters import ENTRY_BOUNDS, EXIT_BOUNDS, GOLDEN_STEPS, RATE_BOUNDS, RATE_GRID_POINTS, VITERBI_TIE
 from .transitions import MINIMUM_SWITCH_PROBABILITY, switch_probabilities
-
-# Bounds of the estimates: rho per Morgan per track (from almost none, a founder's own haplotype, to far beyond any
-# cross); a and b per bin edge. A bound reached is reported in the trajectory, not an error: a = 1e-6 is a boundary
-# fit (no support for error runs under this model and schedule), not a test of their absence.
-
 
 @dataclass(frozen=True)
 class TrackStates:
@@ -83,7 +78,7 @@ def track_states(capable: np.ndarray) -> TrackStates:
     return TrackStates(labels, fids, emission, error_of)
 
 
-# Exact supported layouts from the frozen 3.5 release and typed stage-route census.
+# Supported layouts for typed stage routes.
 _OVERLOADS = {
     "_structured_emissions": (
         (
@@ -352,7 +347,7 @@ def _structured_emissions(raw, emission_label, n_labels):
 
 @kernel(overloads=_OVERLOADS["_reversed_structured_emissions"], cache=True, parallel=True, nogil=True)
 def _reversed_structured_emissions(raw, emission_label, n_labels):
-    """_structured_emissions of the bin-reversed label emissions, read in place (release 4.7.1: no reversed copy)."""
+    """_structured_emissions of the bin-reversed label emissions, read in place."""
     n_samples, _, n_bins = raw.shape
     n_track = len(emission_label)
     out = np.empty((n_samples, n_track * n_track, n_bins))
@@ -375,7 +370,7 @@ def structured_emissions(raw: np.ndarray, tracks: TrackStates, *, reverse: bool 
 @kernel(overloads=_OVERLOADS["_track_labels"], cache=True, parallel=True, nogil=True)
 def _track_labels(states, labels, reverse):
     """int32[N, 2, B] labels of the Viterbi track states ``states``; ``reverse``: states of the bin-reversed chain
-    (the mirrored convention), returned in the original bin order. The same values as labels[states] (release 4.7.1)."""
+    (the mirrored convention), returned in the original bin order. The same values as labels[states]."""
     n_samples, n_tracks, n_bins = states.shape
     out = np.empty((n_samples, n_tracks, n_bins), dtype=np.int32)
     for sample in prange(n_samples):
@@ -1030,7 +1025,7 @@ def masses_from_pairs(faithful_mass, masks, other_masks, public_ids, local_keys)
     """qF and qAF float64[N,B], preserving the native first/second state summation.
 
     Both tracks must be faithful; retain the smaller mass of the two conventions.
-    Unread qV/qA arrays and their additions are absent (WP_PA2 PR12).
+    Unread qV/qA arrays and their additions are absent.
     """
     n_samples, n_pairs, n_bins = faithful_mass.shape
     n_states = public_ids.shape[0]
@@ -1221,7 +1216,7 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
     """EM estimate of (rho, a, b) over all eligible samples of a component. ``raw_batches()`` yields (tempered label
     emissions float64[n, S*S, B], eligible bool[n]) batch by batch, for every sample; it is called once per update.
 
-    From the fixed starting values (PaintingConfig.initial_*), ``estimation_iterations`` updates, each an exact
+    From the fixed starting values (PaintingParameters.initial_*), ``estimation_iterations`` updates, each an exact
     forward-backward pass under the current values (chain_statistics) followed by the M-step of the expected
     complete-data log-likelihood: rho by rate_update, (a, b) by fidelity_update (both include every term of the model
     in them: the label changes, the fidelity chain of labels that stay, and the stationary fidelity draws at the first
@@ -1255,7 +1250,7 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
             tracks += 2 * int(np.count_nonzero(eligible))
         if tracks == 0:
             break
-        # L2a: concatenate contiguous sample batches, then fsum in sample order.
+        # Concatenate contiguous sample batches, then fsum in sample order.
         # Stationary draws are ONE 2N-term sum, never two separately rounded sums.
         c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll = (
             np.concatenate([batch[index] for batch in sample_statistics], axis=0) for index in range(10)
@@ -1315,7 +1310,7 @@ def label_paths(
             float(tie),
             True,
         )
-    # Release 4.7.1: the mirrored chain's states map to labels in the original bin order inside one kernel.
+    # Map the mirrored chain's states to labels in the original bin order inside one kernel.
     return _track_labels(states, np.ascontiguousarray(tracks.labels, dtype=np.int64), bool(reverse))
 
 
@@ -1347,7 +1342,7 @@ def decode_candidates(
     tie: float = VITERBI_TIE,
 ):
     """(paths int32[N, 2, B], candidate masks int64[N, 2, B], switch counts int64[N], the mirrored convention's
-    paths int32[N, 2, B]) of one batch: painting.hmm.decode_candidates for the chain's Viterbi labels (the run's
+    paths int32[N, 2, B]) of one batch: painting.fidelity.decode_candidates for the chain's Viterbi labels (the run's
     convention, with the mirrored one; switch intervals, combined masks and the canonical track order as there)."""
     decoded = []
     for convention in (bool(reverse), not bool(reverse)):

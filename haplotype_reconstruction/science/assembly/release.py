@@ -2,8 +2,8 @@
 
 Owns carrier masking, continuity cuts, ambiguity masks and identity flag mapping.
 Does not read records, clocks or formatting options. Evaluated source-row paths
-are the only evidence for cuts and content withholding (P0 U16; OU03/OU06).
-Method: docs/methods/assembly.md#release; WP_AS6 §4.7 and WP_OU1 §5.
+are the only evidence for cuts and content withholding (U16).
+Method: docs/methods/assembly.md#u16.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         r5_withheld_rows: tuple[int, ...]
 
 
-# Contract statuses, P0 U16 assembly/release.py. These are not tuning parameters.
+# Release contract statuses, recorded independently of tuning parameters.
 COUNT_UNVERIFIED = "count_unverified"
 UNRESOLVED_SEARCH = "unresolved_search"
 RECORDED = "recorded"
@@ -50,7 +50,7 @@ UNRESOLVED_JOINT_BUDGET = "unresolved_joint_budget"
 UNRESOLVED_BRANCH_BUDGET = "unresolved_branch_budget"
 UNRESOLVED_REPLAY_BUDGET = "unresolved_replay_budget"
 
-# Contract strings from 3.5 assembly-core U02/U13/U16; no tuning or normalization.
+# Release-family contract strings; preserve their spelling in recorded payloads.
 ALLELE_CONTENT_AMBIGUITY = "allele_content_ambiguity"
 CONTINUATION_NOT_PERFORMED = "continuation_not_performed"
 CONTINUATION_UNVERIFIED = "continuation_unverified"
@@ -64,7 +64,6 @@ EVALUATED_PRIOR_TIE = "evaluated_prior_tie"
 EXACT_ANCHORS_WITH_UNMATCHED_MULTIPLICITY_FALLBACK = "exact_anchors_with_unmatched_multiplicity_fallback"
 EXACT_COMMON_PATH_ANCHOR = "exact_common_path_anchor"
 FINAL_CORRESPONDENCE_NOT_ESTABLISHED = "final_correspondence_not_established"
-LEGACY_UNKNOWN = "legacy_unknown"
 MINIMUM_SWITCH_PRIOR_UNVERIFIED = "minimum_switch_prior_unverified"
 OBSERVED_CONTENT_MEET_WITH_UNMAPPED_RESIDUAL = "observed_content_meet_with_unmapped_residual"
 OBSERVED_SOURCE_CONTENT_MEET = "observed_source_content_meet"
@@ -411,7 +410,7 @@ def _terminal_shared_rows(paths, panel, lo, hi):
 def release_founders(
     component_panels: Sequence[ReleaseAxes],
     panels: Sequence[tuple[NDArray[np.int64], NDArray[np.int8]]],
-    alternatives: Sequence[ReleaseFamily | Mapping[str, Any]] | None,
+    alternatives: Sequence[ReleaseFamily | Mapping[str, Any]],
     *,
     unobserved_masks: Sequence[NDArray[np.bool_]] | None = None,
     nominal_components: Sequence[FounderComponent] | None = None,
@@ -431,8 +430,7 @@ def release_founders(
     released, counts, metadata = [], [], []
     total_breaks = total_hidden = 0
     unverified_sources = set()
-    known = alternatives is not None
-    alternatives = () if alternatives is None else tuple(ReleaseFamily.from_mapping(f) for f in alternatives)
+    alternatives = tuple(ReleaseFamily.from_mapping(f) for f in alternatives)
     for source, (panel, (positions, calls)) in enumerate(zip(component_panels, panels, strict=False)):
         positions, calls = np.asarray(positions), np.asarray(calls)
         offsets = np.append(np.asarray(panel.atomic_offsets, dtype=np.int64), len(positions))
@@ -721,7 +719,7 @@ def release_founders(
         unobserved_founder_alleles=sum(carrier_counts),
         founder_continuity_breaks=total_breaks,
         assembly_ambiguous_alleles=total_hidden,
-        assembly_ambiguity_metadata=RECORDED if known else LEGACY_UNKNOWN,
+        assembly_ambiguity_metadata=RECORDED,
         assembly_continuation_unverified_records=len(unverified_sources),
         assembly_count_unverified_records=sum(
             bool(f.get(COUNT_UNVERIFIED, False) or f.get("status") == COUNT_UNVERIFIED) for f in alternatives
@@ -742,12 +740,12 @@ def withhold_unobserved(
     panels: Sequence[tuple[NDArray[np.int64], NDArray[np.int8]]],
     carrier_seen: Sequence[NDArray[np.bool_]],
 ) -> tuple[tuple[tuple[NDArray[np.int64], NDArray[np.int8]], ...], tuple[int, ...], tuple[NDArray[np.bool_], ...]]:
-    """Apply OU03 to already aligned PA2 carrier-observation masks.
+    """Withhold founder calls at sites with no aligned carrier-observation evidence.
 
     panels contain (int64 positions[L], int8 calls[K,L]); carrier_seen contains
     bool[K,L] with the same component order. Return panels, counts and original
     hidden masks. A missing call never increases the withholding count. Inputs
-    are not changed; only affected call arrays are copied (3.5 export/run.py).
+    are not changed; only affected call arrays are copied.
     """
     if len(panels) != len(carrier_seen):
         raise InvariantError("founder panels and carrier masks differ")
@@ -773,7 +771,7 @@ def identity_flags(identity_paths, segments=None) -> tuple[FounderIdentityFlag, 
 
     Paths are (first global block, positions, local atomic offsets, source rows).
     Left/right partners retain their source enumeration. Missing right owners
-    skip a flag; a missing left owner falls back to the right owner (A40-16).
+    skip a flag; a missing left owner falls back to the right owner.
     A segment with an incomplete source row permutation is an invariant error.
     """
     output = []

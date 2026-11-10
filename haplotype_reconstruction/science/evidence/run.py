@@ -1,4 +1,4 @@
-"""Prepare one contig in the EC11, EC21, EC23 and EC24 scientific order."""
+"""Prepare a contig: site/sample quality, read-model calibration, likelihoods and discovery blocks."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from haplotype_reconstruction.contracts.likelihoods import CodedLikelihoods
 from haplotype_reconstruction.contracts.observations import PairArray, pair_views
 from haplotype_reconstruction.contracts.roles import record_field
 from haplotype_reconstruction.contracts.source import ContigReads
+from haplotype_reconstruction.core.concurrency import ThreadSource
 from haplotype_reconstruction.core.errors import InputError
 
 from .blocks import _block_spans
@@ -30,7 +31,7 @@ class PreparedEvidence:
 
 
 def prepare_contig(
-    reads: ContigReads, config: EvidenceParameters, team: int = 1, *, reverse: bool = False
+    reads: ContigReads, config: EvidenceParameters, team: ThreadSource = 1, *, map_work=map, reverse: bool = False
 ) -> PreparedEvidence:
     """The evidence of one contig from its allele depths.
 
@@ -43,7 +44,13 @@ def prepare_contig(
     contig = reads.contig
     input_positions, dropped = (reads.positions, dict(reads.dropped))
     site, samples = filter_sites(
-        reads.positions, reads.counts, config.site_quality, config.sample_quality, team=team, reverse=reverse
+        reads.positions,
+        reads.counts,
+        config.site_quality,
+        config.sample_quality,
+        team=team,
+        map_work=map_work,
+        reverse=reverse,
     )
     if site.kept.all():
         kept = reads
@@ -55,7 +62,7 @@ def prepare_contig(
     if kept.n_sites == 0:
         raise InputError(f"{contig}: the site filter kept no sites")
     counts, positions = (kept.counts, kept.positions)
-    fitted, report = calibration.calibrate(counts, positions, config.read_model, team=team)
+    fitted, report = calibration.calibrate(counts, positions, config.read_model, map_work=map_work)
     model = fitted if fitted is not None else fixed_model(config.read_model.fixed_error, kept.n_samples)
     error, heterozygote = model.error_and_heterozygote()
     likelihoods = build_likelihoods(
@@ -64,7 +71,7 @@ def prepare_contig(
         heterozygote,
         model.heterozygote_inverse_concentration,
         config.read_model.lookup_depth,
-        threads=team,
+        map_work=map_work,
     )
     total_depth = counts.sum(axis=(0, 2), dtype=np.int64)
     discovery_sites = total_depth >= config.discovery_sites.threshold()

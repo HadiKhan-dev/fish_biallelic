@@ -10,103 +10,103 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `version` | int | `4` | — | no | Settings schema version (4). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `preset` | str | `""` | tromau, generic | yes | Built-in base configuration: tromau or generic. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `version` | int | `4` | — | no | Settings schema version (4). Provenance: Settings schema version (4). |
+| `preset` | str | `""` | tromau, generic | yes | Built-in base configuration: tromau or generic. Provenance: Built-in base configuration: tromau or generic. |
 ## run
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `output` | path | `""` | — | no | Run directory (outputs, logs, run records); default work/runs/<preset or input kind>[_seed<seed>]. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `checkpoints` | path | `""` | — | no | Checkpoint directory; default OUTPUT/checkpoints. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `stop_after` | str | `""` | relatedness, discovery, painting | no | Stop cleanly after this stage: relatedness (every contig's evidence and the genome-wide relatedness product recorded; run it once before shards), discovery, or painting (per-contig work done, later genome-wide stages not started); empty runs everything. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `output` | path | `""` | — | no | Run directory (outputs, logs, run records); default work/runs/<preset or input kind>[_seed<seed>]. Provenance: Run directory (outputs, logs, run records); default work/runs/<preset or input kind>[_seed<seed>]. |
+| `checkpoints` | path | `""` | — | no | Checkpoint directory; default OUTPUT/checkpoints. Provenance: Checkpoint directory; default OUTPUT/checkpoints. |
+| `stop_after` | str | `""` | relatedness, discovery, painting | no | Stop cleanly after this stage: relatedness (every contig's evidence and the genome-wide relatedness product recorded; run it once before shards), discovery, or painting (per-contig work done, later genome-wide stages not started); empty runs everything. Provenance: Stop cleanly after this stage: relatedness (every contig's evidence and the genome-wide relatedness product recorded; run it once before shards), discovery, or painting (per-contig work done, later genome-wide stages not started); empty runs everything. |
 ## execution
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `cores` | cores | `"auto"` | — | no | Total CPU ceiling (processes x threads); auto = CPU affinity. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `contig_lanes` | cores | `"auto"` | — | no | Contigs reconstructed concurrently; auto = one lane per 8 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `memory_limit` | memory | `"auto"` | — | no | Capacity for measured job memory pressure: a size such as "200G" (binary units), or auto = job cgroup capacity. SOFT/HARD thresholds and sampling interval are in execution/config.py; affects scheduling only. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `serial` | bool | `false` | — | no | Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `max_contigs` | int | `0` | — | no | Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `profile` | bool | `false` | — | no | Print per-phase timings and thread-allocation traces. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `scratch` | path | `""` | — | no | Mapped scratch and kernel-cache base; defaults to the checkpoint filesystem. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `cores` | cores | `"auto"` | — | no | Total CPU ceiling (processes x threads); auto = CPU affinity. Provenance: Total CPU ceiling (processes x threads); auto = CPU affinity. |
+| `contig_lanes` | cores | `"auto"` | — | no | Contigs reconstructed concurrently; auto = one lane per 16 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. Provenance: Contigs reconstructed concurrently; auto = one lane per 16 cores, paced by measured memory pressure; 1 = one contig at a time with all cores. |
+| `memory_limit` | memory | `"auto"` | — | no | Capacity for measured job memory pressure: a size such as "200G" (binary units), or auto = job cgroup capacity. SOFT/HARD thresholds and sampling interval are in engine/memory.py; affects scheduling only. Provenance: Capacity for measured job memory pressure: a size such as "200G" (binary units), or auto = job cgroup capacity. SOFT/HARD thresholds and sampling interval are in engine/memory.py; affects scheduling only. |
+| `serial` | bool | `false` | — | no | Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). Provenance: Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). |
+| `max_contigs` | int | `0` | — | no | Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). Provenance: Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). |
+| `profile` | bool | `false` | — | no | Print per-phase timings and thread-allocation traces. Provenance: Print per-phase timings and thread-allocation traces. |
+| `scratch` | path | `""` | — | no | Mapped scratch and kernel-cache base; defaults to the checkpoint filesystem. Provenance: Mapped scratch and kernel-cache base; defaults to the checkpoint filesystem. |
 ## input
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `kind` | str | `"vcf"` | vcf, simulation | yes | Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `vcf` | path | `""` | — | yes | Input VCF/BCF (kind = vcf). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `contigs` | strings | `[]` | — | yes | Contigs to analyse, in order (required unless the preset lists them). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `kind` | str | `"vcf"` | vcf, simulation | yes | Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates. Provenance: Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates. |
+| `vcf` | path | `""` | — | yes | Input VCF/BCF (kind = vcf). Provenance: Input VCF/BCF (kind = vcf). |
+| `contigs` | strings | `[]` | — | yes | Contigs to analyse, in order (required unless the preset lists them). Provenance: Contigs to analyse, in order (required unless the preset lists them). |
 ## quality
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `site_filter` | str | `"auto"` | auto, on, off | yes | Self-calibrated per-contig site filter; auto = on for VCF input, off for simulations. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `sample_filter` | str | `"auto"` | auto, on, off | yes | Per-contig library-contamination QC (flagged samples leave founder construction); auto = on for VCF input, off for simulations; it runs only where the site filter is applied. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `read_calibration` | bool | `true` | — | yes | Fit read error, allelic balance and overdispersion from the observed AD; off = fixed binomial model (error 0.02). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `site_filter` | str | `"auto"` | auto, on, off | yes | Self-calibrated per-contig site filter; auto = on for VCF input, off for simulations. Provenance: Self-calibrated per-contig site filter; auto = on for VCF input, off for simulations. |
+| `sample_filter` | str | `"auto"` | auto, on, off | yes | Per-contig library-contamination QC (flagged samples leave founder construction); auto = on for VCF input, off for simulations; it runs only where the site filter is applied. Provenance: Per-contig library-contamination QC (flagged samples leave founder construction); auto = on for VCF input, off for simulations; it runs only where the site filter is applied. |
+| `read_calibration` | bool | `true` | — | yes | Fit read error, allelic balance and overdispersion from the observed AD; off = fixed binomial model (error 0.02). Provenance: Fit read error, allelic balance and overdispersion from the observed AD; off = fixed binomial model (error 0.02). |
 ## genetic_map
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `rate_cm_per_mb` | float | `5.0` | — | yes | Fallback recombination rate (cM/Mb) without a map or beyond its knots. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `file` | path | `""` | — | yes | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `rate_is_measured` | bool | `false` | — | yes | rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `rate_cm_per_mb` | float | `5.0` | — | yes | Fallback recombination rate (cM/Mb) without a map or beyond its knots. Provenance: Fallback recombination rate (cM/Mb) without a map or beyond its knots. |
+| `file` | path | `""` | — | yes | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). Provenance: Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). |
+| `rate_is_measured` | bool | `false` | — | yes | rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. Provenance: rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. |
 ## relatedness
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `pairwise_ibd` | bool | `false` | — | no | Write pairwise IBD reports (O(N² L)); off by default. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `pairwise_ibd` | bool | `false` | — | no | Write pairwise IBD reports (O(N² L)); off by default. Provenance: Write pairwise IBD reports (O(N² L)); off by default. |
 ## pedigree
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `evidence_calibration` | str | `"predictive"` | predictive, off | yes | Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `evidence_calibration` | str | `"predictive"` | predictive, off | yes | Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence. Provenance: Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence. |
 ## family_phase
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `protected_intervals` | path | `""` | — | yes | TSV of intervals (chrom, start, end, reason) across which family phase's meiosis chains reset (reference-order breakpoints; a reversed_segment row resets at both ends). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `protected_intervals` | path | `""` | — | yes | TSV of intervals (chrom, start, end, reason) across which family phase's meiosis chains reset (reference-order breakpoints; a reversed_segment row resets at both ends). Provenance: TSV of intervals (chrom, start, end, reason) across which family phase's meiosis chains reset (reference-order breakpoints; a reversed_segment row resets at both ends). |
 ## recombination
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `order_breakpoints` | path | `""` | — | yes | TSV of reference-order breakpoints (chrom, start, end, reason). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `order_breakpoints` | path | `""` | — | yes | TSV of reference-order breakpoints (chrom, start, end, reason). Provenance: TSV of reference-order breakpoints (chrom, start, end, reason). |
 ## export
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `enabled` | bool | `true` | — | no | Write the final products at the end of a complete run (OUTPUT/export): per contig a founder VCF (haploid GT, one column c<component>_H<row> per founder row) and the phased sample VCF (GT:PS), bgzipped with tabix indexes. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `full_length` | bool | `true` | — | yes | Write every input biallelic SNP that reached the site filter (FILTER PASS for kept sites, the rule codes r1-r5 for removed ones); false writes only the kept sites. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `enabled` | bool | `true` | — | no | Write the final products at the end of a complete run (OUTPUT/export): per contig a founder VCF (haploid GT, one column c<component>_H<row> per founder row) and the phased sample VCF (GT:PS), bgzipped with tabix indexes. Provenance: Write the final products at the end of a complete run (OUTPUT/export): per contig a founder VCF (haploid GT, one column c<component>_H<row> per founder row) and the phased sample VCF (GT:PS), bgzipped with tabix indexes. |
+| `full_length` | bool | `true` | — | yes | Write every input biallelic SNP that reached the site filter (FILTER PASS for kept sites, the rule codes r1-r5 for removed ones); false writes only the kept sites. Provenance: Write every input biallelic SNP that reached the site filter (FILTER PASS for kept sites, the rule codes r1-r5 for removed ones); false writes only the kept sites. |
 ## simulation
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `seed` | seed | `400` | — | yes | Simulation seed, or "random" (the realised seed is recorded). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `templates` | path | `""` | — | yes | Directory of chromosome NPZ founder templates. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `cohorts` | ints | `[20, 100, 200]` | — | yes | Individuals in successive cohorts. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `depth` | float | `5.0` | — | yes | Mean read depth. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `generating_rate_cm_per_mb` | float | `5.0` | — | yes | Generating fallback recombination rate. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `generating_map` | path | `""` | — | yes | Generating genetic map (independent of inference). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `backcross_fraction` | float | `0.0` | — | yes | Fraction of later matings with an actual parent. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `backcross_start_cohort` | int | `3` | — | yes | First cohort with backcrosses. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `observe_cohorts` | ints | `[]` | — | yes | Only sequence these cohorts (empty: all). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `observed_fraction` | float | `1.0` | — | yes | Random fraction of eligible individuals sequenced. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `pedigree` | path | `""` | — | yes | Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `seed` | seed | `400` | — | yes | Simulation seed, or "random" (the realised seed is recorded). Provenance: Simulation seed, or "random" (the realised seed is recorded). |
+| `templates` | path | `""` | — | yes | Directory of chromosome NPZ founder templates. Provenance: Directory of chromosome NPZ founder templates. |
+| `cohorts` | ints | `[20, 100, 200]` | — | yes | Individuals in successive cohorts. Provenance: Individuals in successive cohorts. |
+| `depth` | float | `5.0` | — | yes | Mean read depth. Provenance: Mean read depth. |
+| `generating_rate_cm_per_mb` | float | `5.0` | — | yes | Generating fallback recombination rate. Provenance: Generating fallback recombination rate. |
+| `generating_map` | path | `""` | — | yes | Generating genetic map (independent of inference). Provenance: Generating genetic map (independent of inference). |
+| `backcross_fraction` | float | `0.0` | — | yes | Fraction of later matings with an actual parent. Provenance: Fraction of later matings with an actual parent. |
+| `backcross_start_cohort` | int | `3` | — | yes | First cohort with backcrosses. Provenance: First cohort with backcrosses. |
+| `observe_cohorts` | ints | `[]` | — | yes | Only sequence these cohorts (empty: all). Provenance: Only sequence these cohorts (empty: all). |
+| `observed_fraction` | float | `1.0` | — | yes | Random fraction of eligible individuals sequenced. Provenance: Random fraction of eligible individuals sequenced. |
+| `pedigree` | path | `""` | — | yes | Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. Provenance: Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. |
 ## simulation.reads
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `preset` | str | `""` | realistic | yes | Generating read preset; explicit read keys override its values. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `error_rate` | float | `0.02` | — | yes | Generating sequencing error rate. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `depth_cv` | float | `0.0` | — | yes | Between-sample depth coefficient of variation. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `heterozygote_alt_probability` | float | `0.5` | — | yes | Alternate-read probability in heterozygotes. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `dropout_fraction` | float | `0.0` | — | yes | Contiguous missing-marker fraction per sample. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `read_length_bp` | int | `0` | — | yes | Read length; > 0 samples paired-end fragments shared by neighbouring sites. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `fragment_mean_bp` | float | `375.0` | — | yes | Mean fragment length (read_length_bp > 0). Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `fragment_sd_bp` | float | `150.0` | — | yes | Fragment length standard deviation. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `site_depth_cv` | float | `0.0` | — | yes | Shared site-depth lognormal CV (population mean one); 0 = off. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `site_depth_window_bp` | int | `0` | — | yes | Share site factors within physical windows of this width; 0 = independent sites. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
-| `count_dispersion` | float | `0.0` | — | yes | Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. Provenance: P0 ENG-09/ENG-10; WP_I1 section 4.1 |
+| `preset` | str | `""` | realistic | yes | Generating read preset; explicit read keys override its values. Provenance: Generating read preset; explicit read keys override its values. |
+| `error_rate` | float | `0.02` | — | yes | Generating sequencing error rate. Provenance: Generating sequencing error rate. |
+| `depth_cv` | float | `0.0` | — | yes | Between-sample depth coefficient of variation. Provenance: Between-sample depth coefficient of variation. |
+| `heterozygote_alt_probability` | float | `0.5` | — | yes | Alternate-read probability in heterozygotes. Provenance: Alternate-read probability in heterozygotes. |
+| `dropout_fraction` | float | `0.0` | — | yes | Contiguous missing-marker fraction per sample. Provenance: Contiguous missing-marker fraction per sample. |
+| `read_length_bp` | int | `0` | — | yes | Read length; > 0 samples paired-end fragments shared by neighbouring sites. Provenance: Read length; > 0 samples paired-end fragments shared by neighbouring sites. |
+| `fragment_mean_bp` | float | `375.0` | — | yes | Mean fragment length (read_length_bp > 0). Provenance: Mean fragment length (read_length_bp > 0). |
+| `fragment_sd_bp` | float | `150.0` | — | yes | Fragment length standard deviation. Provenance: Fragment length standard deviation. |
+| `site_depth_cv` | float | `0.0` | — | yes | Shared site-depth lognormal CV (population mean one); 0 = off. Provenance: Shared site-depth lognormal CV (population mean one); 0 = off. |
+| `site_depth_window_bp` | int | `0` | — | yes | Share site factors within physical windows of this width; 0 = independent sites. Provenance: Share site factors within physical windows of this width; 0 = independent sites. |
+| `count_dispersion` | float | `0.0` | — | yes | Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. Provenance: Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. |
 
 ## Presets
 

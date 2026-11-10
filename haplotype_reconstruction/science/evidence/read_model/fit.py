@@ -23,7 +23,6 @@ binomial in every candidate; only heterozygotes have an overdispersion parameter
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, cast
 
@@ -119,26 +118,10 @@ BINOMIAL = "binomial"
 SAMPLE_BINOMIAL = "sample_binomial"
 SAMPLE_JOINT = "sample_joint"
 
-# Box constraints of the optimisers (logit error, logit balance, log kappa, mixing logits).
-# Observed-Hessian finite-difference step and the positive-definiteness floor.
-# Samples with an identifiable effect needed for the empirical-Bayes hyperfit.
-# Newton polish of every L-BFGS-B fit (release 2.1, design A-5 / review R5): central-difference Hessian columns of the
-# analytic gradient (relative step), at most this many Newton steps, done when a step moves no coordinate by more
-# than the tolerance (relative to max(1, |x|)), or when steps below _POLISH_STAGNATION stop shrinking (a flat
-# direction, e.g. log kappa near the binomial limit, locates its optimum only to the gradient's rounding divided by
-# its curvature: TroMau chr15 ~1e-10 in log kappa). Measured on actm3 chr13 (sample_joint, 465 parameters): L-BFGS-B
-# stops 8e-3 (logits) and 3e-4 (log kappa) short of the optimum and two paths differ by 2e-4; after 3 Newton steps
-# both agree to 1e-14 (logits) and 2e-13 (log kappa); on TroMau chr15 log kappa moves 12.49 -> 15.23 in 12 steps.
-# A step whose predicted decrease is above the objective's rounding (relative _POLISH_DECREASE) must decrease it
-# (backtracking); smaller steps are taken as they are.
-# A coordinate whose Hessian diagonal is below this fraction of the largest one has no curvature (it is held).
-# EM starts whose converged log likelihoods lie within this many nats per observation of the best are the same
-# optimum (EM stops at a gain of em_tolerance_per_observation per observation; three starts of real contigs end
-# within 1e-11 per observation of each other, measured on actm3). Kept for diagnostics after stationary polishing;
-# distinct stationary models use the training-likelihood rule below.
-# One nat is the existing read-model likelihood tie band, shared with held-out selection.
-# Empirical-Bayes hyperfit: the boundary tau = 0 is kept when its profile value is within this relative band of the
-# interior optimum's (the two coincide when the optimum is the boundary; a band at that exact tie, design A-7).
+# Newton polish uses central differences of the analytic gradient and backtracking to locate stationary fits
+# independently of the L-BFGS-B path. Flat directions stop when small steps cease shrinking; the numerical
+# bounds, stopping scales and likelihood tie rules are described with their constants in
+# read_model/parameters.py.
 
 
 def fixed_model(error: float, n_samples: int) -> ReadModelFit:
@@ -196,9 +179,7 @@ def log_predictive(fit: ReadModelFit, depth, alt) -> np.ndarray:
     return out
 
 
-# ---------------------------------------------------------------------------------------------
-# Newton polish (release 2.1): every fit is moved to its optimum, independently of the optimiser's path
-# ---------------------------------------------------------------------------------------------
+# Newton polish locates stationary fits independently of the initial optimizer path.
 
 
 def _held(x, gradient, lower, upper):
@@ -480,13 +461,13 @@ def _shared_box_step(shared, blocks, coupling, gradient, lower, upper, fixed):
 
 
 def _polish_shared(vector, hist, depth, alt, *, diagnostics=None):
-    """Existing Newton policy with a two-shared-coordinate block Hessian.
+    """Newton polish with a two-shared-coordinate block Hessian.
 
     Samples have independent two-coordinate nuisance mixtures conditional on the
     shared error and balance. The shared block uses central differences; analytic
     covariance terms preserve nearly absent nuisance components and their shared
     coupling. Each Newton direction solves the box-constrained quadratic via
-    the structured Schur system. Bounds, backtracking and stopping are unchanged.
+    the structured Schur system. Box bounds, backtracking and motion/stagnation tests control each step.
     """
 
     def finish(point, iterations, converged, reason):
@@ -535,7 +516,7 @@ def _polish_shared(vector, hist, depth, alt, *, diagnostics=None):
         except _ActiveSetCycle:
             return finish(x, iteration - 1, False, "active_set_cycle")
         except (LinAlgError, ValueError):
-            # The existing coordinate-curvature floor/fallback remains unchanged.
+            # Hold coordinates whose curvature falls below the relative diagonal floor.
             free = ~held
             kept = diagonal > _POLISH_CURVATURE_FLOOR * max(float(diagonal[free].max(initial=0.0)), 0.0)
             if kept[free].all() or not kept[free].any():
@@ -561,7 +542,7 @@ def _polish_shared(vector, hist, depth, alt, *, diagnostics=None):
 
 
 def _shared_diagnostics(record):
-    """Retain native start/failure fields as the D1 scientific fallback contract."""
+    """Retain start and failure diagnostics for the scientific fallback decision."""
     if record is None:
         return None
     starts = []
@@ -592,15 +573,14 @@ class SharedStationarityError(RuntimeError):
 def fit_shared(hist, depth, alt, config: ReadModelParameters) -> ReadModelFit:
     """Polish every start and retain a representative of equivalent stationary fits.
 
-    Shared logits use the existing small-step resolution, nuisance logits the
-    existing stagnation resolution. This is numerical equivalence, not an error
+    Shared logits use the small-step resolution, nuisance logits the
+    Newton stagnation resolution. This is numerical equivalence, not an error
     bound. Maximum training likelihood then lexicographic parameters chooses the
     representative. Distinct competitors must lose by more than the likelihood
     tie band; otherwise the contig uses the fixed model. A failed polish is a failed start.
     """
     # Fix only the floating-point evaluation order, using training data content.
-    # The objective and weights are unchanged. Equal histogram rows are identical
-    # terms; no sample label or incoming row position chooses a numerical endpoint.
+    # Equal histogram rows contribute identical terms; no sample label or incoming row position chooses a numerical endpoint.
     order = np.asarray(sorted(range(len(hist)), key=lambda i: hist[i].tobytes()), dtype=np.int64)
     undo = np.argsort(order)
     hist = np.ascontiguousarray(hist[order])
@@ -654,7 +634,7 @@ def fit_shared(hist, depth, alt, config: ReadModelParameters) -> ReadModelFit:
         )
     vectors = np.asarray([c["vector"] for c in candidates])
     # Numerical equivalence, not an error bound: shared observation parameters
-    # retain the small-step resolution; nuisance logits use the existing Newton
+    # retain the small-step resolution; nuisance logits use the Newton
     # stagnation resolution. Both distances are checked over the complete family.
     shared_distance = nuisance_distance = 0.0
     distances = []
@@ -842,7 +822,7 @@ def _normal_hyperfit(values, variances, fallback):
 
 def _profile_root(slope, start, ceiling):
     """The stationary point of the hyperfit profile near Brent's bounded minimum ``start`` (xatol 1e-5): the root of
-    its derivative, bracketed around ``start`` and solved to rounding precision (release 2.1), so tau does not depend
+    its derivative, bracketed around ``start`` and solved to rounding precision, so tau does not depend
     on Brent's path; ``start`` when no sign change brackets it (a minimum at a bound)."""
     if slope(ceiling) < 0.0:
         return float(ceiling)
@@ -871,20 +851,38 @@ def _profile_root(slope, start, ceiling):
     return float(start)
 
 
-def fit_pooled_samples(hist, depth, alt, shared: ReadModelFit, team: int) -> ReadModelFit:
+def _sample_fits(worker, tasks, map_work):
+    """Finish recoverable fits before raising the first numerical failure in sample order.
+
+    Calibration continues with simpler candidates after these errors. No sample
+    work may outlive that fallback, even when the supplied map aborts on errors.
+    """
+
+    def attempt(task):
+        try:
+            return worker(task)
+        except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
+            return error
+
+    results = list(map_work(attempt, tasks))
+    for result in results:
+        if isinstance(result, Exception):
+            raise result
+    return results
+
+
+def fit_pooled_samples(hist, depth, alt, shared: ReadModelFit, *, map_work=map) -> ReadModelFit:
     """Per-sample binomial effects shrunk by the empirical-Bayes prior (one sample per thread)."""
     tasks = list(enumerate(hist))
     worker = partial(_fit_sample, depth=depth, alt=alt, shared=shared)
-    with ThreadPoolExecutor(max_workers=team) as pool:
-        preliminary = list(pool.map(worker, tasks))
+    preliminary = _sample_fits(worker, tasks, map_work)
     estimates = np.asarray([x[0] for x in preliminary])
     variances = np.asarray([x[1] for x in preliminary])
     shared_local = shared.local()
     hyper = [_normal_hyperfit(estimates[:, j], variances[:, j], shared_local[0, j]) for j in range(2)]
     mean, variance = np.asarray(hyper).T
     worker = partial(worker, prior=(mean, variance))
-    with ThreadPoolExecutor(max_workers=team) as pool:
-        final = list(pool.map(worker, tasks))
+    final = _sample_fits(worker, tasks, map_work)
     fitted = np.asarray([x[0] for x in final])
     return ReadModelFit(
         name=SAMPLE_BINOMIAL,

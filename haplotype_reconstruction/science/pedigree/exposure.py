@@ -9,12 +9,11 @@ named trajectories and BACKGROUND are never identity evidence.
 
 Every quantity is a function of the unordered pair masses (S (S + 1) / 2 per sample and bin), which
 replace the ordered marginals once the projection is built (half their size). The joint presence
-features are formed inside the edge and pair loops with the arithmetic of the stored features of
-92b3daf, so no further N x B x S (S + 1) / 2 arrays exist (base kept three, ~7.6 GB at N = 320,
-K = 30). Cost O((E + T) B S^2 / 2).
+features are formed inside the edge and pair loops to avoid additional persistent
+N x B x S (S + 1) / 2 arrays. Three such float64 arrays would occupy about 7.6 GB at N = 320,
+K = 30. Cost O((E + T) B S^2 / 2).
 
 Method: docs/methods/pedigree.md#exposure-and-junction-counts
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations

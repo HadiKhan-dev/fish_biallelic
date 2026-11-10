@@ -12,13 +12,13 @@ Bridge operator per boundary (row = source state, column = destination): T = dia
 alpha beta^T off the diagonal (+ one pivot row arm and column arm), solved by bisection on the
 maximum-entropy root; branch 0 diagonal, 1 all-small, 2 one-large, 3 Hall star.
 
-PS07 identity notes (WP_PE1 §4.7):
+Bridge construction and checks (PS07):
 1. Row and column change flows a, b: negative beyond `64 ε` → invalid; clipped at 0. `row_mass` = π_b(s), or for a
    subnormal source mass the retained diagonal + outgoing flow; `stay = diagonal/row_mass` (1 for zero mass).
-2. **Zero row residual** (`row_total == 0.0`, `projection.py:432-435`): branch 0; invalid if the column total is not
+2. **Zero row residual** (`row_total == 0.0`): branch 0; invalid if the column total is not
    zero; **the rest of the steps and the post-check are skipped for that boundary** (`continue`). Otherwise invalid when
    `|row − column| > 64 ε·max(row, column)` **and** `> 64 ε`; a, b divided by the row total (b is not renormalised
-   separately); **`b_sum = Σ b` non-positive or non-finite → invalid** (`:446-449`) and the boundary is skipped.
+   separately); **`b_sum = Σ b` non-positive or non-finite → invalid**  and the boundary is skipped.
 3. Any load `a_s + b_s > 1 + 64 ε` → invalid.
 4. **Hall state:** among states whose load is within `HALL_ULPS·ε·max(1, max load)` (`HALL_ULPS = 64.0`) of the
    maximum, the one with the largest π_b + π_{b+1}; masses within `HUB_MASS_TIE = 2^-20` of that maximum are tied and
@@ -29,25 +29,23 @@ PS07 identity notes (WP_PE1 §4.7):
    with a positive Hall gap); else **one-large branch 2**: search states for a bracket `H_l(0) >= −64 ε` and
    `H_l(q_max) <= 64 ε`, first pass only states whose L is within `64 ε·max(1, max L)` of the maximum, second pass
    every state, in index order (reversed under the convention); if no state brackets, use q = q_max on branch 1.
-7. **Bisection** (`projection.py:348-374`): at most `min(128, bridge_max_iterations)` halvings of [0, q_max], stopping
+7. **Bisection**: at most `min(128, bridge_max_iterations)` halvings of [0, q_max], stopping
    early when the midpoint equals an endpoint; return the endpoint with the smaller |H|, **the lower endpoint when the
    magnitudes are equal** (`abs(lower) <= abs(upper)`; independent of the convention).
-   `bridge_tolerance` is **not** a root tolerance.
+   `bridge_postcheck_tolerance` is **not** a root tolerance.
 8. β from the root; **pivot** = the lowest state whose β is within `HALL_ULPS·ε·|top β|` of the largest (highest under
    the reversal); β divided by the pivot's β; α and row arms from the off fractions.
-9. **Post-check** (`projection.py:615-656`) with `post_tolerance = max(8·bridge_tolerance, 256 ε)`: rows with zero
+9. **Post-check** with `post_tolerance = max(8·bridge_postcheck_tolerance, 256 ε)`: rows with zero
    row mass first get `stay = 1`, `alpha = 0`, `column_arm = 0`; a stay or any transition entry **`< −post_tolerance`**
    is invalid; the maximum residual over (reachable rows' |row sum − 1|, |π_b(s)·stay − diagonal flow|, |reproduced
    π_{b+1}(d) − π_{b+1}(d)|) is invalid when **`> post_tolerance`** (equality accepted).
-   Any failure → the stage stops (3.5 `FloatingPointError("persistence-constrained projected bridge did not
-   converge")`; 4.0 `InvariantError` with candidate, component, boundary, branch and the failing residual). **There is
-   no fallback**; do not add one.
+   Any failure raises `ProjectionInvariantError` (an `InvariantError`) with candidate, component, boundary, branch
+   and the failing residual, stopping the stage. There is no fallback.
 
 The first == second < background transmitted-ALT branch is unreachable;
 named states pass through before the BACKGROUND conditional calculation.
 
 Method: docs/methods/pedigree.md#transmitted-state-projection
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -74,9 +72,7 @@ from .parameters import (
     INFORMATIVE_GL_SPREAD,
 )
 
-# A GL row whose max - min exceeds this is informative (base pedigree definition).
-
-# Exact Hall equality of a bridge (release 2.1, review R12). Where the equality holds mathematically (all residual flow
+# Exact Hall equality of a bridge. Where the equality holds mathematically (all residual flow
 # through one state) the computed Hall gap is the rounding of the two differences that form it: <= 2 ULP of their terms
 # on TroMau chr3 (5,009 of 147,320 bridges), and 6,923 bridges flipped between exactly 0 and such a rounding value
 # under iid 1e-9 noise, switching between the star and the one-large parameterisation (M1/M2 scores moved by up to
@@ -84,12 +80,12 @@ from .parameters import (
 # is that equality up to rounding (the same 64 ULP as the feasibility tolerance); genuine gaps move by <= 3e-16 under
 # the same noise. The scale is per difference: a gap formed by tiny flows is compared with those flows, not with 1.
 
-# The Hall state among states whose loads tie up to rounding (release 2.1). Such ties are the rule when the residual
+# The Hall state among states whose loads tie up to rounding. Such ties are the rule when the residual
 # flow is an exchange between two states (both loads equal 1 up to rounding: 1,500-1,900 bridges per TroMau contig);
 # the choice then decides only the rows of near-unreachable states (masses far below rounding of the flows), which the
 # star sends through the Hall state. In the exact transmitted chain those states leave to, and are entered from, the
 # state that holds the mass at the boundary, so the Hall state is the tied state with the largest mass pi_b + pi_b+1
-# (masses within HUB_MASS_TIE are tied: then the lowest state). 2.0 took the first maximum of the rounded loads.
+# (masses within HUB_MASS_TIE are tied: then the lowest state), never the first maximum of the rounded loads.
 
 
 @dataclass(frozen=True)
@@ -183,7 +179,7 @@ def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, sit
     marginalised over the source posterior, without an S^2 per-site array.
 
     Only BACKGROUND (no panel haplotype) is conditioned on the candidate's reads. A named class transmits its panel
-    allele, or BACKGROUND's ALT frequency where the panel left it uncalled (release 2.16): the panel leaves alleles
+    allele, or BACKGROUND's ALT frequency where the panel left it uncalled: the panel leaves alleles
     uncalled where the data are noisy, and there the candidate's own GL rows are noisy too (simulations: heterozygous-
     looking at ~40% of truly homozygous such sites), so conditioning on them cost true parents tens of nats per
     chromosome against M0 and the relative models."""
@@ -568,7 +564,7 @@ def _bridges_kernel(
                 max_load = load
             root_sum = math.sqrt(a[state]) + math.sqrt(b[state])
             max_l = max(max_l, root_sum * root_sum)
-        # The Hall state (release 2.1): among the states whose load is within HALL_ULPS of the maximum (tied up to
+        # The Hall state: among the states whose load is within HALL_ULPS of the maximum (tied up to
         # rounding, e.g. the two states of an exchange), the one with the largest mass across the boundary, then the
         # lowest state (HUB_MASS_TIE).
         load_floor = max_load - HALL_ULPS * epsilon * max(1.0, max_load)
@@ -609,7 +605,7 @@ def _bridges_kernel(
         q = 0.0
         if states == 2 or hall_gap == 0.0 or equality:
             # Exact Hall equality has a unique star support (always for S = 2); gaps within HALL_ULPS of their terms
-            # are that equality up to rounding (release 2.1).
+            # are that equality up to rounding.
             branch[candidate, boundary] = 3
             source_mass = row_mass[hall_index]
             operator_pivot[candidate, boundary] = hall_index
@@ -680,7 +676,7 @@ def _bridges_kernel(
             else:
                 for state in range(states):
                     beta[candidate, boundary, state] = qstar[state]
-            # The pivot: the lowest state whose beta is within HALL_ULPS of the largest (release 2.1).
+            # The pivot: the lowest state whose beta is within HALL_ULPS of the largest.
             top_beta = beta[candidate, boundary, 0]
             for state in range(1, states):
                 top_beta = max(top_beta, beta[candidate, boundary, state])
@@ -838,7 +834,7 @@ def project(
     excursion = np.zeros((candidates, bins - 1), dtype=np.float64)
     if source_gap_support_sites > 0 and bins > 1:
         # A parent bin without informative markers carries only the painter's interpolation (its copying
-        # process; before 2.14 an imposed switch-suppression prior): such bridges take the meiotic
+        # process): such bridges take the meiotic
         # switch probability k as a uniform excursion weight, scaled by 1 - min(1, n / N) for the smaller
         # adjacent count n.
         per_bin = informative_marker_counts(gl, observed, bin_start, bin_stop)

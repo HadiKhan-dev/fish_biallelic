@@ -1,22 +1,12 @@
-"""Sparse block messages, reconstructed by their original block-normalised recursion.
+"""Sparse block messages, reconstructed by the dense block-normalised recursion.
 
 Owns bounded message reconstruction and two-segment view lifetimes; values equal the dense recurrence.
 Method: docs/methods/founder_refinement.md#messages (RC07).
 
-Owns sparse boundary-message reconstruction and reverse-clamped views.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#checkpoints (RC06-RC07).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-
-
 Large, wide message sets keep both ends and every CHECKPOINT_BLOCKS boundary,
-plus per-block normalisers. Others retain every boundary and use the original kernels.
+plus per-block normalisers. Others retain every boundary and use the dense kernels.
 Updates stop only at unchanged checkpoints (scores and switch costs). A reversed pass
-reconstructs the clamped original forward recursion, rather than a differently rounded
+reconstructs the clamped forward recursion, rather than a differently rounded
 reverse backward recursion. Reader caches are private; checkpoints and start-panel alleles
 are read-only until the next sweep, after all readers have finished.
 """
@@ -41,7 +31,7 @@ from .objective import (
 from .overloads import overloads_for
 from .window import capacity, cover, stretch, stretch_back
 
-# Fixed storage policy; measured by the SW5 replay/timing campaign.
+# Fixed storage policy: sparse boundaries trade message storage for reconstruction work.
 CHECKPOINT_BLOCKS = 16
 # Two segments accommodate a junction and a proposal's other flank.
 CACHE_SEGMENTS = 2

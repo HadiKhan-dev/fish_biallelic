@@ -22,12 +22,11 @@ The sweep limit only marks a fit non-converged, never silently.
 Best of two: every fit runs this search twice from the same start, concurrently, once with its
 first pass forward and once reversed (both then alternate; each convention computes its own
 proposals and directional messages). Each is a deterministic local search; the fit keeps the higher exact
-F, decided by tie classes of F (release 2.1: two results within the quantum tie_rules.quantum("refine_F", F)
-are tied; release 2.3 retains the family and uses the minimum exact-optimal switch count
-as the representative prior, then a naming convention), so at a
-fixed start it never ends measurably below the forward-first search. The fit's panel is returned in
-canonical founder order (rows sorted lexicographically, design 5.1): founder indices of the count pass
-(candidates and tie-breaks) are content ranks.
+F, decided by tie classes of F (two results within tie_rules.quantum("refine_F", |F|) are tied). Distinct tied
+panels are retained as a family; the representative has the fewest exact-optimal switches, then the content
+convention. At a fixed start the fit therefore never ends measurably below the forward-first search.
+The fit's panel is returned in canonical founder order (rows sorted lexicographically), so founder
+indices of the count pass (candidates and tie-breaks) are content ranks.
 """
 
 from __future__ import annotations
@@ -55,8 +54,7 @@ from .. import orders as tie_rules
 from . import checkpoints, costs
 from . import gains as gains_kernels
 from . import messages as kernels
-from .acceptance import MOVE_COARSE, MOVE_FINE, TOL
-from .acceptance import accept_pass as _traced_accept_pass
+from .acceptance import MOVE_COARSE, MOVE_FINE, TOL, accept_pass
 from .beam import WindowBeam
 from .cache import Orientation, ProposalCache
 from .cache import WindowMemo as _WindowMemo
@@ -73,7 +71,7 @@ from .parameters import (
     LONG_STRIDE,
     LONG_WINDOW,
     PAIR_TABLE_BYTES,
-    WEAK_JUNCTION_MARGIN,
+    SWITCH_PENALTY,
     RefinementParameters,
 )
 from .proposals import WindowSolver
@@ -81,31 +79,17 @@ from .reductions import panel_objective
 from .workspace import sample_ranges, sample_threads
 
 
-def accept_pass(*args, **kwargs):
-    """Native fit-record view of the instrumented one-sweep acceptance primitive.
-
-    Event arrays belong to the dedicated sweep seam; 3.5 full-fit histories hold
-    the complete native counters only. This does not remove a native field.
-    """
-    counters, gains, pairs = _traced_accept_pass(*args, **kwargs)
-    counters.pop("decision_trace", None)
-    return counters, gains, pairs
-
-
 def _top_class(values) -> np.ndarray:
-    """Indices of the values in the closed band [max - q, max], q the refine_F floor quantum (release 2.13): the
-    polish's choices among candidates whose exact gains differ by less than q (a safety margin over their motion
-    under 1e-6 relative GL noise, not a significance level) are made by content, not by the last bits of the gains.
-    A maximum band, not the chained tie classes of maths.ties: (0, 0.75q, 1.5q) gives the last two."""
+    """Indices of the values in the closed band [max - q, max], q the refine_F floor quantum.
+
+    The polish chooses among candidates whose exact gains differ by less than q (a safety margin over their
+    motion under 1e-6 relative genotype-likelihood noise, not a significance level) by content, not by the last
+    bits of the gains. It is a band at the maximum, not the chained tie classes of core.ties:
+    (0, 0.75q, 1.5q) keeps the last two."""
     values = np.asarray(values, dtype=np.float64)
     return np.flatnonzero(values >= values.max() - tie_rules.quantum("refine_F", 0.0))
 
 
-# Precursor content scoring of the bridge search runs in batches of at most this many message bytes.
-# Polish: long one-founder moves, beam offers on LONG_WINDOW-block windows at LONG_STRIDE, each
-# also tried with one private correction of LONG_CORRECTION blocks (SweepEngine.long_repair).
-# Donors of a long offer's corrections: the LONG_DONORS founders whose rows agree with the offer on most blocks of
-# its changed span (ties: founder order), plus the incumbent's own rows; O(1) per offer keeps long_repair cubic in K.
 # Acceptance counters of the polish's escape and long-repair passes merged into their sweep's counters.
 _POLISH_PASS_KEYS = (
     "evaluated",
@@ -124,10 +108,6 @@ _POLISH_PASS_KEYS = (
     "guard_shared_switches",
     "lex_items",
 )
-# Beam width of the long windows' offers (the ordinary escape keeps beam.BEAM_WIDTH).
-# Junctions whose best suffix exchange costs less than one switch are reported as weak (a fixed
-# reporting margin of 20 nats, 2.6's diplotype switch penalty; 2.8 switch costs are
-# map-derived).
 _MOVE_CODES = {"fine": MOVE_FINE, "coarse": MOVE_COARSE}
 _TOTAL_KEYS = (
     "fine",
@@ -191,7 +171,7 @@ def _weak_junctions(gains, pairs, reverse, blocks):
     with the same founder pair merged (exact against the final panel in the certifying sweep)."""
     records = []
     for p in range(1, blocks):
-        if not gains[p] > -WEAK_JUNCTION_MARGIN:
+        if not gains[p] > -SWITCH_PENALTY:
             continue
         junction = blocks - p if reverse else p
         records.append((junction, int(pairs[p][0]), int(pairs[p][1]), float(gains[p])))
@@ -207,11 +187,6 @@ def _weak_junctions(gains, pairs, reverse, blocks):
 
 def _totals(history):
     return {key: sum(entry.get(key, 0) for entry in history) for key in _TOTAL_KEYS}
-
-
-# The pair-dosage table (L x Q int8) of the exact score is built up to this size, else the direct
-# kernel runs; both give the same values, so this is a speed choice only (a fixed constant: the
-# component task's memory estimate covers it).
 
 
 def _fit_summary(payload):
@@ -285,7 +260,6 @@ class SweepEngine:
         # Shallow branch copies share measured work; cached fits contribute no
         # new work. Updates occur only once per directional search, under a lock.
         self._profile_lock = threading.Lock()
-        self._phase_seconds: dict[str, float] = {}
         self._work_counters: dict[str, int] = {}
         self._fit_order = [0]
         self._ordinal_lock = threading.Lock()
@@ -362,6 +336,16 @@ class SweepEngine:
             self.records.save(label, payload)
 
     # ------------------------------------------------------------------ scores
+    def window(self, orientation, founders, budget):
+        """Read a window, filling lazy numerical tables on the live sample team."""
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
+            return orientation.window(founders)
+
+    def normalisers(self, founders, budget):
+        """Read the cached panel-independent terms, computing them on the live sample team."""
+        with budget.scope(sample_threads(self.workspace.samples, budget)):
+            return self.workspace.normalisers(founders)
+
     def per_sample(self, panel, budget):
         """Per-sample exact scores F_s of the panel, over consecutive sample ranges at the budget's
         live share re-read before each range."""
@@ -372,15 +356,15 @@ class SweepEngine:
             return cached
         ws = self.workspace
         founders = len(panel)
-        with budget.scope(sample_threads(self.workspace.samples, budget)):
+        with budget.scope(sample_threads(ws.samples, budget)):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(panel, np.int64))
+        window = self.window(self.forward, founders, budget)
+        with budget.scope(sample_threads(ws.samples, budget)):
             scores = np.asarray(
-                score_panel(
-                    alleles, ws.windows.view(founders), sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES, budget
-                )
+                score_panel(alleles, window, sample_ranges(ws.samples, budget), PAIR_TABLE_BYTES, budget)
             )
         # The panel-independent terms of K (start and stay): scores of different K compare.
-        return scores + ws.normalisers(founders)
+        return scores + self.normalisers(founders, budget)
 
     def minimum_switches(self, panel, budget):
         """Fewest exact-optimal diplotype switches, summed over the common evidence."""
@@ -392,7 +376,8 @@ class SweepEngine:
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             alleles = selected_alleles(ws.leaves, ws.offsets, np.asarray(key, np.int64))
         total = 0
-        win = ws.windows.view(len(alleles))
+        with budget.scope(sample_threads(ws.samples, budget)):
+            win = ws.windows.view(len(alleles))
         for s0, s1, threads in sample_ranges(ws.samples, budget):
             with budget.scope(threads):
                 _, counts = score_switches_direct(alleles, win, s0, s1)
@@ -421,7 +406,7 @@ class SweepEngine:
         """messages(_lex) of panel X: (fwd, bwd, fcnt, bcnt, fscale, bscale), counts None without
         lex; over consecutive sample ranges at the budget's live share."""
         samples, offsets = self.workspace.samples, self.forward.offsets
-        win = self.forward.window(len(X))
+        win = self.window(self.forward, len(X), budget)
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             haps = self.forward.haps(X)
         step = self.workspace.message_step or checkpoints.stride(len(X), self.blocks, samples, self.guarded)
@@ -438,40 +423,39 @@ class SweepEngine:
                         kernels.messages(haps, win, offsets, s0, s1, fwd.data, bwd.data, fscale, bscale)
                 else:
                     for msg, cnt, scale in ((fwd, fcnt, fscale), (bwd, bcnt, bscale)):
-                        checkpoints.update(
-                            haps,
-                            win,
-                            offsets,
-                            msg.bounds,
-                            changed,
-                            msg.data,
-                            cnt if lex else count3,
-                            scale,
-                            False,
-                            msg.forward,
-                            lex,
-                            s0,
-                            s1,
-                        )
+                        with budget.scope(sample_threads(s1 - s0, budget)):
+                            checkpoints.update(
+                                haps,
+                                win,
+                                offsets,
+                                msg.bounds,
+                                changed,
+                                msg.data,
+                                cnt if lex else count3,
+                                scale,
+                                False,
+                                msg.forward,
+                                lex,
+                                s0,
+                                s1,
+                            )
         return arrays
 
     def _messages(self, X, budget, held=None, lex=None):
-        """The messages of panel X (with switch counts when lex, default: under the guard) and their
-        wall time.
+        """The messages of panel X (with switch counts when lex, default: under the guard).
 
         held: (panel, messages) of an earlier panel, owned by the caller: updated in place to X's
         where X differs from that panel (update_messages(_lex), bitwise the full computation); a
         held backward half of None is computed whole. Held messages without switch
         counts are not updated to lexicographic ones (computed whole); held counts are dropped
         when lex is False (the scores of both recursions are the same)."""
-        started = 0.0
         lex = self.guarded if lex is None else bool(lex)
         if held is not None and lex and held[1][2] is None:
             held = None
         if held is None:
-            return self._full_messages(X, lex, budget), 0.0 - started
+            return self._full_messages(X, lex, budget)
         samples, offsets = self.workspace.samples, self.forward.offsets
-        win = self.forward.window(len(X))
+        win = self.window(self.forward, len(X), budget)
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             haps = self.forward.haps(X)
         panel, (fwd, bwd, fcnt, bcnt, fscale, bscale) = held
@@ -500,22 +484,23 @@ class SweepEngine:
                         )
                 else:
                     for msg, cnt, scale, valid in ((fwd, fcnt, fscale, True), (bwd, bcnt, bscale, known)):
-                        checkpoints.update(
-                            haps,
-                            win,
-                            offsets,
-                            msg.bounds,
-                            changed,
-                            msg.data,
-                            cnt if lex else count3,
-                            scale,
-                            valid,
-                            msg.forward,
-                            lex,
-                            s0,
-                            s1,
-                        )
-        return (fwd, bwd, fcnt, bcnt, fscale, bscale), 0.0 - started
+                        with budget.scope(sample_threads(s1 - s0, budget)):
+                            checkpoints.update(
+                                haps,
+                                win,
+                                offsets,
+                                msg.bounds,
+                                changed,
+                                msg.data,
+                                cnt if lex else count3,
+                                scale,
+                                valid,
+                                msg.forward,
+                                lex,
+                                s0,
+                                s1,
+                            )
+        return fwd, bwd, fcnt, bcnt, fscale, bscale
 
     def proposals(self, X, fwd, bwd, budget, cache=None, convention=None, prefix=None):
         """Every window template's proposals for panel X with messages fwd, bwd.
@@ -540,13 +525,11 @@ class SweepEngine:
                 result = memo.lookup(key)
                 if result is not None:
                     self.windows.work.reused(ordinals[index], result)
-                    return result, 0.0
-            started = 0.0
+                    return result
             result = self.windows.solve(index, X, fwd, bwd, frontier_bytes, convention, ordinal=ordinals[index])
-            cpu = 0.0 - started
             if memo is not None:
                 memo.store(key, result)
-            return result, cpu
+            return result
 
         spans = self.windows.spans
         results = [None] * len(spans)
@@ -585,14 +568,12 @@ class SweepEngine:
             max_frontier=0,
             fallbacks=0,
             changed=0,
-            worker_cpu=0.0,
             templates_solved=len(todo),
             templates_reused=len(spans) - len(todo),
             beam_truncations=0,
             beam_fallbacks=0,
         )
-        for result, cpu in results:
-            stats["worker_cpu"] += cpu
+        for result in results:
             for kind, a, c, k, rows, diagnostic in result:
                 stats["windows"] += 1
                 stats["certified"] += int(diagnostic["certified"])
@@ -637,7 +618,6 @@ class SweepEngine:
             beam_cut=int(beam_stats["beam_cut"]),
             beam_binding=int(beam_stats["beam_binding"]),
             box_max_gap=float(beam_stats["box_max_gap"]),
-            beam_wall=float(beam_stats["wall"]),
             accepted=0,
         )
         if not offers:
@@ -656,7 +636,7 @@ class SweepEngine:
                 bcnt,
                 bscale,
                 props,
-                self.forward.window(len(X)),
+                self.window(self.forward, len(X), budget),
                 self.guarded,
                 budget,
                 start_fwd=fwd,
@@ -716,7 +696,7 @@ class SweepEngine:
         LONG_DONORS screened founders' rows or the incumbent's (one private correction: a long surrogate optimum is
         often exact-F negative only through a short stretch), is a one-founder content candidate on the offer's
         window, scored exactly from the panel's messages (gains.candidate_gains). Per offer the best candidate
-        above TOL (content order among those within the refine_F floor quantum of the best, release 2.13) enters ONE
+        above TOL (content order among those within the refine_F floor quantum of the best) enters ONE
         acceptance pass as a coarse move, so the shared-junction guard
         applies; accepted gains are verified by full rescoring and must clear TOL. Candidates per offer
         O(window), each O(S L_w Q). Returns (panel or None, its per-sample scores, exact gain, record)."""
@@ -730,7 +710,6 @@ class SweepEngine:
             windows=int(beam_stats["windows"]),
             beam_cut=int(beam_stats["beam_cut"]),
             beam_binding=int(beam_stats["beam_binding"]),
-            beam_wall=float(beam_stats["wall"]),
             candidates=0,
             repaired=0,
             accepted=0,
@@ -767,7 +746,7 @@ class SweepEngine:
         with budget.reserve(nbytes, label="founder_refinement long repair"):
             fwd, bwd, fcnt, bcnt, fscale, bscale = self._full_messages(X, self.guarded, budget)
             orient = self.forward
-            win = orient.window(founders)
+            win = self.window(orient, founders, budget)
             threads = max(1, int(budget.threads()))
             with budget.scope(threads):
                 haps = orient.haps(X)
@@ -809,7 +788,7 @@ class SweepEngine:
                     groups.setdefault((a, c, k), []).append((gain, r))
             best = {}
             for unit, members in groups.items():
-                # The variants within the quantum of the best gain are tied: content (the rows) decides (2.13).
+                # The variants within the quantum of the best gain are tied: content (the rows) decides.
                 tied = _top_class([gain for gain, _ in members])
                 r = min((members[i][1] for i in tied), key=lambda rows: tuple(rows.tolist()))
                 best[unit] = (None, r)
@@ -916,19 +895,17 @@ class SweepEngine:
         At an ordinary fixed point the fine proposals of the sweep (the surrogate's window
         maximisers, rejected by exact acceptance) are bridge precursors whatever the sign of their
         exact gain: per fine window the precursor of largest exact gain (content order inside the refine_F floor quantum
-        of it, release 2.13) is
-        applied privately, and every founder-pair suffix exchange at every cut inside the window
+        of it) is applied privately, and every founder-pair suffix exchange at every cut inside the window
         is scored exactly from the private panel's local messages (prefix and suffix outside the
         window unchanged). The offer is precursor gain + exchange gain; the largest above TOL is
         returned (ties within the quantum: content order of (cut, pair, window, founder, rows)) as (panel, predicted
-        exact gain, record). The caller verifies the gain by full rescoring. (The 2.8 design prototype's fine-bridge
-        family on the 2.6 engine's proposals.)"""
+        exact gain, record). The caller verifies the gain by full rescoring."""
         ws = self.workspace
         founders, blocks = X.shape
         X = np.ascontiguousarray(X, np.int64)
         fwd, bwd, _, _, _, bscale = self._full_messages(X, False, budget)
         orient = self.forward
-        win = orient.window(founders)
+        win = self.window(orient, founders, budget)
         offsets, leaves = orient.offsets, orient.leaves
         threads = max(1, int(budget.threads()))
         with budget.scope(threads):
@@ -972,7 +949,7 @@ class SweepEngine:
             windows.setdefault((a, c), []).append(m)
         best = {}
         for (a, c), members in windows.items():
-            # Precursors within the quantum of the largest exact gain are tied: content decides (2.13).
+            # Precursors within the quantum of the largest exact gain are tied: content decides.
             tied = [members[i] for i in _top_class([content[m] for m in members])]
             m = min(tied, key=lambda m: (int(fine_props[m][2]), tuple(int(x) for x in fine_props[m][3])))
             best[(a, c)] = (None, m)
@@ -992,7 +969,7 @@ class SweepEngine:
             # A streaming window is private to this child. Resident log tables
             # are immutable and shared, as in independent fixed-K refits.
             with ws.windows.lease(founders):
-                local_win = orient.window(founders)
+                local_win = self.window(orient, founders, child)
                 team = sample_threads(ws.samples, child)
                 with child.scope(team):
                     haps_y = orient.haps(Y)
@@ -1076,15 +1053,12 @@ class SweepEngine:
 
     def _sweep_inputs(self, X, budget, cache, held=None, convention=None, lex=None, prefix=None):
         """The messages of panel X and its window proposals (pure functions of the panel and the convention)."""
-        message_state, message_wall = self._messages(X, budget, held, lex)
-        started = 0.0
+        message_state = self._messages(X, budget, held, lex)
         proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention, prefix)
         return dict(
             messages=message_state,
             proposals=proposals,
             stats=stats,
-            message_wall=message_wall,
-            proposal_wall=0.0 - started,
         )
 
     # ------------------------------------------------------------------ fixed-K fit
@@ -1120,13 +1094,11 @@ class SweepEngine:
             )
             self.ledger.fits[token] = variants
             return self._choose_fit(token, variants)
-        started = 0.0
-        # Release 2.2: the two searches differ in their start direction and in their content-order convention
+        # The two searches differ in their start direction and in their content-order convention
         # (forward-first: the default order, reverse-first: the reversed one), so the kept fit is the better of
         # both conventions rather than a product of one (equal F with different panels: flagged tied_panels).
-        # Their sweep-0 proposals then differ, so the start panel's inputs are not shared (2.1 computed them once).
-        # The initial exact objective is independent of direction/convention;
-        # only proposals and directional messages need separate computation.
+        # Their sweep-0 proposals differ; only the initial exact objective, independent of direction and
+        # convention, is shared.
         initial_scores = self.per_sample(start, budget)
         if polish:
             # Polish fits run the forward-first search only, with the whole budget (its extra move families
@@ -1219,17 +1191,10 @@ class SweepEngine:
             frontier_fallbacks=int(kept["frontier_fallbacks"]),
             accepted=FitAcceptanceTotals(**kept["accepted"]),
             max_deviation=float(kept["max_deviation"]),
-            wall=0.0 - started,
-            worker_cpu=float(sum(search["worker_cpu"] for search in executed)),
-            thread_cpu=float(sum(search["thread_cpu"] for search in executed)),
             tied_panels=tied_panels,
             tied_scores=tied_scores,
             tied_switches=tied_switches,
             minimum_switches=minimum_switches,
-            phase_seconds={
-                name: sum(search.get("phase_seconds", {}).get(name, 0.0) for search in executed)
-                for name in ("messages", "refinement_windows", "acceptance", "guarded_acceptance")
-            },
             work_counters=FitWorkCounters(
                 **{
                     name: sum(search.get("work_counters", {}).get(name, 0) for search in executed)
@@ -1290,7 +1255,7 @@ class SweepEngine:
 
     def _converge_direction(self, start, label, first, budget, initial_scores=None, polish=False, ordinal=None):
         """_search under one window lease of the panel's K: every kernel of the search reads the same
-        streaming window (window.Windows.lease; nothing for a resident component)."""
+        streaming window (stages.assembly.storage.Windows.lease; nothing for a resident component)."""
         with self.workspace.windows.lease(len(start)):
             return self._search(start, label, first, budget, initial_scores, polish, ordinal)
 
@@ -1304,7 +1269,6 @@ class SweepEngine:
         done = self._load(f"{label}.done")
         if done is not None:
             return np.asarray(done["rows"], np.int64).copy(), done["record"]
-        started, started_cpu = 0.0, 0.0
         X = np.ascontiguousarray(start, np.int64).copy()
         founders, blocks = X.shape
         # Per-sample scores of the current panel X, while known: a pass that accepts nothing leaves
@@ -1312,7 +1276,7 @@ class SweepEngine:
         current = self.per_sample(X, budget) if initial_scores is None else initial_scores
         F0 = panel_objective(current)
         F, history, junctions, converged, sweep = F0, [], (), False, 0
-        # Each direction owns its proposal cache (RS19's shared path is dead).
+        # Each direction owns its proposal cache: the two conventions' proposals differ from sweep 0.
         cache = ProposalCache()
         # This search's own messages of the panel its last sweep started from, updated in place by
         # the next sweep: (panel, messages); a reversed pass keeps their forward half only, so the
@@ -1340,7 +1304,6 @@ class SweepEngine:
                 converged = True
                 break
         while not converged and sweep < limit:
-            sweep_started = 0.0
             inputs = self._sweep_inputs(
                 X,
                 budget,
@@ -1354,7 +1317,6 @@ class SweepEngine:
             lex = inputs["messages"][2] is not None
             fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
             proposals, stats = inputs["proposals"], inputs["stats"]
-            message_wall, proposal_wall = inputs["message_wall"], inputs["proposal_wall"]
             del inputs
             reverse = (sweep % 2 == 1) if first == "fwd" else (sweep % 2 == 0)
             fine_props = [(a, c, k, rows) for kind, a, c, k, rows in proposals if kind == "fine"]
@@ -1364,7 +1326,6 @@ class SweepEngine:
                     props.setdefault(blocks - c, []).append((_MOVE_CODES[kind], blocks - a, k, rows[::-1].copy()))
                 else:
                     props.setdefault(a, []).append((_MOVE_CODES[kind], c, k, rows))
-            pass_started = 0.0
             lex_aborts = 0
             while True:
                 with budget.scope(sample_threads(self.workspace.samples, budget)):
@@ -1395,7 +1356,7 @@ class SweepEngine:
                     stored_cnt,
                     stored_scale,
                     props,
-                    orientation.window(founders),
+                    self.window(orientation, founders, budget),
                     lex,
                     budget,
                     start_fwd=start_fwd,
@@ -1410,8 +1371,7 @@ class SweepEngine:
                 lex_aborts += 1
                 del stored, stored_cnt, stored_scale, start_fwd, start_fcnt, kept, Xo
                 del fwd, bwd, fcnt, bcnt, fscale, bscale
-                message_state, extra_wall = self._messages(X, budget, None, lex=True)
-                message_wall += extra_wall
+                message_state = self._messages(X, budget, None, lex=True)
                 fwd, bwd, fcnt, bcnt, fscale, bscale = message_state
                 del message_state
                 lex = True
@@ -1426,11 +1386,10 @@ class SweepEngine:
             if accepted or current is None:
                 current = self.per_sample(X, budget)
             F_new = panel_objective(current)
-            pass_wall = 0.0 - pass_started
             accounted = acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"]
             deviation = F_new - (F + accounted)
-            # Exactness check of the accepted gains (class-A fix D3: absolute in F's scale plus a
-            # rounding allowance per accepted move, instead of 1e-6 relative to F).
+            # Exactness check of the accepted gains: a relative allowance in F's scale plus a rounding
+            # allowance per accepted move (each accepted gain is its own floating-point sum).
             if abs(deviation) > EXACT_GAIN_RELATIVE * max(1.0, abs(F_new)) + EXACT_GAIN_ABSOLUTE * accepted:
                 raise InvariantError(
                     f"founder refinement {self.name}.{label}:{sweep}: exact F changed by "
@@ -1457,7 +1416,6 @@ class SweepEngine:
             if accepted == 0 and polish:
                 # Polish: a beam escape pass at the ordinary fixed point (beam_escape); its fine
                 # offers are the bridge precursors.
-                escape_started = 0.0
                 Y, scores, gain, escape_record, fine_props = self.beam_escape(X, F_new, budget, first == "rev")
                 acc.update(
                     escape_offers=escape_record["offers"],
@@ -1473,12 +1431,9 @@ class SweepEngine:
                     acc.update(escape=int(escape_record["accepted"]), escape_gain=gain)
                     accepted = int(escape_record["accepted"])
                     accounted += gain
-                escape_wall = 0.0 - escape_started
-                pass_wall += escape_wall
-                stats = dict(stats, escape_wall=escape_wall, escape=escape_record)
+                stats = dict(stats, escape=escape_record)
             if accepted == 0 and polish:
                 # Polish: long one-founder moves with one private correction (long_repair).
-                long_started = 0.0
                 Y, scores, gain, long_record = self.long_repair(X, F_new, budget, first == "rev")
                 acc.update(
                     long_offers=long_record["offers"],
@@ -1494,12 +1449,9 @@ class SweepEngine:
                     acc.update(long=int(long_record["accepted"]), long_gain=gain)
                     accepted = int(long_record["accepted"])
                     accounted += gain
-                long_wall = 0.0 - long_started
-                pass_wall += long_wall
-                stats = dict(stats, long_wall=long_wall, long=long_record)
+                stats = dict(stats, long=long_record)
             if accepted == 0 and polish and fine_props:
                 # Polish: fine-window/suffix bridges at an ordinary fixed point (bridge()).
-                bridge_started = 0.0
                 found = self.bridge(X, fine_props, budget, convention=(first == "rev"))
                 if found is not None:
                     Y, predicted, bridge_record = found
@@ -1521,9 +1473,7 @@ class SweepEngine:
                     acc.update(bridge=1, bridge_gain=actual)
                     accepted = 1
                     accounted += actual
-                bridge_wall = 0.0 - bridge_started
-                pass_wall += bridge_wall
-                stats = dict(stats, bridge_wall=bridge_wall, bridge=bridge_record)
+                stats = dict(stats, bridge=bridge_record)
             junctions = _weak_junctions(gains, pairs, reverse, blocks)
             entry = SweepHistory(
                 sweep=sweep,
@@ -1535,10 +1485,6 @@ class SweepEngine:
                 accepted=int(accepted),
                 **acc,
                 proposals=stats,
-                wall=0.0 - sweep_started,
-                message_wall=message_wall,
-                proposal_wall=proposal_wall,
-                pass_wall=pass_wall,
             )
             history.append(entry)
             F = F_new
@@ -1572,22 +1518,8 @@ class SweepEngine:
             max_frontier=max([h["proposals"]["max_frontier"] for h in history] or [0]),
             frontier_fallbacks=fallbacks,
             max_deviation=max([abs(h["deviation"]) for h in history] or [0.0]),
-            worker_cpu=float(sum(h["proposals"]["worker_cpu"] for h in history)),
-            wall=0.0 - started,
-            thread_cpu=0.0 - started_cpu,
             weak_junctions=[tuple(vars(item).values()) for item in junctions],
             history=history,
-            # Sum of directional elapsed times, not component wall time. Guarded
-            # acceptance includes scoring and bookkeeping; kernel timings are not
-            # injected into the hot Numba loop. Guard tests/work are separate below.
-            phase_seconds={
-                name: sum(h[key] for h in history)
-                for name, key in (
-                    ("messages", "message_wall"),
-                    ("refinement_windows", "proposal_wall"),
-                    ("acceptance", "pass_wall"),
-                )
-            },
             work_counters={
                 name: sum(h["proposals"].get(name, 0) for h in history)
                 for name in (
@@ -1601,19 +1533,9 @@ class SweepEngine:
                 )
             },
         )
-        record["phase_seconds"]["guarded_acceptance"] = record["phase_seconds"]["acceptance"] if self.guarded else 0.0
         for name in _WORK_KEYS:
             record["work_counters"][name] = sum(h.get(name, 0) for h in history)
         fresh = history[resumed:]
-        phases = {
-            name: sum(h[key] for h in fresh)
-            for name, key in (
-                ("messages", "message_wall"),
-                ("refinement_windows", "proposal_wall"),
-                ("acceptance", "pass_wall"),
-            )
-        }
-        phases["guarded_acceptance"] = phases["acceptance"] if self.guarded else 0.0
         work = {
             name: sum(h["proposals"].get(name, 0) for h in fresh)
             for name in (
@@ -1628,8 +1550,6 @@ class SweepEngine:
         }
         work.update(searches=1, **{name: sum(h.get(name, 0) for h in fresh) for name in _WORK_KEYS})
         with self._profile_lock:
-            for name, value in phases.items():
-                self._phase_seconds[name] = self._phase_seconds.get(name, 0.0) + value
             for name, value in work.items():
                 self._work_counters[name] = self._work_counters.get(name, 0) + value
         self._save(f"{label}.done", dict(rows=X.astype(np.int32), record=record))

@@ -63,10 +63,9 @@ _BLOSC = None
 
 def _blosc():
     """Blosc2, imported at the I/O boundary (compression libraries initialise process settings), with its process-wide
-    GIL release on from the first use (release 4.11). The flag was set only inside a multi-thread pipeline and restored
-    after it, so single-thread decodes from several threads of one process (concurrent record reads, release 4.10)
-    held the GIL and ran one at a time; Blosc2 makes a private context per call, so they may overlap. It is never
-    restored: a scope-wise restore would race between overlapping callers."""
+    GIL release enabled at first use. Blosc2 makes a private context per call, allowing independent
+    record decodes in one process to overlap. The process-wide flag remains enabled because scoped
+    restoration would race between overlapping callers."""
     global _BLOSC
     if _BLOSC is None:
         with _BLOSC_LOCK:
@@ -79,11 +78,8 @@ def _blosc():
 
 
 def cpu_threads(nthreads) -> int:
-    """A positive thread count no larger than this process's CPU affinity; a live CPU budget (a contig lane's
-    lease) is re-read now, so compression takes the CPUs the lane holds at that moment."""
-    if hasattr(nthreads, "codec_threads"):
-        nthreads = nthreads.codec_threads()  # a lane's lease: one thread while its pools hold its CPUs
-    elif hasattr(nthreads, "threads"):
+    """A positive thread count bounded by CPU affinity; re-read live task budgets at each codec call."""
+    if hasattr(nthreads, "threads"):
         nthreads = nthreads.threads()
     return min(max(1, int(nthreads)), _affinity_cpus())
 
@@ -111,16 +107,15 @@ def _aligned_buffer(nbytes):
     return storage[offset : offset + nbytes]
 
 
-# Raw bytes per Blosc thread (release 4.8, execution only: Blosc output and decoded values do not depend on threads).
+# Raw bytes per Blosc thread; thread count affects execution cost, not decoded values.
 # Blosc starts its threads per call: a store opened with a whole node's 112 threads spent ~8 ms per call on a small
 # record (a selection round's 1,647 panel reads: 14.2 s, against 2.0 s on one thread).
 _CODEC_BYTES_PER_THREAD = 1 << 20
 
 
-# CPUs the calling task may borrow for a large Blosc call (release 4.9): the engine installs its idle-lane count
-# (engine.scheduler.idle_lane_cpus) when it is imported; the store layer itself never imports the engine. A single-CPU
-# task reading a large record (a painting report, refit's dense evidence) decompressed it on one thread while the node
-# waited for it.
+# CPUs the calling task may borrow for a large Blosc call. The engine installs its idle-lane count
+# (engine.cpu.idle_lane_cpus) at the runtime boundary; the store layer never imports the engine. Borrowing
+# allows a serial task to use idle CPUs while decoding a large record.
 idle_cpus = lambda: 0  # noqa: E731
 
 
@@ -726,12 +721,12 @@ def decode_items(
 ):
     """Selected entries of a dict payload, decoding only their arrays.
 
-    ``check`` (release 4.8), when given, receives the whole top-level record (arrays as untouched placeholders)
+    ``check``, when given, receives the whole top-level record (arrays as untouched placeholders)
     from the first metadata pass, before any buffer group is decompressed: a publication envelope is checked on the
     same decode that selects its payload fields instead of a decode of its own.
 
     ``path`` descends plain-dict keys before selection; an empty path preserves the
-    3.5 top-level behavior. A missing path key raises KeyError; non-dicts raise TypeError.
+    top-level projection behavior. A missing path key raises KeyError; non-dicts raise TypeError.
 
     Entries must be plain data. The metadata is first unpickled against untouched placeholder buffers (an
     unwritten allocation holds no memory) to find which buffers the selected arrays use; only the buffer groups

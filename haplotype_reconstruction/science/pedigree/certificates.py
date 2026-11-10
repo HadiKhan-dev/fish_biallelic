@@ -1,6 +1,5 @@
 """Block certificates: exact null slot and relaxed uncertain parental alleles.
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 import math
@@ -234,7 +233,7 @@ def block_upper(
 def global_common_logs(children, state_alt, gl, coefficient, indices, starts, stops, mismatch):
     """Relax only uncertain parental alleles to [0,1]; retain the null chain.
 
-    All groups can now share the complete emission operator. Exact known
+    All groups share the complete emission operator. Exact known
     founder alleles stay fixed. This is a weaker bound, never a point model.
     """
     bins = starts.shape[1]

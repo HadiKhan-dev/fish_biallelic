@@ -3,7 +3,7 @@
 Owns: the edge-clique cover of a residual compatibility graph, lifting of groups to original records and the
 per-component size-class screening.
 Must not: choose groups by record order, read storage, the environment or a clock, or log.
-Method: docs/methods/discovery.md, unit di18 (P0 DI18).
+Method: docs/methods/discovery.md, unit di18.
 Identity: cliques are seeded in hard-call content order; size classes are taken largest first while within the
 component's cap, a class straddling the cap is admitted whole through twice the cap, a larger straddling class is
 omitted whole, and later classes are ranked truncations.
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 __all__ = ["edge_clique_cover", "screened_components", "lift_groups"]
 
-# Intended lazy overloads: base40 execution/kernel_manifest.json (3.5.0).
+# Supported lazy overloads for the declared kernel routes.
 _UINT64_2C = types.Array(types.uint64, 2, "C", readonly=False)
 
 
@@ -81,7 +81,7 @@ def _edge_cover(adjacent, edges):
     E seeds, at most A additions each, ceil(A/64) words per intersection.
     Every edge retains its greedy extension, including already covered edges.
     Equal closed common neighbourhoods share their deterministic extension;
-    work still reports the original per-edge intersection count.
+    diagnostics count the intersections attributable to every edge.
     """
     n, words = adjacent.shape
     output = np.zeros((edges, words), dtype=np.uint64)
@@ -277,7 +277,7 @@ def _unique_lifted(rows, records, table_size):
 
 
 def _admitted_sizes(counts, cap, omissions):
-    """The existing whole-class policy applied to exact unique-group counts."""
+    """Apply the whole-class policy to exact unique-group counts."""
     sizes = sorted(counts, reverse=True)
     accepted, before, capped = set(), 0, False
     for index, size in enumerate(sizes):

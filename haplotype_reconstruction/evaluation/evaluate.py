@@ -12,7 +12,8 @@ API. Outputs, RUN/evaluation/:
   founder_components.csv   per component (or block) of every founder stage
   founder_matches.csv      the one-to-one row-to-founder matches behind founder_components
 
-``evaluate_run(..., destination=D)`` writes these files to D instead (the run directory is then only read).
+``plan_evaluation`` declares per-contig tasks, ``collect`` combines their results, and
+``write_evaluation(D, ...)`` publishes these files to D. Reading the run does not modify it.
 
 Founder stages (pipeline order, the stage vocabulary): discovery blocks, the three local-selection rounds, the
 final assembly's levels 1-4, founder refinement (the final assembly product), painting (relabelled panels) and
@@ -33,14 +34,13 @@ from ..contracts.pedigree import ParentEdges, PedigreeCalls
 from ..contracts.recombination import Recombination
 from ..core.errors import InputError
 from ..core.files import atomic_path
-from ..results.panels import FOUNDER_STAGES, StagePanel
+from ..results.panels import EVALUATION_STAGES, FOUNDER_STAGES, StagePanel
 from ..simulation.truth import ContigTruth, PedigreeTable, TruthCrossovers
 from .metrics import SAMPLE_COLUMNS
 from .parameters import PHASE_METRIC
 from .tasks import ChromosomeEvaluation, ChromosomeInput, EvaluationReader, EvaluationTask, MetricRow, PhaseArrays
 
-EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
-# Released-phase counts (release 3.2, evaluation.metrics): summed over samples per chromosome (all samples) and
+# Released-phase counts (evaluation.metrics): summed over samples per chromosome (all samples) and
 # per parent group; the N50 columns and phased_share are derived from them.
 PHASE_COLUMNS = SAMPLE_COLUMNS
 
@@ -90,8 +90,8 @@ def pedigree_counts(
     ``sample_ids``/``calls``: pedigree.records.load_calls (PedigreeCalls: state -1 unresolved, parents -1 none);
     ``truth``: the simulation manifest's PedigreeTable of the analysed samples (parents outside the analysed
     samples are not observable edges); ``names``: the analysed sample axis. The calls' axis may be any order of
-    ``names`` (release 2.1 records hold the run's canonical sample order); edges are matched by sample name. Every
-    analysed sample is an inference target (release 3.4: no metadata eligibility), so every sample is counted.
+    ``names`` (records hold the run's canonical sample order); edges are matched by sample name. Every
+    analysed sample is an inference target (no metadata eligibility), so every sample is counted.
     """
     sample_ids = tuple(map(str, sample_ids))
     if len(set(sample_ids)) != len(sample_ids) or set(sample_ids) != set(names) or len(sample_ids) != len(names):
@@ -308,7 +308,7 @@ def phase_scores(
     sample_ids = tuple(map(str, product["sample_ids"]))
     if len(set(sample_ids)) != len(sample_ids) or sorted(sample_ids) != sorted(names):
         raise InputError(f"{contig}: family-phase and true sample axes differ")
-    # Release 2.1 records hold the run's canonical sample order: rows back to the truth's order.
+    # Records hold the run's canonical sample order: restore the truth's row order.
     index = {name: row for row, name in enumerate(sample_ids)}
     order = np.asarray([index[name] for name in names], dtype=np.int64)
     calls = np.asarray(product["calls"])
@@ -508,34 +508,3 @@ def plan_evaluation(
                     raise InputError(f"{contig}: no completed {stage} product")
         tasks.append(EvaluationTask(contig, names, tuple(chosen), requested, parent_counts))
     return report, tuple(tasks)
-
-
-def evaluate_run(
-    run_directory,
-    *,
-    checkpoints=None,
-    cores=None,
-    stages=("available",),
-    contigs=None,
-    destination=None,
-    reader=None,
-    task_runner=None,
-):
-    """Evaluate a simulation through results readers, with caller-supplied task execution.
-
-    The application owns parallel scheduling: task_runner(tasks, reader) returns
-    results in task order. Direct calls execute sequentially without hidden pools.
-    Explicit-stage absence is checked before computation or output publication.
-    """
-    from .tasks import evaluate_task
-
-    if reader is None:
-        from ..results import open_results
-
-        reader = open_results(run_directory, checkpoints=checkpoints)
-    report, tasks = plan_evaluation(reader, stages=stages, contigs=contigs)
-    results = [evaluate_task(task, reader) for task in tasks] if task_runner is None else task_runner(tasks, reader)
-    components, matches = collect(report, [result.parts() for result in results])
-    target = Path(run_directory) / "evaluation" if destination is None else Path(destination)
-    write_evaluation(target, report, components, matches)
-    return report

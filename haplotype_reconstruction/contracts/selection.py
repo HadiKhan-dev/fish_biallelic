@@ -1,8 +1,8 @@
-"""Typed local-selection boundaries with 3.5 field meanings (LS inventories).
+"""Typed local-selection boundaries with explicit array meanings.
 
 Fits retain int64 panels; released local calls are int8. Scientific backstops and
 selection termination remain state. Context proposal views repeat multiplicity
-exactly as 3.5; no likelihood, search, storage or orchestration lives here.
+explicitly; no likelihood, search, storage or orchestration lives here.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class PathFit:
     None while a fit is restored from a memo). log_likelihood, objective (log_likelihood +
     regularizer): nats. converged: ended at a conditional fixed point; termination:
     "conditional_fixed_point", "row_collision_requires_outer_selection", "update_backstop", or
-    (release 2.2) "tied_flips" / "tied_exact_flips": the best moves tied and led to different panels,
+    "tied_flips" / "tied_exact_flips": the best moves tied and led to different panels,
     so the ascent stopped (keep-current; converged is True). termination always describes the trajectory.
     selected: "endpoint" (the trajectory's last state) or "trajectory_best" (an earlier state that the
     caller's selection objective prefers by more than the decision tolerance; it is then refitted in its
@@ -54,7 +54,7 @@ class PathFit:
     selected_update: the GEM update after which the selected state was reached (-1: the start).
     endpoint_selection, selected_selection: the selection objective of the endpoint and of the returned
     state (None without a selection objective).
-    context_snaps (release 2.12): one-bit flips of a context round's fit taken by the selection objective
+    context_snaps: one-bit flips of a context round's fit taken by the selection objective
     after the GEM (``_context_snaps``); a fit with snaps is not a conditional fixed point (converged False).
     snap_ties: the snap steps decided inside a tie class (by content).
     """
@@ -112,7 +112,7 @@ class SearchOutcome:
     """A block search's result: the fit, its selection objective, rounds, how it started
     ("start", "incumbent" or "reused"), the round backstop, the context founders and free rows,
     the reuse key of its inputs and work counts. ``start_was_incumbent_panel``: the start's fit
-    reached the incumbent's panel (release 2.1; the search then continued from the incumbent)."""
+    reached the incumbent's panel, from which the search then continued."""
 
     schema: int = schema_field(1)
     fit: PathFit = record_field("state", axes=(), units="1", dtype="PathFit")
@@ -138,7 +138,7 @@ class PathRelease:
     allele; supporters int64[K, L_kept] favourable carriers by count; unknown_copy_fraction:
     posterior unknown-state occupancy over all copies (report); has_depth bool[N];
     unknown_slots int8[N]; unknown_mass float; favourable_band_cells: observed carrier cells whose
-    gain lies inside the favourable band (diagnostic, release 2.1; 0 in older records)."""
+    gain lies inside the favourable band (diagnostic; defaults to zero)."""
 
     calls: NDArray[np.int8] = record_field("call", axes=("K", "L_kept"), units="1", dtype="int8")
     probability: NDArray[np.float64] = record_field("state", axes=("K", "L_kept"), units="probability", dtype="float64")
@@ -158,9 +158,9 @@ class PathRelease:
 class BankSummary:
     """bank_rows: distinct candidate rows; fitted_starts / scored: novel starts fitted and
     panels admitted; selected_k: the BIC-selected K; rounds: neighbourhood rounds; budget_bound:
-    a reported backstop was hit (start, score or round backstop). Release 2.2: selected_tied:
+    a reported backstop was hit (start, score or round backstop). selected_tied:
     members of the final BIC tie set (all join the bank); starts: distinct path-search starts (the
-    cavity-best tie set over all sources). Both default to 1 (2.1 records)."""
+    cavity-best tie set over all sources). Both default to 1."""
 
     bank_rows: int = record_field("state", axes=(), units="1", dtype="int")
     fitted_starts: int = record_field("state", axes=(), units="1", dtype="int")
@@ -183,9 +183,9 @@ class ContextProposal:
     of the component's refitted founders (lexicographic order; -1 uncalled), ``multiplicity``
     the number of the component's assembled founders carrying each, ``posterior_alt``/``support``
     the refit's ALT posterior and carrier support, ``unknown_slots`` the MAP number of background
-    copies per sample (2 without depth), ``witnessed`` (release 2.12) where the refit itself released
-    the call (site posterior and carrier support passed; not a completion-filled fallback; None in
-    records written before 2.12). Otherwise ``calls`` are the block's current selected calls
+    copies per sample (2 without depth), ``witnessed`` where the refit itself released
+    the call (site posterior and carrier support passed; not a completion-filled fallback;
+    None when unavailable). Otherwise ``calls`` are the block's current selected calls
     and the other fields None.
     """
 
@@ -208,8 +208,9 @@ class ContextProposal:
 
     @property
     def founders(self) -> NDArray[np.int8] | None:
-        """The context founders of the path objective's code: one local row per assembled founder
-        (release 2.12). Founders whose local rows are equal stay separate
+        """The context founders of the path objective's code: one local row per assembled founder.
+
+        Founders whose local rows are equal stay separate
         claimers, so a one-call change that makes two founders' rows equal moves the code by an edit,
         not by a whole free row; the proposal panel itself keeps the distinct rows."""
         if not self.covered:
@@ -236,7 +237,7 @@ class RefitSummary:
     """components refitted, components skipped (block coverage incomplete), released alleles
     that changed a published call, alleles newly called, site-posterior totals, the largest number of
     distinct refitted founder rows in one component (not the dictionary code's claiming slots);
-    tie_events (release 2.1, maths.ties TieCounter record; one decision per refitted site): sites
+    tie_events (core.ties TieCounter record; one decision per refitted site): sites
     with a band decision of the release ("ls.refit.half.band": a carrier probability within the
     band of an exact 1/2; "ls.refit.support.band": a founder's support mass within the band of the
     threshold, its count below it)."""
@@ -295,7 +296,7 @@ class PackedFit:
 
 @dataclass(frozen=True)
 class SelectionMemo:
-    """Cross-round state. Keys are lowercase hex of exact 3.5 content-key bytes.
+    """Cross-round state. Keys are lowercase hex of exact content-key bytes.
 
     Fits keep packed rows, scores are likelihoods, bounds retain proposal order.
     Round initial/l1 only; memo omission in l2 is an explicit storage choice.

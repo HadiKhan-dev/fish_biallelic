@@ -19,8 +19,8 @@ are float64, accumulated per (sample, pair, bin) in site order.
 
 Owns: binned emission layout and site/bin aggregation.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.1; AJ01.
-Identity: Bins never cross blocks; native float32 evidence normalization and float64 sums are retained.
+Method: docs/methods/assembly.md#aj01.
+Invariant: Bins never cross blocks; evidence normalisation uses float32 and sums use float64.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Within-block sum-product scans of the linker's normal/error-tract model (base micro_hmm + micro_hmm_log).
+"""Within-block sum-product scans of the linker's normal/error-tract model (scaled and log-domain scans).
 
 Each sample is a diploid pair of founder copies inside one block. Between adjacent emission sites at most one
 of the two copies switches founder (relative zero/one-switch weights of a per-meiosis recombination fraction,
@@ -41,7 +41,7 @@ from ..parameters import (
     LINKER_MIN_ROUND_CELLS as _MIN_ROUND_CELLS,
 )
 
-# Range guards and lane costs retain their 3.5 values and provenance in parameters.
+# Range guards and lane costs are named in the assembly parameter module.
 from ..parameters import (
     LINKER_MIN_SCALED_MASS as _MIN_SCALED_MASS,
 )

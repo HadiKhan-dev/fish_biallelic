@@ -14,7 +14,6 @@ reciprocal solve replaces the preparatory reciprocal term. Every edge's directio
 edge is exempt from the three terms; sample metadata supplies no design chronology.
 
 Method: docs/methods/pedigree.md#converged-final-reciprocal-solve
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from ...core.kernels import kernel
 from ...core.numerics import log_add as _logaddexp
 from .kernels.signatures import OVERLOADS
 from .orientation import Orientation
-from .parameters import FAMILY_CLAIM_WORK, FAMILY_LANES_PER_THREAD, FAMILY_TRANSPOSE_BLOCK, DirectionConfig
+from .parameters import FAMILY_CLAIM_WORK, FAMILY_LANES_PER_THREAD, FAMILY_TRANSPOSE_BLOCK, DirectionParameters
 from .parameters import FAMILY_EXP_UNDERFLOW as _EXP_UNDERFLOW
 
 __all__ = ["FamilyMessageNonConvergence", "FamilySolveDiagnostics", "adjust"]
@@ -93,7 +92,7 @@ def _lane_count(items, threads):
 
 @kernel(overloads=OVERLOADS["family._child_log_odds"], cache=True, nogil=True)
 def _child_log_odds(log_scores, rows, states, log_multiplicity, samples, child, start, stop, output):
-    """One child's row of _family_log_odds (the serial 3.3 body, unchanged)."""
+    """One child's parent-inclusion log odds from finite scores and state multiplicities."""
     maximum = -np.inf
     best = -1
     included_max = np.full(samples, -np.inf)
@@ -462,7 +461,7 @@ def _converged_cavity(
     Returns (messages, iterations, residual, paused). With window > 0 the solve pauses (paused True, the
     messages being the state to resume from) once two windows have run and the residual's geometric rate over
     the last window cannot reach ``tolerance`` within ``horizon`` iterations; window 0 never pauses.
-    Runs in chunks of iterations (the same iterations as one pass), claiming threads between chunks.
+    Runs in work-sized iteration chunks, carrying the same state and residual history between chunks.
     """
     work = len(rows) + samples * samples
     chunk = max(1, _CLAIM_WORK // max(1, work))
@@ -520,7 +519,7 @@ def _pair_orientation_log_odds(adjusted, rows, states, log_multiplicity, samples
 
 @kernel(overloads=OVERLOADS["family._sample_panel"], cache=True, nogil=True)
 def _sample_panel(scores, rows, states, log_multiplicity, parent, start, stop, budget, selected, weights, tail):
-    """One sample's row of _configuration_panels (the serial 3.3 body, unchanged)."""
+    """One sample's bounded panel of finite configurations, retaining the boundary tie class in the tail."""
     for row in range(start, stop):
         value = scores[row] + log_multiplicity[parent, states[row]]
         if not np.isfinite(value):
@@ -577,7 +576,7 @@ def _configuration_panels(scores, rows, states, log_multiplicity, samples, budge
 
 @kernel(overloads=OVERLOADS["family._path_singles"], cache=True, nogil=True)
 def _path_singles(parent, n, rows, selected, weights, tail, excluded, budget, retained, denominator, single):
-    """One parent's row of the single-parent path factor (the serial 3.3 body, unchanged)."""
+    """One parent's row of the single-parent ancestry-avoidance factor."""
     for child in range(n):
         numerator = tail[parent]
         for j in range(budget):
@@ -603,8 +602,7 @@ def _path_singles(parent, n, rows, selected, weights, tail, excluded, budget, re
 def _path_target(
     target, rows, scores, selected, weights, tail, retained, denominator, single, excluded_by_child, budget
 ):
-    """One configuration row's path factor (the serial 3.3 body; excluded_by_child[c, g] = excluded[g, c], the same
-    values laid out by child)."""
+    """One configuration row's path factor; excluded_by_child[c, g] = excluded[g, c] lays out exclusions by child."""
     child, p, q = rows[target, 0], rows[target, 1], rows[target, 2]
     if p < 0 or not np.isfinite(scores[target]):
         return 0.0
@@ -686,7 +684,7 @@ def adjust(
     states: np.ndarray,
     full_counts: np.ndarray,
     orientation: Orientation,
-    config: DirectionConfig,
+    config: DirectionParameters,
     trace: dict | None = None,
     *,
     threads: int = 1,

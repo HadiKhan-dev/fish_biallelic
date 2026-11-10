@@ -2,7 +2,7 @@
 
 Owns component, fit, proposal, beam and guard working-set models; never changes a
 scientific cap, candidate, order or fallback. Method: docs/methods/founder_refinement.md#memory
-(RC01/RC20, RS06). The native planned frontier is a cost estimate, not the maximum
+(RC01/RC20, RS06). The planned frontier is a cost estimate, not the maximum
 scientific frontier. Parent tasks reserve all simultaneously live child estimates.
 """
 
@@ -21,20 +21,17 @@ __all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "component_task_by
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
 COMPONENT_BASE_BYTES = 64 << 20
-# Private process residence survives task completion: loaded kernels, runtime and retained heap.
-# Measured settled-idle/private post-trim maxima 3.551/3.692 GB; held once per worker for the pool lifetime.
-WORKER_RESIDENT_BYTES = 3584 << 20
 
 
 def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
-    """Peak bytes of one component's workspace (the component task's memory estimate, execution.memory): its log
+    """Peak bytes of one component's workspace for the stage memory reservation: its log
     evidence and switch costs (window.py: the resident tables of a small component, 24 S L float64 codes 0-2, the
     partial sites' codes 3-6 and up to COST_ARRAYS float32 cost arrays; for a streaming component one window of the
     count pass's own kernels: each search's window is in its fit_bytes), a component evidence copy
     (12 S L float32, reserved even when a contiguous whole-span view is possible), the binned emissions
     (8 S R_b(R_b + 1)/2 bins_b per block) and the coded leaves (R_b x L_b int16, forward and reversed
     orientation), plus COMPONENT_BASE_BYTES. The fits' message arrays, the window solves and the score tables
-    reserve their own bytes (additive estimates); calibrated on K30's map (founder_refinement.md 3.2-3.3)."""
+    reserve their own bytes (additive estimates); the estimates depend only on component dimensions."""
     sites = sum(panel.sites for panel in panels)
     bin_size = max(int(min_sites_per_bin), math.ceil(sites / max_bins))
     emissions = sum(
@@ -58,10 +55,10 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
 
 
 def fit_bytes(workspace, founders, guarded, cached_boundaries, polish=False):
-    """Memory of one fixed-K search (its reservation, execution.memory): the message arrays its pass holds
+    """Memory reservation of one fixed-K search: the message arrays its pass holds
     (stored backward values, + counts and the forward history of the guard), its proposal cache's
     boundaries, and the pass transients per junction (f/g starts and ends of up to 3K candidates, the
-    lookahead and backward chain: K30 map 3.2), its streaming window of a large component (window.py; 0 for a
+    lookahead and backward chain), its streaming window of a large component (window.py; 0 for a
     resident one), plus 32 MiB. Guard traceback scratch is
     reserved separately during acceptance; it is not resident during window proposals. A polish fit's chains
     and lookahead can span a long repair's 64 blocks."""

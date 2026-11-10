@@ -1,11 +1,9 @@
-"""Exact G4 M1 values as retained raw scores plus a counted default floor.
+"""Exact genome-floored M1 values as retained raw scores plus a counted default floor.
 
-The genome gate/profile is already fixed. Never apply genome_profile to these
-values again: the exact-sum floor is not idempotent. Dense expansion is explicit
-and reserved for the reference path and migration checks.
+The genome gate/profile is already fixed. Never floor these values again: the
+exact-sum floor is not idempotent.
 
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 import numpy as np

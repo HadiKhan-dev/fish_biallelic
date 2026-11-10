@@ -1,6 +1,6 @@
 """Publish complete pedigree records as plain stored-field dictionaries and lists.
 
-WP_D1 §4.7 owns recursive field/schema/type validation. This PE5 adapter owns only
+The record codec owns recursive field/schema/type validation. This pedigree adapter owns only
 whole-product completeness: a cold reader never repairs reports or reruns science.
 The tagged pilot format is confined to its historical oracle fixture decoder;
 changed code identities refuse those provisional run publications.
@@ -20,7 +20,7 @@ __all__ = ["PedigreeAdapter"]
 
 
 class PedigreeAdapter:
-    """Lossless schema-3 fields, decoded to read-only arrays by the shared D1 codec."""
+    """Lossless schema-3 fields, decoded to read-only arrays by the shared record codec codec."""
 
     schema = 3
 

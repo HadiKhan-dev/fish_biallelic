@@ -1,4 +1,4 @@
-"""Family-phase model, solver and release constants (release 3.0 rebuild).
+"""Family-phase model, solver and release constants.
 
 Only ``protected_intervals`` is user-visible; the stage supplies decoded breakpoint intervals.
 Recombination rates come from the chromosome's genetic map; the
@@ -7,8 +7,7 @@ founder label process comes from the painting's estimated copying model.
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
-from typing import Any
+from dataclasses import dataclass, field
 
 from ...core.errors import SettingsError
 
@@ -43,7 +42,7 @@ class PhaseParameters:
         mutation; the genotype then changes with probability 2/3 of it). Weighed by the sample's own reads at the
         site, reads that contradict the labels' genotype lower, withdraw or move the call. A working value chosen on
         the validation simulations (0.01 unphases 12-13% of phased joins; 3e-4 keeps more genotype errors), not an
-        estimate of an error rate. The panel alleles' own uncertainty is not part of it (3.4): it is each state's
+        estimate of an error rate. The panel alleles' own uncertainty is separate: it is each state's
         capped empirical-Bayes per-copy disagreement with the selected allele, conditional on the fitted carriers
         and panel, with the sample's direct own likelihood term removed. The copies flip independently; this is not
         a cross-fitted refit or exact integration over carrier/panel selection or one shared latent allele.
@@ -76,83 +75,111 @@ class PhaseParameters:
     not_copy_rate_per_bp: float = field(
         default=1e-8,
         metadata={
-            "provenance": "FP02; 3.5 config.py:71, entry rate of a linked homologue into not-a-copy.",
+            "provenance": "FP02; rate 1e-8 per bp for a linked homologue entering the free not-a-copy state.",
             "units": "per bp",
         },
     )
     not_copy_mean_bp: float = field(
         default=5e4,
-        metadata={"provenance": "FP02; 3.5 config.py:72, mean physical length of a not-a-copy run.", "units": "bp"},
+        metadata={
+            "provenance": "FP02; mean not-a-copy run length 50000 bp sets the exit rate.",
+            "units": "bp",
+        },
     )
     max_sweeps: int = field(
         default=30,
-        metadata={"provenance": "FP07-FP08; 3.5 config.py:73, fixed sweep and pairing budgets.", "units": "passes"},
+        metadata={
+            "provenance": (
+                "FP07-FP08; cap of 30 block-sweep passes; reaching it retains the current valid state as "
+                "unsettled."
+            ),
+            "units": "passes",
+        },
     )
     gain_quantum: float = field(
         default=1e-6,
-        metadata={"provenance": "FP07; 3.5 config.py:74, strict minimum local objective improvement.", "units": "nats"},
+        metadata={
+            "provenance": "FP07; strict minimum accepted local objective gain of 1e-6 nats.",
+            "units": "nats",
+        },
     )
     tie_quantum: float = field(
         default=1e-9,
-        metadata={"provenance": "FP04; 3.5 config.py:75, incumbent-first absolute Viterbi tie band.", "units": "nats"},
+        metadata={
+            "provenance": (
+                "FP04; absolute Viterbi tie band 1e-9 nats, preferring the incumbent then the explicit index "
+                "convention."
+            ),
+            "units": "nats",
+        },
     )
     junction_min_samples: int = field(
         default=2,
         metadata={
-            "provenance": "FP10; 3.5 config.py:76, distinct switching samples per candidate junction.",
+            "provenance": "FP10; require 2 distinct switching samples to nominate a founder-identity junction.",
             "units": "samples",
         },
     )
     junction_pin_nats: float = field(
         default=10.0,
         metadata={
-            "provenance": "FP10; 3.5 config.py:77, per-flank own-read evidence for pinning a homologue.",
+            "provenance": "FP10; require 10 nats of parental own-read evidence per flank to pin a homologue.",
             "units": "nats",
         },
     )
     junction_pin_bins: int = field(
         default=10,
-        metadata={"provenance": "FP10; 3.5 config.py:78, flank window capped by label changes.", "units": "bins"},
+        metadata={
+            "provenance": "FP10; inspect up to 10 bins per flank, stopping at parental label changes.",
+            "units": "bins",
+        },
     )
     site_deviation: float = field(
         default=1e-3,
         metadata={
-            "provenance": "FP16; 3.5 config.py:79, validation-chosen genotype departure mixture mass.",
+            "provenance": (
+                "FP16; genotype-departure mixture probability 0.001, a working value chosen on validation "
+                "simulations."
+            ),
             "units": "probability",
         },
     )
     genotype_posterior: float = field(
         default=0.9,
         metadata={
-            "provenance": "FP17-FP19; 3.5 config.py:80, genotype release and informative heterozygosity cutoff.",
+            "provenance": "FP17-FP19; probability cutoff 0.9 for genotype calls and informative heterozygosity.",
             "units": "probability",
         },
     )
     phase_posterior: float = field(
         default=0.99,
         metadata={
-            "provenance": "FP17-FP18/FP21; 3.5 config.py:81, ordered heterozygote and chain release cutoff.",
+            "provenance": "FP17-FP18/FP21; probability cutoff 0.99 for ordered heterozygote and meiosis-chain release.",
             "units": "probability",
         },
     )
     set_posterior: float = field(
         default=0.999,
         metadata={
-            "provenance": "FP08/FP18-FP19; 3.5 config.py:82, set continuation cutoff; D2 uses its odds.",
+            "provenance": (
+                "FP08/FP18-FP19; probability cutoff 0.999 for phase-set continuation; its log odds also gate "
+                "parental pairing moves."
+            ),
             "units": "probability",
         },
     )
     protected_intervals: tuple[tuple[str, int, int], ...] = field(
         default=(),
         metadata={
-            "provenance": "FP02; 3.5 config.py:83, user-supplied closed reference-order breakpoint intervals.",
+            "provenance": (
+                "FP02; supplied closed reference-order breakpoint intervals in bp; empty means no protected "
+                "intervals."
+            ),
             "units": "bp",
         },
     )
 
-    trace: InitVar[Any] = None
-
-    def __post_init__(self, trace=None):
+    def __post_init__(self):
         if not 0 < self.not_copy_rate_per_bp < 1e-3 or not self.not_copy_mean_bp > 0:
             raise SettingsError("family_phase not-a-copy rates must be positive (rate per bp below 1e-3)")
         for name in ("max_sweeps", "junction_min_samples", "junction_pin_bins"):
@@ -165,8 +192,6 @@ class PhaseParameters:
             raise SettingsError("family_phase.set_posterior must be at least phase_posterior")
         ceiling = (1 - 5 * self.site_deviation / 6) / (1 - 2 * self.site_deviation / 3)
         refused = not self.set_posterior < ceiling
-        if trace is not None:
-            trace.append(dict(posterior=self.set_posterior, ceiling=ceiling, raised=refused))
         if refused:
             raise SettingsError(
                 f"family_phase.set_posterior must lie below {ceiling:.6f}, the orientation certainty of a "
@@ -184,7 +209,7 @@ class PhaseParameters:
         return [(int(start), int(end)) for name, start, end in self.protected_intervals if name == contig]
 
 
-# Fixed numerical guards from 3.5 FP02, FP14, FP15 and FP21; these are not new model choices.
+# Fixed probability floors and log-weight guards for transitions and release (FP02, FP14, FP15, FP21).
 LABEL_SWITCH_MINIMUM = 1e-15
 MEIOSIS_SWITCH_MINIMUM = 1e-12
 NOT_COPY_ENTRY_MINIMUM = 1e-12
@@ -196,12 +221,12 @@ PRIOR_BOUNDS = (0.01, 0.99)
 LOGIT_LIMIT = 700.0
 POSTERIOR_LOG_FLOOR = -700.0
 IMPOSSIBLE_LOG_WEIGHT = -1e300
-# FP14/FP22: fixed chunks preserve CAL2 carrier accumulation and complete-bin medians.
+# FP14/FP22: fixed chunks preserve carrier accumulation and complete-bin medians.
 EVIDENCE_CHUNK = 4096
 SITE_WINDOW = 4096
-# Release 4.10: whole-bin site windows of the per-sample release loops (a workspace size; windows are whole bins, so
-# every site posterior, call and bin orientation is the same at any size). 4096-site windows ran one Python step per
-# window and sample: on chr3 at 0.5x most of 112 release threads waited for the interpreter between kernel calls.
+# Whole-bin site windows of the per-sample release loops: a workspace size (windows are whole bins, so every site
+# posterior, call and bin orientation is the same at any size). It is large because each window costs one Python step
+# per sample: with 4096-site windows most of 112 release threads waited for the interpreter (chr3, 0.5x).
 RELEASE_WINDOW = 1 << 16
 EMPTY_COMPONENT_BIN_SITES = 100
 

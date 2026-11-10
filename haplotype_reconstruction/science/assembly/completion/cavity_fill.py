@@ -29,11 +29,10 @@ founder at fewer than ``minimum_observable_founder_separation`` observable
 outside-bin sites. All candidate fills are computed against the immutable
 input panel; the occupancy gate decides which are released.
 
-Evidence normalisation follows base exactly: the block's likelihoods are normalised once for the
-focal-informative mask and the site posteriors, and the bin statistics and site posteriors
-normalise their (already normalised) input again. Every repeated normalisation and positive-mass accumulation is
-part of the
-declared arithmetic; changes must pass the strict native fixture replay.
+The block's likelihoods are normalised once for the focal-informative mask and the site
+posteriors. Bin statistics and site posteriors also normalise their input at their own
+boundaries. These repeated normalisations and positive-mass accumulations define the
+arithmetic used by the cavity calculations.
 
 
 Owns the completion cavity_fill boundary (U05). Must not read files, clocks or
@@ -54,7 +53,7 @@ from ..alleles import site_posterior
 from ..alleles.polynomials import shared_sample_likelihoods
 from . import support
 from .observation import UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, unordered_pairs
-from .parameters import CAVITY_LOG_FLOOR, CavityFillConfig
+from .parameters import CAVITY_LOG_FLOOR, CavityFillParameters
 
 
 @dataclass(frozen=True)
@@ -326,7 +325,7 @@ def cavity_fill(
     called: np.ndarray,
     evidence: np.ndarray,
     observed: np.ndarray,
-    rule: CavityFillConfig,
+    rule: CavityFillParameters,
     settings: np.ndarray,
 ) -> CavityFill:
     """Candidate fills of one block's unknown founder alleles from leave-whole-bin-out evidence.
@@ -334,7 +333,7 @@ def cavity_fill(
     q: float64[K, L] founder ALT probability (the call where called, 0.5 elsewhere); called:
     bool[K, L] (pre-fill calls at discovery sites); evidence: float64[N, L, 3] genotype likelihoods
     (1/3 where unobserved); observed: bool[N, L] (observed discovery sites); rule:
-    CompletionConfig.cavity; settings: ``site_posterior.settings()``.
+    CompletionParameters.cavity; settings: ``site_posterior.settings()``.
     """
     uniform_tolerance = UNIFORM_TOLERANCE
     evidence, informative_focal = _informative_cells(evidence, observed, uniform_tolerance)

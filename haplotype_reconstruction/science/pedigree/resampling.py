@@ -22,12 +22,12 @@ import numpy as np
 from ...contracts.pedigree import Resampling, SupportCounts, TierReach
 from ...core.errors import InvariantError
 from ...core.kernels import kernel
-from ...core.numerics import ordered_sum, weighted_chromosome_sum
+from ...core.numerics import ordered_sum
 from ...core.random import bootstrap_multiplicities
 from . import selection
 from .family import FamilyMessageNonConvergence
 from .kernels.signatures import OVERLOADS
-from .parameters import PedigreeConfig, TierThresholds
+from .parameters import PedigreeParameters, TierThresholds
 from .selection import DecisionInputs
 
 __all__ = [
@@ -40,13 +40,12 @@ __all__ = [
     "evaluate_task",
     "plan",
     "combine",
-    "run",
     "minimum_contigs_for_tier",
     "reach",
 ]
 
 # Work and results keep the existing coalesced task order and integer draw counts.
-FitTask = tuple[bool, np.ndarray, np.ndarray, PedigreeConfig]
+FitTask = tuple[bool, np.ndarray, np.ndarray, PedigreeParameters]
 FitArrays = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 FitResult = tuple[bool, np.ndarray, FitArrays]
 
@@ -100,7 +99,7 @@ def _accumulate(
                         graph_parent[np.searchsorted(edges, child * n_samples + parent)] += count
 
 
-def evaluate(inputs: DecisionInputs, config: PedigreeConfig, multiplicities: np.ndarray) -> FitArrays:
+def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities: np.ndarray) -> FitArrays:
     """Selections of a chunk of multiplicity vectors: local rows, graph rows, local states and the
     nonconverged flag of each vector."""
     n_replicates = len(multiplicities)
@@ -143,7 +142,7 @@ class ResamplingPlan:
     worker_count: int
 
 
-def plan(inputs: DecisionInputs, config: PedigreeConfig, cpus: int = 1) -> ResamplingPlan:
+def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> ResamplingPlan:
     """Draw the bootstrap multiplicities and order the independent fits for at most ``cpus`` workers."""
     alternatives = inputs.alternatives
     n_contigs = alternatives.log_likelihoods.shape[0]
@@ -233,15 +232,6 @@ def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[F
     )
 
 
-def run(inputs: DecisionInputs, config: PedigreeConfig) -> Resampling:
-    """Bootstrap and LOCO support counts of every configuration, state and edge, fitted serially here.
-
-    The stage layer runs the same planned tasks as independent engine subtasks (stages.pedigree.execution).
-    """
-    planned = plan(inputs, config)
-    return combine(inputs, planned, (evaluate_task(inputs, task) for task in planned.tasks))
-
-
 # --------------------------------------------------------------------- chromosome-count reach
 def _distinct_probability(n_contigs: int, minimum: int) -> float:
     """P(at least ``minimum`` distinct chromosomes among C draws with replacement from C)."""
@@ -271,14 +261,14 @@ def minimum_contigs_for_tier(thresholds: TierThresholds, minimum_exposed_contigs
         n_contigs += 1
 
 
-def reach(multiplicities: np.ndarray, units: np.ndarray, config: PedigreeConfig) -> TierReach:
+def reach(multiplicities: np.ndarray, units: np.ndarray, config: PedigreeParameters) -> TierReach:
     """What this run's resampling can release with its informative chromosomes of ``units`` map units each: the
     share of bootstrap draws, and of leave-one-out fits, whose distinct chromosomes hold the gate's map units."""
     n_contigs = multiplicities.shape[1]
     units = np.asarray(units, dtype=np.float64)
     minimum_units = config.exposure.minimum_exposed_units
     minimum = int(np.ceil(minimum_units))
-    drawn = weighted_chromosome_sum(units, (multiplicities > 0).T) if len(multiplicities) else np.zeros(0)
+    drawn = ordered_sum(units[:, None] * (multiplicities > 0).T, axis=0) if len(multiplicities) else np.zeros(0)
     max_bootstrap = float(np.mean(drawn >= minimum_units)) if len(drawn) else 0.0
     left = ordered_sum(units) - units
     max_loco = float(np.mean(left >= minimum_units)) if n_contigs > 1 else 0.0

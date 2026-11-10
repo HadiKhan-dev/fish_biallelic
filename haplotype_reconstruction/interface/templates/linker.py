@@ -7,7 +7,7 @@ with the window's discovery-site mask. Steps:
 1. Junction scores: for every row pair of two consecutive windows, the probabilistic mismatch percentage d of
    their alleles over the shared discovery sites gives similarity s = 0 if d > 50 else 2 (50 - d), scored
    100 (s / 100)^2; windows that do not overlap get score 1 for every pair. Edge weights are a third of these
-   scores (base weighted overlap 1 : sample usage 2, and the sample-usage term never contributed).
+   scores, setting the junction reward scale relative to the node and edge penalties.
 2. Within-window similarity of rows (1 - min(1, 2 d / L) over the discovery sites, normalised by the diagonal):
    the usage penalty spreads to rows similar to a used one.
 3. Up to ``count`` best paths through the window layers (dynamic programming over node + edge scores), each
@@ -39,8 +39,8 @@ from .parameters import (
     SIMILARITY_CUTOFF,
 )
 
-# Junction edge weight: base combined the overlap score (weight 1) with a sample-usage score (weight 2) that never
-# contributed (its inputs were stripped before matching), so every edge weighs a third of its overlap score.
+# EDGE_DIVISOR scales each junction reward relative to node and edge usage penalties.
+# Changing this scale changes the selected template paths.
 _START, _END = "I", "S"
 
 

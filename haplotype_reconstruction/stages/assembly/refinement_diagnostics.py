@@ -21,7 +21,6 @@ _DESCRIPTIONS = {
     "beam_fallbacks": "window beam fallback",
     "beam_truncations": "window beam truncation",
     "frontier_fallbacks": "frontier cap (incumbent retained)",
-    "count_limit_hits": "additions count limit",
 }
 
 
@@ -30,7 +29,7 @@ def refinement_diagnostics(results: Iterable[ComponentRefinement]) -> dict:
 
     Totals count every fit event, grouping polish alternatives together and all
     count-search fits together. Each component is counted once per diagnostic/stage.
-    The count limit itself and all individual operands stay in component records.
+    All individual fit operands stay in component records.
     """
     totals: dict[str, Counter] = {}
     affected: dict[str, dict[str, set[int]]] = {}
@@ -41,7 +40,6 @@ def refinement_diagnostics(results: Iterable[ComponentRefinement]) -> dict:
             counts["frontier_fallbacks"] = fit.frontier_fallbacks
             stage = "polish" if fit.label.split(".", 1)[0] == "polish" else "count"
             _accumulate(totals, affected, stage, result.component, counts)
-        _accumulate(totals, affected, "count", result.component, {"count_limit_hits": int(result.count_limit_reached)})
     return {
         label: {name: dict(total=count, components=len(affected[label][name])) for name, count in counts.items()}
         for label, counts in totals.items()

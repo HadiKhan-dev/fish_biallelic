@@ -1,9 +1,7 @@
 """Release rule and the painting product.
 
 Per sample, bin and track the decoder gives a Viterbi state (gauge-fixed track
-order) and the gate's two posterior masses (release 2.14: the faithful masses qF
-and qAF of painting.fidelity, with both tracks copying their rows without a panel
-error): the mass of the Viterbi state's unordered public
+order) and the gate's two posterior masses: the mass of the Viterbi state's unordered public
 class pair, and that of its unordered pair of per-bin local allele-equivalence
 keys (the second >= the first). Release, with
 tau = minimum_release_posterior:
@@ -18,15 +16,12 @@ tau = minimum_release_posterior:
    classes with that key); the other track keeps its stage-1 release.
 3. else both tracks abstain (LOW_POSTERIOR_ABSTENTION).
 
-Switch intervals (release 2.2). Where a track's switch between classes a and b
-cannot be placed by the sample's data (a run of bins in which a and b have the
-same calls at every site the sample observes; painting.hmm.switch_interval_masks),
-the track's candidates in those bins are {a, b}. The gate is unchanged from 2.1
-(qF / qAF of the Viterbi pair, taken as the smaller of the two traceback
-conventions' pairs, so no bin 2.1 rejects is released). A released interval track has status
-SWITCH_INTERVAL, no label or class, and the union of the candidates' founder rows
-as members (stage 2: of every class sharing a candidate's local key); () when a
-candidate is BACKGROUND or unanchored. The other track is released as usual.
+Switch intervals. When a sample's data cannot place a switch between classes a and b (a run of bins with
+identical calls at every observed site; painting.hmm.switch_interval_masks), the track's candidates there are
+{a, b}. The release gate takes the smaller qF / qAF mass of the two traceback conventions' Viterbi pairs. A
+released interval track has status SWITCH_INTERVAL, no label or class, and the union of candidate founder rows
+as members (stage 2 includes every class sharing a candidate's local key); members are empty when a candidate
+is BACKGROUND or unanchored. The other track is released as usual.
 
 Samples without any observed informative site abstain everywhere
 (INELIGIBLE_NO_EVIDENCE). The rule runs once, when the product is made.
@@ -60,13 +55,10 @@ def release_tracks(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Staged release of the Viterbi tracks: (labels, classes, status), each [N, 2, B].
 
-    ``paths`` int32[N, 2, B] gauge-fixed Viterbi states; ``qf``/``qaf``
-    float64[N, B] (the faithful-copy masses of the Viterbi pairs, painting.fidelity.release_posteriors);
-    ``support`` bool[N, 2, B] direct read support of each Viterbi track;
-    ``threshold`` = tau; ``masks`` int64[N, 2, B] candidate states (None = the
-    Viterbi state alone): an interval track of a released bin gets SWITCH_INTERVAL.
-    The gate itself is 2.1's (stages 1 and 2 on the Viterbi tracks), so a switch
-    interval never releases a bin that 2.1 rejects.
+    ``paths`` int32[N, 2, B] gauge-fixed Viterbi states; ``qf``/``qaf`` float64[N, B] faithful-copy masses
+    (painting.fidelity.release_posteriors); ``support`` bool[N, 2, B] direct read support; ``threshold`` =
+    tau; ``masks`` int64[N, 2, B] candidates (None = the Viterbi state alone). The posterior and
+    direct-support gates apply to Viterbi tracks; an interval track of a released bin gets SWITCH_INTERVAL.
     """
     anchored = states.anchored
     class_labels = np.asarray(
@@ -89,8 +81,8 @@ def release_tracks(
     bins = np.arange(paths.shape[2])[None, None, :]
     interval = interval_tracks(paths, masks)
     multi = multi_member_local_states(local_keys)[bins, paths]
-    # Stage 2 exactly as 2.1 (the Viterbi tracks' direct support); an interval track is then released as
-    # SWITCH_INTERVAL instead of LOCAL_ALLELE_EQUIVALENCE.
+    # Stage 2 requires direct support of the Viterbi tracks; a released interval track gets SWITCH_INTERVAL
+    # instead of LOCAL_ALLELE_EQUIVALENCE.
     stage_two = (~stage_one) & (qaf >= threshold) & ~np.any(multi & ~support, axis=1)
     local = stage_two[:, None, :] & multi & ~interval
     classes[local] = local_keys[bins, paths][local]

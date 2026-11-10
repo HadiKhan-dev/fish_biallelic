@@ -1,6 +1,6 @@
 """Release full-marker parent counts after the sibling guard has withdrawn unsafe edges.
 
-Owns P0 PD22 count release, never scores genotype data or adds edges.
+Owns PD22 count release, never scores genotype data or adds edges.
 Method: docs/methods/pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-counts.
 """
 
@@ -19,7 +19,7 @@ from ...contracts.pedigree import (
 from ...core.errors import InputError
 from . import exclusion
 from .eligibility import ParentEligibility
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .release import PartialEdges, TierCalls
 
 __all__ = ["target_dyads", "release_counts"]
@@ -41,7 +41,7 @@ def target_dyads(tier_b: TierCalls, rows: np.ndarray, eligibility: ParentEligibi
 def release_counts(
     basis: CountReleaseBasis,
     bounds: CountExclusion,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     *,
     withheld: frozenset = frozenset(),
 ) -> CountRelease:

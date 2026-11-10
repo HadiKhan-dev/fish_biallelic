@@ -1,12 +1,12 @@
 """Declare observed join argument types without compilation or filesystem effects.
 
-Signatures are trusted Numba descriptors captured from bounded native fixtures.
+Signatures are trusted Numba descriptors for supported join inputs.
 Both conventions and one/eight-thread execution contribute to the inventory.
 
-Owns: lazy Numba overload declarations for AS4/AS5 kernels.
+Owns: lazy Numba overload declarations for join and count kernels.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §6; C2.
-Identity: Declarations describe observed supported calls and do not select scientific routes.
+Method: docs/methods/assembly.md#aj02.
+Invariant: Declarations describe observed supported calls and do not select scientific routes.
 """
 
 from haplotype_reconstruction.core.kernels import decode_signature

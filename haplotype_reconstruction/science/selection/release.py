@@ -3,7 +3,7 @@
 Owns LS21-LS22: conditional one-bit probability, favourable-carrier support,
 context witness rescue and the assembly-facing LocalPanel. Must not fit a panel,
 read records, schedule work or inspect process state.
-Method: docs/methods/local_selection.md#release (WP_SE2 section 4.10).
+Method: docs/methods/selection.md#ls21.
 Probability must pass min_call_probability; support is the maximum of carrier
 count and mass. A matching context founder's actually released witness can
 rescue insufficient direct support. Completion-filled calls are never witnesses.
@@ -20,7 +20,7 @@ from ...contracts.selection import PathFit, PathRelease
 from ...core.ties import TieCounter, census, census_enabled
 from .diagnostics import CensusSink
 from .objective import ContextFounders
-from .parameters import FAVOURABLE_CENSUS_WINDOW, UNKNOWN_CENSUS_WINDOW, PathReleaseConfig
+from .parameters import FAVOURABLE_CENSUS_WINDOW, UNKNOWN_CENSUS_WINDOW, PathReleaseParameters
 from .path_model import PreparedBlock, release_statistics
 
 __all__ = ["context_witnessed", "release", "local_panel"]
@@ -40,7 +40,7 @@ def context_witnessed(panel: np.ndarray, context: ContextFounders, witness: np.n
 def release(
     fit: PathFit,
     prepared: PreparedBlock,
-    config: PathReleaseConfig,
+    config: PathReleaseParameters,
     ties: TieCounter | None = None,
     census_key: str | None = None,
     context: ContextFounders | None = None,
@@ -48,7 +48,7 @@ def release(
     *,
     census_sink: CensusSink | None = None,
 ) -> PathRelease:
-    """The PathRelease of a selected fit. ``ties`` (maths.ties.TieCounter) counts the favourable band
+    """The PathRelease of a selected fit. ``ties`` (core.ties.TieCounter) counts the favourable band
     and the unknown-count band (one decision per release each; inside: some observed carrier cell's
     gain in the favourable band, some observed site's count lowered by the unknown-count band);
     ``census_key`` records the carrier cells' gains within FAVOURABLE_CENSUS_WINDOW of zero and the

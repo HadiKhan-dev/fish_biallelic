@@ -122,7 +122,7 @@ Source: [`MODEL_COLUMNS`](../../haplotype_reconstruction/outputs/reports/paintin
 | 11 | `error_run_bins_keeping_label` | 1 / ErrorExit; empty when ErrorExit is zero (bins). |
 | 12 | `site_correlation` | fitted within-site emission correlation (1). |
 | 13 | `eligible_samples` | eligible samples (1). |
-| 14 | `continuity_budget_reached` | label continuity's search ended at its per-iteration check budget (release 4.7): |
+| 14 | `continuity_budget_reached` | label continuity's search ended at its per-iteration check budget: |
 
 ## painting/founder_support.csv
 

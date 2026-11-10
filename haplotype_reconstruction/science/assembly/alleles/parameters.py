@@ -1,6 +1,6 @@
-"""Name the preserved founder-allele search, release and numerical constants.
+"""Name the founder-allele search, release and numerical constants.
 
-Owns the typed settings-to-kernel adapter (P0 U08-U10; WP_AS2 sections 5 and 7).
+Owns founder-allele settings and their typed kernel-vector adapter (U08-U10).
 Must not choose a search route, read an environment or perform I/O.
 Method: docs/methods/assembly.md#founder-allele-posteriors.
 """
@@ -27,11 +27,11 @@ SITE_RECENTRE_BACKSTOP = 50
 SITE_IMPROVEMENT = 2.0 ** (-10)
 SITE_HALF_BAND = 2.0 ** (-20)
 
-# U08 direct positive-sum cancellation guard; baseline polynomials.py:145.
+# Direct positive-sum fallback when polynomial cancellation exceeds this relative guard.
 POLYNOMIAL_CANCELLATION = 1e-10
-# U09 positive likelihood floor; baseline site_posterior.py:125.
+# Positive likelihood floor, preventing log(0) in site posteriors.
 TINY_LIKELIHOOD = 1e-300
-# U10 robust evidence mixture and strict uniform-range test; baseline :163-164.
+# Robust evidence mixture weights and strict uniform-range tolerance for context feedback.
 FEEDBACK_EVIDENCE_KEEP = 0.99
 FEEDBACK_EVIDENCE_MIX = 0.01
 FEEDBACK_UNIFORM_TOLERANCE = 1e-12
@@ -41,57 +41,84 @@ FEEDBACK_UNIFORM_TOLERANCE = 1e-12
 class SitePosteriorParameters:
     """Frozen U09/U10 settings, with no mutation or implicit convention choice.
 
-    vector returns a fresh float64[13] in the baseline SETTING_* index order.
+    vector returns a fresh float64[13] in SETTING_* index order.
     The explicit reverse flag changes only the three arbitrary conventions.
     """
 
     max_exact_bits: int = field(
         default=MAX_EXACT_BITS,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "free founder alleles",
+            "provenance": "Enumerate the complete cube through 10 unresolved bits; larger sites use core support.",
+        },
     )
     certain_nats: float = field(
         default=SITE_CERTAIN_NATS,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "nats",
+            "provenance": "A certain founder must resist single and pair flips by more than 20 log-posterior units.",
+        },
     )
     ball_configurations: int = field(
         default=SITE_BALL_CONFIGURATIONS,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "configurations",
+            "provenance": "Target at most 1024 configurations when sizing the uncertain-core Hamming ball.",
+        },
     )
     ball_minimum_radius: int = field(
         default=SITE_BALL_MINIMUM_RADIUS,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "flipped alleles",
+            "provenance": "Use radius at least 3 even when the target configuration count would suggest less.",
+        },
     )
     shell_guard: float = field(
         default=SITE_SHELL_GUARD,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "dimensionless",
+            "provenance": "Multiply outer-shell flip mass by 3 to guard releases near their posterior threshold.",
+        },
     )
     bp_damping: float = field(
         default=SITE_BP_DAMPING,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={"units": "dimensionless", "provenance": "Belief-propagation update damping weight 0.5."},
     )
     bp_tolerance: float = field(
         default=SITE_BP_TOLERANCE,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "nats of message log odds",
+            "provenance": "Stop belief propagation when message changes reach tolerance 1e-9.",
+        },
     )
     bp_iterations: int = field(
         default=SITE_BP_ITERATIONS,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "iterations",
+            "provenance": "Maximum 500 damped belief-propagation iterations for the mode start.",
+        },
     )
     ascent_backstop: int = field(
         default=SITE_ASCENT_BACKSTOP,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={"units": "steps", "provenance": "Report a backstop after 50 single/pair-flip ascent steps."},
     )
     recentre_backstop: int = field(
         default=SITE_RECENTRE_BACKSTOP,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={"units": "steps", "provenance": "Report a backstop after 50 uncertain-core ball recentrings."},
     )
     improvement: float = field(
         default=SITE_IMPROVEMENT,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "nats",
+            "provenance": "Require log-posterior gain above 2^-10; the same band groups nearly equal ascent moves.",
+        },
     )
     half_band: float = field(
         default=SITE_HALF_BAND,
-        metadata={"provenance": "P0 assembly-core U09/U10; baseline founder_alleles/site_posterior.py:86-104"},
+        metadata={
+            "units": "absolute probability",
+            "provenance": "Exclude carrier probabilities within 2^-20 of one half from the confident carrier count.",
+        },
     )
 
     def vector(self, reverse: bool) -> NDArray[np.float64]:

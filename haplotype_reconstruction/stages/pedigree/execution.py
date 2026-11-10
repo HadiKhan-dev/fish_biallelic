@@ -2,9 +2,9 @@
 
 Resampling (PD16): one weighted fit is GIL-bound Python over the N children (selection, family
 messages, ties), so threads of one process cannot run fits side by side (at N = 1,003, 16 nested
-threads realised about 4.5 CPUs; ped40c PERF_FOUND). The decision task therefore returns the
+threads realised about 4.5 CPUs). The decision task therefore returns the
 planned fits as an engine Expansion: work-sized batches of planned fit tasks, run in the engine's
-forkserver worker processes under its CPU and memory authority, as 3.5 ran them in a process pool.
+forkserver worker processes under its CPU and memory authority.
 The read-only DecisionInputs arrays go to shared memory once (engine.workers.share_value); each
 subtask attaches them without copying. The gather receives the results in the plan's fixed order
 and reduces them there (integer support sums), then releases the segments.
@@ -12,10 +12,10 @@ and reduces them there (integer support sums), then releases the segments.
 Calibration (PD03): when the objective is large enough for a term executor (calibration.uses_executor),
 the scale search runs in rounds. Science's optimizer (calibration.solve: grid, Brent, refiner) runs
 unchanged in a helper thread on the decision's affinity worker; each objective call it makes becomes
-one engine Expansion of contiguous child-range chunks (3.5's cut: about equal terms plus a per-child
+one engine Expansion of contiguous child-range chunks (about equal terms plus a per-child
 overhead, one chunk per worker) over the terms shared once, and the round's gather hands the children's
 terms, concatenated in child order, back to science, which folds them serially in that order. Between
-rounds the helper thread only waits. Method: docs/methods/pedigree.md#parallel-structure (WP_PE4/PE5 §8).
+rounds the helper thread only waits. Method: docs/methods/pedigree.md#parallel-structure.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ import threading
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 
 from ...contracts.pedigree import CalibrationRecord, DecisionInputs
 from ...core.errors import InvariantError
+from ...engine.cpu import thread_team
 from ...engine.graph import Expansion, ResourceRequest, ResultRef, Task, TaskKey
-from ...engine.runtime import thread_team
 from ...engine.workers import (
     ResidentRef,
     SharedValue,
@@ -53,34 +53,16 @@ __all__ = [
     "calibration_round",
     "child_ranges",
     "fit_subtasks",
-    "fit_task",
     "fit_batch",
     "fit_batches",
 ]
 
-# Calibration chunks (3.5's pool cut; execution only, values never depend on them): contiguous child ranges of
+# Calibration chunks (execution only, values never depend on them): contiguous child ranges of
 # about equal cost, a child's cost being its term count plus this overhead, and one chunk per worker.
 CALIBRATION_CHILD_OVERHEAD = 500.0
 CALIBRATION_CHUNKS_PER_WORKER = 1
 # How often a waiting side of the calibration rounds re-checks that the other side still exists (seconds).
 _LIVENESS_SECONDS = 1.0
-
-
-class _NumbaConfiguration(Protocol):
-    """Numba's runtime setting is absent from its generated stubs."""
-
-    CACHE_DIR: str
-
-
-def _fit_attached(inputs: DecisionInputs, task: FitTask) -> FitResult:
-    # One fit per worker. Numerical kernels never compete for that worker's CPU.
-    with thread_team(1):
-        return evaluate_task(inputs, task)
-
-
-def fit_task(inputs: SharedValue, task: FitTask) -> FitResult:
-    """Engine subtask: one planned fit task on the shared read-only DecisionInputs."""
-    return call_shared(inputs, _fit_attached, task)
 
 
 # Selection scans per batch; two waves per worker retain load balancing. This is
@@ -175,7 +157,7 @@ class CalibrationTerms:
         return cls(*(tuple(np.ravel(block, order="C") for block in column) for column in zip(*prepared, strict=True)))
 
     def child(self, index: int) -> tuple[np.ndarray, ...]:
-        """Child ``index``'s prepared entry as fresh C-ordered arrays of the original shapes (as 3.5 copied out)."""
+        """Child ``index``'s prepared entry as fresh C-ordered arrays of the original shapes."""
         count = len(self.combined[index])
         return tuple(
             np.array(block[index].reshape((3, count) if rows else (count,)), dtype=np.float64, order="C")

@@ -4,7 +4,7 @@ Owns a per-search proposal cache and the bounded cross-root
 memo. Must not open storage, choose scientific budgets, or inspect free memory.
 Method: docs/methods/founder_refinement.md#fixed-k-search (RS04, RS06, RS11).
 Cache keys bind row/flank bytes, convention and frontier cap. A memo hit restores
-its native logical work receipt while doing no new physical programme work.
+its logical work receipt while doing no new physical programme work.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class ProposalCache:
         self._fwd_same = self._bwd_same = None
 
     def lookup(self, spans, X, fwd, bwd, results):
-        """Fill results[t] = (cached result, 0 CPU) for templates with unchanged inputs; return the
+        """Fill results[t] = cached result for templates with unchanged inputs; return the
         others' indices."""
         self._fwd_same, self._bwd_same = {}, {}
         todo = []
@@ -129,13 +129,13 @@ class ProposalCache:
                 if c not in self._bwd_same:
                     self._bwd_same[c] = np.array_equal(self.bwd[c], bwd[c])
                 if self._fwd_same[a] and self._bwd_same[c] and np.array_equal(held[0], X[:, a:c]):
-                    results[index] = (held[1], 0.0)
+                    results[index] = held[1]
                     continue
             todo.append(index)
         return todo
 
     def store(self, spans, X, fwd, bwd, todo, computed):
-        for index, (result, _) in zip(todo, computed, strict=False):
+        for index, result in zip(todo, computed, strict=False):
             a, c = spans[index]
             self.windows[index] = (X[:, a:c].copy(), result)
             if not self._fwd_same.get(a, False):

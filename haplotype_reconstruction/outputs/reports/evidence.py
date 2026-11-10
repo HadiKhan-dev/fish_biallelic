@@ -1,6 +1,6 @@
 """Format recorded sample QC diagnostics as the original fixed-decimal cells.
 
-Owns P0 OU16 text only; no quality decisions or source reads occur here.
+Owns diagnostic report text only; no quality decisions or source reads occur here.
 Method: docs/methods/evidence.md#sample-quality.
 """
 
@@ -68,8 +68,8 @@ def segment_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], lis
     return header, rows
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
+# Published report column schemas.
+# Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
 SAMPLE_COLUMNS = (
     "sample",

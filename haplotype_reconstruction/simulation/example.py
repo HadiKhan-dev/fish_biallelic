@@ -2,7 +2,7 @@
 
 OU22 (docs/methods/simulation.md#example): six independent Bernoulli haplotypes
 per contig, from SeedSequence(seed).spawn(C)[c]. One int8 integers(0,2,(H,L))
-draw per contig; positions use the original integer linspace call. This is a
+draw per contig; positions use integer linspace spacing. This is a
 software wiring example, not a reference genome or calibrated diversity model.
 The interface owns destination checks, NPZ/config/README writing and validation.
 """
@@ -24,7 +24,7 @@ __all__ = ["ExampleDesign", "create_example"]
 
 @dataclass(frozen=True)
 class ExampleDesign:
-    """Generated templates and the original example's generating settings."""
+    """Generated templates and their example generating settings."""
 
     seed: int = record_field("obs", axes=(), units="1", dtype="int")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")

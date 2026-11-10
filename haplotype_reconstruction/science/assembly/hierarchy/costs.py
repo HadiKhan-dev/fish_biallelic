@@ -1,6 +1,6 @@
 """Estimate batch working sets without selecting scientific outcomes.
 
-P0 U17's measured envelope is reported to the engine. Branches use their maximum,
+The measured working-set envelope is reported to the engine. Branches use their maximum,
 not their sum because they execute sequentially. No cap truncates a family here.
 """
 
@@ -10,7 +10,7 @@ from dataclasses import replace
 from haplotype_reconstruction.contracts.assembly import JoinTask
 from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD
 
-# Cost only, 3.5 join/search.py: Python beam/archive residence per path-pair.
+# Cost only: estimated Python beam/archive residence in bytes per path-pair.
 POOL_BYTES_PER_PATH_PAIR = 200
 
 
@@ -31,8 +31,7 @@ def batch_work(task: JoinTask) -> int:
 
 
 def batch_memory_bytes(task: JoinTask) -> int:
-    """Upper estimate of the peak bytes one batch's join allocates (base hierarchy._hmm_batch_memory_gb,
-    over the batch's informative samples S instead of all samples).
+    """Upper estimate of one batch join's peak bytes over its informative samples S.
 
     The batch keeps a float32 evidence slice of its samples over its sites; as much again covers
     transient copies (the search's flat emission layout while it is built). Linker scans keep seven
@@ -45,9 +44,9 @@ def batch_memory_bytes(task: JoinTask) -> int:
     beam lists of O(B q K^2) entries up to the saturation ladder's normal top (quota 16 x 2^4); a
     search whose ladder climbs on to the backstop, and its concurrent seed refits, reserve their own
     bytes (join.search). The linker's concurrent steps reserve nothing beyond this estimate.
-    Measured / estimate (tests/T4/k_scaling, estimate_ratios.py): K = 30, S = 320: L1 0.50-0.51, L2
-    0.37-0.40, L3 0.55, L3 at 2,000 bins 0.80, a pool at quota 1024 (backstop counted) 0.69; AulStu chr3
-    proxy L1 (K 8-16, S 290): 0.43-0.79. Worker private residence is held separately for the pool lifetime.
+    Measured peak/estimate ratios at K = 30, S = 320 are 0.37-0.80 across hierarchy levels,
+    including 2000 bins and a quota-1024 pool; this headroom supports the working-set allowance.
+    Worker private residence is held separately for the pool lifetime.
     """
     if task.branches:
         return max(batch_memory_bytes(replace(task, components=branch, branches=())) for branch in task.branches)

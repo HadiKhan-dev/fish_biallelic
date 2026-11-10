@@ -6,8 +6,8 @@ the diagonal. None of these indices may be substituted for another.
 
 Owns: the three independent emission, objective-state and splice pair orders.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §6; AJ01, AJ02, AJ19.
-Identity: These orders are deliberately different and cannot be substituted for one another.
+Method: docs/methods/assembly.md#aj03.
+Invariant: These orders are deliberately different and cannot be substituted for one another.
 """
 
 import numpy as np
@@ -29,7 +29,7 @@ def state_pairs(founders: int, allowed=None):
     """Two int64[Q] arrays in nested first <= second order.
 
     Optional bool[K] allowed mask excludes a path without renumbering its slot.
-    Counting and filling retain the native objective's exact iteration order.
+    Counting and filling both visit the objective states in nested pair order.
     """
     if allowed is None:
         allowed = np.ones(founders, np.bool_)

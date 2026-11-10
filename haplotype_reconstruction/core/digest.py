@@ -1,6 +1,6 @@
-"""Give parameters and arrays one canonical content identity (P0 ENG-06).
+"""Give parameters and arrays one canonical content identity (ENG-06).
 
-Relocates 3.5's canonical JSON and dtype/shape/C-byte array digests unchanged.
+Canonical JSON and dtype/shape/C-order array bytes define the content encoding.
 These are content and resume keys, not a cryptographic trust boundary. Arrays are
 explicitly digested rather than silently expanded into JSON.
 """

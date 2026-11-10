@@ -1,9 +1,9 @@
 """Publish assembly products and partial results under derivation identities.
 
-Owns AS6 keys, prepared/component codecs and the scoped AS8 record capability.
+Owns assembly keys, prepared/component codecs and the scoped final refinement record capability.
 Every read verifies the expected identity. Joins are contig-wide and normalize
 transport axes; output publication is atomic and never uses physical record IDs.
-Method: WP_AS6 §4.6; ARCHITECTURE_40 §4.3; P0 U15/AJ36.
+Method: docs/methods/assembly.md (derivations and publication records).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def operation_derivation(
     upstream: Mapping[str, str],
     *,
     reverse: bool = False,
-    roots: tuple[str, ...] = ("haplotype_reconstruction.stages.assembly.final",),
+    roots: tuple[str, ...] = ("haplotype_reconstruction.stages.assembly.tasks", "haplotype_reconstruction.stages.assembly.final"),
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> Derivation:
@@ -150,9 +150,9 @@ def operation_derivation(
 
 
 def component_derivation(
-    parent: str, component: FounderComponent, *, level: int, context: Any, parameters: Any, additions: bool
+    parent: str, component: FounderComponent, *, level: int, context: Any, parameters: Any
 ) -> str:
-    """AS8 component identity includes its ordered coarse alphabet and final flag."""
+    """final refinement component identity includes its ordered coarse alphabet."""
     return json_digest(
         dict(
             parent=parent,
@@ -160,7 +160,6 @@ def component_derivation(
             component=identity_value(component),
             context=identity_value(context),
             parameters=identity_value(parameters),
-            additions=additions,
         )
     )
 
@@ -561,15 +560,9 @@ class Reader:
     records: RecordCapability | None = None
 
     def decode(self, payload: Mapping[str, Any]) -> Any:
-        from haplotype_reconstruction.contracts.assembly import FounderRelease
         from haplotype_reconstruction.contracts.panels import materialise
-        from haplotype_reconstruction.contracts.payload import from_payload
 
         require_schema(payload, self.schema)
-        if self.product == "release_timings":
-            return dict(payload["phase_seconds"])
-        if self.product == "founder_release":
-            return from_payload(FounderRelease, payload)
         prepared = self.prepared if self.records is None else _read_prepared(self.records)
         if self.product in ("founders", "assembly"):
             result = decode_product(payload, prepared=prepared)
@@ -588,68 +581,16 @@ def _read_prepared(records: RecordCapability) -> tuple[PreparedPanel, ...]:
     return decode_prepared(completion["prepared"])
 
 
-def result_reader(
-    store: CheckpointStore,
-    manifest: Mapping[str, Any],
-    *,
-    product: str,
-    contig: str | None = None,
-    stage: str | None = None,
-    upstream: Mapping[str, str] | None = None,
-    round_name: str | None = None,
-) -> Reader | TieReader | ContextReader | JoinSearchReader | None:
-    """Rebuild final/release requests from bound settings and checked upstream readers.
+def expected(store, manifest, *, contig, round_name=None, upstream=None, levels=None):
+    """Bind this role's input construction and complete record namespace once."""
+    from ...contracts.payload import from_payload
+    from ...core.errors import InputError
+    from ...science.assembly.parameters import AssemblyParameters
+    from ..evidence import records as evidence_records
+    from ..selection import records as selection_records
 
-    Composition may supply already verified upstream identities. Otherwise the
-    selection/evidence/painting/refit adapters derive them from the same manifest.
-    No expected identity is read from an AS6 publication envelope.
-    """
-    from haplotype_reconstruction.contracts.payload import from_payload
-    from haplotype_reconstruction.core.errors import InputError
-    from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
-    from haplotype_reconstruction.stages.evidence import records as evidence_records
-    from haplotype_reconstruction.stages.selection import records as selection_records
-
-    if contig is None or contig not in manifest["contigs"]:
-        raise InputError("assembly reader needs a bound contig")
-    if product not in (
-        "founders",
-        "assembly",
-        "stage_panels",
-        "founder_release",
-        "release_timings",
-        "tie_sources",
-        "join_searches",
-    ):
-        raise InputError(f"unsupported assembly reader product {product!r}")
-    if round_name is not None and (
-        round_name not in ("l1", "l2") or product not in ("assembly", "join_searches", "tie_sources")
-    ):
-        raise InputError("context reader needs assembly, join_searches or tie_sources and round_name l1 or l2")
-    prefix = FINAL_PREFIX if round_name is None else f"local_selection/{round_name}/assembly"
     file = store.contig(contig)
-    requested_key = COMPLETION if product in ("tie_sources", "join_searches") else FINAL
-    if product == "stage_panels" and stage != "founder_refinement":
-        if stage is None or not stage.startswith("assembly_l"):
-            raise InputError(f"unsupported assembly panel stage {stage!r}")
-        try:
-            ordinal = int(stage.removeprefix("assembly_l"))
-        except ValueError as error:
-            raise InputError(f"invalid assembly panel stage {stage!r}") from error
-        if ordinal < 1:
-            raise InputError("assembly panel level must be positive")
-        requested_key = level_key(ordinal)
-    if round_name is not None:
-        requested_key = COMPLETION
-    physical_key = (
-        "release/timings"
-        if product == "release_timings"
-        else "release"
-        if product == "founder_release"
-        else prefix + "/" + requested_key
-    )
-    if not file.has(physical_key):
-        return None
+    prefix = FINAL_PREFIX if round_name is None else f"local_selection/{round_name}/assembly"
     ties = manifest["ties"]
     policy = NumericalPolicy(**manifest["numerical_policy"])
     if upstream is None:
@@ -680,39 +621,66 @@ def result_reader(
         parameters,
         upstream,
         role="final" if round_name is None else "context",
-        levels=None if round_name is None else int(round_name[1:]),
+        levels=None if round_name is None else int(round_name[1:]) if levels is None else levels,
         reverse=bool(ties["reverse"]),
-        tie_keep=tuple(ties.get("keep", ())),
+        tie_keep=tuple(ties["keep"]),
         numerical_policy=policy,
     )
     capability = RecordCapability(file, prefix, root)
-    if product in ("founder_release", "release_timings"):
-        from haplotype_reconstruction.stages.painting import records as painting_records
-        from haplotype_reconstruction.stages.refit import records as refit_records
+    return capability
 
-        from .release import release_identity
 
-        painting = painting_records.result_reader(
-            store, manifest, product="painting", contig=contig, panels=False, emissions=False
-        )
-        refit = refit_records.result_reader(store, manifest, product="refit", contig=contig, panels=False)
-        if painting is None or refit is None:
-            raise InputError("founder release needs published painting and refit")
-        for request in (painting, refit):
-            if read_items(file, request.key, request.identity, ("schema",)) is None:
-                raise InputError("founder-release upstream publication is incomplete")
-        expected = release_identity(
-            dict(
-                assembly=capability.derivation(FINAL),
-                painting=painting.identity,
-                refit=refit.identity,
-                evidence=upstream["evidence"],
-                payload=upstream["payload"],
-            ),
-            reverse=bool(ties["reverse"]),
-            numerical_policy=policy,
-        )
-        return Reader(physical_key, expected, product)
+def result_reader(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+    stage: str | None = None,
+    upstream: Mapping[str, str] | None = None,
+    round_name: str | None = None,
+) -> Reader | TieReader | ContextReader | JoinSearchReader | None:
+    """Rebuild final/release requests from bound settings and checked upstream readers.
+
+    Composition may supply already verified upstream identities. Otherwise the
+    selection/evidence/painting/refit adapters derive them from the same manifest.
+    No expected identity is read from an assembly publication envelope.
+    """
+    from haplotype_reconstruction.core.errors import InputError
+
+    if contig is None or contig not in manifest["contigs"]:
+        raise InputError("assembly reader needs a bound contig")
+    if product not in (
+        "founders",
+        "assembly",
+        "stage_panels",
+        "tie_sources",
+        "join_searches",
+    ):
+        raise InputError(f"unsupported assembly reader product {product!r}")
+    if round_name is not None and (
+        round_name not in ("l1", "l2") or product not in ("assembly", "join_searches", "tie_sources")
+    ):
+        raise InputError("context reader needs assembly, join_searches or tie_sources and round_name l1 or l2")
+    prefix = FINAL_PREFIX if round_name is None else f"local_selection/{round_name}/assembly"
+    file = store.contig(contig)
+    requested_key = COMPLETION if product in ("tie_sources", "join_searches") else FINAL
+    if product == "stage_panels" and stage != "founder_refinement":
+        if stage is None or not stage.startswith("assembly_l"):
+            raise InputError(f"unsupported assembly panel stage {stage!r}")
+        try:
+            ordinal = int(stage.removeprefix("assembly_l"))
+        except ValueError as error:
+            raise InputError(f"invalid assembly panel stage {stage!r}") from error
+        if ordinal < 1:
+            raise InputError("assembly panel level must be positive")
+        requested_key = level_key(ordinal)
+    if round_name is not None:
+        requested_key = COMPLETION
+    physical_key = prefix + "/" + requested_key
+    if not file.has(physical_key):
+        return None
+    capability = expected(store, manifest, contig=contig, round_name=round_name, upstream=upstream)
     if product == "tie_sources":
         return TieReader(capability, context=round_name is not None)
     if product == "join_searches":
@@ -793,14 +761,10 @@ def _decode_window_stop(value: Mapping[str, Any]) -> WindowStop:
 
 
 def decode_fit_summary(value: Mapping[str, Any]) -> FitSummary:
-    """Restore complete native fit counters, preserving empty legacy witness records.
-
-    Native fixed-K summaries carry every declared counter. Sparse component and
-    level counters have a different alphabet and are deliberately left alone.
-    """
+    """Restore complete native fit counters; sparse outer diagnostics have their own codecs."""
     value = dict(value)
     for name, record in (("accepted", FitAcceptanceTotals), ("work_counters", FitWorkCounters)):
-        if isinstance(value.get(name), Mapping) and value[name]:
+        if not isinstance(value[name], record):
             value[name] = record(**value[name])
     return FitSummary(**value)
 
@@ -859,7 +823,7 @@ def context_tie_sources(records: RecordCapability) -> tuple[TieSource, ...]:
 
 @dataclass(frozen=True)
 class TieReader:
-    """Read only AS6/AS8's OU19 whitelist under independently reconstructed scopes."""
+    """Read only assembly/final refinement's OU19 whitelist under independently reconstructed scopes."""
 
     records: RecordCapability
     context: bool = False

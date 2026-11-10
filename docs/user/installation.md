@@ -35,5 +35,4 @@ falls back to compilation. Use the documented execution settings for CPU and
 scratch placement; scientific behaviour is configured through TOML, not environment
 variables. See [runtime controls](../reference/environment.md).
 
-Continue with the [quick start](quickstart.md). For an existing 3.5 installation,
-read the [migration guide](migration.md) before opening a checkpoint directory.
+Continue with the [quick start](quickstart.md). Configuration files use `version = 4`.

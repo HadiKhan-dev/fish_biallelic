@@ -1,7 +1,7 @@
 """Select local founder panels with explicit copying, search and context-refit rules.
 
 Owns the science of LS01-LS31; stage adapters own scheduling, storage and assembly.
-Method: docs/methods/local_selection.md. Imports declare no runtime side effects.
+Method: docs/methods/selection.md#ls01.
 Uses science.discovery.api: DiscoveryParameters
 Uses science.discovery.api: CavityWorkspace
 Uses science.discovery.api: score_solutions

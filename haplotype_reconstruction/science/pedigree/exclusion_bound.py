@@ -1,12 +1,11 @@
-"""Completed-window bounds on the original averaged Mendelian exclusion e-value.
+"""Completed-window bounds on the chromosome-averaged Mendelian exclusion e-value.
 
 One FINISHED window/bet contributes P/(chromosomes * windows * bets) to
 that average. Unfinished products never justify stopping; uncertified rows
-finish the original exact sum in its original reduction order. The reference
-scorer stays available. This is not a maximum-window model.
+finish the exact sum in its fixed reduction order. This is not a
+maximum-window model.
 
 Method: docs/methods/pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-counts
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from ...core.errors import InputError
 from ...core.kernels import kernel
 from . import exclusion
 from .kernels.signatures import OVERLOADS
-from .parameters import ExclusionConfig
+from .parameters import ExclusionParameters
 
 MODEL = "completed-window-exclusion-v1"
 
@@ -98,7 +97,7 @@ def _completed_windows(
                     value = prefix[h] - saved[start_index[last], h]
                     completed[h, original_window[last]] = value
                     # Conservative allowance for prefix summation, subtraction,
-                    # logarithms and the original positive-term reduction.
+                    # logarithms and the fixed positive-term reduction.
                     guard = (
                         64
                         * eps
@@ -154,7 +153,7 @@ def _completed_windows(
                     absolute[h] += abs(value)
         is_certificate[row] = certified
         if not certified:
-            # Every window has completed. Reduce in the original bet/window
+            # Every window has completed. Reduce in the declared bet/window
             # order, reproducing the reference float64 value without a rescan.
             combined = -np.inf
             for h in range(len(bets)):
@@ -170,7 +169,7 @@ def score_contig(
     observed: np.ndarray,
     positions: np.ndarray,
     dyads: np.ndarray,
-    config: ExclusionConfig,
+    config: ExclusionParameters,
     genome_contigs: int,
     sample_count: int,
     claim_threads: Callable[[], int | None] = lambda: None,
@@ -227,12 +226,3 @@ def score_contig(
         threshold=threshold,
     )
     return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), fallback_samples, upper), work
-
-
-def combine(evidence):
-    """Original chromosome average with lower and upper endpoints."""
-    lower, observed = exclusion.combine(evidence)
-    upper = np.logaddexp.reduce(
-        np.stack([value.log_e if value.log_e_upper is None else value.log_e_upper for value in evidence]), axis=0
-    ) - np.log(len(evidence))
-    return lower, upper, observed

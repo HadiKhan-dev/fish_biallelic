@@ -9,7 +9,7 @@ Emissions are the sample's normalised genotype likelihoods of the pair's dosage 
 mixes its two alleles); unobserved cells emit 1.
 
 Owns LS01/LS02/LS23 and the release E-step; no storage, environment, clock or logging.
-Method: docs/methods/local_selection.md#copying-model.
+Method: docs/methods/selection.md#ls01.
 The caller configures the Numba team before entering science; threads bounds scratch slots.
 The long kernels deliberately retain their recurrence and ascending-sample accumulation order.
 
@@ -40,7 +40,15 @@ from numpy.typing import NDArray
 
 from ...core.errors import InvariantError
 from ...core.kernels import bounded_team, kernel
-from .parameters import COMBINE_TILE, LANE_ALIGN, LANE_WIDTH, LOG_RATIO_NEAR, RELEASE_SAMPLE_BATCH
+from .parameters import (
+    CHAIN_HIGH,
+    CHAIN_LOW,
+    COMBINE_TILE,
+    LANE_ALIGN,
+    LANE_WIDTH,
+    LOG_RATIO_NEAR,
+    RELEASE_SAMPLE_BATCH,
+)
 
 # Exact Numba argument types observed at the immutable public boundaries.
 _BOOL_C1 = types.Array(types.bool, 1, "C", readonly=False)
@@ -168,16 +176,12 @@ def _log_ratio(new, old):
     return np.log(new) - np.log(old)
 
 
-# Range of a running product of exact one-bit likelihood ratios (_chain): a product leaving it, or a ratio outside it,
-# moves into the log total, so no product over- or underflows.
-CHAIN_LOW = 2.0**-300
-CHAIN_HIGH = 2.0**300
 
 
 @kernel(overloads=((types.float64, types.float64, types.float64),), cache=True, inline="always", nogil=True)
 def _chain(product, total, ratio):
     """(product, total) after one more sample's ratio, product * exp(total) being the running product of every ratio
-    so far (release 4.6). A founder-site's exact gain is the log of the product over its observed samples in ascending
+    so far. A founder-site's exact gain is the log of the product over its observed samples in ascending
     order: one log per founder-site instead of one per sample, the same chain for any thread count or lane width."""
     if ratio < CHAIN_LOW or ratio > CHAIN_HIGH:
         return product, total + np.log(ratio)
@@ -964,8 +968,8 @@ def _backward_block(
                             prob, q = 2.0 * posterior[p, j], qgain[a, j]
                             qgain[a, j] = q + prob * rt[block, site, ha, hb, j] if prob > 0 else q
                 # The exact flip likelihood ratio (outside + alt) / denominator of every lane; the observed samples'
-                # ratios join the founder-site's running product (_chain) in ascending sample order (release 4.6:
-                # one log per founder-site, not one libm log per sample).
+                # ratios join the founder-site's running product (_chain) in ascending sample order,
+                # requiring one log per founder-site rather than per sample.
                 for j in range(lanes):
                     quotient[j] = (outside[a, j] + alt[a, j]) / vec[0, j]
                 if direct:
@@ -1760,11 +1764,11 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, count_ba
     once, exceeds 1/2) and by mass (their summed carrier probabilities); copy occupancy summed
     over samples (S, L); per sample the largest MAP unknown-copy count (0, 1, 2) over its
     observed sites, where a larger count must win by more than ``count_band`` relative posterior
-    mass (else the smaller count, release 2.1), with per sample the number of observed sites where
+    mass (else the smaller count), with per sample the number of observed sites where
     the band took a smaller count than the strict MAP and the smallest relative gap between a
     site's two largest count masses (inf without observed sites); per sample the number of
     observed carrier cells (carrier probability above
-    1/2) whose exact gain lies inside the favourable band [-margin, margin] (release 2.1: the
+    1/2) whose exact gain lies inside the favourable band [-margin, margin] (the
     band around the exact zero of symmetric-evidence cells; not favourable there); and, with
     ``keep_gains`` (diagnostics only), every carrier cell's exact gain (N, K, L; NaN elsewhere),
     else a (1, 1, 1) placeholder.

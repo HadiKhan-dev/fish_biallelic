@@ -36,7 +36,7 @@ from .parameters import IMPOSSIBLE_LOG_WEIGHT
 NEG = IMPOSSIBLE_LOG_WEIGHT
 
 
-# Baseline release-manifest signatures; all calls remain lazily compiled.
+# Declared kernel signatures; all calls remain lazily compiled.
 _OVERLOADS = {
     "subtree_terms": (
         (
@@ -176,12 +176,11 @@ _OVERLOADS = {
 
 @kernel(overloads=_OVERLOADS["evidence_terms"], cache=True, nogil=True)
 def evidence_terms(lab0, lab1, alleles, lg, out):
-    """Release 4.10: allele_evidence's carrier sums for one chunk of sites, added into ``out`` float64 [S, c] (zero
-    on entry). lab0, lab1 int64 [R, c]: the carriers' MAP labels at the sites; alleles int8 [S, c]; lg float64
-    [R, c, 3]: their robust log likelihoods (computed by the caller, as before). The terms are allele_evidence._terms's
-    (the same subtractions); each site's cells receive the homologue-0 terms of rows 0..R-1, then the homologue-1
-    terms of rows 0..R-1, the order in which np.bincount over the concatenated homologue-0 and homologue-1 terms
-    added them, so every sum is the same to the bit. No GIL: chunks run concurrently."""
+    """Carrier sums for one site chunk, added into zero-initialized ``out`` float64 [S, c].
+    lab0, lab1 int64 [R, c] are the carriers' MAP labels; alleles int8 [S, c]; lg float64 [R, c, 3] contains robust
+    log likelihoods. The contrasts implement the same law as allele_evidence._terms. Each site's cells receive
+    homologue-0 terms of rows 0..R-1, then homologue-1 terms of rows 0..R-1. The kernel releases the GIL so
+    disjoint site chunks can run concurrently."""
     R, c = lab0.shape
     for j in range(c):
         for r in range(R):
@@ -330,15 +329,8 @@ def gauge_children_terms(b, g0, g1, V, child_tracks, mstay, mmove):
     return total
 
 
-_VITERBI_TRACE_OVERLOADS = tuple(
-    signature + extra
-    for signature in _OVERLOADS["block_viterbi"]
-    for extra in ((types.none, types.none), (types.Array(types.float64, 2, "C"), types.Array(types.float64, 3, "C")))
-)
-
-
-@kernel(overloads=_VITERBI_TRACE_OVERLOADS, cache=True, nogil=True)
-def _block_viterbi(
+@kernel(overloads=_OVERLOADS["block_viterbi"], cache=True, nogil=True)
+def block_viterbi(
     n,
     kinds,
     parents,
@@ -363,12 +355,10 @@ def _block_viterbi(
     cur1,
     tie,
     rev,
-    receipt,
-    initial,
 ):
     """Exact factorised max-product for one sample block: phase.block.viterbi.
 
-    Tie rule (verbatim, WP_PH1 section 4.4):
+    Tie rule:
     in each of the three stages the predecessor is scanned in
     ascending index order (descending when `rev`); with `best = NEG`, `arg = 0`, a candidate replaces the incumbent when
     `val > best + tie` or (`|val − best| <= tie` and the candidate is the slot's current state at bin b − 1 (`c0`/`c1`)
@@ -406,7 +396,6 @@ def _block_viterbi(
     tmpP = np.zeros((S, S))
     lab0 = np.empty(n0, dtype=np.int64)
     lab1 = np.empty(n1, dtype=np.int64)
-    event = 0
     for b in range(B):
         for g in range(G):
             hp[g] = subtree_terms(n, b, g, E, X, V, par, desc, mark, tmpF0, tmpF1, tmpP)
@@ -437,8 +426,6 @@ def _block_viterbi(
                     i1 = slot_init(kinds[1], s1, init_copy, init_bottom)
                     for g in range(G):
                         score[s0, s1, g] = em[s0, s1, g] + i0 + i1 if g == 0 else NEG
-            if initial is not None:
-                initial[:] = score
             continue
         for r0 in range(n0):
             for s0 in range(n0):
@@ -463,27 +450,6 @@ def _block_viterbi(
                         val = score[r0, r1, h] + T0[r0, s0]
                         preferred = r0 == c0 and arg != c0
                         taken = val > best + tie or (abs(val - best) <= tie and preferred)
-                        if receipt is not None:
-                            receipt[event, 0] = 1
-                            receipt[event, 1] = b
-                            receipt[event, 2] = s0
-                            receipt[event, 3] = r1
-                            receipt[event, 4] = h
-                            receipt[event, 5] = r0
-                            receipt[event, 6] = s0
-                            receipt[event, 7] = s1
-                            receipt[event, 8] = g
-                            receipt[event, 9] = cur0[B - 1]
-                            receipt[event, 10] = cur1[B - 1]
-                            receipt[event, 11] = 0
-                            receipt[event, 12] = arg
-                            receipt[event, 13] = c0
-                            receipt[event, 14] = val
-                            receipt[event, 15] = best
-                            receipt[event, 16] = tie
-                            receipt[event, 17] = preferred
-                            receipt[event, 18] = taken
-                            event += 1
                         if taken:
                             best = val
                             arg = r0
@@ -500,27 +466,6 @@ def _block_viterbi(
                         val = A[s0, r1, h] + T1[r1, s1]
                         preferred = r1 == c1 and arg != c1
                         taken = val > best + tie or (abs(val - best) <= tie and preferred)
-                        if receipt is not None:
-                            receipt[event, 0] = 2
-                            receipt[event, 1] = b
-                            receipt[event, 2] = s0
-                            receipt[event, 3] = s1
-                            receipt[event, 4] = h
-                            receipt[event, 5] = r1
-                            receipt[event, 6] = s0
-                            receipt[event, 7] = s1
-                            receipt[event, 8] = g
-                            receipt[event, 9] = cur0[B - 1]
-                            receipt[event, 10] = cur1[B - 1]
-                            receipt[event, 11] = 0
-                            receipt[event, 12] = arg
-                            receipt[event, 13] = c1
-                            receipt[event, 14] = val
-                            receipt[event, 15] = best
-                            receipt[event, 16] = tie
-                            receipt[event, 17] = preferred
-                            receipt[event, 18] = taken
-                            event += 1
                         if taken:
                             best = val
                             arg = r1
@@ -537,27 +482,6 @@ def _block_viterbi(
                         val = Bm[s0, s1, h] + TG[h, g]
                         preferred = h == g and arg != g
                         taken = val > best + tie or (abs(val - best) <= tie and preferred)
-                        if receipt is not None:
-                            receipt[event, 0] = 3
-                            receipt[event, 1] = b
-                            receipt[event, 2] = s0
-                            receipt[event, 3] = s1
-                            receipt[event, 4] = g
-                            receipt[event, 5] = h
-                            receipt[event, 6] = s0
-                            receipt[event, 7] = s1
-                            receipt[event, 8] = g
-                            receipt[event, 9] = cur0[B - 1]
-                            receipt[event, 10] = cur1[B - 1]
-                            receipt[event, 11] = 0
-                            receipt[event, 12] = arg
-                            receipt[event, 13] = g
-                            receipt[event, 14] = val
-                            receipt[event, 15] = best
-                            receipt[event, 16] = tie
-                            receipt[event, 17] = preferred
-                            receipt[event, 18] = taken
-                            event += 1
                         if taken:
                             best = val
                             arg = h
@@ -577,27 +501,6 @@ def _block_viterbi(
                 keep = s0 == cur0[B - 1] and s1 == cur1[B - 1] and g == 0
                 preferred = keep
                 taken = val > best + tie or (abs(val - best) <= tie and preferred)
-                if receipt is not None:
-                    receipt[event, 0] = 4
-                    receipt[event, 1] = b
-                    receipt[event, 2] = 0
-                    receipt[event, 3] = 0
-                    receipt[event, 4] = 0
-                    receipt[event, 5] = -1
-                    receipt[event, 6] = s0
-                    receipt[event, 7] = s1
-                    receipt[event, 8] = g
-                    receipt[event, 9] = cur0[B - 1]
-                    receipt[event, 10] = cur1[B - 1]
-                    receipt[event, 11] = 0
-                    receipt[event, 12] = -1
-                    receipt[event, 13] = -1
-                    receipt[event, 14] = val
-                    receipt[event, 15] = best
-                    receipt[event, 16] = tie
-                    receipt[event, 17] = preferred
-                    receipt[event, 18] = taken
-                    event += 1
                 if taken:
                     best = val
                     a0 = s0
@@ -618,42 +521,6 @@ def _block_viterbi(
         r0 = argA[b, s0, r1, h]
         s0, s1, g = r0, r1, h
     return path0, path1, gpath, best
-
-
-def block_viterbi(*args, trace=False):
-    """Run the native retained-score recurrence; trace=True exposes its actual candidate branches.
-
-    Receipt buffers are opt-in and intended for bounded kernel witnesses. The
-    ordinary production call allocates no candidate history. Integer indices fit
-    exactly in the receipt's float64 transport, then recover their declared type.
-    """
-    if not trace:
-        return _block_viterbi(*args, None, None)
-    kinds, E, child_tracks, S = args[1], args[3], args[8], args[10]
-    bins = E.shape[3]
-    n0, n1 = S + 2 if kinds[0] == 1 else S, S + 2 if kinds[1] == 1 else S
-    gauges = 2 if len(child_tracks) else 1
-    count = (bins - 1) * (n0 * n0 * n1 * gauges + n0 * n1 * n1 * gauges + n0 * n1 * gauges * gauges) + n0 * n1 * gauges
-    receipt = np.empty((count, 19), dtype=np.float64)
-    initial = np.empty((n0, n1, gauges), dtype=np.float64)
-    result = _block_viterbi(*args, receipt, initial)
-    fields = {}
-    for name, column in (("stage", 0), ("bin", 1), ("candidate", 5), ("arg_before", 12), ("incumbent", 13)):
-        fields[name] = receipt[:, column].astype(np.int64)
-    for name, first in (("destination", 2), ("terminal", 6), ("current_terminal", 9)):
-        fields[name] = receipt[:, first : first + 3].astype(np.int64)
-    for name, column in (("value", 14), ("best", 15), ("quantum", 16)):
-        fields[name] = receipt[:, column].copy()
-    fields["preferred"], fields["taken"] = receipt[:, 17].astype(bool), receipt[:, 18].astype(bool)
-    return dict(
-        path0=result[0],
-        path1=result[1],
-        gauge=result[2],
-        score=result[3],
-        trace=fields,
-        initial_scores=initial,
-        scratch_clean=bool(np.all(args[9] == -1)),
-    )
 
 
 @kernel(overloads=_OVERLOADS["objective"], cache=True, nogil=True)

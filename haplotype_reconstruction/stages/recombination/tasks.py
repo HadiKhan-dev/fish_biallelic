@@ -6,6 +6,12 @@ The task owns no pipeline orchestration, hidden cache or source-data reopening.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..configure import ResolvedConfiguration
+    from ...contracts.genetic_map import GeneticMapSet
+
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
@@ -78,3 +84,41 @@ def publish_contig(
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
     return product
+
+
+from ..inputs.products import task_inputs, required_product
+from ..context import StageRun
+from ..framework import Task, RecordKey, ResourceRequest
+
+
+def run(
+    root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet
+) -> str:
+    """Execute recombination against checked phase and conditioned edges, binding before resume."""
+    from ..pedigree import records as pedigree_records
+    from ..phase import records as phase_records
+    from ..recombination import records
+    from ..recombination.tasks import publish_contig
+
+    reader, store = task_inputs(root)
+    phase = required_product(reader, phase_records, "phase", contig)
+    pedigree = required_product(reader, pedigree_records, "pedigree", None)
+    reverse = reader.manifest["ties"]["reverse"]
+    expected = records.expected(store, reader.manifest, product="recombination", contig=contig,
+                                parameters=resolved.parameters.recombination)
+    publish_contig(
+        store.contig(contig),
+        phase,
+        pedigree.edges,
+        resolved.parameters.recombination,
+        maps.for_contig(contig),
+        expected,
+        reverse=reverse,
+    )
+    return expected.identity
+
+
+def task(key, context: StageRun) -> Task:
+    """Declare the production single-core conditional recombination action."""
+    return Task(key, run, (context.root, key.scope, context.resolved, context.maps),
+                outputs=(RecordKey(key.scope, "recombination"),), resources=ResourceRequest(1, 1))

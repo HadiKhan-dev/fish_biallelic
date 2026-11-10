@@ -165,7 +165,7 @@ def write_truth_pedigree(output, manifest) -> Path:
 
 def frame_in_input_order(frame, input_ids: Sequence[str] | None, column: str = "Sample"):
     """A per-sample table with its rows stably sorted by the input position of ``column`` (published tables list
-    samples in the input order, as release 2.0 did; the records keep the canonical order). Rows whose sample is not
+    samples in the input order; the records keep the canonical order). Rows whose sample is not
     in ``input_ids`` keep their relative order after the others. The frame is returned unchanged when
     ``input_ids`` is None or it has no ``column``."""
     if input_ids is None or column not in getattr(frame, "columns", ()):
@@ -197,8 +197,8 @@ def record_mapping(value):
     return value
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
+# Published report column schemas.
+# Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
 TRUTH_PEDIGREE_COLUMNS = ("sample", "cohort", "parent1", "parent2")
 """Columns in published order.

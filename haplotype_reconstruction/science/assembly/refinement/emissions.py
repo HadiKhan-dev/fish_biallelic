@@ -1,8 +1,8 @@
-"""Re-export shared genotype emissions and the AS4 prepared-pair triangle address.
+"""Re-export shared genotype emissions and the prepared-pair triangle address.
 
-Genotype emissions come directly from C1; pair order comes directly from AS4.
+Genotype emissions come from science.shared.emissions; pair order comes from assembly.pairs.
 Must not choose a numerical formula or perform storage. Method:
-docs/methods/founder_refinement.md#emissions (RC03; AS4 pairs interface).
+docs/methods/founder_refinement.md#emissions (RC03).
 """
 
 from haplotype_reconstruction.science.shared.emissions import (

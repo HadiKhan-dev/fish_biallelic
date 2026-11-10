@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haplotype-reconstruction"
-version = "4.11.0"
+version = "4.12.0"
 description = "Founder-haplotype reconstruction, pedigree, phase and recombination maps for experimental crosses"
 readme = "README.md"
 license = "MIT"
@@ -56,21 +56,12 @@ namespaces = true
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = [
-    "tests/oracle/extract",
-    # Frozen witness extractors whose bytes are pinned by digest in fixture manifests (dise40c, 1 Nov).
-    "tests/oracle/fast/discovery_fixed_k/trajectory_trace.py",
-    "tests/oracle/fast/discovery_search_witness/closest_boundary.py",
-    "tests/oracle/fast/discovery_search_witness/native_cache.py",
-    "tests/oracle/fast/selection_search_witness/boundary_inputs.py",
-]
 
 [tool.ruff.lint]
 select = ["E", "F", "F403", "F405", "W", "B", "I", "UP", "T20"]
 ignore = ["E741"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["T20"]
 "haplotype_reconstruction/interface/**" = ["T20"]
 
 [tool.mypy]
@@ -82,13 +73,3 @@ files = ["haplotype_reconstruction/contracts", "haplotype_reconstruction/stages"
 [[tool.mypy.overrides]]
 module = ["haplotype_reconstruction.contracts.*", "haplotype_reconstruction.stages.*", "haplotype_reconstruction.interface.api"]
 disallow_untyped_defs = true
-
-[tool.pytest.ini_options]
-pythonpath = ["tests"]
-testpaths = ["tests"]
-markers = [
-  "threads: thread-count identity checks run with NUMBA_NUM_THREADS=4 without xdist",
-  "stage: stage-tier oracle tests (minutes, run on a node)",
-  "slow: reference implementations and long property tests",
-]
-addopts = "--import-mode=importlib -m 'not stage and not slow'"

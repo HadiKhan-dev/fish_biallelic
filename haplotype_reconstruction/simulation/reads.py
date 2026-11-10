@@ -23,14 +23,13 @@ and variance count_dispersion. Conditional depth is Poisson in both samplers, he
 mixing gives negative-binomial marginals, Var(D | sample, site) = mu + alpha * mu**2.
 Fragments are drawn at the maximum target factor per sample and site-hits thinned to their
 target intensity, retaining the shared fragment's homologue. No extra draws or arithmetic
-on the historical rates occur when these options are off.
+on the unmodified rates occur when these options are off.
 
-Random streams (release 4.8): the factors shared by all samples (sample depth factors, site factors)
+Random streams: the factors shared by all samples (sample depth factors, site factors)
 and one seed come from the contig's stream; each sample's own draws (cell factors, depth or
 fragments, dropout tract, alleles) come from its own stream, simulation.sample_reads(seed, sample
 index). Blocks of samples are therefore simulated in parallel with the same result at any worker
-count. The laws are unchanged from 4.7; the draws for a seed are not (4.7 drew all samples' cells
-from the one contig stream).
+count, because each sample stream is indexed independently of its execution block.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ from .parameters import FRAGMENT_QUANTILES, FRAGMENT_SD_LIMIT, MINIMUM_FRAGMENT_
 
 @dataclass(frozen=True)
 class ReadInputs:
-    """Everything one contig's per-sample read draws read (release 4.8): haplotypes int8[N, L], sorted positions
+    """Everything one contig's per-sample read draws read: haplotypes int8[N, L], sorted positions
     int64[L], the sample depth factors float64[N] and site factors float64[L] (or None) drawn once for all samples,
     and the seed of the per-sample streams. Shared read-only with the workers simulating blocks of samples."""
 
@@ -93,7 +92,7 @@ def read_inputs(
 def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer] | None = None) -> NDArray[np.integer]:
     """REF/ALT counts int64[stop - first, L, 2] of samples first..stop-1, each from its own stream
     (simulation.sample_reads, the inputs' seed and the sample's index): any partition of the samples into blocks,
-    simulated anywhere, gives the same counts. ``out`` (optional, integer [stop - first, L, 2]; release 4.10): written
+    simulated anywhere, gives the same counts. ``out`` (optional, integer [stop - first, L, 2]): written
     in place and returned instead (the simulation stage's shared int32 counts)."""
     sample = _fragment_sample if inputs.model.read_length_bp else _site_sample
     sites = inputs.hap0.shape[1]
@@ -113,23 +112,6 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
             stream("simulation.sample_reads", seed=inputs.seed, index=i),
         )
     return out
-
-
-def sample_reads(
-    hap0: NDArray[np.int8],
-    hap1: NDArray[np.int8],
-    positions: NDArray[np.int64],
-    depth: float,
-    model: ReadModel,
-    rng: np.random.Generator,
-) -> NDArray[np.int64]:
-    """REF/ALT read counts int64[N, L, 2] of individuals with haplotypes hap0, hap1 (int8[N, L]).
-
-    Release 4.8: the factors shared by all samples come from ``rng``, then each sample's reads from its own stream
-    (read_inputs, read_rows), so the simulation stage simulates blocks of samples in parallel with the same result.
-    """
-    inputs = read_inputs(hap0, hap1, positions, depth, model, rng)
-    return read_rows(inputs, 0, inputs.hap0.shape[0])
 
 
 def _sample_factors(samples, model, rng):

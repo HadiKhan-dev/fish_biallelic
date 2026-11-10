@@ -7,14 +7,13 @@ its child's common chromosome profile, whose sum is the genome cutoff:
 All identity multiplicities and contamination are preserved downstream.
 
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-# The existing screen softmax cutoff, now shared by ranks and all M1 consumers.
+# The screen's softmax cutoff, shared by ranks and every M1 consumer.
 from .parameters import LOG_FLOOR
 
 MODEL = "genome-relative-m1-floor-retained-m2-v1"

@@ -19,8 +19,6 @@ complete 2^snps_per_bin table would hold.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import math
 from collections import OrderedDict
 
@@ -28,9 +26,10 @@ import numba
 import numpy as np
 from numba import prange
 
+from ....core.concurrency import ThreadSource, thread_count
 from ....core.kernels import kernel
 from ....core.ties import BlockQuanta, block_scale, fixed_policy
-from ..parameters import EMISSION_FLOOR, FixedKModelConfig
+from ..parameters import EMISSION_FLOOR, FixedKModelParameters
 
 # Cache bounds by entry count (one block's search stays far below them).
 FIT_CACHE_ENTRIES = 4096
@@ -360,7 +359,7 @@ def _fill_pattern_rows(diff1, w, kw_diff, new_bins, new_patterns, new_slots, dif
     nogil=True,
 )
 def _pack_state(matrix):
-    """The existing little-endian packed key, directly from the ordered panel."""
+    """The little-endian packed key, directly from the ordered panel."""
     k, length = matrix.shape
     packed = np.zeros((k * length + 7) // 8, dtype=np.uint8)
     for row in range(k):
@@ -484,25 +483,25 @@ class FixedKWorkspace:
     @property
     def threads(self) -> int:
         """Threads for the next kernel: the fixed count, or the live share re-read now."""
-        return max(1, int(self._threads() if callable(self._threads) else self._threads))
+        return thread_count(self._threads)
 
     @threads.setter
-    def threads(self, value: int | Callable[[], int]) -> None:
+    def threads(self, value: ThreadSource) -> None:
         self._threads = value if callable(value) else int(value)
 
     def __init__(
         self,
         likelihoods: np.ndarray,
         observed: np.ndarray,
-        model: FixedKModelConfig,
+        model: FixedKModelParameters,
         quanta: BlockQuanta | None = None,
         *,
         reverse: bool = False,
-        threads: int | Callable[[], int] = 1,
+        threads: ThreadSource = 1,
     ):
-        """``threads``: a count, or the task's live share (engine live_threads), read at every kernel choice so a
-        block grows into CPUs its finished siblings leave (release 4.9; serial and parallel kernels agree exactly).
-        ``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
+        """``threads``: a fixed count or caller-owned live source, read at every kernel choice so a
+        block grows into CPUs its finished siblings leave.
+        ``quanta``: the block's BlockQuanta (core.ties); None derives them from the block's null NLL. The A step
         uses ``quanta.sample``, the H step ``quanta.h_step``, cycle and duplicate resolution ``quanta.nll``.
         Every fixed-K path uses uniform evidence over its winning category's tied states."""
         self.reverse = bool(reverse)

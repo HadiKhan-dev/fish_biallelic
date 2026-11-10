@@ -1,6 +1,5 @@
-"""Selected exact M1 kernel and batched one-sided search under the G4 model.
+"""Selected exact M1 kernel and batched one-sided search under the genome-relative floor model.
 Method: docs/methods/pedigree.md#candidate-panel
-PE1–PE3 preserve this 3.5 method.
 """
 
 from collections.abc import Callable
@@ -9,9 +8,9 @@ from typing import TypedDict, cast
 import numpy as np
 
 from ...core.errors import InvariantError
-from ...core.numerics import contiguous_axis_sum
+from ...core.numerics import ordered_sum
 from . import m1
-from .parameters import SELECTIVE_FRONTIER_ULPS, SELECTIVE_SUM_ULPS, PedigreeConfig
+from .parameters import SELECTIVE_FRONTIER_ULPS, SELECTIVE_SUM_ULPS, PedigreeParameters
 
 
 class SearchCounts(TypedDict):
@@ -55,7 +54,7 @@ def search_batch(
     children: np.ndarray,
     eligible: np.ndarray,
     markers: np.ndarray,
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     score: Callable[[np.ndarray], np.ndarray],
 ) -> SearchBatch:
     """Certify B, the complete genome gate and all b in bulk exact-query phases.
@@ -100,8 +99,8 @@ def search_batch(
         for c in range(batch):
             completed = np.flatnonzero(eligible[c] & known[:, c].all(0))
             if len(completed):
-                # This indexed layout and summation match G4 genome_profile.
-                best[c] = np.max(contiguous_axis_sum(values[:, c, completed]))
+                # Exact chromosome sums define the genome-relative M1 floor.
+                best[c] = np.max(ordered_sum(values[:, c, completed], axis=0))
                 cutoff[c] = best[c] + shift
 
     # First complete maximum-upper tie class, with no index-based tie split.
@@ -137,7 +136,7 @@ def search_batch(
     for c in range(batch):
         complete = np.flatnonzero(eligible[c] & known[:, c].all(0))
         if len(complete):
-            totals = contiguous_axis_sum(values[:, c, complete])
+            totals = ordered_sum(values[:, c, complete], axis=0)
             retained.append(complete[totals >= cutoff[c]])
             for j in range(contigs):
                 local[j, c] = np.max(values[j, c, complete])

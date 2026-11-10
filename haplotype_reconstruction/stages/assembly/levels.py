@@ -2,7 +2,7 @@
 
 Owns derivation lookup, execution teams and incremental join publication.
 Pure planning/composition lives in science.assembly.hierarchy.level; each
-completed join is durable before the level gather runs (WP_AS6 §4.6/8).
+completed join is durable before the level gather runs.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import numpy as np
 
 from haplotype_reconstruction.contracts.assembly import JoinRecord, JoinSettings, JoinTask, ReleaseFamily
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
+from haplotype_reconstruction.engine.cpu import thread_team
 from haplotype_reconstruction.engine.graph import ResourceRequest, ResultRef, Task, TaskKey
-from haplotype_reconstruction.engine.runtime import task_team
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.batch import run_batch
@@ -52,7 +52,7 @@ def execute_join(
             save_join(records.file, identity, result)
             return result
     began = perf_counter()
-    with attached_scoring(scoring) as data, task_team(cores):
+    with attached_scoring(scoring) as data, thread_team(default=cores):
         # The task's live allowance: the join search re-reads it at its boundaries, so a long batch grows into CPUs
         # its finished peers left (a fixed budget kept a tail batch on the cores it started with).
         result = run_batch(task, data, JoinTeam(batch_threads(task)))
@@ -90,7 +90,7 @@ def expand_level(
     scoring_ref: SharedArrayRef | None = None,
 ) -> T | Expansion:
     """Create one engine task per missing join, preserving input-order gathering."""
-    with task_team(cores):
+    with thread_team(default=cores):
         planned = plan_level(
             components,
             prepared,
@@ -116,8 +116,8 @@ def expand_level(
             continue
         key = replace(parent, unit=f"{parent.unit}.batch{item.index}")
         # Batches are independent (each publishes its own join under a claim; the gather places them by index), so
-        # they are not pinned to the parent's worker: they run side by side across the contig's lane, as 3.5's
-        # hierarchy pool ran them. Pinned, a contig's batches ran one at a time on a few threads.
+        # they run side by side across the contig's lane. Pinning them to the parent's worker
+        # would serialize independent batches on that worker's threads.
         pending.append(
             Task(
                 key,
@@ -137,53 +137,3 @@ def expand_level(
         affinity=parent.scope,
     )
     return Expansion(tuple(pending), gather)
-
-
-def run_level_stage(
-    components: Sequence[FounderComponent],
-    prepared: Sequence[PreparedPanel],
-    evidence: AssemblyEvidence,
-    settings: JoinSettings,
-    *,
-    batch_size: int,
-    min_informative: int,
-    records: RecordCapability | None,
-    release_alternatives: Sequence[ReleaseFamily] = (),
-    cores: int = 1,
-) -> LevelOutput:
-    """Synchronous adapter with the same incremental-publication protocol.
-
-    Used for bounded composition cuts and context callbacks with an existing
-    engine task; it creates no pool or new CPU authority.
-    """
-    with task_team(cores):
-        planned = plan_level(
-            components,
-            prepared,
-            evidence,
-            settings,
-            batch_size=batch_size,
-            min_informative=min_informative,
-            release_alternatives=release_alternatives,
-        )
-    code = join_code()
-    identities = {
-        t.index: join_derivation(t, evidence.scoring, evidence_identity=evidence.identity, code=code).identity
-        for t in planned.tasks
-    }
-    if records is not None and not records.has("plan"):
-        records.save(
-            "plan",
-            dict(schema=1, batches=[(a, b, identities.get(i)) for i, (a, b) in enumerate(planned.partition.ranges)]),
-        )
-    results, reused = {}, 0
-    for task in sorted(planned.tasks, key=lambda item: (-batch_work(item), item.index)):
-        found = None if records is None else load_join(records.file, identities[task.index], index=task.index)
-        if found is not None:
-            reused += 1
-        results[task.index] = (
-            found
-            if found is not None
-            else execute_join(task, evidence.scoring, records, identities[task.index], cores=cores)
-        )
-    return compose_level(planned, results, identities=identities, reused=reused)

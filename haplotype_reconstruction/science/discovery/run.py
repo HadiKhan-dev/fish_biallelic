@@ -10,11 +10,12 @@ from ...contracts.evidence import ContigEvidence
 from ...contracts.likelihoods import LikelihoodSlice, gather_likelihoods, slice_likelihoods
 from ...contracts.observations import PairArray, dense_observed, slice_observed
 from ...contracts.roles import record_field
+from ...core.concurrency import ThreadSource
 from ...core.errors import InvariantError
 from ...core.ties import inverse_permutation, run_sample_order
 from .diagnostics import BlockDiagnostics
 from .panel import FixedKSolution, restricted
-from .parameters import DiscoveryConfig
+from .parameters import DiscoveryParameters
 from .release import DiscoveredBlock, materialise
 from .search import BlockSearch, _search
 
@@ -26,8 +27,8 @@ class BlockEvidence:
     block, site_start: block index and its first contig site; positions: int64[L];
     kept: bool[L] discovery sites; likelihoods: float64[N, L, 3] normalised GLs (zero depth
     exactly 1/3); observed: bool[N, L] positive depth (False for excluded samples).
-    sample_ids: the samples' names (release 2.1; optional): the search runs in the run's canonical
-    sample order (maths.ties.run_sample_order), so its result does not depend on the input order.
+    sample_ids: the samples' names: the search runs in the run's canonical
+    sample order (core.ties.run_sample_order), so its result does not depend on the input order.
     None means the evidence is already in canonical order.
     """
 
@@ -71,13 +72,13 @@ def _sample_subset(solution: FixedKSolution, index: np.ndarray) -> FixedKSolutio
 def search_block(
     likelihoods: np.ndarray,
     observed: np.ndarray,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     *,
     sample_ids: tuple[str, ...] | None = None,
     reverse: bool = False,
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
-    threads: int = 1,
+    threads: ThreadSource = 1,
 ) -> BlockSearch:
     """Search neutralised float64[N,L,3] evidence in the explicit canonical sample order.
 
@@ -111,12 +112,12 @@ def search_block(
 
 def discover_block(
     evidence: BlockEvidence,
-    config: DiscoveryConfig,
+    config: DiscoveryParameters,
     *,
     reverse: bool = False,
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
-    threads: int = 1,
+    threads: ThreadSource = 1,
 ) -> DiscoveredBlock | None:
     """Search one founder-view block and release alleles; None means uninformative.
 

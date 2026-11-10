@@ -1,7 +1,7 @@
-"""Represent export options and the selected rows being formatted (P0 OU01/OU08).
+"""Represent export options and the selected rows being formatted.
 
 Owns formatting projections only; source reads and released calls belong to stages.
-Method: docs/methods/export.md. Constants retain export/sites.py and config.py provenance.
+Method: docs/methods/export.md. Site decisions arrive as published records.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ SCHEMA = 4
 
 
 def project_sites(record: ReleasedSites, *, full_length: bool) -> SiteTable:
-    """Select the 3.5 full/kept formatting table without making a site decision.
+    """Select the full/kept formatting table without making a site decision.
 
     Kept-only files clear removed bits and common calls and have empty common counts.
     Filter state, applied rules, source alleles, drops and header length are retained.

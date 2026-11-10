@@ -8,7 +8,6 @@
     example DEST        a small synthetic example (templates + configuration)
     templates           simulation templates from a VCF (naive builder)
     init / evidence / relatedness / reconstruct / pedigree / phase / report: cuts of the same graph
-    migrate-config OLD  explicit 3.5 settings migration
 
 Settings come from the configuration (see docs/configuration.md); scientific switches are changed with
 `--set section.key=value`. The parser imports no numerical code.
@@ -37,8 +36,8 @@ def _add_run_options(command):
     command.add_argument("--cores", type=int, help="CPU ceiling ([execution] cores; default: affinity).")
     command.add_argument(
         "--memory-limit",
-        help="Memory the run may plan to use at once, e.g. 200G "
-        "([execution] memory_limit; default: available at start minus headroom).",
+        help="Capacity for measured job memory pressure, e.g. 200G (binary units) "
+        "([execution] memory_limit; auto = job cgroup capacity).",
     )
     command.add_argument(
         "--contigs",
@@ -91,10 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("evidence", "reconstruct", "phase"):
             command.add_argument("--contig", required=True, help="Configured contig for this scatter step.")
 
-    migrate = commands.add_parser("migrate-config", help="Translate a 3.5 TOML file with an explicit per-key audit.")
-    migrate.add_argument("config", type=Path, metavar="OLD.toml")
-    migrate.add_argument("-o", "--output", type=Path, metavar="NEW.toml")
-
     status = commands.add_parser("status", help="Run records and checkpoint progress (no payload decoding).")
     status.add_argument("run_directory", type=Path, metavar="RUN")
     status.add_argument("--checkpoints", type=Path)
@@ -134,8 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("founders", "samples", "tracks"),
         default=["founders", "samples"],
         help="founders: per-contig founder VCF (haploid GT, one column c<component>_H<row> per "
-        "founder row); samples: phased sample VCF (GT:PS); tracks: per-component founder-track "
-        "TSV.gz (CHROM POS H0 H1 ...).",
+        "founder row); samples: phased sample VCF (GT:PS); tracks: per-contig founder-track "
+        "CSV.gz (contig, component, pos, h0, h1, ...).",
     )
     export.add_argument(
         "--format",
@@ -233,8 +228,8 @@ def _command_status(args: argparse.Namespace) -> int:
 
 def _command_recombination(args: argparse.Namespace) -> int:
     from ..core.errors import SettingsError
-    from .run import rerun_recombination
-    from .settings.load import load_settings, parse_override
+    from .run import _load_recorded_settings, rerun_recombination
+    from .settings.load import parse_override
 
     for override in args.overrides:
         path, _ = parse_override(override)
@@ -243,9 +238,7 @@ def _command_recombination(args: argparse.Namespace) -> int:
     options: dict[str, dict[str, Any]] = {}
     if args.order_breakpoints is not None:
         options["recombination"] = {"order_breakpoints": str(Path(args.order_breakpoints).resolve())}
-    if args.cores is not None:
-        options["execution"] = {"cores": args.cores}
-    settings = load_settings(args.run_directory / "config.toml", options=options, overrides=args.overrides)
+    settings = _load_recorded_settings(args.run_directory, args.cores, options=options, overrides=args.overrides)
     rerun_recombination(settings, args.run_directory)
     return 0
 
@@ -253,15 +246,6 @@ def _command_recombination(args: argparse.Namespace) -> int:
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command in {"run", "init", "evidence", "relatedness", "reconstruct", "pedigree", "phase", "report"}:
         return _command_workflow(args)
-    if args.command == "migrate-config":
-        from .settings.migrate import migrate_config
-
-        report = migrate_config(args.config, args.output)
-        if args.output is None:
-            print(report.text, end="")
-        else:
-            print(f"Migrated configuration: {args.output}")
-        return 0
     if args.command == "status":
         return _command_status(args)
     if args.command == "recombination":

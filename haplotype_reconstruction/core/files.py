@@ -12,8 +12,8 @@ def temporary_path(path: Path) -> Path:
     """A hidden temporary beside ``path``, unique per writer and call.
 
     Duplicate workflow steps may write the same file at once; a shared temporary
-    name would let one writer rename the other's file away. Final names, contents
-    and the atomic rename are unchanged.
+    name would let one writer rename the other's file away. Each writer publishes
+    its own contents through an atomic rename.
     """
     return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
 
@@ -38,7 +38,7 @@ def placement_lock(path: Path):
 
     Placing a file with an index is several renames, and a writer that fails part-way restores the previous pair.
     Without serialisation, a failed duplicate writer could restore older data beside another writer's newly placed
-    index (release 4.11). Holds an exclusive lock on a hidden file beside ``path`` while files are moved. The lock file
+    index. Holds an exclusive lock on a hidden file beside ``path`` while files are moved. The lock file
     is coordination metadata, not a product: it holds no state and is left in place (removing it could let a waiting
     writer and a newcomer lock different files).
     """

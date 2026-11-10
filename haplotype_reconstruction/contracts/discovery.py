@@ -1,7 +1,6 @@
 """Discovery products and scientific search status (DI23/25/27).
 
-The 3.5 field meanings and array dtypes are preserved. Search omissions and
-backstops are state, ambiguity is a call. Timings and tie-event diagnostics live
+Search omissions and backstops are state, ambiguity is a call. Timings and tie-event diagnostics live
 in science.discovery.diagnostics, outside these products. No I/O or science.
 """
 
@@ -41,11 +40,11 @@ class DiscoveryOmission:
 
 @dataclass(frozen=True)
 class DiscoverySearchStatus:
-    """Scientific search state and released ambiguity (DI25 / WP_DI2 §9.2).
+    """Scientific search state and released ambiguity (DI25).
 
     k_values int16[R] and k_log_scores float64[R] describe completely scored K
     classes. Counts, limits, omissions, heuristic cuts, certification, termination
-    and mean-field failure counts retain their exact 3.5 meanings. No omitted
+    and mean-field failure counts describe the attempted search. No omitted
     search is diagnostic. score_margin is inf when no competing K exists;
     archive/failure counts may be None when not measured. Timings and tie events
     are supplied separately by the science diagnostics.
@@ -94,7 +93,7 @@ class DiscoveredBlock:
     fsum negative log likelihood; inf and K=0 denote unresolved search.
     ambiguous/tied_alternatives count the winning set before deduplication and
     are stored calls projected from search (decoding checks consistency).
-    Historical latent_unknown=None remains decodable.
+    latent_unknown=None denotes an unavailable unknown-copy view.
     """
 
     schema: int = schema_field(1)

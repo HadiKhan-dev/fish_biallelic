@@ -56,7 +56,7 @@ class LabelModel:
     never read from the environment).
     """
 
-    def __init__(self, E, par, theta_l, theta_m, alpha, beta, config, reverse=False, *, decision_audit=None):
+    def __init__(self, E, par, theta_l, theta_m, alpha, beta, config, reverse=False):
         self.E = np.ascontiguousarray(E, dtype=np.float64)
         self.N, self.S, _, self.B = self.E.shape
         S = self.S
@@ -113,7 +113,7 @@ class LabelModel:
                         seen.add(c)
                         stack.append(c)
             self.desc.append(np.asarray(sorted(seen, key=lambda i: rank[i]), dtype=np.int64))
-        # L2: release sums use ancestors first, then ascending sample index, for both
+        # Release sums use ancestors first, then ascending sample index, for both
         # solves and every worker count. Search continues to use its own desc order.
         self.release_desc = [
             np.asarray(sorted(rows, key=lambda i: (depth[i], i)), dtype=np.int64) for rows in self.desc
@@ -134,9 +134,7 @@ class LabelModel:
         self.pairing_odds = float(np.log(config.set_posterior / (1.0 - config.set_posterior)))
         self.pairing_moves = []
         self.pairings = []
-        self.audit = None
-        self.decision_audit = decision_audit
-        # Release 4.10: concurrent blocks (solve(map_work=...)). The rows a block of n writes (n and its descendants:
+        # Concurrent blocks (solve(map_work=...)). The rows a block of n writes (n and its descendants:
         # labels, chains, its children's gauge) and reads (those rows and their parents: the kernel's copied labels
         # and subtree marks, propagate) fix which blocks commute; ``_waves`` keeps the sequential order of every
         # pair that does not. Each thread has its own subtree mark scratch.
@@ -331,7 +329,7 @@ class LabelModel:
             self.apply(n, path0, path1, np.zeros_like(gpath), kinds)
 
         if self.map_work is not None:
-            # Release 4.10: the free blocks read and write only their own sample; the oriented ones run in waves.
+            # The free blocks read and write only their own sample; the oriented ones run in waves.
             self._concurrent(own, np.arange(self.N, dtype=np.int64))
             if self._initial_waves is None:
                 self._initial_waves = self._waves([n for n in self.order if np.any(self.par[n] >= 0)])
@@ -346,7 +344,7 @@ class LabelModel:
             oriented(n)
 
     def _sweep_block(self, n):
-        """One block of a sweep without audits: apply it when its local gain exceeds the gain quantum, else restore
+        """One block of a sweep: apply it when its local gain exceeds the gain quantum, else restore
         n's and its descendants' rows. Returns whether it was applied."""
         rows = self.affected[n]
         X0, V0 = self.X[rows], self.V[rows]
@@ -368,7 +366,7 @@ class LabelModel:
         accept = lambda change: change > quantum  # noqa: E731
         J = self.objective()
         self.history.append(float(J))
-        concurrent = self.map_work is not None and self.decision_audit is None and self.audit is None
+        concurrent = self.map_work is not None
         if concurrent and self._sweep_waves is None:
             self._sweep_waves = self._waves(self.order)
         for sweep_index in range(self.config.max_sweeps):
@@ -384,93 +382,45 @@ class LabelModel:
                 self.apply(n, path0, path1, gpath, kinds)
                 gain, changed = self._gain(rows, X0, V0)
                 taken = accept(gain)
-                if self.decision_audit is not None:
-                    self.decision_audit.difference("gain", gain, quantum, taken)
-                if self.audit is not None:
-                    self.audit.gains.append([n, float(gain), float(quantum)])
-                    self.audit.emit("phase.gain", taken, gain=float(gain), threshold=float(quantum), sample=n)
                 if taken:
                     accepted += 1
                 else:
                     self._restore(rows, X0, V0, changed)
             J = self.objective()
             self.history.append(float(J))
-            if self.audit is not None:
-                self.audit.sweeps.append(
-                    dict(
-                        index=int(sweep_index), accepted=accepted, objective=float(J), X=self.X.copy(), V=self.V.copy()
-                    )
-                )
             if accepted == 0:
-                if self.audit is not None:
-                    self.audit.cap_events.append(
-                        dict(
-                            loop="sweeps",
-                            used=int(sweep_index) + 1,
-                            limit=self.config.max_sweeps,
-                            improvements=accepted,
-                        )
-                    )
-                    self.audit.emit(
-                        "ph1.solve.caps",
-                        False,
-                        loop="sweeps",
-                        used=int(sweep_index) + 1,
-                        limit=self.config.max_sweeps,
-                        improvements=accepted,
-                    )
                 self.settled = True
                 return J
-        if self.audit is not None:
-            self.audit.cap_events.append(
-                dict(loop="sweeps", used=self.config.max_sweeps, limit=self.config.max_sweeps, improvements=accepted)
-            )
-            self.audit.emit(
-                "ph1.solve.caps",
-                True,
-                loop="sweeps",
-                used=self.config.max_sweeps,
-                limit=self.config.max_sweeps,
-                improvements=accepted,
-            )
         self.settled = False
         return J
 
-    def solve(self, *, trace=False, map_work=None):
+    def solve(self, *, map_work=None):
         """The capped ascent below (_solve); with ``map_work(function, items)`` (ordered results, one thread per call)
-        its initial blocks and sweep blocks run in conflict-free waves (release 4.10) and reach the same state."""
-        self.map_work = None if trace or self.decision_audit is not None else map_work
+        its initial blocks and sweep blocks run in conflict-free waves and reach the same state."""
+        self.map_work = map_work
         try:
-            return self._solve(trace=trace)
+            return self._solve()
         finally:
             self.map_work = None
 
-    def _solve(self, *, trace=False):
+    def _solve(self):
         """Perform one capped global ascent and retain its final X/V for release.
 
         Initialise every sample, then alternate whole-pedigree block sweeps and
         joint parent/descendant pairing passes. Each sweep round and the pairing
-        loop has the unchanged max_sweeps cap. A cap leaves a valid improved
+        loop has the max_sweeps cap. A cap leaves a valid improved
         state; a capped pairing loop runs the final keep=False pass so ambiguity
         is measured at that final state. This is not independent family solving.
         The component runs default and mirror independently, then releases their
         agreement; neither solve supplies initial conditions to the other.
         """
-        if trace:
-            from .diagnostics import SolveTrace
-
-            self.audit = SolveTrace()
         self.initialise()
-        if self.audit is not None:
-            self.audit.initial.update(X=self.X.copy(), V=self.V.copy(), objective=float(self.objective()))
         J = self.sweeps()
         for _ in range(self.config.max_sweeps):
             if not self.pairing_pass():
                 break  # the pass's gains were measured in the final state
             J = self.sweeps()
         else:
-            if self.audit is not None:
-                self.audit.final_nonkeeping_pass = True
             self.pairing_pass(keep=False)
         return J
 
@@ -510,10 +460,6 @@ class LabelModel:
         ``keep``), else undone. Records (p, j, gain) of every candidate in ``pairings``; returns the number kept. A move
         that leaves every label and chain as it was (the parent's swapped suffix is the same configuration, e.g. a
         homozygous pair on both sides) is no competing pairing and is not recorded."""
-        if self.audit is not None:
-            self.audit.passes.append(
-                dict(keep=bool(keep), before=float(self.objective()), X_before=self.X.copy(), V_before=self.V.copy())
-            )
         kept = 0
         records = []
         margin = max(self.pairing_odds, self.config.gain_quantum)
@@ -523,39 +469,12 @@ class LabelModel:
                 continue  # the same state: nothing to choose between
             records.append((p, j, float(gain)))
             taken = keep and gain > margin
-            if keep and self.decision_audit is not None:
-                self.decision_audit.difference("pairing", gain, margin, gain > margin)
-            if self.audit is not None:
-                self.audit.emit(
-                    "phase.pairing", taken, gain=float(gain), threshold=float(margin), keep=bool(keep), parent=p, bin=j
-                )
             if taken:
                 kept += 1
                 self.pairing_moves.append((p, j, float(gain)))
             else:
                 self._restore(rows, X0, V0, changed)
         self.pairings = records
-        if self.audit is not None:
-            self.audit.passes[-1].update(
-                kept=int(kept),
-                after=float(self.objective()),
-                records=list(self.pairings),
-                X_after=self.X.copy(),
-                V_after=self.V.copy(),
-            )
-            if keep:
-                used = sum(row["keep"] for row in self.audit.passes)
-                self.audit.cap_events.append(
-                    dict(loop="pairing", used=used, limit=self.config.max_sweeps, improvements=int(kept))
-                )
-                self.audit.emit(
-                    "ph1.solve.caps",
-                    bool(used >= self.config.max_sweeps and kept > 0),
-                    loop="pairing",
-                    used=used,
-                    limit=self.config.max_sweeps,
-                    improvements=int(kept),
-                )
         return kept
 
     def ambiguous_pairings(self):
@@ -563,17 +482,10 @@ class LabelModel:
         result = []
         for p, j, gain in self.pairings:
             ambiguous = gain > -self.pairing_odds
-            if self.decision_audit is not None:
-                self.decision_audit.difference("ambiguity", gain, -self.pairing_odds, ambiguous)
-            if self.audit is not None:
-                self.audit.emit(
-                    "phase.ambiguity", ambiguous, gain=float(gain), threshold=-self.pairing_odds, parent=p, bin=j
-                )
             if ambiguous:
                 result.append((p, j))
         return result
 
-    # ------------------------------------------------------------------------------------------- junctions
 
 
 __all__ = ["LabelModel"]

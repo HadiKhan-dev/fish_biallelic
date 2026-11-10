@@ -1,6 +1,6 @@
 """Compute numeric pedigree report views from the released decision, without rendering.
 
-Owns PD25 and the slot/guard transformations of PE5. No DataFrames, storage,
+Owns PD25 and the slot-order and sibling-guard transformations. No DataFrames, storage,
 scoring, names or formatted support strings enter these producers.
 Method: docs/methods/pedigree.md#published-tables (PD25).
 Identity: count overwrite precedes slots; guard filters existing slots; the complete
@@ -43,9 +43,9 @@ from ...contracts.pedigree import (
     StructuralCompatibility,
     TierCalls,
 )
-from ...core.numerics import weighted_chromosome_sum
+from ...core.numerics import ordered_sum
 from .orientation import parent_role_probability
-from .parameters import PedigreeConfig
+from .parameters import PedigreeParameters
 from .release import support_sides
 from .slots import ParentOrientation
 from .ties import unique_finite_winner
@@ -83,16 +83,14 @@ def configuration_support(
     return tuple(result)
 
 
-def _structure(decision: Decision, config: PedigreeConfig) -> StructuralCompatibility:
+def _structure(decision: Decision, config: PedigreeParameters) -> StructuralCompatibility:
     """Full-data C/X diagnostics: edge coverage [E] per eligible edge (GenomeScores.edges), pair
     explainability [T], C/X-compatible and exposure-testable rows [A], children with a testable M1 row [N]."""
     scores, alternatives = decision.scores, decision.alternatives
-    # L2: configured-contig float64 fold, independent of BLAS team and C/F layout.
-    weights = np.ones(len(scores.contigs))
-    edge_matched = weighted_chromosome_sum(weights, scores.edge_matched)
-    edge_exposed = weighted_chromosome_sum(weights, scores.edge_exposed)
-    pair_explained = weighted_chromosome_sum(weights, scores.pair_explained)
-    pair_exposed = weighted_chromosome_sum(weights, scores.pair_exposed)
+    edge_matched = ordered_sum(scores.edge_matched, axis=0)
+    edge_exposed = ordered_sum(scores.edge_exposed, axis=0)
+    pair_explained = ordered_sum(scores.pair_explained, axis=0)
+    pair_exposed = ordered_sum(scores.pair_exposed, axis=0)
     coverage = np.divide(edge_matched, edge_exposed, out=np.full_like(edge_matched, np.nan), where=edge_exposed > 0.0)
     explainability = np.divide(
         pair_explained, pair_exposed, out=np.full_like(pair_explained, np.nan), where=pair_exposed > 0.0
@@ -117,7 +115,7 @@ def _structure(decision: Decision, config: PedigreeConfig) -> StructuralCompatib
     return StructuralCompatibility(coverage, explainability, compatible, testable, evaluable)
 
 
-def diagnostics(decision: Decision, config: PedigreeConfig) -> tuple[DiagnosticView, ...]:
+def diagnostics(decision: Decision, config: PedigreeParameters) -> tuple[DiagnosticView, ...]:
     """One row per sample: selections, margins, support fractions, structure and tier flags."""
     full, alternatives, evidence = decision.full, decision.alternatives, decision.evidence
     rows, states = alternatives.rows, alternatives.states
@@ -367,7 +365,7 @@ def explanations(
     diagnostic: tuple[DiagnosticView, ...],
     release: CountRelease,
 ) -> tuple[tuple[CallExplanationView, ...], tuple[AlternativeExplanationView, ...]]:
-    """Select local/graph and leading three finite alternatives per state in baseline row order."""
+    """Select local/graph and leading three finite alternatives per state in configuration row order."""
     full, alternatives = decision.full, decision.alternatives
     rows, states = alternatives.rows, alternatives.states
     state_scores, identity_scores = decision.adjusted
@@ -465,7 +463,7 @@ def build(
     release: CountRelease,
     search: tuple[SearchDiagnosticView, ...],
     chromosome_summary: tuple[ChromosomeSummaryView, ...],
-    config: PedigreeConfig,
+    config: PedigreeParameters,
     *,
     relative_contrasts: RelativeContrasts | None = None,
 ) -> PedigreeViews:

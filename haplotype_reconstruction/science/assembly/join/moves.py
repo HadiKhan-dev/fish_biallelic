@@ -10,8 +10,8 @@ are decided by the count step. :func:`lower_bounds` turns the two-region bounds 
 
 Owns: structural move order, bounds and exact improving-target selection.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §§4.6–4.8; AJ14, AJ17–AJ20.
-Identity: Duplicate targets keep their first score payload and later canonical witness slot order (A40-8).
+Method: docs/methods/assembly.md#aj17.
+Invariant: Duplicate targets keep their first score payload and canonical witness slot order.
 """
 
 from __future__ import annotations
@@ -350,11 +350,12 @@ def best_improvement(
     <= 1.2e-10 relative). A move improves iff its exact change < -t, t = max(1e-8,
     eps); it is excluded iff its bound > -t + eps. Survivors are scored in increasing
     bound order while the next bound <= min(best admissible exact change + reach, -t) + eps
-    (reach: how far above the best a tie class may extend, in score units; release 2.1 passes
+    (reach: how far above the best a tie class may extend, in score units; callers pass
     WIDE_CLASS_QUANTA tie quanta so every move that could share the best's tie class is scored).
-    choose(improving entries) picks the move among the improving (default, base: the least exact
-    change, ties by canonical order; release 2.1: tie classes of the change, the panel's content
-    inside a class); identical panels are scored once and take the path order of their first move
+    choose(improving entries) picks the improving move. Without a chooser, the least exact change
+    wins, with ties by canonical order; the panel search supplies a chooser using change tie
+    classes and panel content within a class; identical panels are scored once and take the path order of their
+    first move
     in canonical order. Entries are [change, canonical, move, panel, payload]. Returns
     ((change, canonical, move, panel, payload) or None, survivors, scored).
     observe(panel, exact_score, payload), when given, sees each uniquely exact-scored

@@ -3,12 +3,6 @@
 Owns refinement inputs, moves and results (RS01–RS12; required RC02/RC04–RC08).
 Must not choose storage, run kernels, read checkpoints or select a founder count.
 Method: docs/methods/founder_refinement.md#fixed-k-search.
-
-Producer-owned arrays are read-only by contract; a sweep copies founder rows before
-editing them. Evidence, coded leaves and surrogate emissions stay in original sample,
-site and prepared-row order. No founder relabelling occurs within a sweep. Canonical
-ordering belongs to best-of-two selection. These records do not claim convergence
-beyond the offered moves of this one sweep.
 """
 
 from __future__ import annotations
@@ -20,147 +14,15 @@ from typing import Any, Literal, Protocol, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from haplotype_reconstruction.science.assembly.count_rule.parameters import CountRuleParameters
+from haplotype_reconstruction.science.assembly.parameters import JoinParameters, LinkerParameters
+
 from ..core.ties import TieCensus, TieCounts
 from .genetic_map import ChromosomeGeneticMap
 from .panels import ComponentPanel, FounderComponent, PreparedPanel
 from .roles import freeze_record_arrays, record_field, schema_field
 
-__all__ = ["RefinementContext", "RefinementProblem", "RefinementSweep", "RefinementProposal", "RefinementSelection"]
-
-
-@dataclass(frozen=True)
-class RefinementContext:
-    """Fully contained L1 span alphabets, sorted by local (start, stop).
-
-    WP_AS8 4.10 excludes edge-crossing spans. Coverage of B is not required;
-    e.g. [(5,15)] is valid for a 20-block component. No absent edge is filled.
-
-    groups: int64[U,2] local half-open block spans. paths[u]: int64[A_u,B_u]
-    distinct L1 prepared-row paths, refined before unrefined. No mutation occurs.
-    """
-
-    groups: NDArray[np.int64] = record_field("state", axes=("U", "2"), units="block", dtype="int64")
-    paths: tuple[NDArray[np.int64], ...] = record_field("state", axes=("U", "A_u", "B_u"), dtype="int64")
-
-
-@dataclass(frozen=True)
-class RefinementProblem:
-    """Complete numerical inputs after RC01/RC03 preparation, before a fixed-K sweep.
-
-    Evidence is the float32 assembly scoring copy; uniform cells are uninformative.
-    leaves[b] codes known alleles as 0/1 and an unknown local row r as -2-r.
-    emissions[b] addresses prepared pairs by max(a,b)*(max(a,b)+1)//2+min(a,b),
-    whereas exact objective states enumerate a<=b lexicographically. normalisers
-    are the per-sample start/stay constants for this K, included in exact scores.
-    No arrays are mutated; output rows have separate ownership.
-    """
-
-    rows: NDArray[np.int64] = record_field("state", axes=("K", "B"), dtype="int64")
-    evidence: NDArray[np.float32] = record_field("evidence", axes=("N", "L", "3"), dtype="float32")
-    leaves: tuple[NDArray[np.int16], ...] = record_field("state", axes=("B", "R_b", "L_b"), dtype="int16")
-    offsets: NDArray[np.int64] = record_field("state", axes=("B+1",), units="site", dtype="int64")
-    kept: NDArray[np.bool_] = record_field("state", axes=("L",), dtype="bool")
-    partial: NDArray[np.bool_] = record_field("state", axes=("L",), dtype="bool")
-    hazards: NDArray[np.float64] = record_field("state", axes=("L",), units="reset hazard", dtype="float64")
-    emissions: tuple[NDArray[np.float64], ...] = record_field(
-        "state", axes=("B", "N", "R_b*(R_b+1)/2", "M_b"), units="nats", dtype="float64"
-    )
-    normalisers: NDArray[np.float64] = record_field("state", axes=("N",), units="nats", dtype="float64")
-    context: RefinementContext | None = record_field("state", dtype="RefinementContext | None")
-    penalty: float = record_field("state", units="nats", dtype="float64")
-    source_start: int = record_field("state", units="block", dtype="int64")
-    bin_size: int = record_field("state", units="site", dtype="int64")
-    schema: int = schema_field(1)
-
-
-@dataclass(frozen=True)
-class RefinementProposal:
-    """One surrogate proposal, in template then focal order; rows cover [start,stop).
-
-    Founder is the sweep-start label, remapped by exchanges during acceptance.
-    All block coordinates and rows are in forward orientation. No mutation occurs.
-    """
-
-    kind: Literal["fine", "coarse"] = record_field("state", dtype="str")
-    start: int = record_field("state", units="block", dtype="int64")
-    stop: int = record_field("state", units="block", dtype="int64")
-    founder: int = record_field("state", dtype="int64")
-    rows: NDArray[np.int64] = record_field("state", axes=("stop-start",), dtype="int64")
-
-
-@dataclass(frozen=True)
-class RefinementSweep:
-    """Result of one sweep, including every steering counter and ordered decision receipt.
-
-    rows retain the search's founder label frame; scores include K's normalisers.
-    decision_trace is float64[D,10]: event, junction, founder, partner, start, stop,
-    proposal, operand (nats), cutoff (nats), verdict (0/1). Index columns are exact
-    integer-valued floats; the adapter splits their comparison roles explicitly.
-    Events 0/1 test exchange/content gains; 2 tests a guard residual; 5 tests guard E; 3/4 record an
-    accepted exchange/content move. Trace order is execution order, including ties.
-    lex_next steers the next sweep's message mode. A computational work stop raises
-    WindowWorkLimit and returns no usable result, never a biological alternative.
-    """
-
-    rows: NDArray[np.int64] = record_field("state", axes=("K", "B"), dtype="int64")
-    scores: NDArray[np.float64] = record_field("state", axes=("N",), units="nats", dtype="float64")
-    F0: float = record_field("state", units="nats", dtype="float64")
-    F: float = record_field("state", units="nats", dtype="float64")
-    gain: float = record_field("state", units="nats", dtype="float64")
-    accounted: float = record_field("state", units="nats", dtype="float64")
-    deviation: float = record_field("report", units="nats", dtype="float64")
-    accepted: int = record_field("state", dtype="int64")
-    converged: bool = record_field("state", dtype="bool")
-    lex_next: bool = record_field("state", dtype="bool")
-    counters: AcceptanceCounters = record_field("state", dtype="AcceptanceCounters")
-    proposals: tuple[RefinementProposal, ...] = record_field("state", dtype="tuple[RefinementProposal]")
-    proposal_statistics: ProposalCounters = record_field("state", dtype="ProposalCounters")
-    window_work: WindowWorkCounters = record_field("state", dtype="WindowWorkCounters")
-    window_domains: tuple[WindowDomain, ...] = record_field("state", dtype="tuple[WindowDomain]")
-    junction_gain: NDArray[np.float64] = record_field("report", axes=("B+1",), units="nats", dtype="float64")
-    junction_pair: NDArray[np.int64] = record_field("report", axes=("B+1", "2"), dtype="int64")
-    weak_junctions: tuple[RefinementWeakJunction, ...] = record_field("report", dtype="tuple[WeakJunction]")
-    decision_trace: RefinementDecisionTrace = record_field("state", dtype="RefinementDecisionTrace")
-    schema: int = schema_field(1)
-
-
-@dataclass(frozen=True)
-class RefinementSelection:
-    """RS12 representative of two completed directional searches, with tied alternatives.
-
-    F ties use the refine_F policy, then minimum exact-optimal switches as a prior;
-    the arbitrary content convention applies only after that prior. Chosen rows
-    and alternatives are canonical, with multiplicity preserved. No input mutates.
-    """
-
-    rows: NDArray[np.int64] = record_field("state", axes=("K", "B"), dtype="int64")
-    first: Literal["fwd", "rev"] = record_field("state", dtype="str")
-    tied_panels: tuple[tuple[tuple[int, ...], ...], ...] = record_field("call", dtype="tuple[PanelKey]")
-    tied_scores: tuple[float, ...] = record_field("state", units="nats", dtype="float64")
-    tied_switches: tuple[int, ...] = record_field("state", dtype="int64")
-    minimum_switches: int | None = record_field("state", dtype="int64 | None")
-    schema: int = schema_field(1)
-
-
-# PILOT-R neutral comparison views. These are adapter views of a RefinementSweep,
-# not separately persisted products; their schema is the enclosing sweep's schema.
-@dataclass(frozen=True)
-class RefinementDecisionTrace:
-    """Separate exact trace indices from the two nats columns without losing order."""
-
-    indices: NDArray[np.int64] = record_field("state", dtype="int64")
-    operand: NDArray[np.float64] = record_field("state", units="nats", dtype="float64")
-    cutoff: NDArray[np.float64] = record_field("state", units="nats", dtype="float64")
-
-
-@dataclass(frozen=True)
-class RefinementWeakJunction:
-    """First-look weak junction interval, representative pair and exact gain."""
-
-    first: int = record_field("report", units="block", dtype="int64")
-    last: int = record_field("report", units="block", dtype="int64")
-    pair: tuple[int, int] = record_field("report", dtype="tuple[int64,int64]")
-    gain: float = record_field("report", units="nats", dtype="float64")
+__all__ = ["AcceptanceCounters"]
 
 
 class RefinementCounterAccess:
@@ -230,7 +92,7 @@ class AcceptanceCounters(RefinementCounterAccess):
     long_candidates: int = record_field("state", dtype="int64")
 
 
-# AS7/AS8: bound window-work identity. This section is owned by pr40.
+# Bound identity of windowed refinement work.
 @dataclass(frozen=True, order=True)
 class WindowOrdinal:
     """Bind a template to deterministic driver order before any cost scheduling.
@@ -244,27 +106,6 @@ class WindowOrdinal:
     direction: int = record_field("state", dtype="int64")
     sweep: int = record_field("state", dtype="int64")
     template: int = record_field("state", dtype="int64")
-
-
-# The neutral comparison view and the actual product now use the same record.
-RefinementAcceptanceCounters = AcceptanceCounters
-
-
-@dataclass(frozen=True)
-class ProposalCounters(RefinementCounterAccess):
-    """Outcome-steering proposal counts, including reuse and bounded programme work."""
-
-    windows: int = record_field("state", dtype="int64")
-    certified: int = record_field("state", dtype="int64")
-    dp: int = record_field("state", dtype="int64")
-    fixing_dps: int = record_field("state", dtype="int64")
-    max_frontier: int = record_field("state", dtype="int64")
-    fallbacks: int = record_field("state", dtype="int64")
-    changed: int = record_field("state", dtype="int64")
-    templates_solved: int = record_field("state", dtype="int64")
-    templates_reused: int = record_field("state", dtype="int64")
-    beam_truncations: int = record_field("state", dtype="int64")
-    beam_fallbacks: int = record_field("state", dtype="int64")
 
 
 @dataclass(frozen=True)
@@ -352,8 +193,6 @@ class WindowDomain(RefinementCounterAccess):
 
 
 __all__ += [
-    "AcceptanceCounters",
-    "ProposalCounters",
     "WindowWorkCounters",
     "WindowOrdinal",
     "WindowWorkShape",
@@ -361,52 +200,10 @@ __all__ += [
     "WindowDomain",
     "WindowRangeAlphabet",
     "WindowPathAlphabet",
-    "RefinementAcceptanceCounters",
-    "RefinementWeakJunction",
-    "RefinementDecisionTrace",
 ]
 
 # ---------------------------------------------------------------------------
-# AS6: assembly hierarchy and founder release (WP_AS6; sole integrator as40c).
-# Existing PILOT-R records above retain their fields and semantics.
-
-
-@dataclass(frozen=True)
-class LinkerSettings:
-    """Plain linker values crossing the join task boundary; no science imports."""
-
-    max_sites: int = record_field("state", dtype="int64")
-    max_iterations: int = record_field("state", dtype="int64")
-    robustness: float = record_field("state", dtype="float64")
-    error_fraction: float = record_field("state", dtype="float64")
-    error_tract_bp: float = record_field("state", units="bp", dtype="float64")
-    min_log_probability: float = record_field("state", units="nats", dtype="float64")
-    pseudo_count: float = record_field("state", dtype="float64")
-    uniform_mix: float = record_field("state", dtype="float64")
-    min_change: float = record_field("state", dtype="float64")
-    learning_rate_decay: float = record_field("state", dtype="float64")
-    minimum_learning_rate: float = record_field("state", dtype="float64")
-
-
-@dataclass(frozen=True)
-class JoinSearchSettings:
-    """The four plain search controls carried by a join task."""
-
-    paths_per_endpoint: int = record_field("state", dtype="int64")
-    full_scores_per_kind: int = record_field("state", dtype="int64")
-    max_bins: int = record_field("state", dtype="int64")
-    tensor_budget_mb: int = record_field("diagnostic", units="MiB", dtype="int64")
-
-
-@dataclass(frozen=True)
-class CountRuleSettings:
-    """Plain effective-carrier controls, shared by join and refinement tasks."""
-
-    bootstrap_resamples: int = record_field("state", dtype="int64")
-    bootstrap_level: float = record_field("state", dtype="float64")
-    near_identity: float = record_field("state", dtype="float64")
-    shadow_combinations: int = record_field("state", dtype="int64")
-    schema: int = schema_field(2)
+# Assembly hierarchy and founder release.
 
 
 @dataclass(frozen=True)
@@ -414,13 +211,13 @@ class JoinSettings:
     """All scientific settings of one batch, including the explicit tie convention.
 
     The map covers the task's absolute genomic positions. L1 ignores the horizon
-    controls; later levels use them. The three nested records contain values only:
-    owning science constructors rebuild their parameter dataclasses from them.
+    controls; later levels use them. The three nested records are the owning science parameter types, shared
+    directly with each join consumer.
     """
 
-    linker: LinkerSettings = record_field("state", dtype="LinkerSettings")
-    join: JoinSearchSettings = record_field("state", dtype="JoinSearchSettings")
-    count_rule: CountRuleSettings = record_field("state", dtype="CountRuleSettings")
+    linker: LinkerParameters = record_field("state", dtype="LinkerParameters")
+    join: JoinParameters = record_field("state", dtype="JoinParameters")
+    count_rule: CountRuleParameters = record_field("state", dtype="CountRuleParameters")
     cost_scale: float = record_field("state", dtype="float64")
     gap_horizon_scale: float = record_field("state", dtype="float64")
     recombination_tolerance: float = record_field("state", dtype="float64")
@@ -470,7 +267,7 @@ class ReleaseFamily:
     retain the producer's coordinates: join-local paths for joins; prepared-row
     paths for refinement. Re-basing the family never re-bases that provenance.
 
-    The sparse payload view retains 3.5 metadata, including explicit None.
+    The sparse payload view retains metadata, including explicit None.
     This is a value record, not a Mapping subclass: its scientific values field
     must not shadow Mapping.values(), which orchestration traversals call.
     This is needed because absence and None differ for fallback status/provenance
@@ -578,7 +375,7 @@ class ReleaseFamily:
 
 
 def release_family_kind(status: str) -> Literal["biological", "unverified", "diagnostic"]:
-    """Return a family's comparison kind from its declared status (WP_AS6 §5)."""
+    """Return a family's comparison kind from its declared status."""
     if status == "count_unverified":
         return "diagnostic"
     if status.startswith("unresolved") or status == "continuation_unverified":
@@ -622,8 +419,6 @@ class JoinSummaryView(Protocol):
     """
 
     @property
-    def phase_seconds(self) -> Mapping[str, float]: ...
-    @property
     def work_counters(self) -> Mapping[str, int]: ...
     @property
     def total_full_scores(self) -> int: ...
@@ -631,8 +426,6 @@ class JoinSummaryView(Protocol):
     def count_exact_scores(self) -> int: ...
     @property
     def count_exact_sample_scores(self) -> int: ...
-    @property
-    def beam_seconds(self) -> float: ...
     @property
     def events(self) -> tuple[Mapping[str, Any], ...]: ...
     @property
@@ -782,9 +575,6 @@ class FounderRelease:
 
 
 __all__ += [
-    "LinkerSettings",
-    "JoinSearchSettings",
-    "CountRuleSettings",
     "JoinSettings",
     "JoinInputs",
     "ReleaseFamily",
@@ -799,7 +589,7 @@ __all__ += [
 ]
 
 
-# AS6 publication products. Prepared panels are hoisted to completion for final products.
+# Publication products. Prepared panels are hoisted to completion for final products.
 @dataclass(frozen=True)
 class CompletionProduct:
     """Immutable prepared alphabet and typed completion summary payload."""
@@ -845,7 +635,7 @@ class AssemblyProduct:
 __all__ += ["CompletionProduct", "JoinedLevel", "RefinedLevel", "AssemblyProduct"]
 
 
-# AS7/AS8: integrated pr40 handoff; source SHA256 0753ec91e822a7580c1de10d5680cd001c687b340752836fdb5fa707728d40df
+# Fixed-K refinement records use component-local prepared-row coordinates.
 @dataclass(frozen=True)
 class WeakJunction:
     """Native fit weak-junction record; persisted name best_gain is preserved."""
@@ -942,18 +732,12 @@ class FitSummary:
     frontier_fallbacks: int = record_field("state", dtype="int", units="1")
     accepted: FitAcceptanceTotals = record_field("state", dtype="FitAcceptanceTotals", units="1")
     max_deviation: float = record_field("state", dtype="float64", units="nats")
-    wall: float = record_field("diagnostic", dtype="float64", units="seconds")
-    worker_cpu: float = record_field("diagnostic", dtype="float64", units="seconds")
-    thread_cpu: float = record_field("diagnostic", dtype="float64", units="seconds")
     tied_panels: tuple[tuple[tuple[int, ...], ...], ...] = record_field(
         "state", dtype="int64", axes=("A", "K", "B"), units="1", default=()
     )
     tied_scores: tuple[float, ...] = record_field("state", dtype="float64", axes=("A",), units="nats", default=())
     tied_switches: tuple[int, ...] = record_field("state", dtype="int64", axes=("A",), units="switch", default=())
     minimum_switches: int | None = record_field("state", dtype="int", units="1", default=None)
-    phase_seconds: Mapping[str, float] = record_field(
-        "diagnostic", dtype="float64", units="seconds", default_factory=dict
-    )
     work_counters: FitWorkCounters = record_field("state", dtype="FitWorkCounters", units="1", default_factory=dict)
 
 
@@ -998,10 +782,6 @@ class CountDecisionRecord:
     shadow_alternatives: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_unverified: tuple = record_field("diagnostic", dtype="tuple", units="1", default=())
     hidden_sequence_failures: tuple | None = record_field("state", dtype="tuple | None", units="1", default=None)
-    after_addition: bool = record_field("state", dtype="bool", units="1", default=False)
-    count_cycle: bool = record_field("call", dtype="bool", units="1", default=False)
-    cycle_start_count: int | None = record_field("state", dtype="int", units="1", default=None)
-    cycle_undecided: bool = record_field("call", dtype="bool", units="1", default=False)
     larger_fit: str | None = record_field("state", dtype="str", units="1", default=None)
     smaller_fit: str | None = record_field("state", dtype="str", units="1", default=None)
     tied_candidates: tuple = record_field("state", dtype="tuple", units="1", default=())
@@ -1028,6 +808,7 @@ class BestFReplacement:
     gain: float = record_field("state", dtype="float64", units="nats")
     recorded: tuple[Mapping[str, Any], ...] = record_field("state", dtype="recorded count comparisons", units="1")
     deletion_vs_best_smaller: dict[str, Any] | None = record_field("state", dtype="dict[str, Any] | None", units="1")
+    # Comparison of a previously computed larger fit; also used by deletion-only passes.
     addition_vs_best_larger: dict[str, Any] | None = record_field("state", dtype="dict[str, Any] | None", units="1")
     own_deletion_test: dict[str, Any] | None = record_field("state", dtype="dict[str, Any] | None", units="1")
     fails_own_deletion_test: bool | None = record_field("state", dtype="bool", units="1")
@@ -1048,11 +829,6 @@ class CountPass:
     )
     final_fit: str = record_field("call", dtype="str", units="1")
     weak_junctions: tuple[WeakJunction, ...] = record_field("state", dtype="WeakJunction", units="1")
-    count_cycle: bool = record_field("call", dtype="bool", units="1")
-    cycle_undecided: bool = record_field("call", dtype="bool", units="1")
-    count_limit: int = record_field("state", dtype="int", units="1")
-    count_limit_reached: bool = record_field("call", dtype="bool", units="1")
-    additions: bool = record_field("state", dtype="bool", units="1")
     ambiguous: bool = record_field("call", dtype="bool", units="1")
     best_f_replacement: BestFReplacement | None = record_field("state", dtype="BestFReplacement | None", units="1")
     live_alternatives: tuple = record_field("state", dtype="tuple", units="1", default=())
@@ -1061,13 +837,11 @@ class CountPass:
     count_unverified: tuple = record_field("diagnostic", dtype="tuple", units="1", default=())
     branch_evaluations: int = record_field("state", dtype="int", units="1", default=1)
     branch_reused_fits: int = record_field("state", dtype="int", units="1", default=0)
-    branch_seconds: float = record_field("diagnostic", dtype="float64", units="seconds", default=0.0)
     branch_status: str = record_field("call", dtype="str", units="1", default="none")
     selected_branch: str | None = record_field("call", dtype="str", units="1", default=None)
     input_F0: float | None = record_field("state", dtype="float64", units="nats", default=None)
     count_continuations: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_branch_evaluations: int = record_field("state", dtype="int", units="1", default=0)
-    count_branch_seconds: float = record_field("diagnostic", dtype="float64", units="seconds", default=0.0)
 
 
 @dataclass(frozen=True)
@@ -1091,10 +865,6 @@ class ComponentRefinement:
         "state", dtype="CountDecisionRecord", units="1", default=()
     )
     fits: tuple[FitSummary, ...] = record_field("state", dtype="FitSummary", units="1", default=())
-    count_cycle: bool = record_field("call", dtype="bool", units="1", default=False)
-    cycle_undecided: bool = record_field("call", dtype="bool", units="1", default=False)
-    count_limit: int | None = record_field("state", dtype="int", units="1", default=None)
-    count_limit_reached: bool = record_field("call", dtype="bool", units="1", default=False)
     ambiguous: bool = record_field("call", dtype="bool", units="1", default=False)
     final_fit: str | None = record_field("call", dtype="str", units="1", default=None)
     best_f_replacement: BestFReplacement | None = record_field(
@@ -1108,15 +878,10 @@ class ComponentRefinement:
     input_alternatives: tuple = record_field("state", dtype="tuple", units="1", default=())
     branch_evaluations: int = record_field("state", dtype="int", units="1", default=1)
     branch_reused_fits: int = record_field("state", dtype="int", units="1", default=0)
-    branch_seconds: float = record_field("diagnostic", dtype="float64", units="seconds", default=0.0)
     branch_status: str = record_field("call", dtype="str", units="1", default="none")
     selected_branch: str | None = record_field("call", dtype="str", units="1", default=None)
     count_continuations: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_branch_evaluations: int = record_field("state", dtype="int", units="1", default=0)
-    count_branch_seconds: float = record_field("diagnostic", dtype="float64", units="seconds", default=0.0)
-    phase_seconds: dict[str, Any] = record_field(
-        "diagnostic", dtype="dict[str, Any]", units="seconds", default_factory=dict
-    )
     work_counters: dict[str, Any] = record_field("state", dtype="dict[str, Any]", units="1", default_factory=dict)
     polish: dict[str, Any] = record_field("state", dtype="dict[str, Any]", units="1", default_factory=dict)
 
@@ -1128,7 +893,6 @@ class LevelSummary:
     """Census of one refinement level (its level record; logged as one line, LevelSummary.line)."""
 
     level: int = record_field("state", dtype="int", units="1")
-    additions: bool = record_field("state", dtype="bool", units="1")
     min_sites_per_bin: int = record_field("state", dtype="int", units="1")
     elapsed_seconds: float = record_field("diagnostic", dtype="float64", units="seconds")
     components: int = record_field("state", dtype="int", units="1")
@@ -1138,9 +902,6 @@ class LevelSummary:
     mean_sweeps: float = record_field("state", dtype="float64", units="1")
     max_frontier: int = record_field("state", dtype="int", units="1")
     frontier_fallbacks: int = record_field("state", dtype="int", units="1")
-    count_limit_hits: int = record_field("state", dtype="int", units="1")
-    count_cycles: int = record_field("state", dtype="int", units="1")
-    count_cycles_undecided: int = record_field("state", dtype="int", units="1")
     best_f_replacements: int = record_field("state", dtype="int", units="1")
     weak_label_junctions: int = record_field("state", dtype="int", units="1")
     deletions_without_sequence: int = record_field("state", dtype="int", units="1")
@@ -1148,9 +909,6 @@ class LevelSummary:
     hidden_sequence_failures: int = record_field("state", dtype="int", units="1")
     ambiguous_count_calls: tuple[Mapping[str, Any], ...] = record_field(
         "state", dtype="ambiguous count comparisons", units="1"
-    )
-    phase_seconds: dict[str, Any] = record_field(
-        "diagnostic", dtype="dict[str, Any]", units="seconds", default_factory=dict
     )
     work_counters: dict[str, Any] = record_field("state", dtype="dict[str, Any]", units="1", default_factory=dict)
 
@@ -1160,8 +918,7 @@ class LevelSummary:
             f"  [founder refinement L{self.level}] converged search: {self.fits} fits, "
             f"{self.nonconverged_fits} at the sweep limit, max sweeps {self.max_sweeps}, "
             f"max window frontier {self.max_frontier} ({self.frontier_fallbacks} frontier-cap "
-            f"fallbacks), count limit hits {self.count_limit_hits}, count cycles "
-            f"{self.count_cycles} ({self.count_cycles_undecided} undecided), ambiguous count "
+            f"fallbacks), ambiguous count "
             f"calls {len(self.ambiguous_count_calls)}, best-F panel replacements "
             f"{self.best_f_replacements}, weak label junctions {self.weak_label_junctions}, "
             f"deletions without sequence {self.deletions_without_sequence}, decided by the "
@@ -1182,7 +939,7 @@ __all__ += [
 ]
 
 
-# AS8 logical-prefix records, supplied by pr40 (2026-11-01 07:46).
+# Logical-prefix search records.
 @dataclass(frozen=True)
 class FitOrdinalBinding:
     ordinal: int = record_field("state", dtype="int")
@@ -1224,7 +981,7 @@ __all__ += ["FitOrdinalBinding", "LogicalWindowReceipt", "PhysicalWindowWork", "
 __all__ += ["FitAcceptanceTotals", "FitWorkCounters"]
 
 
-# AS7/AS8 sweep history, moved from refinement/diagnostics.py (TEMP-AS6; asm40c, 1 Nov).
+# Refinement sweep history.
 @dataclass(frozen=True)
 class SweepHistory(AcceptanceCounters):
     """One completed native sweep, with flat counter names retained by its codec.
@@ -1241,10 +998,6 @@ class SweepHistory(AcceptanceCounters):
     deviation: float = record_field("state", dtype="float64", units="nats")
     accepted: int = record_field("state", dtype="int", units="1")
     proposals: Mapping[str, Any] = record_field("state", dtype="Mapping", units="1")
-    wall: float = record_field("diagnostic", dtype="float64", units="seconds")
-    message_wall: float = record_field("diagnostic", dtype="float64", units="seconds")
-    proposal_wall: float = record_field("diagnostic", dtype="float64", units="seconds")
-    pass_wall: float = record_field("diagnostic", dtype="float64", units="seconds")
 
 
 __all__ += ["SweepHistory"]

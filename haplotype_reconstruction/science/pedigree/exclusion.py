@@ -1,11 +1,11 @@
 """Full-marker exclusion windows and exact pattern encodings for certified scans.
 Method: docs/methods/pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-counts
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import numpy as np
 from numba import prange
@@ -83,9 +83,17 @@ def _encode_patterns(gl, observed, cap):
     return codes, catalog, counts
 
 
-def combine(evidence: list[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray]:
-    """(log E [D] averaged over all configured chromosomes, jointly observed sites [D])."""
+def combine(evidence: Sequence[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Log endpoints of the arithmetic mean of exclusion e-values over all configured contigs.
+
+    Preserve contig order and include uninformative contigs in the denominator. An absent upper
+    endpoint means exact evidence; certified lower bounds retain their supplied upper endpoint.
+    Observed-site counts are summed over contigs."""
     # NumPy 2.5's reduce stub omits the ordinary allocating out=None overload.
-    log_e = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))
+    lower = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))
+    upper = np.logaddexp.reduce(
+        np.stack([value.log_e if value.log_e_upper is None else value.log_e_upper for value in evidence]), axis=0
+    )
+    upper -= np.log(len(evidence))
     observed = np.sum([value.observed_sites for value in evidence], axis=0).astype(np.int64)
-    return log_e, observed
+    return lower, upper, observed

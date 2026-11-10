@@ -8,10 +8,9 @@ import numpy as np
 
 from ...contracts.pedigree import PreparedChromosome, RelativeContrasts
 from ...contracts.roles import record_field
-from ...engine.runtime import task_team
-from ...engine.scheduler import claim_threads
+from ...engine.cpu import claim_threads, thread_team
 from ...science.pedigree import relatives as science
-from ...science.pedigree.parameters import PedigreeConfig
+from ...science.pedigree.parameters import PedigreeParameters
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
 
 
@@ -26,7 +25,7 @@ class ContigContrasts:
 
 def run(
     prepared: PreparedChromosome,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     pairs: np.ndarray,
     *,
     threads: int = 1,
@@ -36,7 +35,7 @@ def run(
     second = np.zeros(len(pairs))
     full = np.zeros(len(pairs))
     usable: np.ndarray = np.zeros(len(pairs), bool)
-    with task_team(threads):
+    with thread_team(default=threads):
         for component in prepared.components:
             # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
             a, b, use = science.component_contrasts(component, parameters, pairs, claim_threads, reverse=reverse)
@@ -65,7 +64,7 @@ def aggregate(
 
 def task(
     prepared: PreparedChromosome,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     pairs: np.ndarray,
     *,
     cores: int = 1,

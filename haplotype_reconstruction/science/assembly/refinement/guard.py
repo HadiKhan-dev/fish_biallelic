@@ -4,24 +4,14 @@ Owns local tracebacks and the shared-switch charge; never decides a count.
 The event scan remains quadratic within a transition group; no unreviewed shortcut changes sharing.
 Method: docs/methods/founder_refinement.md#shared-switch-guard (RC08).
 
-Owns canonical switch events and the shared-switch saving bound.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#guard (RS10; RC08).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-
-
 A long founder edit (a coarse move copying an L1 span) can raise F by letting several samples drop
 the switch of a crossover they share (descendants of one meiosis carry the same breakpoint),
 turning the founder into an artificial recombinant. A coarse move that lowers the genotype fit
 E = F + switch cost (of the samples' lexicographic maximum paths) is refused unless its F gain
 exceeds the acceptance tolerance once every saved switch at a shared one-way junction is
 uncredited: dF - C_shared > TOL, C_shared = sum over samples of min(switch cost the sample saves,
-the cost of its removed switch events at shared one-way junctions). (Release 2.8: switch costs are
-the map-derived per-homologue costs of objective.py; an event changing both homologues costs 2c.)
+the cost of its removed switch events at shared one-way junctions). Switch costs are map-derived
+per-homologue costs (objective.py); an event changing both homologues costs 2c.
 A removed event is a founder transition u -> v of one homologue; it is one-way unless it leaves the edited founder
 and the same path later rejoins it (an excursion of the founder's own carrier, the signature of a row that is
 wrong there: descendants sharing both breakpoints of a short double crossover is improbable under
@@ -29,9 +19,9 @@ crossover interference); it is shared when another sample's one-way removed even
 transition with an overlapping evidence interval (the stretch between the sample's nearest
 informative sites where u and v differ). Moves that do not lower E, and moves whose gain comes from
 switch savings at unshared junctions or from excursions, pass. The acceptance pass
-(acceptance.uncredited_switches) traces the paths with and without the move.
+(acceptance._uncredited_switches) traces the paths with and without the move.
 
-Event identity (release 2.1, design 5.3): the traceback places a switch at one site of the stretch where the two
+Event identity: the traceback places a switch at one site of the stretch where the two
 states' genotypes are equal for the sample (or the sample has no evidence), and which site it picks there follows
 exact float ties. Removed events are therefore compared by (transition, evidence interval): every event's site is
 moved to the leftmost site of its interval (canonical_sites) before the set difference, using the alleles of the
@@ -45,7 +35,6 @@ from numba import prange
 
 from haplotype_reconstruction.core.kernels import kernel
 
-from .costs import traceback_bytes
 from .emissions import CENTER
 from .objective import lex_better, pair_code7, row_max, unordered_pairs
 from .overloads import overloads_for
@@ -367,7 +356,7 @@ def shared_savings(rem_sample, rem_offsets, rem_events, rem_costs, saved, focal,
     saved[s] = net switch cost sample s saves. Returns the sum over samples of min(saved, the cost
     of its removed homologue transitions at shared one-way junctions).
 
-    Release 2.8: a removed event that changes one homologue is one transition
+    A removed event that changes one homologue is one transition
     (cost c); one that changes both is two transitions of cost c each under one of its two
     consistent pairings (x1 -> x2, y1 -> y2) or (x1 -> y2, y1 -> x2). Every transition is tested for
     sharing separately, and a double change is charged c per shared transition of its better
@@ -379,9 +368,8 @@ def shared_savings(rem_sample, rem_offsets, rem_events, rem_costs, saved, focal,
     consistent pairing), and events are compared as whole diplotype events (removed_events), so a
     homologue transition that persists while the other homologue changes counts as removed. Both
     errors only uncredit more, so the guard can reject more coarse moves than an exact attribution
-    would, never fewer; the extra rejections are counted (guard_rejected) and checked on the native
-    set. Unordered tracebacks do not identify homologue pairings, and resolving the pairings jointly
-    would be a combinatorial search."""
+    would, never fewer; the rejections are counted (guard_rejected). Unordered tracebacks do not
+    identify homologue pairings, and resolving the pairings jointly would be a combinatorial search."""
     trans = np.empty((4, 2), np.int64)
     # one-way events (FIFO pairing of the focal founder's excursions per sample)
     n_events = len(rem_events)
@@ -497,5 +485,4 @@ __all__ = [
     "canonical_sites",
     "removed_events",
     "shared_savings",
-    "traceback_bytes",
 ]

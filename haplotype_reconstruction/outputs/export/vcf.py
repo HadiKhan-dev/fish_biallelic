@@ -18,10 +18,8 @@ def suffix(file_format: str) -> str:
     return ".bcf" if file_format == "bcf" else ".vcf.gz"
 
 
-# htslib's writer header already declares VCFv4.2: a header text declaring another version keeps that line as a
-# second fileformat line (as in kept-site sample files, unchanged for byte identity with earlier exports).
+# Match htslib's declaration so each output has exactly one fileformat line.
 FILEFORMAT = "##fileformat=VCFv4.2\n"
-LEGACY_FILEFORMAT = "##fileformat=VCFv4.3\n"
 
 
 def contig_line(contig: str, length) -> str:
@@ -107,7 +105,7 @@ def htslib_header(path: Path, header: str) -> str:
 class RecordWriter:
     """Write VCF/BCF records given as text lines (no trailing newline) to ``path``.
 
-    BCF: cyvcf2's record writer, each line parsed into a record. VCF (release 4.10): htslib's own header text, then
+    BCF: cyvcf2's record writer, each line parsed into a record. VCF: htslib's own header text, then
     the lines as text through htslib's bgzf_write, with the BGZF blocks htslib's record writer makes: its header
     write ends with a flush, and before each record it starts a new block when the record does not fit in the current
     one (vcf_write's bgzf_flush_try). The same htslib compresses the same blocks, so the file, and its index, are the
@@ -244,8 +242,7 @@ def place(
     """Index ``temporary`` when asked (on ``threads``), then move it (and its index) to ``final``; returns the file
     names placed.
 
-    A failure before the new index is in place leaves the previous publication as it was (release 4.11; the previous
-    indexes were removed before the data moved, so a failed rename lost the accepted index): the new index is built
+    A failure before the new index is in place preserves the previous publication: the new index is built
     first, the previous data is kept under a hard link while the new data and then its index are renamed into place,
     and it is restored beside its untouched index if the index cannot be placed (without previous data, the new data
     is removed rather than left unindexed). The rollback is decided by the files, so an interruption just after a

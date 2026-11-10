@@ -22,7 +22,7 @@ Compute the block scale once and keep its tie quanta fixed throughout search. NL
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py), [core/ties.py](../../haplotype_reconstruction/core/ties.py), [science/discovery/panel.py](../../haplotype_reconstruction/science/discovery/panel.py).
 
-Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `WIDE_CLASS_QUANTA`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L); O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -33,7 +33,7 @@ Enumerate unordered known-row pairs, a known row with one unknown copy, then two
 
 Implementation: [science/discovery/api.py](../../haplotype_reconstruction/science/discovery/api.py), [science/discovery/fixed_k/workspace.py](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py).
 
-Parameters by name: `unknown_copy_penalty`, `snps_per_bin`, `release`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `unknown_copy_penalty`, `snps_per_bin`, `release`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -44,7 +44,7 @@ Find the minimum whole-block state cost and retain every state within the inclus
 
 Implementation: [science/discovery/fixed_k/assign.py](../../haplotype_reconstruction/science/discovery/fixed_k/assign.py), [science/discovery/fixed_k/fit.py](../../haplotype_reconstruction/science/discovery/fixed_k/fit.py).
 
-Parameters by name: `switch_penalty`, `snps_per_bin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `switch_penalty`, `snps_per_bin`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N K² B) state comparisons on binned evidence; B is determined by the named binning parameter.
 
@@ -55,7 +55,7 @@ Choose singleton or fractional assignment evidence according to the complete tie
 
 Implementation: [science/discovery/fixed_k/update.py](../../haplotype_reconstruction/science/discovery/fixed_k/update.py), [science/discovery/fixed_k/fit.py](../../haplotype_reconstruction/science/discovery/fixed_k/fit.py).
 
-Parameters by name: `H_SUM_ERROR_FACTOR`, `H_SUM_ERROR_CUTOFF`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `H_SUM_ERROR_FACTOR`, `H_SUM_ERROR_CUTOFF`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(L x total memberships + K L); O(N L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -66,7 +66,7 @@ For each ordered start, look up or compute the next transition, enforce the traj
 
 Implementation: [science/discovery/fixed_k/fit.py](../../haplotype_reconstruction/science/discovery/fixed_k/fit.py).
 
-Parameters by name: `max_iterations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_iterations`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(iterations N K² B) per trajectory, with named iteration and usage-schedule budgets.
 
@@ -90,7 +90,7 @@ Canonicalise distinct-row starts, obtain synchronised and refitted endpoints, an
 
 Implementation: [science/discovery/fixed_k/fit.py](../../haplotype_reconstruction/science/discovery/fixed_k/fit.py).
 
-Parameters by name: `max_iterations`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_iterations`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: One fixed-count trajectory family per distinct admitted start, plus permitted collapse refits.
 
@@ -101,7 +101,7 @@ Canonicalise panels by content, deduplicate exact keys, then order NLL tie class
 
 Implementation: [science/discovery/panel.py](../../haplotype_reconstruction/science/discovery/panel.py).
 
-Parameters by name: `SET_COUNT_ROUNDING_FLOOR`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `SET_COUNT_ROUNDING_FLOOR`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K^2 L); O(n); O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -112,7 +112,7 @@ Combine the state prior, founder mean-field model, endpoint classes, predictive 
 
 Implementation: [science/discovery/api.py](../../haplotype_reconstruction/science/discovery/api.py), [science/discovery/cavity.py](../../haplotype_reconstruction/science/discovery/cavity.py), [science/discovery/cavity_kernels.py](../../haplotype_reconstruction/science/discovery/cavity_kernels.py).
 
-Parameters by name: `state_concentration`, `unknown_prior_mass`, `double_unknown_fraction`, `mean_field_max_iterations`, `mean_field_tolerance`, `likelihood_floor`, `PREDICTION_TILE_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `state_concentration`, `unknown_prior_mass`, `double_unknown_fraction`, `mean_field_max_iterations`, `mean_field_tolerance`, `likelihood_floor`, `PREDICTION_TILE_BYTES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L K²) per bounded mean-field sweep/start budget, plus endpoint/cavity scoring.
 
@@ -134,7 +134,7 @@ Select landmark classes under the declared whole-class limit, build bounded prop
 
 Implementation: [science/discovery/landmarks.py](../../haplotype_reconstruction/science/discovery/landmarks.py).
 
-Parameters by name: `landmark_budget`, `seed_landmark_budget`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `landmark_budget`, `seed_landmark_budget`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(R L log R + A R log R + R A ceil(L/64)); O(R A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -145,7 +145,7 @@ Rank initial clusters by size, admit whole size classes, then use the decisive-s
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `data_seed_count`, `seed_min_cluster_size`, `data_start_beam_width`, `seed_landmark_budget`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `data_seed_count`, `seed_min_cluster_size`, `data_start_beam_width`, `seed_landmark_budget`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N_a^2 L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -167,7 +167,7 @@ Generate gauge rewires, deduplicate each death/gauge bucket by content, and admi
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `exact_cut_max_k`, `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `exact_cut_max_k`, `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(2^(m-1) m); O(K); O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -178,7 +178,7 @@ Construct observed-cell dosage and population seed rows, rank complete seed clas
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `data_birth_attempts_factor`, `data_birth_children_factor`, `data_birth_tie_budget_factor`, `unknown_copy_penalty`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `data_birth_attempts_factor`, `data_birth_children_factor`, `data_birth_tie_budget_factor`, `unknown_copy_penalty`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K); O(K · max_iterations · N K² L / 10); O(N L K³). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -189,7 +189,7 @@ Create soft-residual records in sample/row order and retain complete dominant-pa
 
 Implementation: [science/discovery/residual_births.py](../../haplotype_reconstruction/science/discovery/residual_births.py).
 
-Parameters by name: `min_soft_responsibility`, `residual_call_probability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `min_soft_responsibility`, `residual_call_probability`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N P L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -200,7 +200,7 @@ Group residuals with density geometry and an edge-clique cover, then apply the a
 
 Implementation: [science/discovery/residual_births.py](../../haplotype_reconstruction/science/discovery/residual_births.py), [science/discovery/_cliques.py](../../haplotype_reconstruction/science/discovery/_cliques.py).
 
-Parameters by name: `max_cluster_hamming`, `min_residual_joint_known_fraction`, `max_alternative_groups`, `landmark_budget`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_cluster_hamming`, `min_residual_joint_known_fraction`, `max_alternative_groups`, `landmark_budget`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(R^2 ceil(L/64)); O(E A ceil(A/64)); O(A^3 ceil(A/64)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -211,7 +211,7 @@ Form each soft candidate’s consensus from its supporting residual records, ord
 
 Implementation: [science/discovery/residual_births.py](../../haplotype_reconstruction/science/discovery/residual_births.py), [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `candidate_call_probability`, `min_candidate_known_fraction`, `min_dedup_joint_known_fraction`, `min_dedup_bidirectional_coverage`, `dedup_hamming_fraction`, `min_unique_sample_support`, `min_effective_sample_support`, `max_proposals_per_expansion`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `candidate_call_probability`, `min_candidate_known_fraction`, `min_dedup_joint_known_fraction`, `min_dedup_bidirectional_coverage`, `dedup_hamming_fraction`, `min_unique_sample_support`, `min_effective_sample_support`, `max_proposals_per_expansion`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(members x L); O(C (K + C) L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -222,7 +222,7 @@ Use ranked birth classes to generate birth-delete replacements, fitting and dedu
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `max_replacement_children`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_replacement_children`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: The replacement budget bounds fitted starts per call; the offered neighbourhood grows with births times K.
 
@@ -233,7 +233,7 @@ Maintain a permanent fitted-key archive and bounded per-count beams of whole NLL
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
-Parameters by name: `beam_width`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `beam_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n K L); O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -244,7 +244,7 @@ Refresh cavity scores in the declared count-distance order and count exact-score
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
-Parameters by name: `exact_score_backstop_base`, `exact_score_backstop_per_founder`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `exact_score_backstop_base`, `exact_score_backstop_per_founder`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K); O(N L K^2); O(N L K^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -255,7 +255,7 @@ Form chained score classes across represented founder counts, select the preferr
 
 Implementation: [contracts/discovery.py](../../haplotype_reconstruction/contracts/discovery.py), [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
-Parameters by name: `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `WIDE_CLASS_QUANTA`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n log n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -266,7 +266,7 @@ Expand every parent in a selected class before testing improvement. Run the decl
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
-Parameters by name: `expansion_backstop_base`, `expansion_backstop_per_founder`, `beam_width`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `expansion_backstop_base`, `expansion_backstop_per_founder`, `beam_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K); O(max_iterations · N K² L / 10); O(N L K⁴). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -288,7 +288,7 @@ Evaluate raw allele evidence and informative carrier support in either direction
 
 Implementation: [science/discovery/api.py](../../haplotype_reconstruction/science/discovery/api.py), [science/discovery/release.py](../../haplotype_reconstruction/science/discovery/release.py).
 
-Parameters by name: `min_call_probability`, `min_supporters`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `min_call_probability`, `min_supporters`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K L x memberships per founder); O(N L); O(N K L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

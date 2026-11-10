@@ -1,7 +1,6 @@
 """Estimate the shared Hardy-Weinberg allele frequencies.
 
-Owns the relocated frequency units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md#rl02.
 """
 
 from __future__ import annotations
@@ -31,20 +30,17 @@ def allele_frequency(
     observed: np.ndarray | PairArray,
     parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     *,
-    map_work=None,
+    map_work=map,
 ) -> np.ndarray:
     """float64 [L]: the alternative allele frequency under Hardy-Weinberg (EM over the samples' genotype likelihoods
     gl [N, L, 3]; unobserved cells carry the prior), clipped to [clip, 1 - clip].
 
-    One parallel pass per site (allele_frequency_sites), a mathematically equivalent per-site form of the
-    array expression it replaced (allele_frequency_reference), without [N, L, 3] temporaries. It agrees bitwise on the
-    production replays checked (all contigs of the validation runs); other array shapes can differ in the last bit,
-    as numpy's own reductions may associate differently.
+    One parallel pass per site (allele_frequency_sites) avoids [N, L, 3] temporaries.
+    Each site sums sample posteriors in sample order and genotype weights in genotype order.
 
-    Coded or windowed inputs are decoded window by window; ``map_work(function, items)`` (ordered, optional; release
-    4.10) runs the windows of resident sources (dense or coded arrays: concurrent gathers only read them) concurrently,
-    each site's EM unchanged; another window source (e.g. a checkpoint reader with one file position) is read one
-    window after another, as before."""
+    Coded or windowed inputs are decoded window by window. The optional ordered ``map_work(function, items)``
+    runs resident-source windows concurrently because gathers only read in-memory arrays. Other sources, such
+    as a reader with one file position, are read serially. Each site has an independent EM solve."""
     out = np.empty(gl.shape[1])
     if not isinstance(gl, np.ndarray) or not isinstance(observed, np.ndarray):
         size = likelihood_window_sites(gl) if isinstance(gl, CodedLikelihoods) else 2048
@@ -56,11 +52,11 @@ def allele_frequency(
             )
 
         lefts = list(range(0, gl.shape[1], size))
-        if map_work is None or len(lefts) <= 1 or not (_resident(gl) and _resident(observed)):
+        if len(lefts) <= 1 or not (_resident(gl) and _resident(observed)):
             for left in lefts:
                 window(left)
         else:
-            map_work(window, lefts)
+            list(map_work(window, lefts))
         return out
     allele_frequency_sites(
         np.ascontiguousarray(gl, dtype=np.float64),

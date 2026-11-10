@@ -1,24 +1,25 @@
 """Count pass of one component: converged count decisions between converged fixed-K fits.
 
 Owns count rounds and continuation order; never selects a storage route or inspects free memory.
-The count driver keeps deletion/addition closures beside their per-pass state so their mutation and
-bootstrap labels remain visibly ordered. Each closure implements one scientific transition.
+The deletion closure keeps its per-pass state and bootstrap labels visibly ordered.
 Method: docs/methods/founder_refinement.md#count-pass (RC09–RC17).
 
 Count rule (assembly/count_rule, shared with the join): a decision between a larger panel X+ and a
 smaller X- keeps X+ iff the effective-carrier test passes on the total per-sample gain
 d_s = F_s(X+) - F_s(X-) AND on its sequence part q_s = F_s(X+) - F_s(X+^sigma). The shadow X+^sigma
 replaces every cell (block, row) of X+ that a reference panel does not use by the reference's row
-nearest to it at that block. Release 2.8 (symmetric null, _symmetric_decision): the reference is X+
+nearest to it at that block. Under the symmetric null (_symmetric_decision), the reference is X+
 minus each member of its own canonical death tie class (its best unrefitted one-founder deletions,
 founders without a private cell first), in both directions, so the same two endpoints get the same
 decision whichever was the incumbent; X+ is kept only if every member's test keeps it, and a
-disagreement or an unresolved member family takes the smaller K with ambiguity. A
+reference disagreement takes the smaller K with ambiguity; opposed shadows
+withhold the larger K without forcing bootstrap ambiguity. A
 founder without a private cell (every cell another founder uses at that block) owns no sequence:
 q = 0 exactly when X+ holds one. Otherwise q is the exact shadow difference; equally near
 replacements form a complete factored family. Families within the separate shadow budget
-are evaluated completely; only opposing evaluated verdicts invoke the smaller-K prior.
-Overflow preserves the incumbent shadow verdict and records count_unverified without
+are evaluated completely only when the total test passes; otherwise one conventional
+incumbent is evaluated. Only opposing evaluated verdicts invoke the smaller-K prior.
+Overflow with a passing total preserves the incumbent verdict and records count_unverified without
 creating biological alternatives or withholding calls. Unlike the join,
 refinement takes no near-identity shortcut, because its last level is final and no later level can
 re-split a merged pair. Switch savings alone never justify a founder.
@@ -28,25 +29,23 @@ private cell when present, otherwise every founder). The best-F refit is decided
 ends deletions; K >= 2. There is no zero-gain cleanup before the ordinary count decision.
 
 Ties (fits are in canonical founder order, so founder indices are content ranks): the refit
-is the content-smallest member (deleted founder's or copied seed's path) of the best tie class
+is the content-smallest member (deleted founder's path) of the best tie class
 of endpoint F, using tie_rules.quantum("refine_F", F). Evaluate the other members with the
 same symmetric null and bootstrap stream, retaining their endpoint and shadow families.
 The best-F keep and restore compare F with max(TOL, quantum).
-At the final count step only, addition rounds refit every duplicate seed. An accepted addition
-needs no check deletion round under the symmetric null, so no count cycle arises.
+Refinement never increases K: fixed-K fits preserve K and count rounds only delete rows.
 Each count round fits O(K) candidates: O(N L K^3) for quadratic fixed-K scoring/fitting work.
 A pass has at most (accepted deletions + 1) deletion rounds, hence a quartic worst case in K;
 fixed-K search iterations, canonical window work and continuation histories are additional
 factors, not a whole-pass cubic guarantee. See docs/developer/costs.md for observed round counts.
-An optimistic bound (upper_bound) may skip a round
+An optimistic block-option bound (option_scores) may skip a round
 only when it proves the decision and its non-ambiguity for every candidate (a deletion round's
-bootstrap band through count_rule.deletion_bound_excludes' replicate-wise bound). The count rule
-reads the informative samples only (workspace.count_samples, count_rule.founder_cost's S): every
+bootstrap band through count_criterion.deletion_bound_excludes' replicate-wise bound). The count rule
+reads the informative samples only (workspace.count_samples, count_criterion.founder_cost's S): every
 other sample's F_s is exactly 0 for every panel. The decisions choose K; the panel kept at that
 K is the best-F converged fit computed at K during the pass (with the restored panel's adjacent-K
-comparisons reported, and the call flagged ambiguous when it fails its own deletion test). Earlier
-levels make deletion decisions only: their K is the working set of the next join. K stays within
-[2, 2 x incoming K] (the upper bound is a reported limit).
+deletion comparison reported, and the call flagged ambiguous when it fails its own deletion test).
+The chosen K is the working set of the next join; deletion stops at K = 2.
 """
 
 from __future__ import annotations
@@ -66,10 +65,12 @@ from haplotype_reconstruction.contracts.assembly import BestFReplacement, CountD
 from haplotype_reconstruction.core import ties
 from haplotype_reconstruction.core.kernels import kernel
 
-from .. import count_rule
 from .. import orders as tie_rules
-from ..count_rule import shadow_bounds
+from ..count_rule import criterion as count_criterion
+from ..count_rule import geometry as count_geometry
 from ..count_rule.geometry import shadow_choices
+from ..count_rule.parameters import CountRuleParameters
+from ..count_rule.shadow_family import SHADOW_PRIOR, shadow_family_decision
 from .acceptance import TOL
 from .capabilities import RefinementExecution
 
@@ -81,19 +82,11 @@ from .overloads import overloads_for
 from .parameters import (
     COUNT_BOUND_RELATIVE,
     COUNT_FANOUT_BYTES,
-    COUNT_LIMIT_MULTIPLE,
     FAMILY_BYTES,
-    SAMPLE_BOUND_RELATIVE,
 )
 from .reductions import panel_objective
 from .window import capacity, cover, locate, samples_of, site_cost, site_logs, stretch
 from .workspace import sample_ranges, sample_threads
-
-# Additions stop at the incoming count plus COUNT_LIMIT_MULTIPLE times it (reported when reached).
-
-# A complete shadow family is scored in one prefix-sharing pass while the pass's own arrays (allele slabs, base
-# alleles, scores and kernel scratch) take at most this many bytes; a larger family is scored member by member
-# (engine.per_sample: the same values). The engine's workspace and caches are not counted.
 
 
 # ------------------------------------------------------------------ optimistic count bound
@@ -121,66 +114,16 @@ def _block_sample_scores(haps, win, start, stop, removed):
     return result
 
 
-@kernel(overloads=overloads_for(__name__, "upper_bound"), cache=True, parallel=True, nogil=True)
-def upper_bound(leaves, offsets, win, target):
-    """Per-block optimistic scores bounding every panel with at most `target` distinct rows per
-    block, and their per-sample form.
-
-    Each block chooses its own panel and every sample's diplotype resets freely between blocks;
-    a block with target + 1 rows takes its best one-row deletion (exact for that block), any other
-    block every local row (possibly more than target). Both relaxations enlarge the feasible set,
-    so the sum over blocks bounds every chromosome panel with <= target founder paths drawn from
-    these prepared rows (same site mask, emissions and switch costs as fitting: costs are
-    the target K's; a free panel of more rows with the same per-change costs only enlarges the
-    path set). The panel-independent normalisers of the target K are not included (callers add
-    workspace.normalisers(target)).
-    bounds[b] is the block's total over samples; per_sample[b] lets every sample drop a different
-    row of a target+1-row block (a maximum of sums becomes a sum of maxima): summed over blocks it
-    bounds each sample. constrained[b] = 1 for a target+1-row block. The window (the target K's
-    costs) covers one stretch of blocks at a time; the blocks of a stretch run in parallel."""
-    samples = samples_of(win)
-    blocks = len(leaves)
-    bounds = np.empty(blocks, np.float64)
-    constrained = np.zeros(blocks, np.int64)
-    per_sample = np.empty((blocks, samples), np.float64)
-    b0 = 0
-    while b0 < blocks:
-        b1 = stretch(offsets, b0, blocks, capacity(win))
-        cover(win, offsets[b0], offsets[b1], 0, samples, False)
-        for block_index in prange(b0, b1):
-            block = np.int64(block_index)
-            haps = leaves[block]
-            deletion = len(haps) == target + 1
-            best = -np.inf
-            best_sample = np.full(samples, -np.inf)
-            for removed in range(len(haps) if deletion else 1):
-                scores = _block_sample_scores(
-                    haps, win, offsets[block], offsets[block + 1], removed if deletion else -1
-                )
-                total = 0.0
-                for sample in range(samples):
-                    total += scores[sample]
-                best = max(best, total)
-                best_sample = np.maximum(best_sample, scores)
-            bounds[block] = best
-            per_sample[block] = best_sample
-            constrained[block] = int(deletion)
-        b0 = b1
-    return bounds, constrained, per_sample
-
-
-@kernel(overloads=overloads_for(__name__, "upper_bound"), cache=True, parallel=True, nogil=True)
+@kernel(overloads=overloads_for(__name__, "option_scores"), cache=True, parallel=True, nogil=True)
 def option_scores(leaves, offsets, win, target):
-    """upper_bound's block scores option by option: sigma[o] holds every sample's optimistic score of
-    option o, and the options of block b are rows option_offsets[b] .. option_offsets[b + 1] - 1.
+    """Optimistic per-sample block scores for the deletion round's summed bound.
 
-    The options are one per removed row for a block with target + 1 rows, otherwise one: the
-    block's every local row. upper_bound's bounds[b] is the largest row sum of the block's options
-    and per_sample[b] their per-sample maximum. The deletion round's summed bound
-    (count_rule.deletion_bound_excludes) needs the options themselves, because a panel fixes one
-    option per block for all samples together. Stretch by stretch of blocks, as upper_bound; the
-    blocks of a stretch run in parallel. Its arguments are upper_bound's, so it shares
-    upper_bound's declared overloads."""
+    sigma[o] scores option o; option_offsets bounds each block's options. A block
+    with target + 1 rows has one option per removed row, otherwise one containing
+    every local row. A panel fixes one option per block for all samples together.
+    Each sample's chain starts afresh at every block, using the target K's switch
+    costs. Normalisers are added by the caller. Blocks of a stretch run in parallel.
+    """
     samples = samples_of(win)
     blocks = len(leaves)
     option_offsets = np.zeros(blocks + 1, np.int64)
@@ -202,65 +145,6 @@ def option_scores(leaves, offsets, win, target):
                 )
         b0 = b1
     return sigma, option_offsets
-
-
-@kernel(overloads=overloads_for(__name__, "_shadow_codes"), cache=True, nogil=True)
-def _shadow_codes(leaves, site_offsets, choices, starts):
-    """shadow_bounds._dosages on coded leaves: pair codes (pair_code7) of every local row choice."""
-    founders = choices.shape[1]
-    states = founders * (founders + 1) // 2
-    offsets = np.zeros(len(choices) + 1, np.int64)
-    for block in range(len(starts) - 1):
-        sites = site_offsets[block + 1] - site_offsets[block]
-        for choice in range(starts[block], starts[block + 1]):
-            offsets[choice + 1] = offsets[choice] + sites
-    codes = np.empty((offsets[-1], states), np.int8)
-    for block in range(len(starts) - 1):
-        leaf = leaves[block]
-        for choice in range(starts[block], starts[block + 1]):
-            for site in range(leaf.shape[1]):
-                state = 0
-                for first in range(founders):
-                    a = leaf[choices[choice, first], site]
-                    for second in range(first, founders):
-                        codes[offsets[choice] + site, state] = pair_code7(a, leaf[choices[choice, second], site])
-                        state += 1
-    return codes, offsets
-
-
-@kernel(overloads=overloads_for(__name__, "_full_site_costs"), cache=True, parallel=True, nogil=True)
-def _full_site_costs(win, site_offsets, dosages, dose_offsets, starts, founders):
-    """shadow_bounds._full_site on the refinement objective (per-homologue transitions with the
-    switch costs of K = founders, the window's): per sample the maximum over every block's local row
-    choices, carried across blocks (an exact per-sample envelope of the shadow family, without the
-    normalisers). Stretch by stretch of blocks, each covered before it is read."""
-    samples, states = samples_of(win), dosages.shape[1]
-    blocks = len(starts) - 1
-    rows = np.zeros((samples, states))
-    b0 = 0
-    while b0 < blocks:
-        b1 = stretch(site_offsets, b0, blocks, capacity(win))
-        cover(win, site_offsets[b0], site_offsets[b1], 0, samples, False)
-        for sample in prange(samples):
-            row = rows[sample]
-            trial = np.empty(states)
-            target = np.empty(states)
-            R = np.empty(founders)
-            e = np.empty(7)
-            for block in range(b0, b1):
-                target[:] = -np.inf
-                lo, hi = site_offsets[block], site_offsets[block + 1]
-                for choice in range(starts[block], starts[block + 1]):
-                    trial[:] = row
-                    forward_sites(trial, dosages, lo - dose_offsets[choice], win, sample, lo, hi, R, e)
-                    for state in range(states):
-                        target[state] = max(target[state], trial[state])
-                row[:] = target
-        b0 = b1
-    result = np.empty(samples, np.float64)
-    for sample in prange(samples):
-        result[sample] = row_max(rows[sample])
-    return result
 
 
 @kernel(overloads=(), inline="always", nogil=True)
@@ -378,11 +262,11 @@ def _family_scores(engine, choices, shape, budget):
         with budget.scope(sample_threads(ws.samples, budget)):
             base = selected_alleles(ws.leaves, ws.offsets, np.ascontiguousarray(base_rows))
         raw = np.empty((ws.samples, members))
-        for s0, s1, threads in sample_ranges(ws.samples, budget):
+        for s0, s1, _ in sample_ranges(ws.samples, budget):
             # A streaming component reads each sample range through windows that hold every site of a
-            # bounded slice of its samples (window.Windows.samples_view).
+            # bounded slice of its samples (stages.assembly.storage.Windows.samples_view).
             for c0, c1 in ws.windows.sample_slices(s0, s1):
-                with budget.scope(threads):
+                with budget.scope(sample_threads(c1 - c0, budget)):
                     _family_forward(
                         base,
                         ws.windows.samples_view(founders, c0, c1),
@@ -398,7 +282,7 @@ def _family_scores(engine, choices, shape, budget):
         # Depth-first leaf -> product index (cells in founder-major order, the last cell fastest).
         radix = [len(choices[i]) for i in varying]
         position = {cell: k for k, cell in enumerate(varying)}
-        normalisers = ws.normalisers(founders)
+        normalisers = engine.normalisers(founders, budget)
         for leaf, picks in enumerate(itertools.product(*[unit for _, unit in combos])):
             digits = [0] * len(varying)
             for (cells, _), unit_picks in zip(combos, picks, strict=False):
@@ -445,12 +329,12 @@ def _point_margins(larger, smaller, cost):
     differences = np.asarray(larger, np.float64) - np.asarray(smaller, np.float64)
     samples = len(differences)
     rest = np.delete(differences, int(np.argmax(differences)))
-    return (count_rule.margin(differences, cost, samples), count_rule.margin(rest, cost, samples))
+    return (count_criterion.margin(differences, cost, samples), count_criterion.margin(rest, cost, samples))
 
 
 def _shadow_options(geometry, larger, reference):
     """Complete factored nearest-row family over every replaced founder cell."""
-    cover = count_rule.covered_rows(np.asarray(reference, np.int64))
+    cover = count_geometry.covered_rows(np.asarray(reference, np.int64))
     choices, replaced = [], 0
     for path in larger:
         options, lost = shadow_choices(path, cover, geometry)
@@ -461,14 +345,14 @@ def _shadow_options(geometry, larger, reference):
 
 def _shadow(geometry, larger, reference):
     """The incumbent's conventional shadow, retained when its family cannot be completed."""
-    cover = count_rule.covered_rows(np.asarray(reference, np.int64))
-    paths = [count_rule.shadow_path(path, cover, geometry) for path in larger]
+    cover = count_geometry.covered_rows(np.asarray(reference, np.int64))
+    paths = [count_geometry.shadow_path(path, cover, geometry) for path in larger]
     return np.asarray([path for path, _ in paths], np.int64), sum(lost for _, lost in paths)
 
 
 def _own_sequence(rows):
     """owns[f]: founder f has a private cell (a row at some block that no other founder uses)."""
-    return count_rule.private_mask(np.asarray(rows, np.int64)).any(axis=1)
+    return count_geometry.private_mask(np.asarray(rows, np.int64)).any(axis=1)
 
 
 def _sequence_scores(engine, geometry, larger, larger_scores, reference, budget):
@@ -510,10 +394,9 @@ def _shadow_decision(
     actual opposed verdicts invoke smaller K. All scores use one mask/seed stream;
     existing no-private-cell q=0 and optimistic round bounds remain exact shortcuts.
     """
-    begun = 0.0
     without = tuple(int(f) for f in np.flatnonzero(~_own_sequence(larger)))
     if without:
-        decision = count_rule.decide(
+        decision = count_criterion.decide(
             view(larger_scores),
             view(smaller_scores),
             view(larger_scores),
@@ -532,12 +415,11 @@ def _shadow_decision(
                 complete=True,
                 unresolved=False,
                 no_private_sequence=True,
-                seconds=0.0 - begun,
             ),
         )
     choices, replaced = _shadow_options(geometry, larger, reference)
     if not replaced:
-        decision = count_rule.decide(
+        decision = count_criterion.decide(
             view(larger_scores),
             view(smaller_scores),
             view(larger_scores),
@@ -550,99 +432,51 @@ def _shadow_decision(
             decision,
             without,
             0,
-            dict(combinations=1, evaluated=0, complete=True, unresolved=False, seconds=0.0 - begun),
+            dict(combinations=1, evaluated=0, complete=True, unresolved=False),
         )
-    combinations = math.prod(map(len, choices))
-    total_passes = count_rule.passes(view(larger_scores - smaller_scores), cost, len(view(larger_scores)))
-    # A complete small family also supplies invariant count margins for ranking
-    # tied refits, even if the total-gain test alone rejects the larger count.
-    complete = combinations <= int(rule.shadow_combinations)
-    paths = itertools.product(*choices) if complete else [_shadow(geometry, larger, reference)[0].ravel()]
-    family = (
-        count_rule.ShadowDecisionFamily(
-            view(larger_scores), view(smaller_scores), cost, kind=kind, config=rule, seed_key=seed_key
-        )
-        if complete and combinations > 1
-        else None
-    )
-    decisions = []
-    # A complete family is scored in one prefix-sharing pass (the same per-member values as per_sample).
-    member_scores = _family_scores(engine, choices, larger.shape, budget) if complete and combinations > 1 else None
-    for m, cells in enumerate(paths):
-        rows = np.asarray(cells, np.int64).reshape(larger.shape)
-        shadow_scores = engine.per_sample(rows, budget) if member_scores is None else member_scores[m]
-        decisions.append(
-            count_rule.decide(
-                view(larger_scores),
-                view(smaller_scores),
-                view(shadow_scores),
-                cost,
-                kind=kind,
-                config=rule,
-                seed_key=seed_key,
+
+    def evaluate(paths, multiple):
+        family = (
+            count_criterion.ShadowDecisionFamily(
+                view(larger_scores), view(smaller_scores), cost, kind=kind, config=rule, seed_key=seed_key
             )
-            if family is None
-            else family.decide(view(shadow_scores))
+            if multiple
+            else None
         )
-    if decision_options is not None:
-        decision_options.extend(decisions)
-    verdicts = {decision.accept_larger for decision in decisions}
-    unresolved = total_passes and len(verdicts) > 1
-    decision = min(decisions, key=lambda value: (value.accept_larger, value.margin, value.sequence.loso_margin))
-    if unresolved:
-        decision = replace(decision, accept_larger=False, ambiguous=True)
-    details = dict(
-        nearest_choices=choices,
-        combinations=combinations,
-        evaluated=len(decisions),
-        complete=complete,
-        resolved_by_total=not total_passes,
-        unresolved=unresolved,
-        count_unverified=not complete,
-        verdicts=tuple(value.accept_larger for value in decisions),
-        sequence_margins=tuple(value.sequence.margin for value in decisions),
-        sequence_loso_margins=tuple(value.sequence.loso_margin for value in decisions),
-        seconds=0.0 - begun,
-    )
-    if not complete:
-        # The ordinary decision and its nominal sequence diagnostics stay intact.
-        # An optional full-domain proof updates only computational verification.
-        from .parameters import PAIR_TABLE_BYTES
-
-        ws = engine.workspace
-        threads = max(1, int(budget.threads()))
-
-        def upper_scores(plan):
-            founders = int(larger.shape[0])
-            with budget.scope(sample_threads(ws.samples, budget)):
-                dosages, dose_offsets = _shadow_codes(ws.leaves, ws.offsets, plan.choices, plan.starts)
-                scores = _full_site_costs(
-                    ws.windows.view(founders), ws.offsets, dosages, dose_offsets, plan.starts, founders
+        member_scores = _family_scores(engine, choices, larger.shape, budget) if multiple else None
+        decisions = []
+        for m, cells in enumerate(paths):
+            rows = np.asarray(cells, np.int64).reshape(larger.shape)
+            scores = engine.per_sample(rows, budget) if member_scores is None else member_scores[m]
+            decisions.append(
+                count_criterion.decide(
+                    view(larger_scores),
+                    view(smaller_scores),
+                    view(scores),
+                    cost,
+                    kind=kind,
+                    config=rule,
+                    seed_key=seed_key,
                 )
-            return view(scores + ws.normalisers(founders))
+                if family is None
+                else family.decide(view(scores))
+            )
+        return decisions
 
-        proof, audit = shadow_bounds.attempt_certificate(
-            choices,
-            larger.shape,
-            np.diff(ws.offsets),
-            view(larger_scores),
-            view(smaller_scores),
-            cost,
-            incumbent=decision,
-            config=rule,
-            seed_key=seed_key,
-            upper_scores=upper_scores,
-            scorer_samples=ws.samples,
-            threads=threads,
-            full_site=True,
-            max_table_bytes=PAIR_TABLE_BYTES,
-        )
-        details.update(
-            criterion_verified=proof is not None, proof_attempt=audit, sequence_diagnostics="evaluated_incumbent_only"
-        )
-        if proof is not None:
-            details.update(count_unverified=False, count_verified_by_bound=proof)
-        details["seconds"] = 0.0 - begun
+    decision, details = shadow_family_decision(
+        choices,
+        view(larger_scores),
+        view(smaller_scores),
+        cost,
+        rule,
+        evaluate,
+        reverse=geometry.reverse,
+        withhold=lambda d: replace(d, accept_larger=False),
+        decision_options=decision_options,
+    )
+    details.pop("incumbent_shadow")  # join-only path diagnostic; preserve refinement record shape
+    for key in ("verdicts", "sequence_margins", "sequence_loso_margins"):
+        details[key] = tuple(details[key])
     return decision, without, int(replaced), details
 
 
@@ -670,7 +504,7 @@ def _shadow_flags(flags, details, refits, X):
     panels = set(flags.get("unresolved_panels", ()))
     panels.add(tie_rules.panel_key(X))
     panels.update(tie_rules.panel_key(refits[position].rows) for position in uncertain)
-    return dict(flags, ambiguous_k=True, unresolved_panels=tuple(sorted(panels)), prior="smaller_k+nearest_shadow")
+    return dict(flags, ambiguous_k=True, unresolved_panels=tuple(sorted(panels)), prior=SHADOW_PRIOR)
 
 
 def _loso_margin(criterion):
@@ -721,11 +555,10 @@ def _symmetric_decision(
     *,
     decision_options=None,
 ):
-    """Symmetric count null (release 2.8): the sequence reference is the larger panel minus its own
+    """Symmetric count null: the sequence reference is the larger panel minus its own
     canonical death candidate in either direction, so the same two endpoints get the same decision
     whichever was the incumbent. Every member of the death tie class is evaluated; disagreement takes
     smaller K with ambiguity (the existing nearest-shadow convention)."""
-    begun = 0.0
     members = _death_class(engine, larger, budget)
 
     def member(child, founder):
@@ -767,10 +600,10 @@ def _symmetric_decision(
     )
     detail = dict(detail)
     disagree = len({x[1].accept_larger for x in outcomes}) > 1
-    # Any member whose own nearest-shadow family is unresolved keeps the ambiguity.
+    # Reference disagreement is ambiguous; member shadows preserve their bootstrap band.
     member_unresolved = any(bool(x[4].get("unresolved")) for x in outcomes)
     if disagree or member_unresolved:
-        decision = replace(decision, accept_larger=False, ambiguous=True)
+        decision = replace(decision, accept_larger=False, ambiguous=decision.ambiguous or disagree)
     detail.update(
         unresolved=bool(disagree or member_unresolved),
         sequence_null="larger_minus_death_class",
@@ -788,7 +621,6 @@ def _symmetric_decision(
         sequence_founder=int(founder),
         death_class=tuple(members),
         death_class_verdicts=tuple(bool(x[1].accept_larger) for x in outcomes),
-        symmetric_seconds=0.0 - begun,
     )
     if decision_options is not None:
         for x in outcomes:
@@ -798,17 +630,13 @@ def _symmetric_decision(
 
 def _score_bytes(engine, founders: int) -> int:
     """Transient bytes of one engine.per_sample of a K = founders panel: its int16 alleles, the pair-dosage
-    table when objective.score_panel builds it (search.PAIR_TABLE_BYTES), and its result."""
+    table when objective.score_panel builds it (parameters.PAIR_TABLE_BYTES), and its result."""
     from .parameters import PAIR_TABLE_BYTES
 
     ws = engine.workspace
     sites = int(ws.offsets[-1])
     table = sites * founders * (founders + 1) // 2
     return 2 * founders * sites + (table if table <= PAIR_TABLE_BYTES else 0) + 8 * int(ws.samples)
-
-
-# Transient bytes the count pass's concurrent scorings and shadow decisions may hold together: waves of them run
-# concurrently up to this sum (one at a time when a single one exceeds it), whatever the memory admission does.
 
 
 def _waves(sizes):
@@ -896,8 +724,8 @@ def _count_refit_endpoints(engine, chosen, refits):
 
 
 def _refit_choice(values, keys, scale, counter=None, census_key=None, *, reverse, sink=None):
-    """The refit decided at a count step: the content-smallest member (keys: the deleted founder's or
-    copied seed's row path) of the best tie class of the refits' F (quantum at |scale|, the incumbent's
+    """The refit decided at a count step: the content-smallest member (keys: the deleted founder's
+    row path) of the best tie class of the refits' F (quantum at |scale|, the incumbent's
     F). Returns (position, positions of its class in decision order)."""
     quantum = tie_rules.quantum("refine_F", scale)
     result = ties.fixed_policy("assembly.refine_refit", quantum, reverse=reverse).classes(
@@ -918,10 +746,17 @@ def _refit_choice(values, keys, scale, counter=None, census_key=None, *, reverse
     return pick, members
 
 
-def _tied_resolution(members, pick, outcomes, refits, X, engine=None, budget=None):
-    """Release 2.2: the count decision among the members of the selected refit's tie class (refits whose F
+def _resulting_panel(X, refit_rows, accept_larger):
+    """Content key of the larger or smaller panel selected by the count decision."""
+    refit_rows = np.asarray(refit_rows)
+    takes_refit = accept_larger if len(refit_rows) > len(X) else not accept_larger
+    return tie_rules.panel_key(refit_rows if takes_refit else X)
+
+
+def _tied_resolution(members, pick, outcomes, refits, X, engine, budget):
+    """The count decision among the members of the selected refit's tie class (refits whose F
     the data do not separate), decided by the data where they can and by stated priors otherwise -- never by
-    index or content order (design tickets/IC/DESIGN_22.md B1).
+    index or content order.
 
     outcomes: {position: CountDecision} of every member. When the members disagree on the decision (one
     would keep the larger panel, another accept the smaller), the smaller K is taken (parsimony: the side the
@@ -929,30 +764,25 @@ def _tied_resolution(members, pick, outcomes, refits, X, engine=None, budget=Non
     taken, the one whose count margin most strongly supports it is chosen (the most negative margin for the
     smaller panel, the most positive for the larger), by tie classes of the margins (count_margin quantum);
     members still tied are alternatives: when their resulting panels differ, the set is released flagged and
-    the canonical panel key decides ("symmetric"). A decision that keeps the incumbent panel X has no
-    alternatives. Returns (position, record flags)."""
+    fewest exact-optimal switches and then the content convention choose the representative.
+    A decision that keeps the incumbent panel X has no alternatives. Returns (position, record flags)."""
     if len(members) < 2:
         return pick, dict(competitive_fits=(refits[pick].summary.label,))
     taken_larger = {position: bool(outcomes[position].accept_larger) for position in members}
     disagree = len(set(taken_larger.values())) > 1
-    # accept_larger False = the smaller panel (a deletion accepted, an addition rejected)
+    # accept_larger False = the smaller panel (deletion accepted)
     candidates = [p for p in members if not taken_larger[p]] if disagree else list(members)
     larger_side = taken_larger[candidates[0]]
 
     def panel_of(position):
-        # The panel the decision leaves: the member's refit (K + 1 rows for an addition, K - 1 for a deletion)
-        # when the decision takes it, else the incumbent X.
-        refit_rows = np.asarray(refits[position].rows)
-        larger = taken_larger[position]
-        takes_refit = larger if len(refit_rows) > len(X) else not larger
-        return tie_rules.panel_key(refit_rows if takes_refit else X)
+        return _resulting_panel(X, refits[position].rows, taken_larger[position])
 
     margins = [float(outcomes[p].margin) for p in candidates]
     contents = [panel_of(p) for p in candidates]
     quantum = tie_rules.quantum("count_margin")
-    result = ties.fixed_policy(
-        "assembly.refine_eligible", quantum, reverse=False if engine is None else engine.reverse
-    ).classes(margins, content=contents, descending=larger_side)
+    result = ties.fixed_policy("assembly.refine_eligible", quantum, reverse=engine.reverse).classes(
+        margins, content=contents, descending=larger_side
+    )
     winner = candidates[result.winner]
     tied = [candidates[i] for i in result.members(int(result.classes[result.winner]))]
     distinct = sorted({panel_of(p) for p in tied})
@@ -968,14 +798,11 @@ def _tied_resolution(members, pick, outcomes, refits, X, engine=None, budget=Non
         )
     if len(distinct) > 1:
         flags["alternatives"] = tuple(distinct)
-        if engine is not None:
-            counts = {panel: engine.minimum_switches(np.asarray(panel, np.int64), budget) for panel in distinct}
-            minimum = min(counts.values())
-            eligible = [p for p in tied if counts[panel_of(p)] == minimum]
-            winner = ties.conv_sorted(eligible, key=panel_of, reverse=False if engine is None else engine.reverse)[0]
-            flags["prior"] += "+fewest_switches"
-        else:
-            flags["prior"] += "+symmetric"
+        counts = {panel: engine.minimum_switches(np.asarray(panel, np.int64), budget) for panel in distinct}
+        minimum = min(counts.values())
+        eligible = [p for p in tied if counts[panel_of(p)] == minimum]
+        winner = ties.conv_sorted(eligible, key=panel_of, reverse=engine.reverse)[0]
+        flags["prior"] += "+fewest_switches"
     return winner, flags
 
 
@@ -983,9 +810,7 @@ def _eligible_count_records(X, members, outcomes, refits, shadow_options, shadow
     """Actual evaluated outcomes in each verdict's winning count-margin class."""
 
     def panel_of(position, decision):
-        rows = refits[position].rows
-        take = decision.accept_larger if len(rows) > len(X) else not decision.accept_larger
-        return tie_rules.panel_key(rows if take else X)
+        return _resulting_panel(X, refits[position].rows, decision.accept_larger)
 
     records = []
     for position in members:
@@ -1012,7 +837,7 @@ def _eligible_count_records(X, members, outcomes, refits, shadow_options, shadow
 
 
 def _endpoint_evaluations(
-    kind, X, chosen, refits, members, outcomes, shadow_options, shadow_details, selected, view, *, reverse
+    X, chosen, refits, members, outcomes, shadow_options, shadow_details, selected, view, *, reverse
 ):
     """Complete observed endpoint audit, before any representative convention."""
     records, eligible = _eligible_count_records(
@@ -1022,7 +847,7 @@ def _endpoint_evaluations(
     table = []
     for position, (origin, fit) in enumerate(zip(chosen, refits, strict=False)):
         evaluated = position in outcomes
-        reference = np.delete(X, origin, axis=0) if kind == "deletion" else X
+        reference = np.delete(X, origin, axis=0)
         table.append(
             dict(
                 candidate=int(origin),
@@ -1057,9 +882,7 @@ def _count_choice(engine, kind, label, X, members, resolved, outcomes, refits, s
     """
 
     def panel_of(position, decision):
-        rows = refits[position].rows
-        take = decision.accept_larger if len(rows) > len(X) else not decision.accept_larger
-        return tie_rules.panel_key(rows if take else X)
+        return _resulting_panel(X, refits[position].rows, decision.accept_larger)
 
     _, eligible = _eligible_count_records(
         X, members, outcomes, refits, shadow_options, shadow_details, reverse=engine.reverse
@@ -1185,6 +1008,9 @@ def _restored_comparisons(
     round accepted a deletion or, without a recorded round, when the best-F K - 1 fit is preferred
     to it; the call is then flagged ambiguous. panels[i]: (larger rows, smaller rows) of
     decisions[i] (None for a round skipped by a bound); view: the count rule's _CountSamples."""
+    # The larger fit can come from an earlier deletion round even without any
+    # founder additions. Its shadow comparison feeds default release ambiguity;
+    # retaining this already-evaluated panel never offers a new founder.
     K = len(rows)
     recorded = []
     for entry, pair in zip(decisions, panels, strict=False):
@@ -1405,14 +1231,12 @@ def keep_margin(F):
     return max(TOL, tie_rules.quantum("refine_F", F))
 
 
-def _count_pass_point(
-    engine, geometry, start, cost, rule, budget, seed_key, additions, counter=None, census_prefix=None
-):
+def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, counter=None, census_prefix=None):
     """Converged fixed-K fit and converged count decisions for one component (module docstring).
 
-    engine: the component's search.SweepEngine; geometry: count_rule.RowGeometry of its prepared
-    panels; start: int64 K x B starting rows; cost: the per-founder cost c; rule: CountRuleConfig;
-    seed_key: the component's bootstrap key; additions: run addition rounds (the final count step);
+    engine: the component's fit.SweepEngine; geometry: count_geometry.RowGeometry of its prepared
+    panels; start: int64 K x B starting rows; cost: the per-founder cost c; rule: CountRuleParameters;
+    seed_key: the component's bootstrap key;
     counter: the component's tie-class counter (tie_rules.SharedCounter) or None; census_prefix: its
     valley-census key prefix or None. Returns a CountPass."""
     engine.ledger.start_count_pass()
@@ -1465,10 +1289,7 @@ def _count_pass_point(
     adopt(fit)
     X = fit.rows
     scores = engine.fit_scores(fit.summary.label, X, budget)
-    count_samples = len(view(scores))
     round_index = 0
-    upper = incoming + COUNT_LIMIT_MULTIPLE * incoming
-    limit_reached = False
     # Best-F converged fit computed at each K: (F, panel, fit label, per-sample scores, fit).
     best_at = {}
 
@@ -1532,14 +1353,14 @@ def _count_pass_point(
             # replicate-wise form also proves the band (the decision's own bootstrap stream).
             with budget.scope(sample_threads(ws.samples, budget)):
                 sigma, option_offsets = option_scores(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
-            normalisers = ws.normalisers(K - 1)
+            normalisers = engine.normalisers(K - 1, budget)
             starts = option_offsets[:-1]
-            # upper_bound's block totals: each option's samples summed in order (a sequential sum, as its kernel).
+            # Each option's samples are summed in order before taking the best block total.
             optimistic = float(
                 panel_objective(np.maximum.reduceat(sigma.cumsum(axis=1)[:, -1], starts)) + panel_objective(normalisers)
             )
             tolerance = COUNT_BOUND_RELATIVE * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
-            excluded, band_bound = count_rule.deletion_bound_excludes(
+            excluded, band_bound = count_criterion.deletion_bound_excludes(
                 view(scores),
                 sigma if view.rows is None else sigma[:, view.rows],
                 starts,
@@ -1686,7 +1507,6 @@ def _count_pass_point(
             ),
             fit_family_evaluations=(
                 _endpoint_evaluations(
-                    "deletion",
                     X,
                     chosen,
                     refits,
@@ -1724,199 +1544,6 @@ def _count_pass_point(
                 failing.append((int(f), float(value), float(loso)))
         return tuple(failing)
 
-    def addition_round(X, scores, smaller_fit):
-        nonlocal round_index
-        K = len(X)
-        label = f"r{round_index}"
-        round_index += 1
-        F = panel_objective(scores)
-        with budget.scope(sample_threads(ws.samples, budget)):
-            bounds, _, per_block_sample = upper_bound(ws.leaves, ws.offsets, ws.windows.view(K + 1), K + 1)
-        normalisers = ws.normalisers(K + 1)
-        optimistic = float(panel_objective(bounds) + panel_objective(normalisers))
-        tolerance = COUNT_BOUND_RELATIVE * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
-        if count_rule.addition_bound_excludes(optimistic, F, cost, count_samples, tolerance=tolerance):
-            return (
-                CountDecisionRecord(
-                    kind="addition",
-                    round=label,
-                    founders=K,
-                    skipped_by_bound=True,
-                    accept_larger=False,
-                    ambiguous=False,
-                    bound="addition_total",
-                    optimistic_score=optimistic,
-                    smaller_fit=smaller_fit,
-                ),
-                None,
-                None,
-                None,
-            )
-        # No sample's optimistic gain reaches the per-carrier cost c/(2S): no seed's refit (nor any
-        # (K+1)-panel) can pass or make the call ambiguous, so the round is decided unrun.
-        per_sample_optimistic = per_block_sample.sum(axis=0) + normalisers
-        tolerance = SAMPLE_BOUND_RELATIVE * max(1.0, abs(F), float(np.max(np.abs(per_sample_optimistic))))
-        excluded, gain_bound, gain_sample = count_rule.addition_per_sample_bound_excludes(
-            view(per_sample_optimistic), view(scores), cost, tolerance=tolerance
-        )
-        if excluded:
-            return (
-                CountDecisionRecord(
-                    kind="addition",
-                    round=label,
-                    founders=K,
-                    skipped_by_bound=True,
-                    accept_larger=False,
-                    ambiguous=False,
-                    bound="addition_per_sample",
-                    optimistic_score=optimistic,
-                    per_sample_gain_bound=float(gain_bound),
-                    per_sample_gain_bound_sample=view.row(gain_sample),
-                    smaller_fit=smaller_fit,
-                ),
-                None,
-                None,
-                None,
-            )
-        starts = [np.vstack((X, X[f : f + 1])) for f in range(K)]
-        # Every duplicate seed competes by its converged endpoint, without a proxy ranking.
-        chosen = list(range(K))
-        refits = _fit_many(engine, [starts[f] for f in chosen], [f"{label}.add{f}" for f in chosen], budget)
-        # Keep one work summary per actual convergence; the endpoint table
-        # expands evidence already computed, not the number of searches run.
-        fits.extend(refit.summary for refit in refits)
-        chosen, refits, endpoint_family = _count_refit_endpoints(engine, chosen, refits)
-        candidate_fits.extend(refits)
-        pick, members = _refit_choice(
-            [refit.summary.F for refit in refits],
-            [tie_rules.path_key(X[f]) for f in chosen],
-            F,
-            counter,
-            key(label, "addition"),
-            reverse=engine.reverse,
-            sink=engine.census,
-        )
-        larger = refits[pick]
-        larger_scores = engine.fit_scores(larger.summary.label, larger.rows, budget)
-        # The refit may have moved any founder: its sequence part is the gain over the refit with
-        # every cell the incumbent does not use replaced by the incumbent's nearest row.
-        observed = []
-        decision, without, shadow_cells, detail = _symmetric_decision(
-            engine,
-            geometry,
-            larger.rows,
-            larger_scores,
-            scores,
-            budget,
-            cost,
-            rule,
-            [*seed_key, label, "addition"],
-            "addition",
-            view,
-            decision_options=observed,
-        )
-        shadow_details = {pick: detail}
-        shadow_options = {pick: observed}
-        tie_rules.census(
-            "assembly.count_margin",
-            key(label, "addition", "margin"),
-            [
-                decision.total.margin,
-                decision.total.loso_margin,
-                decision.sequence.margin,
-                decision.sequence.loso_margin,
-            ],
-            sink=engine.census,
-        )
-
-        def decide_member(position):
-            if position == pick:
-                return decision
-            member = refits[position]
-            member_scores = engine.fit_scores(member.summary.label, member.rows, budget)
-            member_observed = []
-            member_decision, _, _, detail = _symmetric_decision(
-                engine,
-                geometry,
-                member.rows,
-                member_scores,
-                scores,
-                budget,
-                cost,
-                rule,
-                [*seed_key, label, "addition"],
-                "addition",
-                view,
-                decision_options=member_observed,
-            )
-            shadow_details[position] = detail
-            shadow_options[position] = member_observed
-            return member_decision
-
-        tied, tie_records, agree, outcomes = tie_outcomes(
-            "addition", label, members, pick, chosen, refits, decide_member
-        )
-        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X, engine, budget)
-        flags = _shadow_flags(flags, shadow_details, refits, X)
-        resolved, selected_decision, flags = _count_choice(
-            engine, "addition", label, X, members, resolved, outcomes, refits, shadow_options, shadow_details, flags
-        )
-        if resolved != pick or selected_decision is not decision:
-            pick = resolved
-            larger = refits[pick]
-            decision = selected_decision
-            larger_scores = engine.fit_scores(larger.summary.label, larger.rows, budget)
-            without = tuple(int(f) for f in np.flatnonzero(~_own_sequence(larger.rows)))
-            _, shadow_cells = _shadow_options(geometry, larger.rows, X)
-        entry = _decision(
-            "addition",
-            label,
-            K,
-            decision,
-            chosen,
-            refits,
-            pick,
-            cost,
-            view,
-            larger_fit=larger.summary.label,
-            smaller_fit=smaller_fit,
-            optimistic_score=optimistic,
-            without_sequence=without,
-            shadow_cells=shadow_cells,
-            shadow_alternatives=tuple(
-                dict(
-                    candidate=int(chosen[p]),
-                    **({"fit_endpoint": tie_rules.panel_key(refits[p].rows)} if endpoint_family else {}),
-                    **shadow_details[p],
-                )
-                for p in sorted(shadow_details)
-            ),
-            fit_family_evaluations=(
-                _endpoint_evaluations(
-                    "addition",
-                    X,
-                    chosen,
-                    refits,
-                    members,
-                    outcomes,
-                    shadow_options,
-                    shadow_details,
-                    pick,
-                    view,
-                    reverse=engine.reverse,
-                )
-                if endpoint_family
-                else ()
-            ),
-            selected_refit_panel=(tie_rules.panel_key(refits[pick].rows) if endpoint_family else ()),
-            tied_candidates=tied,
-            tie_decisions=tie_records,
-            tie_decisions_agree=agree,
-            **flags,
-        )
-        remember(larger.rows, larger, larger_scores)
-        return entry, larger, larger_scores, (larger.rows, X)
-
     final = fit
     # Ordinary count deletions only: no separate score-loss cleanup bypasses the rule.
     # At most d + 1 deletion rounds for d accepted deletions (fewer on reaching K = 2).
@@ -1928,24 +1555,6 @@ def _count_pass_point(
         if entry.accept_larger:
             break
         final, X, scores = smaller, smaller.rows, smaller_scores
-        adopt(final)
-    cycle = False
-    cycle_undecided = False
-    while additions:
-        if len(X) >= upper:
-            limit_reached = True
-            break
-        entry, larger, larger_scores, pair = addition_round(X, scores, final.summary.label)
-        decisions.append(entry)
-        decided(entry)
-        panels.append(pair)
-        if not entry.accept_larger:
-            break
-        adopt(larger)
-        # Release 2.8: additions and deletions use the same symmetric null on the same converged
-        # endpoints, so no check deletion round follows an accepted birth and no count cycle arises
-        # (count_cycle and cycle_undecided stay False in the records).
-        final, X, scores = larger, larger.rows, larger_scores
         adopt(final)
     replaced = None
     held = best_at[len(X)]
@@ -1986,7 +1595,7 @@ def _count_pass_point(
                         panels=comparison["panels"],
                         source_decision="best_f",
                         source_reason="nearest_shadow_count",
-                        representative_prior="smaller_k+nearest_shadow",
+                        representative_prior=SHADOW_PRIOR,
                         shadow_alternatives=(comparison["shadow"],),
                     )
                 )
@@ -2012,11 +1621,6 @@ def _count_pass_point(
         decisions=tuple(decisions),
         final_fit=final.summary.label,
         weak_junctions=final.weak_junctions,
-        count_cycle=cycle,
-        cycle_undecided=cycle_undecided,
-        count_limit=int(upper),
-        count_limit_reached=limit_reached,
-        additions=bool(additions),
         ambiguous=(any(d.ambiguous for d in decisions) or bool(replaced is not None and replaced.ambiguous)),
         best_f_replacement=replaced,
         live_alternatives=live,
@@ -2029,13 +1633,12 @@ def _count_pass_point(
 
 def count_pass(
     engine: SweepEngine,
-    geometry: count_rule.RowGeometry,
+    geometry: count_geometry.RowGeometry,
     start: NDArray[np.int64],
     cost: float,
-    rule: count_rule.CountRuleConfig,
+    rule: CountRuleParameters,
     budget: RefinementExecution,
     seed_key: Sequence[int | str],
-    additions: bool,
     counter: tie_rules.SharedCounter | None = None,
     alternative_starts: Sequence[Sequence[Sequence[int]]] = (),
 ) -> CountPass:
@@ -2055,7 +1658,6 @@ def count_pass(
             rule,
             budget,
             incoming_seed,
-            additions,
             counter=counter,
             census_prefix=worker.census_prefix,
         )
@@ -2139,7 +1741,6 @@ def count_pass(
                     retained_terminal_count=1,
                     within_K_F_margins=(),
                     representative_prior=None,
-                    replay_seconds=0.0,
                     histories=(
                         dict(
                             branch=engine.branch_key,
@@ -2148,8 +1749,6 @@ def count_pass(
                             terminal_K=len(initial.rows),
                             terminal_F=float(initial.F),
                             unverified_history=True,
-                            count_cycle=initial.count_cycle,
-                            count_limit_reached=initial.count_limit_reached,
                         ),
                     ),
                 )
@@ -2189,7 +1788,6 @@ def count_pass(
         return replace(
             initial, branch_status=("unresolved_count_continuation" if initial.unresolved_alternatives else "none")
         )
-    begun = 0.0
     pending: list[dict[str, Any]] = [
         dict(
             choices={},
@@ -2201,7 +1799,7 @@ def count_pass(
             input_key=nominal_input,
         )
     ]
-    evaluations, reused, count_evaluations, count_seconds = 1, 0, 0, 0.0
+    evaluations, reused, count_evaluations = 1, 0, 0
     for panel in input_keys:
         if panel == nominal_input:
             continue
@@ -2252,7 +1850,6 @@ def count_pass(
                 nominal=nominal,
                 options=options,
                 overflow=False,
-                replay_seconds=0.0,
             )
             count_events.append(record)
         # Enumerate the full encountered class, or retain its incumbent and history.
@@ -2270,15 +1867,11 @@ def count_pass(
                 pending.append(dict(state, choices=choices, count_choices=count_choices))
             else:
                 branch = branch_worker(choices, count_choices, state["input_key"])
-                started = 0.0
                 result = run(branch, state["start"], state["seed_key"])
-                seconds = 0.0 - started
                 evaluations += 1
                 reused += branch.reused_fits
                 if kind == "count":
                     count_evaluations += 1
-                    count_seconds += seconds
-                    cast(dict[str, Any], record)["replay_seconds"] += seconds
                 pending.append(dict(state, choices=choices, count_choices=count_choices, result=result, engine=branch))
 
     # Compare only outputs of the same K by F. Different supported count outcomes
@@ -2407,14 +2000,7 @@ def count_pass(
                         dict(panel=terminal_digest(p), K=len(p), F=float(f))
                         for p, f in terminal_panels_of(state).items()
                     ),
-                    unverified_history=bool(
-                        state.get("unfinished_budget")
-                        or remaining_families(state)
-                        or point.count_cycle
-                        or point.count_limit_reached
-                    ),
-                    count_cycle=point.count_cycle,
-                    count_limit_reached=point.count_limit_reached,
+                    unverified_history=bool(state.get("unfinished_budget") or remaining_families(state)),
                 )
             )
         seen = {h["source_panel"] for h in histories}
@@ -2497,7 +2083,6 @@ def count_pass(
                     if len(retained) > 1
                     else None
                 ),
-                replay_seconds=event["replay_seconds"],
             )
         )
     unresolved = tuple(unique.values())
@@ -2511,14 +2096,12 @@ def count_pass(
         ambiguous=result.ambiguous or len(counts) > 1,
         branch_evaluations=evaluations,
         branch_reused_fits=reused,
-        branch_seconds=0.0 - begun,
         branch_status=status,
         selected_branch=chosen["engine"].branch_key,
         input_F0=initial.input_F0,
         count_continuations=tuple(count_reports),
         count_branch_evaluations=count_evaluations,
-        count_branch_seconds=count_seconds,
     )
 
 
-__all__ = ["upper_bound", "keep_margin", "count_pass"]
+__all__ = ["keep_margin", "count_pass"]

@@ -22,7 +22,7 @@ Split selected sites into near-equal consecutive bins according to the target si
 
 Implementation: [science/painting/states.py](../../haplotype_reconstruction/science/painting/states.py).
 
-Parameters by name: `snps_per_bin`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `snps_per_bin`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(L_s). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -44,7 +44,7 @@ For each sample/pair/bin, sum robust centred site logs in site order and divide 
 
 Implementation: [science/painting/emissions.py](../../haplotype_reconstruction/science/painting/emissions.py), [science/painting/hmm.py](../../haplotype_reconstruction/science/painting/hmm.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py).
 
-Parameters by name: `robustness_epsilon`, `emission_log_floor`, `emission_site_correlation`, `INFORMATIVE_SPREAD`, `WINDOW_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `robustness_epsilon`, `emission_log_floor`, `emission_site_correlation`, `INFORMATIVE_SPREAD`, `WINDOW_BYTES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S(S + 1)/2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -55,7 +55,7 @@ Construct the label copying process from map distance, ancestry-change rate and 
 
 Implementation: [science/painting/transitions.py](../../haplotype_reconstruction/science/painting/transitions.py).
 
-Parameters by name: `MINIMUM_SWITCH_PROBABILITY`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `MINIMUM_SWITCH_PROBABILITY`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -66,7 +66,7 @@ Augment each copying label with its permitted faithful/panel-error states. Label
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py).
 
-Parameters by name: `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n B S'^2); O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -84,11 +84,12 @@ Cost and scope: O(n B S'^2). These terms describe the unit’s work/storage dime
 <a id="pr08"></a>
 ## pr08 Copying-model estimator: fixed EM updates of (rho, a, b), M-step searches, named log-grid rounding; estimation batches
 
-Start from the named copying/error parameters and execute the fixed number of EM updates. Each E-step supplies both the rate and error updates; use the fixed grid/refinement and bounded searches with their stated tie preferences. Round final estimates to the named natural-log grid. L2 fixes sample reduction order independently of memory batches.
+Start from the named copying/error parameters and execute the fixed number of EM updates. Each E-step supplies both the rate and error updates; use the fixed grid/refinement and bounded searches with their stated tie preferences. Round final estimates to the named natural-log grid. Sample reductions follow sample order independently of memory batches.
+
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S^2/2); O(N B S'^2); O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -99,7 +100,7 @@ Decode both conventions with the structured two-track Viterbi recurrence. Apply 
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py).
 
-Parameters by name: `VITERBI_TIE`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `VITERBI_TIE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n B S'^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -121,7 +122,7 @@ Combine candidate masks from both traceback conventions, identify switch interva
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py).
 
-Parameters by name: `MAXIMUM_MASK_STATES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `MAXIMUM_MASK_STATES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(n L_s); O(n B); O(n B S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -143,7 +144,7 @@ Apply the faithful unordered-pair gate first, then the locally allele-equivalent
 
 Implementation: [science/painting/release.py](../../haplotype_reconstruction/science/painting/release.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `minimum_release_posterior`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_release_posterior`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N B); O(N B + B C). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -154,9 +155,9 @@ Cost and scope: O(N B); O(N B + B C). These terms describe the unit’s work/sto
 
 Choose resident packed emissions or whole-bin windows using the supplied storage capability and dimension-based workspace plan. When the evidence offers resident copies, each component's evidence at its panel sites (codes and likelihood dictionaries) is read once into memory under the emission budget, whenever the estimate and the decode keep the packed emissions they would keep without it, so that every emission build of the component is an in-memory parallel gather. The copying-model estimate (pr08) reads the same tempered emissions in each of its updates, since they do not depend on (rho, a, b). When their packed form fits the remaining cache budget, they are built once and unpacked for each update. The values are the same: the ordered-pair emissions are written symmetrically. The estimate releases them before label continuity. Label continuity's part emissions are kept for the whole relabelling search under the same budget, because a candidate relabelling only remaps states; each candidate check then re-decodes without rebuilding emissions. When every sample batch's part emissions do not fit, the batches that fit are kept, and the component's selected evidence (each sample's genotype-likelihood codes at the selected sites and its likelihood dictionary, far smaller than the emissions) is read once into memory under the same budget (the leading batches that fit, when the whole copy does not), so that rebuilding a batch is a parallel in-memory gather and emission kernel; one rebuild serves several candidates, the next ones in ranked order being decoded from it after a candidate fails (1, 2, 4, ... per iteration, within the check budget), and they count as checks only when the search reaches them. The search, its checks and its outcome are the same. Progress records make an interrupted painting resumable: each component's copying model, its label-continuity outcome and every decoded sample batch are published as soon as they are final, under the painting's derivation, and a resumed painting reads them instead of recomputing (a restored decode leaves the packed-emission cache out, which later stages rebuild). Decode each sample with identical kernels and site order. Cache presence and batch size affect work only; packed arrays are reconstructible from the recorded model/evidence. Release-only decoding arrays end at the component release boundary; the next component retains only the published product and its original cache entry.
 
-Implementation: [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
+Implementation: [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [stages/painting/compute.py](../../haplotype_reconstruction/stages/painting/compute.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `EMISSION_CACHE_MAX_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `EMISSION_CACHE_MAX_BYTES`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -167,7 +168,7 @@ Construct eligible link points, movable classes, split-bin emissions and the tra
 
 Implementation: [science/painting/label_continuity.py](../../haplotype_reconstruction/science/painting/label_continuity.py).
 
-Parameters by name: `LABEL_CONTINUITY_BASE_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters: supplied typed inputs and the painting parameter record; batching uses the supplied execution capability. This unit has no independent byte allowance.
 
 Cost and scope: Per-sample label-continuity memory is O(S²(B + links)) plus switch-count/message/scoring scratch; batching bounds the simultaneous sample set.
 
@@ -185,11 +186,11 @@ Cost and scope: O(N B S^2); O(links N (S^2 log S + C^2 S)); O(links N S^3). Thes
 <a id="pr17"></a>
 ## pr17 Label continuity decision: ranking in tie classes, leftmost placement, painted-switch acceptance, competing repairs, iteration
 
-Admit candidates meeting the named switch-gain gate, rank gain tie classes, and move equivalent repairs to their leftmost placement. Test actual painted switch gains and the loser/winner criterion before acceptance. Group the ranked tie peers once per iteration without changing their order or ambiguity rule. An iteration re-decodes at most `label_continuity_check_budget` candidates in ranked order: reaching it without an acceptable candidate ends the search and is flagged (`check_budget_reached`, the painting model table's ContinuityBudgetReached), so the final iteration, which otherwise re-decodes every screened candidate (hundreds on long chromosomes below 0.5x), stays bounded; at the release-matrix depths a component checks at most a handful of candidates and the budget is not reached. Recompute scores and candidate checks after each accepted repair until none qualifies; there is no fixed iteration cap.
+Admit candidates meeting the named switch-gain gate, rank gain tie classes, and move equivalent repairs to their leftmost placement. Test actual painted switch gains and the loser/winner criterion before acceptance. Group the ranked tie peers once per iteration without changing their order or ambiguity rule. The main ranked loop stops when `label_continuity_check_budget` candidates have been checked without an acceptable repair and flags `check_budget_reached` (ContinuityBudgetReached in the painting model table). Certification against other members of an acceptable candidate's tied gain class can perform additional checks. This preserves competing-repair ambiguity but does not impose a peer-inclusive decode bound. Recompute scores and candidate checks after each accepted repair until none qualifies; there is no fixed iteration cap.
 
 Implementation: [science/painting/label_continuity.py](../../haplotype_reconstruction/science/painting/label_continuity.py), [core/ties.py](../../haplotype_reconstruction/core/ties.py).
 
-Parameters by name: `label_continuity_minimum_switch_gain`, `label_continuity_maximum_loser_ratio`, `label_continuity_check_budget`, `WIDE_CLASS_QUANTA`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `label_continuity_minimum_switch_gain`, `label_continuity_maximum_loser_ratio`, `label_continuity_check_budget`, `WIDE_CLASS_QUANTA`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: With J links, Q <= J K(K-1)/2 candidates per iteration. Tie-peer lookup is O(Q) after ranking. Each actual candidate check constructs trial emissions and runs both full decoders, O(N (B + J) K^2); checking all candidates can therefore remain quartic in K. Accepted repairs strictly decrease the integer switch total; their number is bounded by that decrease, not by a founder-sized cap. A cubic whole-search bound has not been established.
 
@@ -207,7 +208,7 @@ Cost and scope: O(N B S'^2). These terms describe the unit’s work/storage dime
 <a id="pr19"></a>
 ## pr19 Painting stage order, product, records and views
 
-Build the model, apply label continuity, decode, then release, in that order. Publish typed painting and model diagnostics with declared source identities. Pedigree reads the frozen painting through its public API; later refit does not feed back into pedigree scoring.
+The stage orchestrates model fitting, label continuity, decoding and release, in that order. It owns checkpoint progress and cache budgets; science computes models and batch results. Publish typed painting and model diagnostics with declared source identities. Pedigree reads the frozen painting through its public API; later refit does not feed back into pedigree scoring.
 
 Implementation: [contracts/painting.py](../../haplotype_reconstruction/contracts/painting.py), [science/painting/diagnostics.py](../../haplotype_reconstruction/science/painting/diagnostics.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py), [stages/painting/records.py](../../haplotype_reconstruction/stages/painting/records.py).
 

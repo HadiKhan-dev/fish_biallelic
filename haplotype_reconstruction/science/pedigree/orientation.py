@@ -1,8 +1,8 @@
 """Orientation evidence from painted junction counts (which of two linked samples is the parent).
 
 A transmitted homologue copies one parental homologue at each position and switches between the two at
-meiotic crossovers, so the parent's painted junctions are inherited together along a homologue (release 2.16;
-pedigree.junctions.linked_log_cdf): the junctions sit on the parent's two homologues of its minimum-switch
+meiotic crossovers, so the parent's painted junctions are inherited together along a homologue
+(``junctions.linked_log_cdf``): the junctions sit on the parent's two homologues of its minimum-switch
 trajectory pair, the selector switches with the meiotic probability between bins, and an inherited junction is
 seen where the child is callable (its chromosome-wide callable fraction f_c, missing at random); new crossovers,
 co-parent and false junctions form a non-negative remainder. Per chromosome, L(p -> c) is proportional to
@@ -12,7 +12,6 @@ resulting log odds add over chromosomes (weighted by resampling multiplicity).
 A paired junction-density contrast only orders the acyclic graph search and is reported.
 
 Method: docs/methods/pedigree.md#finite-continuous-direction
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import numpy as np
 
 from ...contracts.pedigree import JunctionEvidence, Orientation
 from ...core.kernels import kernel
-from ...core.numerics import weighted_chromosome_sum
 from .kernels.signatures import OVERLOADS
 from .parameters import ORDER_MINIMUM_WEIGHT, ORDER_VARIANCE_OFFSET
 
@@ -177,9 +175,10 @@ def junction_evidence(
 
 def fit(evidence: JunctionEvidence, weights: np.ndarray) -> Orientation:
     """Orientation of a fit whose chromosomes carry multiplicities ``weights`` [C]."""
-    counts = weighted_chromosome_sum(weights, evidence.junctions)
-    exposure = weighted_chromosome_sum(weights, evidence.callable_bins)
-    full = float(weighted_chromosome_sum(weights, 2.0 * evidence.total_bins))
+    # Burden and callability are report-only; direction decisions use the kernels below.
+    counts = np.sum(weights[:, None] * evidence.junctions, axis=0)
+    exposure = np.sum(weights[:, None] * evidence.callable_bins, axis=0)
+    full = float(np.sum(weights * (2.0 * evidence.total_bins)))
     fractions = np.divide(exposure, full, out=np.zeros_like(exposure), where=full > 0)
     adjusted = np.divide(counts, fractions, out=np.full_like(counts, np.nan), where=fractions > 0)
     return Orientation(

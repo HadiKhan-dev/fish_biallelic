@@ -29,7 +29,7 @@ def validate_sample_order(reference: Sequence[str], **sources: Sequence[str]) ->
 def validate_parent_edges(edges: ParentEdges) -> None:
     """Verify canonical Tier-B indices, slot uniqueness/order and acyclicity.
 
-    PE5 releases a subset of its selected DAG. This consumer assertion rejects a
+    pedigree releases a subset of its selected DAG. This consumer assertion rejects a
     corrupt or mismatched record before LabelModel traverses descendants.
     """
     n = len(edges.sample_ids)

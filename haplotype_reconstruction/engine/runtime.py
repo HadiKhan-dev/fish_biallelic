@@ -2,7 +2,7 @@
 
 The isolated entry starts a clean Python interpreter before unpickling user tasks.
 Forkserver preload names and hooks are caller-supplied; no stage names occur here.
-Memory observations preserve ENG-19/25 (3.5 execution/resources.py).
+Memory observations support process bootstrap and pressure admission (ENG-19/25).
 """
 
 from __future__ import annotations
@@ -27,21 +27,19 @@ from ..core.errors import ResourceError, SettingsError
 __all__ = [
     "affinity_cpus",
     "configure_worker",
-    "thread_team",
     "start",
     "start_run",
     "RunSettings",
     "WorkerSettings",
     "worker_settings",
+    "current_settings",
     "apply_worker_settings",
     "isolated",
-    "run_isolated",
     "warm_kernels",
     "kernel_run",
     "start_forkserver",
     "signal_boundary",
     "RunInterrupted",
-    "available_memory_bytes",
     "resident_bytes",
     "memory_pressure",
     "profiling",
@@ -59,7 +57,7 @@ THREADING_LAYER = "omp"
 
 
 def affinity_cpus() -> int:
-    """Return the process's available CPUs using the original 3.5 affinity rule."""
+    """Return the process's available CPUs from affinity, then the OS CPU count."""
     try:
         count = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -68,7 +66,7 @@ def affinity_cpus() -> int:
 
 
 def configure_worker(max_threads: int) -> None:
-    """Set the 3.5 numerical policy before a fresh worker imports task modules.
+    """Set the numerical policy before a fresh worker imports task modules.
 
     If Numba was already initialized, refuse incompatible settings rather than
     silently changing numerical execution. The caller owns its cache directory.
@@ -101,43 +99,6 @@ def configure_worker(max_threads: int) -> None:
         numba.config.THREADING_LAYER = "omp"
 
 
-@contextmanager
-def thread_team(cores: int):
-    """Lease a bounded Numba team for one task and restore the previous team afterward."""
-    import numba
-
-    from ..core.kernels import enable_caches
-
-    enable_caches()
-    previous = numba.get_num_threads()
-    numba.set_num_threads(cores)
-    try:
-        yield
-    finally:
-        numba.set_num_threads(previous)
-
-
-@contextmanager
-def task_team(default: int):
-    """A parallel section's Numba team: under an engine CPU budget (a graph task's, or a thread map worker's one CPU),
-    that budget's live share when the section starts (a boundary: a section started after peers finished uses their
-    CPUs); elsewhere ``default``. On exit the team never returns above the budget's share then (it may have shrunk).
-    Sections sized by the share their task started with ran on one CPU while the node emptied."""
-    import numba
-
-    from ..core.kernels import enable_caches
-    from .scheduler import _THREAD_BUDGET
-
-    enable_caches()
-    budget = getattr(_THREAD_BUDGET, "value", None)
-    previous = numba.get_num_threads()
-    numba.set_num_threads(max(1, int(budget.threads() if budget is not None else default)))
-    try:
-        yield
-    finally:
-        numba.set_num_threads(previous if budget is None else max(1, min(previous, int(budget.threads()))))
-
-
 def _inactive_file_bytes(directory: Path, version1: bool) -> int:
     """Reclaimable inactive file cache charged to a cgroup (hierarchical total in v1)."""
     key = "total_inactive_file" if version1 else "inactive_file"
@@ -149,54 +110,6 @@ def _inactive_file_bytes(directory: Path, version1: bool) -> int:
     except (OSError, ValueError):
         pass
     return 0
-
-
-def available_memory_bytes() -> int | None:
-    """Bytes this process may still allocate: the minimum over all known limits, or None if none is known.
-
-    Candidates: MemAvailable of the node; for every cgroup level from this process's own up to the root, its
-    limit minus its working set (usage minus reclaimable inactive file cache, so a plan does not depend on how
-    much recently read checkpoint data the page cache still holds); SLURM_MEM_PER_NODE (MiB).
-    """
-    candidates = []
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                candidates.append(int(line.split()[1]) * 1024)
-                break
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        entries = Path("/proc/self/cgroup").read_text().splitlines()
-    except OSError:
-        entries = []
-    for entry in entries:
-        _, controllers, relative = entry.split(":", 2)
-        if "memory" in controllers.split(","):
-            root = Path("/sys/fs/cgroup/memory")
-            maximum_name, current_name = ("memory.limit_in_bytes", "memory.usage_in_bytes")
-        elif not controllers:
-            root = Path("/sys/fs/cgroup")
-            maximum_name, current_name = ("memory.max", "memory.current")
-        else:
-            continue
-        directory = root / relative.lstrip("/")
-        while True:
-            try:
-                maximum = int((directory / maximum_name).read_text().strip())
-                current = int((directory / current_name).read_text().strip())
-                if 0 < maximum < 1 << 60:
-                    current -= _inactive_file_bytes(directory, bool(controllers))
-                    candidates.append(max(0, maximum - current))
-            except (OSError, ValueError):
-                pass
-            if directory == root:
-                break
-            directory = directory.parent
-    slurm_mib = os.environ.get("SLURM_MEM_PER_NODE")
-    if slurm_mib and slurm_mib.isdigit() and (int(slurm_mib) > 0):
-        candidates.append(int(slurm_mib) << 20)
-    return min(candidates) if candidates else None
 
 
 def resident_bytes() -> int:
@@ -284,6 +197,11 @@ class WorkerSettings:
 _RUN: RunSettings | None = None
 _BOOTSTRAP_DIRECTORY: tempfile.TemporaryDirectory | None = None
 _CHECKED_DECLARATIONS: tuple[Any, ...] | None = None
+
+
+def current_settings() -> RunSettings | None:
+    """Observe this process's configured runtime without starting one."""
+    return _RUN
 
 
 def _hooks(settings: RunSettings) -> None:
@@ -419,8 +337,10 @@ def start(
         sys.path.insert(0, str(directory))
     multiprocessing.set_forkserver_preload([*BASE_PRELOAD, name])
     _RUN = settings
-    from .scheduler import start_governor
+    from .cpu import install_runtime_hooks
+    from .memory import start_governor
 
+    install_runtime_hooks()
     start_governor(memory_limit, diagnostic_directory=memory_diagnostics)
     return settings
 
@@ -446,7 +366,7 @@ def start_run(cores: int, **options: Any) -> RunSettings:
 
 
 def worker_settings() -> WorkerSettings:
-    from .scheduler import governor_handle
+    from .memory import governor_handle
 
     settings = _RUN
     if settings is None:
@@ -458,8 +378,10 @@ def apply_worker_settings(settings: WorkerSettings) -> None:
     global _RUN
     _RUN = settings.run
     _preload(_RUN, hooks=True)
-    from .scheduler import attach_governor
+    from .cpu import install_runtime_hooks
+    from .memory import attach_governor
 
+    install_runtime_hooks()
     attach_governor(settings.governor_handle)
     import numba
 
@@ -468,12 +390,11 @@ def apply_worker_settings(settings: WorkerSettings) -> None:
 
 
 def _unnamed_numba_init_lock() -> None:
-    """Release 4.11: give Numba's threading-backend initialisation lock an unnamed semaphore before the layer starts.
+    """Give Numba's threading-backend initialisation lock an unnamed semaphore before the layer starts.
 
     Numba creates that lock lazily (numba.np.ufunc.parallel._set_init_process_lock) from the default start method's
-    context: under forkserver a named semaphore registered with the resource tracker, which a worker killed inside a
-    native call (an interrupted run's forced kill) left behind ("leaked semaphore objects" at shutdown). A lock from
-    the fork context is unlinked as it is made and serves the same purpose inside this process. Numba versions
+    context. Under forkserver that semaphore is named and tracked, so a worker killed inside a
+    native call can leave it behind. A lock from the fork context is unlinked as it is made and serves the same purpose inside this process. Numba versions
     without this module attribute are left alone."""
     import multiprocessing
 
@@ -511,7 +432,7 @@ def task_boundary() -> None:
 
 
 def warm_kernels(requests: Any = None, *, store: str | Path | None = None, defer: bool = False) -> Any:
-    """Warm the caller-declared closure before task execution; return C2 CacheState.
+    """Warm the caller-declared closure before task execution; return the kernel CacheState.
 
     start must have configured and preloaded the complete invocation. The caller
     publishes this disposable state in finally, or uses kernel_run below. With ``defer``
@@ -624,7 +545,7 @@ def isolated(
         request.write_bytes(pickle.dumps((pickle.dumps((function, args, kwargs)), cores, tuple(preload))))
         # The child imports from the parent's module search path, as multiprocessing's forkserver does: with a bare
         # -c its working directory came first, so a run started in a source checkout's root imported that checkout's
-        # package instead of the parent's (to 4.7; the simulation identity then refused the result).
+        # package instead of the parent's, giving the child a different source identity.
         search = Path(directory) / "path.pkl"
         search.write_bytes(pickle.dumps(list(sys.path)))
         program = (
@@ -683,15 +604,3 @@ def _isolated_entry() -> None:
         result.write_bytes(pickle.dumps(("error", failure)))
         raise failure from error
     result.write_bytes(pickle.dumps(("result", value)))
-
-
-def run_isolated(
-    function: Callable[..., Any],
-    *,
-    args: tuple[Any, ...] = (),
-    kwargs: dict[str, Any] | None = None,
-    cores: int = 1,
-    preload: Sequence[str] = (),
-) -> Any:
-    """I1's structural entry to a fresh numerical interpreter."""
-    return isolated(function, *args, cores=cores, preload=preload, **({} if kwargs is None else kwargs))

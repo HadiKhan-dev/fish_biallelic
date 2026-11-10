@@ -16,9 +16,7 @@ no multimodal site, shell guard), and the other fold's samples are painted on co
 released panel only. Each sample's carrier profile therefore never uses its own evidence in the
 release that defines it.
 
-The EM runs from one start (uniform configurations, complete-site pair posteriors): base ran five
-starts, but with minimum_iterations >= 2 starts 1-4 shared start 0's trajectory after the initial
-ELBO, so start 0 was always selected (survey MAP 4.2).
+The EM starts from uniform site configurations and complete-site pair posteriors.
 
 
 Owns the completion crossfit boundary (U03-U04). Must not read files, clocks or
@@ -40,7 +38,7 @@ from haplotype_reconstruction.core.errors import InvariantError
 from ..alleles import site_posterior
 from . import dosage_statistics, support
 from .observation import UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, row_classes, unordered_pairs
-from .parameters import CrossFitConfig
+from .parameters import CrossFitParameters
 
 
 @dataclass(frozen=True)
@@ -350,14 +348,14 @@ def crossfit_block(
     evidence: np.ndarray,
     observed: np.ndarray,
     folds: np.ndarray,
-    config: CrossFitConfig,
+    config: CrossFitParameters,
     settings: np.ndarray,
 ) -> CrossFit:
     """Learn calls on one fold and paint only the complementary held-out fold.
 
     alleles: int8[K, L] the block's pre-fill calls (-1 unresolved, and at every non-discovery site);
     evidence: float64[N, L, 3] genotype likelihoods (1/3 where unobserved); observed: bool[N, L];
-    folds: int8[N] (``content_fold_plan``); config: CompletionConfig.crossfit; settings:
+    folds: int8[N] (``content_fold_plan``); config: CompletionParameters.crossfit; settings:
     ``site_posterior.settings()``.
     """
     founders = alleles.shape[0]

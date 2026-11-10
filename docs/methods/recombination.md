@@ -66,7 +66,7 @@ Group touching/overlapping reported event intervals into loci and require suppor
 
 Implementation: [science/recombination/junctions.py](../../haplotype_reconstruction/science/recombination/junctions.py).
 
-Parameters by name: `minimum_parents`, `hotspot_switch_probability`, `flag_log_likelihood_ratio`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_parents`, `hotspot_switch_probability`, `flag_log_likelihood_ratio`, `SWITCH_GRID_SPEC`, `DISCORDANCE_GRID_SPEC`. The fixed profile specifications give inclusive probability endpoints and point counts; flip symmetry bounds switching at 1/2, and the discordance floor allows isolated discordant meioses. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(loci^2 x E); O(loci^2 x parents x grid). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

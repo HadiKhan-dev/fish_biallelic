@@ -3,7 +3,7 @@
 ReleasedSites contains every loader-retained site, including removed sites and
 r5-only common alleles. The sites stage computes it; output writers select rows.
 This contract performs no source I/O, filtering decisions or output formatting.
-FounderRelease is owned by contracts.assembly (AS6). Method: WP_OU1 §5–§6.1.
+FounderRelease is owned by contracts.assembly. Method: docs/methods/export.md.
 """
 
 from __future__ import annotations

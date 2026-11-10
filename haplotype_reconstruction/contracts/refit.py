@@ -20,7 +20,7 @@ from .roles import freeze_record_arrays, record_field, schema_field
 class ComponentRefit:
     """Refit calls, inference snapshot and row-major changed cells.
 
-    changed_rows widens the baseline int32 indices to int64 exactly (WP_RF1).
+    changed_rows holds int64 row indices.
     panel is a derived view reconstructed from the painted panel plus these
     released/inference arrays; it is never stored.
     """

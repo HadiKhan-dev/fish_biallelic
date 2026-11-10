@@ -8,8 +8,8 @@ nearest-shadow count outcomes.
 
 Owns: bounded original-input replay plans and their releases.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.11; AJ29.
-Identity: Replay is FIFO within MAX_BRANCHES; seed-refit choices are never independently forced.
+Method: docs/methods/assembly.md#aj29.
+Invariant: Replay is FIFO within MAX_BRANCHES; seed-refit choices are never independently forced.
 """
 
 from __future__ import annotations
@@ -23,8 +23,6 @@ from haplotype_reconstruction.core import ties
 from .. import orders as tie_rules
 from ..parameters import MAX_BRANCHES
 from .state import DEFAULT_TIE_SETTINGS
-
-# Approved joint-branch budget, including the primary search.
 
 
 @dataclass(frozen=True)
@@ -82,7 +80,6 @@ class ReplayChoices:
 class ReplayBranch:
     outcome: object = record_field("state", axes=(), units="1", dtype="object")
     choices: tuple[PanelChoice, ...] = record_field("state", axes=(), units="1", dtype="tuple[PanelChoice, ...]")
-    seconds: float = record_field("diagnostic", axes=(), units="s", dtype="float64")
     forced_choices: int = record_field("state", axes=(), units="1", dtype="int64")
 
 
@@ -93,7 +90,6 @@ class ReplayResult:
     excluded_families: tuple[dict, ...] = record_field("state", axes=(), units="1", dtype="tuple[dict, ...]")
     complete: bool = record_field("state", axes=(), units="1", dtype="bool")
     attempted: int = record_field("state", axes=(), units="1", dtype="int64")
-    seconds: float = record_field("diagnostic", axes=(), units="s", dtype="float64")
     failures: tuple[str, ...] = record_field("state", axes=(), units="1", dtype="tuple[str, ...]")
 
     def diagnostics(self):
@@ -102,8 +98,6 @@ class ReplayResult:
             complete=self.complete,
             attempted=self.attempted,
             completed=len(self.branches),
-            branch_seconds=[branch.seconds for branch in self.branches],
-            seconds=self.seconds,
             failures=list(self.failures),
             unresolved_families=len(self.unresolved_families),
             excluded_seed_families=len(self.excluded_families),
@@ -164,9 +158,8 @@ def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
             # A changed prefix invalidates this family comparison. Preserve all
             # unrun choices, rather than trying more mismatched replays.
             break
-        elapsed = 0.0
         choices = tuple(plan.observed)
-        branches.append(ReplayBranch(outcome, choices, elapsed, len(forced)))
+        branches.append(ReplayBranch(outcome, choices, len(forced)))
         excluded.extend(plan.excluded)
         visited.update(choices[:stop] for stop in range(len(choices) + 1))
         for at, choice in enumerate(choices):
@@ -185,7 +178,6 @@ def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
         _family_records(excluded, "unresolved_seed_continuation"),
         not pending and not failures,
         attempted,
-        0.0,
         tuple(failures),
     )
 
@@ -300,22 +292,15 @@ def resolve_replays(
         survivors=len(survivors),
         certified=certified,
         resolved=replay.complete and certified and len(survivors) == 1 and not families,
-        additional_seconds=max(0.0, replay.seconds - replay.branches[0].seconds),
-        resolution_seconds=0.0,
     )
     # Biological census/acceptance events describe the selected complete history.
     # Work totals account for every executed history, and the replay event reports
-    # branch costs separately without mixing their count-state semantics.
+    # branch work separately without mixing their count-state semantics.
     summary = replace(
         chosen.summary,
         total_full_scores=sum(outcome.summary.total_full_scores for outcome in outcomes),
         count_exact_scores=sum(outcome.summary.count_exact_scores for outcome in outcomes),
         count_exact_sample_scores=sum(outcome.summary.count_exact_sample_scores for outcome in outcomes),
-        beam_seconds=sum(outcome.summary.beam_seconds for outcome in outcomes),
-        phase_seconds={
-            name: sum(outcome.summary.phase_seconds.get(name, 0.0) for outcome in outcomes)
-            for name in {key for outcome in outcomes for key in outcome.summary.phase_seconds}
-        },
         work_counters={
             name: sum(outcome.summary.work_counters.get(name, 0) for outcome in outcomes)
             for name in {key for outcome in outcomes for key in outcome.summary.work_counters}

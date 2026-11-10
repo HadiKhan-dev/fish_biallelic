@@ -1,7 +1,6 @@
 """Keep mutable family sums and versioned gain caches.
 
-Owns the relocated partition units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1. Legacy arithmetic retained for relocation.
+Method: docs/methods/relatedness.md.
 """
 
 from __future__ import annotations
@@ -9,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 from numba.typed import List
 
+from ...core.concurrency import ThreadSource
 from .family_kernels import (
     alone_logliks,
     family_loglik_parallel,
@@ -29,10 +29,6 @@ from .parameters import FamilyParameters
 _DEFAULT_FAMILY = FamilyParameters()
 
 
-def _no_claim():
-    return None
-
-
 class _Partition:
     """Mutable families over the run's samples (family indices are reused once a family empties), with the search's
     kept gains.
@@ -41,11 +37,11 @@ class _Partition:
     computed for and is evaluated again once that differs. join[f, c]: the change of family f's log-likelihood when
     sample c joins it; leave[c]: the change of c's family's log-likelihood when c leaves it."""
 
-    def __init__(self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY, claim_threads=None):
+    def __init__(self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY, threads: ThreadSource = 1):
         self.parameters = parameters
-        # Step boundary hook: the caller re-reads its CPU share and applies it to the parallel kernels' team, so a
-        # search that starts beside other stages grows into the CPUs they free. Values never depend on the team.
-        self.claim_threads = claim_threads if claim_threads is not None else _no_claim
+        # Read this caller-owned source at batch/sweep boundaries. A live source
+        # refreshes the ambient kernel team as siblings return their CPUs.
+        self.threads = threads
         self.C, self.logpi, self.logpost = C, logpi, logpost
         self.N, self.M = C.shape[0], C.shape[1]
         # Every live family contains a sample; even a split or an undone merge needs at most N slots.
@@ -110,7 +106,7 @@ class _Partition:
             self.shared_sum[f] = False
 
     def sum_members(self, f):
-        """The original sum(axis=0), in bounded site slices with the same member/reduction order.
+        """Member sum(axis=0) in bounded site slices, retaining member and reduction order.
 
         A singleton's child terms already are its sum (family_terms emits +0 at neutral cells). Borrow that row;
         multi-member rows are owned. Slice only the non-reduced site axis so NumPy adds members in the same order.
@@ -379,7 +375,7 @@ class _Partition:
     def slot_logliks(self, f, allowed):
         """float64 [N]: family f's log-likelihood with its free slot filled by sample p (slot_gains), for every allowed
         p whose value may be within the tolerance of the largest (NaN for the others), kept for f's version. A screen
-        (kernels.slot_screen) estimates every allowed p; only those whose estimate plus its error bound reaches the
+        (family_kernels.slot_screen) estimates every allowed p; only those whose estimate plus its error bound reaches the
         largest estimate minus its bound, less the tolerance, are evaluated exactly: they include the largest value and
         every value tied with it."""
         key = (int(f), int(self.version[f]))

@@ -6,7 +6,7 @@ not the full read posterior. No exposure crosses a reset or excluded order zone.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast, overload
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
@@ -16,7 +16,6 @@ from ...contracts.phase import PhasedSamples
 from ...contracts.recombination import AppliedBreakpoints, Recombination, RecombinationSummary
 from ...core.errors import InvariantError
 from . import junctions as junction_report
-from .diagnostics import RecombinationTrace, Traced
 from .junctions import contig_breakpoints
 from .map import aggregate_map, genetic_coordinates, map_bins, posterior_intervals
 from .parameters import RecombinationParameters
@@ -66,12 +65,11 @@ def packed(rows, columns):
     return offsets, values.reshape(-1, columns)
 
 
-def chain_bins(phase, segments, *, trace=False, audit=None):
+def chain_bins(phase, segments):
     """(left, right, centre bp float64 [M], segment int64 [M], reset bool [M]) of the chain arrays' painting bins:
     each bin's half-open bp range and centre (family phase's bin_centers: the mean position of its sites, which the
     meiosis transitions use), the segment of its sites on the decoded axis ``segments`` (-1 when its sites fall in
     two segments or in an excluded breakpoint zone), and where a new segment starts."""
-    audit = RecombinationTrace() if trace and audit is None else audit
     edges = [phase.component_bin_edges(c) for c in range(len(phase.bin_edge_offsets) - 1)]
     left = np.concatenate([e[:-1] for e in edges]).astype(np.float64) if edges else np.zeros(0)
     right = np.concatenate([e[1:] for e in edges]).astype(np.float64) if edges else np.zeros(0)
@@ -83,25 +81,20 @@ def chain_bins(phase, segments, *, trace=False, audit=None):
         if last[b] >= first[b]:
             values = segments[first[b] : last[b] + 1]
             same = values[0] >= 0 and np.all(values == values[0])
-            if audit is not None:
-                audit.emit("bin.segment", same, bin=int(b), segments=values.copy())
             if same:
                 segment[b] = values[0]
     reset = np.ones(len(left), dtype=bool)
     reset[1:] = segment[1:] != segment[:-1]
     result = left, right, np.asarray(phase.bin_centers, dtype=np.float64), segment, reset
-    if audit is not None:
-        audit.bin_axis = result
-    return Traced(result, audit) if trace else result
+    return result
 
 
-def follow_chain(source, support, reset, left, right, centres, segment, *, trace=False, audit=None):
+def follow_chain(source, support, reset, left, right, centres, segment):
     """One meiosis from its chain arrays: (called events (n, 5): left bp, right bp, released-homologue support left
     and right, segment; reported intervals (n, 2), inclusive bp; callable spans (m, 3); marker counts (released bins,
     bins of followed stretches, of them without a released homologue); the map markers for
     map.posterior_intervals: the released bins, whether each starts a stretch, and the released parity of the
     interval ending at each)."""
-    audit = RecombinationTrace() if trace and audit is None else audit
     released = (source >= 0) & (segment >= 0)
     stretch = np.cumsum(reset)
     events, reported, spans = [], [], []
@@ -112,29 +105,11 @@ def follow_chain(source, support, reset, left, right, centres, segment, *, trace
             followed[previous + 1 : b + 1] = True
             part = float(segment[b])
             merge = bool(spans and spans[-1][1] == centres[previous] and spans[-1][2] == part)
-            if audit is not None and spans:
-                audit.emit(
-                    "span.merge",
-                    merge,
-                    last_right=spans[-1][1],
-                    last_segment=spans[-1][2],
-                    left=float(centres[previous]),
-                    segment=part,
-                )
             if merge:
                 spans[-1] = (spans[-1][0], float(centres[b]), part)
             else:
                 spans.append((float(centres[previous]), float(centres[b]), part))
             changed = source[b] != source[previous]
-            if audit is not None:
-                audit.emit(
-                    "event",
-                    changed,
-                    previous=int(source[previous]),
-                    current=int(source[b]),
-                    previous_bin=int(previous),
-                    current_bin=int(b),
-                )
             if changed:
                 events.append(
                     (float(centres[previous]), float(centres[b]), float(support[previous]), float(support[b]), part)
@@ -158,45 +133,7 @@ def follow_chain(source, support, reset, left, right, centres, segment, *, trace
         (markers, marker_reset, parity),
     )
 
-    if audit is not None:
-        audit.followed.append(result)
-    return Traced(result, audit) if trace else result
-
-
-@overload
-def map_chromosome(
-    phase: PhasedSamples,
-    edges: ParentEdges,
-    config: RecombinationParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    *,
-    reverse: bool = False,
-    trace: Literal[False] = False,
-) -> Recombination: ...
-
-
-@overload
-def map_chromosome(
-    phase: PhasedSamples,
-    edges: ParentEdges,
-    config: RecombinationParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    *,
-    reverse: bool = False,
-    trace: Literal[True],
-) -> Traced[Recombination]: ...
-
-
-@overload
-def map_chromosome(
-    phase: PhasedSamples,
-    edges: ParentEdges,
-    config: RecombinationParameters,
-    chromosome_map: ChromosomeGeneticMap,
-    *,
-    reverse: bool = False,
-    trace: bool,
-) -> Recombination | Traced[Recombination]: ...
+    return result
 
 
 def map_chromosome(
@@ -206,14 +143,12 @@ def map_chromosome(
     chromosome_map: ChromosomeGeneticMap,
     *,
     reverse: bool = False,
-    trace: bool = False,
-) -> Recombination | Traced[Recombination]:
-    """Recombination of one chromosome, or its producer trace when requested.
+) -> Recombination:
+    """Recombination of one chromosome from its released meiosis chains.
 
     ``phase`` PhasedSamples with meiosis chains; ``edges`` ParentEdges (the edges the phase was
     conditioned on, whose order the chain rows follow).
     """
-    audit = RecombinationTrace() if trace else None
     if phase.edges_identity != edges.identity:
         raise InvariantError(f"{phase.contig}: family phase was conditioned on a different pedigree")
     if phase.chain_source is None:
@@ -229,10 +164,10 @@ def map_chromosome(
         segments, origin, masked = components, None, 0
     else:
         segments, origin, masked = junction_report.split_at_breakpoints(
-            positions, components, breakpoints, bin_edges, audit=audit
+            positions, components, breakpoints, bin_edges
         )
     parents, children, slots = (np.asarray(x, dtype=np.int64) for x in (edges.parents, edges.children, edges.slots))
-    left, right, centres, segment, segment_reset = chain_bins(phase, segments, audit=audit)
+    left, right, centres, segment, segment_reset = chain_bins(phase, segments)
     bins = map_bins(positions, segments, config.bin_bp)
     genetic, knots, knot_genetic = genetic_coordinates(positions, chromosome_map)
     centre_genetic = None if knots is None else np.interp(centres, knots, knot_genetic)
@@ -242,8 +177,6 @@ def map_chromosome(
     expected = np.zeros((len(parents), len(bins) - 1))
     exposure = np.zeros_like(expected)
     for edge in range(len(parents)):
-        if audit is not None:
-            audit.edge = edge
         called, report, callable_spans, counts, (markers, marker_reset, parity) = follow_chain(
             np.asarray(phase.chain_source[edge]),
             np.asarray(phase.chain_support[edge]),
@@ -252,10 +185,9 @@ def map_chromosome(
             right,
             centres,
             segment,
-            audit=audit,
         )
         if centre_genetic is None:
-            soft = posterior_intervals(centres[markers], marker_reset, parity, bins, rate, audit=audit)
+            soft = posterior_intervals(centres[markers], marker_reset, parity, bins, rate)
         else:
             soft = posterior_intervals(
                 centres[markers],
@@ -266,7 +198,6 @@ def map_chromosome(
                 centre_genetic[markers],
                 knots,
                 knot_genetic,
-                audit=audit,
             )
         events.append(called)
         reported.append(report)
@@ -290,9 +221,7 @@ def map_chromosome(
             masked,
             origin,
         )
-    if audit is not None:
-        audit.edge = -1
-    reversed_calls = junction_report.in_reversed_segment(crossover_rows, breakpoints, audit=audit)
+    reversed_calls = junction_report.in_reversed_segment(crossover_rows, breakpoints)
     loci = junction_report.detect_junctions(
         phase.contig,
         names,
@@ -307,7 +236,6 @@ def map_chromosome(
         chromosome_map,
         breakpoints,
         reverse=reverse,
-        audit=audit,
     )
     summary = RecombinationSummary(
         phase.contig,
@@ -347,4 +275,4 @@ def map_chromosome(
         summary,
     )
 
-    return Traced(product, cast(RecombinationTrace, audit)) if trace else product
+    return product

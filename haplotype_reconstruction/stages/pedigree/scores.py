@@ -18,14 +18,13 @@ from ...contracts.pedigree import (
 from ...contracts.roles import require_schema
 from ...core.digest import array_digest
 from ...core.errors import InputError
-from ...engine.runtime import task_team
-from ...engine.scheduler import claim_threads
-from ...science.pedigree.parameters import PedigreeConfig
+from ...engine.cpu import claim_threads, thread_team
+from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.scoring import score_chromosome_selective
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy
-from ..framework import RecordKey, ResourceRequest, Task, TaskKey, load_product, publish_product
+from ..framework import load_product, publish_product
 
 KEY = "pedigree/floored_scores"
 
@@ -45,7 +44,7 @@ class ScoresAdapter:
 
 
 def derivation(
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     prepared_identity: str,
     screen_identity: str,
     panel: CandidatePanel,
@@ -70,7 +69,7 @@ def run(
     chromosome: int,
     panel: CandidatePanel,
     eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     threads: int = 1,
     reverse: bool | None = None,
@@ -87,7 +86,7 @@ def run(
         if previous is not None:
             return previous
     one = compact.chromosome_reference(chromosome, eligibility)
-    with task_team(threads):
+    with thread_team(default=threads):
         # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
         product = score_chromosome_selective(
             prepared, one, panel.trios, eligibility, parameters, claim_threads, reverse=reverse
@@ -96,40 +95,6 @@ def run(
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)
     return adapter.decode(adapter.encode(product))
-
-
-def task(
-    prepared: PreparedChromosome,
-    compact: CompactM1,
-    chromosome: int,
-    panel: CandidatePanel,
-    eligibility: ParentEligibility,
-    parameters: PedigreeConfig,
-    *,
-    file: CheckpointFile | None = None,
-    identity: str | None = None,
-    cores: int = 1,
-    reverse: bool | None = None,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> Task:
-    """Declare one informative contig's score task, with prepared-record affinity."""
-    c = prepared.contig
-    return Task(
-        TaskKey("pedigree", "scores", c),
-        run,
-        args=(prepared, compact, chromosome, panel, eligibility, parameters),
-        kwargs=dict(file=file, identity=identity, reverse=reverse),
-        depends_on=depends_on,
-        inputs=(
-            RecordKey(c, "pedigree/prepared"),
-            RecordKey("run", "pedigree/selective_screen"),
-            RecordKey("run", "pedigree/panel"),
-        ),
-        outputs=(RecordKey(c, KEY),),
-        resources=ResourceRequest(max_cores=cores),
-        affinity=c,
-        thread_argument="threads",
-    )
 
 
 def chromosome_summary(prepared: tuple[PreparedChromosome, ...]) -> tuple[ChromosomeSummaryView, ...]:

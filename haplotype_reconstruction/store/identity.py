@@ -1,7 +1,7 @@
 """Bind stored results to their static code dependency closure and canonical inputs.
 
-Canonical value digests are relocated unchanged to core.digest (P0 ENG-06). Source
-walking retains the 3.5 path/NUL/bytes encoding. 4.0 code identities follow local
+Canonical value digests live in core.digest (ENG-06). Source walking encodes
+relative paths, NUL separators and source bytes. Code identities follow local
 imports, including package initializers; callers seed the graph with stage adapters,
 input construction and decoding modules as well as science. No module is imported
 while computing a closure. Once a process has fixed its installed sources (the engine runtime
@@ -51,7 +51,7 @@ class CodeIdentity:
 
 
 def add_sources(digest, directory: Path, root: Path = PACKAGE_ROOT) -> None:
-    """Feed sorted source paths and bytes to a hasher using the original 3.5 encoding."""
+    """Feed sorted source paths and bytes to a hasher as relative path, NUL separator and source bytes."""
     for current, subdirectories, files in os.walk(directory):
         subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
         for name in sorted(files):
@@ -63,8 +63,8 @@ def add_sources(digest, directory: Path, root: Path = PACKAGE_ROOT) -> None:
 
 
 def _read_sources(root: Path) -> dict[Path, bytes]:
-    """Every source file under ``root``, read concurrently (release 4.8): a closure's file checks, reads and hashing
-    then cost no filesystem round trips (one stat and read per module, serially, took 10-15 s on a compute node)."""
+    """Read source files under ``root`` concurrently into one snapshot. Closure traversal then uses memory
+    lookups, avoiding per-module filesystem round trips on shared storage."""
     from concurrent.futures import ThreadPoolExecutor
 
     paths = []
@@ -184,7 +184,7 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
     """Return the sorted local import closure, without executing package code.
 
     Roots may be fully qualified or relative to the package. Explicit package roots
-    include their source modules (the 3.5 package-hashing behavior). Static imports in all
+    include their source modules. Static imports in all
     branches count. Literal import_module calls count; dynamically selected modules
     must be supplied as roots by the stage. Unknown roots raise ValueError.
 
@@ -323,7 +323,7 @@ def code_identity(*modules: str, package_root: Path = PACKAGE_ROOT) -> str:
 
 
 def source_digest() -> str:
-    """Hash the whole package for run provenance using the original source walker."""
+    """Hash the whole package for run provenance using the sorted source walker."""
     digest = hashlib.sha256()
     add_sources(digest, PACKAGE_ROOT)
     return digest.hexdigest()

@@ -1,4 +1,4 @@
-"""Share typed boundary records and storage conventions across the 4.0 stages.
+"""Share typed boundary records and storage conventions across stages.
 
 Axes: N samples, L sites, B blocks, K founders, R local rows, C components,
 M bins (or source sites where explicitly stated), E edges, P pairs, F families.

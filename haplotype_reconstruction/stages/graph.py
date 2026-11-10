@@ -1,21 +1,22 @@
 """Declare the model dependencies and workflow cuts without scheduling science.
 
-The 3.5 driver barriers become policy in engine.scheduler. Relatedness consumes
+Execution barriers are policy in engine.scheduler. Relatedness consumes
 all evidence, refit consumes painting, and only pedigree consumes relatedness.
 Stage adapters supply concrete importable actions; this module owns no science.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 from ..core.errors import SettingsError
+from .catalog import STAGES
 from ..engine.graph import RecordKey, Task, TaskKey
 from ..store.container import CheckpointFile
 from ..store.identity import code_dependency_identity
-from ..store.protocol import Derivation, NumericalPolicy, resume
+from ..store.protocol import Derivation, NumericalPolicy
 
 __all__ = [
     "Node",
@@ -26,8 +27,6 @@ __all__ = [
     "bind_tasks",
     "derivation",
     "preload_modules",
-    "OracleInput",
-    "oracle_inputs",
     "run_checks",
     "execution_options",
     "complete_cut",
@@ -227,21 +226,12 @@ def workflow_cut(
                 if node.key.scope == "run" or node.key.scope in scatter:
                     selected.add(node.key)
     else:
-        stages = {
-            "init": {"init"},
-            "evidence": {"evidence"},
-            "relatedness": {"relatedness"},
-            "reconstruct": {"discovery", "selection", "assembly", "painting", "refit"},
-            "pedigree": {"pedigree"},
-            "phase": {"phase", "recombination", "export", "sites", "release"},
-            "recombination": {"recombination"},
-            "report": {"report"},
-        }
-        if step not in stages:
+        stages = {name for name, stage in STAGES.items() if step in stage.steps}
+        if not stages:
             raise SettingsError(f"unknown workflow step: {step}")
         if step in {"evidence", "reconstruct", "phase"} and contig is None:
             raise SettingsError(f"{step} requires one contig")
-        selected = {k for k in keys if k.stage in stages[step] and (k.scope == "run" or k.scope in scatter)}
+        selected = {k for k in keys if k.stage in stages and (k.scope == "run" or k.scope in scatter)}
     prerequisites = {p for n in graph.nodes if n.key in selected for p in n.dependencies} - selected
     return Cut(
         step,
@@ -257,7 +247,7 @@ def bind_tasks(
 ) -> tuple[Task, ...]:
     """Bind stage actions, requiring checked upstream results for workflow cuts.
 
-    ``completed`` is supplied by protocol resume (or ``oracle_inputs`` in tests).
+    ``completed`` is supplied by protocol resume.
     The scheduler receives it as ``initial_results``; no marker is consulted.
     """
     completed = {} if completed is None else completed
@@ -303,37 +293,6 @@ def derivation(
     )
 
 
-@dataclass(frozen=True)
-class OracleInput:
-    """Test-only prepublished prerequisite, checked under a fixed oracle token."""
-
-    task: TaskKey
-    record: RecordKey
-    decode: Callable[[Any], Any] | None = None
-
-
-def oracle_inputs(
-    inputs: Sequence[OracleInput], containers: Mapping[str, CheckpointFile], *, oracle_derivation_token: str
-) -> dict[TaskKey, Any]:
-    """IN1 test hook: read pre-seeded published records, never bypass publication.
-
-    The harness owns seeding. Its fixed derivation token is checked by resume for
-    every upstream input. This returns the scheduler's ``initial_results`` map.
-    Production stage derivations are unaffected and cannot inherit this token.
-    """
-    if not oracle_derivation_token:
-        raise SettingsError("an explicit fixed oracle derivation token is required")
-    results = {}
-    for item in inputs:
-        record = resume(containers[item.record.container], item.record.key, oracle_derivation_token)
-        if record is None:
-            raise SettingsError(f"oracle prerequisite is absent: {item.record}")
-        if item.task in results:
-            raise SettingsError(f"duplicate oracle prerequisite: {item.task}")
-        results[item.task] = record.payload if item.decode is None else item.decode(record.payload)
-    return results
-
-
 def run_checks(
     contigs: Sequence[str],
     *,
@@ -350,8 +309,7 @@ def run_checks(
 
         from ..science.pedigree.resampling import minimum_contigs_for_tier
 
-        # ENG-02: baseline pedigree.stage.minimum_scored_contigs; the tier
-        # reach calculation remains the pedigree's own authoritative function.
+        # The exposure rule supplies the minimum; pedigree's tier function determines reach.
         minimum_scored_contigs = math.ceil(parameters.exposure.minimum_exposed_units)
         tier_b_minimum_contigs = minimum_contigs_for_tier(parameters.release.tier_b, minimum_scored_contigs)
     if minimum_scored_contigs is None or tier_b_minimum_contigs is None:
@@ -372,13 +330,13 @@ def execution_options(
 ) -> dict[str, Any]:
     """Translate ENG-03 early nodes and ENG-23 contig costs into executor policy.
 
-    Chain costs come from scheduler.planning_cost(D,N,L), never measured pressure.
-    The application supplies phase size estimates separately. Early ready refits
+    Chain costs are application-supplied size estimates, never measured pressure.
+    Phase size estimates may be supplied separately. Early ready refits
     and the relatedness gather precede ordinary chain work. Ready recombination
     precedes export; both consume immutable phase products on any free worker.
     These priorities/leases add no model edge or scientific identity input.
     """
-    from ..engine.scheduler import ChainPlan
+    from ..engine.lanes import ChainPlan
 
     costs = {c: 1.0 if contig_costs is None else float(contig_costs[c]) for c in graph.contigs}
     if any(value < 0 for value in costs.values()):
@@ -404,7 +362,7 @@ def execution_options(
         )
         for key in cut.nodes
     }
-    chain_stages = {"discovery", "selection", "assembly", "painting", "refit"}
+    chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps}
     chains = tuple(
         ChainPlan(c, costs[c], tuple(key for key in cut.nodes if key.scope == c and key.stage in chain_stages))
         for c in graph.contigs
@@ -426,8 +384,8 @@ def complete_cut(
     This also repairs a missing marker after process death without recomputation.
     Markers never enter the completion decision. Append-only records make the
     multi-container check stable while the final marker is atomically placed.
-    ``map_work(function, items)`` (ordered results) checks the containers concurrently (release 4.10: one container
-    after another took most of a run's last minute); a mismatch propagates through the map.
+    ``map_work(function, items)`` (ordered results) checks independent contig containers concurrently,
+    avoiding a serial tail of file reads and decodes. A mismatch propagates through the map.
     """
     from ..store.protocol import is_complete
 
@@ -468,3 +426,114 @@ def complete_cut(
     finally:
         Path(temporary).unlink(missing_ok=True)
     return True
+
+
+def stage_modules(task):
+    """Return the implementation owners behind a task's stage and product variant."""
+    spec = STAGES.get(task.key.stage)
+    if spec is None:
+        return None
+    modules = spec.pair_owners if task.key.stage == "relatedness" and task.key.unit == "pairs" else spec.owners
+    result = tuple("haplotype_reconstruction." + module for module in modules)
+    if task.key.stage == "assembly":
+        from ..science.assembly.kernel_inventory import MODULES
+
+        result += tuple(module.__name__ for module in MODULES)
+    return result
+
+
+def task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
+    """Name the stage implementations behind application wrappers before workers warm their kernels."""
+
+    modules = list(preload_modules(tasks))
+    for task in tasks:
+        modules.extend(stage_modules(task) or ())
+    return tuple(dict.fromkeys(modules))
+
+
+def stage_kernel_modules(task: Task) -> tuple[str, ...]:
+    """Numerical ownership within the stage's static closure, including dynamically expanded work."""
+    from ..store.identity import code_dependency_identity
+
+    spec = STAGES.get(task.key.stage)
+    if spec is None:
+        return ()
+    roots = spec.pair_kernel_roots if task.key.stage == "relatedness" and task.key.unit == "pairs" else spec.kernel_roots
+    if not roots:
+        return ()
+    # Tie kernels are the common numerical foundation; source identity still traverses the full task closure.
+    numerical_roots = tuple("haplotype_reconstruction." + root for root in roots)
+    modules = code_dependency_identity((*numerical_roots, "core.ties")).modules
+    science = spec.kernels
+    if task.key.stage == "selection" and task.key.round in {"initial", "l1", "l2"}:
+        science = ("selection", "assembly.evidence", "shared.emissions")
+        if task.key.round != "initial":
+            science += ("assembly.alleles",)
+        else:
+            modules = tuple(m for m in modules if m != "haplotype_reconstruction.science.selection.context_refit")
+    if task.key.stage == "assembly" and task.key.round.startswith("context."):
+        # CONTEXT returns after the join; only FINAL expands final refinement refinement.
+        modules = tuple(m for m in modules if not m.startswith("haplotype_reconstruction.science.assembly.refinement."))
+    prefixes = tuple(
+        "haplotype_reconstruction." + name + "."
+        for name in ("core", "contracts", *("science." + name for name in science))
+    )
+    return tuple(
+        module
+        for module in modules
+        if (module + ".").startswith(prefixes)
+        or module == "haplotype_reconstruction.science.evidence.likelihoods"
+        or module in numerical_roots
+    )
+
+
+def with_kernel_tasks(
+    tasks: tuple[Task, ...], scheduling: dict[str, Any], state: Any
+) -> tuple[tuple[Task, ...], dict[str, Any]]:
+    """Gate each scientific root on its own missing compiles, leaving unrelated work runnable.
+
+    A root's dependency also protects its dynamic expansions: no child can use a tail signature before its module
+    has been warmed in the shared run cache. Only state.missing emits tasks or edges. Compilation retains the
+    earliest-consumer/learned-cost order; independent stages keep their existing priority over spare warm-up work.
+    """
+    from ..engine.kernels import compile_tasks
+
+    compiles: dict[tuple[str, str], list[Task]] = {}
+    for task in compile_tasks(state):  # one per missing overload, grouped by function
+        compiles.setdefault(task.args[0], []).append(task)
+    if not compiles:
+        return tasks, scheduling
+    by_module: dict[str, list[tuple[str, str]]] = {}
+    for name in compiles:
+        by_module.setdefault(name[0], []).append(name)
+    indexed = {task.key: task for task in tasks}
+    levels: dict[TaskKey, int] = {}
+
+    def level(key: TaskKey) -> int:  # the longest dependency path to ``key`` within this graph
+        if key not in levels:
+            levels[key] = 1 + max((level(d) for d in indexed[key].depends_on if d in indexed), default=-1)
+        return levels[key]
+
+    first_use: dict[tuple[str, str], int] = {}
+    gated = []
+    for task in tasks:
+        dependencies = list(task.depends_on)
+        for module in stage_kernel_modules(task):
+            for name in by_module.get(module, ()):
+                first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
+                dependencies.extend(compile.key for compile in compiles[name])
+        gated.append(replace(task, depends_on=tuple(dict.fromkeys(dependencies))))
+    unused = 1 + max(levels.values(), default=0)
+    order = sorted(
+        compiles,
+        key=lambda name: (
+            first_use.get(name, unused),
+            -state.seconds.get(name, 0.0),
+            -len(state.missing[name]),
+            name,
+        ),
+    )
+    priorities = dict(scheduling.get("priorities") or {})
+    floor = min(priorities.values(), default=0.0) - 1.0
+    priorities.update({compile.key: floor - rank for rank, name in enumerate(order) for compile in compiles[name]})
+    return (*gated, *(compile for name in order for compile in compiles[name])), dict(scheduling, priorities=priorities)

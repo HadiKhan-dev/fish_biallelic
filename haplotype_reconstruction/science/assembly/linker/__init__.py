@@ -8,7 +8,7 @@ Modules (import them directly; this package imports nothing, so the join can imp
     proxies    linking-proxy sites of a block (also used by the batch partition)
 
 
-Owns the linker __init__ boundary (AS1-AS3). Must not read files, clocks or
+Owns the linker __init__ public boundary. Must not read files, clocks or
 environment, allocate execution resources or publish diagnostics.
 Method: docs/methods/assembly.md#linker.
 """

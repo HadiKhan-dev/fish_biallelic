@@ -1,7 +1,7 @@
 """Describe estimator trajectories, released intervals and explicit tie censuses.
 
-These records explain scientific decisions; they never affect a search or release.
-Interval runs preserve 3.5's member-id boundary rule (P0 PR19). No I/O or clocks.
+These records explain scientific decisions and never affect search or release. Interval runs split at
+member-id changes. No I/O or clocks.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def interval_counts(component: ComponentPainting) -> tuple[int, int]:
 
 
 def summarise(painting: Painting) -> PaintingSummary:
-    """The unchanged component sizes, eligibility, moves and released interval counts."""
+    """The component sizes, eligibility, moves and released interval counts."""
     outcomes = painting.label_continuity
     counts = [interval_counts(component) for component in painting.components]
     return PaintingSummary(

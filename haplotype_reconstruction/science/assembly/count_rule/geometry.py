@@ -6,7 +6,7 @@ shadow X+^sigma of a decided founder f replaces each of f's cells that the small
 use by the row the smaller panel uses at that block nearest to it (Hamming distance over sites
 called in both rows). Equally nearest rows form a complete factored shadow domain; the count
 callers evaluate or explicitly flag that domain. The scalar helper chooses a representative
-for legacy/diagnostic uses. A founder without a private cell is a pure mosaic
+for scalar diagnostic queries. A founder without a private cell is a pure mosaic
 of the others: its sequence part q is exactly zero.
 
 Distances are measured on the pre-fill inference calls, the calls every likelihood of the join and
@@ -16,8 +16,8 @@ nearest rows, shadows and near-identity tests see exactly the alleles the scores
 
 Owns: row distances, nearest shadows and completeness accounting.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS5 §§4.3–4.4; AJ32–AJ33.
-Identity: Near identity is inclusive; evaluated completeness is distinct from fitting the enumeration budget.
+Method: docs/methods/assembly.md#aj32.
+Invariant: Near identity is inclusive; evaluated completeness is distinct from fitting the enumeration budget.
 """
 
 from __future__ import annotations

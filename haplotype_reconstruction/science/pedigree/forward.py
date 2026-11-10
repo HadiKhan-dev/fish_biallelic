@@ -15,7 +15,6 @@ are cached per child and bin (NaN marks entries needing the candidate-specific p
 children bounded by a 256 MiB workspace.
 
 Method: docs/methods/pedigree.md#child-forward-model-and-composite-score
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -181,7 +180,7 @@ def _fill_named_first_products(
 
 @kernel(overloads=OVERLOADS["forward.normalized_power"], cache=True, inline="always", nogil=True)
 def normalized_power(emission, maximum, exponent):
-    """L12: the single probability-domain normalized power, including eta one."""
+    """The probability-domain normalized power, including eta one."""
     base = emission / maximum
     return base if exponent == 1.0 else math.pow(base, exponent)
 
@@ -229,8 +228,8 @@ def _normalise(values):
 def _apply_probability_emission(current, emission, exponent, powered=None):
     """Apply pow(emission / maximum, exponent), then normalize the pair mass.
 
-    L12 replaces reciprocal multiplication and raw-power ratios. Even exponent
-    zero takes this normalization path, retaining its log(total) increment.
+    Divide by the maximum before taking the power. Even exponent zero takes
+    this normalization path, retaining its log(total) increment.
     """
     maximum = np.max(emission)
     if maximum <= 0.0 or not np.isfinite(maximum):
@@ -761,12 +760,12 @@ def score_m1_cached(
     named_maximum,
     column_powered,
 ):
-    """_score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches: the same
+    """score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches: the same
     forward recursion, emission values and operations, so the same (tempered, full) log likelihoods.
 
     Where every named-first product of the bin is cached, the candidate's BACKGROUND row is accumulated site by site
     for all second states together (each entry still multiplies its own site likelihoods in site order, with the
-    zero rule; any underflow sends the bin to the log path, which recomputes every entry as before); otherwise the
+    zero rule; any underflow sends the bin to the log path, which recomputes every entry); otherwise the
     general loop of score_path runs unchanged.
     """
     states = state_alt.shape[0]
@@ -1442,7 +1441,7 @@ def component_m0(
     return 0.5 * (a + b)
 
 
-# Pair chunks per M1 query call (release 4.7): the calling thread re-reads its CPU share before each chunk, so a
+# Pair chunks per M1 query call: the calling thread re-reads its CPU share before each chunk, so a
 # chromosome whose query outlasts its peers grows into the CPUs they free (a kernel's team is fixed for the whole call).
 # Pairs are scored independently, so chunking does not change any value.
 _CLAIM_CHUNKS = 32

@@ -15,7 +15,7 @@ from ...core.errors import SettingsError
 
 @dataclass(frozen=True)
 class BreakpointTable:
-    """Parsed input rows, preserving native order; applied record types belong to D1."""
+    """Parsed input rows, preserving native order; applied record types belong to record codec."""
 
     rows: tuple[tuple[str, int, int, str], ...] = record_field(
         "obs", axes=("R", "4"), units="contig,bp,bp,reason", dtype="tuple[str,int,int,str]"

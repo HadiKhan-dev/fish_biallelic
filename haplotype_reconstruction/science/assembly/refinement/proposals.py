@@ -1,20 +1,12 @@
 """Window proposals: exact founder-row maximisers of a binned surrogate on bounded windows.
 
-Owns template enumeration, the surrogate programme and native charged-work bounds.
-Accretion (RS06/RS07): retries, caps and phase debits decide outcomes and remain scientific.
+Owns template enumeration, the surrogate programme and charged-work bounds.
+Retries, caps and phase debits decide outcomes and remain scientific state.
 Long kernels stay whole to expose recurrence, pruning, restart and canonical-fixing order; splitting
 those loops would obscure the shared work account and the exact sequence of incumbent checks.
 Method: docs/methods/founder_refinement.md#window-programme (RS04–RS07).
 
-Owns fine/coarse surrogate programmes, ordered retries and exact work debits.
-Must not choose K, read storage or configure runtime.
-Method: docs/methods/founder_refinement.md#proposals (RS02-RS07).
-STYLE_40 exception: numerical kernels retain flat scalar/array arguments because
-Numba cannot lower the frozen Python boundary records; the stage uses those records.
-Hot recurrences remain whole to preserve their loop/update order and avoid temporary
-materialisations. Parallel kernels write disjoint sample slices; sample reductions
-are fixed serial folds, independent of the explicit stage team's size.
-Accretion (RS07): retry/debit order is scientific; an exhausted template discards all focal results.
+Retry/debit order is scientific; an exhausted template discards all focal results.
 
 
 Window problem (one founder f, a window of W units: prepared blocks for fine windows, L1 spans for
@@ -24,7 +16,7 @@ coarse copy moves): maximise the binned surrogate
 
 over f's rows x (one alphabet per unit, every other founder fixed). The rest of the component enters
 exactly through the current panel's normalised flank messages; the interior uses the component's
-binned emissions (workspace.binned_emissions, bins of at least the level's minimum size) with a
+binned emissions (component_workspace.binned_emissions, bins of at least the level's minimum size) with a
 switch-then-emission bin recursion. The surrogate only proposes: every proposal is re-scored
 exactly against the current panel by the acceptance pass.
 
@@ -39,21 +31,20 @@ chooses f's later rows freely but pays zero-sum multipliers lam_s(unit, row), wh
 common path; the multipliers come from block-coordinate sweeps that equalise the samples'
 max-marginals) and the best feasible value among the incumbent, a beam and the dual's decoded
 consensus paths. Pruning keeps every path within the margin of a feasible value, so the optimum and
-the canonical answer are unchanged — except where the restarted programme's BEAM_CAP binds (release
-2.8): there it keeps the BEAM_CAP best children per unit, so its answer (and a canonical
+the canonical answer are unchanged — except where the restarted programme's BEAM_CAP binds:
+there it keeps the BEAM_CAP best children per unit, so its answer (and a canonical
 restricted programme's reachability test) is approximate; every such unit is counted
 (beam_truncations in the window receipts, sweep statistics and fit/component work counters), and a
 main programme that loses its feasible witness that way keeps the incumbent with status BEAM_LIMIT
 (a reported beam fallback, never retried at a larger memory budget). A programme whose frontier would
 exceed the fixed cap
-SweepParameters.frontier_bytes (frontier_limit) stops and keeps the incumbent (a reported
+RefinementParameters.frontier_bytes (frontier_limit) stops and keeps the incumbent (a reported
 fallback; it binds at no reference size). Large programmes follow the fixed retry schedule
 (programme_budgets): a solve that passes a budget is repeated within the next
 one, so the result always equals one solve at the cap.
 
 Canonical answer (a pure function of the problem): among paths within tol = CANONICAL_TOL + 1e-9 |H(incumbent)|
-of the optimum (release 2.13: CANONICAL_TOL = 2^-14; 1e-7 before, below the motion of 1e-6 relative GL noise), the
-incumbent if it is one, else the lexicographically first path, units left to right, each in the order (incumbent
+of the optimum, the incumbent if it is one, else the lexicographically first path, units left to right, each in the order (incumbent
 row, then ascending index), found by exact restricted programmes.
 
 Shared background: only the K states containing f depend on f's row, so children carry their K focal
@@ -65,7 +56,7 @@ parent's row-independent quantities once per parent (_parent, _parent_floor); an
 whose focal states can reach neither a bin maximum of the background nor the closing floor (an
 upper bound by monotone rounding) takes the parent's shared outcome. Maxima over states use
 interleaved running maxima (objective.row_max): the values of a sequential scan. The all-state
-reference recursions of the box bound and the programme are kept as tests (tests/T5), which check
+reference recursions of the box bound and the programme are kept as tests (tests/oracle/fast/refinement), which check
 that the shared-background forms give the same answers.
 """
 
@@ -83,24 +74,20 @@ from haplotype_reconstruction.core.kernels import kernel
 from .emissions import pair_index
 from .objective import row_max
 from .overloads import overloads_for
-
-# Closed-message dominance tolerance (nats): a partial path is dropped when no completion makes it better than a kept
-# one by more than this; the programme's margin carries (units + 1) times it and the canonical answer is then found
-# by exact restricted programmes, so it bounds the programme's approximation, not which tied path is returned.
-# Absolute part of the canonical-answer tolerance (nats; release 2.13: 2^-14, 16 times the ~1e-6 motion of a window
-# contrast under 1e-6 relative GL noise; 1e-7 before; the module docstring).
-# Relative float margin between the box bound's and the programme's summation orders: a window is
-# certified by the box only clear of it, so a certified window is one the programme would also
-# leave unchanged.
 from .parameters import (
+    BEAM_CAP,
     BOX_ARITHMETIC_MARGIN,
     CANONICAL_SKIP_ABSOLUTE_MARGIN,
     CANONICAL_SKIP_RELATIVE_MARGIN,
     CANONICAL_TOL,
+    COARSE_STRIDE,
+    COARSE_WINDOW,
     DOMINANCE_ABSOLUTE_MARGIN,
     DOMINANCE_RELATIVE_MARGIN,
     DOMINANCE_TOLERANCE,
     DUAL_RELATIVE_SLACK,
+    FINE_STRIDE,
+    FINE_WINDOW,
     PROGRAMME_RELATIVE_MARGIN,
 )
 from .work_limit import WindowWorkState
@@ -120,23 +107,15 @@ NO_FLOOR2 = np.empty((0, 0))
 # any zero-sum multipliers give valid bounds, so the limit never decides an answer.
 EXPLORE_FRONTIER = 256
 BEAM_WIDTH = 16
-# Restart 2.8 (c0): a programme past the Lagrangian restart keeps at most BEAM_CAP partial paths per
-# unit (in its existing child order: prefix value, incumbent row first, parent, row) instead of an
-# unbounded frontier, so no programme's frontier grows exponentially. The cap is above every
-# tightened post-dominance frontier measured on the native set (at most 270). A binding cap makes that
+# A programme past the Lagrangian restart keeps at most BEAM_CAP partial paths per
+# unit (child order: prefix value, incumbent row first, parent, row), bounding the retained frontier.
+# The cap is above every
+# tightened post-dominance frontier measured in component replays (at most 270). A binding cap makes that
 # programme approximate (the best path the beam keeps; proposals only, acceptance stays exact): every
 # unit where it dropped a child whose bound still reached the programme's floor is counted
 # (beam_truncations in the window receipts and sweep proposal stats), and a main programme that loses
 # its feasible witness that way keeps the incumbent as a reported fallback (solve_focal).
-BEAM_CAP = 512
 DUAL_SWEEPS = 100
-
-# Window templates: fine windows of FINE_WINDOW prepared blocks every FINE_STRIDE blocks (plus the
-# window ending at the last block); coarse windows of COARSE_WINDOW L1 spans every COARSE_STRIDE.
-FINE_WINDOW = 8
-FINE_STRIDE = 4
-COARSE_WINDOW = 4
-COARSE_STRIDE = 2
 
 # solve_focal statuses (BEAM_LIMIT: the beam-capped main programme lost its witness; the
 # incumbent is kept and reported, and a larger memory budget would not help, so it is not retried)
@@ -154,7 +133,7 @@ def _debit(work, phase, a, b=1, c=1, d=1, e=1, f=1):
         return
     shift = work[20]
     if shift == 0:
-        # Preserve the original exact integer debit for ordinary-sized accounts.
+        # Use exact integer debits for ordinary-sized accounts.
         amount = 1
         for factor in (a, b, c, d, e, f):
             if factor == 0:
@@ -3195,11 +3174,11 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
     unit u is 0..sizes[u]-1. backstop: the largest frontier a programme may hold.
     Returns per focal (status, rows, box_certified, dp, frontier, fixing_dps) as arrays.
 
-    Release 2.8: the flanks are the exact objective's messages (per-homologue transitions), whose
+    The flanks are the exact objective's messages (per-homologue transitions), whose
     entries can lie more than `penalty` below their maximum (a change of both homologues costs 2c).
     The surrogate's bounds assume Potts-closed flanks, so both the start (_closed_start) and the end
     (_closed_end) are closed here: the surrogate is a Potts window between relaxed flanks
-    (proposals only; a no-op for 2.6's own Potts messages, which are closed by construction).
+    (proposals only).
     """
     end = _closed_end(end, penalty)
     _charge_window(work, 0, emissions, cols, sizes)
@@ -3343,7 +3322,7 @@ def window_templates(blocks, groups):
 # A window's programmes are first solved within a first budget (covered by the window solve's own memory
 # estimate, WindowSolver.template_bytes); programmes whose frontier passes it are solved again within budgets
 # PROGRAMME_GROWTH times larger, each a deterministic retry, independent of live memory, up to
-# SweepParameters.frontier_bytes. A solve that stays within a budget computes exactly what a solve at the
+# RefinementParameters.frontier_bytes. A solve that stays within a budget computes exactly what a solve at the
 # cap computes, so results never depend on the budgets or on pacing; a repeat costs at most the passed budget's
 # work. The first budget holds a frontier just past the EXPLORE_FRONTIER restart trigger (every reference and
 # K = 30 frontier so far stopped there, at 257 paths), and at least PROGRAMME_FIRST_BYTES; a window solve's own
@@ -3374,7 +3353,7 @@ def frontier_limit(frontier_bytes, samples, founders, bins):
 
 
 def _work_shape_terms(samples, width, founders, rows, bins, frontier):
-    """Python integers for shape expressions formed before native factored debits."""
+    """Python integers for shape expressions formed before compiled factored debits."""
     n, w, k, r, b, p = map(int, (samples, width, founders, rows, bins, frontier))
     q = k * (k + 1) // 2
     row = b * k + b * b + 1
@@ -3438,7 +3417,7 @@ class WindowSolver:
     """The window problems of one component: templates, coarse alphabets and their exact solves.
 
     arrays: the prepared blocks' binned emissions float64 (S, R_b * (R_b + 1) // 2, bins_b) (workspace).
-    context: None, or (groups, paths) of the L1 context (stage.l1_context): groups[u] = (first,
+    context: None, or (groups, paths) of the L1 context (run.macro_context): groups[u] = (first,
     end) prepared blocks of L1 span u (fully contained spans; uncovered edges are allowed), paths[u] = int64[P_u, end -
     first] the distinct L1 row paths offered on that span. penalty: SWITCH_PENALTY. Every solve
     takes frontier_bytes, the memory one programme's frontier may hold (frontier_limit).
@@ -3505,15 +3484,14 @@ class WindowSolver:
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
         unit's bins). Returns [(focal, unit choices or None, diagnostic)]; a frontier fallback
         keeps the incumbent."""
-        # Release 2.8: the exact objective's backward messages end with a per-homologue transition
+        # The exact objective's backward messages end with a per-homologue transition
         # (up to 2c below the maximum, c map-derived), while the surrogate's bounds and dominance
-        # assume a flank closed under its own flat switch (entries >= max - penalty, as 2.6's
-        # stored messages always were). Close the end flank under the surrogate's switch, as
-        # _closed_start does for the start flank; proposals only (acceptance stays exact).
+        # assume a flank closed under its own flat switch (entries >= max - penalty). Close the end
+        # flank under the surrogate's switch, as _closed_start does for the start flank; proposals only.
         end = np.maximum(end, end.max(axis=1, keepdims=True) - self.penalty)
         # Dimensions are those of this actual fine/coarse problem, including temporary
         # duplicate-seed founders and all distinct context paths. Python-int products
-        # precede scaled native accounting; there is no small-K cap or off mode.
+        # precede scaled integer work accounting; there is no small-K cap or off mode.
         founders = int(cols.shape[1])
         samples = int(start.shape[0])
         width = len(emissions)
@@ -3631,10 +3609,9 @@ class WindowSolver:
 
     def coarse_window(self, X, fwd, bwd, i, j, frontier_bytes, convention=False, *, ordinal=None):
         """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
-        tuples the founders use there and the L1 context paths, in content order (release 2.1,
-        design 5.3: the tuples sorted lexicographically, so the window programme's canonical-tie
-        order "incumbent, then ascending index" is incumbent, then content; 2.0: founder slots
-        first, in first-seen order)."""
+        tuples the founders use there and the L1 context paths, sorted lexicographically. The
+        window programme's canonical-tie order "incumbent, then ascending index" therefore
+        means incumbent, then content."""
         self.work.check(ordinal)
         groups, context = self.coarse
         alphabets, lookups = [], []

@@ -86,8 +86,8 @@ def write_relatedness(
     return written
 
 
-# Published column schemas: B reports and P0 outputs inventory D6 / OU15.
-# Row-dict tables retain B's headerless empty constructor; these constants do not
+# Published report column schemas.
+# Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
 FAMILY_COLUMNS = ("Sample", "Family", "FamilySupport", "Parent1", "Parent1Support", "Parent2", "Parent2Support")
 """Columns in published order.

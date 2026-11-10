@@ -1,4 +1,4 @@
-"""The polish's polynomial window-beam proposer (from the 2.8 design prototype) on the 2.6 engine; proposals only.
+"""The polish's bounded window-beam proposer of the map-aware binned surrogate; proposals only.
 
 Owns the map-aware bounded escape proposer; never accepts a move or changes K.
 Method: docs/methods/founder_refinement.md#polish (RS15–RS16).
@@ -9,13 +9,13 @@ midpoints of a sample's informative bins), with the surrogate's own flank messag
 (potts_bin_messages). For every (founder, window) a bounded beam (BEAM_WIDTH partial paths per
 unit, box bounds, pairwise dominance that never lets an incumbent prefix erase a distinct one)
 finds the best path that differs from the incumbent; it is offered only if its H exceeds the
-incumbent's (2.6's offer rule). A window whose box bound cannot
+incumbent's by the offer quantum. A window whose box bound cannot
 exceed the incumbent's H by the offer quantum offers nothing and skips the beam. Exact acceptance (acceptance.py)
 decides every
 move. The beam is an approximate H search by design; its cut counts are reported as
 beam_cut / beam_binding in the proposal statistics. It reads the workspace's binned emissions (the window
 programmes' surrogate: floor-2 robust emissions over kept sites with a called local row, predictive classes for
-uncalled alleles). Used only by the polish (search.SweepEngine.beam_escape and long_repair).
+uncalled alleles). Used only by the polish (fit.SweepEngine.beam_escape and long_repair).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def compose_bin_resets(flags, hazards):
 @kernel(overloads=overloads_for(__name__, "rank_table"), cache=True, parallel=True, nogil=True)
 def rank_table(emissions, bin_offsets, max_pairs):
     """(S, bins, 3 + max_pairs) surrogate table: column 0 the informative-bin flag, columns 3 + pair
-    the binned pair emissions (workspace.binned_emissions laid out per bin)."""
+    the binned pair emissions (component_workspace.binned_emissions laid out per bin)."""
     samples = emissions[0].shape[0]
     out = np.zeros((samples, bin_offsets[-1], 3 + max_pairs))
     for s in prange(samples):
@@ -216,7 +216,7 @@ def extend(message, logs, rho, states, cols, candidate, first, second, focal):
 
 @kernel(overloads=overloads_for(__name__, "box_unit"), cache=True, nogil=True)
 def box_unit(logs, rho, states, cols, candidates, first, second, focal, tail):
-    """2.6's window box bound per unit (backward: emission then switch; absent bins identity);
+    """Window box bound per unit (backward: emission then switch; absent bins identity);
     each sample may choose its own row."""
     active, bg, prefix, seg, _ = unit_tables(logs, cols, first, second, focal, tail)
     n, b, _ = logs.shape
@@ -307,7 +307,7 @@ def beam_template(
         incumbent += np.max(base[s] + upper[w][s])
     # The box bound over every path of the window (each sample choosing its own rows)
     # cannot beat the incumbent by more than the offer quantum -> no distinct path would be offered
-    # (b1 gating), so the beam is skipped (2.6's box certificate). The margin covers the bound's
+    # so the beam is skipped by the box certificate. The margin covers the bound's
     # different summation order.
     bound = 0.0
     start = fwd[groups[a, 0]]
@@ -355,9 +355,9 @@ def beam_template(
         children += len(flat)
         for v in range(len(flat)):
             flat[v] += totals[v // rmax]
-        # Rank keys anchored at the unit's best bound (release 2.13): the bounds are totals (~|H|) that a GL
-        # perturbation shifts in common by far more than the quantum, so a fixed grid on the totals reordered
-        # near-equal children at its rounding boundaries; anchored at the best, only contrasts are quantised.
+        # Rank keys anchored at the unit's best bound: the bounds are totals (~|H|) that a GL
+        # perturbation shifts in common by far more than the quantum. Anchoring at the best quantises only
+        # contrasts, avoiding rank changes from rounding a common shift on a fixed grid.
         anchor = -np.inf
         for v in range(len(flat)):
             anchor = max(anchor, flat[v])
@@ -447,7 +447,7 @@ def beam_template(
         if not distinct[p]:
             continue
         # A later distinct path replaces the best only when its difference to the best rounds to at least one quantum,
-        # i.e. it is better by half the quantum or more (release 2.13: the difference is rounded, not each total on a
+        # i.e. it is better by half the quantum or more (the difference is rounded, not each total on a
         # fixed grid); admission of the offer itself still needs a gain above the quantum.
         if np.all(chosen < 0) or np.floor((value - best) / quantum + 0.5) > 0.0:
             best = value
@@ -520,8 +520,6 @@ class WindowBeam:
         [(kind, first unit, end unit)] to solve instead of the component's (the polish's long windows)."""
         templates = self.templates if templates is None else templates
         width = BEAM_WIDTH if width is None else int(width)
-        started = 0.0
-        cpu = 0.0
         X = np.ascontiguousarray(X, np.int64)
         focals = np.arange(len(X)) if focals is None else np.asarray(focals, np.int64)
         reverse = bool(convention)
@@ -533,7 +531,6 @@ class WindowBeam:
             max_frontier=0,
             fallbacks=0,
             changed=0,
-            worker_cpu=0.0,
             templates_solved=0,
             templates_reused=0,
             beam_truncations=0,
@@ -678,7 +675,7 @@ class WindowBeam:
                         path = paths[t][: j - i]
                         if np.any(path < 0):
                             continue
-                        # b1 gating: offer only a surrogate improvement (2.6's offer rule).
+                        # Offer only a surrogate improvement above the offer quantum.
                         if not values[t] > quantum:
                             continue
                         rows = np.concatenate([alphabets[u][path[u - i]] for u in range(i, j)])
@@ -692,7 +689,7 @@ class WindowBeam:
                     stats["windows"] += len(tasks)
                     stats["dp"] += len(tasks)
                     stats["templates_solved"] += len(tasks) // max(1, len(focals))
-        stats.update(changed=len(proposals), worker_cpu=0.0 - cpu, wall=0.0 - started)
+        stats.update(changed=len(proposals))
         return proposals, stats
 
 

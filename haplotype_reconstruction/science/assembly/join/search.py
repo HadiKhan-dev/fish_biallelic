@@ -28,7 +28,7 @@ panel does not depend on thread counts. The Numba team is bound by the caller ca
 boundaries where the search changes phase (each full score or painting chunk, each panel's
 forwards, each certify pass); the caller binds each concurrent refit to its assigned team.
 
-Ties (release 2.1, design 5.4): the panel is kept in canonical order (its paths sorted, tie_rules.sort_panel) after
+Ties: the panel is kept in canonical order (its paths sorted, tie_rules.sort_panel) after
 every change, so every slot tie-break (painting ties to the lower slot, proposal descriptions, the death candidate,
 duplicate-seed enumeration) is a content rule; the pool comes from the beam in tie-class order. Every choice
 between candidates on a continuous value (start panel, tier-1 winner, the top proposals of each kind,
@@ -38,8 +38,8 @@ a truncation keeps every proposal of the class it cuts (at most twice the budget
 
 Owns: initial panel selection and the certified same-count/pool loop.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §§4.4–4.10; AJ12–AJ29.
-Identity: L7 changes the pool trigger from identity to ordered content; budgets and decisions remain native.
+Method: docs/methods/assembly.md#aj12.
+Invariant: Only changed ordered pool content triggers additional count evidence; cache identity does not.
 """
 
 from __future__ import annotations
@@ -55,13 +55,15 @@ import numpy as np
 
 from haplotype_reconstruction.core import ties
 
-from .. import count_rule
 from .. import orders as tie_rules
+from ..count_rule import criterion as count_criterion
+from ..count_rule import geometry as count_geometry
 from ..count_rule.parameters import BIRTH_SETS, COUNT_BACKSTOP_BASE, COUNT_BACKSTOP_PER_ROW
 from ..parameters import (
     EXPLORATORY_PENALTY,
     IMPROVEMENT_ABSOLUTE,
     IMPROVEMENT_RELATIVE,
+    MAX_BRANCHES,
     POOL_EXTENDED_DOUBLINGS,
     POOL_QUOTA_DOUBLINGS,
     SWEEP_BACKSTOP_BASE,
@@ -84,8 +86,6 @@ from .diagnostics import (
     JoinSummary,
     _plain,
     append_event,
-    census_lines,
-    summarise,
 )
 from .moves import MOVES_PER_CHUNK, REPLACE, SPLICE, Moves, best_improvement, lower_bounds, replaced_row
 from .moves import improves as _improves
@@ -121,19 +121,14 @@ BeamRunner = Callable[[int, Mapping[tuple[int, int], int] | None], Beam]
 # whose 256 rung accepted a move climbs on, up to POOL_EXTENDED_DOUBLINGS (16 x 2**6 = 1024). A
 # panel is certified only when no rung up to its ladder top adds a move; a move accepted at 1024
 # is the reported pool backstop.
-# Count changes (decisions plus seed swaps) per search before births and seed swaps stop (a reported backstop, never
-# expected to bind: normal searches make at most a few count changes; release 2.1 guard against count cycles that
-# return through seed swaps, which the born-path freeze cannot see).
+# The count-change backstop guards cycles returning through seed swaps, which the born-path
+# freeze cannot see. Normal searches make at most a few count changes.
 
 
-# Distinct-path sets whose birth bounds are kept for reuse (memory: one samples-long vector per
-# pool path and set); raised to the number of sets a round of seed refits meets.
 # Panels whose exclusion forwards are kept (a sweep, its stall, tier 2 and the saturation ladder
 # often share one panel) and beam re-runs kept per search.
 FORWARDS_KEPT = 3
 BEAM_RUNS_KEPT = 4
-# The exploratory painting's penalty cap: a lower-penalty painting reveals coordinated apparent
-# switches (proposals only; acceptance uses the join score at the join's penalty).
 # Same-count proposal kinds of a tier-1 sweep, in evaluation order.
 SAME_COUNT_KINDS = (
     "replace",
@@ -158,9 +153,7 @@ __all__ = [
     "POOL_EXTENDED_DOUBLINGS",
     "POOL_QUOTA_DOUBLINGS",
     "PanelSearch",
-    "census_lines",
     "search_panel",
-    "summarise",
 ]
 
 
@@ -205,7 +198,7 @@ def _admissible(old, new, geometry, near_identity, exempt=frozenset()):
         return False
     if not checked:
         return True
-    private = count_rule.private_mask(np.asarray(new, dtype=np.int64))
+    private = count_geometry.private_mask(np.asarray(new, dtype=np.int64))
     for i in checked:
         if not private[i].any():
             return False
@@ -258,8 +251,8 @@ class PanelSearch:
         self.tie_settings = tie_settings
         self.choice_plan = choice_plan
         self.config = config
-        # The batch linker's path score (join/beam.path_linkage; release 2.2): the data criterion inside
-        # log-likelihood tie classes (None: content only, 2.1).
+        # The batch linker's path score (join/beam.path_linkage): the data criterion inside
+        # log-likelihood tie classes (None: panel content alone decides inside a class).
         self.linkage = linkage
         self._claim_threads = claim_threads or numba.get_num_threads
         self._map_tasks = map_tasks
@@ -293,7 +286,7 @@ class PanelSearch:
         site_counts = [len(block.positions) for block in inputs.blocks]
         self.penalty = emissions.switch_penalty(site_counts)
         self.sites_per_bin = emissions.sites_per_bin(site_counts, config.max_bins)
-        self.cost = count_rule.founder_cost(site_counts, self.samples, cost_scale)
+        self.cost = count_criterion.founder_cost(site_counts, self.samples, cost_scale)
         self.layout = (
             emissions.binned_emissions(inputs, self.sites_per_bin, self.claim)
             if shared_layout is None
@@ -302,7 +295,7 @@ class PanelSearch:
         self.total_bins = self.layout.total_bins
         self.block_offsets = np.ascontiguousarray(self.layout.offsets[:-1], dtype=np.int64)
         self.block_sizes = [int(k) for k in self.layout.founders]
-        self.geometry = count_rule.RowGeometry.from_panels(inputs.blocks, reverse=self.tie_settings.reverse)
+        self.geometry = count_geometry.RowGeometry.from_panels(inputs.blocks, reverse=self.tie_settings.reverse)
         self.near_identity = float(count_rule_config.near_identity)
         self.release_families: list[dict[str, Any]] = []
         # Observed flat neighbours of the current panel: canonical panel -> (log likelihood, certify key).
@@ -335,7 +328,6 @@ class PanelSearch:
         self.candidate_array = self.candidate_workspace = None
         self.capacity = 0
         self.beam_cache: dict[tuple[int, tuple[tuple[tuple[int, int], int], ...]], Panel] = {}
-        self.beam_seconds = 0.0
         self.forwards_cache: dict[PanelKey, PanelForwards] = {}
         self.births_by_set: dict[PanelKey, dict[bytes, np.ndarray]] = {}
         self.birth_sets = BIRTH_SETS
@@ -349,7 +341,7 @@ class PanelSearch:
         self.count_states: set[PanelKey] = set()
         self.events: list[dict[str, Any]] = []
         self.refit_events: dict[str, list[dict[str, Any]]] | None = None
-        # The count tallies (CountCensus fields; ints, flags, seconds and an optional census).
+        # The count tallies (CountCensus fields; ints, flags and an optional census).
         self.count: dict[str, Any] = dict(
             decisions=0,
             births=0,
@@ -367,8 +359,6 @@ class PanelSearch:
             seed_refits=0,
             ladder_births=0,
             final_paths_failing_death_test=None,
-            seconds=0.0,
-            seed_seconds=0.0,
             state_revisits=0,
             count_backstop_reached=False,
         )
@@ -423,7 +413,7 @@ class PanelSearch:
         self.start_size = len(self.selected)
         self.count["start_size"] = self.start_size
         # Panel size at the start and after every count change, and the changes that deleted a
-        # path without sequence of its own (count_rule.pre_cycle_count).
+        # path without sequence of its own (count_criterion.pre_cycle_count).
         self.sizes = [self.start_size]
         self.cleanup_steps: set[int] = set()
         self.static_totals = [self.layout.block(j).sum(axis=2) for j in range(self.blocks)]
@@ -670,7 +660,6 @@ class PanelSearch:
                 beam = beam.covering()
             paths = dict.fromkeys(_paths(beam))
             self.beam_cache[key] = self.original_pool + [path for path in paths if path not in self.original_set]
-            self.beam_seconds += 0.0
         return self.beam_cache[key]
 
     def panel_forwards(self, panel):
@@ -752,7 +741,7 @@ class PanelSearch:
         combined = self.candidates if not pool_offset else self.candidates + list(pool)
         cache = {}
         sparse = dict(scores=0, samples=0)
-        splice_work = dict(tables=0, scores=0, seconds=0.0)
+        splice_work = dict(tables=0, scores=0)
 
         scored_changes = []
 
@@ -770,7 +759,6 @@ class PanelSearch:
                     self.claim()
 
                     cache["splice"] = splice_scores(self.layout, rows, self.penalty)
-                    splice_work["seconds"] += 0.0
                     splice_work["tables"] += 1
                 _, first, second, boundary, _ = moves.canonical[move]
                 column = pair_column(len(panel), int(first), int(second))
@@ -873,12 +861,10 @@ class PanelSearch:
             sparse_exact_samples=sparse["samples"],
             splice_exact_scores=splice_work["scores"],
             splice_tables=splice_work["tables"],
-            splice_seconds=splice_work["seconds"],
             observed_plateau_neighbours=len(flat) if best_move is None else 0,
             recomputed_exclusions_per_sample=float(forwards.recomputed_per_sample),
             accepted=None if best_move is None else str(moves.description(best_move[2])),
             accepted_likelihood_change=(None if best_move is None else -0.5 * float(best_move[0])),
-            seconds=0.0,
         )
         return best_move, record, forwards
 
@@ -909,7 +895,7 @@ class PanelSearch:
     def _painting_proposals(self, panel, local, eligible, convention):
         """The proposals of the painting-dependent generators (replace, local, one-sided, splices,
         switch splices, cycles) from the panel's Viterbi paintings with the traceback tie convention
-        ``convention`` (release 2.2: _tier1_sweep merges both conventions). Returns (proposals by kind,
+        ``convention`` (_tier1_sweep merges both conventions). Returns (proposals by kind,
         local edits screened)."""
         k = len(panel)
         blocks = self.blocks
@@ -953,7 +939,7 @@ class PanelSearch:
             proposals["switch_splice"].extend(
                 boundary_proposals(switch_gain, boundary, None, "splice", reverse=self.tie_settings.reverse)
             )
-            # Both tie conventions of the greedy and cycle permutations (release 2.2: an order-invariant union).
+            # Both tie conventions of the greedy and cycle permutations (an order-invariant union).
             for permutation in greedy_permutations(votes):
                 if np.any(permutation != np.arange(k)):
                     gain = float(votes[np.arange(k), permutation].sum() - np.trace(votes))
@@ -999,7 +985,7 @@ class PanelSearch:
         # in tie-class order of their novelty (content: the candidate path), the class the budget cuts
         # kept whole (at most twice the budget).
         band = ties.quantum("join_proxy")
-        # Preserve the native observer's comprehension line events for operand replay.
+        # Operand replays observe the comprehension line events; keep these boundaries explicit.
         # fmt: off
         novel_items = [c for c in np.flatnonzero(eligible_mask).tolist()
                        if candidates[c] not in panel_set and novelty[c] > band]
@@ -1008,7 +994,8 @@ class PanelSearch:
             float(novelty[c]) for c in np.flatnonzero(eligible_mask).tolist() if 0.0 < novelty[c] <= 1e3 * band
         )
         with self.tie_lock:
-            # The band at the exact zero of a non-novel candidate's novelty (owner rule A-7).
+            # The band at the exact zero of a non-novel candidate's novelty (symmetric candidates have exactly zero
+            # novelty).
             self.tie_counter.note("assembly.join_novelty.band", inside_tie=bool(near and near[0] <= band))
         if near:
             self._census("assembly.join_novelty.band", f"{sweep_key}", near[:16])
@@ -1040,7 +1027,7 @@ class PanelSearch:
             )
         for c in novel:
             similarity = np.mean(local == candidate_array[c], axis=1)
-            # the two most similar founders, with every founder tied with the second (release 2.2: order-invariant)
+            # the two most similar founders, with every founder tied with the second (an order-invariant set)
             if len(similarity) > 2:
                 second = np.sort(similarity)[::-1][1]
                 ranked = [int(f) for f in np.flatnonzero(similarity >= second)]
@@ -1059,7 +1046,7 @@ class PanelSearch:
         proposal_counts["onesided"] = (blocks - 1) * k * (k - 1)
         proposal_counts["splice"] = (blocks - 1) * k * (k - 1) // 2
         proposal_counts["switch_splice"] = proposal_counts["splice"]
-        # Painting-dependent generators under both traceback tie conventions (release 2.2): the Viterbi
+        # Painting-dependent generators under both traceback tie conventions: the Viterbi
         # painting's choice among equal-score states is a convention, so the proposals of both paintings are
         # merged, the larger proxy of a repeated edit kept: the union does not depend on the order.
         merged = {}
@@ -1154,7 +1141,7 @@ class PanelSearch:
                 boundary_acceptances.extend(w[0] for w in witnesses if w[1] == quota)
                 improving_trials.append((trial_ll, trial, description, gain, trial_scores, signature))
         # The winner: tie classes of the improving trials' log likelihoods, their content (sorted
-        # paths) inside a class (base: the first evaluated of the maximum).
+        # paths) inside a class.
         if improving_trials:
             best = self.class_winner(
                 "assembly.join_tier1",
@@ -1189,7 +1176,6 @@ class PanelSearch:
             improving_at_budget_boundary=boundary_acceptances,
             leading_evaluated_alternatives=leading,
             scope="this sweep only; proxy-truncated and ungenerated edits are untested",
-            seconds=0.0,
         )
         return best, record
 
@@ -1280,7 +1266,6 @@ class PanelSearch:
             )
         )
         if selected == nominal:
-            self.events[-1]["seconds"] = 0.0
             return False
         visited = self._plateau_certified
         # This is a branch transition, not an improving move or count decision.
@@ -1289,7 +1274,6 @@ class PanelSearch:
         scores = self._score(selected)
         apply_same_count(self, selected, scores)
         self._plateau_certified = visited
-        self.events[-1]["seconds"] = 0.0
         return True
 
     def run(self, *, report_switches=False) -> JoinOutcome:
@@ -1329,9 +1313,8 @@ class PanelSearch:
                 continue
             # Tier 2 at the stall, on C0 plus the beam with the panel's multiplicity.
             pool_before = len(self.candidates)
-            beam_before = self.beam_seconds
             pool = self._extension_pool(quota, self.selected)
-            # L7: a fresh list with identical ordered content adds no count evidence.
+            # A fresh list with identical ordered content adds no count evidence.
             if pool != self.candidates:
                 self._set_pool(pool)
                 largest_pool = max(largest_pool, len(self.candidates))
@@ -1348,7 +1331,6 @@ class PanelSearch:
                 tier2_pass=tier2_passes,
                 quota=quota,
                 pool_before=pool_before,
-                beam_seconds=self.beam_seconds - beam_before,
             )
             self.events.append(record)
             if best_move is not None:
@@ -1377,7 +1359,6 @@ class PanelSearch:
             while not accepted and 2 * level <= ladder_top:
                 level *= 2
                 saturation_steps += 1
-                beam_before = self.beam_seconds
                 doubled = [path for path in self._extension_pool(level, self.selected) if path not in checked]
                 best_move, record, level_forwards = self.certify(
                     self.selected,
@@ -1393,7 +1374,6 @@ class PanelSearch:
                     quota=quota,
                     tested_quota=level,
                     new_paths=len(doubled),
-                    beam_seconds=self.beam_seconds - beam_before,
                 )
                 self.events.append(record)
                 if best_move is not None:
@@ -1435,7 +1415,6 @@ class PanelSearch:
             quota=quota,
             ladder_top=ladder_top,
             quota_backstop=quota_backstop,
-            beam_seconds=self.beam_seconds,
             count=CountCensus(**self.count),
             count_exact_scores=self.counter.exact_scores,
             count_exact_sample_scores=self.counter.exact_sample_scores,
@@ -1447,7 +1426,6 @@ class PanelSearch:
             pool_backstop=pool_backstop,
             events=tuple(_plain(event) for event in self.events),
             tie_events=self.tie_counter.record(),
-            phase_seconds={"count_step": float(self.count["seconds"])},
             work_counters={"beam_materialization_bounds": 0},
         )
         return JoinOutcome(
@@ -1473,7 +1451,7 @@ def search_panel(
     counter: ties.TieCounter | None = None,
     linkage: Callable[[Path], float] | None = None,
     report_switches: bool = False,
-    max_branches: int = 4,
+    max_branches: int = MAX_BRANCHES,
     tie_settings: ties.TieSettings = DEFAULT_TIE_SETTINGS,
 ) -> JoinOutcome:
     """The certified panel of one joined batch.
@@ -1484,7 +1462,7 @@ def search_panel(
         batch's endpoint beam re-run with a base quota and per-endpoint quotas
         ({(block, row): quota}), same format (pool extension and saturation rungs).
     config: JoinParameters; count_rule: CountRuleParameters; cost_scale: the per-founder cost scale
-        (count_rule.founder_cost). claim_threads binds the current team at kernel boundaries;
+        (count_criterion.founder_cost). claim_threads binds the current team at kernel boundaries;
         map_tasks binds independent seed teams and returns results in input order. label: the census label (None:
         no census); counter: the batch's core.ties.TieCounter (shared with its beam; recorded as the
         summary's tie_events). max_branches: complete original-input executions, at

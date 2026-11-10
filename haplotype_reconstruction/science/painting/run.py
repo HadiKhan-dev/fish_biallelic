@@ -1,7 +1,7 @@
 """Painting stage: label continuity, then the released painting of every component.
 
 For one chromosome, each assembled component's copying model is first estimated from all its samples (the
-ancestry-change rate and the panel-error chain, painting.fidelity.estimate_chain; release 2.14); the component is
+ancestry-change rate and the panel-error chain, painting.fidelity.estimate_chain); the component is
 then relabelled by label continuity (painting/label_continuity.py) under that model, and painted: every sample is
 decoded as a diploid mosaic of the component's trajectory classes plus BACKGROUND, each track copying faithfully or
 through a panel-error run, with exact Viterbi and forward-backward recurrences, and the release rule
@@ -10,41 +10,30 @@ reset at every assembly break). Painting reads every sample's evidence, includin
 keeps out of founder construction.
 
 Explicit sample batches bound the chain workspace (about 40 S'^2 B + 16 S^2 B + 24 L bytes per sample).
-The stage supplies whole-bin evidence windows and the thread team. Batches do not change a sample's arithmetic;
-L2a fixes estimator reductions across samples. A dimension-only 1 GiB cache is consumed in component order.
+The stage supplies whole-bin evidence windows and the thread team. Batches do not change a sample's arithmetic.
+Estimator reductions follow sample order across batches. The stage controls emission-cache residency.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
-from ...contracts.painting import ComponentPainting, LabelContinuity, Painting, PaintingSettings
-from ...contracts.panels import ComponentPanel, relabel_rows
-from ...contracts.payload import from_payload, to_payload
+from ...contracts.painting import ComponentPainting
+from ...contracts.panels import ComponentPanel
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...core import ties
 from ...core.errors import InvariantError
 from . import emissions, fidelity, hmm
 from .emissions import ArraySource, EmissionBuilder
-from .label_continuity import relabel_component
-from .parameters import EMISSION_CACHE_MAX_BYTES, MAXIMUM_MASK_STATES, PaintingParameters
+from .parameters import MAXIMUM_MASK_STATES, PaintingParameters
 from .release import release_tracks, track_members
 from .states import PaintingBins, PaintingStates, build_bins, build_states, local_allele_keys
 from .transitions import PaintingTransitions, copying_transitions, edge_morgans
-
-
-class PaintingProgress(Protocol):
-    """Checkpoint records of one painting derivation (the stage binds them to the store): ``load`` returns a saved
-    payload or None, ``save`` publishes one atomically. Keys are relative to the painting."""
-
-    def load(self, key: str) -> Any | None: ...
-
-    def save(self, key: str, payload: Any) -> None: ...
 
 
 class PaintingEvidence(Protocol):
@@ -67,10 +56,9 @@ class ComponentDecoding:
     paths: int32[N, 2, B] gauge-fixed Viterbi state per track and bin;
     masks: int64[N, 2, B] candidate states per track and bin as bits (the Viterbi
         state, plus the other side inside a switch interval, over both traceback
-        conventions; release 2.2);
+        conventions);
     switch_counts: int64[N] minimum track changes (the fewer of the two conventions' paths);
-    qf, qaf: float64[N, B] the same masses with both tracks copying faithfully (no panel error): the release gate
-        (release 2.14, see painting/release.py);
+    qf, qaf: float64[N, B] the same masses with both tracks copying faithfully (no panel error): the release gate;
     model: the component's copying model (painting.fidelity.ChainModel; None without bins);
     support: bool[N, 2, B] direct read support of each Viterbi track
         (False for ineligible samples);
@@ -100,14 +88,8 @@ class ComponentDecoding:
         freeze_record_arrays(self)
 
 
-# Samples per decode progress record (fixed: progress records must not depend on the CPU count).
-PROGRESS_BLOCK_SAMPLES = 16
-
-
 def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=()):
-    """Generator factory: for each contiguous batch of ``size`` samples, (tempered label emissions float64[n, S*S, B],
-    eligible bool[n], start, stop, informative mask, gathered observed). Batches whose start is in ``skip`` (restored
-    from progress records) are not built."""
+    """Yield emissions, eligibility and observed masks for the requested contiguous sample batches."""
     alt_probability = states.alt_probability()
     n_samples = likelihoods.shape[0]
 
@@ -133,14 +115,6 @@ def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emiss
     return batches
 
 
-def _decoder_bytes(states: PaintingStates, n_bins: int) -> int:
-    """Per-sample working bytes of the chain's estimation and decoding (module docstring)."""
-    n_track = states.n_states + int(np.sum(states.anchored))
-    return max(
-        1, 40 * n_track * n_track * n_bins + 16 * states.n_states * states.n_states * n_bins + 24 * states.n_sites
-    )
-
-
 def error_capable(states: PaintingStates) -> np.ndarray:
     """int64[S]: 1 for the labels with a panel-error state (anchored classes), 0 for the others and BACKGROUND."""
     return np.concatenate((np.asarray(states.anchored, dtype=np.int64), np.zeros(1, dtype=np.int64)))
@@ -155,17 +129,17 @@ def component_model(
     genetic_map: ChromosomeGeneticMap,
     *,
     batch_samples: int = 1,
-    emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
+    cache_emissions: bool = True,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
 ) -> fidelity.ChainModel | None:
     """The component's copying model (rho, a, b; painting.fidelity.estimate_chain), estimated from all its samples on
     the assembled panel, or None without bins. Label continuity then uses it unchanged: a relabelling renames states
     but leaves their emissions and error capabilities.
 
-    The tempered emissions do not depend on (rho, a, b), so every EM update reads the same batches. When their
-    packed upper triangles fit ``emission_cache_bytes`` they are built once and unpacked for each update (the same
+    The tempered emissions do not depend on (rho, a, b), so every EM update reads the same batches. When the stage requests cached
+    packed upper triangles they are built once and unpacked for each update (the same
     values: the ordered-pair emissions are symmetric), otherwise rebuilt for each update. The cache is released
-    before label continuity, so it never coexists with decode_component's packed emissions."""
+    before label continuity, so it never coexists with the decoding cache."""
     n_samples = likelihoods.shape[0]
     states = build_states(panel.positions, panel.inference, panel.kept)
     bins = build_bins(states.positions, config.snps_per_bin)
@@ -176,7 +150,7 @@ def component_model(
     batches = _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder)
     n_states = states.n_states
     n_packed = n_states * (n_states + 1) // 2
-    if 8 * n_samples * n_packed * bins.n_bins <= emission_cache_bytes:
+    if cache_emissions:
         packed = np.empty((n_samples, n_packed, bins.n_bins))
         spans = []
         for raw, eligible, start, stop, *_ in batches():
@@ -201,188 +175,6 @@ def component_model(
     )
 
 
-def decode_component(
-    panel: ComponentPanel,
-    likelihoods: ArraySource,
-    observed: ArraySource,
-    evidence_sites: np.ndarray,
-    config: PaintingParameters,
-    genetic_map: ChromosomeGeneticMap,
-    *,
-    model: fidelity.ChainModel | None,
-    emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
-    batch_samples: int = 1,
-    reverse: bool,
-    emission_builder: EmissionBuilder = emissions.tempered_emissions,
-    progress: PaintingProgress | None = None,
-    progress_key: str = "",
-) -> ComponentDecoding:
-    """Decode every sample of one component (all samples of ``likelihoods``).
-
-    ``progress``: optional records of finished sample batches under ``progress_key`` (the stage's checkpoint store,
-    bound to this painting's derivation). A restored batch is not decoded again; the packed-emission cache is then
-    left out (a cache, never a result), so later stages rebuild those emissions.
-
-    ``evidence_sites`` int64[L] maps the panel's sites to the evidence site axis (``panel.site_indices()``).
-    ``model``: the component's copying model (component_model; required for nonempty bins). The packed tempered label
-    emissions are kept when they fit ``emission_cache_bytes``. ``reverse``: the run's tie-convention reversal
-    (TieSettings.reverse), required so that no caller falls back to the forward convention by omission.
-    """
-    n_samples = likelihoods.shape[0]
-    states = build_states(panel.positions, panel.inference, panel.kept)
-    bins = build_bins(states.positions, config.snps_per_bin)
-    n_states = states.n_states
-    if n_states > MAXIMUM_MASK_STATES:
-        raise InvariantError(f"painting interval masks require S <= {MAXIMUM_MASK_STATES}; got {n_states}")
-    n_bins = bins.n_bins
-    if n_bins == 0:
-        empty_grid = np.zeros((n_samples, 2, 0), dtype=np.int32)
-        no_edges = np.zeros(0, dtype=np.float64)
-        return ComponentDecoding(
-            states=states,
-            bins=bins,
-            transitions=PaintingTransitions(
-                n_states,
-                no_edges,
-                no_edges.copy(),
-                no_edges.copy(),
-                site_correlation=float(config.emission_site_correlation),
-            ),
-            local_keys=np.zeros((0, n_states), dtype=np.int32),
-            eligible=np.zeros(n_samples, dtype=np.bool_),
-            paths=empty_grid,
-            masks=np.zeros((n_samples, 2, 0), dtype=np.int64),
-            switch_counts=np.zeros(n_samples, dtype=np.int64),
-            support=np.zeros((n_samples, 2, 0), dtype=np.bool_),
-            packed_emissions=None,
-            batch_size=0,
-            working_memory_bytes=0,
-            qf=np.zeros((n_samples, 0)),
-            qaf=np.zeros((n_samples, 0)),
-            model=None,
-        )
-    if model is None:
-        raise InvariantError("a nonempty painting component requires its assembled-panel model")
-    capable = error_capable(states)
-    transitions = copying_transitions(
-        edge_morgans(bins.centers, genetic_map),
-        n_states,
-        model.rate,
-        error_entry=model.entry,
-        error_exit=model.exit,
-        site_correlation=model.site_correlation,
-    )
-    local_keys = local_allele_keys(states.named_alleles, bins)
-    public_ids = states.public_state_ids()
-    sites = evidence_sites[states.site_indices]
-
-    n_packed = n_states * (n_states + 1) // 2
-    packed_bytes = 8 * n_samples * n_packed * n_bins
-    fixed_bytes = packed_bytes if packed_bytes <= emission_cache_bytes else 0
-    bytes_per_sample = _decoder_bytes(states, n_bins)
-    packed = np.empty((n_samples, n_packed, n_bins)) if fixed_bytes else None
-    size = max(1, min(n_samples, int(batch_samples)))
-    budget = fixed_bytes + size * bytes_per_sample
-
-    paths = np.empty((n_samples, 2, n_bins), dtype=np.int32)
-    masks = np.empty((n_samples, 2, n_bins), dtype=np.int64)
-    switch_counts = np.zeros(n_samples, dtype=np.int64)
-    qf = np.empty((n_samples, n_bins))
-    qaf = np.empty((n_samples, n_bins))
-    support = np.empty((n_samples, 2, n_bins), dtype=np.bool_)
-    eligible = np.empty(n_samples, dtype=np.bool_)
-    # Progress records hold fixed blocks of PROGRESS_BLOCK_SAMPLES samples, so their keys and contents do not depend on
-    # the CPU-sized decode batch: a run and its shell workflow publish the same records, and a resume on another node
-    # reuses every block it finds. A batch is skipped when all its samples were restored.
-    done = np.zeros(n_samples, dtype=np.bool_)
-    saved_blocks: set[int] = set()
-    restored = set()
-    if progress is not None:
-        for block in range(0, n_samples, PROGRESS_BLOCK_SAMPLES):
-            saved = progress.load(f"{progress_key}/decode/{block}")
-            if saved is None:
-                continue
-            end = min(block + PROGRESS_BLOCK_SAMPLES, n_samples)
-            paths[block:end], masks[block:end] = saved["paths"], saved["masks"]
-            switch_counts[block:end], qf[block:end], qaf[block:end] = saved["switches"], saved["qf"], saved["qaf"]
-            support[block:end], eligible[block:end] = saved["support"], saved["eligible"]
-            done[block:end] = True
-            saved_blocks.add(block)
-        restored = {start for start in range(0, n_samples, size) if done[start : min(start + size, n_samples)].all()}
-    if done.any():
-        packed = None
-    for raw, batch_eligible, start, stop, informative, batch_observed in _raw_batches(
-        states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=restored
-    )():
-        if packed is not None:
-            emissions.pack_emissions(raw, packed, start, n_states)
-        # Switch intervals (release 2.2) over both traceback conventions, the canonical track order (release
-        # 2.14) and the release masses as before, of the chain's Viterbi labels.
-        batch_paths, batch_masks, batch_switches, other_paths = fidelity.decode_candidates(
-            raw,
-            model,
-            capable,
-            local_keys,
-            states.named_alleles,
-            batch_observed,
-            bins.starts,
-            bins.stops,
-            states.n_classes,
-            reverse=reverse,
-            tie=config.viterbi_tie,
-        )
-        qf[start:stop], qaf[start:stop] = fidelity.release_posteriors(
-            raw, model, capable, batch_paths, other_paths, public_ids, local_keys
-        )
-        del raw
-        batch_support = hmm.direct_support(
-            batch_paths, states.named_alleles, informative, bins.starts, bins.stops, states.n_classes
-        )
-        batch_support[~batch_eligible] = False
-        paths[start:stop] = batch_paths
-        masks[start:stop] = batch_masks
-        switch_counts[start:stop] = batch_switches
-        support[start:stop] = batch_support
-        eligible[start:stop] = batch_eligible
-        done[start:stop] = True
-        if progress is not None:
-            first_block = start - start % PROGRESS_BLOCK_SAMPLES
-            for block in range(first_block, stop, PROGRESS_BLOCK_SAMPLES):
-                end = min(block + PROGRESS_BLOCK_SAMPLES, n_samples)
-                if block in saved_blocks or not done[block:end].all():
-                    continue
-                progress.save(
-                    f"{progress_key}/decode/{block}",
-                    dict(
-                        paths=paths[block:end],
-                        masks=masks[block:end],
-                        switches=switch_counts[block:end],
-                        qf=qf[block:end],
-                        qaf=qaf[block:end],
-                        support=support[block:end],
-                        eligible=eligible[block:end],
-                    ),
-                )
-                saved_blocks.add(block)
-    return ComponentDecoding(
-        states=states,
-        bins=bins,
-        transitions=transitions,
-        local_keys=local_keys,
-        eligible=eligible,
-        paths=paths,
-        masks=masks,
-        switch_counts=switch_counts,
-        support=support,
-        packed_emissions=packed,
-        batch_size=size,
-        working_memory_bytes=budget,
-        qf=qf,
-        qaf=qaf,
-        model=model,
-    )
-
-
 def release_component(
     panel: ComponentPanel,
     decoding: ComponentDecoding,
@@ -393,8 +185,8 @@ def release_component(
     """Apply the release rule once and build the component's product."""
     states = decoding.states
     if ties.census_enabled(census_sink) and decoding.bins.n_bins:
-        # Continuous release thresholds are not banded (design A-7, owner 15:50): posteriors within 1e-5 of tau go
-        # to the valley census so a crossing is reported with its distance.
+        # Continuous release thresholds are not banded. Posteriors within 1e-5 of tau enter the valley census
+        # so a crossing is reported with its distance.
         tau = config.minimum_release_posterior
         first = int(panel.positions[0])
         for name, values in (("painting.release.qf", decoding.qf), ("painting.release.qaf", decoding.qaf)):
@@ -405,7 +197,7 @@ def release_component(
                     [float(values[sample, bin_index]) - tau],
                     sink=census_sink,
                 )
-    # The release gate is the faithful-copy mass (release 2.14): the pair's rows carry the sample's alleles here.
+    # The release gate is the faithful-copy mass: the pair's rows carry the sample's alleles here.
     labels, classes, status = release_tracks(
         states,
         decoding.paths,
@@ -447,136 +239,58 @@ def release_component(
     )
 
 
-def _component_sources(
-    panel: ComponentPanel,
-    likelihoods: ArraySource,
-    observed: ArraySource,
-    sites: np.ndarray,
-    config: PaintingParameters,
-    budget: int,
-) -> tuple[tuple[Any, Any, np.ndarray], int]:
-    """((likelihoods, observed, panel-site map) to build the component's emissions from, the emission budget left).
-
-    Release 4.7.1: when the evidence offers resident copies (resident_columns), the component's evidence at its panel
-    sites (each sample's genotype-likelihood codes and its likelihood dictionary, far smaller than the emissions) is
-    read once into memory, charged to the budget, whenever the copying-model estimate and the decode keep the packed
-    emissions they would keep without it (or could not keep them anyway). Every emission build of the component, the
-    estimate's, label continuity's and the decode's, is then a parallel in-memory gather and emission kernel instead
-    of a serial read of the stored evidence. The values are the same."""
-    unchanged = (likelihoods, observed, sites), budget
-    if not (hasattr(likelihoods, "resident_columns") and hasattr(observed, "resident_columns")):
-        return unchanged
+def decoding_grid(panel, config):
+    """Construct the component's state and bin axes before decoding."""
     states = build_states(panel.positions, panel.inference, panel.kept)
     bins = build_bins(states.positions, config.snps_per_bin)
-    if bins.n_bins == 0:
-        return unchanged
-    packed = 8 * likelihoods.shape[0] * (states.n_states * (states.n_states + 1) // 2) * bins.n_bins
-    copy_bytes = likelihoods.resident_bytes(len(sites)) + observed.resident_bytes(len(sites))
-    if copy_bytes + (packed if packed <= budget else 0) > budget:
-        return unchanged
-    copy = likelihoods.resident_columns(sites)
-    resident = (copy, observed.resident_columns(sites, copy), np.arange(len(sites), dtype=np.int64))
-    return resident, budget - copy_bytes
+    if states.n_states > MAXIMUM_MASK_STATES:
+        raise InvariantError(f"painting interval masks require S <= {MAXIMUM_MASK_STATES}; got {states.n_states}")
+    return states, bins
 
 
-def paint_chromosome(
-    panels: tuple[ComponentPanel, ...],
-    evidence: PaintingEvidence,
-    config: PaintingParameters,
-    genetic_map: ChromosomeGeneticMap,
-    *,
-    batch_samples: int = 1,
-    reverse: bool,
-    emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
-    census_sink: Callable[[ties.TieCensus], None] | None = None,
-    emission_builder: EmissionBuilder = emissions.tempered_emissions,
-    model_sink: Callable[[int, fidelity.ChainModel | None], None] | None = None,
-    progress: PaintingProgress | None = None,
-) -> Painting:
-    """Label continuity, then the painting of every component of one chromosome.
-
-    ``panels``: the final assembly's ComponentPanels in genomic order;
-    ``evidence``: the contig's evidence (all samples); ``genetic_map``: the
-    contig's ChromosomeGeneticMap; ``reverse``: the run's tie-convention reversal (TieSettings.reverse), required.
-    Numba kernels use the caller's thread team.
-    """
-    likelihoods = evidence.likelihoods
-    observed = evidence.observed
-    cache_remaining = max(0, int(emission_cache_bytes))
-    components: list[ComponentPainting] = []
-    continuity: list[LabelContinuity] = []
-    for component_index, panel in enumerate(panels):
-        (component_likelihoods, component_observed, sites), budget = _component_sources(
-            panel, likelihoods, observed, panel.site_indices(), config, cache_remaining
-        )
-        # Progress records (resume after an interruption): the copying model, the label-continuity outcome and each
-        # decoded sample batch, each published as soon as it is final and bound to this painting's derivation.
-        saved = None if progress is None else progress.load(f"c{component_index}/model")
-        if saved is not None:
-            model = None if saved["model"] is None else from_payload(fidelity.ChainModel, saved["model"])
-        else:
-            model = component_model(
-                panel,
-                component_likelihoods,
-                component_observed,
-                sites,
-                config,
-                genetic_map,
-                batch_samples=batch_samples,
-                emission_cache_bytes=budget,
-                emission_builder=emission_builder,
-            )
-            if progress is not None:
-                progress.save(f"c{component_index}/model", dict(model=None if model is None else to_payload(model)))
-        if model_sink is not None:
-            model_sink(component_index, model)
-        saved = None if progress is None else progress.load(f"c{component_index}/continuity")
-        if saved is not None:
-            outcome = from_payload(LabelContinuity, saved["outcome"])
-            painted = relabel_rows(panel, outcome.row_maps) if outcome.accepted else panel
-        else:
-            painted, outcome = relabel_component(
-                panel,
-                component_likelihoods,
-                component_observed,
-                sites,
-                config,
-                genetic_map,
-                model=model,
-                batch_samples=batch_samples,
-                reverse=reverse,
-                census_sink=census_sink,
-                emission_builder=emission_builder,
-                emission_cache_bytes=budget,
-            )
-            if progress is not None:
-                progress.save(f"c{component_index}/continuity", dict(outcome=to_payload(outcome)))
-        decoding = decode_component(
-            painted,
-            component_likelihoods,
-            component_observed,
-            sites,
-            config,
-            genetic_map,
-            model=model,
-            emission_cache_bytes=budget,
-            batch_samples=batch_samples,
-            reverse=reverse,
-            emission_builder=emission_builder,
-            progress=progress,
-            progress_key=f"c{component_index}",
-        )
-        if decoding.packed_emissions is not None:
-            cache_remaining -= decoding.packed_emissions.nbytes
-        components.append(release_component(painted, decoding, config, census_sink=census_sink))
-        continuity.append(outcome)
-        # Release-only paths, masks and posterior gates end here, before the next component, as does its resident
-        # evidence copy.
-        del decoding, component_likelihoods, component_observed
-    return Painting(
-        contig=evidence.contig,
-        sample_ids=tuple(evidence.sample_ids),
-        components=tuple(components),
-        label_continuity=tuple(continuity),
-        parameters=PaintingSettings(**asdict(config)),
+def decoding_model(states, bins, evidence_sites, genetic_map, model):
+    """Prepare the fixed copying transitions, local labels and sample-independent inputs."""
+    n_states = states.n_states
+    capable = error_capable(states)
+    transitions = copying_transitions(
+        edge_morgans(bins.centers, genetic_map),
+        n_states,
+        model.rate,
+        error_entry=model.entry,
+        error_exit=model.exit,
+        site_correlation=model.site_correlation,
     )
+    local_keys = local_allele_keys(states.named_alleles, bins)
+    public_ids = states.public_state_ids()
+    sites = evidence_sites[states.site_indices]
+
+    return capable, transitions, local_keys, public_ids, sites
+
+
+def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
+                 local_keys, public_ids, config, *, reverse):
+    """Compute one batch's candidate paths, release masses and direct support."""
+    # Combine switch intervals from both traceback conventions, canonical track order and faithful-copy
+    # release masses of the chain's Viterbi labels.
+    batch_paths, batch_masks, batch_switches, other_paths = fidelity.decode_candidates(
+        raw,
+        model,
+        capable,
+        local_keys,
+        states.named_alleles,
+        batch_observed,
+        bins.starts,
+        bins.stops,
+        states.n_classes,
+        reverse=reverse,
+        tie=config.viterbi_tie,
+    )
+    batch_qf, batch_qaf = fidelity.release_posteriors(
+        raw, model, capable, batch_paths, other_paths, public_ids, local_keys
+    )
+    del raw
+    batch_support = hmm.direct_support(
+        batch_paths, states.named_alleles, informative, bins.starts, bins.stops, states.n_classes
+    )
+    batch_support[~batch_eligible] = False
+    return batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support

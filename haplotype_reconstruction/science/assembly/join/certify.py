@@ -28,8 +28,8 @@ O(m k (k^2 + sum_b K_b)).
 
 Owns: exclusion forwards, structural bounds and sparse scoring.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.7; AJ17–AJ18.
-Identity: Sequential bound totals and native survivor/open predicates are retained; bounds never widen a search.
+Method: docs/methods/assembly.md#aj17.
+Invariant: Bound totals are sequential; survivor/open predicates exclude work without widening a search.
 Hot compiled loops remain whole to preserve the recurrence and its arithmetic update order.
 """
 

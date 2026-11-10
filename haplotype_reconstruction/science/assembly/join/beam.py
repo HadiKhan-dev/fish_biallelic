@@ -1,5 +1,5 @@
-"""The endpoint beam: candidate chromosome paths through a batch's blocks from the linker's transitions (base
-paths.run_endpoint_beam, FastMesh), and the beam's maximum transition gap (base hierarchy.compute_max_gap).
+"""The endpoint beam: candidate chromosome paths through a batch's blocks from linker transitions,
+and the maximum transition gap used by both beam and linker.
 
 A path picks one founder per block. Its score is the sum over blocks k >= 1 of the mean of the log transitions into
 block k from the earlier blocks within the maximum gap (a missing gap contributes nothing). Pass 1 builds paths left
@@ -13,7 +13,7 @@ Constant transition families use first-covering representatives without Cartesia
 Arithmetic and ties: the log transitions are float64 (linker.em), scores accumulate in
 float64 in past-block order and divide by the transition count in float64. Candidates are ranked by anchored
 tie classes of their scores
-(maths.ties rules; quantum ``ties.quantum("beam", scale of the cut)``), the lexicographic path deciding inside
+(core.ties rules; quantum ``ties.quantum("beam", scale of the cut)``), the lexicographic path deciding inside
 a class; identical paths are kept once (their best score); an endpoint's quota keeps at most q paths,
 including when it cuts a tie class. The archive is returned in the same tie-class order
 (descending score, content inside a class), so the panel search's pool order is a content order up to genuine
@@ -21,8 +21,8 @@ score differences.
 
 Owns: endpoint beam, constant family, linkage and maximum gap.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS4 §4.3; AJ08–AJ11.
-Identity: Endpoint quotas split cut classes; archive/pass-2 sums and running pass-1 sums remain distinct.
+Method: docs/methods/assembly.md#aj08.
+Invariant: Endpoint quotas split cut classes; archive/pass-2 sums and running pass-1 sums remain distinct.
 """
 
 from __future__ import annotations
@@ -371,7 +371,7 @@ def _endpoint_order(
 def path_linkage(transitions: Transitions, max_gap: int | None = None):
     """A function path -> the path's linker log-probability score (float64 sum of its step scores, the beam's
     ranking value) for this batch's transitions; the join search's data criterion inside log-likelihood tie classes
-    (release 2.2). Results are cached per path."""
+    Results are cached per path."""
     lookup = _lookup(transitions)
     gap_limit = max_gap if max_gap is not None else transitions.blocks
     cache: dict[tuple[int, ...], float] = {}
@@ -493,7 +493,7 @@ def endpoint_beam(
 
 
 def max_gap(blocks: Sequence[ComponentPanel], genetic_map, gap_horizon_scale, tolerance) -> int:
-    """The beam's (and linker's) maximum transition gap of a batch at levels >= 2 (base compute_max_gap).
+    """The beam's (and linker's) maximum transition gap of a batch at levels >= 2 (the span-based horizon).
 
     scaled span = mean component span in Morgans x gap_horizon_scale (the map's interval
     distance when available, else span bp x fallback rate). The search horizon is

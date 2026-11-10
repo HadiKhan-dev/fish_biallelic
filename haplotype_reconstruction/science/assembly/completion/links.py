@@ -28,7 +28,7 @@ from haplotype_reconstruction.contracts.roles import record_field
 
 from .crossfit import CarrierProfiles
 from .observation import row_classes
-from .parameters import LinkConfig
+from .parameters import LinkParameters
 
 
 @dataclass(frozen=True)
@@ -127,12 +127,12 @@ def link_boundary(
     left: CarrierProfiles,
     right: CarrierProfiles,
     folds: np.ndarray,
-    config: LinkConfig,
+    config: LinkParameters,
 ) -> BoundaryLink:
     """Accepted singleton-class correspondences at one boundary.
 
     left_alleles / right_alleles: int8[K, L] pre-fill calls of the two blocks; left / right: their
-    cross-fitted carrier profiles; folds: int8[N] fold labels; config: CompletionConfig.links.
+    cross-fitted carrier profiles; folds: int8[N] fold labels; config: CompletionParameters.links.
     """
     left_classes = row_classes(left_alleles)
     right_classes = row_classes(right_alleles)

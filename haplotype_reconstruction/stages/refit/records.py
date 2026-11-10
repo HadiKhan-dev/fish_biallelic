@@ -1,6 +1,6 @@
 """Store schema-2 founder refits and reconstruct panels from painting views.
 
-The envelope contains the versioned D1 product. Derived panels never enter storage;
+The envelope contains the versioned record codec product. Derived panels never enter storage;
 reads check the caller's expected derivation, never a physical record identifier.
 """
 
@@ -27,6 +27,32 @@ FOUNDER_REFIT = "founder_refit"
 SUMMARY = "founder_refit/summary"
 IDENTITY = "identity/founder_refit"
 SCHEMA = 2
+
+
+from ...store.identity import code_dependency_identity
+from ...store.protocol import Derivation
+
+
+def derivation(
+    parameters: RefitParameters,
+    *,
+    contig: str,
+    sample_ids: tuple[str, ...],
+    painting_identity: str,
+    evidence_identity: str,
+    payload_identity: str,
+    ties: TieSettings = TieSettings(),
+    numerical_policy: NumericalPolicy | None = None,
+) -> str:
+    return Derivation(
+        code_dependency_identity(("science.refit", "stages.refit.tasks", "stages.refit.records")),
+        dict(parameters=parameters, contig=contig, sample_ids=sample_ids),
+        numerical_policy or NumericalPolicy.current(),
+        dict(painting=painting_identity, evidence=evidence_identity, payload=payload_identity),
+        tie_reverse=ties.reverse,
+        tie_keep=ties.keep,
+        schema=SCHEMA,
+    ).identity
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:
@@ -95,13 +121,56 @@ class Reader:
 
     def decode(self, payload: Mapping[str, Any]) -> FounderRefit | RefitSummary | tuple[()]:
         if self.product == "tie_sources":
-            # RF1 has no shared tie census (its carrier-specific relation is a local rule).
+            # founder refit has no shared tie census (its carrier-specific relation is a local rule).
             require_schema(payload, SCHEMA)
             return ()
         if self.product == "summary":
             require_schema(payload, SCHEMA)
             return from_payload(RefitSummary, {key: value for key, value in payload.items() if key != "schema"})
         return Adapter().decode(payload, painting=self.painting)
+
+
+def expected(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+) -> Reader | None:
+    """Derive the refit request from manifest settings and checked upstream products."""
+    from ..evidence import records as evidence_records
+    from ..painting import records as painting_records
+
+    if contig is None or contig not in manifest["contigs"]:
+        raise InputError("refit reader requires a bound contig")
+    if product not in ("refit", "summary", "tie_sources"):
+        raise InputError(f"unsupported refit reader product {product!r}")
+    file = store.contig(contig)
+    # Identity construction checks headers; result_reader attaches panels only when requested.
+    painted = painting_records.result_reader(
+        store, manifest, product="painting", contig=contig, panels=False, emissions=False
+    )
+    evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
+    if painted is None or evidence is None:
+        raise InvariantError("refit requires published painting and evidence")
+    painting_record = read_items(file, painted.key, painted.identity, ("schema",))
+    checked_evidence = read_items(file, evidence.key, evidence.identity, ("schema",))
+    if painting_record is None or checked_evidence is None:
+        raise InvariantError("refit upstream publication is incomplete")
+    painting_records.require_evidence_binding(file, painted.identity, evidence.identity)
+    parameters = from_payload(RefitParameters, manifest["parameters"]["founder_refit"])
+    settings = manifest["ties"]
+    expected_identity = derivation(
+        parameters,
+        contig=contig,
+        sample_ids=tuple(manifest["sample_ids"]),
+        painting_identity=painted.identity,
+        evidence_identity=evidence.identity,
+        payload_identity=bound_payload_identity(file),
+        ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings["keep"])),
+        numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
+    )
+    return Reader(expected_identity, product, key=SUMMARY if product == "summary" else FOUNDER_REFIT)
 
 
 def result_reader(
@@ -112,52 +181,21 @@ def result_reader(
     contig: str | None = None,
     panels: bool = True,
 ) -> Reader | None:
-    """Derive the refit request from manifest settings and checked upstream products."""
-    from ..evidence import records as evidence_records
+    """Attach painted panels to the shared expected refit publication."""
     from ..painting import records as painting_records
-    from .tasks import identity
 
-    if contig is None or contig not in manifest["contigs"]:
-        raise InputError("refit reader requires a bound contig")
-    if product not in ("refit", "summary", "tie_sources"):
-        raise InputError(f"unsupported refit reader product {product!r}")
     file = store.contig(contig)
     if not file.has(FOUNDER_REFIT):
         return None
-    # The painting payload is decoded only to rebuild refit panels; otherwise its header is checked.
-    rebuild = panels and product == "refit"
-    painted = painting_records.result_reader(
-        store, manifest, product="painting", contig=contig, panels=rebuild, emissions=False
-    )
-    evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
-    if painted is None or evidence is None:
-        raise InvariantError("refit requires published painting and evidence")
-    if painted.items is None:
-        raise InvariantError("painting product reader requires explicit fields")
-    painting_record = read_items(file, painted.key, painted.identity, painted.items if rebuild else ("schema",))
-    checked_evidence = read_items(file, evidence.key, evidence.identity, ("schema",))
-    if painting_record is None or checked_evidence is None:
+    request = expected(store, manifest, product=product, contig=contig)
+    if not panels or product != "refit":
+        return request
+    painted = painting_records.result_reader(store, manifest, product="painting", contig=contig,
+                                             panels=True, emissions=False)
+    saved = read_items(file, painted.key, painted.identity, painted.items)
+    if saved is None:
         raise InvariantError("refit upstream publication is incomplete")
-    painting_records.require_evidence_binding(file, painted.identity, evidence.identity)
-    parameters = from_payload(RefitParameters, manifest["parameters"]["founder_refit"])
-    settings = manifest["ties"]
-    expected = identity(
-        parameters,
-        contig=contig,
-        sample_ids=tuple(manifest["sample_ids"]),
-        painting_identity=painted.identity,
-        evidence_identity=evidence.identity,
-        payload_identity=bound_payload_identity(file),
-        ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings.get("keep", ()))),
-        numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
-    )
-    product_painting: Painting | None = None
-    if rebuild:
-        decoded = painted.decode(painting_record.payload)
-        if not isinstance(decoded, Painting):
-            raise InvariantError("painting reader returned the wrong product")
-        product_painting = decoded
-    return Reader(expected, product, product_painting, key=SUMMARY if product == "summary" else FOUNDER_REFIT)
+    return replace(request, painting=painted.decode(saved.payload))
 
 
 __all__ += ["Reader", "result_reader"]

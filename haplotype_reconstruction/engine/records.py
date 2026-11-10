@@ -8,7 +8,6 @@ Neither elapsed time, diagnostics nor output paths enter scientific identities.
 from __future__ import annotations
 
 import copy
-import inspect
 import json
 import logging
 import os
@@ -16,16 +15,17 @@ import platform
 import sys
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from functools import wraps
 from importlib import metadata
 from pathlib import Path
 from typing import IO, Any, TypedDict
 
 from ..core.digest import canonical_json, jsonable
 from ..core.files import atomic_path
+from ..store.releases import CURRENT_RELEASE, require_current_release, unsupported_release
 from .runtime import affinity_cpus
 
 _LOG = logging.getLogger(__name__)
@@ -35,10 +35,6 @@ __all__ = [
     "RunRecord",
     "RunRecorder",
     "record_run",
-    "worker_stages",
-    "stage_timer",
-    "timed_stage",
-    "record_product",
     "record_diagnostic",
     "TeeOutput",
     "run_log",
@@ -58,8 +54,7 @@ DEPENDENCIES = (
     "openpyxl",
 )
 _ACTIVE = None
-_ROUTE_CAPTURE: tuple[int, list[dict[str, Any]]] | None = None
-_ROUTE_LOCK = threading.RLock()
+_DIAGNOSTIC_LOCK = threading.RLock()
 _DIAGNOSTIC_CAPTURE: tuple[int, list[str]] | None = None
 
 
@@ -78,47 +73,11 @@ def capture_diagnostics():
 
 def record_diagnostic(message: str) -> None:
     """Emit a stage summary here, or return it with a worker's existing reply."""
-    with _ROUTE_LOCK:
+    with _DIAGNOSTIC_LOCK:
         if _DIAGNOSTIC_CAPTURE is not None and _DIAGNOSTIC_CAPTURE[0] == os.getpid():
             _DIAGNOSTIC_CAPTURE[1].append(message)
             return
     _LOG.info("%s", message)
-
-
-@contextmanager
-def capture_storage_routes():
-    """Collect one task's route receipts, including its engine-owned threads."""
-    global _ROUTE_CAPTURE
-    previous = _ROUTE_CAPTURE
-    rows: list[dict[str, Any]] = []
-    _ROUTE_CAPTURE = (os.getpid(), rows)
-    try:
-        yield rows
-    finally:
-        _ROUTE_CAPTURE = previous
-
-
-def record_storage_routes(rows) -> None:
-    """Publish operational route receipts at the invocation boundary."""
-    record = _active()
-    if record is not None and rows:
-        with record.lock:
-            record.data.setdefault("storage_routes", []).extend(copy.deepcopy(rows))
-        record.publish()
-
-
-def record_storage_route(
-    *, route: str, shape: tuple[int, ...], dtype: str, consumers: int, window_axis: int, window_width: int
-) -> None:
-    """Capture only dimensions and route choice; no payload or path identity."""
-    row = dict(
-        route=route, shape=shape, dtype=dtype, consumers=consumers, window_axis=window_axis, window_width=window_width
-    )
-    with _ROUTE_LOCK:
-        if _ROUTE_CAPTURE is not None and _ROUTE_CAPTURE[0] == os.getpid():
-            _ROUTE_CAPTURE[1].append(row)
-            return
-    record_storage_routes((row,))
 
 
 def _git_commit(directory: Path) -> str | None:
@@ -177,26 +136,55 @@ def _thread_label() -> str:
     return "main" if thread is threading.main_thread() else thread.name
 
 
+class ThreadUsage:
+    """Integrate a task's claimed CPUs between its existing allowance boundaries.
+
+    Claims include CPUs retained by running children. This measures allocation,
+    like threads_start/threads_peak, rather than native threads doing useful work.
+    The histogram is bounded by the task's CPU ceiling, regardless of its duration.
+    """
+
+    def __init__(self, threads: int, *, start: float) -> None:
+        self.threads = threads
+        self.changed = start
+        self.seconds: dict[int, float] = {}
+        self.lock = threading.Lock()
+
+    def observe(self, threads: int) -> None:
+        with self.lock:
+            if threads != self.threads:
+                self._close(time.perf_counter())
+                self.threads = threads
+
+    def _close(self, now: float) -> None:
+        self.seconds[self.threads] = self.seconds.get(self.threads, 0.0) + now - self.changed
+        self.changed = now
+
+    def finish(self, stop: float) -> tuple[tuple[int, float], ...]:
+        with self.lock:
+            self._close(stop)
+            return tuple(sorted(self.seconds.items()))
+
+
 def task_log_path(record: Path) -> Path:
     """The append-only task log beside a run record."""
     return record.with_suffix(".tasks.jsonl")
 
 
 def record_tasks(record: Path, data: dict | None = None) -> list[dict]:
-    """Read detailed tasks from a retained JSONL log or a legacy embedded task list.
+    """Read detailed tasks from this release's retained JSONL log.
 
     A partly written final line from a running or interrupted invocation is skipped.
     Status uses task_summaries instead and never opens this log.
     """
     data = json.loads(record.read_text()) if data is None else data
-    if "tasks" in data:
-        return list(data["tasks"])
+    require_current_release(data, record)
+    if data.get("schema") != "run-record-v5" or "tasks" in data:
+        raise unsupported_release(record, data.get("release"))
     try:
         lines = task_log_path(record).read_text().splitlines()
     except FileNotFoundError:
-        # A legacy writer can finish between the header and log reads, moving
-        # its task list into the record and deleting the log. New records keep it.
-        return list(json.loads(record.read_text()).get("tasks", ()))
+        return []  # A current invocation creates its task log only on its first task.
     rows = []
     for number, line in enumerate(lines):
         try:
@@ -211,12 +199,15 @@ def _add_task_summary(summaries: dict, entry: dict) -> None:
     """One constant-size resource total per stage, including failed task outcomes."""
     row = summaries.setdefault(
         entry["key"]["stage"],
-        dict(tasks=0, wall_seconds=0.0, cpu_seconds=0.0, peak_bytes=None, threads_start=0, threads_peak=0, failures=0),
+        dict(tasks=0, wall_seconds=0.0, cpu_seconds=0.0, publish_lock_wait_seconds=0.0,
+             publish_fsync_seconds=0.0, peak_bytes=None, threads_start=0, threads_peak=0, failures=0),
     )
     row["tasks"] += 1
     row["failures"] += int(entry.get("state") == "failed")
-    for name in ("wall_seconds", "cpu_seconds"):
-        row[name] += entry.get(name, 0.0)
+    for name in ("wall_seconds", "cpu_seconds", "publish_lock_wait_seconds", "publish_fsync_seconds"):
+        value = entry.get(name)
+        if value is not None:
+            row[name] += value
     for name in ("peak_bytes", "threads_start", "threads_peak"):
         value = entry.get(name)
         if value is not None:
@@ -224,17 +215,12 @@ def _add_task_summary(summaries: dict, entry: dict) -> None:
 
 
 def task_summaries(data: dict) -> dict[str, dict]:
-    """Stage aggregates, or one linear pass through a legacy embedded task list.
+    """Read this release's bounded per-stage aggregates without opening task detail."""
+    require_current_release(data, "invocation record")
+    if data.get("schema") != "run-record-v5" or "tasks" in data:
+        raise unsupported_release("invocation record", data.get("release"))
+    return data["task_summaries"]
 
-    Legacy running records without aggregates retain their recorded task_count;
-    their unbounded task log is deliberately not read by status.
-    """
-    if "task_summaries" in data:
-        return data["task_summaries"]
-    summaries: dict[str, dict] = {}
-    for entry in data.get("tasks", ()):
-        _add_task_summary(summaries, entry)
-    return summaries
 
 
 @dataclass(frozen=True)
@@ -268,6 +254,8 @@ class RunRecorder:
     """
 
     PUBLISH_SECONDS = 5.0
+    PUBLISH_WAIT_WINDOW = 32  # most recent completed tasks per contig
+    PUBLISH_WAIT_MIN_TASKS = 8  # avoid warning on a single short task
 
     def __init__(
         self, output, command: str, log, *, config: dict | None = None, checkpoints=None, source_descriptor: Any = None
@@ -284,8 +272,11 @@ class RunRecorder:
         self.lock = threading.RLock()
         self.checkpoints = None if checkpoints is None else str(checkpoints)
         self._clean_stop = False
+        self._publish_windows: dict[str, deque[tuple[float, float]]] = {}
+        self._publish_warned: set[str] = set()
         self.data = dict(
             schema="run-record-v5",
+            release=CURRENT_RELEASE,
             command=command,
             state="running",
             started_utc=datetime.now(UTC).isoformat(),
@@ -305,12 +296,13 @@ class RunRecorder:
         self.data["numerical_policy"] = jsonable(NumericalPolicy.current())
         self.data["task_count"] = 0
         self.data["task_summaries"] = {}
-        self.data["storage_routes"] = []
         self.data["published_identities"] = {}
-        from .scheduler import _GOVERNOR
+        from .memory import current_governor
 
-        if _GOVERNOR is not None:
-            _LOG.info(f"[memory] {_GOVERNOR.describe()}")
+        governor = current_governor()
+
+        if governor is not None:
+            _LOG.info(f"[memory] {governor.describe()}")
         self.publish(force=True)
 
     def publish(self, *, force: bool = False):
@@ -438,13 +430,21 @@ class RunRecorder:
         ``finished_seconds`` is when the coordinator received the reply, in seconds since the run started; with
         ``wall_seconds`` it places the task on the run's timeline (where wall time goes, stage by stage)."""
         with self.lock:
+            thread_seconds = reply.thread_seconds
+            observed = sum(seconds for _, seconds in thread_seconds)
             entry = dict(
                 key=asdict(task.key),
                 finished_seconds=round(time.monotonic() - self.start, 3),
                 wall_seconds=reply.wall_seconds,
                 cpu_seconds=reply.cpu_seconds,
+                publish_lock_wait_seconds=reply.publish_lock_wait_seconds,
+                publish_fsync_seconds=reply.publish_fsync_seconds,
                 threads_start=reply.threads[0],
                 threads_peak=reply.threads[1],
+                thread_seconds=thread_seconds,
+                threads_mean=(sum(threads * seconds for threads, seconds in thread_seconds) / observed
+                              if observed else None),
+                threads_one_seconds=dict(thread_seconds).get(1, 0.0) if observed else None,
                 peak_bytes=reply.peak_bytes,
                 working_set_bytes=task.resources.working_set_bytes,
                 scratch_bytes=task.resources.scratch_bytes,
@@ -452,10 +452,27 @@ class RunRecorder:
                 retired=reply.retire,
             )
             self._append_task(entry)
-            from .scheduler import memory_statistics
+            self._publish_progress(task.key.scope, entry)
+            from .memory import memory_statistics
 
             self.data["memory"] = memory_statistics() or {}
         self.publish()
+
+    def _publish_progress(self, contig: str, entry: dict) -> None:
+        """Warn once per invocation/contig when recent completed tasks mostly waited to publish."""
+        if contig == "run" or contig in self._publish_warned:
+            return
+        window = self._publish_windows.setdefault(contig, deque(maxlen=self.PUBLISH_WAIT_WINDOW))
+        window.append((entry["wall_seconds"], entry["publish_lock_wait_seconds"]))
+        wall, wait = map(sum, zip(*window, strict=True))
+        if len(window) >= self.PUBLISH_WAIT_MIN_TASKS and wait > 0.5 * wall:
+            self._publish_warned.add(contig)
+            del self._publish_windows[contig]
+            _LOG.warning(
+                "[progress] %s: checkpoint publish lock wait %.1fs / %.1fs task wall time "
+                "(%.0f%% over %d tasks); checkpoint storage is limiting throughput",
+                contig, wait, wall, 100 * wait / wall, len(window),
+            )
 
     def _append_task(self, entry: dict) -> None:
         if self._tasks_log is None:
@@ -467,7 +484,11 @@ class RunRecorder:
     def task_failed(self, key, error: BaseException) -> None:
         """Record an attributed scheduler failure; no resource measurement is invented."""
         with self.lock:
-            self._append_task(dict(key=asdict(key), state="failed", error=f"{type(error).__name__}: {error}"))
+            self._append_task(dict(
+                key=asdict(key), state="failed", error=f"{type(error).__name__}: {error}",
+                publish_lock_wait_seconds=getattr(error, "publish_lock_wait_seconds", None),
+                publish_fsync_seconds=getattr(error, "publish_fsync_seconds", None),
+            ))
         self.publish()
 
     def published(self, identities: dict[str, str]) -> None:
@@ -476,13 +497,15 @@ class RunRecorder:
         self.publish()
 
     def _record_memory(self):
-        """The memory governor's pacing statistics (execution.memory), also printed to the log."""
-        from .scheduler import _GOVERNOR
+        """The memory governor's pacing statistics (engine.scheduler), also printed to the log."""
+        from .memory import current_governor
 
-        if _GOVERNOR is None:
+        governor = current_governor()
+
+        if governor is None:
             return
-        self.data["memory"] = _GOVERNOR.statistics()
-        for line in _GOVERNOR.summary_lines():
+        self.data["memory"] = governor.statistics()
+        for line in governor.summary_lines():
             _LOG.info(line)
 
 
@@ -511,34 +534,6 @@ def record_run(
         _ACTIVE = previous
 
 
-class _WorkerStages(RunRecorder):
-    """Stage timer of a worker process; it writes nothing to the run directory."""
-
-    def __init__(self):
-        self.pid, self.start = (os.getpid(), time.monotonic())
-        self.stacks = {}
-        self.lock = threading.RLock()
-        self.checkpoints = None
-        self.data = dict(stages=[])
-
-    def publish(self, *, force: bool = False):
-        pass
-
-
-@contextmanager
-def worker_stages():
-    """Collect a worker's timed stages (yielded list); its coordinator records them."""
-    global _ACTIVE
-    previous = _ACTIVE
-    record = _WorkerStages()
-    _ACTIVE = record
-    from .runtime import signal_boundary
-
-    try:
-        with signal_boundary(lambda: None):
-            yield record.data["stages"]
-    finally:
-        _ACTIVE = previous
 
 
 def _active():
@@ -549,46 +544,10 @@ def _active():
 def record_task_failure(key, error: BaseException) -> None:
     """Attach a known failed task to the coordinator's operational record."""
     record = _active()
-    if record is not None and not isinstance(record, _WorkerStages):
+    if record is not None:
         record.task_failed(key, error)
 
 
-def stage_timer(name: str, contig=None):
-    """Time a block as stage ``name`` (contig defaults to the enclosing stage's); no-op outside a run."""
-    record = _active()
-    if record is None:
-        return nullcontext()
-    if contig is None:
-        contig = record.current_contig()
-    return record.stage(name, None if contig is None else str(contig))
-
-
-def timed_stage(name: str, contig_arg: str | None = None):
-    """Decorator: time a function as stage ``name``; ``contig_arg`` names the argument holding the contig."""
-
-    def decorate(function):
-        signature = inspect.signature(function)
-
-        @wraps(function)
-        def wrapped(*args, **kwargs):
-            if _active() is None:
-                return function(*args, **kwargs)
-            contig = None
-            if contig_arg:
-                contig = signature.bind_partial(*args, **kwargs).arguments.get(contig_arg)
-            with stage_timer(name, contig):
-                return function(*args, **kwargs)
-
-        return wrapped
-
-    return decorate
-
-
-def record_product(name: str, contig, summary) -> None:
-    """Attach a small JSON-compatible summary of one contig's product to the active run record."""
-    record = _active()
-    if record is not None:
-        record.add_product(name, contig, summary)
 
 
 class TeeOutput:

@@ -4,19 +4,20 @@ The join objective is :mod:`.objective`'s (per sample, the maximum over sequence
 panel-path pairs of binned emissions minus a uniform penalty per state change). Same-count moves
 are judged by it alone. A count move compares a larger panel X+ with X- = X+ minus one path f (a
 death of f or a birth of f) and keeps X+ iff the effective-carrier test of
-:func:`assembly.count_rule.decide` passes on
+:func:`assembly.count_rule.criterion.decide` passes on
 
 * the total per-sample gain d_s = V_s(X+) - V_s(X-), and
 * its sequence part q_s = V_s(X+) - V_s(X+^sigma): X+^sigma replaces every cell (block, row) of
   f that no path of X- uses by the nearest row X- uses at that block (Hamming distance over sites
   called in both rows; all equally nearest choices are evaluated when their full Cartesian
-  family fits the shadow budget; otherwise the incumbent shadow is evaluated and flagged).
+  family fits the shadow budget and the total test passes; otherwise the conventional
+  incumbent is evaluated, with count_unverified only for a passing total and budget overflow).
 
 Every distance of this step (nearest rows, near identity) is measured on the blocks' pre-fill
 inference calls, the calls the join's likelihood reads (:mod:`assembly.count_rule.geometry`).
 
 A path whose every cell another path uses (a pure mosaic, e.g. any recombinant of panel paths),
-or which lies within the near-identity rate (CountRuleConfig.near_identity, 1% of called sites) of
+or which lies within the near-identity rate (CountRuleParameters.near_identity, 1% of called sites) of
 another panel path over the span, has q = 0: it is never added and always deleted. Switch savings
 never justify a path; a near-identical row's q comes only from its few differing sites;
 q_s <= d_s for every sample (X+^sigma contains X-).
@@ -29,24 +30,22 @@ then deleted here.
 Order at a panel certified for same-count moves: (1) a path without private cells is deleted
 (largest V(P minus f) first); (2) otherwise the best-F death candidate (largest V(P minus f)) is
 decided; (3) otherwise the birth with the largest total gain among the pool births the rule
-accepts is added. "Largest" is decided by tie classes of the join log likelihood (release 2.1,
-ties.quantum("join_ll", |V(P)|)): within a class the path's content decides (base: the
-lowest slot or pool index). Births are excluded by per-sample upper bounds (two-region bounds of
+accepts is added. "Largest" is decided by tie classes of the join log likelihood
+(ties.quantum("join_ll", |V(P)|)): within a class the path's content decides. Births are excluded by per-sample
+upper bounds (two-region bounds of
 :mod:`.certify`; u_s >= d_s >= q_s) through the necessary conditions of the effective-carrier test,
 and scored exactly best-first until the bound excludes every remaining birth. Work per step:
 O(D k |pool|) bounds plus exact scores restricted to the samples a bound cannot rule out.
 
 Owns: count candidates, shadow decisions and search-side count drivers.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
-Method: WP_AS5 §4; AJ21–AJ25, AJ32–AJ33.
-Identity: Death precedes birth; shared bootstrap keys, frozen revisits and born tags retain native semantics.
+Method: docs/methods/assembly.md#aj21.
+Invariant: Death precedes birth; bootstrap keys are shared, revisits freeze births, and born tags follow changed paths.
 """
 
 from __future__ import annotations
 
 import copy
-import itertools
-import math
 import re
 import threading
 from collections.abc import Callable
@@ -57,11 +56,13 @@ import numpy as np
 
 from haplotype_reconstruction.core import ties
 
-from .. import count_rule
 from .. import orders as tie_rules
+from ..count_rule import criterion as count_criterion
+from ..count_rule import geometry as count_geometry
 from ..count_rule.criterion import _test as margin_test
 from ..count_rule.geometry import shadow_choices
 from ..count_rule.parameters import BIRTH_SETS
+from ..count_rule.shadow_family import SHADOW_PRIOR, shadow_family_decision
 from ..parameters import SPARSE_RELATIVE
 from .certify import PanelForwards
 from .diagnostics import append_event, ordered_refit_events
@@ -91,7 +92,7 @@ _DECISION_BYTES = 5120
 
 
 def _test_record(test) -> dict:
-    """A count_rule.MarginTest as a plain JSON record (lists, Python numbers)."""
+    """A count_criterion.MarginTest as a plain JSON record (lists, Python numbers)."""
     record = asdict(test)
     for name in ("top_samples", "top_differences", "top_shares"):
         record[name] = list(record[name])
@@ -102,11 +103,11 @@ class PendingDecision:
     """A count decision whose bootstrap band is computed only when a caller records it.
 
     The point part (both effective-carrier tests, the verdict and min(m_d, m_q)) equals
-    count_rule.decide's: the same differences and the same test. The band of min(m_d, m_q)
-    (count_rule.decide or the shadow family's shared draws) depends only on the decision's own
+    count_criterion.decide's: the same differences and the same test. The band of min(m_d, m_q)
+    (count_criterion.decide or the shadow family's shared draws) depends only on the decision's own
     scores, cost, configuration and seed key, and only the decision a record reports reads it:
     the shadow and birth choices compare verdicts, margins and gains. :meth:`resolve` returns the
-    CountDecision count_rule.decide would have returned (with accept_larger False where the
+    CountDecision count_criterion.decide would have returned (with accept_larger False where the
     shadow family's opposed verdicts withheld the larger panel), so every recorded field is
     unchanged; the other candidates' bands are never drawn (computed only for the winner).
     """
@@ -147,12 +148,12 @@ class PendingDecision:
             charge += 2 * _OBJECT_BYTES + _MARGIN_TEST_BYTES
         return charge + _DECISION_BYTES  # room for the decision a later resolve records
 
-    def resolve(self, cost, config) -> count_rule.CountDecision:
+    def resolve(self, cost, config) -> count_criterion.CountDecision:
         if self._resolved is not None:
             return self._resolved
         larger, smaller, shadow, seed_panel, family = self._inputs
         if family is None:
-            decision = count_rule.decide(
+            decision = count_criterion.decide(
                 larger,
                 smaller,
                 shadow,
@@ -173,7 +174,7 @@ class PendingDecision:
 
 
 class _ShadowFamily:
-    """One shadow family's shared total test, and its count_rule.ShadowDecisionFamily (bootstrap draws)
+    """One shadow family's shared total test, and its count_criterion.ShadowDecisionFamily (bootstrap draws)
     built when the first of its decisions is resolved."""
 
     __slots__ = ("total", "_arguments", "_family")
@@ -183,10 +184,10 @@ class _ShadowFamily:
         self._arguments = (larger, smaller, cost, kind, config, seed_panel)
         self._family = None
 
-    def family(self) -> count_rule.ShadowDecisionFamily:
+    def family(self) -> count_criterion.ShadowDecisionFamily:
         if self._family is None:
             larger, smaller, cost, kind, config, seed_panel = self._arguments
-            self._family = count_rule.ShadowDecisionFamily(
+            self._family = count_criterion.ShadowDecisionFamily(
                 larger, smaller, cost, kind=kind, config=config, seed_key=("join_count", kind, sorted(seed_panel))
             )
         return self._family
@@ -220,8 +221,8 @@ class CountStep:
     """One count decision at a panel certified for same-count moves (deaths first, then births).
 
     layout: the join's EmissionLayout; penalty: the join's switch penalty; cost: the per-founder
-    cost c (count_rule.founder_cost); samples: S; geometry: count_rule.RowGeometry of the batch's
-    blocks; config: CountRuleConfig; score(panel) -> exact per-sample scores of a panel (the
+    cost c (count_criterion.founder_cost); samples: S; geometry: count_geometry.RowGeometry of the batch's
+    blocks; config: CountRuleParameters; score(panel) -> exact per-sample scores of a panel (the
     search's full scorer, which counts its evaluations). Panels are lists of path tuples (local
     rows per block). exact_scores / exact_sample_scores count the exact scores this step made.
     """
@@ -245,7 +246,7 @@ class CountStep:
     ) -> None:
         self.tie_settings = tie_settings
         self.layout = layout
-        # The batch linker's path score (release 2.2): the data criterion inside tie classes (None: content).
+        # The batch linker's path score : the data criterion inside tie classes (None: content).
         self.linkage = linkage
         self.choose_panel = choose_panel
         self.record_count_family = record_count_family
@@ -275,7 +276,7 @@ class CountStep:
     def _choose(self, kind, items, value, content, scale, key=None, quantum_kind="join_ll", link=None, panel=None):
         """The tie-class winner of ``items`` by value(item) (descending; nats of the join log
         likelihood, quantum_kind's quantum at |scale|); inside a class link(item) (the batch linker's
-        score, descending; release 2.2), then content(item)."""
+        score, descending), then content(item)."""
         items = list(items)
         values = [float(value(item)) for item in items]
         policy = search_tie_policy(kind, quantum_kind, self.tie_settings)
@@ -314,7 +315,7 @@ class CountStep:
             self.exact_sample_scores += samples
 
     def _decision(self, larger, smaller, shadow, kind, seed_panel, key=None, family=None):
-        """The point part of count_rule.decide (the family's total test when given); the band waits for
+        """The point part of count_criterion.decide (the family's total test when given); the band waits for
         PendingDecision.resolve."""
         larger = np.asarray(larger, np.float64)
         smaller = np.asarray(smaller, np.float64)
@@ -357,56 +358,48 @@ class CountStep:
         The smaller-K prior applies only to actually opposed evaluated verdicts.
         """
         if cover is None:
-            cover = count_rule.covered_rows(np.asarray(smaller_panel, np.int64))
+            cover = count_geometry.covered_rows(np.asarray(smaller_panel, np.int64))
         choices, lost = shadow_choices(larger_panel[focal], cover, self.geometry)
-        combinations = math.prod(map(len, choices))
-        total_passes = count_rule.passes(larger - smaller, self.cost, self.samples)
-        complete = combinations <= int(self.config.shadow_combinations)
-        paths = list(itertools.product(*choices)) if complete and total_passes else [tuple(rows[0] for rows in choices)]
-        family = (
-            _ShadowFamily(
-                np.asarray(larger, np.float64),
-                np.asarray(smaller, np.float64),
-                self.cost,
-                kind,
-                self.config,
-                tuple(map(tuple, larger_panel)),
+
+        def evaluate(paths, multiple):
+            family = (
+                _ShadowFamily(
+                    np.asarray(larger, np.float64),
+                    np.asarray(smaller, np.float64),
+                    self.cost,
+                    kind,
+                    self.config,
+                    tuple(map(tuple, larger_panel)),
+                )
+                if multiple
+                else None
             )
-            if len(paths) > 1
-            else None
+            decisions = []
+            for path in paths:
+                panel = list(larger_panel)
+                panel[focal] = tuple(path)
+                if forwards is None:
+                    values = self.score(tie_rules.sort_panel(panel))
+                else:
+                    bound = forwards.birth_values(self.rows([path]), self.offsets)[:, 0]
+                    values = self._sparse(tie_rules.sort_panel(panel), smaller, bound)
+                self._counted(scores=1)
+                decisions.append(self._decision(larger, smaller, values, kind, larger_panel, key, family))
+            return decisions
+
+        decision, details = shadow_family_decision(
+            choices,
+            larger,
+            smaller,
+            self.cost,
+            self.config,
+            evaluate,
+            reverse=self.geometry.reverse,
+            withhold=lambda d: d.withheld(),
         )
-        decisions = []
-        for path in paths:
-            panel = list(larger_panel)
-            panel[focal] = path
-            if forwards is None:
-                values = self.score(tie_rules.sort_panel(panel))
-            else:
-                bound = forwards.birth_values(self.rows([path]), self.offsets)[:, 0]
-                values = self._sparse(tie_rules.sort_panel(panel), smaller, bound)
-            self._counted(scores=1)
-            decisions.append(self._decision(larger, smaller, values, kind, larger_panel, key, family))
-        verdicts = {decision.accept_larger for decision in decisions}
-        unresolved = total_passes and len(verdicts) > 1
-        count_unverified = total_passes and not complete
-        # Pick diagnostics consistently. The prior, when used, is explicit alongside them.
-        decision = min(decisions, key=lambda d: (d.accept_larger, d.margin, d.sequence.loso_margin))
-        if unresolved:
-            decision = decision.withheld()
-        details = dict(
-            nearest_choices=choices,
-            combinations=combinations,
-            evaluated=len(paths),
-            complete=len(paths) == combinations,
-            resolved_by_total=not total_passes,
-            unresolved=unresolved,
-            count_unverified=count_unverified,
-            cause="nearest_shadow_budget" if count_unverified else None,
+        details.update(
+            cause="nearest_shadow_budget" if details["count_unverified"] else None,
             budget=int(self.config.shadow_combinations),
-            incumbent_shadow=tuple(rows[0] for rows in choices),
-            verdicts=[d.accept_larger for d in decisions],
-            sequence_margins=[d.sequence.margin for d in decisions],
-            sequence_loso_margins=[d.sequence.loso_margin for d in decisions],
         )
         return decision, lost, details
 
@@ -439,7 +432,7 @@ class CountStep:
                 reason="nearest_shadow_count",
                 source_decision=key,
                 objective="count_rule",
-                representative_prior="smaller_K_then_exact_minimum_switches",
+                representative_prior=SHADOW_PRIOR,
                 status="ambiguous_k",
                 unresolved_search=True,
                 shadow=details,
@@ -465,7 +458,7 @@ class CountStep:
             return None
         removal = forwards.removal_scores()
         totals = column_sums(np.ascontiguousarray(removal))
-        pure = np.flatnonzero(~count_rule.novel_paths(panel, self.geometry, self.near_identity))
+        pure = np.flatnonzero(~count_geometry.novel_paths(panel, self.geometry, self.near_identity))
         pool = pure if len(pure) else np.arange(k)
         founder = int(
             self._choose(
@@ -610,7 +603,7 @@ class CountStep:
         """
         k = len(panel)
         rows = np.asarray(panel, dtype=np.int64)
-        cover = count_rule.covered_rows(rows)
+        cover = count_geometry.covered_rows(rows)
         present = set(map(tuple, panel))
         outside = [path for path in dict.fromkeys(pool) if path not in present]
         memo = self._birth_memo(panel, base, forwards)
@@ -619,7 +612,7 @@ class CountStep:
         for path in outside:
             found = novelty.get(path)
             if found is None:
-                found = count_rule.has_novelty(path, panel, cover, self.geometry, self.near_identity)
+                found = count_geometry.has_novelty(path, panel, cover, self.geometry, self.near_identity)
                 # A novelty entry: one table slot and the path tuple it keeps alive (the flag is a shared bool).
                 charge = _SLOT_BYTES + _OBJECT_BYTES + _ITEM_BYTES * len(path)
                 if memo is not None and self._memo_bytes + charge <= BIRTH_MEMO_BYTES:
@@ -730,7 +723,7 @@ class CountStep:
         removed = 0
         panel = list(panel)
         while len(panel) > 1:
-            pure = np.flatnonzero(~count_rule.novel_paths(panel, self.geometry, self.near_identity))
+            pure = np.flatnonzero(~count_geometry.novel_paths(panel, self.geometry, self.near_identity))
             if not len(pure):
                 break
             forwards = PanelForwards(self.layout, self.rows(panel), self.penalty, self.total_bins)
@@ -867,7 +860,7 @@ def deaths(search: SearchState, forwards) -> bool:
     search to tier 1 (the next death is decided at the re-optimized panel). Deleting a
     path that a birth here added closes a count cycle and freezes births; the deletion
     stands. It is recorded as undecided when it is ambiguous (its bootstrap band contains
-    zero) and the cycle began with a decided deletion (count_rule.pre_cycle_count;
+    zero) and the cycle began with a decided deletion (count_criterion.pre_cycle_count;
     deleting a path without sequence of its own is not a decision)."""
     count = search.count
     changed = False
@@ -885,7 +878,7 @@ def deaths(search: SearchState, forwards) -> bool:
         if rest is not None and record["tagged"]:
             count["cycles"] += 1
             if not record["pure_mosaic"]:
-                origin = count_rule.pre_cycle_count(search.sizes, len(search.selected), search.cleanup_steps)
+                origin = count_criterion.pre_cycle_count(search.sizes, len(search.selected), search.cleanup_steps)
                 record["cycle_start_size"] = origin
                 if origin >= len(search.selected) and record["ambiguous"]:
                     record["cycle_undecided"] = True
@@ -985,7 +978,7 @@ def count_decision(search: SearchState, forwards, pool, seeds) -> bool:
                 candidates.append((settled_ll, settled, settled_scores, seed_record, "seed"))
         if candidates:
             # The best surviving refit: tie classes of its log likelihood, the settled panel's
-            # content inside a class (base: the first seed of the maximum).
+            # content inside a class.
             best = search.class_winner(
                 "assembly.join_seed",
                 candidates,
@@ -995,7 +988,6 @@ def count_decision(search: SearchState, forwards, pool, seeds) -> bool:
                 link=lambda item: search.panel_link(item[1]),
                 panel=lambda item: item[1],
             )
-        count["seed_seconds"] += 0.0
     search.events.append(dict(stage="count_birth", **record))
     if best is None:
         return False
@@ -1060,8 +1052,8 @@ def final_census(search: SearchState, forwards) -> int:
     removal = forwards.removal_scores()
     for founder in range(k):
         rest = [path for i, path in enumerate(selected) if i != founder]
-        cover = count_rule.covered_rows(np.asarray(rest, dtype=np.int64))
-        if not count_rule.has_novelty(selected[founder], rest, cover, search.geometry, search.near_identity):
+        cover = count_geometry.covered_rows(np.asarray(rest, dtype=np.int64))
+        if not count_geometry.has_novelty(selected[founder], rest, cover, search.geometry, search.near_identity):
             failing += 1
             continue
         decision, _, _ = search.counter.shadow_decision(

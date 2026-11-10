@@ -2,7 +2,7 @@
 
 Owns the flat stored array layout and schema adapter. Science does no storage I/O;
 identity binds parameters, numerical policy, canonical samples and consumed payload.
-Method: docs/methods/evidence.md#records; B evidence/records.py.
+Method: docs/methods/evidence.md#records.
 """
 
 from __future__ import annotations
@@ -42,11 +42,9 @@ __all__ = [
     "load_observed_counts",
     "load_dense",
     "open_arrays",
-    "load_report",
-    "load_decisions",
-    "load_diagnostics",
     "complete",
     "progress",
+    "expected",
     "result_reader",
 ]
 EVIDENCE = "evidence"
@@ -325,14 +323,14 @@ class _TableWindows:
         if 0 < span <= len(indices):
             # A selection whose rows span no more rows than it requests reads that span once and indexes it: the same
             # rows as reading each run of distinct codes, with one read instead of one per run, and never more rows
-            # than requested (release 4.7.1).
+            # than requested.
             block = np.empty((span, *self.array.shape[1:]), dtype=self.array.dtype)
             begin = self.array.offset + (int(first) + low) * row_bytes
             self.array.reader.read_range(self.array.group, begin, begin + block.nbytes, memoryview(block).cast("B"))
             return block[indices - low]
         if 0 < len(indices) and size <= 4 * len(indices) + 4096:
             # The sorted distinct codes and their inverse by marking, O(size + n), instead of np.unique's sort:
-            # the same arrays (release 4.7; painting gathers every sample's rows once per batch and pass).
+            # the same arrays (painting gathers every sample's rows once per batch and pass).
             mark = np.zeros(size, dtype=np.bool_)
             mark[indices] = True
             selected = np.flatnonzero(mark)
@@ -389,7 +387,7 @@ class LikelihoodWindows:
     def resident_columns(self, columns: np.ndarray, samples: slice = slice(None)) -> CodedLikelihoods:
         """The evidence of ``samples`` (a contiguous range) at ``columns`` (strictly increasing site indices) as a
         resident CodedLikelihoods: each sample's own dictionary rows, and its codes or dense rows at those sites only
-        (release 4.7.1: a component's selected evidence, read once, so that repeated emission builds gather in
+        (a component's selected evidence, read once, so that repeated emission builds gather in
         memory, in parallel). Sample k of the copy is sample ``samples.start + k`` here."""
         if self.reader.closed:
             raise ValueError("window reader is closed")
@@ -526,31 +524,6 @@ def load_observed_counts(
         return observation_counts(arrays["observed"], axis=1, rows=rows)
 
 
-def load_decisions(file: CheckpointFile, *, expected_identity: str | None = None) -> EvidenceDecisions:
-    """Read site, sample and read-model decisions without decoding the evidence arrays."""
-    record = read_items(file, EVIDENCE, _identity(file, expected_identity), ("schema", "decisions"))
-    if record is None:
-        raise KeyError(EVIDENCE)
-    require_schema(record.payload, SUPPORTED_SCHEMAS)
-    return from_payload(EvidenceDecisions, record.payload["decisions"])
-
-
-def load_report(
-    file: CheckpointFile, *, expected_identity: str | None = None, nthreads: int | None = None
-) -> EvidenceDecisions:
-    """Consumer entry for the typed decision record (decoder team belongs to the store)."""
-    return load_decisions(file, expected_identity=expected_identity)
-
-
-def load_diagnostics(file: CheckpointFile, *, expected_identity: str | None = None) -> EvidenceDiagnostics:
-    """Read runtime diagnostics independently of scientific decisions."""
-    record = read_items(file, EVIDENCE, _identity(file, expected_identity), ("schema", "diagnostics"))
-    if record is None:
-        raise KeyError(EVIDENCE)
-    require_schema(record.payload, SUPPORTED_SCHEMAS)
-    return from_payload(EvidenceDiagnostics, record.payload["diagnostics"])
-
-
 @dataclass(frozen=True)
 class Reader:
     """Results' structural reader; its derivation is rebuilt from independently bound inputs."""
@@ -604,7 +577,7 @@ class Reader:
         return from_payload(EvidenceDecisions, payload["decisions"])
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
@@ -622,8 +595,6 @@ def result_reader(
     if contig not in manifest["contigs"]:
         raise InputError(f"{contig}: contig is absent from the bound run manifest")
     file = store.contig(contig)
-    if not file.has(EVIDENCE):
-        return None
     consumed = bound_payload_identity(file)
     parameters = from_payload(EvidenceParameters, manifest["parameters"]["evidence"])
     policy = NumericalPolicy(**manifest["numerical_policy"])
@@ -634,5 +605,13 @@ def result_reader(
         reverse=bool(manifest["ties"]["reverse"]),
         numerical_policy=policy,
     )
-    version, encoding = _layout(file, derivation)
-    return Reader(derivation, product, counts, schema=version, encoding=encoding)
+    return Reader(derivation, product, counts)
+
+
+def result_reader(store, manifest, *, product, contig=None, counts=False):
+    """Read the same expected request, adding the published array layout."""
+    if contig is None or not store.contig(contig).has(EVIDENCE):
+        return None
+    request = expected(store, manifest, product=product, contig=contig, counts=counts)
+    version, encoding = _layout(store.contig(contig), request.identity)
+    return replace(request, schema=version, encoding=encoding)

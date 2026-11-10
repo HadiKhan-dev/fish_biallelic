@@ -20,7 +20,7 @@ from haplotype_reconstruction.core import ties
 from .orders import panel_key
 from .parameters import BRANCH_LIMIT, WIDE_CLASS_QUANTA
 
-# Contract strings from 3.5 assembly-core U02/U13/U16; no tuning or normalization.
+# Release-family contract strings; preserve their spelling in recorded payloads.
 AMBIGUOUS_K = "ambiguous_k"
 COMMON_COHORT_PARENT_JOIN = "common_cohort_parent_join"
 COMPONENT_COUNT_NOT_REDUCED = "component_count_not_reduced"

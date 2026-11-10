@@ -4,133 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
-from ...contracts.discovery import DiscoveredBlock, DiscoveryBlockResult, DiscoveryPlan, DiscoverySearchStatus
+from ...contracts.discovery import DiscoveryBlockResult, DiscoveryPlan, DiscoverySearchStatus
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.roles import require_schema
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieCounts, TieSettings
-from ...science.discovery.diagnostics import DiscoveryDiagnostics
 from ...science.discovery.parameters import DiscoveryParameters
-from ...science.discovery.release import _search_status
-from ...science.discovery.search import SearchSummary
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
 from ...store.store import CheckpointStore
-
-
-def encode(block: DiscoveredBlock | None, diagnostics: DiscoveryDiagnostics | None = None) -> dict[str, Any] | None:
-    if block is None:
-        return None
-    summary = block.search
-    return dict(
-        block=int(block.block),
-        site_start=int(block.site_start),
-        positions=block.positions,
-        kept=block.kept,
-        latent=block.latent,
-        calls=block.calls,
-        alt_probability=block.alt_probability,
-        support=block.support,
-        unknown_mass=float(block.unknown_mass),
-        nll=float(block.nll),
-        latent_unknown=block.latent_unknown,
-        tied_panels=(
-            np.concatenate(block.tied_panels)
-            if block.tied_panels
-            else np.zeros((0, block.latent.shape[1]), dtype=np.int8)
-        ),
-        tied_panel_k=np.asarray([len(panel) for panel in block.tied_panels], dtype=np.int32),
-        tied_panel_nll=np.asarray(block.tied_panel_nll, dtype=np.float64),
-        tied_unknown=(
-            np.concatenate(block.tied_unknown)
-            if block.tied_unknown
-            else np.zeros((0, block.latent.shape[1]), dtype=np.bool_)
-        ),
-        search=dict(
-            k_values=summary.k_values,
-            k_log_scores=summary.k_log_scores,
-            natural_k_ceiling=int(summary.natural_k_ceiling),
-            expansions=int(summary.expansions),
-            data_starts=int(summary.data_starts),
-            exact_scores=int(summary.exact_scores),
-            exact_score_cache_hits=int(summary.exact_score_cache_hits),
-            residual_calls=int(summary.residual_calls),
-            residual_rows=int(summary.residual_rows),
-            limits=list(summary.limits),
-            heuristic_gauge_cuts=bool(summary.heuristic_gauge_cuts),
-            stop_reason=str(summary.stop_reason),
-            certified=bool(summary.certified),
-            tie_quantum=float(summary.tie_quantum),
-            escalated=False,
-            conventions=1,
-            ambiguous=bool(summary.ambiguous),
-            tied_alternatives=int(summary.tied_alternatives),
-            score_margin=float(summary.score_margin),
-            search_incomplete=bool(summary.search_incomplete),
-            unresolved=bool(summary.unresolved),
-            omissions=[asdict(item) for item in summary.omissions],
-            **diagnostic_fields(summary, diagnostics),
-            tie_events=(
-                {
-                    item.kind: {name: getattr(item, name) for name in ("decisions", "inside_tie", "wide", "boundary")}
-                    for item in diagnostics.tie_events.entries
-                }
-                if diagnostics is not None
-                else {}
-            ),
-        ),
-    )
-
-
-def diagnostic_fields(summary: DiscoverySearchStatus, diagnostics: DiscoveryDiagnostics | None = None) -> dict:
-    """Fixed-size measured fields; None/empty buckets mean unavailable in old data."""
-    return dict(
-        archive_max_k=summary.archive_max_k,
-        wall_seconds=None if diagnostics is None else diagnostics.wall_seconds,
-        cpu_seconds=None if diagnostics is None else diagnostics.cpu_seconds,
-        phase_seconds={},
-        selected_mean_field_failures=summary.selected_mean_field_failures,
-        other_mean_field_failures=summary.other_mean_field_failures,
-    )
-
-
-def decode(payload: Mapping[str, Any] | None) -> DiscoveredBlock | None:
-    """A recorded block (2.0 payloads without the 2.1 summary fields decode with their defaults)."""
-    if payload is None:
-        return None
-    search = dict(payload["search"])
-    search["limits"] = tuple(search["limits"])
-    if "omissions" in search:
-        search["omissions"] = tuple(dict(item) for item in search["omissions"])
-    if "tie_events" in search:
-        search["tie_events"] = {
-            str(kind): {str(name): int(value) for name, value in dict(counts).items()}
-            for kind, counts in dict(search["tie_events"]).items()
-        }
-    fields = dict(payload)
-    fields["search"] = _search_status(SearchSummary(**search))
-    counts = fields.pop("tied_panel_k", None)
-    if counts is not None:
-        bounds = np.concatenate(([0], np.cumsum(np.asarray(counts, dtype=np.int64))))
-        stacked, unknown = fields["tied_panels"], fields["tied_unknown"]
-        fields["tied_panels"] = tuple(
-            np.ascontiguousarray(stacked[a:b]) for a, b in zip(bounds[:-1], bounds[1:], strict=False)
-        )
-        fields["tied_unknown"] = tuple(
-            np.ascontiguousarray(unknown[a:b]) for a, b in zip(bounds[:-1], bounds[1:], strict=False)
-        )
-        fields["tied_panel_nll"] = tuple(float(value) for value in fields.get("tied_panel_nll", ()))
-    else:
-        for name in ("tied_panels", "tied_panel_nll", "tied_unknown"):
-            fields.pop(name, None)
-    return DiscoveredBlock(**fields)
-
 
 STAGE = "discovery"
 PLAN = "discovery/plan"
@@ -149,7 +35,7 @@ def diagnostic_key(block: int) -> str:
 
 
 class BlockAdapter:
-    """Versioned discriminated block completion, decoded into D1's frozen contract."""
+    """Versioned discriminated block completion, decoded into its frozen record contract."""
 
     schema = 1
 
@@ -187,10 +73,9 @@ def identities(
 ) -> dict[str, str]:
     """Bind the ordered block domain and each block to independent scientific inputs.
 
-    Release 4.10: a process keeps the result, keyed by everything it derives from: every reader of a contig's domain
-    derived thousands of identities again (chr3 at 0.5x: 7,533 blocks, about 1 s, derived anew by the pedigree
-    decision, each export check and the run's completion step). The shared parts are converted to plain JSON data
-    once for the key; ``jsonable`` returns plain JSON data unchanged, so every identity is the same."""
+    Cache the result per process, keyed by every derivation input, so downstream readers do not
+    repeatedly traverse thousands of block identities. Shared parts are converted to plain JSON data
+    once for the key; ``jsonable`` returns that data unchanged."""
     from ...core.digest import json_digest, jsonable
 
     code = jsonable(
@@ -218,7 +103,7 @@ def identities(
     return dict(result)
 
 
-# Discovery identities per process (release 4.10), keyed by everything they derive from.
+# Discovery identities per process, keyed by everything they derive from.
 _IDENTITIES: dict[tuple, dict[str, str]] = {}
 
 
@@ -253,7 +138,7 @@ class Reader:
         if PlanAdapter().decode(payload).blocks != self.blocks:
             raise InvariantError("discovery plan block count differs from evidence")
         products = []
-        with self.file.batch() as reader:  # one index snapshot and handle for every block record (4.8)
+        with self.file.batch() as reader:  # one index snapshot and handle for every block record
             for index in range(self.blocks):
                 key = block_key(index)
                 saved = resume(self.file, key, self.identities[key], reader=reader)
@@ -281,7 +166,7 @@ class Reader:
 _CHECKED: set[tuple[str, int, str]] = set()
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
@@ -304,8 +189,6 @@ def result_reader(
     if stage not in (None, "discovery"):
         raise InputError(f"unsupported discovery stage {stage!r}")
     file = store.contig(contig)
-    if not file.has(PLAN):
-        return None
     request = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     if request is None:
         raise InvariantError("discovery requires published evidence")
@@ -320,20 +203,37 @@ def result_reader(
         blocks=count,
         evidence_identity=request.identity,
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
-        ties=TieSettings(reverse=bool(manifest["ties"]["reverse"]), keep=tuple(manifest["ties"].get("keep", ()))),
+        ties=TieSettings(reverse=bool(manifest["ties"]["reverse"]), keep=tuple(manifest["ties"]["keep"])),
     )
-    checked = (file.path, os.stat(file.path).st_ino, expected[PLAN])
+    return Reader(file, expected, product, count)
+
+
+def result_reader(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+    stage: str | None = None,
+) -> Reader | None:
+    """Check the expected plan and every block before exposing discovery."""
+    if contig is None or not store.contig(contig).has(PLAN):
+        return None
+    request = expected(store, manifest, product=product, contig=contig, stage=stage)
+    file, count = store.contig(contig), request.blocks
+    expected_identities = request.identities
+    checked = (file.path, os.stat(file.path).st_ino, expected_identities[PLAN])
     if checked in _CHECKED:
-        return Reader(file, expected, product, count)
+        return Reader(file, expected_identities, product, count)
     # One pass over the plan and every block: each record's envelope is checked once, with its small metadata. Every
     # record is read before deciding, so a present record whose identity differs raises CheckpointMismatch even when
-    # another is missing; a missing record leaves the domain incomplete. Release 4.10: through one index snapshot and
+    # another is missing; a missing record leaves the domain incomplete. Use one index snapshot and
     # one handle (CheckpointFile.batch); per block, an index refresh and an open cost a network filesystem far more
     # than the small decode (chr3 at 0.5x: 7,533 blocks, read again by every process that checks the domain).
     with file.batch() as reader:
-        plan = read_items(file, PLAN, expected[PLAN], ("schema", "blocks"), reader=reader)
+        plan = read_items(file, PLAN, expected_identities[PLAN], ("schema", "blocks"), reader=reader)
         blocks = [
-            read_items(file, block_key(i), expected[block_key(i)], ("schema", "block", "kind"), reader=reader)
+            read_items(file, block_key(i), expected_identities[block_key(i)], ("schema", "block", "kind"), reader=reader)
             for i in range(count)
         ]
     present = [block for block in blocks if block is not None]
@@ -346,7 +246,7 @@ def result_reader(
         if block.payload["block"] != index or block.payload["kind"] not in ("discovered", "uninformative"):
             raise InvariantError("discovery block completion has invalid metadata")
     _CHECKED.add(checked)
-    return Reader(file, expected, product, count)
+    return Reader(file, expected_identities, product, count)
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:

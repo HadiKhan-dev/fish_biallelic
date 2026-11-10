@@ -105,8 +105,8 @@ def _ball_site_dosages(out, site, centres, indices, flips, sizes, pairs, start, 
             out[3 * site + fixed + 1 - current, state] = changed[bit]
         else:
             both = joint[min(a, b), max(a, b)]
-            # The old table also formed its centre cell by subtracting moved
-            # masses. Clamp roundoff at zero; mathematical pair masses agree.
+            # Centre-cell mass is total - changed[a] - changed[b] + both.
+            # Clamp negative roundoff to zero.
             out[3 * site + x + y, state] += max(total - changed[a] - changed[b] + both, 0.0)
             out[3 * site + 1 - x + y, state] += max(changed[a] - both, 0.0)
             out[3 * site + x + 1 - y, state] += max(changed[b] - both, 0.0)

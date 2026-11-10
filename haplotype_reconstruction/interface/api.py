@@ -1,7 +1,7 @@
 """Provide the lazy Python entry points with an explicit numerical runtime boundary.
 
 Settings loading uses only the standard library. Execution is delegated to the
-runtime and the same graph composition used by the CLI (WP_I1 section 4.4).
+runtime and the same graph composition used by the CLI.
 Results are opened lazily and never reopen original observations.
 """
 

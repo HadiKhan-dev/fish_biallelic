@@ -11,7 +11,7 @@ shared model; successful simpler candidates remain eligible after a more complex
 Optimiser convergence flags are diagnostics and decide nothing. The selected fit is applied to every
 cell of the contig without genotype-mixture priors. When calibration is disabled, the training or held-out folds are
 empty, the shared model cannot be fitted or it has no finite held-out score, the fixed binomial model applies
-(``EvidenceParameters.fixed_error``).
+(``ReadModelParameters.fixed_error``).
 No truth, pedigree or founder panel enters fitting.
 """
 
@@ -37,10 +37,6 @@ from .parameters import (
     CALIBRATION_TRAIN_FOLDS as _TRAIN_FOLDS,
 )
 from .parameters import ReadModelParameters
-
-# Folds 0/1 (of every four fold windows) train, folds 2/3 are held out.
-# A selection whose z lies within this distance of selection_z is counted as a near-tie in the ties report.
-
 
 def histograms(counts, positions, config: ReadModelParameters):
     """Per-sample histograms over the observed (depth, ALT) cells of every kept site, built one sample at a time.
@@ -92,11 +88,11 @@ def block_scores(counts, positions, config: ReadModelParameters, depth, alt, mod
 
 
 def calibrate(
-    counts: np.ndarray, positions: np.ndarray, config: ReadModelParameters, team: int
+    counts: np.ndarray, positions: np.ndarray, config: ReadModelParameters, *, map_work=map
 ) -> tuple[ReadModelFit | None, ReadModelDecision]:
     """Fit and select the contig's read model. Returns (ReadModelFit | None, ReadModelDecision).
 
-    Kernels run on the caller's Numba team; per-sample fits use ``team`` Python team.
+    Kernels run on the caller's Numba team; independent sample fits use its ordered ``map_work``.
     """
     if not config.enabled:
         return None, ReadModelDecision(
@@ -140,7 +136,7 @@ def calibrate(
     candidates = {fits.BINOMIAL: shared}
     complex_failure = None
     try:
-        pooled = fits.fit_pooled_samples(training, depth, alt, shared, team)
+        pooled = fits.fit_pooled_samples(training, depth, alt, shared, map_work=map_work)
         candidates[fits.SAMPLE_BINOMIAL] = pooled
         joint = fits.fit_joint(training, depth, alt, pooled, config)
         candidates[fits.SAMPLE_JOINT] = joint

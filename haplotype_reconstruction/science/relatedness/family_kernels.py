@@ -1,8 +1,7 @@
 """Evaluate full-sib families and their gain screens.
 
-Owns the relocated family_kernels units. No storage, environment or runtime policy.
-Method: docs/methods/relatedness.md; WP_RL1 §4.3, L13. Member sums precede parent laws.
-Float32 screens and their original fallback expressions remain unchanged (§4.7).
+Member sums precede parent laws; float32 screens fall back to exact evaluation within their error allowance.
+Method: docs/methods/relatedness.md.
 """
 
 from __future__ import annotations
@@ -480,7 +479,7 @@ def screen_shapes(S, families, W2, logpi, m, A, y, Y):
     M = logpi.shape[0]
     F = families.shape[0]
     # Fetch each shared row once per site tile: typed-list access retains the array, which must stay outside
-    # the scalar inner loops. Each site's arithmetic and every output cell are unchanged.
+    # the scalar inner loops. Sites remain independent and each output cell uses its site-local terms.
     tiles = (M + SCREEN_SITE_TILE - 1) // SCREEN_SITE_TILE
     for t in numba.prange(F * tiles):
         j = t // tiles

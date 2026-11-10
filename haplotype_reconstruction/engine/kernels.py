@@ -4,8 +4,7 @@ The caller supplies roots and applies numerical settings before importing Numba.
 This module never discovers scientific stages or imports them. The caller preloads
 its roots before warm_up; every executing process activates declared caches only
 at that explicit boundary. Persistent cache failures cost compilation time, never
-scientific results. ENG-19/27 are relocated from 3.5 execution/bootstrap.py and
-kernel_cache.py; the learned manifest and signature guard retain their semantics.
+scientific results. ENG-19/27 describe the learned manifest and signature guard.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any, cast
@@ -35,7 +34,7 @@ from typing import Any, cast
 from ..core.errors import InvariantError
 from ..store.identity import PACKAGE_ROOT, CodeIdentity, code_dependency_identity
 
-# P0 engine.parameters.csv ENG-19/27; operational storage, never science identity.
+# ENG-19/27: operational kernel-cache storage limits, in bytes.
 KEEP_KEYS = 6
 KERNEL_SCRATCH = Path("/dev/shm")
 KERNEL_SCRATCH_FREE_BYTES = 4 << 30
@@ -398,8 +397,7 @@ def install_compile_lock() -> None:
 
     * a process holds an overload's lock file (beside its function's cache index) from its cache check to its save:
       another process needing that overload meanwhile waits, then loads what the first saved. Overloads of one
-      function compile in parallel (release 4.8: the lock was per function, so a function's ten overloads compiled
-      one after another, and their callers waited; on a cold cache that chain held assembly back for minutes);
+      function compile in parallel;
     * every save of a function's index and data files holds the function's index lock: one writer at a time, each
       re-reading the index under the lock, so no entry is lost and no data file is shared.
 
@@ -502,15 +500,13 @@ class CacheState:
     missing: dict = field(default_factory=dict)
 
 
-def _compile_function(task, shared, budget):
+def _compile_function(name: tuple[str, str], encoded: bytes, encoded_declared: bytes):
     """Compile one imported dispatcher's union; declared failures are invariants."""
     from ..core.kernels import declarations, enable_caches
 
-    name, dispatcher, encoded, encoded_declared = task
-    if dispatcher is None:
-        dispatcher = next(
-            (entry.dispatcher for entry in declarations() if (entry.module, entry.function) == name), None
-        )
+    dispatcher = next(
+        (entry.dispatcher for entry in declarations() if (entry.module, entry.function) == name), None
+    )
     signatures, declared = pickle.loads(encoded), pickle.loads(encoded_declared)
     install_signature_guard()
     install_compile_lock()
@@ -532,27 +528,23 @@ def _compile_function(task, shared, budget):
     return name, compiled, time.perf_counter() - started
 
 
-def _compile_requests(requests: Mapping, required: Mapping, seconds: Mapping, team) -> tuple[int, dict]:
-    from numba.core.serialize import dumps
+def _compile_requests(state: CacheState, requests: Mapping, cores: int) -> tuple[int, dict]:
+    """Run the same overload tasks as deferred warm-up in a fresh worker group."""
+    from .graph import run_graph
 
-    from .workers import BudgetedPool
-
-    # Passing a CPUDispatcher through pickle rebuilds an uncached dispatcher.
-    # Resolve the preloaded, declared object in the worker so cache activation applies.
-    # One task per overload (release 4.8): a function's overloads compile in parallel (install_compile_lock).
-    tasks = [
-        (name, None, dumps((signature,)), dumps(set(required.get(name, ())) & {signature}))
-        for name, signatures in requests.items()
-        for signature in sorted(signatures, key=str)
-    ]
-    tasks.sort(key=lambda item: (-seconds.get(item[0], 0.0), -len(requests[item[0]]), item[0]))
-    cores = int(team.threads()) if hasattr(team, "threads") else int(team)
+    tasks = sorted(
+        compile_tasks(replace(state, missing=requests)),
+        key=lambda task: (-state.seconds.get(task.args[0], 0.0), -len(requests[task.args[0]]), task.args[0]),
+    )
     count, timings = 0, {}
     if tasks:
-        with BudgetedPool(team, processes=max(1, min(cores, len(tasks))), label="kernel-warm-up") as pool:
-            for name, compiled, elapsed in pool.imap_unordered(_compile_function, tasks):
-                count += compiled
-                timings[name] = timings.get(name, 0.0) + elapsed
+        values = run_graph(
+            tasks, cores=cores, max_workers=max(1, min(cores, len(tasks))), in_process=False,
+            priorities={task.key: float(len(tasks) - index) for index, task in enumerate(tasks)},
+        )
+        for name, compiled, elapsed in values.values():
+            count += compiled
+            timings[name] = timings.get(name, 0.0) + elapsed
     return count, timings
 
 
@@ -618,7 +610,7 @@ def plan_warm_up(
 def warm_up(
     roots: Iterable[str],
     requests: Mapping,
-    team,
+    cores: int,
     *,
     cache: Path | None = None,
     store: Path | None = None,
@@ -628,21 +620,20 @@ def warm_up(
     """Seed and warm declarations plus learned signatures before scientific pools.
 
     The caller preloads roots and sets NUMBA_CACHE_DIR before importing Numba.
-    One task per function uses the engine pool; a fresh pool, one task per
-    function, verifies the complete union after a cold compile. Learned failures are counted/skipped;
+    One graph task per overload compiles the missing set; a second graph with
+    fresh workers verifies the complete union after a cold compile. Learned failures are counted/skipped;
     declared overload failures raise InvariantError. Store I/O failures only log.
     Call publish(state) in a finally block, including after scientific failure.
     """
     state = plan_warm_up(roots, requests, cache=cache, store=store, key=key, key_closure=key_closure)
-    state.compiled, timings = _compile_requests(state.missing, state.required, state.seconds, team)
+    state.compiled, timings = _compile_requests(state, state.missing, cores)
     state.seconds.update(timings)
     total = sum(map(len, state.union.values()))
     state.verified = total
     if state.requested:
-        # Verified by a fresh pool (processes that compiled nothing), one task per function as in the compile step,
-        # so each function's cache index still has one writer if a load must recompile. A single process loaded
-        # every kernel in turn: one busy CPU for a minute or more at the start of every cold run.
-        state.verified, _ = _compile_requests(state.union, state.required, state.seconds, team)
+        # The first graph has closed its workers. Verify the full union in fresh
+        # processes so a loaded dispatcher cannot hide a missing cache overload.
+        state.verified, _ = _compile_requests(state, state.union, cores)
     state.stale = state.compiled < state.requested or state.verified < total
     state.skipped = total - state.verified
     return state
@@ -656,8 +647,8 @@ def kernel_task_key(name: tuple[str, str], overload: int = 0):
 
 
 def compile_kernel(name: tuple[str, str], signatures: bytes, declared: bytes) -> tuple[tuple[str, str], int, float]:
-    """Graph task: compile one function's missing overloads into the run's kernel cache (warm-up's pool task)."""
-    return _compile_function((name, None, signatures, declared), None, None)
+    """Graph task: compile one function's missing overloads into the run's kernel cache (eager and deferred warm-up share this action)."""
+    return _compile_function(name, signatures, declared)
 
 
 def compile_tasks(state: CacheState) -> tuple:
@@ -665,7 +656,7 @@ def compile_tasks(state: CacheState) -> tuple:
     stages instead of before them (interface.run). The caller attaches each consumer's missing compile keys as
     dependencies before admitting that stage; unrelated work can proceed. Overload locks still protect shared
     callees and lazy callers, and index locks every save (install_compile_lock). There is no verify pass on this
-    route. Release 4.8: one task per overload, not per function, so a function's overloads compile in parallel."""
+    route. One task per missing overload allows a function's overloads to compile in parallel."""
     from numba.core.serialize import dumps
 
     from .graph import ResourceRequest, Task

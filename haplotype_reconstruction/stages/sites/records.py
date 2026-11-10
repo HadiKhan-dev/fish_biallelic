@@ -38,12 +38,12 @@ class SitesAdapter:
         return from_payload(ReleasedSites, payload)
 
 
-def identity(evidence_identity: str, payload_identity: str, *, synthetic: bool = False) -> str:
+def derivation(evidence_identity: str, payload_identity: str, *, synthetic: bool = False) -> str:
     """Bind upstream evidence, consumed observations and source/stage code, without export options."""
     from ...store.identity import code_dependency_identity
     from ...store.protocol import Derivation, NumericalPolicy
 
-    roots = ("stages.inputs.sites", "stages.inputs.sources", "stages.inputs.vcf_alleles")
+    roots = ("stages.sites.tasks", "stages.inputs.sources", "stages.inputs.vcf_alleles")
     return Derivation(
         code=code_dependency_identity(roots),
         parameters={"synthetic": synthetic},
@@ -65,7 +65,7 @@ class SitesReader:
         return SitesAdapter().decode(payload)
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
@@ -80,7 +80,7 @@ def result_reader(
     result_reader supplies its expected evidence derivation; the input binding is
     the immutable source record made at evidence construction, never this product.
     """
-    if product != "released_sites":
+    if product != "sites":
         raise InvariantError(f"unsupported sites reader product {product!r}")
     if evidence_identity is None:
         from ..evidence import records
@@ -95,4 +95,10 @@ def result_reader(
         payload_identity = bound_payload_identity(store.contig(contig))
     source = manifest.get("source", {})
     synthetic = source.get("kind") == "simulation"
-    return SitesReader(identity(evidence_identity, payload_identity, synthetic=synthetic))
+    return SitesReader(derivation(evidence_identity, payload_identity, synthetic=synthetic))
+
+
+def result_reader(store, manifest, *, product, contig, evidence_identity=None, payload_identity=None):
+    """Expose the same expected sites request to read-only consumers."""
+    return expected(store, manifest, product=product, contig=contig,
+                    evidence_identity=evidence_identity, payload_identity=payload_identity)

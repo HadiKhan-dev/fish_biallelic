@@ -1,8 +1,8 @@
-"""Compose PE4/PE5 with PE2 exclusion and PE3 relative tasks, then publish once.
+"""Compose pedigree decision, exclusion and relative-evidence tasks, then publish once.
 
 Owns PD27's engine/storage boundary. Science run.py owns the ordered transitions;
 this adapter never renders tables or repairs a partial cached product.
-Method: docs/methods/pedigree.md#products-and-published-tables (WP_PE5 §4.10).
+Method: docs/methods/pedigree.md#products-and-published-tables.
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ from ...contracts.pedigree import (
 )
 from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
-from ...engine.scheduler import TASK_THREADS
+from ...engine.cpu import TASK_THREADS
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
 from ...science.pedigree import panel, resampling, stacking
 from ...science.pedigree import run as science
-from ...science.pedigree.parameters import ExclusionConfig, PedigreeConfig
+from ...science.pedigree.parameters import ExclusionParameters, PedigreeParameters
 from ...science.pedigree.resampling import FitResult
 from ...store.container import CheckpointFile
 from ...store.protocol import NumericalPolicy, claim
@@ -63,7 +63,7 @@ from .records import (
     PedigreeDependencies,
     RequestAdapter,
     bound_inputs,
-    derivation,
+    expected,
     request_dependencies,
     result_reader,
 )
@@ -72,8 +72,6 @@ __all__ = [
     "DecisionStageInputs",
     "StoredPrepared",
     "StoredEvidence",
-    "task",
-    "tasks",
     "task_stored",
     "run",
     "run_stored",
@@ -119,9 +117,9 @@ class StoredEvidence:
 
 @dataclass(frozen=True)
 class DecisionStageInputs:
-    """Already prepared/scored PE1–PE3 inputs in their declared axes.
+    """Already prepared/scored pedigree preparation–pedigree scoring inputs in their declared axes.
 
-    Evidence is consumed only by the independent PE2 exclusion tasks. Observed
+    Evidence is consumed only by the independent pedigree screening exclusion tasks. Observed
     counts are streamed from those masks by the caller, one configured contig at
     a time. No raw genotype or painting computation occurs in this stage.
     """
@@ -137,7 +135,10 @@ class DecisionStageInputs:
 
 
 def _dependencies(
-    inputs: DecisionStageInputs, request: ExclusionRequest, parameters: PedigreeConfig, policy: NumericalPolicy | None
+    inputs: DecisionStageInputs,
+    request: ExclusionRequest,
+    parameters: PedigreeParameters,
+    policy: NumericalPolicy | None,
 ) -> PedigreeDependencies:
     if request.contigs != inputs.contigs:
         raise InputError("exclusion request differs from configured contigs")
@@ -145,9 +146,12 @@ def _dependencies(
 
 
 def _identity(
-    inputs: DecisionStageInputs, request: ExclusionRequest, parameters: PedigreeConfig, policy: NumericalPolicy | None
+    inputs: DecisionStageInputs,
+    request: ExclusionRequest,
+    parameters: PedigreeParameters,
+    policy: NumericalPolicy | None,
 ) -> str:
-    return derivation(
+    return expected(
         parameters,
         inputs.genome.sample_ids,
         inputs.contigs,
@@ -159,10 +163,10 @@ def _identity(
 
 def _request_identity(
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     policy: NumericalPolicy | None,
 ) -> str:
-    return derivation(
+    return expected(
         parameters,
         inputs.genome.sample_ids,
         inputs.contigs,
@@ -175,7 +179,7 @@ def _request_identity(
 def resume(
     file: CheckpointFile,
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     numerical_policy: NumericalPolicy | None = None,
 ) -> Pedigree | None:
@@ -192,7 +196,7 @@ def resume(
 def _resumed(
     file: CheckpointFile,
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy | None,
 ) -> tuple[str, Pedigree] | None:
     if not file.has(PRODUCT):
@@ -208,7 +212,7 @@ def _resumed(
 
 def run(
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     *,
     workers: int = 1,
     file: CheckpointFile | None = None,
@@ -248,7 +252,7 @@ def run(
 def _calibrated(
     fitted: tuple[float, CalibrationRecord],
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     started: science.decision.FitStart,
     *,
     workers: int,
@@ -311,7 +315,7 @@ def _resampled_retained(
 
 def _requested(
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     decided: Decision,
     *,
     workers: int = 1,
@@ -388,7 +392,7 @@ def _release_retained(
 
 def _release(
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     decided: Decision,
     request: ExclusionRequest,
     evidence: tuple[ExclusionEvidence, ...],
@@ -458,7 +462,7 @@ def _publish_retained(
 
 def _publish(
     inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     released: ReleasedDecision,
     search: tuple[SearchDiagnosticView, ...],
     contrasts: tuple[relatives.ContigContrasts, ...],
@@ -493,28 +497,6 @@ def _reply(identity: str, product: Pedigree, receipt: bool) -> Pedigree | dict[R
     return product_receipt(identity) if receipt else product
 
 
-def task(
-    inputs: DecisionStageInputs,
-    parameters: PedigreeConfig,
-    *,
-    cores: int = 1,
-    file: CheckpointFile | None = None,
-    contig_files: Mapping[str, CheckpointFile] | None = None,
-    numerical_policy: NumericalPolicy | None = None,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> Task:
-    """Declare the scored-input stage cut; expansion preserves the pure transition order."""
-    return Task(
-        TaskKey("pedigree", "decision"),
-        run,
-        args=(inputs, parameters),
-        kwargs=dict(file=file, contig_files=contig_files, numerical_policy=numerical_policy),
-        depends_on=depends_on,
-        affinity=_AFFINITY,
-        outputs=(RecordKey("run", PRODUCT),),
-        resources=ResourceRequest(max_cores=cores),
-        thread_argument="workers",
-    )
 
 
 def _summary(value: PreparedChromosome | StoredPrepared) -> ChromosomeSummaryView:
@@ -525,7 +507,7 @@ def _exclusion_stored(
     contig: str,
     reference: StoredEvidence,
     dyads: np.ndarray,
-    parameters: ExclusionConfig,
+    parameters: ExclusionParameters,
     configured_contigs: int,
     sample_count: int,
     *,
@@ -551,7 +533,7 @@ def _exclusion_task(
     contig: str,
     evidence: ContigEvidence | StoredEvidence,
     dyads: np.ndarray,
-    parameters: ExclusionConfig,
+    parameters: ExclusionParameters,
     configured_contigs: int,
     sample_count: int,
     *,
@@ -586,7 +568,7 @@ def _exclusion_task(
 
 def _relative_stored(
     reference: StoredPrepared,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     pairs: np.ndarray,
     *,
     threads: int = 1,
@@ -599,7 +581,7 @@ def _relative_stored(
 
 def _relative_task(
     prepared: PreparedChromosome | StoredPrepared,
-    parameters: PedigreeConfig,
+    parameters: PedigreeParameters,
     pairs: np.ndarray,
     *,
     cores: int,
@@ -632,7 +614,7 @@ def run_stored(
     manifest = store.manifest("run") if manifest is None else manifest
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
-    configured_parameters = from_payload(PedigreeConfig, manifest["parameters"]["pedigree"])
+    configured_parameters = from_payload(PedigreeParameters, manifest["parameters"]["pedigree"])
     precheck(len(manifest["sample_ids"]), len(manifest["contigs"]), configured_parameters, basis="configured")
     reader = result_reader(store, manifest, product="pedigree")
     if reader is not None:
@@ -659,8 +641,8 @@ def run_stored(
     relatedness = GuardRelatedness(bound.sample_ids, family.family, family.member_support)
     samples = len(bound.sample_ids)
     observed_counts = np.empty((len(bound.contigs), samples), dtype=np.int64)
-    # Release 4.10: each contig's exact counts in OBSERVED_COUNT_RANGES sample ranges, every range on its own reader,
-    # all read concurrently (decoded contig after contig, one sample at a time, before; the largest contig ran alone).
+    # Split each contig's exact counts into OBSERVED_COUNT_RANGES sample ranges, each on its own
+    # reader, so independent ranges can decode concurrently even on the largest contig.
     edges = [round(samples * r / OBSERVED_COUNT_RANGES) for r in range(OBSERVED_COUNT_RANGES + 1)]
     units = [
         (k, contig, identity, first, stop)
@@ -669,8 +651,8 @@ def run_stored(
         if stop > first
     ]
 
-    # Release 4.11: each range decodes on its own budget (TASK_THREADS: one CPU inside the map), so the ranges'
-    # decodes overlap (a store with the task's width ran them one at a time behind the codec's pipeline lock).
+    # Each range uses TASK_THREADS (one CPU inside the map), allowing independent decodes
+    # to overlap without sharing the codec pipeline lock.
     readers = CheckpointStore(root, nthreads=TASK_THREADS)
 
     def count(unit: tuple[int, str, str, int, int]) -> np.ndarray:
@@ -747,7 +729,7 @@ def task_stored(
     cores: int = 1,
     depends_on: tuple[TaskKey, ...] = (),
 ) -> Task:
-    """Join any PE1–PE3 score barrier; construction performs no I/O.
+    """Join any pedigree preparation–pedigree scoring score barrier; construction performs no I/O.
 
     The dispatch itself retains no arrays and inherits any outer affinity. Its
     decision child establishes the affinity required for the retained fit and
@@ -760,13 +742,3 @@ def task_stored(
         depends_on=depends_on,
         outputs=(RecordKey("run", PRODUCT),),
     )
-
-
-def tasks(
-    root: str,
-    *,
-    maximum_cores: int = 1,
-    depends_on: tuple[TaskKey, ...] = (),
-) -> tuple[Task, ...]:
-    """Expose the stored-input action to integration and the kernel declaration audit."""
-    return (task_stored(root, cores=maximum_cores, depends_on=depends_on),)

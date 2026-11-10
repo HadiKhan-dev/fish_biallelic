@@ -7,7 +7,6 @@ meiotic switch probability and the measured map length between bins, and the inf
 tempered view.
 
 Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-information-blocks
-PE1–PE3 preserve this 3.5 method.
 """
 
 from __future__ import annotations
@@ -19,10 +18,12 @@ from typing import cast
 import numpy as np
 from numba import prange
 
+from haplotype_reconstruction.science.painting.parameters import PaintingParameters
+
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
 from ...contracts.likelihoods import gather_likelihoods, likelihood_window_sites
-from ...contracts.painting import ComponentPainting, Painting, PaintingSettings, TrackStatus
+from ...contracts.painting import ComponentPainting, Painting, TrackStatus
 from ...contracts.pedigree import HammingTransition, PreparedChromosome, PreparedComponent, SourceFactors
 from ...core.errors import InputError
 from ...core.kernels import kernel
@@ -30,7 +31,7 @@ from ..painting import api as painting_hmm
 from ..shared.recombination import haldane_fraction
 from . import sources
 from .kernels.signatures import OVERLOADS
-from .parameters import EMISSION_SAMPLE_BLOCK, INFORMATIVE_GL_SPREAD, SELECTOR_SWITCH_FLOOR, PreparationConfig
+from .parameters import EMISSION_SAMPLE_BLOCK, INFORMATIVE_GL_SPREAD, SELECTOR_SWITCH_FLOOR, PreparationParameters
 
 # Painting tracks whose class is not an anchored founder identity (painting TrackStatus values).
 _BACKGROUND_STATUS = TrackStatus.BACKGROUND
@@ -133,13 +134,13 @@ def _source_factors(
     painted: ComponentPainting,
     evidence: ContigEvidence,
     sites: np.ndarray,
-    painting_config: PaintingSettings,
+    painting_config: PaintingParameters,
     transition: HammingTransition,
     available: np.ndarray,
     claim_threads: Callable[[], None],
     component_index: int,
 ) -> SourceFactors:
-    """Fill the original dense factors while keeping only one sample batch's emissions/GL live.
+    """Fill the dense factors while keeping only one sample batch's emissions/GL live.
 
     Every candidate's backward recurrence is independent. Cached emissions are unpacked
     by the same batch boundary as uncached emissions; neither route retains an all-sample
@@ -186,9 +187,9 @@ def _prepare_component(
     index: int,
     painted: ComponentPainting,
     evidence: ContigEvidence,
-    painting_config: PaintingSettings,
+    painting_config: PaintingParameters,
     chromosome_map: ChromosomeGeneticMap,
-    config: PreparationConfig,
+    config: PreparationParameters,
     claim_threads: Callable[[], None],
     rate_is_measured: bool = False,
     *,
@@ -253,7 +254,7 @@ def _prepare_component(
 
 
 def _information_exponents(
-    prepared: list[PreparedComponent], config: PreparationConfig, claim_threads: Callable[[], None]
+    prepared: list[PreparedComponent], config: PreparationParameters, claim_threads: Callable[[], None]
 ) -> np.ndarray:
     """Chromosome-wide marker groups with only one sample batch's concatenated GL live."""
     samples = prepared[0].genotype_likelihoods.shape[0]
@@ -279,7 +280,7 @@ def prepare_chromosome(
     painting: Painting,
     evidence: ContigEvidence,
     chromosome_map: ChromosomeGeneticMap,
-    config: PreparationConfig,
+    config: PreparationParameters,
     claim_threads: Callable[[], None] = lambda: None,
     rate_is_measured: bool = False,
 ) -> PreparedChromosome:

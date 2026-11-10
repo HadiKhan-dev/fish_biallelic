@@ -4,7 +4,7 @@ Owns selection/block, memo, proposals and selected adapters (LS30). Memos are st
 initial/l1 memo records are published before their block, and missing memo state
 cannot silently become a cold search. Completion verifies all promised records.
 Must not fit, choose candidates or use physical container tokens as input identity.
-Method: docs/methods/local_selection.md#records; WP_SE2 section 4.14.
+Method: docs/methods/local_selection.md#records.14.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ SCHEMA = 1
 
 
 def context_assembly_prefix(round_name: str) -> str:
-    """Return AS6's context scope; its role and level enter its own derivation."""
+    """Return assembly's context scope; its role and level enter its own derivation."""
     return f"local_selection/{round_name}/assembly"
 
 
@@ -278,7 +278,7 @@ class SelectionRecords:
         if selected is None:
             raise InvariantError(f"selection {self.contig}/{self.round_name} is incomplete")
         result = []
-        with self.file.batch() as reader:  # one index snapshot and handle for the round's block records (4.8)
+        with self.file.batch() as reader:  # one index snapshot and handle for the round's block records
             for index in selected["indices"]:
                 key, identity = self.key("block", index), self.derivation("block", index)
                 saved = read_items(self.file, key, identity, ("panel",), reader=reader)
@@ -348,7 +348,7 @@ class Reader:
                     saved = read_items(item.file, key, identity, ("summary",), reader=reader)
                     assert saved is not None
                     summaries.append(from_payload(SelectionSummary, saved.payload["summary"]))
-            # The 3.5 record groups the ties report reads: a round's blocks, then its proposals (refit rounds).
+            # The record groups the ties report reads: a round's blocks, then its proposals (refit rounds).
             blocks = tuple(summary.tie_events for summary in summaries)
             sources.append(TieSource(f"local_selection/{item.round_name}/blocks", blocks))
             if item.round_name != "initial":
@@ -367,7 +367,7 @@ class Reader:
         return tuple(sources)
 
 
-def result_reader(
+def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
     *,
@@ -378,7 +378,7 @@ def result_reader(
 ) -> Reader | None:
     """Derive selection identities from bound parameters and independently checked upstreams.
 
-    G1/IN1 may supply already verified evidence/discovery identities. Otherwise their
+    graph/workflow may supply already verified evidence/discovery identities. Otherwise their
     stage readers verify them from the same manifest. No selection envelope supplies
     an expected identity. Finished panel views do not decode outcomes or memo fits.
     """
@@ -398,8 +398,6 @@ def result_reader(
     if name not in ROUNDS:
         raise InputError(f"unsupported selection round {name!r}")
     file = store.contig(contig)
-    if not file.has(f"selection/selected/{contig}/{name}"):
-        return None
     if upstream is None:
         evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
         discovery = discovery_records.result_reader(store, manifest, product="discovery", contig=contig)
@@ -425,7 +423,7 @@ def result_reader(
             identities,
             assembly_parameters if round_name != "initial" else None,
             reverse=bool(settings["reverse"]),
-            tie_keep=tuple(settings.get("keep", ())),
+            tie_keep=tuple(settings["keep"]),
             numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
         )
         scopes.append(SelectionRecords(file, contig, round_name, expected))
@@ -433,29 +431,25 @@ def result_reader(
     context_scopes = []
     if product in ("tie_sources", "join_searches"):
         from ...store.protocol import bound_payload_identity
-        from ..assembly.records import COMPLETION, RecordCapability, assembly_identity
+        from ..assembly.records import COMPLETION
+        from ..assembly import records as assembly_records
 
         for index, round_name in enumerate(ROUNDS[1:], start=1):
             prefix = context_assembly_prefix(round_name)
             if not file.has(prefix + "/" + COMPLETION):
                 continue
-            context_upstream = dict(
-                panels=scopes[index - 1].derivation("selected"),
-                evidence=upstream["evidence"],
-                payload=bound_payload_identity(file),
-                map=manifest["map_identities"][contig],
-            )
-            identity = assembly_identity(
-                assembly_parameters,
-                context_upstream,
-                role="context",
-                levels=parameters.context_levels[index - 1],
-                reverse=bool(settings["reverse"]),
-                tie_keep=tuple(settings.get("keep", ())),
-                numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
-            )
-            context_scopes.append(RecordCapability(file, prefix, identity))
+            context_scopes.append(assembly_records.expected(
+                store, manifest, contig=contig, round_name=round_name, levels=parameters.context_levels[index - 1]
+            ))
     return Reader(tuple(scopes), ROUNDS.index(name), product, context_scopes=tuple(context_scopes))
+
+
+def result_reader(store, manifest, *, product, contig=None, stage=None, upstream=None):
+    """Expose a selected publication through the same expected round scopes."""
+    name = "l2" if stage is None else stage.removeprefix("local_selection_")
+    if contig is None or not store.contig(contig).has(f"selection/selected/{contig}/{name}"):
+        return None
+    return expected(store, manifest, product=product, contig=contig, stage=stage, upstream=upstream)
 
 
 def progress(file: CheckpointFile) -> dict[str, Any]:

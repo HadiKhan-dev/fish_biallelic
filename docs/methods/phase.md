@@ -18,7 +18,8 @@ Cost and scope: O(N S^2 B); O(N S^2 L_c). These terms describe the unit’s work
 <a id="fp02"></a>
 ## fp02 Edge rates and initial terms (label switch, Haldane meiosis switch with protected resets, not-a-copy entry/exit)
 
-Derive label-switch rates from recorded painting transitions, meiosis-switch rates from map distances and the shared Haldane fraction, and not-a-copy entry/exit rates from physical distance. Protected intervals force meiosis resets. L1 unifies only the Haldane formula; the distinct not-a-copy expressions retain their declared arithmetic. Initialise linked slots with the stationary copy/not-copy terms and preserve the reset boundary test.
+Derive label-switch rates from recorded painting transitions, meiosis-switch rates from map distances and the shared Haldane fraction, and not-a-copy entry/exit rates from physical distance. Protected intervals force meiosis resets. The shared rate transform supplies the Haldane formula. The not-a-copy entry and exit laws use their own physical-distance rates. Initialise linked slots with the stationary copy/not-copy terms and preserve the reset boundary test.
+
 
 Implementation: [science/phase/inputs.py](../../haplotype_reconstruction/science/phase/inputs.py), [science/shared/recombination.py](../../haplotype_reconstruction/science/shared/recombination.py), [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py), [science/phase/model.py](../../haplotype_reconstruction/science/phase/model.py).
 
@@ -82,7 +83,7 @@ Parameters by name: `gain_quantum`, `max_sweeps`. Values and provenance are in t
 Cost and scope: O(B S^3); O(B (1 + A_n)); O(N B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fp08"></a>
-## fp08 D2 parents' pairing joint moves, solve loop and pairing ambiguity
+## fp08 Parents' pairing joint moves, solve loop and pairing ambiguity
 
 After initial sweeps, enumerate eligible unlinked parents and their double-switch junctions once per pairing pass. Swap the parental suffix, propagate and re-solve children in rank order, then keep only a strict gain above the maximum of pairing odds and gain quantum. Restore rejected moves and record final-state ambiguity. Accepted passes trigger more sweeps; reaching the pass cap adds a keep=False pass so ambiguity is measured without another update. Compute pairing odds from the posterior parameter, never a rounded literal.
 
@@ -148,7 +149,7 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(L + S m). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fp14"></a>
-## fp14 CAL2 panel-allele uncertainty (prior, carrier evidence, flips, own terms)
+## fp14 Panel-allele uncertainty (prior, carrier evidence, flips, own terms)
 
 Form the chromosome-wide allele prior from all called refit cells. Accumulate robust carrier evidence from solve-MAP labels, excluding founder-excluded samples, in fixed site chunks and homologue-then-sample order. Convert it to capped allele-flip uncertainty; unknown alleles have no flip correction. Remove the released sample’s own terms by subtraction before its site model. Resident/windowed routes preserve the same float32 evidence inputs and float64 accumulation.
 
@@ -161,7 +162,8 @@ Cost and scope: O(N m); O(m); O(S m). These terms describe the unit’s work/sto
 <a id="fp15"></a>
 ## fp15 Block posterior (forward-backward), label-pair posterior and chain marginals
 
-Compute the exact conditional block forward/backward posterior with gauge starting at zero and any anchor mask enforced in both directions. Sum gauge and other-slot states in declared row order, applying the small-log-mass cutoff without renormalisation. L2 uses topological depth/ascending-index descendant order for release in both solves, independent of workers. L4 retains chain probabilities as float64 until release tests, casting only stored support.
+Compute the exact conditional block forward/backward posterior with gauge starting at zero and any anchor mask enforced in both directions. Sum gauge and other-slot states in declared row order, applying the small-log-mass cutoff without renormalisation. Release uses topological depth/ascending-index descendant order in both solves, independent of workers. Retain chain probabilities as float64 until release tests, casting only stored support.
+
 
 Implementation: [science/phase/kernels.py](../../haplotype_reconstruction/science/phase/kernels.py), [science/phase/release_kernels.py](../../haplotype_reconstruction/science/phase/release_kernels.py).
 
@@ -172,7 +174,7 @@ Cost and scope: O(B (S + 2)^3 G). These terms describe the unit’s work/storage
 <a id="fp16"></a>
 ## fp16 Site model (ordered allele posteriors per site)
 
-Mix known label-pair mass with CAL2 allele uncertainty and the site-deviation law. Preserve exact-zero grouping: unchanged pairs, one-flipped-label sides and individually normalised two-flipped pairs are accumulated in their specified order. Skip unknown pairs or nonpositive normalisers. Validate posterior settings against the model’s attainable certainty ceiling. Sites are independent conditional on the block posterior, but the block remains pedigree conditioned.
+Mix known label-pair mass with per-copy allele uncertainty and the site-deviation law. Preserve exact-zero grouping: unchanged pairs, one-flipped-label sides and individually normalised two-flipped pairs are accumulated in their specified order. Skip unknown pairs or nonpositive normalisers. Validate posterior settings against the model’s attainable certainty ceiling. Sites are independent conditional on the block posterior, but the block remains pedigree conditioned.
 
 Implementation: [science/phase/kernels.py](../../haplotype_reconstruction/science/phase/kernels.py), [science/phase/release_kernels.py](../../haplotype_reconstruction/science/phase/release_kernels.py).
 
@@ -240,7 +242,8 @@ Cost and scope: O(E B). These terms describe the unit’s work/storage dimension
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Choose resident or windowed likelihood storage by the declared dimension rule. Keep whole-bin orientation medians, fixed CAL2 chunks, identical input casts and indexed sample writes on both routes. Per-sample release may run independently, but L2 fixes its descendant order for both solves. Storage buffers and worker count cannot change calls, phase sets or chains.
+Choose resident or windowed likelihood storage by the declared dimension rule. Keep whole-bin orientation medians, fixed carrier-evidence chunks, identical input casts and indexed sample writes on both routes. Per-sample release may run independently, with the same fixed descendant order for both solves. Storage buffers and worker count cannot change calls, phase sets or chains.
+
 
 Implementation: [science/phase/window.py](../../haplotype_reconstruction/science/phase/window.py), [store/mapped.py](../../haplotype_reconstruction/store/mapped.py).
 
@@ -277,7 +280,7 @@ Cost and scope: O(N L). These terms describe the unit’s work/storage dimension
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Independent tests enumerate small block-path objectives, including blocks with children in both conventions, and compare the selected path with the full objective. Separate threshold tests check the strict block-gain and pairing-keep predicates. Production computes local row differences and records diagnostic traces; it does not run a per-move full-objective verification wrapper.
+Independent tests enumerate small block-path objectives, including blocks with children in both conventions, and compare the selected path with the full objective. Separate threshold tests check the strict block-gain and pairing-keep predicates. Production computes local row differences; it does not run a per-move full-objective verification wrapper.
 
 Implementation: [science/phase/model.py](../../haplotype_reconstruction/science/phase/model.py).
 

@@ -105,7 +105,7 @@ def _confidence(child: int, state_margins: np.ndarray, identity_margins: np.ndar
 
 def _visit_order(local_rows, rows, state_margins, identity_margins, orientation, *, reverse=False):
     """Children by descending orientation support (exact: junction counts), then confidence in tie classes
-    (release 2.1: confidences closer than the winner tolerance are tied; GL noise moves them), then index (the run's
+    (confidences closer than the winner tolerance are tied because GL noise moves them), then index (the run's
     canonical sample order)."""
     role = {child: parent_role_probability(row, rows, orientation) for child, row in local_rows.items()}
     children = list(local_rows)
@@ -120,7 +120,7 @@ def _visit_order(local_rows, rows, state_margins, identity_margins, orientation,
         descending=True,
     ).classes
     rank = {child: int(classes[index]) for index, child in enumerate(children)}
-    # The index is the arbitrary last key (reversed under the convention reversal, release 2.2).
+    # The index is the arbitrary last key (reversed under the convention reversal).
     return sorted(children, key=lambda child: (-role[child], rank[child], tie_rules.conv_key(child, reverse=reverse)))
 
 
@@ -247,7 +247,7 @@ def _cyclic_components(adjacency, reverse) -> list[frozenset[int]]:
     """Iterative Kosaraju, O(vertices + edges); components in minimum-vertex order.
 
     Traversal order cannot affect membership. The final vertex scan preserves the
-    old peeling order without sorting or a Python recursion-depth limit.
+    minimum-vertex peeling order without sorting or a Python recursion-depth limit.
     """
     n = len(adjacency)
     seen = [False] * n

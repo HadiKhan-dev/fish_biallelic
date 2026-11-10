@@ -1,10 +1,10 @@
-"""Expose assembly's pure context and founder-allele boundary to selection.
+"""Expose assembly's founder-allele boundary to selection.
 
 Owns the declared selection-to-assembly surface; no execution, storage or implicit
 policy is constructed here. Array kernels preserve their compiled entry points so
 selection can call them from its per-site Numba loop. Settings are float64[13] from
 SitePosteriorParameters.vector(reverse); info is int64[INFO_FIELDS] in INFO_* order.
-Method: docs/methods/assembly.md; WP_AS1-AS3 and WP_AS6.
+Method: docs/methods/assembly.md#u09 and #u10.
 """
 
 from .alleles.parameters import SitePosteriorParameters
@@ -32,10 +32,9 @@ from .alleles.site_posterior import (
     summarize_sites,
 )
 from .evidence import AssemblyEvidence, SelectionEvidence
-from .run import AssemblyInputs, AssemblyResult, Role, assemble
+from .run import AssemblyInputs, AssemblyResult, Role
 
 __all__ = [
-    "assemble",
     "Role",
     "AssemblyInputs",
     "AssemblyResult",

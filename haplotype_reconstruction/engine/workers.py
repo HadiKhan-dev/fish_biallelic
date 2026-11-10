@@ -2,9 +2,8 @@
 
 Owns transport, shared-array lifetimes and the two native recycling cadences.
 Scheduling/admission belongs to scheduler; science never opens a pool.
-BudgetedPool is retained for engine-owned C2 compilation. P0 ENG-21/22/24;
-methods: WP_E1 sections 4.4/4.7. Constants carry execution/pools.py and
-shared_arrays.py values from engine.parameters.csv; bytes and seconds as named.
+Graph tasks also own eager kernel compilation. Methods: ENG-21, ENG-22 and ENG-24 in
+docs/methods/execution.md. Constants use bytes and seconds as named.
 """
 
 from __future__ import annotations
@@ -17,23 +16,19 @@ import logging
 import math
 import mmap
 import multiprocessing as mp
-import multiprocessing.pool as mp_pool
 import os
 import pickle
-import queue
 import sys
 import threading
 import time
 import traceback
 import weakref
 from collections.abc import Callable, Container, Mapping
-from concurrent.futures import CancelledError
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from itertools import count, islice
+from itertools import count
 from multiprocessing.connection import wait
-from multiprocessing.context import ForkServerContext, ForkServerProcess
 from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
@@ -46,28 +41,18 @@ from ..core.errors import InvariantError, SettingsError
 from ..core.immutable import declared_immutable
 from ..core.kernels import kernel
 from . import runtime as bootstrap
-from .graph import Expansion, ResultRef, Task, TaskKey, _field_names, _readonly
-from .scheduler import (
-    _CONTEXT,
-    AdmissionToken,
+from .cpu import (
     CpuBudget,
-    HelperBudget,
     PoolCounters,
     PoolShareBudget,
-    _HelperSeat,
-    _read,
-    adopted,
-    as_budget,
     budget_context,
-    depth_below,
-    enter_pool_seat,
-    held_context,
-    lease_exit,
-    lease_user,
+    thread_team,
+)
+from .graph import Expansion, PackedCall, ResultRef, Task, TaskKey, _field_names, _readonly
+from .memory import (
+    adopted,
     malloc_trim,
     memory_governor,
-    numba_threads,
-    pool_seat,
     release_memory,
     task_peak_bytes,
     task_peak_start,
@@ -78,15 +63,11 @@ __all__ = [
     "SharedArrayRef",
     "MappedArrayRef",
     "new_segment",
-    "create_shared_array",
     "empty_shared_array",
     "attach_shared_array",
     "close_shared_memory",
     "main_module_guard",
-    "private_memory_measured",
-    "record_recycle",
     "recycle_threshold",
-    "BudgetedPool",
     "ResidentRef",
     "WorkerReply",
     "retain",
@@ -104,7 +85,7 @@ __all__ = [
     "WorkerGroup",
 ]
 
-COPY_CHUNK_BYTES = 1 << 20  # ENG-24 shared_arrays.py: 1 MiB copy partitions.
+COPY_CHUNK_BYTES = 1 << 20  # ENG-24: copy partitions of 1 MiB.
 _PARALLEL_COPY_BYTES = 4 << 20
 
 
@@ -237,7 +218,7 @@ def new_segment(size: int, *, name: str | None = None, track: bool = True) -> Sh
     """A new segment of ``size`` bytes (at least one) named after the run (see the module docstring), or ``name``
     (FileExistsError if it exists). ``track=False`` leaves it out of this process's resource tracker: a segment a
     worker creates for its coordinator to adopt."""
-    from .scheduler import mark_in_use, segment_name
+    from .memory import mark_in_use, segment_name
 
     for _ in range(1 if name is not None else 64):
         try:
@@ -255,7 +236,7 @@ def new_segment(size: int, *, name: str | None = None, track: bool = True) -> Sh
 @kernel(
     overloads=(
         (numba.types.uint8[::1], numba.types.uint8[::1]),
-        # Release 4.10: a read-only source (a frozen record array's bytes) is declared too; it was compiled on the fly.
+        # Declare read-only sources as well as writable sources for frozen record-array bytes.
         (numba.types.Array(numba.types.uint8, 1, "C", readonly=True), numba.types.uint8[::1]),
     ),
     cache=True,
@@ -268,23 +249,6 @@ def _copy_shared_bytes(source, destination):
         start = part * chunk
         stop = min(source.size, start + chunk)
         destination[start:stop] = source[start:stop]
-
-
-def create_shared_array(array, *, copy_threads: int = 1) -> tuple[SharedMemory, SharedArrayRef]:
-    """Copy ``array`` (C-contiguous) into a new segment; return (handle, reference).
-
-    POSIX shared memory has no zero-byte segments, so an empty array gets a one-byte segment and keeps its shape
-    and dtype. ``copy_threads`` parallelises the first-touch copy of large arrays, capped at the caller's CPU
-    authority (in a task, its claim). If anything fails after allocation, the segment is closed
-    and unlinked at once.
-    """
-    contiguous = _shareable(array)
-    handle = new_segment(contiguous.nbytes)
-    try:
-        return (handle, _fill_shared(contiguous, handle, copy_threads))
-    except BaseException:
-        close_shared_memory([handle], unlink=True)
-        raise
 
 
 def _shareable(array) -> np.ndarray:
@@ -302,9 +266,9 @@ def _fill_shared(
     lane's idle CPUs), so it is not capped at the task's claim again."""
     threads = int(copy_threads)
     if threads > 1 and contiguous.nbytes >= _PARALLEL_COPY_BYTES:
-        from .scheduler import authority_threads, numba_threads
+        from .cpu import authority_threads, thread_team
 
-        with numba_threads(authority_threads(threads) if capped else threads):
+        with thread_team(authority_threads(threads) if capped else threads):
             _copy_shared_bytes(
                 np.frombuffer(memoryview(contiguous), dtype=np.uint8),
                 np.frombuffer(cast(memoryview, handle.buf), dtype=np.uint8, count=contiguous.nbytes),
@@ -318,8 +282,9 @@ def empty_shared_array(shape, dtype) -> tuple[SharedMemory, SharedArrayRef, np.n
     """A new uninitialised segment for an array of ``shape`` and ``dtype``: (handle, reference, writable view).
 
     The caller fills it (e.g. in one parallel scan), passes ``reference`` to pools (``shared={"name": reference}``:
-    attached, not copied), reserves its bytes itself (execution.reserve_memory), and at the end drops the view and
-    closes and unlinks the segment (close_shared_memory([handle], unlink=True)).
+    attached, not copied). The allocation contributes to measured memory pressure.
+    At the end the caller drops the view, closes and unlinks the segment
+    (close_shared_memory([handle], unlink=True)).
     """
     dtype = np.dtype(dtype)
     if dtype.hasobject:
@@ -339,7 +304,7 @@ def empty_shared_array(shape, dtype) -> tuple[SharedMemory, SharedArrayRef, np.n
 
 def attach_shared_array(ref: SharedArrayRef, *, track: bool = True) -> tuple[SharedMemory, np.ndarray]:
     """Attach to a segment created by create_shared_array; return (handle, array view)."""
-    from .scheduler import mark_in_use
+    from .memory import mark_in_use
 
     dtype = np.dtype(ref.dtype)
     handle = SharedMemory(name=ref.name, create=False, track=track)
@@ -369,17 +334,11 @@ def close_shared_memory(handles, *, unlink: bool = False) -> None:
                 pass
 
 
-LIVE_TOTAL_SECONDS = 0.25
-TRIM_AFTER_BYTES = 64 << 20
 RECYCLE_MIN_BYTES = 256 << 20
 RECYCLE_MAX_BYTES = 1 << 30
-# Graces on an abort are strictly nested, so each level can finish its own bounded cleanup before the level
-# above escalates: a forced kill leaves the killed process's named semaphores to the resource tracker.
-# Children of a task's nested pool get POOL_TERMINATE_GRACE_SECONDS; the graph's workers, which may themselves
-# be closing such a pool, get GROUP_TERMINATE_GRACE_SECONDS (runtime.COORDINATOR_GRACE_SECONDS exceeds both).
-# A process inside a long native kernel cannot run its handler before the grace ends.
-POOL_TERMINATE_GRACE_SECONDS = 5.0
-GROUP_TERMINATE_GRACE_SECONDS = POOL_TERMINATE_GRACE_SECONDS + 5.0
+# Give a worker time to release native resources before its coordinator escalates.
+# runtime.COORDINATOR_GRACE_SECONDS also covers the coordinator's bounded reaping.
+GROUP_TERMINATE_GRACE_SECONDS = 10.0
 RECYCLE_CHECK_SECONDS = 0.2
 FORKSERVER = mp.get_context("forkserver")
 _GUARD_LOCK = threading.RLock()
@@ -387,8 +346,8 @@ _GUARD_DEPTH = 0
 _GUARD_SAVED = None
 # A forkserver listens on <multiprocessing's temporary directory>/sock-<12 hex digits>, and a socket path holds at
 # most 107 bytes on Linux (103 on macOS and the BSDs). CPython 3.14 moves that directory off a long TMPDIR to /tmp,
-# but sizes the socket name as 8 characters: a TMPDIR of 76-79 characters passed its check and the first pool then
-# failed with "AF_UNIX path too long" (older Pythons never move it).
+# but sizes the socket name as 8 characters. Account for the full socket path to prevent
+# an AF_UNIX path-length failure when creating a pool.
 _SOCKET_NAME_BYTES = len("/sock-") + 12
 _SOCKET_PATH_LIMIT = 107 if sys.platform.startswith("linux") else 103
 _SYSTEM_TEMPORARY_DIRECTORIES = ("/tmp", "/var/tmp", "/usr/tmp")
@@ -454,163 +413,6 @@ def main_module_guard():
                 _GUARD_SAVED = None
 
 
-ARRIVAL_CHECK_SECONDS = 1.0
-_STARTED: dict[int, list] = {}
-_STARTED_LOCK = threading.Lock()
-
-
-class _BatchEnd:
-    """The consumer's CPU-wait cancellation: the batch's stop event is set, or a worker of the pool has died."""
-
-    def __init__(self, stop, pool):
-        self.stop, self.pool = (stop, pool)
-
-    def is_set(self) -> bool:
-        return self.stop.is_set() or (not self.pool._closed and bool(self.pool._lost_workers()))
-
-
-def _exited(process):
-    """The exit code the stdlib pool's worker handler recorded when it reaped ``process`` (None while it runs)."""
-    return None if process._popen is None else process._popen.returncode
-
-
-class _NonDaemonicProcess(ForkServerProcess):
-    """A forkserver process allowed to create child processes; every start (also a pool's replacement of a
-    recycled worker) is guarded against re-executing the entry script and recorded for its pool (_STARTED)."""
-
-    @property
-    def daemon(self):
-        return False
-
-    @daemon.setter
-    def daemon(self, value):
-        pass
-
-    def run(self):
-        # A pool child must unwind its own resource owners before multiprocessing runs its finalizers.
-        with bootstrap.signal_boundary(lambda: None):
-            super().run()
-
-    def start(self):
-        args = getattr(self, "_args", ())
-        initargs = args[3] if len(args) > 3 and isinstance(args[3], tuple) else ()
-        with main_module_guard():
-            super().start()
-        from .scheduler import _start_ticks
-
-        self._eng40_started = _start_ticks(self.pid)
-        if initargs:
-            with _STARTED_LOCK:
-                started = _STARTED.get(id(initargs[0]))
-                if started is not None:
-                    started.append(self)
-
-
-class _NonDaemonicContext(ForkServerContext):
-    Process = _NonDaemonicProcess
-
-
-_SHARED: dict = {}
-_HANDLES: list = []
-_INIT_ERROR: str | None = None
-_FIRST_TASK = True
-_INQUEUE: Any = None
-_RECYCLE_BYTES = 0
-_BASELINE: int | None = None
-_CHECKED_AT = 0.0
-_TASKS_RUN = 0
-_CHUNKS_RUN = 0
-_RETIRING = False
-
-
-def _initialize(counters, references, settings, recycle_bytes=0):
-    """Pool initializer: run settings, a seat in the pool's shares, attached shared arrays, one Numba thread.
-
-    Starting the threading layer here (set_num_threads) matters: Numba 0.64 cannot link a cached kernel that
-    calls a parallel kernel loaded from the cache before the layer runs. A failure is kept and reported by the
-    worker's first task: multiprocessing would otherwise replace a worker whose initializer raises forever, and
-    the batch would hang without an error.
-    """
-    global _INIT_ERROR, _INQUEUE, _RECYCLE_BYTES
-    import atexit
-
-    try:
-        import numba
-
-        caller = sys._getframe(1)
-        if caller.f_code.co_name == "worker" and hasattr(caller.f_locals.get("inqueue"), "_reader"):
-            _INQUEUE = caller.f_locals["inqueue"]
-            _RECYCLE_BYTES = max(0, int(recycle_bytes or 0))
-        bootstrap.apply_worker_settings(settings)
-        enter_pool_seat(counters)
-        for name, reference in references.items():
-            handle, array = attach_shared_array(reference)
-            _HANDLES.append(handle)
-            _SHARED[name] = array
-        atexit.register(close_shared_memory, _HANDLES)
-        numba.set_num_threads(1)
-    except BaseException:
-        import traceback
-
-        _INIT_ERROR = traceback.format_exc()
-
-
-def _run_task(packed):
-    """One task in a worker: accounted as active (start-up gate, remainder claims) while it runs, under the
-    memory admission token its parent made for it (marked running now), or under an
-    explicit presence token (so the governor sees running work). Returns task index, measured peak bytes, first, result.
-    ``first`` marks the worker's first task, whose peak includes loading the process's compiled kernels (its
-    statistics are kept apart from the other tasks')."""
-    global _FIRST_TASK
-    function, task, index, held, label, parent = packed
-    if _INIT_ERROR is not None:
-        raise RuntimeError(f"pool worker initialisation failed:\n{_INIT_ERROR}")
-    bootstrap.task_boundary()
-    seat = pool_seat()
-    seat.begin_task()
-    governor = memory_governor()
-    presence = peak = None
-    first, _FIRST_TASK = (_FIRST_TASK, False)
-    if held[0]:
-        governor.start(held[0])
-    else:
-        presence = governor.presence(label, held[1], parent=parent, outer=True)
-        held = presence.held
-    start = task_peak_start()
-    try:
-        with adopted(held):
-            result = function(task, _SHARED, PoolShareBudget())
-        peak = task_peak_bytes(start)
-        if peak is not None and peak > TRIM_AFTER_BYTES:
-            malloc_trim()
-        return (index, peak, first, result)
-    finally:
-        if presence is not None:
-            presence.release(None if first else peak)
-            if first and peak is not None:
-                governor.note(f"{label} (first task of a worker)", peak)
-        import numba
-
-        numba.set_num_threads(1)
-        seat.end_task()
-
-
-def _run_chunk(chunk):
-    """Consecutive tasks of one dispatch, run in order in one worker; then the worker may retire."""
-    global _TASKS_RUN, _CHUNKS_RUN
-    rows = [_run_task(packed) for packed in chunk]
-    _TASKS_RUN += len(chunk)
-    _CHUNKS_RUN += 1
-    seat = pool_seat()
-    assert seat is not None
-    counters = seat.counters
-    if counters.retire_chunks and _CHUNKS_RUN >= counters.retire_chunks:
-        _announce_pool_retirement()
-    if _RECYCLE_BYTES and (not _RETIRING):
-        _consider_retiring(chunk[-1][4])
-    return rows
-
-
 def _private_bytes() -> int | None:
     """This process's private resident memory (USS: Private_Clean + Private_Dirty of /proc/self/smaps_rollup)."""
     try:
@@ -624,68 +426,6 @@ def _private_bytes() -> int | None:
         return None
 
 
-def private_memory_measured() -> bool:
-    """Whether this system reports a process's private memory (Linux smaps_rollup), which recycling needs."""
-    return _private_bytes() is not None
-
-
-def _consider_retiring(label: str) -> None:
-    """After a dispatch: the first sets the worker's baseline (start-up and kernels loaded, heap trimmed); later ones
-    (at most every RECYCLE_CHECK_SECONDS) retire the worker when its private memory, after trimming the heap,
-    exceeds the baseline by more than the pool's threshold."""
-    global _BASELINE, _CHECKED_AT, _RETIRING
-    now = time.monotonic()
-    if _BASELINE is None:
-        malloc_trim()
-        _BASELINE, _CHECKED_AT = (_private_bytes(), now)
-        if _BASELINE is None:
-            _RETIRING = True
-        return
-    if now - _CHECKED_AT < RECYCLE_CHECK_SECONDS:
-        return
-    _CHECKED_AT = now
-    private = _private_bytes()
-    if private is None or private - _BASELINE <= _RECYCLE_BYTES:
-        return
-    malloc_trim()
-    private = _private_bytes()
-    if private is None or private - _BASELINE <= _RECYCLE_BYTES:
-        return
-    _retire(label, private)
-
-
-def _retire(label: str, private: int) -> None:
-    """Leave the pool after this result: the worker loop sends it, its next read of the closed task queue fails and
-    it exits; the pool starts a fresh worker in its place. Recorded in the run's memory statistics."""
-    global _RETIRING
-    try:
-        _INQUEUE._reader.close()
-    except Exception:
-        return
-    _RETIRING = True
-    _announce_pool_retirement()
-    assert _BASELINE is not None
-    record_recycle(label, private, _BASELINE, _RECYCLE_BYTES, _TASKS_RUN)
-
-
-def record_recycle(label: str, private: int, baseline: int, threshold: int, tasks: int) -> None:
-    """A worker's retirement in the run's memory statistics (label "<label> worker recycled": count, private bytes
-    at retirement); the first one of a label is also logged."""
-    name = f"{label} worker recycled"
-    try:
-        governor = memory_governor()
-        if not governor.statistics()["labels"].get(name, {}).get("tasks", 0):
-            gib = 1 << 30
-            _LOG.info(
-                f"[memory] {label}: recycled after {tasks} tasks (private {private / gib:.2f} GiB, "
-                f"{(private - baseline) / gib:.2f} GiB above baseline; threshold {threshold / gib:.2f} GiB); "
-                "further recycles are counted in the memory summary"
-            )
-        governor.note(name, private)
-    except Exception:
-        pass
-
-
 def recycle_threshold(processes: int, recycle_bytes: int | None = None) -> int:
     """The private-memory growth after which a worker is replaced: ``recycle_bytes`` if given (0: never), else a
     quarter of a worker's share of the run's memory limit within RECYCLE_MIN_BYTES..RECYCLE_MAX_BYTES."""
@@ -694,544 +434,6 @@ def recycle_threshold(processes: int, recycle_bytes: int | None = None) -> int:
             RECYCLE_MAX_BYTES, max(RECYCLE_MIN_BYTES, memory_governor().limit // (4 * max(1, int(processes))))
         )
     return max(0, int(recycle_bytes))
-
-
-class BudgetedPool:
-    """A forkserver pool whose workers share ``budget``'s CPUs dynamically (see the module docstring).
-
-    ``processes`` workers (the caller bounds it by tasks and memory); ``shared`` arrays are copied into shared
-    memory once (their bytes reserved for the pool's lifetime) and attached by every worker (no copy), and
-    unlinked when the pool closes; a ``SharedArrayRef`` value (a segment the caller created, e.g. with
-    `empty_shared_array`) is attached as it is, neither copied nor unlinked nor reserved by the pool. Use as a
-    context manager: a normal exit closes and joins the pool, an exception terminates it. ``recycle_bytes``: a
-    worker whose private memory grows by more than this since its first task is replaced after its task (None:
-    a quarter of a worker's share of the run's memory limit, 256 MiB to 1 GiB; 0: never). Tasks share the
-    total fairly and give CPUs above their share back at their boundaries to peers that are short or waiting
-    (execution.budget._PoolSeat.share). ``max_processes`` bounds growth (None: the total and waiting tasks).
-    ``yield_to_waiters`` is accepted for compatibility (yielding to waiting workers is always on).
-    """
-
-    def __init__(
-        self,
-        budget,
-        *,
-        processes: int,
-        shared=None,
-        max_tasks_per_child: int | None = None,
-        label: str = "pool",
-        recycle_bytes: int | None = None,
-        max_processes: int | None = None,
-    ):
-        self.budget: CpuBudget = as_budget(budget)
-        self.processes = max(1, int(processes))
-        self.max_processes = None if max_processes is None else max(self.processes, int(max_processes))
-        self.label = label
-        total = max(1, int(self.budget.threads()))
-        self._counters = PoolCounters(FORKSERVER, total, self.processes)
-        self._counters.retirements = FORKSERVER.Array("q", 4096, lock=False)
-        self._counters.retire_chunks = int(max_tasks_per_child or 0)
-        with _STARTED_LOCK:
-            self._workers = _STARTED[id(self._counters)] = []
-        self._lease = None
-        self._handles = []
-        self._closed = False
-        self._batch_in_progress = False
-        self._stop = threading.Event()
-        self._refresher = None
-        self._batch_stop = None
-        self._outstanding: set[AdmissionToken] = set()
-        self._outstanding_lock = threading.Lock()
-        self._pools, self._sizes, self._busy = ([], [], [])
-        self._group_lock = threading.Lock()
-        self._governor = memory_governor()
-        self.recycle_bytes = recycle_threshold(self.processes, recycle_bytes)
-        self._shared_hold = self._context_entry = None
-        shared = dict(shared or {})
-        shared_bytes = sum(
-            int(np.asarray(array).nbytes) for array in shared.values() if not isinstance(array, SharedArrayRef)
-        )
-        if shared_bytes:
-            self._shared_hold = self._governor.request(label=f"{label} shared")
-            self._shared_hold.wait()
-            self._context_list = _CONTEXT.held
-            self._context_entry = [self._shared_hold.id, self._shared_hold.depth, True]
-            self._context_list.append(self._context_entry)
-        references = {}
-        try:
-            for name, array in shared.items():
-                if isinstance(array, SharedArrayRef):
-                    references[name] = array
-                    continue
-                handle, reference = create_shared_array(array, copy_threads=total)
-                self._handles.append(handle)
-                references[name] = reference
-            if self._shared_hold is not None:
-                self._governor.rest(self._shared_hold.id)
-                assert self._context_entry is not None
-                self._context_entry[2] = False
-            self._pool_arguments: dict[str, Any] = dict(
-                initializer=_initialize,
-                initargs=(self._counters, references, bootstrap.worker_settings(), self.recycle_bytes),
-                maxtasksperchild=max_tasks_per_child,
-            )
-            with main_module_guard():
-                self._pool = mp_pool.Pool(
-                    processes=self.processes, context=_NonDaemonicContext(), **self._pool_arguments
-                )
-            self._pools.append(self._pool)
-            self._sizes.append(self.processes)
-            self._busy.append(0)
-        except BaseException:
-            close_shared_memory(self._handles, unlink=True)
-            self._release_shared()
-            with _STARTED_LOCK:
-                _STARTED.pop(id(self._counters), None)
-            raise
-        if self.budget.live:
-            self._lease = lease_user(self.budget)
-            if self._lease is not None:
-                self._lease.enter_user()
-            self._refresher = threading.Thread(target=self._follow_budget, name=f"{label}-total", daemon=True)
-            self._refresher.start()
-
-    def _follow_budget(self):
-        """Follow the live parent budget (a lane's lease grows as other lanes finish and returns CPUs above its
-        share that it does not use): the pool total is re-read every LIVE_TOTAL_SECONDS."""
-        while not self._stop.wait(LIVE_TOTAL_SECONDS):
-            if self._lease is not None and hasattr(self.budget, "settle"):
-                if self._counters.admission.acquire(timeout=LIVE_TOTAL_SECONDS):
-                    try:
-                        self._counters.set_total(self.budget.settle(_read(self._counters.claimed)))
-                    finally:
-                        self._counters.admission.release()
-            else:
-                self._counters.set_total(int(self.budget.threads()))
-
-    def _grow(self, waiting: int | None) -> int:
-        """Start more workers when the total exceeds the workers: up to the total, the ``waiting`` dispatches
-        (None: unknown) and max_processes. Returns the number added (0 if none or if starting them failed)."""
-        room = self.total - self.processes
-        if waiting is not None:
-            room = min(room, waiting)
-        if self.max_processes is not None:
-            room = min(room, self.max_processes - self.processes)
-        if room <= 0 or self._closed:
-            return 0
-        with _STARTED_LOCK:
-            registered = {id(process) for process in self._workers}
-        try:
-            with main_module_guard():
-                pool = mp_pool.Pool(processes=room, context=_NonDaemonicContext(), **self._pool_arguments)
-        except Exception as error:
-            with self._group_lock:
-                current = {id(process) for group in self._pools for process in list(cast(Any, group)._pool)}
-            with _STARTED_LOCK:
-                self._workers[:] = [
-                    process for process in self._workers if id(process) in registered or id(process) in current
-                ]
-            _LOG.info(
-                f"[pool] {self.label}: could not add {room} workers ({type(error).__name__}: {error}); "
-                f"continuing with {self.processes}"
-            )
-            self.max_processes = self.processes
-            return 0
-        with self._group_lock:
-            if self._closed:
-                pool.terminate()
-                return 0
-            self._pools.append(pool)
-            self._sizes.append(room)
-            self._busy.append(0)
-            self.processes += room
-        return room
-
-    @property
-    def total(self) -> int:
-        """The pool's current CPU total."""
-        return int(self._counters.total.value)
-
-    def imap_unordered(self, function, tasks, *, chunksize: int = 1):
-        """Run ``function(task, shared, budget)`` for every task; yield results in completion order.
-
-        Each call is one batch with its own start-up gate. ``function`` must be importable (module level).
-        A lazy task iterable is drawn from only when a dispatch slot is free;
-        measured pressure controls sending the task. No byte reservation exists.
-        ``chunksize`` consecutive tasks are sent and run together. The consumer holds one of the pool's CPUs while
-        it handles a result: keep that work to bookkeeping (no codec or Numba teams of its own).
-        """
-        return (result for _, result in self._batch(function, tasks, chunksize))
-
-    def map(self, function, tasks, *, chunksize: int = 1) -> list:
-        """Like imap_unordered, but return the results as a list in task order."""
-        results = {}
-        for index, result in self._batch(function, tasks, chunksize):
-            results[index] = result
-        return [results[index] for index in range(len(results))]
-
-    def _batch(self, function, tasks, chunksize):
-        """Start one batch; return a generator of (task index, result) in completion order."""
-        if self._closed:
-            raise RuntimeError(f"{self.label}: the pool is closed")
-        if self._batch_in_progress:
-            raise RuntimeError(f"{self.label}: the pool already has an unfinished batch")
-        chunksize = max(1, int(chunksize))
-        count = len(tasks) if hasattr(tasks, "__len__") else None
-        governor, counters, label = (self._governor, self._counters, self.label)
-        caller = held_context()
-        depth, parent = (depth_below(caller), caller[0] if caller else 0)
-        free_slots = threading.Semaphore(self.processes)
-        stop = self._batch_stop = threading.Event()
-        if self._stop.is_set():
-            stop.set()
-        arrivals = queue.SimpleQueue()
-        outstanding, outstanding_lock = (self._outstanding, self._outstanding_lock)
-
-        def settle(request, peak):
-            with outstanding_lock:
-                owned = request in outstanding
-                outstanding.discard(request)
-            if owned:
-                request.release(peak)
-
-        def free_slot(group):
-            with self._group_lock:
-                self._busy[group] -= 1
-            free_slots.release()
-
-        def arrived(request, rows, group):
-            try:
-                if request is not None:
-                    peaks = [row[1] for row in rows if row[1] is not None and (not row[2])]
-                    firsts = [row[1] for row in rows if row[1] is not None and row[2]]
-                    settle(request, max(peaks, default=None))
-                    if firsts:
-                        governor.note(f"{label} (first task of a worker)", max(firsts))
-            except BaseException as error:
-                arrivals.put(("error", error))
-            finally:
-                free_slot(group)
-                arrivals.put(("rows", rows))
-
-        def failed(request, error, group):
-            try:
-                if request is not None:
-                    settle(request, None)
-            finally:
-                free_slot(group)
-                arrivals.put(("error", error))
-
-        def reserve():
-            """The chunk's admission token (including zero-byte work), or False on cancellation."""
-            request = governor.request(label=label, depth=depth, queued=True, parent=parent, outer=True)
-            if not request.poll():
-                counters.open_gate()
-                if not request.wait(cancel=stop):
-                    return False
-            return request
-
-        def dispatch():
-            iterator, position, exhausted = (iter(tasks), 0, False)
-            try:
-                while not stop.is_set():
-                    if count is not None and position >= count:
-                        exhausted = True
-                        return
-                    request = None
-                    width = chunksize if count is None else min(chunksize, count - position)
-                    chunk = list(islice(iterator, width))
-                    if not chunk:
-                        exhausted = True
-                        return
-                    if not free_slots.acquire(blocking=False):
-                        waiting = None if count is None else -(-(count - position) // chunksize)
-                        added = self._grow(waiting)
-                        if added:
-                            free_slots.release(added)
-                        while not free_slots.acquire(timeout=0.5):
-                            if stop.is_set():
-                                return
-                            added = self._grow(waiting)
-                            if added:
-                                free_slots.release(added)
-                    request = reserve()
-                    if request is False:
-                        return
-                    held = (0, depth)
-                    if request:
-                        with outstanding_lock:
-                            outstanding.add(request)
-                        held = (request.id, depth)
-                    packed = [
-                        (function, task, position + offset, held, label, parent) for offset, task in enumerate(chunk)
-                    ]
-                    with self._group_lock:
-                        group = next(
-                            (
-                                index
-                                for index, (size, busy) in enumerate(zip(self._sizes, self._busy, strict=False))
-                                if busy < size
-                            )
-                        )
-                        self._busy[group] += 1
-                        pool = self._pools[group]
-                    pool.apply_async(
-                        _run_chunk,
-                        (packed,),
-                        callback=lambda rows, r=request, g=group: arrived(r, rows, g),
-                        error_callback=lambda error, r=request, g=group: failed(r, error, g),
-                    )
-                    position += len(chunk)
-            except BaseException as error:
-                arrivals.put(("error", error))
-                exhausted = None
-            finally:
-                if exhausted:
-                    counters.open_gate()
-                    arrivals.put(("end", position))
-                elif exhausted is False:
-                    arrivals.put(("error", RuntimeError(f"{label}: the batch stopped before every task was sent")))
-
-        counters.start_batch(self.processes if count is None else count, self.processes)
-        self._batch_in_progress = True
-        dispatcher = threading.Thread(target=dispatch, name=f"{label}-dispatch", daemon=True)
-        dispatcher.start()
-        blocked = governor.suspended
-
-        def consume():
-            received, total, completed = (0, None, False)
-            lease = (
-                self._lease
-                if self._lease is not None
-                and hasattr(self._lease, "owner")
-                and (self._lease.owner == threading.get_ident())
-                else None
-            )
-            if lease is not None:
-                lease.waiting += 1
-            try:
-                while total is None or received < total:
-                    with blocked():
-                        kind, payload = self._next_arrival(arrivals)
-                    if kind == "error":
-                        raise payload
-                    if kind == "end":
-                        total = payload
-                        continue
-                    for index, _, _, result in payload:
-                        received += 1
-                        with blocked():
-                            held = counters.take_one(cancel=_BatchEnd(stop, self))
-                        if not held:
-                            self._raise_lost()
-                            raise CancelledError(f"{label}: the pool closed while a result waited for a CPU")
-                        if lease is not None:
-                            lease.waiting -= 1
-                        try:
-                            yield (index, result)
-                        finally:
-                            if held and not counters.give_one(cancel=_BatchEnd(stop, self)):
-                                self._raise_lost()
-                                raise CancelledError(f"{label}: pool closed while returning a CPU")
-                            if lease is not None:
-                                lease.waiting += 1
-                completed = True
-            finally:
-                stop.set()
-                if not completed:
-                    counters.closed.get_obj().value = 1
-                dispatcher.join(timeout=1.0 if not completed else None)
-                if lease is not None:
-                    lease.waiting -= 1
-                if completed:
-                    self._batch_in_progress = False
-                    self._close_added()
-                else:
-                    self._release_outstanding()
-
-        return consume()
-
-    def _lost_workers(self) -> list:
-        """Every unannounced exit fails, including status zero (A40-7 R4)."""
-        with _STARTED_LOCK:
-            lost, retained = [], []
-            for process in self._workers:
-                status = _exited(process)
-                if status is None:
-                    retained.append(process)
-                    continue
-                slots = [i for i, pid in enumerate(self._counters.retirements) if pid == process.pid]
-                if status == 0 and slots:
-                    for slot in slots:
-                        self._counters.retirements[slot] = 0
-                else:
-                    retained.append(process)
-                    lost.append((process.pid, status))
-            self._workers[:] = retained
-            return lost
-
-    def _raise_lost(self) -> None:
-        """RuntimeError if a worker died during the batch; nothing once the pool is closing (closing or terminating
-        it stops its workers deliberately; the waiters then end with CancelledError)."""
-        if self._closed:
-            return
-        lost = self._lost_workers()
-        if lost:
-            raise RuntimeError(
-                f"{self.label}: pool workers exited unexpectedly (pid, exit code) {lost} "
-                "during the batch; their tasks were lost"
-            )
-
-    def _next_arrival(self, arrivals):
-        """The batch's next arrival, after checking that no worker has died (also while results keep arriving);
-        every ARRIVAL_CHECK_SECONDS without one: CancelledError if the pool was closed or terminated meanwhile,
-        RuntimeError if a worker it started has exited abnormally."""
-        while True:
-            try:
-                arrival = arrivals.get(timeout=ARRIVAL_CHECK_SECONDS)
-            except queue.Empty:
-                arrival = None
-            if arrival is None and self._closed:
-                raise CancelledError(f"{self.label}: the pool closed while results were awaited")
-            self._raise_lost()
-            if arrival is not None:
-                return arrival
-
-    @contextmanager
-    def helper_seat(self, share: float = 0.25):
-        """A seat in this pool's CPUs for a thread of its parent process on the tasks' critical path (discovery's
-        evidence helper): ``share`` of the pool's total is set aside for it while it runs (the tasks share the rest
-        and give back above it at their boundaries); yields its live budget (also bound for the thread's nested
-        claims), so the helper's work and its tasks' together stay within the pool's total."""
-        seat = _HelperSeat(self._counters, max(1, int(self.total * share)), self._raise_lost)
-        seat.begin()
-        budget = HelperBudget(seat)
-        try:
-            with budget_context(budget):
-                yield budget
-        finally:
-            seat.end_task()
-
-    def _close_added(self):
-        """After a completed batch: close the worker groups added by growth (their workers are idle), so a pool
-        does not keep its peak worker count; the next batch grows again if its total allows."""
-        with self._group_lock:
-            added = self._pools[1:]
-            del self._pools[1:], self._sizes[1:], self._busy[1:]
-            self.processes = self._sizes[0]
-        for pool in added:
-            pool.close()
-        for pool in added:
-            pool.join()
-
-    def _release_outstanding(self):
-        with self._outstanding_lock:
-            requests = list(self._outstanding)
-            self._outstanding.clear()
-        for request in requests:
-            request.release()
-
-    def _abort_pools(self, pools) -> None:
-        """Stop owned processes without stdlib finalizers acquiring dead-worker locks.
-
-        multiprocessing.Pool._terminate_pool first acquires its queue read lock;
-        SIGKILL can leave that lock held forever. Stop its daemon management
-        threads, cancel that finalizer, and reap only our recorded PID/start pairs.
-        """
-        from .scheduler import _alive
-
-        for pool in pools:
-            pool._state = mp_pool.TERMINATE
-            pool._terminate.cancel()
-            for thread in (pool._worker_handler, pool._task_handler, pool._result_handler):
-                thread._state = mp_pool.TERMINATE
-            pool._change_notifier.put(None)
-            pool._taskqueue.put(None)
-        for pool in pools:
-            pool._worker_handler.join(timeout=0.5)
-        with _STARTED_LOCK:
-            processes = tuple(self._workers)
-
-        def alive(process):
-            started = getattr(process, "_eng40_started", None)
-            return started is not None and _alive(process.pid, started)
-
-        for process in processes:
-            if alive(process):
-                process.terminate()
-        deadline = time.monotonic() + POOL_TERMINATE_GRACE_SECONDS
-        for process in processes:
-            process.join(timeout=max(0.0, deadline - time.monotonic()))
-        forced = 0
-        for process in processes:
-            if alive(process):
-                process.kill()
-                forced += 1
-            process.join(timeout=0.5)
-        if forced:
-            _LOG.warning(
-                "%s: %d pool process(es) did not stop within %.0f s and were killed",
-                self.label,
-                forced,
-                POOL_TERMINATE_GRACE_SECONDS,
-            )
-        for pool in pools:
-            pool._inqueue.close()
-            pool._outqueue.close()
-            for thread in (pool._worker_handler, pool._task_handler, pool._result_handler):
-                if thread is not threading.current_thread():
-                    thread.join(timeout=0.2)
-
-    def _finish(self, terminate: bool):
-        with self._group_lock:
-            if self._closed:
-                return
-            self._closed = True
-            pools = list(self._pools)
-        self._stop.set()
-        if self._batch_stop is not None:
-            self._batch_stop.set()
-        self._counters.closed.get_obj().value = 1
-        try:
-            if terminate:
-                self._abort_pools(pools)
-            else:
-                self._counters.close()
-                for pool in pools:
-                    pool.close()
-                for pool in pools:
-                    pool.join()
-        finally:
-            with _STARTED_LOCK:
-                _STARTED.pop(id(self._counters), None)
-            if self._refresher is not None:
-                self._refresher.join(timeout=1.0)
-            close_shared_memory(self._handles, unlink=True)
-            self._release_outstanding()
-            self._release_shared()
-            if self._lease is not None:
-                lease_exit(self._lease)
-
-    def _release_shared(self):
-        if self._context_entry is not None:
-            self._context_list.remove(self._context_entry)
-            self._context_entry = None
-        if self._shared_hold is not None:
-            self._shared_hold.release()
-            self._shared_hold = None
-
-    def close(self):
-        """Wait for the workers to finish their tasks and exit; release the shared arrays."""
-        self._finish(terminate=False)
-
-    def terminate(self):
-        """Stop the workers at once; release the shared arrays."""
-        self._finish(terminate=True)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._finish(terminate=exc_type is not None)
 
 
 @dataclass(frozen=True)
@@ -1253,9 +455,11 @@ class WorkerReply:
     peak_bytes: int | None
     resident_affinities: tuple[str, ...]
     retire: bool = False
-    storage_routes: tuple[dict[str, Any], ...] = ()
     threads: tuple[int, int] = (1, 1)  # CPUs the task held at its start and at most while it ran
     diagnostics: tuple[str, ...] = ()
+    publish_lock_wait_seconds: float = 0.0
+    publish_fsync_seconds: float = 0.0
+    thread_seconds: tuple[tuple[int, float], ...] = ()  # seconds at each claimed CPU count
 
 
 _RESIDENT: dict[tuple[str, str], Any] = {}
@@ -1575,7 +779,7 @@ def release_shared_value(reference: SharedValue) -> None:
 
 
 def share_output(shape, dtype, key: str) -> tuple[SharedArrayRef, np.ndarray]:
-    """A writable shared array owned by the calling task's affinity like a SharedValue (release 4.10): subtasks attach
+    """A writable shared array owned by the calling task's affinity like a SharedValue: subtasks attach
     its reference (attach_shared_array) and each fills its own part; ``release_output(key)`` unlinks it after its last
     use. Until then it is one of the affinity's owned segments, so the engine's failure paths unlink it as they unlink
     shared values (a failed task's holds, an aborted in-process graph, the coordinator's announced names, exit).
@@ -1646,13 +850,13 @@ class RecyclingPolicy:
 
 def _task_peak_threads() -> int:
     """The most CPUs this process's running task has held (its pool seat), 1 outside a pool."""
-    from . import scheduler
+    from . import cpu
 
-    seat = scheduler._POOL_SEAT
+    seat = cpu.pool_seat()
     return 1 if seat is None else max(1, int(seat.peak))
 
 
-def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gathers: bool = False) -> WorkerReply:
+def perform_task(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gathers: bool = False) -> WorkerReply:
     global _ACTIVE_AFFINITY
     from .graph import _readonly
     from .runtime import task_boundary
@@ -1664,23 +868,27 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gath
     start, cpu, peak = (time.perf_counter(), time.process_time(), task_peak_start())
     try:
         args, kwargs = (task.args, dict(task.kwargs))
-        from .scheduler import TaskBudget, executing_task
+        from .cpu import TaskBudget, executing_task
+        from .records import ThreadUsage
 
-        budget = TaskBudget(budget, task.resources.min_cores, task.resources.max_cores)
+        usage = ThreadUsage(task.resources.min_cores, start=start)
+        budget = TaskBudget(budget, task.resources.min_cores, task.resources.max_cores, observe=usage.observe)
         team = budget.threads()
         if task.thread_argument is not None:
             kwargs[task.thread_argument] = team
         _readonly((args, kwargs))
-        from .records import capture_diagnostics, capture_storage_routes
+        from ..store.container import capture_publish_timing
+        from .records import capture_diagnostics
 
         try:
             with (
-                capture_storage_routes() as routes,
                 capture_diagnostics() as diagnostics,
+                capture_publish_timing() as publish_timing,
                 executing_task(task.key),
                 adopted(token),
+                # Restore the outer mask after the finished task's budget unbinds.
+                thread_team(team),
                 budget_context(budget),
-                numba_threads(team),
             ):
                 value = _readonly(task.function(*args, **kwargs))
                 if keep_gathers and task.affinity is not None and isinstance(value, Expansion):
@@ -1688,17 +896,24 @@ def _perform(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gath
         except bootstrap.RunInterrupted:
             raise
         except BaseException as error:
-            raise bootstrap.task_failure(error) from error
+            # The existing exception transport retains observed I/O times even when no reply is produced.
+            failure = bootstrap.task_failure(error)
+            failure.publish_lock_wait_seconds = publish_timing.lock_wait_seconds
+            failure.publish_fsync_seconds = publish_timing.fsync_seconds
+            raise failure from error
+        stop = time.perf_counter()
         return WorkerReply(
             task.key,
             value,
-            time.perf_counter() - start,
+            stop - start,
             time.process_time() - cpu,
             task_peak_bytes(peak),
             tuple(sorted({key[0] for key in _RESIDENT})),
-            storage_routes=tuple(routes),
             diagnostics=tuple(diagnostics),
+            publish_lock_wait_seconds=publish_timing.lock_wait_seconds,
+            publish_fsync_seconds=publish_timing.fsync_seconds,
             threads=(int(team), max(int(team), _task_peak_threads())),
+            thread_seconds=usage.finish(stop),
         )
     finally:
         _ACTIVE_AFFINITY = None
@@ -1717,9 +932,9 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
     try:
         with bootstrap.signal_boundary(lambda: None):
             bootstrap.apply_worker_settings(settings)
-            from .scheduler import _PoolSeat
+            from .cpu import PoolSeat
 
-            seats = [_PoolSeat(counters) for counters in groups]
+            seats = [PoolSeat(counters) for counters in groups]
             policy = RecyclingPolicy(threshold)
             connection.send(("ready", os.getpid()))
             while True:
@@ -1737,20 +952,20 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
                 task, token, lane = message
                 if isinstance(task, _PackedTask):
                     task = task.load()
-                from . import scheduler
+                from . import cpu
 
-                seat = scheduler._POOL_SEAT = seats[lane]
+                seat = seats[lane]
+                cpu.set_pool_seat(seat)
                 seat.begin_task(task.resources.min_cores, dispatched=True)
                 # Failed native descendants cannot be interrupted by Python unwind.
                 # The graph aborts and reaps this worker; keep its seat until then.
-                reply = _perform(task, token, PoolShareBudget(), keep_gathers=True)
+                reply = perform_task(task, token, PoolShareBudget(), keep_gathers=True)
                 retire = policy.eligible(affinity=task.affinity is not None, retained=bool(_RESIDENT or _SHARED_OWNED))
-                # The reply is packed while the task still holds its CPUs, so that its large result arrays are copied
-                # into shared memory by the task's whole team (release 4.7.1), not by one thread after it released them.
-                # Release 4.8: plus the lane's CPUs nobody holds or waits for. An expanding single-CPU task (a contig's
-                # chain step) copied gigabytes of children's arrays on one thread while the node waited for them.
-                team = scheduler.authority_threads(_task_peak_threads())
-                packed = _pack_reply(replace(reply, retire=retire), copy_threads=team + scheduler.idle_lane_cpus())
+                # Pack the reply while the task holds its CPUs, using its team plus idle lane CPUs.
+                # Expanding chain steps return large child arrays; parallel copying keeps their
+                # shared-memory transfer from holding up the contig.
+                team = cpu.authority_threads(_task_peak_threads())
+                packed = _pack_reply(replace(reply, retire=retire), copy_threads=team + cpu.idle_lane_cpus())
                 seat.end_task()
                 connection.send(("result", packed))
                 # Idle workers retain only explicitly registered affinity state.
@@ -1776,10 +991,9 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
 # distinct array is copied once into a segment the coordinator owns, and every task that carries it sends a small
 # reference that the worker attaches without copying. Only arrays whose data provably can no longer change are shared
 # (_fixed: read-only views of immutable bytes, as every array a worker sends back arrives, or of an owner its producer
-# declared immutable at birth, core.immutable), with an exact dtype; every other array travels by value as before,
-# and the transport never changes a caller's array. Tasks receive their arguments read-only (_perform freezes them),
-# so a read-only shared view is exactly what each task saw before. Pickling such arrays per task cost the single
-# coordinator thread O(tasks x bytes): one contig's 925 MB evidence rode on every selection block task.
+# declared immutable at birth, core.immutable), with an exact dtype; other arrays travel by value.
+# The transport never changes a caller's array. Tasks receive read-only arguments (_perform freezes them),
+# so a shared view preserves their access semantics while avoiding O(tasks x bytes) coordinator pickling.
 TRANSPORT_SHARE_BYTES = 8 << 20
 
 
@@ -1997,17 +1211,16 @@ def _close_reply_handle(handle: SharedMemory) -> bool:
 
 
 def _retry_reply_closes() -> None:
-    """Close the reply mappings whose views have gone (at the next reply, and, release 4.11, after each reply is sent
-    and at an idle boundary: a worker sending no more large replies kept them until it exited)."""
+    """Close unreferenced reply mappings before a new reply, after each send and at idle boundaries,
+    so a worker needs no further large reply to release its mappings."""
     _REPLY_UNCLOSED[:] = [handle for handle in _REPLY_UNCLOSED if not _close_reply_handle(handle)]
 
 
 def _reply_segment(array: np.ndarray, copy_threads: int = 1) -> tuple:
     """Copy ``array`` into a new segment for the coordinator to adopt, with ``copy_threads`` threads when it is large;
-    this worker keeps no mapping of it. (Release 4.10: if a view of the new mapping is still alive when it closes,
-    which failed a 4.10 matrix case with BufferError once, it is collected and closed again, else kept and closed at a
-    later reply; the coordinator adopts the segment by name either way.)"""
-    from .scheduler import segment_name
+    If live views prevent closing the mapping, collect them and retry; retain any still-open mapping
+    for a later retry. The coordinator adopts the segment by name independently of this handle's lifetime."""
+    from .memory import segment_name
 
     _retry_reply_closes()
     transposed = not array.flags.c_contiguous
@@ -2043,20 +1256,6 @@ def _pack_reply(reply: WorkerReply, *, copy_threads: int = 1) -> _PackedReply:
     return _PackedReply(buffer.getvalue())
 
 
-@dataclass(frozen=True)
-class _PackedCall:
-    """A child task's call (function, arguments) pickled once by the worker that expanded it, or for an affinity
-    task's gather kept there (``kept``, _kept_gather), plus the transport segments it refers to and the results it
-    reads (``refs``, its gather's children). The coordinator forwards the bytes unread (it neither unpickles nor
-    re-pickles them, nor walks them for references), holds those segments while the child is pending or running, and
-    sends the referenced results beside the bytes."""
-
-    payload: bytes
-    names: tuple[str, ...]
-    refs: tuple[TaskKey, ...] = ()
-    kept: str | None = None  # the call stayed in the worker that expanded it (_kept_gather): no payload
-
-
 _KEPT_NUMBERS = count()
 
 
@@ -2074,7 +1273,7 @@ def _kept_gather(gather: Task, affinity: str) -> Task:
     name = f"continuation/{next(_KEPT_NUMBERS)}"
     _RESIDENT[affinity, name] = (gather.function, gather.args, kwargs)
     refs = tuple(dict.fromkeys(_references((gather.args, kwargs))))
-    return replace(gather, function=_call_packed, args=(_PackedCall(b"", (), refs, kept=name),), kwargs={})
+    return replace(gather, function=_call_packed, args=(PackedCall(b"", (), refs, kept=name),), kwargs={})
 
 
 SHARED_CHILD_ARRAY_BYTES = 64 << 10  # smaller arrays several packed calls carry are copied into each
@@ -2130,16 +1329,16 @@ def _packed_child(
     except _ByValue:
         return task
     names = tuple(sorted({reference[1].name for reference in pickler.references}))
-    packed = _PackedCall(buffer.getvalue(), names, tuple(pickler.refs))  # dict order: by index
+    packed = PackedCall(buffer.getvalue(), names, tuple(pickler.refs))  # dict order: by index
     return replace(task, function=_call_packed, args=(packed,), kwargs={})
 
 
-def _call_packed(packed: _PackedCall, values: tuple = (), /, **extra: Any) -> Any:
+def _call_packed(packed: PackedCall, values: tuple = (), /, **extra: Any) -> Any:
     """Run a child's call packed by its expanding worker: ``values`` are the results its references name (in
     ``packed.refs`` order, sent by the coordinator), substituted with the coordinator's own resolver
-    (scheduler._resolve_graph: same traversal, rebuilt containers and dataclasses, literal mapping keys), and
+    (graph.resolve_results: same traversal, rebuilt containers and dataclasses, literal mapping keys), and
     ``extra`` the engine's per-run arguments (its thread team)."""
-    from .scheduler import _resolve_graph
+    from .graph import resolve_results
 
     if packed.kept is None:
         function, args, kwargs = _TransportUnpickler(io.BytesIO(packed.payload), _TASK_NUMBER).load()
@@ -2152,7 +1351,7 @@ def _call_packed(packed: _PackedCall, values: tuple = (), /, **extra: Any) -> An
             raise InvariantError(f"kept continuation {packed.kept} is not on this worker") from error
     # Always, as the coordinator resolved every task (references or not): it rebuilds tuples, lists and mappings.
     results = dict(zip(packed.refs, values, strict=True))
-    args, kwargs = _resolve_graph(args, results), _resolve_graph(kwargs, results)
+    args, kwargs = resolve_results(args, results), resolve_results(kwargs, results)
     args, kwargs = _readonly((args, dict(kwargs, **extra)))
     return function(*args, **kwargs)
 
@@ -2252,7 +1451,7 @@ class _ArrayTransport:
         if isinstance(reply.value, Expansion):
             for child in (*reply.value.subtasks, reply.value.gather):
                 for packed in child.args:
-                    if isinstance(packed, _PackedCall):
+                    if isinstance(packed, PackedCall):
                         for name in packed.names:
                             self.hold(name, packed)
         return reply
@@ -2328,7 +1527,7 @@ class _ArrayTransport:
 
     def _new_segment(self, size: int) -> SharedMemory:
         """A new segment, its name recorded before it exists: whatever interrupts its creation, close() unlinks it."""
-        from .scheduler import segment_name
+        from .memory import segment_name
 
         for _ in range(64):
             name = segment_name()
@@ -2448,7 +1647,7 @@ class WorkerGroup:
         static_affinities=(),
     ):
         self.context = mp.get_context("forkserver")
-        from .scheduler import LaneAuthority
+        from .lanes import LaneAuthority
 
         self.authority = LaneAuthority(self.context, cores, lanes, processes, chains)
         self.settings = bootstrap.worker_settings()
@@ -2464,7 +1663,7 @@ class WorkerGroup:
         self.traffic: dict[tuple[str, str], list[float]] = {}
         self.affinities: dict[str, int] = {}
         if static_affinities:
-            from .scheduler import partition_chains
+            from .lanes import partition_chains
 
             partitions = partition_chains([weight for _, weight in static_affinities], min(lanes, processes))
             self.affinities.update(
@@ -2479,7 +1678,7 @@ class WorkerGroup:
             raise
 
     def _spawn(self, index: int) -> None:
-        from .scheduler import _start_ticks
+        from .memory import process_start_ticks
 
         parent, child = self.context.Pipe()
         process = self.context.Process(
@@ -2495,7 +1694,7 @@ class WorkerGroup:
             raise
         child.close()
         assert process.pid is not None
-        handle = _WorkerHandle(process, parent, _start_ticks(process.pid))
+        handle = _WorkerHandle(process, parent, process_start_ticks(process.pid))
         if index == len(self.handles):
             self.handles.append(handle)
         else:
@@ -2505,7 +1704,7 @@ class WorkerGroup:
         """An idle worker for a task of ``affinity``: its pinned worker, else the first idle one outside
         ``reserved`` (the workers a pinned chain or a pending gather will need), then one reserved for the task's own
         chain or gather (``own``: what waits there waits for this task anyway), and another chain's only when no
-        other is idle. Another contig's task on a chain's worker held that chain's next step until it finished. A
+        other is idle. Giving the chain's worker other work can delay its next step. A
         new affinity is pinned to it only when a task is sent (pin), not when admission may still refuse the task."""
         if affinity in self.affinities:
             index = self.affinities[affinity]
@@ -2651,7 +1850,7 @@ class WorkerGroup:
         self.closed = True
         for group in self.authority.groups:
             group.closed.get_obj().value = 1
-        from .scheduler import _alive
+        from .memory import process_alive
 
         if not abort:
             for handle in self.handles:
@@ -2661,14 +1860,14 @@ class WorkerGroup:
                     pass
         for handle in self.handles:
             process = handle.process
-            if abort and handle.started is not None and _alive(process.pid, handle.started):
+            if abort and handle.started is not None and process_alive(process.pid, handle.started):
                 process.terminate()
         deadline = time.monotonic() + GROUP_TERMINATE_GRACE_SECONDS
         for handle in self.handles:
             handle.process.join(timeout=max(0.0, deadline - time.monotonic()))
         forced = 0
         for handle in self.handles:
-            if handle.started is not None and _alive(handle.process.pid, handle.started):
+            if handle.started is not None and process_alive(handle.process.pid, handle.started):
                 handle.process.kill()
                 forced += 1
             handle.process.join(timeout=1.0)
@@ -2729,16 +1928,7 @@ class WorkerGroup:
         self.close(abort=kind is not None)
 
 
-def _announce_pool_retirement() -> None:
-    """Publish the exact retiring PID before stdlib sends its final chunk result."""
-    seat = pool_seat()
-    assert seat is not None
-    counters = seat.counters
-    with counters.admission:
-        for i, pid in enumerate(counters.retirements):
-            if pid == os.getpid():
-                return
-            if not pid:
-                counters.retirements[i] = os.getpid()
-                return
-        raise InvariantError("pool retirement announcement table is full")
+def release_local_state() -> None:
+    """Release resident values and shared backing when an in-process graph closes."""
+    _RESIDENT.clear()
+    _release_all_shared()
