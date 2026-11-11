@@ -22,6 +22,8 @@ These override cost, speed and convenience. Each is detailed in the section cite
 3. **The owner controls Git history.** Without an explicit instruction:
    - never commit, push, pull, merge, rebase, reset, check out, switch, amend, tag, stash, clean or force;
    - never discard local changes (§4.8).
+
+   Read-only Git is allowed for every agent, delegated agents included (§4.8).
 4. **Never delete checkpoints, results or other files without explicit approval**, except the provisional outputs
    of your own authorized attempt. Never overwrite accepted results (§5.1, §7.3).
 5. **Never test on real AulStu data.** No acceptance runs, validation, benchmarks, scaling studies or projections on
@@ -537,6 +539,12 @@ Keep the audit proportionate. Broad simulations, scaling studies and benchmarks 
 the gate. Passing it means no launch-blocking defect was found, not that the code is bug-free.
 
 ### 4.8 Git
+
+**Read-only Git is allowed** (owner, 10 November 2026: blanket bans on Git were too strict). Any agent, delegated
+agents included, may use commands that read the repository without changing it: `git status`, `git log`, `git show`
+(for example `git show REV:path` to view an earlier version of a file), `git diff`, `git blame`, `git grep` and
+`git ls-files`. They never change the working tree, the index, refs or the remote. Everything else stays with the
+owner (§1).
 
 The owner controls history (§1). After editing:
 - run `git status --short`, `git diff --stat` and `git diff --check`;
@@ -1172,7 +1180,7 @@ here beyond the resource rules, but delegation is one level deep.
   - safe process stopping (§7.2);
   - no AulStu tests (§3.1);
   - SL4 only (§6.2);
-  - no Git history operations (§4.8);
+  - no Git history operations; read-only Git is allowed (§4.8);
   - start checks and fail-fast tasks (§5.3);
   - cancelling superseded validation (§5.5);
   - no sub-agents (above).
