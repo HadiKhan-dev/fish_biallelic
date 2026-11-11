@@ -67,7 +67,8 @@ class GenomeScores:
              of non-edges and self coverage) are never read by the decision or the report.
     zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C];
     informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
-    junction_log_cdf float64 [C, D] (ChromosomeScores); scored_morgans float64 [C] (NaN where unknown);
+    transmission_log_likelihood float64 [C, D] in nats (ChromosomeScores);
+    scored_morgans float64 [C] (NaN where unknown);
     edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier
     records).
     """
@@ -88,7 +89,7 @@ class GenomeScores:
     callable_bins: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
     informative_markers: np.ndarray = record_field("obs", axes=("C",), units="1", dtype="int64")
     junction_dyads: np.ndarray = record_field("evidence", axes=("D", "2"), units="1", dtype="int64")
-    junction_log_cdf: np.ndarray = record_field("evidence", axes=("C", "D"), units="1", dtype="float64")
+    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("C", "D"), units="nats", dtype="float64")
     scored_morgans: np.ndarray | None = record_field(
         "evidence", axes=("C",), units="Morgans", dtype="float64", default=None
     )
@@ -686,8 +687,8 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 3 with columnar
-    exclusion evidence."""
+    """Complete released pedigree and retained numerical state, published atomically as schema 4 with joint
+    transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -709,7 +710,7 @@ class Pedigree:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(3)
+    schema: int = schema_field(4)
 
 
 @dataclass(frozen=True)
@@ -1567,9 +1568,10 @@ class ChromosomeScores:
     component_count, scored_component_count: painting components / prepared components.
     junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every
         eligible edge, in row-major order (the same for every chromosome of a run).
-    junction_log_cdf: float64 [D] log P(the junctions that c inherits from p and detects are at most c's own
-        count) under linked transmission (science.pedigree.junctions.linked_log_cdf).
-    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans;
+    transmission_log_likelihood: float64 [D] joint log likelihood (nats) of the two samples' scheduled
+        homologues under c <- p (science.pedigree.transmission.log_likelihood).
+    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components
+        (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans;
         0 without a measured map).
     edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length
         over which the pair (child and both panel parents) is exposed: each measured interval between adjacent
@@ -1590,11 +1592,11 @@ class ChromosomeScores:
     component_count: int = record_field("state", axes=(), units="1", dtype="int64")
     scored_component_count: int = record_field("state", axes=(), units="1", dtype="int64")
     junction_dyads: np.ndarray = record_field("state", axes=("D", "2"), units="1", dtype="int64")
-    junction_log_cdf: np.ndarray = record_field("state", axes=("D",), units="nats", dtype="float64")
+    transmission_log_likelihood: np.ndarray = record_field("state", axes=("D",), units="nats", dtype="float64")
     scored_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64")
     edge_exposed_morgans: np.ndarray = record_field("state", axes=("N", "N"), units="Morgans", dtype="float64")
     pair_exposed_morgans: np.ndarray = record_field("state", axes=("T",), units="Morgans", dtype="float64")
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)

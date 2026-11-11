@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("init", "Validate inputs and initialize the run manifest."),
         ("evidence", "Record one contig's evidence."),
         ("relatedness", "Gather relatedness from every contig's evidence."),
-        ("reconstruct", "Reconstruct and refit one contig."),
+        ("reconstruct", "Reconstruct and refit one contig; concurrent invocations share unclaimed units."),
         ("pedigree", "Gather the genome-wide pedigree."),
         ("phase", "Phase, map and export one contig."),
         ("report", "Publish tables from available records."),
@@ -205,7 +205,18 @@ def _command_workflow(args: argparse.Namespace) -> int:
     settings = load_settings(
         args.config, preset=args.preset, options=options, overrides=args.overrides, fallback_contigs=selected
     )
-    args.output = run_paths(settings).output
+    from dataclasses import replace
+    from ..results.paths import active_exclusions
+    from .settings.load import parse_override
+
+    output = run_paths(settings).output
+    recorded = args.config is not None and args.config.expanduser().resolve() == output / "config.toml"
+    explicit = any(tuple(parse_override(value)[0]) == ("run", "exclude_contigs") for value in args.overrides)
+    if recorded and not explicit:
+        active = active_exclusions(output)
+        if active is not None:
+            settings = replace(settings, run=replace(settings.run, exclude_contigs=active))
+    args.output = output
     execute(
         settings,
         command=args.command,

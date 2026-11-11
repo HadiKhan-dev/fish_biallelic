@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..contracts.contigs import AnalysisContigs
 from ..core.digest import canonical_json, json_digest, jsonable
 from ..core.errors import SettingsError
 from ..core.random import realise_seed
@@ -237,6 +238,7 @@ class ResolvedConfiguration:
     simulation_config: SimulationConfig | None
     scientific_json: str
     outputs: OutputSelection
+    analysis: AnalysisContigs
 
     @property
     def identity(self) -> str:
@@ -257,6 +259,7 @@ def resolve(
     sample_ids: Sequence[str] = (),
     maps: GeneticMapSet | None = None,
     bound_seeds: Mapping[str, int] | None = None,
+    analysis: AnalysisContigs | None = None,
 ) -> ResolvedConfiguration:
     """Resolve once under init's claim; on resume pass seeds from its manifest."""
     parameters = configure(settings)
@@ -292,7 +295,8 @@ def resolve(
     related = getattr(settings, "relatedness", None)
     outputs = OutputSelection(bool(settings.export.enabled), bool(getattr(related, "pairwise_ibd", False)))
     return ResolvedConfiguration(
-        parameters, order, samples, tuple(seeds.items()), map_ids, sim, canonical_json(jsonable(document)), outputs
+        parameters, order, samples, tuple(seeds.items()), map_ids, sim, canonical_json(jsonable(document)), outputs,
+        AnalysisContigs(order, tuple(settings.run.exclude_contigs)) if analysis is None else analysis
     )
 
 

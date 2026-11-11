@@ -6,13 +6,20 @@ must continue to work when an input VCF or a template directory has moved.
 
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.errors import SettingsError
 
-__all__ = ["RunPaths"]
+__all__ = ["RunPaths", "active_exclusions"]
+
+
+def active_exclusions(output: str | Path) -> tuple[str, ...] | None:
+    """Read the active analysis choice; None means no choice has been published."""
+    path = Path(output) / "analysis_selection.json"
+    return tuple(json.loads(path.read_text())["excluded_contigs"]) if path.is_file() else None
 
 
 @dataclass(frozen=True)

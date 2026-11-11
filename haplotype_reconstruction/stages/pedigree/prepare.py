@@ -12,6 +12,7 @@ from dataclasses import dataclass, fields, replace
 from functools import partial
 from typing import Any
 
+from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap, GeneticMapSet
 from ...contracts.painting import Painting
@@ -233,7 +234,7 @@ def _scores_stored(
     file = store.contig(reference.contig)
     cached = read_items(file, scores.KEY, identity, ("schema", "contig"))
     if cached is not None:
-        require_schema(cached.payload, 1)
+        require_schema(cached.payload, scores.ScoresAdapter.schema)
         return reference.contig, identity
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
@@ -402,7 +403,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
         reverse_conventions=bool(manifest["ties"]["reverse"]),
     )
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
-    contigs = tuple(manifest["contigs"])
+    contigs = AnalysisContigs.from_manifest(manifest).included
     precheck(len(manifest["sample_ids"]), len(contigs), parameters, basis="configured")
     if any(json_digest(maps.identity(c)) != manifest["map_identities"][c] for c in contigs):
         raise InputError("pedigree maps differ from the bound run manifest")

@@ -1514,9 +1514,9 @@ _SIGNATURES = {
             ),
         },
     ),
-    'haplotype_reconstruction.science.assembly.refinement.acceptance.pass_chunk': (
+    "haplotype_reconstruction.science.assembly.refinement.acceptance.pass_chunk": (
         {
-            'text': (
+            "text": (
                 "(Array(int16, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), ListType(Arra"
                 "y(int16, 2, 'C', False, aligned=True)), Tuple((Array(float32, 3, 'C', False, aligned=True), Array(bo"
                 "ol, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', F"
@@ -1538,61 +1538,61 @@ _SIGNATURES = {
                 "e), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
                 "4, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', Fal"
                 "se, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=Tr"
-                "ue), Array(int64, 1, 'C', False, aligned=True), bool, bool, bool, Array(float64, 1, 'C', False, alig"
-                'ned=True), Ahead(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d'
-                ', C), array(int32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain'
-                '(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(flo'
-                "at64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool"
-                ', bool)'
+                "ue), Array(int64, 1, 'C', False, aligned=True), bool, bool, Array(float64, 1, 'C', False, aligned=Tr"
+                "ue), Ahead(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C), "
+                "array(int32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain(bool,"
+                " int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(float64, "
+                "3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool, bool"
+                ")"
             ),
-            'pickle': (
-                'fCQB=4FCWD0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*'
-                'Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS'
-                '1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK'
-                'WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<'
-                'DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d'
-                'XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^'
-                'l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%'
-                'Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkC}<970%!$j4~zvyY;R$7l#`Tb3r>fW'
-                'eUvC@6pROEY;R$7GcuHD7E2&#7)u*<hm=y3Xd6odXdGxAXda9eVRCX|c_?OVZ((#ZGAtl7WGo;<DU@g+O@IM)hm=y3XaZ;jXb5Nv'
-                'PKT6zlqhHpXaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3Xd6obXdGxAXda9bVRCX|c_?CUZ)_|eF=Q+t'
-                'Ln)MKAWeY*b%&HvlxS6G0%!$j2xtpVhm?JkC}<970%!$jL1+t3hm?JkC}<Rn2WD(<VRSY$lxP-9Kxi0C9Ce43Qj};LO95ycXdP%C'
-                'j1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXdq330d<FzQj}-{Xa#5pXbVn<lzo&aXbxyxXd6odXdGxAXda9eVRCX|c_?OVZ((#cG%O%9'
-                'WGo;<DU@g+O@je-hm=y3Xk=&tXa#5pXbVn<lzo&aXbxy8Xd6obXdGxAXda9cVRCX|c_?XabT%|BATeYtAVVpXXdq350d<FzQj}-{'
-                'Xa#5pXbVn<lzo&aXbxybXd6ocXdGxAXda9eVRCX|c_?OVZ((#ZGAtl6WGo;<DU@g+O@#q<hm=y3XlZCtbd-z*V{dhCbd*a9XftR6'
-                'Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}>q^ZfHqpUua}#X=qY(l#B#!VQpoUjEYrmX>V>@VRCX|c_?CUZ)_|eF=Q+tLn$m_'
-                'a&lpLC}wPLVRSPxEFdyuEFeQEEManTVR<NKY;R$7Gcqh7Gh{3vLn$m_a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|C'
-                'Gh{3vLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*Oc}l#B&mV{c?-lud>Kb%&HvlxTL0&{TDBY-K26a&lpLC}wPLVRSPxEFd#vEFeQE'
-                'EFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|C'
-                'Gh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpL'
-                'C~0nVHZ&|CF=Q+tLn$mEVsCG3DU@h<O@{$>hm=y3XlZCEXenqZXaZ;jXb5NvPKT6zlqhHpXk2I;O9E&dXdP%Cj1^&Wa$$KWW^8X^'
-                'bT%|BATneuAVVpXXdq390d<FzQj}<dXk=()XaZ;jXgX*MPKT6zlqhIDC}?D8WN2w<B4~YRX=qYtQfPu`0%!$j2xtpVhm?JkC}<97'
-                'Txc6h1ZW&+9cUhm6=8C6VR<NKY;R$7HZ&|CG-NCwLn)MKAWew@b%&HvlxT@)X=qY(lxT2E4QMlH0%!$ja%c-qhm?JkC}=$>Xnkmc'
-                'Xk=)KXd-B7Xi{{PXm(ge0RRA1ZfS3BTU2#$Y-K26a&lpLC}wPLVRSPxEFd#vEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KW'
-                'VsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<'
-                'DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ)@fa$$KW'
-                'W^8X^bT%|BATneuAVVoEVRCX|c_?OVZ((#cG%O%9WGo;<DJ)@fa$$KWW^8X^bT%|BAT(qwAVVoEVRCX|c_?XabTKw8ATneuAVVoE'
-                'VRCX|c_?XabT%|BATeYtAVVoEVsCG3U6g2eO^N|^hm=y3Xm(hz0RRA0b#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OV'
-                'Z((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?XabTKw8ATneuAVVoEAXIg5Y-K26a&lpLC}wPLVRSPxEFd#v'
-                'EFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7'
-                'HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pi'
-                'a&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3EFfZUZ)_|eVRCX|c_?OVZ((#cG%O%8WGo;<'
-                'DJ&pia&lpLC}wPLVRSY$EFd&wEFeQEEFfWWa$$KWW^8X^bT%|BAT(qwAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn0MF'
-                '0d<FzQj}<9Xo6^IXlZC^XlZC^XlZC^XlZC^XlZCtXi{iWXkTaoXa#63j0#R+ZDnLsb#QEDl#`Tb3r>fWeUvC@Jt$~WXenqZXk=()'
-                'Xo6@0Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2gGL&c*OCV?$h-er~8Fh!0Qj};LO9E&dXdP%Cj1ysUa$$KWX>N2g'
-                'GAtl6WGo;<DU@g+O^g9`hm=y3Xo6^=Xo7T<XmCpkj0R?DWo%?~lqie>Z)=o{1#@&^a&(l81$JR<X=Id)26ka=b!Bsuj0R(Gb#8QX'
-                'l#B>-X>?^@ZDDwnj0tmTbY)*`WnpBLj0s|FZ)0m;ZDDwnj0$3GZ)0m;Y-M3&l#B>-X>?^@V{UYmbd-z^X>N0LVQyn(Ut?@xb90o8'
-                'KWJfaY;SaVaAjX|Wn*t{b98cbV{~b6ZZ30UX=QF>WiDZJb7gH}Y<VtnWoBt^Wo>0{bS`0IV`Xr3VQyn(l#B&IXk}q!l#`T<1a4t%'
-                'Wt5DzL1<-RWGG^9Z)_|eX>N2jG%O%#Zge&@EFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|'
-                'c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC~0nVGcqh7GGr_uLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC~0nVGcqh7GGr_u'
-                'Ln$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJhhU1z%%tWM!01rvi0{lv0#v0%!$jm1ql2hm?JkC}=$>Xi{h?Xenr9Xk=)Dbd+dtO9p78'
-                'D2xJcYm|%yb97;Hbd-z(Wo~4Yj0SdLY;|RGl#B*rZ*^{TbCiq*b7Ns_Wpk8tlxVMLu#5#mXklq?l#`Tbvy5ItXklq?C}MAKY%CyY'
-                'Zge&@EFfuabT%|BAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQE'
-                'DU@inO`-yIhm=y3Xk=()Xi{igXi{iWbd)X'
+            "pickle": (
+                "fCQB;4FCWD0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*"
+                "Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS"
+                "1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK"
+                "WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<"
+                "DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d"
+                "XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^"
+                "l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%"
+                "Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkC}<970%!$j4~zvyY;R$7l#`Tb3r>fW"
+                "eUvC@6pROEY;R$7GcuHD7E2&#7)u*<hm=y3Xd6odXdGxAXda9eVRCX|c_?OVZ((#ZGAtl7WGo;<DU@g+O@IM)hm=y3XaZ;jXb5Nv"
+                "PKT6zlqhHpXaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3Xd6obXdGxAXda9bVRCX|c_?CUZ)_|eF=Q+t"
+                "Ln)MKAWeY*b%&HvlxS6G0%!$j2xtpVhm?JkC}<970%!$jL1+t3hm?JkC}<Rn2WD(<VRSY$lxP-9Kxi0C9Ce43Qj};LO95ycXdP%C"
+                "j1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXdq330d<FzQj}-{Xa#5pXbVn<lzo&aXbxyxXd6odXdGxAXda9eVRCX|c_?OVZ((#cG%O%9"
+                "WGo;<DU@g+O@je-hm=y3Xk=&tXa#5pXbVn<lzo&aXbxy8Xd6obXdGxAXda9cVRCX|c_?XabT%|BATeYtAVVpXXdq350d<FzQj}-{"
+                "Xa#5pXbVn<lzo&aXbxybXd6ocXdGxAXda9eVRCX|c_?OVZ((#ZGAtl6WGo;<DU@g+O@#q<hm=y3XlZCtbd-z*V{dhCbd*a9XftR6"
+                "Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}>q^ZfHqpUua}#X=qY(l#B#!VQpoUjEYrmX>V>@VRCX|c_?CUZ)_|eF=Q+tLn$m_"
+                "a&lpLC}wPLVRSPxEFdyuEFeQEEManTVR<NKY;R$7Gcqh7Gh{3vLn$m_a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|C"
+                "Gh{3vLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*Oc}l#B&mV{c?-lud>Kb%&HvlxTL0&{TDBY-K26a&lpLC}wPLVRSPxEFd#vEFeQE"
+                "EFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|C"
+                "Gh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpL"
+                "C~0nVHZ&|CF=Q+tLn$mEVsCG3DU@h<O@{$>hm=y3XlZCEXenqZXaZ;jXb5NvPKT6zlqhHpXk2I;O9E&dXdP%Cj1^&Wa$$KWW^8X^"
+                "bT%|BATneuAVVpXXdq390d<FzQj}<dXk=()XaZ;jXgX*MPKT6zlqhIDC}?D8WN2w<B4~YRX=qYtQfPu`0%!$j2xtpVhm?JkC}<97"
+                "Txc6h1ZW&+9cUhm6=8C6VR<NKY;R$7HZ&|CG-NCwLn)MKAWew@b%&HvlxT@)X=qY(lxT2E4QMlH0%!$ja%c-qhm?JkC}=$>Xnkmc"
+                "Xk=)KXd-B7Xi{{PXm(ge0RRA1ZfS3BTU2#$Y-K26a&lpLC}wPLVRSPxEFd#vEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KW"
+                "VsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<"
+                "DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ)@fa$$KW"
+                "W^8X^bT%|BATneuAVVoEVRCX|c_?OVZ((#cG%O%9WGo;<DJ)@fa$$KWW^8X^bT%|BAT(qwAVVoEVRCX|c_?XabTKw8ATneuAVVoE"
+                "VRCX|c_?XabT%|BATeYtAVVoEVsCG3U6g2eO^N|^hm=y3Xm(hz0RRA0b#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OV"
+                "Z((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?XabTKw8ATneuAVVoEAXIg5Y-K26a&lpLC}wPLVRSPxEFd#v"
+                "EFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7"
+                "HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pi"
+                "a&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3EFfZUZ)_|eVRCX|c_?OVZ((#cG%O%8WGo;<"
+                "DJ&pia&lpLC}wPLVRSY$EFd&wEFeQEEFfWWa$$KWW^8X^bT%|BAT(qwAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn0MF"
+                "0d<FzQj}<9Xo6^IXlZC^XlZC^XlZC^XlZC^XlZCtXi{ijXaZ;jXf2EiPGN0jWK?x<Y-N;_lxPc1hm?JkC}=$>Xi{h?Xenr9Xk=)D"
+                "XaZ;jXb5NvPKT6zlqhHpXaZ;jXc1@&PKT6zlqhHvj0I_KbTcxPXckK#XcvfR7)u#-hm=y3Xd6ocXdGxAXda9cVRCX|c_?XabTcw6"
+                "ATneuAVVpXXdq3D0d<FzQj}<dXrX9=bd+dtOA3qzW@%+?WOI}#i~?_Kl#B&)bYXIIl#B&-VQgt+l#B*;VQh6}bCiq*V{dhCbaRx9"
+                "2y<z4WnXP!c$AC@b7^#CUu<PzWR#2vVr*|?YhP_)c$AC^Vr*|?YhP?-VPuqy2y<z4WnW`%bd+?Ij1FmTb97;DV`X1sY+-YAl#D-U"
+                "VQ_43ba`-PUvgz*Z*FsRa&=>LX>V>Wb7N^`ZewLGVRLh3ZDMSBE^=jNX>Mh0Wo~pXVPj)uaCBjAV`Y?#1wm+KVPuq(l#B#!VQpoU"
+                "jJ82&Wnp9}VsCG3EFfuabT%|BAZc!NHZ&|CVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KW"
+                "W^8X^bT%|BATneuAVVoEAYpQHVR<NNZgev;EFdyuEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NNZgev;EFdyuEFeQE"
+                "EFfWWa$$KWW^8X^bT%|BATneuAVVoBl#B&mV{c?-luf4sb%&HvlxPBI1!$FM3r>fWeUvC@Jt$~WXenqZXk=()Xo7T<XmCpgXrm~M"
+                "0&i=Sj0JOaVRCeoj00tEWR#2sc42IFWpk8_24in^Zgg{$j0SUKVQgh{lysD6uV}E01w&|IX>OF0lxVYzUPEYMX>KTDZ*OcYAZc!N"
+                "HZ&|CX>N2jG%O%ta&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$eg"
+                "XthnE0(FO!Qj}<9Xk=(oXk2JgXi{{PE&"
             ),
         },
         {
-            'text': (
+            "text": (
                 "(Array(int16, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), ListType(Arra"
                 "y(int16, 2, 'C', False, aligned=True)), Tuple((Array(float32, 3, 'C', True, aligned=True), Array(boo"
                 "l, 1, 'C', True, aligned=True), Array(bool, 1, 'C', True, aligned=True), Array(float64, 1, 'C', True"
@@ -1614,60 +1614,60 @@ _SIGNATURES = {
                 "(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C'"
                 ", False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, align"
                 "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Arra"
-                "y(int64, 1, 'C', False, aligned=True), bool, bool, bool, Array(float64, 1, 'C', False, aligned=True)"
-                ', Ahead(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C), arr'
-                'ay(int32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain(bool, in'
-                't64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(float64, 3, '
-                "'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool, bool)"
+                "y(int64, 1, 'C', False, aligned=True), bool, bool, Array(float64, 1, 'C', False, aligned=True), Ahea"
+                "d(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C), array(int"
+                "32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain(bool, int64, i"
+                "nt64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(float64, 3, 'C', F"
+                "alse, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool, bool)"
             ),
-            'pickle': (
-                'fCQC|4gdfE0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*'
-                'Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS'
-                '1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK'
-                'WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<'
-                'DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d'
-                'XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^'
-                'l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%'
-                'Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkD2xYfb#!53Y-N;*XbxxsXa#5wj0Hw)'
-                'Z(($llay!+PKT6zlqhHvj0a|HZ((#ZGL&c*OCV?%OB;2Elv0#v8%qOd9B3VA9*iDxWnpA*ZftoVVRCX|c_?OVZ((#ZGAtl7WGo;<'
-                'DU@g+O{D>Khm=y3XaZ;jXb5NvPKT6zlqhIGiD(XJ0%!$j4~z#wZ*Od6VQ!R@lxPc1hm?JkC}<Rn1Y&P*Y?NpiOA>X5lv0#v8%qIb'
-                '9B3VA9*i4uWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn)MKAWfzLb%&HvlxS9H0%!$j2xtpVhm?JkC}=>5XbxxsXa#6OXbVn<lzo&a'
-                'XcUYGW^8X^bT%}UXckLAXc$Wzb%&HvlxQ1E0cad(9cUhm9&%-2WN&V4c_3kOa$$KWW^8X^bT%|BATeYtAVVpXXdq3I0d<FzQj}-{'
-                'Xa#5pXbVn<lzo&aXbxyyXd6odXdGxAXda9eVRCX|c_?OVZ((#cG%O%9WGo;<DU@g+O@je-hm=y3Xk};uXa#5pXbVn<lzo&aXbxy8'
-                'Xd6obXdGxAXda9cVRCX|c_?XabT%|BATeYtAVVpXXdq350d<FzQj}-{Xa#5pXbVn<lzo&aXbxycXd6ocXdGxAXda9eVRCX|c_?OV'
-                'Z((#ZGAtl6WGo;<DU@g+O@#q<hm=y3XliIvbd-z*V{dhCbd*a9XftR6Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}?kJWoT+>'
-                'Q)pIbN@!qol#B#!VQpoUjHOj>X>V>@VRCX|c_?OVZ((#ZGAtl6WGo;<DJ)@fa$$KWW^8X^bT%|BATwkvAVVoEVRCX|c_?XabT%|B'
-                'ATeYtAVVoEVsCG3EOKRGWN&V4c_3kOa$$KWVsCG3EFdvtEFeQEEOKRGWN&V4c_3kOa$$KWW^8X^bTcw6ATwkvAVVoEa%Ev;Z*FXP'
-                'AYpQHVR<NKY;R$7HZ&|CF=Q+tLn&R9j0Im~Z)9bZO|=1ahm=y3Xm^bCRCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQE'
-                'EFf}aVPtP^Y<VDIa&lpLC}MAKY%Cx#WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NKY;R$7'
-                'HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pi'
-                'a&lpLC}wPLVRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVlxTTPwgGjAlv0#vYG^5FDQGEZ0%!$j2xtpVhm?Jk'
-                'C}<97U1%Fi0%#m)9cUhm6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKAWet?b%&HvlxTx!WoTt+0%!$jI%o?{hm?JkC}=$>Xk}<+XliI8'
-                'Xntq{Xa#5pXbVn<lzo&aXh4Z*4rnQ88%qIb9B3VA9*i7vWnpA*ZftoVVRCX|c_?XabT%|BATeYtAVVpXXdq3$0d<FzQj};@Xj5o|'
-                'XaZ;jXb5NvPKT6zlqhHpXkBO<O9W^fXdP%Cj1^&Wa$$KWW^8X^bT%|BAT(qwAVVpXXdq3A0d<FzQj}<qXliIvbd+duOATl<XaZ;j'
-                'Xme-_PKT6zlqhIDC}@6YgJ@-Fk7y!jYG_kvigc7{cUXr30032PX>V>@RCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQE'
-                'EFf}aVPtP^Y<VDIa&lpLC}MAKY%Cx#WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NKY;R$7'
-                'HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pi'
-                'a&lpLC}wPLVRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPL'
-                'VRSY$EFd#vEFeQEEManTVR<NKY;R$7HZ&|CG-NCwLn$m_a&lpLC~0nVF*Yn9GGr_uLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*OcY'
-                'a%Ev;Z*FXPAYpQHVR<NNZge&@EFdvtEFeQEU6g2fP4NMBhm=y3Xm?oM0RRA0b#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|'
-                'c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?XabTKw8ATneuAVVoEAXIg5Y-K2NWnpA*ZftoVVRCX|'
-                'c_?OVZ((#ZGAtl7WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NGZ*OcYATeYtAVVoEAaZ44'
-                'WN&V4c_3kOa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpL'
-                'C~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ&pzWnpA*ZftoVVRCX|'
-                'c_?XabT%|BATeYtAVVoEAYyNCY%CyRZ*OcYAYpQHVR<NKY;R$7HZ&|CGGr_uLn$mEVRCX|c_?OVZ((#cG%O%AWGo;<DJ&pia&lpL'
-                'C}wPLVRSY$EFd&wEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVlxTTP@&R>+lv0#vWoUzFYG`U`YG`U`YG`U`YG`U`YG`U`'
-                'Q)p9YQ)mKc1!xFp3r>fWeUvC@4rpCy8%qIb9B3VA9*h-Xa&lpLC}wPLVRSY$EFdvtEFeQElxQGLf&q1hlv0#v0%!$jEsP3IVQpn('
-                'RCRD{Wt5YYXbVn<lzo&aXgw%sQ)nq@DQIPAWoUzF0%!$j2xtpVhm?JkC}<970%!$j5oilehm?JkC}<Rn1!-<{GcuHD7E2&#7l>#W'
-                'OBr>Clv0#v8%qLc9B3VA9*h%Va&lpLC~0nVGcqh7GGr_uLn)MKAWe(`b%&HvlxTx!tZ0LDlxT5F3XBG3X=Q9=bCf8I0&i=Sj0JOa'
-                'VRCeoj0JXKY-wbaj0SdLY;|RGl#B*rZ*^{TbCiq-b7^#CUu|J{l#B^;X>?^@Y-M3&l#B^tY;R+0Uu|J{l#B{uY;R+0Uu<PzWR#2u'
-                'b7^#CUt?}`lysDg4ry+4bYX5|WnW`#VRLhoj6Y~$aBOdMd2nT4a%E$0ZgX^Ubz^jCZ*DGgV`*h>V`VO3b8}^FVr+RXa%E;|Ze?v{'
-                'ZgehTV`F7-bYX5|Wt5BsL1<-RWR#PXj0A3BZDo{<wn1oRVPq&`Z*OcYAZc!NHZ&|CX>N2jG%O%ta&lpLC}wPLVRSY$EFd#vEFeQE'
-                'EFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$mEVRCX|c_?XabTcw6ATneuAVVoEAYpQHVR<NKY;R$7'
-                'HZ&|CGGr_uLn$mEVRCX|c_?XabTcw6ATneuAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$egj0Im~Z)9bZO{W5Nhm=y3XaZ;jXrO2d'
-                'PKT6zlqhIDC}>k?DQGEZWoTt+gLIT=aZ3hht|*KGZ)=o{1#@&^a&(l817&Vxl#B*;VQh6}bCiq*V{dhCbaRx926JO!Y-Mwlbd+ei'
-                'XuFIBLug@XZj_UhXugbILug@XZYW}JZ)_|eX>N2jG%O%#Zge&@EFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|C'
-                'Gh{3vLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJhg_z)hk8b%&HvlxSsWWoT1qU1(EiQ*@Lr'
+            "pickle": (
+                "fCQC`4gdfE0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*"
+                "Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS"
+                "1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK"
+                "WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<"
+                "DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d"
+                "XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^"
+                "l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%"
+                "Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkD2xYfb#!53Y-N;*XbxxsXa#5wj0Hw)"
+                "Z(($llay!+PKT6zlqhHvj0a|HZ((#ZGL&c*OCV?%OB;2Elv0#v8%qOd9B3VA9*iDxWnpA*ZftoVVRCX|c_?OVZ((#ZGAtl7WGo;<"
+                "DU@g+O{D>Khm=y3XaZ;jXb5NvPKT6zlqhIGiD(XJ0%!$j4~z#wZ*Od6VQ!R@lxPc1hm?JkC}<Rn1Y&P*Y?NpiOA>X5lv0#v8%qIb"
+                "9B3VA9*i4uWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn)MKAWfzLb%&HvlxS9H0%!$j2xtpVhm?JkC}=>5XbxxsXa#6OXbVn<lzo&a"
+                "XcUYGW^8X^bT%}UXckLAXc$Wzb%&HvlxQ1E0cad(9cUhm9&%-2WN&V4c_3kOa$$KWW^8X^bT%|BATeYtAVVpXXdq3I0d<FzQj}-{"
+                "Xa#5pXbVn<lzo&aXbxyyXd6odXdGxAXda9eVRCX|c_?OVZ((#cG%O%9WGo;<DU@g+O@je-hm=y3Xk};uXa#5pXbVn<lzo&aXbxy8"
+                "Xd6obXdGxAXda9cVRCX|c_?XabT%|BATeYtAVVpXXdq350d<FzQj}-{Xa#5pXbVn<lzo&aXbxycXd6ocXdGxAXda9eVRCX|c_?OV"
+                "Z((#ZGAtl6WGo;<DU@g+O@#q<hm=y3XliIvbd-z*V{dhCbd*a9XftR6Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}?kJWoT+>"
+                "Q)pIbN@!qol#B#!VQpoUjHOj>X>V>@VRCX|c_?OVZ((#ZGAtl6WGo;<DJ)@fa$$KWW^8X^bT%|BATwkvAVVoEVRCX|c_?XabT%|B"
+                "ATeYtAVVoEVsCG3EOKRGWN&V4c_3kOa$$KWVsCG3EFdvtEFeQEEOKRGWN&V4c_3kOa$$KWW^8X^bTcw6ATwkvAVVoEa%Ev;Z*FXP"
+                "AYpQHVR<NKY;R$7HZ&|CF=Q+tLn&R9j0Im~Z)9bZO|=1ahm=y3Xm^bCRCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQE"
+                "EFf}aVPtP^Y<VDIa&lpLC}MAKY%Cx#WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NKY;R$7"
+                "HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pi"
+                "a&lpLC}wPLVRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVlxTTPwgGjAlv0#vYG^5FDQGEZ0%!$j2xtpVhm?Jk"
+                "C}<97U1%Fi0%#m)9cUhm6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKAWet?b%&HvlxTx!WoTt+0%!$jI%o?{hm?JkC}=$>Xk}<+XliI8"
+                "Xntq{Xa#5pXbVn<lzo&aXh4Z*4rnQ88%qIb9B3VA9*i7vWnpA*ZftoVVRCX|c_?XabT%|BATeYtAVVpXXdq3$0d<FzQj};@Xj5o|"
+                "XaZ;jXb5NvPKT6zlqhHpXkBO<O9W^fXdP%Cj1^&Wa$$KWW^8X^bT%|BAT(qwAVVpXXdq3A0d<FzQj}<qXliIvbd+duOATl<XaZ;j"
+                "Xme-_PKT6zlqhIDC}@6YgJ@-Fk7y!jYG_kvigc7{cUXr30032PX>V>@RCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQE"
+                "EFf}aVPtP^Y<VDIa&lpLC}MAKY%Cx#WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NKY;R$7"
+                "HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pi"
+                "a&lpLC}wPLVRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPL"
+                "VRSY$EFd#vEFeQEEManTVR<NKY;R$7HZ&|CG-NCwLn$m_a&lpLC~0nVF*Yn9GGr_uLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*OcY"
+                "a%Ev;Z*FXPAYpQHVR<NNZge&@EFdvtEFeQEU6g2fP4NMBhm=y3Xm?oM0RRA0b#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|"
+                "c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?XabTKw8ATneuAVVoEAXIg5Y-K2NWnpA*ZftoVVRCX|"
+                "c_?OVZ((#ZGAtl7WGo;<DJ&pzWnpA*ZftoVVRCX|c_?CUZ)_|eF=Q+tLn$mEa%Ev;Z*FXPAYpQHVR<NGZ*OcYATeYtAVVoEAaZ44"
+                "WN&V4c_3kOa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpL"
+                "C~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3DJ&pzWnpA*ZftoVVRCX|"
+                "c_?XabT%|BATeYtAVVoEAYyNCY%CyRZ*OcYAYpQHVR<NKY;R$7HZ&|CGGr_uLn$mEVRCX|c_?OVZ((#cG%O%AWGo;<DJ&pia&lpL"
+                "C}wPLVRSY$EFd&wEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVlxTTP@&R>+lv0#vWoUzFYG`U`YG`U`YG`U`YG`U`YG`U`"
+                "Q)p9Y0%!$j2xtpVhm?JkC}<97U1%Fi0cad(9cUhm6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKAWeb+b%&HvlxPBI1!ygd3Ql2dWn@%!"
+                "aBO9ilay!+PKT6zlqhIDC}>k?DQGEZWoTt+gJ=S11!xFp3r>fWeUvC@4rl^s1!xgy3r>fWeUvC@6pRIFZgev;lxP-9AZQneXc$Ww"
+                "b%&HvlxQ1E0%#m)9cUhm6Jc_4VR<NNZgev;EFdyuEFeQElxQGLi~)6rlv0#vgJ`U1gLIT=aZ3t}24-nxY-DqkD2xJcYm|%yb97;H"
+                "bd-z*c42I3WR#2sc42IFWpk8_24in^Zgg{$j0kgSbY)*{VR)2`33F+5WnXM%VPuqy31Vz-V{2b+VR)2`3Sw+;V{2b*WnpBLj0kgS"
+                "bY)*-ZgiA%l#C8(ZgX^DZewL%V{Bn_bCirfXkl<{Z*+NZWnXe-V{dMAbaHiLbZKvHE^}jPWo~0-E@5+XWo=??c`kBgW@&C^ZDnqB"
+                "E@5M1WpH$1ZewMXj0HhxWnpBLla!1EZeeX@l#I4PXk}q!C}MAKY%CyYZge&@EFfuabT%|BAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mE"
+                "VRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEFfWWa$$KWX>N2gGAtl6WGo;<DJ&pia&lpLC}wPLVRSY$"
+                "EFdyuEFeQEEFfWWa$$KWX>N2gGAtl6WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEDU^%_Ut@1%Wt2^)0(FO!Qj}-{Xa#7XXbVn<"
+                "lzo&aXgw%sQ)nq@DQIPAWoUzRlxT5F257D*i~?_Kl#B&)bYXIIl#ByqZe)~<26ka=b!Bsuj0R(Gb#8QXl#B**V_|G%bCh(HXu4>-"
+                "j0HnzVQFrZlay$_j9x=%VQFqCVsCG3EFfuabT%|BAZc!NHZ&|CVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#v"
+                "EFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoBlxV<Bq5^e?lv0#vWoTt+Q)pdiQ)p9klr8"
             ),
         },
     ),
@@ -3750,132 +3750,6 @@ _SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._beam_value": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C"
-                "', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, "
-                "'C', False, aligned=True), Literal[int](16), Array(int64, 1, 'C', False, aligned=True), "
-                "Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligne"
-                "d=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64,"
-                " 3, 'C', False, aligned=True)))"
-            ),
-            "pickle": (
-                "fCQDJ0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWHCl0%!$j5oilehm?JkC}<RDA7~&;0%##<B4{Iw6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MK"
-                "B~6S0b%&HvlxPBI1!xgy3r>fWeUvC@6lfo4AWH#gA!s6KBa9Vca&lpLC}wPLVRSY$EFdvtEFeQElxQVQe*txelv0"
-                "#vL}({y0%!$j6^sr^Zggd5WpYeubY*g3Y?PCfXbVn<lzo&aj1FIHX>?_BVQgP^VQh6}luHnd1Yc`qd6Y{Kj1ymMX"
-                ">?_BVQgP?d2nT4V_{=xWt3<)j0A3BZDo{<5KL)wWpZI`TWM}|T_`a&DU^%|Vrg`DX=HS0luJO226Jg=Ze?VYh>Qh"
-                "aV{c?-lufb%b%&HvlxRO_KWHszEod!tlr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C'"
-                ", False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, '"
-                "C', False, aligned=True), Literal[int](16), Array(int64, 1, 'C', False, aligned=True), A"
-                "rray(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned"
-                "=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, "
-                "3, 'C', False, aligned=True)))"
-            ),
-            "pickle": (
-                "fCQC31ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3KnXaZ;jXc1@&PKT6zlqhHwXdq}IO9E&j"
-                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXeLdJ0d<FzQj}-{Xa#5yXbVn<lzo&aXccH6Xdz1hXd-AMXe5jkVRC"
-                "X|c_?OVZ((#cG%O%7WGo;<DU@g?O@9G(hm=y3XhmoOXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c_?OVZ"
-                "((#cG%O%9WGo;<DU@g?O@IM)hm=y3XaZ;jXcmkPNp5syXJv9sX>?_BVQiF>lxPc1hm?JkD2xtYY-x05a$#&=c42I"
-                "FWt2-0j09h6WqFiK5R4OFY-x05a$#&=ba`-PUt?ioXl0aWIE(~tVQpoUj1Wv|bY*g3Y+Gq=bX_PhHYt>h2x4h;cW"
-                "GpFXp~Dpj0SUQXKrO=l!%N4Ut@1%Wt2^_0(FO!Qj};wXh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^"
-                "TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj}<7Xkv7fE&"
-            ),
-        },
-    ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._canonical_restricted": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C"
-                "', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C"
-                "', False, aligned=True), float64, int64, int64, Array(int64, 1, 'C', False, aligned=True"
-                "), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, ali"
-                "gned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float"
-                "64, 3, 'C', False, aligned=True)), float64, bool, float64, float64, Array(int64, 1, 'C',"
-                " False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQCG0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxRd~Cul!tA80pdH)ua-KWHszEod!hA7}z-1!xtF2SRUeY-M3?l#`Tb3r>fWeUvC@8jJ*DZ*OdrXdO!ub%&Hvl"
-                "xQDlA80>xlr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C'"
-                ", False, aligned=True), float64, int64, int64, Array(int64, 1, 'C', False, aligned=True)"
-                ", Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, alig"
-                "ned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float6"
-                "4, 3, 'C', False, aligned=True)), float64, bool, float64, float64, Array(int64, 1, 'C', "
-                "False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQE10{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};#XaZ;jXc1@&PKT6zlqhHwXdq}IO9N;kXd`GOj1^&Wa$$KWW"
-                "^8X^bT%|BATwkvAVVpXXeLd70d<FzQj};wXdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b"
-                "^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEt*XaZ;jXcmkILT_(uWnpfVlay!+PKT6zlqhH$j0"
-                "9qDZ)}uk9!nB+hm=y3Xdq}HXh3w7E&"
-            ),
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._charge_window": (
         {
             "text": (
@@ -4259,120 +4133,114 @@ _SIGNATURES = {
     "haplotype_reconstruction.science.assembly.refinement.proposals._child": (
         {
             "text": (
-                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True"
-                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=Tr"
-                "ue), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned="
-                "True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligne"
-                "d=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), float64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', Fa"
-                "lse, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', "
-                "False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, '"
-                "C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1,"
-                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, "
-                "1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))"
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
+                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, "
+                "aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligne"
+                "d=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True"
+                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Arr"
+                "ay(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, "
+                "1, 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQCa0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEb"
-                "Ciq*Z(?d?V|0|0lun0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn"
-                "<lzo&aj0A3BZDo{<2WD(<VRSY$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Y"
-                "j9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%7WGo;<DU^%_Ut@1%Wt2^S0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4"
-                "O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXdg|C0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7"
-                "r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@IM)hm=y3XeMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BN"
-                "p5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0n"
-                "VHZ&|CF=Q+tLn)MKA5DP)b%&HvlxR3;8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3JA!s3Vlr8"
+                "fCQCY0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^Q0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg{}0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@9G(hm=y3X"
+                "eMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB"
+                "!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5DM(b%&HvlxR3;8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3JA#{"
+                "{3"
             ),
         },
         {
             "text": (
-                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True"
-                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=Tr"
-                "ue), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned="
-                "True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligne"
-                "d=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), float64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', Fa"
-                "lse, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', "
-                "True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', "
-                "True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 1, 'C', "
-                "True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', "
-                "True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', "
-                "True, aligned=True), Array(float64, 1, 'C', False, aligned=True))"
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
+                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, "
+                "aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligne"
+                "d=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True),"
+                " Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(f"
+                "loat64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, "
+                "1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', "
+                "True, aligned=True))"
             ),
             "pickle": (
-                "fCQEI0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEb"
-                "Ciq*Z(?d?V|0|0lun0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn"
-                "<lzo&aj0A3BZDo{<2WD(<VRSY$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Y"
-                "j9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%7WGo;<DU^%_Ut@1%Wt2^S0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4"
-                "O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXdg|C0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7"
-                "r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@IM)hm=y3XeMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BN"
-                "p5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0n"
-                "VHZ&|CF=Q+tLn)MKA5DP)b%&HvlxR3;8E7GBCTJ#T0%!$j2xtpVhm?JkD2xYfb#!53Y-N;*Xbxx@Xc|iaXd7r8Xd"
-                "R3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5AL)b%&HvlxPBI1!xFp3r>fWeUvC@JBerxXc=f4O9E&c"
-                "XdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKDFStelv0#vLuf;2K4?B@K4?B@K4>9ylr8"
+                "fCQEG0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^U0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|20d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@je-hm=y3X"
+                "eMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB"
+                "!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5DY-b%&HvlxR3;8E7GBCTJ#T0%!$j2xtpVhm?JkD2xYfb#!"
+                "53Y-N;*Xbxx@Xc|iaXd7r8XdR3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5Db;b%&HvlxPBI1!xFp3r>fWeUvC"
+                "@JBerxXc=f4O9E&cXdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKh5>bllv0#vLuf;2K4?B@K4?B@K6I2W"
             ),
         },
         {
             "text": (
-                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True"
-                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=Tr"
-                "ue), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned="
-                "True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligne"
-                "d=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', True, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), float64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', Fal"
-                "se, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', F"
-                "alse, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C"
-                "', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, "
-                "'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1"
-                ", 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))"
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', True, aligned=True), Array(int64, 1, 'C', False, al"
+                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, a"
+                "ligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned"
+                "=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True)"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Arra"
+                "y(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1"
+                ", 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQDV0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEb"
-                "Ciq*Z(?d?V|0|0lun0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn"
-                "<lzo&aj0A3BZDo{<2WD(<VRSY$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Y"
-                "j9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%7WGo;<DU^%_Ut@1%Wt2^S0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4"
-                "O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXdg|C0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7"
-                "r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@IM)hm=y3XeMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4"
-                "rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O~3+mhm=y3XaZ;jXb5NvPKT6zlqhH"
-                "pXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB!{Dlv0#v8cP9a8)zJ89g"
-                "GuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5DP)b%&HvlxRL^8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3JA!s3Vlr8"
+                "fCQDT0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^a0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|80d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O^E?@hm=y3X"
+                "eMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU"
+                "@g*O^N|^hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#"
+                "~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5Dt^b%&HvlxRL^8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3"
+                "JA#{{3"
             ),
         },
         {
             "text": (
-                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True"
-                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=Tr"
-                "ue), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned="
-                "True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligne"
-                "d=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', True, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), float64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', Fal"
-                "se, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', T"
-                "rue, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', T"
-                "rue, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 1, 'C', T"
-                "rue, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', T"
-                "rue, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', T"
-                "rue, aligned=True), Array(float64, 1, 'C', False, aligned=True))"
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', True, aligned=True), Array(int64, 1, 'C', False, al"
+                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, a"
+                "ligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned"
+                "=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), "
+                "Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(fl"
+                "oat64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1"
+                ", 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', T"
+                "rue, aligned=True))"
             ),
             "pickle": (
-                "fCQC40{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEb"
-                "Ciq*Z(?d?V|0|0lun0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn"
-                "<lzo&aj0A3BZDo{<2WD(<VRSY$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Y"
-                "j9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%7WGo;<DU^%_Ut@1%Wt2^S0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4"
-                "O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXdg|C0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7"
-                "r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O@IM)hm=y3XeMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4"
-                "rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O~3+mhm=y3XaZ;jXb5NvPKT6zlqhH"
-                "pXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB!{Dlv0#v8cP9a8)zJ89g"
-                "GuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5DP)b%&HvlxRL^8E7GBCTJ#T0%!$j2xtpVhm?JkC}=K;Xbxx@Xc|iaXd7r8"
-                "XdR3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5AL)b%&HvlxPBI1!xFp3r>fWeUvC@E{SLkXc=f4O9E"
-                "&cXdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKDFStelv0#vNN7lCLuf;2Luf;2Lues%lr8"
+                "fCQC20{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^f0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|D0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O^yL|hm=y3X"
+                "eMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU"
+                "@g*O^*R}hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#"
+                "~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5D+}b%&HvlxRL^8E7GBCTJ#T0%!$j2xtpVhm?JkC}=K"
+                ";Xbxx@Xc|iaXd7r8XdR3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5D<~b%&HvlxPBI1!xFp3r>fWeUvC@E{SLk"
+                "Xc=f4O9E&cXdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKk^yyxlv0#vNN7lCLuf;2Luf;2Lv)lb"
             ),
         },
     ),
@@ -5573,124 +5441,6 @@ _SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._dual_bounds": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C"
-                "', False, aligned=True), float64, float64, Array(int64, 1, 'C', False, aligned=True), Ar"
-                "ray(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned="
-                "True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3"
-                ", 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQBj0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxRd~A7~$FKWIN_Eod!hEoeV<lr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), float64, float64, Array(int64, 1, 'C', False, aligned=True), Arr"
-                "ay(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=T"
-                "rue)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3,"
-                " 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQDU0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};#Xdq}HXh3K{XaZ;jXb5NvPKT6zlqhHpXaZ;jXc1@&PKT6zl"
-                "qhHwXdq}IO9N;kXd`GOj1^&Wa$$KWW^8X^bT%|BATwkvAVVpXXeLd70d<FzQj};ZXi;b?j2}#Cb97XBaAjLza&lp"
-                "LC}wPLVRSY$EFd#vEFeQEU6g1nO|AlUhm=y3XjEuaXh3w7E&"
-            ),
-        },
-    ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._dual_sweep": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 3, 'C"
-                "', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C"
-                "', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float"
-                "64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True))"
-                ", ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, ali"
-                "gned=True))"
-            ),
-            "pickle": (
-                "fCQBh0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxQbtL}))~KWHszEod!hKXjBX"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 3, 'C'"
-                ", False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C'"
-                ", False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float6"
-                "4, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)),"
-                " ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, alig"
-                "ned=True))"
-            ),
-            "pickle": (
-                "fCQDS0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj}-{Xa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c_?OVZ"
-                "((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xhmp1Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR<N"
-                "KY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEuGbd)X"
-            ),
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._extend": (
         {
             "text": (
@@ -5944,72 +5694,6 @@ _SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._restricted_programme": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C"
-                "', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C',"
-                " False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C"
-                "', False, aligned=True), int64, Array(float64, 3, 'C', False, aligned=True), float64, in"
-                "t64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, align"
-                "ed=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64,"
-                " 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), f"
-                "loat64, bool, float64, float64, Array(int64, 1, 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQCO0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxRd~KWIN_L}*E9H)tnlA80pdH)ua-KWHszEod!hA7}z-1!xtF2SRUeY-M3?l#`Tb3r>fWeUvC@8jJ*DZ*OdrX"
-                "dO!ub%&HvlxQDlA80>xlr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', "
-                "False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C'"
-                ", False, aligned=True), int64, Array(float64, 3, 'C', False, aligned=True), float64, int"
-                "64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, "
-                "3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), fl"
-                "oat64, bool, float64, float64, Array(int64, 1, 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQE90{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};#Xh3K{XhmpBXgFvBXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMX"
-                "e5jkVRCX|c_?OVZ((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{"
-                "!Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEt*XaZ;jXcmkILT_(uWnpfVlay!+PK"
-                "T6zlqhH$j09qDZ)}uk9!nB+hm=y3Xdq}HXh3w7E&"
-            ),
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._row_maxima": (
         {
             "text": (
@@ -6186,66 +5870,6 @@ _SIGNATURES = {
         },
     ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._sum_max": (),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._tighten": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C"
-                "', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, float64, "
-                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Li"
-                "stType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', Fal"
-                "se, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, "
-                "1, 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQBl0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxRd~CukpNA80>lKWHszEod!hKXjBX"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, float64, A"
-                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Lis"
-                "tType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', Fals"
-                "e, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1"
-                ", 'C', False, aligned=True))"
-            ),
-            "pickle": (
-                "fCQDW0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};#XaZ;jXc1@&PKT6zlqhHwXdq}IO9N;kXd`GOj1^&Wa$$KWW"
-                "^8X^bT%|BATwkvAVVpXXeLd70d<FzQj};QXdq}nXh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl"
-                "?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEuGbd)X"
-            ),
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._unit_rows": (
         {
             "text": (
@@ -6401,121 +6025,114 @@ _SIGNATURES = {
     "haplotype_reconstruction.science.assembly.refinement.proposals.solve_focal": (
         {
             "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C"
-                "', False, aligned=True), float64, ListType(Tuple((Array(float64, 3, 'C', False, aligned="
-                "True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligne"
-                "d=True), Array(int64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned="
-                "True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligne"
-                "d=True)))), int64, int64, Array(int64, 1, 'C', False, aligned=True))"
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTy"
+                "pe(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=Tru"
+                "e), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Arra"
+                "y(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float6"
+                "4, 3, 'C', False, aligned=True)))), int64, Array(int64, 1, 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQCr1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxRd~A7}z-1!xFp3r>fWeUvC@4rl^s1!xA01ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhH?XeVeVXaZ;jXc1@&P"
-                "KT6zlqhHvXg6peO9N;jXd-AMj1ysUa$$KWX>N2jG%O%9WGo;<DU@g>O|JrVhm=y3XjNz@XeV@(j0IzFb#8Q&O9yB"
-                "uXaZ;jXa<Z4Rc>i-Zd7@2Wt5YYXbVn<lzo&aXi#V;XjO)kj0A3BZDo{<Fja18Z*E&*a&lpLC}wPLVRSY$EFd#vEF"
-                "eQEEManTVR<NNZge&@EFd#vEFeQEU6hOkUt@1%Wt2^`0(FO!Qj}<2jG|O^aBO8LVRCX|c_?OVZ((#cG%O%9WGo;<"
-                "DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFf"
-                "WWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoBlxSZ~v"
-                ";uX9lv0#vC}?D8DU7U4X>)W`d2nT0RCRD{Whh~Ca$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3"
-                "vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAY"
-                "pQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJfl)Xe&*%0(FO!Qj};nXg6p-bd)X"
+                "fCQCp1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-ludmBb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO@0A&h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~5<;b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~5?<b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQfdO@glv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~5|>b%&HvlxRd~A7}z-1!xFp3r>fWeUvC@4rl^s1!xA01ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhH?XeVeVXaZ;jXc1@&P"
+                "KT6zlqhHvXg6peO9N;jXd-AMj1ysUa$$KWX>N2jG%O%9WGo;<DU@g>O@je-hm=y3XjNz@XeV@(j0IzFb#8Q&O9yBuXaZ;jXa"
+                "<Z4Rc>i-Zd7@2Wt5YYXbVn<lzo&aXi#V;XjO)kj0A3BZDo{<Fja18Z*E&*a&lpLC}wPLVRSY$EFd#vEFeQEEManTVR<NNZge"
+                "&@EFd#vEFeQEU6hOkUt@1%Wt2^X0d<FzQj}<2jG|O^aBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#"
+                "vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpL"
+                "C}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoBlxSZ~g#mSklv0#vC}?D8DU7U4X>)W`d2nT0RCRD{Whh~Ca"
+                "$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ"
+                "&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJf"
+                "l)Xe&*I0d<FzQj};nXg_q6E&"
             ),
         },
         {
             "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C'"
-                ", False, aligned=True), float64, ListType(Tuple((Array(float64, 3, 'C', False, aligned=T"
-                "rue), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned"
-                "=True), Array(int64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=T"
-                "rue), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned"
-                "=True)))), int64, int64, Array(int64, 1, 'C', False, aligned=True))"
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTyp"
+                "e(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True"
+                "), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Array"
+                "(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64"
+                ", 3, 'C', False, aligned=True)))), int64, Array(int64, 1, 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQDv1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};#Xdq|;Xa#5pXbVn<lzo&aXbxxsXa#5nj0IG6aBO9ilay!+P"
-                "KT6zlqie^ba`-PbCf7(0%!$j5oilehm?JkC}<UEAZQ^=185>>BWNUy6=8C6VR<NKY;R$7HZ&|CGh{3vLn)MKCQX0"
-                "=b%&HvlxS9HR%ilf1!xgy3r>fWeUvC@6=*nUAxi^jB4{IMB#aYba&lpLC~0nVHZ&|CGh{3vLn)MKCQYvbb%&Hvlx"
-                "SOMR%ljql#B&qZ*^{TluHL_DQE&{1!xA02~}=sZ*Ek1aAlN}lxPc1hm?JkC}>e=R%ly>l#B#!VQpoUj4)MhX>V>@"
-                "VRCX|c_?OVZ((#cG%O%9WGo;<DJ)@fa$$KWX>N2jG%O%9WGo;<DP5F|1z%%tWM!01vjTO8lv0#vV~nCyb#QEDC}D"
-                "DPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa"
-                "$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wP"
-                "LVRSY$EFd#vEFeQEDU@hsO|$}ahm=y3XenrFXex}XOlfm;RC#b^TU2#$Y-K26a&lpLC}wPLVRSY$EFd#vEFeQEEF"
-                "fWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAYpQH"
-                "VR<NNZge&@EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$d;lxQqXwE}"
-                "gAlv0#vIA}O%Ky;KY"
+                "fCQDt1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lud^Lb%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lud{Mb%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLd60d<FzQj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd70d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O@RS*hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd90d<FzQj};#Xdq|;Xa#5pXbVn<lzo&aXbxxsXa#5nj0IG6aBO9ilay!+P"
+                "KT6zlqie^ba`-PbCf7(0%!$j5oilehm?JkC}<UEAZQ^=185>>BWNUy6=8C6VR<NKY;R$7HZ&|CGh{3vLn)MKCQW?-b%&Hvlx"
+                "S9HR%ilf1!xgy3r>fWeUvC@6=*nUAxi^jB4{IMB#aYba&lpLC~0nVHZ&|CGh{3vLn)MKCQX9@b%&HvlxSOMR%ljql#B&qZ*^"
+                "{TluHL_DQE&{1!xA02~}=sZ*Ek1aAlN}lxPc1hm?JkC}>e=R%ly>l#B#!VQpoUj4)MhX>V>@VRCX|c_?OVZ((#cG%O%9WGo;"
+                "<DJ)@fa$$KWX>N2jG%O%9WGo;<DP5F|1z%%tWM!01gaLJjlv0#vV~nCyb#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|"
+                "c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CG"
+                "h{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEDU@hsO@#q<hm=y3XenrFXex}XOlfm;RC"
+                "#b^TU2#$Y-K26a&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$"
+                "mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$"
+                "7HZ&|CGh{3vLn$d;lxQqXh5>bllv0#vIA}n0lr8"
             ),
         },
     ),
     "haplotype_reconstruction.science.assembly.refinement.proposals.solve_template": (
         {
             "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', Fa"
-                "lse, aligned=True), int64, int64, bool, Array(int64, 1, 'C', False, aligned=True))"
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int6"
+                "4, bool, Array(int64, 1, 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQEA0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQElxQVQi~)6r"
-                "lv0#vL})i?H)sNA1!xtF2SRUeY-M3?l#`Tb3r>fWeUvC@8jJ*DZ*OdrXdO!ub%&HvlxRP6lr8"
+                "fCQE80ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-ludmBb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO^E?@h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~5<;b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~5?<b%&HvlxRO_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdy"
+                "uEFeQElxQVQfdO@glv0#vL})i?0%!$j6^sW$Z*Od6VQ!R@lxPc1hm?JkC}<jt1Y&P*Y?NpnOA>X5lv0#vKXjBX"
             ),
         },
         {
             "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', Fal"
-                "se, aligned=True), int64, int64, bool, Array(int64, 1, 'C', False, aligned=True))"
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64,"
+                " Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int64"
+                ", bool, Array(int64, 1, 'C', False, aligned=True))"
             ),
             "pickle": (
-                "fCQBc0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXdq|;Xa#5yXbVn<lzo&aXccH6Xdz1iXd-AMXe5jk"
-                "VRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3Xhmo^XgFvBXa#5%j0Zw*Z){~@Zj_UhXbVn<lzo&aXd8?KVsC"
-                "G3lxQAH5_N}^Qj};wbd)X"
+                "fCQBa0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lue2Ob%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lue5Pb%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLd60d<FzQj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd70d<FzQj};wXdq|;Xa#5yXbVn<lzo&aXccH"
+                "6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O@RS*hm=y3Xhmo^XaZ;jXcmkILT_(uWnpfVlay!+PKT6zlqhH$"
+                "j09qDZ)}uk9!nB+hm=y3Xh3w7E&"
             ),
         },
     ),
@@ -6568,313 +6185,6 @@ _SIGNATURES = {
                 "Xd`GOj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXeLdJ0d<FzQj};wXh3KJXa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo"
                 "&aXccH6Xdz1jXd-AMXe5jkVRCX|c_?OVZ((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xenq+Xex{!Olfm;RC#b^TVZl?V"
                 "R<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};<Xis#ME&"
-            ),
-        },
-    ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals.window_box_dual": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C',"
-                " False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64"
-                ", 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), "
-                "ListType(Array(float64, 3, 'C', False, aligned=True)), Array(float64, 2, 'C', False, ali"
-                "gned=True))"
-            ),
-            "pickle": (
-                "fCQDz0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWHCl0%!$j5oilehm?JkC}<RDA7~&;0%##<B4{Iw6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MK"
-                "B~6S0b%&HvlxRO_KWHszEod!hM0Auc"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', "
-                "False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64,"
-                " 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), L"
-                "istType(Array(float64, 3, 'C', False, aligned=True)), Array(float64, 2, 'C', False, alig"
-                "ned=True))"
-            ),
-            "pickle": (
-                "fCQCj0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3KnXaZ;jXc1@&PKT6zlqhHwXdq}IO9E&j"
-                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXeLdJ0d<FzQj};wXh3KJXa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo"
-                "&aXccH6Xdz1jXd-AMXe5jkVRCX|c_?OVZ((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xenq+Xex{!Olfm;RC#b^TVZl?V"
-                "R<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};<XisQGbd)X"
-            ),
-        },
-    ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals.window_dp": (
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal[int](0), Arr"
-                "ay(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), f"
-                "loat64, float64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array"
-                "(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=Tru"
-                "e)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, '"
-                "C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True), Literal[int](512))"
-            ),
-            "pickle": (
-                "fCQEE0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxPBI1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)G0E`4*Yh`(qO8|@$Uu<b~W"
-                "pZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CBdX>?_BVQgDzZggEJFe#Lb2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1"
-                "%Wt2^V0d<FzQj};!XeVeNXdh@FXg6p#Xg_E_Xf0?hXf0?zXaZ;jXiI1dPKT6zlqhIUO#lLDPfY*<Xi#W3Xi<z2Ol"
-                "fpwa$#&+X>N2~C^a!MDU@haOF(E;h-g(!u>y66lv0#*lr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal[int](0), Arr"
-                "ay(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), f"
-                "loat64, float64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array"
-                "(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=Tru"
-                "e)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, '"
-                "C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True), omitted(default=0)"
-                ")"
-            ),
-            "pickle": (
-                "fCQB$1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxPBI1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)G0E`4*Yh`(qO8|@$Uu<b~W"
-                "pZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CBdX>?_BVQgDzZggEJFe#Lb2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1"
-                "%Wt2^V0d<FzQj};!XeVeNXdh@FXg6p#Xg_E_Xf0?hXf0?zXaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>"
-                "@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH1N3SV|%Y;|Q{Yh`(qO8|@nZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*^DU^%_"
-                "Ut@1%Wt2^@0(FO!Qj~O*E&"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(float64"
-                ", 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, fl"
-                "oat64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1,"
-                " 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListT"
-                "ype(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False,"
-                " aligned=True)), Array(int64, 1, 'C', False, aligned=True), Literal[int](512))"
-            ),
-            "pickle": (
-                "fCQDc0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxR0-L}({yA7~$FA80pdH)ua-KWHszEod!hKWGAI1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~W"
-                "pZI`Uv^<^b!C)I00N8zUu$J~luZBvj1ymMX>?_BVQgP?d2nT4V_{=xWt3<)j0A3BZDo{<5lm@xWpZI`TWM}|T_`m"
-                "%GAWdd2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1%Wt2^^0(FO!Qj~O*E&"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, alig"
-                "ned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligne"
-                "d=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
-                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C',"
-                " False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(float64"
-                ", 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, fl"
-                "oat64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1,"
-                " 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListT"
-                "ype(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False,"
-                " aligned=True)), Array(int64, 1, 'C', False, aligned=True), int64)"
-            ),
-            "pickle": (
-                "fCQBv0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie^WOR9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeU"
-                "vDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!cFbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJ"
-                "ZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-ludvEb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#"
-                "b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO|AlUhm=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syX"
-                "JvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|"
-                "CGGr_uLn)MKB~6L}b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&lpLC~0nVHZ&|CF=Q+tLn)MKB~"
-                "5_=b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdyuEFeQE"
-                "lxQVQi~)6rlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKB~5<;b%&"
-                "HvlxR0-L}({yA7~$FA80pdH)ua-KWHszEod!hKWH~}lr8"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal[int](0), Arra"
-                "y(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), fl"
-                "oat64, float64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array("
-                "int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True"
-                ")), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C"
-                "', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True), Literal[int](512))"
-            ),
-            "pickle": (
-                "fCQC}1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj}-{Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(b"
-                "Y*g3Y+rU^Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9"
-                "Mj0j?Bba!cFbZC@IK#T@+X=iR_WR!@E1z%%tWM!01f&q1hlv0#vMQ8$O1!xgy3r>fWeUvC@6=)!6Axi^jB4{IMB#"
-                "aeda&lpLC}wPLVRSY$EFd#vEFeQElxQYRfB|)flv0#vAZQ?HAZR#fIA}m<KxhJJ1!xFp3r>fWeUvC@4rpCyDQI12"
-                "DvTdYX>)W`d2nT0VRCX|c_?OVZ((#cG%O%9WGo;<DP5FkEKRNgb%&HvlxSjTVrW2U0%!$jOlS*Ehm?JkC}>Yj00L"
-                "-GO#lLDQD``5Qj8HyX>?_BVQgDzZggEJH8C<NlxS2-KxkEnXjV<J0(FO!Qj~O*E&"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal[int](0), Arra"
-                "y(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), fl"
-                "oat64, float64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array("
-                "int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True"
-                ")), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C"
-                "', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True), omitted(default=0))"
-            ),
-            "pickle": (
-                "fCQDn1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj}-{Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(b"
-                "Y*g3Y+rU^Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9"
-                "Mj0j?Bba!cFbZC@IK#T@+X=iR_WR!@E1z%%tWM!01f&q1hlv0#vMQ8$O1!xgy3r>fWeUvC@6=)!6Axi^jB4{IMB#"
-                "aeda&lpLC}wPLVRSY$EFd#vEFeQElxQYRfB|)flv0#vAZQ?HAZR#fIA}m<KxhJJ1!xFp3r>fWeUvC@4rpCyDQI12"
-                "DvTdYX>)W`d2nT0VRCX|c_?OVZ((#cG%O%9WGo;<DP5FkEKRNgb%&HvlxSjTVrW2U0%!${6>fEHVqq?0Z*pZWba`"
-                "-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO8|@tUv^<^b!A^`WqFiK0E`4~VQpoUj1q5cX>@dDW"
-                "GG~1W?^+~bUiRBl#B&mV{c?-lufV#b%&HvlysCX"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(float64,"
-                " 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, flo"
-                "at64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, "
-                "'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListTy"
-                "pe(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, "
-                "aligned=True)), Array(int64, 1, 'C', False, aligned=True), Literal[int](512))"
-            ),
-            "pickle": (
-                "fCQCM1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};oXhmoOXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
-                "_?OVZ((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xdq}HXdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm"
-                ";RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEuGXaZ;jXcmkPNp5syXJv9sX>?_BVQiF>lx"
-                "Pc1hm?JkD2xtYY-x05a$#&=c42IFWt2?-0*nM-Yh`(qO#lLn6JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B&"
-                "Olfpwa$#&+X>N2~C^a!MDU^%|Vrg`DX=HS0luJO226Jg=Ze?VYh>QhaV{c?-lufY$b%&HvlysCX"
-            ),
-        },
-        {
-            "text": (
-                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, align"
-                "ed=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
-                "=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, al"
-                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', "
-                "False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(float64,"
-                " 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, flo"
-                "at64, float64, int64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, "
-                "'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned=True)), ListTy"
-                "pe(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, "
-                "aligned=True)), Array(int64, 1, 'C', False, aligned=True), int64)"
-            ),
-            "pickle": (
-                "fCQDg0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX"
-                ">4?9ZgZ5325(|&Wn*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh"
-                "*a$$Ltlay!+PKT6zlqie`ZFO{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z("
-                "($llay!+PKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9B"
-                "d2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luf__b%&Hvl#B&rba`"
-                "-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c?-luf|`b%&Hvl"
-                "xPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ"
-                "^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLdH0d<FzQj}-{Xa#5yXbVn<lzo&aXccHUXdz1hXd"
-                "-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd80d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn<lzo&aXccH6Xdz1i"
-                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O^g9`hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yiXd`GOj1^"
-                "&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLd60d<FzQj};oXhmoOXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
-                "_?OVZ((#cG%O%9WGo;<DU@g?O@IM)hm=y3Xdq}HXdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm"
-                ";RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>>x0(FO!Qj};^XjEuGXgG9~E&"
             ),
         },
     ),
@@ -9325,9 +8635,9 @@ _COMPONENT_SIGNATURES = {
             "bool)",
         },
     ),
-    'haplotype_reconstruction.science.assembly.refinement.acceptance.pass_chunk': (
+    "haplotype_reconstruction.science.assembly.refinement.acceptance.pass_chunk": (
         {
-            'text': (
+            "text": (
                 "(Array(int16, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), ListType(Arra"
                 "y(int16, 2, 'C', False, aligned=True)), Tuple((Array(float32, 3, 'C', True, aligned=True), Array(boo"
                 "l, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', Fa"
@@ -9349,58 +8659,57 @@ _COMPONENT_SIGNATURES = {
                 ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64,"
                 " 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False"
                 ", aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True"
-                "), Array(int64, 1, 'C', False, aligned=True), bool, bool, bool, Array(float64, 1, 'C', False, aligne"
-                'd=True), Ahead(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, '
-                'C), array(int32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain(b'
-                'ool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(float'
-                "64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool, "
-                'bool)'
+                "), Array(int64, 1, 'C', False, aligned=True), bool, bool, Array(float64, 1, 'C', False, aligned=True"
+                "), Ahead(bool, int64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C), ar"
+                "ray(int32, 2d, C), array(float64, 2d, C), array(int32, 2d, C), array(float64, 2d, C)), Chain(bool, i"
+                "nt64, int64, array(float64, 3d, C), array(float64, 3d, C), array(float64, 2d, C)), Array(float64, 3,"
+                " 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), bool, float64, bool, bool)"
             ),
-            'pickle': (
-                'fCQCj4FCWD0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*'
-                'Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS'
-                '1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK'
-                'WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<'
-                'DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d'
-                'XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^'
-                'l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%'
-                'Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkD2xYfb#!53Y-N;*XbxxsXa#5wj0Hw)'
-                'Z(($llay!+PKT6zlqhHvj0a|HZ((#ZGL&c*OCV?%OB;2Elv0#v8%qOd9B3VA9*iDxWnpA*ZftoVVRCX|c_?OVZ((#ZGAtl7WGo;<'
-                'DU@g+O{D>Khm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3Xd6obXdGxA'
-                'Xda9bVRCX|c_?CUZ)_|eF=Q+tLn)MKAWeY*b%&HvlxS9H0%!$j2xtpVhm?JkC}<970%!$jLTC$4hm?JkC}<Rn2WD(<VRSY$lxP-9'
-                'Kxi0C9Ce43Qj};LO95ycXdP%Cj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXdq330d<FzQj}-{Xa#5pXbVn<lzo&aXbxyyXd6odXdGxA'
-                'Xda9eVRCX|c_?OVZ((#cG%O%9WGo;<DU@g+O@je-hm=y3Xk};uXa#5pXbVn<lzo&aXbxy8Xd6obXdGxAXda9cVRCX|c_?XabT%|B'
-                'ATeYtAVVpXXdq350d<FzQj}-{Xa#5pXbVn<lzo&aXbxycXd6ocXdGxAXda9eVRCX|c_?OVZ((#ZGAtl6WGo;<DU@g+O@#q<hm=y3'
-                'XliIvbd-z*V{dhCbd*a9XftR6Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}>t_Z)jj>WoT+>Q)o(bl#B#!VQpoUjFVMvX>V>@'
-                'VRCX|c_?CUZ)_|eF=Q+tLn$m_a&lpLC}wPLVRSPxEFdyuEFeQEEManTVR<NKY;R$7HZ&|CF=Q+tLn$m_a&lpLC}wPLVRSY$EFd#v'
-                'EFeQEEManTVR<NNZge&@EFdvtEFeQEEMjkOY%FqRVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQEU6hOkUt@1%Wt2^~0d<FzQj}<S'
-                'jM-FmaBO8La%Ev;Z*FXPAYpQHVR<NKY;R$7Gcqh7Gh{3vLn$mEVRCX|c_?CUZ)_|eF=Q+tLn$mEVRCX|c_?CUZ)_|eF=Q+tLn$mE'
-                'VRCX|c_?OVZ((#cG%O%7WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@'
-                'EFdvtEFeQEEFfWWa$$KWW^8X^bTcw6ATneuAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn9Sz0d<FzQj}<FXenqZXenp{'
-                'Xa#5pXbVn<lzo&aXbxyyXd6ocXdGxAXda9eVRCX|c_?OVZ((#cG%O%8WGo;<DU@g+O^5+?hm=y3XoF~FXk};uXa#6GXbVn<lzo&a'
-                'Xgw%sWoTt+YG@*8erRfFQ)p9YgJ=S11!xFp3r>fWeUvC@4rpCy8%qRe9B3VA9*h-Xa&lpLC}wPLVRSY$EFd&wEFeQElxQGLi2-$o'
-                'lv0#vifC$RQ*@MQaZ3$oGiU;61!!|<3r>fWeUvC@Jt$~?XoF~FXo_eeXliIvbd+d!SWf`}099^jZ*E&ub#QEDC~{?CWN&V4c_3kO'
-                'a$$KWW^8X^bTcw6ATwkvAVVoEAYpQHVR<NGZ*OcYATeYtAVVoEAYpQHVR<NGZ*OcYATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+t'
-                'Ln$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pia&lpLC}wPL'
-                'VRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#v'
-                'EFeQEEManTVR<NKY;R$7HZ&|CG-NCwLn$m_a&lpLC~0nVF*Yn9GGr_uLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*Oc}lxTTP^8s~-'
-                'lv0#vcUZXr002~VaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<'
-                'DJ&pia&lpLC~0nVF*Yn9GGr_uLn$mERCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQEEFfWWa$$KWVsCG3EFdvtEFeQE'
-                'EFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#c'
-                'G%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3'
-                'DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3EFfZUZ)_|eVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}wPLVRSY$EFd&wEFeQE'
-                'EFfWWa$$KWW^8X^bT%|BAT(qwAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn9Ta0d<FzQj}<AXoF~KXliI`XliI`XliI`'
-                'XliI`XliIvXj5oYXkcgpXa#63j0#R+ZDnLsb#QEDl#`Tb3r>fWeUvC@Jt$~XXenqZXk}<+XoF}1Xa#5pXbVn<lzo&aXbxxsXa#5y'
-                'XbVn<lzo&aXcUYEX>N2gGL&c*OCV?$h-er~8Fh!0Qj};LO9E&dXdP%Cj1ysUa$$KWX>N2gGAtl6WGo;<DU@g+O^g9`hm=y3XoF~?'
-                'XoGZ=XmLvlj0R?DWo%?~lqie>Z)=o{1#@&^a&(l81$JR<X=Id)26ka=b!Bsuj0R(Gb#8QXl#B>-X>?^@ZDDwnj0tmTbY)*`WnpBL'
-                'j0s|FZ)0m;ZDDwnj0$3GZ)0m;Y-M3&l#B>-X>?^@V{UYmbd-z^X>N0LVQyn(Ut?@xb90o8KWJfaY;SaVaAjX|Wn*t{b98cbV{~b6'
-                'ZZ30UX=QF>WiDZJb7gH}Y<VtnWoBt^Wo>0{bS`0IV`Xr3VQyn(l#B&IXk}q!l#`T<1a4t%Wt5DzL1<-RWGG^9Z)_|eX>N2jG%O%#'
-                'Zge&@EFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpL'
-                'C~0nVGcqh7GGr_uLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC~0nVGcqh7GGr_uLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<'
-                'DJhhU1z%%tWM!01rvi0{lv0#v0%!$jmS_u3hm?JkC}=$>Xj5n@XenrAXk}=Fbd+duO9p79D2xJcYm|%yb97;Hbd-z(Wo~4Yj0SdL'
-                'Y;|RGl#B*rZ*^{TbCiq*b7Ns_Wpk8tlxVPMv5W;nXklq?l#`Tbw2WRuXklq?C}MAKY%CyYZge&@EFfuabT%|BAYpQHVR<NKY;R$7'
-                'HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEDU@ioO`-yIhm=y3Xk}<+Xj5oiXj5oY'
-                'bd)X'
+            "pickle": (
+                "fCQCh4FCWD0000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%Uvgz*"
+                "Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lun0~eUvDS"
+                "1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZgep=l#B>sX>@mK"
+                "WOQhhOAw3(b7^O8Wn`3yj0Im~Z)9bZOBi*Blv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$KWX>N2eHY^}AWGo;<"
+                "DU^%_Ut@1%Wt2^Q0d<FzQj}-{Xa#5pXbVn<lzo&aXbxxsXa#5yXbVn<lzo&aXcUYEX>N2jG?Zu-OF(EBh-er~8g+-1Qj};LO9E&d"
+                "XdP%Cj1ysUa$$KWX>N2jG%O%8WGo;<DU@g+O@0A&hm=y3XaZ;jj2musZDL_AV{dY0E_8WtWpgfLZ*Fv9X>Mh5bCiq-Olfm;RC#b^"
+                "l#`Tb3r>fWeUvDS32Ag?ZC`YGaAlNeB8&xOba`-PlxQN11a4t%Wt5B^Olfm;RC#b^TVZl?VR<NNZgep=EFdyuEFeQEU6hOkUt@1%"
+                "Wt2^S0d<FzQj}-{Xa#63j0IG6aBO9ilay!+PKT6zlqie^ba`-PbCf7(0%!$j2xtpVhm?JkD2xYfb#!53Y-N;*XbxxsXa#5wj0Hw)"
+                "Z(($llay!+PKT6zlqhHvj0a|HZ((#ZGL&c*OCV?%OB;2Elv0#v8%qOd9B3VA9*iDxWnpA*ZftoVVRCX|c_?OVZ((#ZGAtl7WGo;<"
+                "DU@g+O{D>Khm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3Xd6obXdGxA"
+                "Xda9bVRCX|c_?CUZ)_|eF=Q+tLn)MKAWeY*b%&HvlxS9H0%!$j2xtpVhm?JkC}<970%!$jLTC$4hm?JkC}<Rn2WD(<VRSY$lxP-9"
+                "Kxi0C9Ce43Qj};LO95ycXdP%Cj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXdq330d<FzQj}-{Xa#5pXbVn<lzo&aXbxyyXd6odXdGxA"
+                "Xda9eVRCX|c_?OVZ((#cG%O%9WGo;<DU@g+O@je-hm=y3Xk};uXa#5pXbVn<lzo&aXbxy8Xd6obXdGxAXda9cVRCX|c_?XabT%|B"
+                "ATeYtAVVpXXdq350d<FzQj}-{Xa#5pXbVn<lzo&aXbxycXd6ocXdGxAXda9eVRCX|c_?OVZ((#ZGAtl6WGo;<DU@g+O@#q<hm=y3"
+                "XliIvbd-z*V{dhCbd*a9XftR6Xa#63j0sh4X>V>+d2nTvlay!+PKT6zlqhIDC}>t_Z)jj>WoT+>Q)o(bl#B#!VQpoUjFVMvX>V>@"
+                "VRCX|c_?CUZ)_|eF=Q+tLn$m_a&lpLC}wPLVRSPxEFdyuEFeQEEManTVR<NKY;R$7HZ&|CF=Q+tLn$m_a&lpLC}wPLVRSY$EFd#v"
+                "EFeQEEManTVR<NNZge&@EFdvtEFeQEEMjkOY%FqRVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQEU6hOkUt@1%Wt2^~0d<FzQj}<S"
+                "jM-FmaBO8La%Ev;Z*FXPAYpQHVR<NKY;R$7Gcqh7Gh{3vLn$mEVRCX|c_?CUZ)_|eF=Q+tLn$mEVRCX|c_?CUZ)_|eF=Q+tLn$mE"
+                "VRCX|c_?OVZ((#cG%O%7WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@"
+                "EFdvtEFeQEEFfWWa$$KWW^8X^bTcw6ATneuAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn9Sz0d<FzQj}<FXenqZXenp{"
+                "Xa#5pXbVn<lzo&aXbxyyXd6ocXdGxAXda9eVRCX|c_?OVZ((#cG%O%8WGo;<DU@g+O^5+?hm=y3XoF~FXk};uXa#6GXbVn<lzo&a"
+                "Xgw%sWoTt+YG@*8erRfFQ)p9YgJ=S11!xFp3r>fWeUvC@4rpCy8%qRe9B3VA9*h-Xa&lpLC}wPLVRSY$EFd&wEFeQElxQGLi2-$o"
+                "lv0#vifC$RQ*@MQaZ3$oGiU;61!!|<3r>fWeUvC@Jt$~?XoF~FXo_eeXliIvbd+d!SWf`}099^jZ*E&ub#QEDC~{?CWN&V4c_3kO"
+                "a$$KWW^8X^bTcw6ATwkvAVVoEAYpQHVR<NGZ*OcYATeYtAVVoEAYpQHVR<NGZ*OcYATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+t"
+                "Ln$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pia&lpLC}wPL"
+                "VRSPxEFdyuEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<DJ&pjZ*OcVEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#v"
+                "EFeQEEManTVR<NKY;R$7HZ&|CG-NCwLn$m_a&lpLC~0nVF*Yn9GGr_uLn$m_a&lpLC~0nVHZ&|CF=Q+tLn$m`Z*Oc}lxTTP^8s~-"
+                "lv0#vcUZXr002~VaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%7WGo;<"
+                "DJ&pia&lpLC~0nVF*Yn9GGr_uLn$mERCRD{WhioGVPtP^Y<VDIa&lpLC}wPLVRSPxEFd#vEFeQEEFfWWa$$KWVsCG3EFdvtEFeQE"
+                "EFfWWa$$KWVsCG3EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATeYtAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#c"
+                "G%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#ZGAtl6WGo;<DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3"
+                "DJ&pia&lpLC~0nVHZ&|CF=Q+tLn$mEVsCG3EFfZUZ)_|eVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}wPLVRSY$EFd&wEFeQE"
+                "EFfWWa$$KWW^8X^bT%|BAT(qwAVVoEAYpQHVR<NNZge&@EFdvtEFeQEEFfZUZ)_=)Xn9Ta0d<FzQj}<AXoF~KXliI`XliI`XliI`"
+                "XliI`XliIvXj5olXaZ;jXf2EiPGN0jWK?x<Y-N;_lxPc1hm?JkC}=$>Xj5n@XenrAXk}=FXaZ;jXb5NvPKT6zlqhHpXaZ;jXc1@&"
+                "PKT6zlqhHvj0I_KbTcxPXckK#XcvfR7)u#-hm=y3Xd6ocXdGxAXda9cVRCX|c_?XabTcw6ATneuAVVpXXdq3D0d<FzQj}<eXrgF?"
+                "bd+duOA3qzW@%+?WOI}#i~?_Kl#B&)bYXIIl#B&-VQgt+l#B*;VQh6}bCiq*V{dhCbaRx92y<z4WnXP!c$AC@b7^#CUu<PzWR#2v"
+                "Vr*|?YhP_)c$AC^Vr*|?YhP?-VPuqy2y<z4WnW`%bd+?Ij1FmTb97;DV`X1sY+-YAl#D-UVQ_43ba`-PUvgz*Z*FsRa&=>LX>V>W"
+                "b7N^`ZewLGVRLh3ZDMSBE^=jNX>Mh0Wo~pXVPj)uaCBjAV`Y?#1wm+KVPuq(l#B#!VQpoUjJ82&Wnp9}VsCG3EFfuabT%|BAZc!N"
+                "HZ&|CVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NN"
+                "Zgev;EFdyuEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NNZgev;EFdyuEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoB"
+                "l#B&mV{c?-luf4sb%&HvlxPBI1!$IN3r>fWeUvC@Jt$~XXenqZXk}<+XoGZ=XmLvhXrw5N0&i=Sj0JOaVRCeoj00tEWR#2sc42IF"
+                "Wpk8_24in^Zgg{$j0SUKVQgh{lysD6uxPQ21w&|IX>OF0lxVb!UPEYMX>KTDZ*OcYAZc!NHZ&|CX>N2jG%O%ta&lpLC}wPLVRSY$"
+                "EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$egXtqtF0(FO!Qj}<AXk}<qXkBPiXj62Q"
+                "E&"
             ),
         },
     ),
@@ -12563,6 +11872,2115 @@ _EXCHANGE_SIGNATURES = {
 }
 
 
+_RELEASE_SIGNATURES = {
+    "haplotype_reconstruction.science.assembly.refinement.proposals._canonical_restricted": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, "
+                "3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Literal[int](6"
+                "4), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True),"
+                " ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, a"
+                "ligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False"
+                ", aligned=True))"
+            ),
+            "pickle": (
+                "fCQDT0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxRd~Cul!tA7}z-1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)GK#T-mYh`(qO"
+                "F)bhUu<b~WpZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CEeX>?_BVQgDzZggEJHZ&=ej0j?Bba!cFbZC@IK#T@+X=iR_WR!@E1z"
+                "%%tWM!01)B<&flv0#vH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3"
+                ", 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Literal[int](64"
+                "), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), "
+                "ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, al"
+                "igned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False,"
+                " aligned=True))"
+            ),
+            "pickle": (
+                "fCQCD1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};#XaZ;jXc1@&PKT6zlqhHwXdq}IO9N;kXd`GOj1^&Wa$$KWW"
+                "^8X^bT%|BATwkvAVVpXXeLc20(FO!Qj};wXdq|;Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^Y;"
+                "|RnOF)bSUu$J~luJO26JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B%Olfpwa$#&+X>N2~C^j@Hl#B>sX>@mKWOQhhOF)"
+                "bUb7^O8Wn`3yj0Im~Z)9bZP1FK)hm=y3XgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR<NKY;R$"
+                "7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj}<7XkutUbd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, "
+                "3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, int64, int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(A"
+                "rray(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True"
+                ")), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=T"
+                "rue))"
+            ),
+            "pickle": (
+                "fCQBp0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxRd~Cul!tA80pdH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3"
+                ", 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, int64, int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Ar"
+                "ray(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)"
+                "), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=Tr"
+                "ue))"
+            ),
+            "pickle": (
+                "fCQDa0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};#XaZ;jXc1@&PKT6zlqhHwXdq}IO9N;kXd`GOj1^&Wa$$KWW"
+                "^8X^bT%|BATwkvAVVpXXeLc20(FO!Qj};wXdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR"
+                "<NKY;R$7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj};^XjEuGbd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals._child": (
+        {
+            "text": (
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
+                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, "
+                "aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligne"
+                "d=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True),"
+                " Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(f"
+                "loat64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, "
+                "1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', "
+                "True, aligned=True))"
+            ),
+            "pickle": (
+                "fCQEG0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^m0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|K0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O_c$4hm=y3X"
+                "eMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB"
+                "!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5E44b%&HvlxR3;8E7GBCTJ#T0%!$j2xtpVhm?JkD2xYfb#!"
+                "53Y-N;*Xbxx@Xc|iaXd7r8XdR3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5E75b%&HvlxPBI1!xFp3r>fWeUvC"
+                "@JBerxXc=f4O9E&cXdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKm;rT%lv0#vLuf;2K4?B@K4?B@K6I2W"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, a"
+                "ligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, "
+                "aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligne"
+                "d=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True"
+                "), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Arr"
+                "ay(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, "
+                "1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCY0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^s0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|Q0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O`8FAhm=y3X"
+                "eMYOXeMYYXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-OB"
+                "!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5EMAb%&HvlxR3;8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3JA#{"
+                "{3"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', True, aligned=True), Array(int64, 1, 'C', False, al"
+                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, a"
+                "ligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned"
+                "=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True)"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Arra"
+                "y(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1"
+                ", 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDT0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^w0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|U0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O`idEhm=y3X"
+                "eMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU"
+                "@g*O`rjFhm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#"
+                "~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5EbFb%&HvlxRL^8E7GBCTJ#TA!sIOCTJ#TA!s3JA!s3"
+                "JA#{{3"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float"
+                "64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2,"
+                " 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', "
+                "False, aligned=True), Array(float64, 3, 'C', True, aligned=True), Array(int64, 1, 'C', False, al"
+                "igned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, a"
+                "ligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned"
+                "=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), "
+                "Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(fl"
+                "oat64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1"
+                ", 'C', True, aligned=True), Array(float64, 1, 'C', True, aligned=True), Array(float64, 1, 'C', T"
+                "rue, aligned=True))"
+            ),
+            "pickle": (
+                "fCQC20{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO96}qY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "7WGo;<DU^%_Ut@1%Wt2^#0d<FzQj};RXaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg|Z0d<FzQj};RXeMX^Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O{4*Jhm=y3X"
+                "eMYOXeMX^Xa#5pXbVn<lzo&aj0bIXbYWs_Wt53%4rm!@8cPFc8)zJ89gH4wWnpA*ZftoVVRCX|c_?OVZ((#cG%O%9WGo;<DU"
+                "@g*O{D>Khm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#"
+                "~-OB!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA5EqKb%&HvlxRL^8E7GBCTJ#T0%!$j2xtpVhm?JkC}=K"
+                ";Xbxx@Xc|iaXd7r8XdR3ma%Ev;Z*FXPAYpQHVR<NKY;R$7HZ&|CF=Q+tLn)MKA5EtLb%&HvlxPBI1!xFp3r>fWeUvC@E{SLk"
+                "Xc=f4O9E&cXdGxAj2?1jVPtP^Y<VDIa&lpLC}wPLVRSY$EFdyuEFeQElxQDKr~!3{lv0#vNN7lCLuf;2Luf;2Lv)lb"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals._debit": (
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](0), Literal[int](128), int64, int64, in"
+                "t64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C"
+                ")G0gMV?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](0), Literal[int](128), int64, omitted(d"
+                "efault=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C)G0gM"
+                "V?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhCQ}XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](0), Literal[int](128), int64, int64, in"
+                "t64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh"
+                "6}luH4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj~O*E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](0), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](13), Literal[int](128), int64, int64, i"
+                "nt64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAU+!Uu$J~luHea6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0iBl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{M~Mhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|"
+                "RnO96}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRV8lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](13), Literal[int](128), int64, omitted("
+                "default=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAU+!Uu$J~luHea6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0iBl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{M~Mhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96"
+                "}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRU{L1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](13), Literal[int](128), int64, int64, i"
+                "nt64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAU+!Uu$J~luHea6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0iBl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{M~Mhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY458fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42"
+                "IFWt2++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](13), Literal[int](128), int64, int64, o"
+                "mitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAU+!Uu$J~luHea6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0iBl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{M~Mhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42IFWt2"
+                "++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#vL1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](1), Literal[int](128), int64, int64, in"
+                "t64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO96}oUu$J~luH4O6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^0FNj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01q5^e?lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C"
+                ")G0gMV?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](1), Literal[int](128), int64, omitted(d"
+                "efault=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO96}oUu$J~luH4O6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^0FNj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01q5^e?lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C)G0gM"
+                "V?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhCQ}XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](1), Literal[int](128), int64, int64, in"
+                "t64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO96}oUu$J~luH4O6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^0FNj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01q5^e?lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh"
+                "6}luH4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj~O*E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](1), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO96}oUu$J~luH4O6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^0FNj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01q5^e?lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](3), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9PAqUu$J~luHAQ6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^IRPj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01sseR~lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](4), Literal[int](128), int64, int64, in"
+                "t64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9YGrUu$J~luHDR6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^RXQj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01paOM=lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh"
+                "6}luH4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj~O*E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](4), Literal[int](128), int64, int64, in"
+                "t64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9YGrUu$J~luHDR6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^RXQj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01paOM=lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C"
+                ")G0gMV?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](4), Literal[int](128), int64, int64, Li"
+                "teral[int](1), int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD>0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9YGrUu$J~luHDR6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^RXQj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01paOM=lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jXe4M0PKT6zlqhH?O95yoO95ypXc}lLj1Np{bY*g3Y+Gq=bX_PhDU@g|OF(EXh-fZNq5^"
+                "e?lv0#v8fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42IFWt2++j0#_NVQh6}Uu$J"
+                "~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](4), Literal[int](128), Literal[int](1),"
+                " int64, omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD>0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9YGrUu$J~luHDR6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^RXQj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01paOM=lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3XaZ;jXe4M0PKT6zlqhH?O95yoO95ypXc}lLj1Np{bY*g3Y+Gq=bX_PhDU@g|OF(EXh-fZNq5^e?lv0"
+                "#v8fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42IFWt2++j0#_NVQh6}Uu$J~luH4"
+                "O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#vMrcNKlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](5), Literal[int](128), Literal[int](4),"
+                " int64, int64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD>0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9hMsUu$J~luHGS6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^adRj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01s{(b0lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3XaZ;jXe4M0PKT6zlqhH?O9W^rO9W^sXc}lLj1Np{bY*g3Y+Gq=bX_PkDU@g|OF(EXh-fZNpaOM=lv0"
+                "#v8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96}uUv^<^b!A^`WqFi"
+                "K0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRkDlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](6), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9qStUu$J~luHJT6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^jjSj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01JOXuxlv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](7), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9zYuUu$J~luHMU6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^spTj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01tO9k1lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](9), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9_kwUu$J~luHSW6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^;#Vj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01t^#$3lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](8), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9+evUu$J~luHPV6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^#vUj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01tpat2lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](9), Literal[int](128), int64, int64, Li"
+                "teral[int](1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD>0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9_kwUu$J~luHSW6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^;#Vj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01t^#$3lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jXe4M0PKT6zlqhH?O95yoO95ypXc}lLj1Np{bY*g3Y+Gq=bX_PhDU@g|OF(EXh-fZNq5^"
+                "e?lv0#v0%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96}uUv^<^b!A^`WqFi"
+                "K0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRkDlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](9), Literal[int](128), int64, omitted(d"
+                "efault=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9_kwUu$J~luHSW6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^;#Vj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01t^#$3lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C)G0gM"
+                "V?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhCQ}XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](4), Literal[int](128), int64, int64, om"
+                "itted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9YGrUu$J~luHDR6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^RXQj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01paOM=lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5XaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH"
+                "4O3SV|%Y;|Q{Yh`(qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};xXhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](9), Literal[int](128), int64, int64, in"
+                "t64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDE0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnO9_kwUu$J~luHSW6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B$Olfpwa$#&+X>N2~C^;#Vj0j?Bba!cFbZC@IK"
+                "#T@+X=iR_WR!@E1z%%tWM!01t^#$3lv0#v0%!$jBxnmxhm?JkC}<~3fM_U7fM_Xb8fYqv5lm@xWpZI`TWM}|T_`a!I4P89EK"
+                "5LWEr@6?O`igFhm=y3Xc}l5Xc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C"
+                ")G0gMV?c42IFWnXJ$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3XhC$8E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](12), Literal[int](128), int64, int64, i"
+                "nt64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAL$zUu$J~luHbZ6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0fAl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{D^Lhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|"
+                "RnO96}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRV8lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](12), Literal[int](128), int64, omitted("
+                "default=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAL$zUu$J~luHbZ6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0fAl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{D^Lhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96"
+                "}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRU{L1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](12), Literal[int](128), int64, int64, i"
+                "nt64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAL$zUu$J~luHbZ6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0fAl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{D^Lhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY458fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42"
+                "IFWt2++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](12), Literal[int](128), int64, int64, o"
+                "mitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAL$zUu$J~luHbZ6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0fAl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{D^Lhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42IFWt2"
+                "++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#vL1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](14), Literal[int](128), int64, int64, i"
+                "nt64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAd?#Uu$J~luHhb6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0lCl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{W5Nhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|"
+                "RnO96}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRV8lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](14), Literal[int](128), int64, omitted("
+                "default=1), omitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAd?#Uu$J~luHhb6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0lCl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{W5Nhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96"
+                "}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRU{L1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](14), Literal[int](128), int64, int64, i"
+                "nt64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAd?#Uu$J~luHhb6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0lCl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{W5Nhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY458fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42"
+                "IFWt2++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](14), Literal[int](128), int64, int64, o"
+                "mitted(default=1), omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAd?#Uu$J~luHhb6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0lCl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{W5Nhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42IFWt2"
+                "++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#vL1;mAlr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, int64, i"
+                "nt64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|"
+                "RnO96}uUv^<^b!A^`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlxRV8lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, Literal["
+                "int](0), Literal[int](0), int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD?0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!$jBxnmxhm?JkC}<~30B9&n0B9*_8fYqv4@_xvWpZI`TWM}|T_`XqlxQqVKxi$9Xf91H0(F"
+                "O!Qj};qXc}k&Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C)G0gMV?c42IFWnXJ"
+                "$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, int64, i"
+                "nt64, Literal[int](0), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD?0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY450%!$jBxnmxhm?JkC}<~30B9&n0B9*_8fYqv4@_xvWpZI`TWM}|T_`XqlxQqVKxi$9Xf9"
+                "1H0(FO!Qj}-{Xa$TFZgp*9VJ>5Da%C=bd2nTOE^TRZW0Z^sPi<**bY*0elay!+PKT6zlqie_Uv^<^b!C)G0gMV?c42IFWnXJ"
+                "$d6Y{5j0A3BZDo{<5^rs3baZ88C}d@3VRdYDJuxYij0Im~Z)9bZO`!sHhm=y3bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, int64, i"
+                "nt64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQDF0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g8fY458fXG&1&kGLb!}o{E@N+UWiE7iaAk8YZE163l#B;YZE19LWn`3-lxPc1hm?JkD2xVQc42"
+                "IFWt2++j0#_NVQh6}Uu$J~luH4O1a4t%Wt5B(Z*6IGbY)~HWMyVyb!>D!F)5Uc1z%%tWM!01p#pV>lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, Literal["
+                "int](32), int64, int64, omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD@0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!$jBxnmxhm?JkC}<~3AZRE{AZRIQ8fYqv5KL)wWpZI`TWM}|T_`g$DU@g|OF(EXh-fZNuL5"
+                "<4lv0#v8fY450%!${6>fEHVqq?0Z*pZWba`-Pb1rRZb7Pc@2TyHjbaZ88l#`Tb3r>fWeUvDS248kzY;|RnO96}uUv^<^b!A^"
+                "`WqFiK0gME0VQpoUj1q5cX>@dDWGG~1W?^+~bUiUCl#B&mV{c?-lue-mb%&HvlysCX"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Literal[int](15), Literal[int](128), int64, Literal["
+                "int](0), int64, omitted(default=1), omitted(default=1))"
+            ),
+            "pickle": (
+                "fCQD?0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj}-{Xa#5wj1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^"
+                "Y;|RnOAm|$Uu$J~luHkc6JKm;bY*g3Y+rPFaAjX(VPj}zlxP}^1a4t%Wt5B%Olfpwa$#&+X>N2~C^0oDl#B>sX>@mKWOQhhO"
+                "F)bUb7^O8Wn`3yj0Im~Z)9bZO{fBOhm=y3XaZ;jXe4M0PKT6zlqhH?OMqx7OMqx8Xc}lLj1f#}bY*g3Y+Gq=bX_PhGB_!eXe"
+                ">)WXf23nE=`{Tb%&HvlxP}g0%!$jBxnmxhm?JkC}<~30B9&n0B9*_8fYqv4@_xvWpZI`TWM}|T_`XqlxQqVKxi$9Xf91H0(F"
+                "O!Qj};KXaZ;jj1_KmZDL_AV{dY0E_8WtWpgfVX>((gj0aC`X>@dDWR#PXXbVn<lzo&aj0RtJVQh6}luH4O3SV|%Y;|Q{Yh`("
+                "qO96}oZeeX@l#CK@ZE19LWn?I1WoBV@Y;-*_DU^%_Ut@1%Wt2^!0(FO!Qj};$bd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals._restricted_programme": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), "
+                "Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True),"
+                " Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(flo"
+                "at64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(fl"
+                "oat64, 3, 'C', False, aligned=True), float64, Literal[int](64), int64, Array(int64, 1, 'C', Fals"
+                "e, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', Fal"
+                "se, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float6"
+                "4, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDT0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxR0-0%!$j5oilehm?JkC}<RDH)tSB0cas;B4{Iw6Jc"
+                "_4VR<NNZge&@EFdvtEFeQElxQVQAp&)Wlv0#vKWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY"
+                "$EFdyuEFeQElxQVQ8v=EQlv0#vKWIN_L}&tN1!xgy3r>fWeUvC@6lfo4AWH#gA!s6KBa9Vca&lpLC}wPLVRSY$EFdvtEFeQE"
+                "lxQVQAOdxVlv0#vH)tnlA7}z-1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)GK#T-mYh`(qO"
+                "F)bhUu<b~WpZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CEeX>?_BVQgDzZggEJHZ&=ej0j?Bba!cFbZC@IK#T@+X=iR_WR!@E1z"
+                "%%tWM!01)B<&flv0#vH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), "
+                "Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True),"
+                " Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(flo"
+                "at64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(fl"
+                "oat64, 3, 'C', False, aligned=True), float64, int64, int64, Array(int64, 1, 'C', False, aligned="
+                "True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned"
+                "=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', "
+                "False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQBp0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxR0-0%!$j5oilehm?JkC}<RDH)tSB0cas;B4{Iw6Jc"
+                "_4VR<NNZge&@EFdvtEFeQElxQVQAp&)Wlv0#vKWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY"
+                "$EFdyuEFeQElxQVQ8v=EQlv0#vKWIN_L}&tN1!xgy3r>fWeUvC@6lfo4AWH#gA!s6KBa9Vca&lpLC}wPLVRSY$EFdvtEFeQE"
+                "lxQVQAOdxVlv0#vH)tnlA80pdH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), A"
+                "rray(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(floa"
+                "t64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(flo"
+                "at64, 3, 'C', False, aligned=True), float64, Literal[int](64), int64, Array(int64, 1, 'C', False"
+                ", aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', Fals"
+                "e, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64"
+                ", 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCD1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj};oXaZ"
+                ";jXc1@&PKT6zlqhHwXgFvgO95yiXd`GOj1ysUa$$KWX>N2jG%O%7WGo;<DU@g?O(6nxhm=y3Xh3K{Xdq|;Xa#5yXbVn<lzo&"
+                "aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3Xh3K{XhmoOXa#5yXbVn<lzo&aXccH6Xdz1h"
+                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%7WGo;<DU@g?O&|hwhm=y3XgFvBXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
+                "_?OVZ((#cG%O%9WGo;<DU@g?O(p_$hm=y3Xdq|;Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^Y;"
+                "|RnOF)bSUu$J~luJO26JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B%Olfpwa$#&+X>N2~C^j@Hl#B>sX>@mKWOQhhOF)"
+                "bUb7^O8Wn`3yj0Im~Z)9bZP1FK)hm=y3XgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR<NKY;R$"
+                "7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj}<7XkutUbd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), A"
+                "rray(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(floa"
+                "t64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), int64, Array(flo"
+                "at64, 3, 'C', False, aligned=True), float64, int64, int64, Array(int64, 1, 'C', False, aligned=T"
+                "rue), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C', False, aligned="
+                "True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', F"
+                "alse, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDa0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj};oXaZ"
+                ";jXc1@&PKT6zlqhHwXgFvgO95yiXd`GOj1ysUa$$KWX>N2jG%O%7WGo;<DU@g?O(6nxhm=y3Xh3K{Xdq|;Xa#5yXbVn<lzo&"
+                "aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3Xh3K{XhmoOXa#5yXbVn<lzo&aXccH6Xdz1h"
+                "Xd-AMXe5jkVRCX|c_?OVZ((#cG%O%7WGo;<DU@g?O&|hwhm=y3XgFvBXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
+                "_?OVZ((#cG%O%9WGo;<DU@g?O(p_$hm=y3Xdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR"
+                "<NKY;R$7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj};^XjEuGbd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals.solve_focal": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTy"
+                "pe(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=Tru"
+                "e), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Arra"
+                "y(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float6"
+                "4, 3, 'C', False, aligned=True)))), int64, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCp1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-lue8Qb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO^pF{h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~5<;b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~5?<b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQfdO@glv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~6Y2b%&HvlxRd~A7}z-1!xFp3r>fWeUvC@4rl^s1!xA01ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhH?XeVeVXaZ;jXc1@&P"
+                "KT6zlqhHvXg6peO9N;jXd-AMj1ysUa$$KWX>N2jG%O%9WGo;<DU@g>O^*R}hm=y3XjNz@XeV@(j0IzFb#8Q&O9yBuXaZ;jXa"
+                "<Z4Rc>i-Zd7@2Wt5YYXbVn<lzo&aXi#V;XjO)kj0A3BZDo{<Fja18Z*E&*a&lpLC}wPLVRSY$EFd#vEFeQEEManTVR<NNZge"
+                "&@EFd#vEFeQEU6hOkUt@1%Wt2^j0d<FzQj}<2jG|O^aBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#"
+                "vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpL"
+                "C}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoBlxSZ~kpXpwlv0#vC}?D8DU7U4X>)W`d2nT0RCRD{Whh~Ca"
+                "$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ"
+                "&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJf"
+                "l)Xe&*U0d<FzQj};nXg_q6E&"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTyp"
+                "e(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True"
+                "), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Array"
+                "(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64"
+                ", 3, 'C', False, aligned=True)))), int64, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDt1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lueTXb%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lueWYb%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLd60d<FzQj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd70d<FzQj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O@RS*hm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLdL0d<FzQj};#Xdq|;Xa#5pXbVn<lzo&aXbxxsXa#5nj0IG6aBO9ilay!+P"
+                "KT6zlqie^ba`-PbCf7(0%!$j5oilehm?JkC}<UEAZQ^=185>>BWNUy6=8C6VR<NKY;R$7HZ&|CGh{3vLn)MKCQXb1b%&Hvlx"
+                "S9HR%ilf1!xgy3r>fWeUvC@6=*nUAxi^jB4{IMB#aYba&lpLC~0nVHZ&|CGh{3vLn)MKCQXk4b%&HvlxSOMR%ljql#B&qZ*^"
+                "{TluHL_DQE&{1!xA02~}=sZ*Ek1aAlN}lxPc1hm?JkC}>e=R%ly>l#B#!VQpoUj4)MhX>V>@VRCX|c_?OVZ((#cG%O%9WGo;"
+                "<DJ)@fa$$KWX>N2jG%O%9WGo;<DP5F|1z%%tWM!01kO6gvlv0#vV~nCyb#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|"
+                "c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CG"
+                "h{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEDU@hsO_2e0hm=y3XenrFXex}XOlfm;RC"
+                "#b^TU2#$Y-K26a&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$"
+                "mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$"
+                "7HZ&|CGh{3vLn$d;lxQqXk^yyxlv0#vIA}n0lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals.solve_focal_reference": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTy"
+                "pe(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=Tru"
+                "e), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Arra"
+                "y(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float6"
+                "4, 3, 'C', False, aligned=True)))), int64, int64, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCr1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxRd~A7}z-1!xFp3r>fWeUvC@4rl^s1!xA01ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhH?XeVeVXaZ;jXc1@&P"
+                "KT6zlqhHvXg6peO9N;jXd-AMj1ysUa$$KWX>N2jG%O%9WGo;<DU@g>O}qkihm=y3XjNz@XeV@(j0IzFb#8Q&O9yBuXaZ;jXa"
+                "<Z4Rc>i-Zd7@2Wt5YYXbVn<lzo&aXi#V;XjO)kj0A3BZDo{<Fja18Z*E&*a&lpLC}wPLVRSY$EFd#vEFeQEEManTVR<NNZge"
+                "&@EFd#vEFeQEU6hOkUt@1%Wt2_a0(FO!Qj}<2jG|O^aBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#"
+                "vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpL"
+                "C}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoBlxSZ~-2!!olv0#vC}?D8DU7U4X>)W`d2nT0RCRD{Whh~Ca"
+                "$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ"
+                "&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJf"
+                "l)Xe&+L0(FO!Qj};nXg6p-bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTyp"
+                "e(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True"
+                "), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Array"
+                "(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64"
+                ", 3, 'C', False, aligned=True)))), int64, int64, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDv1poj50000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};#Xdq|;Xa#5pXbVn<lzo&aXbxxsXa#5nj0IG6aBO9ilay!+P"
+                "KT6zlqie^ba`-PbCf7(0%!$j5oilehm?JkC}<UEAZQ^=185>>BWNUy6=8C6VR<NKY;R$7HZ&|CGh{3vLn)MKCQT*+b%&Hvlx"
+                "S9HR%ilf1!xgy3r>fWeUvC@6=*nUAxi^jB4{IMB#aYba&lpLC~0nVHZ&|CGh{3vLn)MKCQZBob%&HvlxSOMR%ljql#B&qZ*^"
+                "{TluHL_DQE&{1!xA02~}=sZ*Ek1aAlN}lxPc1hm?JkC}>e=R%ly>l#B#!VQpoUj4)MhX>V>@VRCX|c_?OVZ((#cG%O%9WGo;"
+                "<DJ)@fa$$KWX>N2jG%O%9WGo;<DP5F|1z%%tWM!01+yZrnlv0#vV~nCyb#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|"
+                "c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CG"
+                "h{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEDU@hsP2B=@hm=y3XenrFXex}XOlfm;RC"
+                "#b^TU2#$Y-K26a&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$"
+                "mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$"
+                "7HZ&|CGh{3vLn$d;lxQqX-U4-plv0#vIA}O%Ky;KY"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTy"
+                "pe(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=Tru"
+                "e), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Arra"
+                "y(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float6"
+                "4, 3, 'C', False, aligned=True)))), Literal[int](64), int64, Array(int64, 1, 'C', False, aligned"
+                "=True))"
+            ),
+            "pickle": (
+                "fCQBU1^@s60000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxRd~A7}z-1!xFp3r>fWeUvC@4rl^s1!xA01ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhH?XeVeVXaZ;jXc1@&P"
+                "KT6zlqhHvXg6peO9N;jXd-AMj1ysUa$$KWX>N2jG%O%9WGo;<DU@g>O}qkihm=y3XjNz@XeV@(j0IzFb#8Q&O9yBuXaZ;jXa"
+                "<Z4Rc>i-Zd7@2Wt5YYXbVn<lzo&aXi#V;XjO)kj0A3BZDo{<Fja18Z*E&*a&lpLC}wPLVRSY$EFd#vEFeQEEManTVR<NNZge"
+                "&@EFd#vEFeQEU6hOkUt@1%Wt2_a0(FO!Qj}<2jG|O^aBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#"
+                "vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpL"
+                "C}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoBlxSZ~-2!!olv0#vC}?D8DU7U4X>)W`d2nT0RCRD{Whh~Ca"
+                "$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC~0nVHZ"
+                "&|CGh{3vLn$mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJf"
+                "l)Xe&+L0(FO!Qj}-{Xa#5$j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+rU^Y;|RnOF)bSUu$J~luJO26JKm"
+                ";bY*g3Y+rPFaAjX(VPj}zlxR1M1a4t%Wt5B%Olfpwa$#&+X>N2~C^j@Hl#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZ"
+                "P1FK)hm=y3Xg6p-bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, ListTyp"
+                "e(Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True"
+                "), Array(float64, 3, 'C', False, aligned=True), Array(int64, 3, 'C', False, aligned=True), Array"
+                "(int64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64"
+                ", 3, 'C', False, aligned=True)))), Literal[int](64), int64, Array(int64, 1, 'C', False, aligned="
+                "True))"
+            ),
+            "pickle": (
+                "fCQCY1^@s60000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};#Xdq|;Xa#5pXbVn<lzo&aXbxxsXa#5nj0IG6aBO9ilay!+P"
+                "KT6zlqie^ba`-PbCf7(0%!$j5oilehm?JkC}<UEAZQ^=185>>BWNUy6=8C6VR<NKY;R$7HZ&|CGh{3vLn)MKCQT*+b%&Hvlx"
+                "S9HR%ilf1!xgy3r>fWeUvC@6=*nUAxi^jB4{IMB#aYba&lpLC~0nVHZ&|CGh{3vLn)MKCQZBob%&HvlxSOMR%ljql#B&qZ*^"
+                "{TluHL_DQE&{1!xA02~}=sZ*Ek1aAlN}lxPc1hm?JkC}>e=R%ly>l#B#!VQpoUj4)MhX>V>@VRCX|c_?OVZ((#cG%O%9WGo;"
+                "<DJ)@fa$$KWX>N2jG%O%9WGo;<DP5F|1z%%tWM!01+yZrnlv0#vV~nCyb#QEDC}DDPVR<NKY;R$7HZ&|CGh{3vLn$mEVRCX|"
+                "c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWX>N2jG%O%9WGo;<DJ&pia&lpLC~0nVHZ&|CG"
+                "h{3vLn$mEVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFd#vEFeQEDU@hsP2B=@hm=y3XenrFXex}XOlfm;RC"
+                "#b^TU2#$Y-K26a&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGh{3vLn$"
+                "mEVRCX|c_?XabT%|BATwkvAVVoEAYpQHVR<NNZge&@EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$"
+                "7HZ&|CGh{3vLn$d;lxQqX-U4-plv0#v0%!$j7K{!_Zggd5WpYeubY*g3Y?PCfXbVn<lzo&aj1FIHX>?_BVQgP^VQh6}luJO2"
+                "1Yc`qd6Y{)j1ymMX>?_BVQgP?d2nT4V_{=xWt3<*j0A3BZDo{<5KL)wWpZI`TWM}|T_`p*DU^%|Vrg`DX=HS0luJO226Jg=Z"
+                "e?VYh>QhaV{c?-lugtEb%&HvlxR3;Ky;KY"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals.solve_template": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int6"
+                "4, bool, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQE80ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-lue8Qb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO_c$4h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~5<;b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~5?<b%&HvlxRO_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wPLVRSY$EFdy"
+                "uEFeQElxQVQfdO@glv0#vL})i?0%!$j6^sW$Z*Od6VQ!R@lxPc1hm?JkC}<jt1Y&P*Y?NpnOA>X5lv0#vKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64,"
+                " Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int64"
+                ", bool, Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQBa0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-luecab%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-luefbb%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLd60d<FzQj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLd70d<FzQj};wXdq|;Xa#5yXbVn<lzo&aXccH"
+                "6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O@RS*hm=y3Xhmo^XaZ;jXcmkILT_(uWnpfVlay!+PKT6zlqhH$"
+                "j09qDZ)}uk9!nB+hm=y3Xh3w7E&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.proposals.window_dp": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Literal[int](0), Array(float64, 2, 'C', False, aligned=True)"
+                ", Array(float64, 3, 'C', False, aligned=True), float64, float64, float64, Literal[int](64), int6"
+                "4, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListTyp"
+                "e(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=T"
+                "rue)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligne"
+                "d=True))"
+            ),
+            "pickle": (
+                "fCQE90{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxPBI1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)G0E`4*Yh`(qO8|@$Uu<b~W"
+                "pZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CBdX>?_BVQgDzZggEJFe#Lb2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1%Wt2@V0("
+                "FO!Qj};!XeVeNXdh@FXaZ;jXiI1dPKT6zlqhIUOF(E(OF(E)Xg6q4j1Wv|bY*g3Y+Gq=bX_PmG%1v5Q%gW-RETI*P1FK)hm="
+                "y3Xg6p-Xg_EzXf0?hXg_q6E&"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(fl"
+                "oat64, 3, 'C', False, aligned=True), float64, float64, float64, Literal[int](64), int64, Array(i"
+                "nt64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(fl"
+                "oat64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), Lis"
+                "tType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDX0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxR0-L}({yA7~$FA7}z-1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)GK#T-mY"
+                "h`(qOF)bhUu<b~WpZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CEeX>?_BVQgDzZggEJHZ&=ej0j?Bba!cFbZC@IK#T@+X=iR_WR"
+                "!@E1z%%tWM!01)B<&flv0#vH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(fl"
+                "oat64, 3, 'C', False, aligned=True), float64, float64, float64, int64, int64, Array(int64, 1, 'C"
+                "', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, '"
+                "C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array"
+                "(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQBt0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxR0-L}({yA7~$FA80pdH)ua-KWHszEod!hKXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Literal[int](0), Array(float64, 2, 'C', False, aligned=True),"
+                " Array(float64, 3, 'C', False, aligned=True), float64, float64, float64, Literal[int](64), int64"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType"
+                "(Array(float64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=Tr"
+                "ue)), ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned"
+                "=True))"
+            ),
+            "pickle": (
+                "fCQC^1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj}-{Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(b"
+                "Y*g3Y+rU^Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba"
+                "!cFbZC@IK#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#vMQ8$O1!xgy3r>fWeUvC@6=)!6Axi^jB4{IMB#aeda&lpLC}wPLVRS"
+                "Y$EFd#vEFeQElxQYRCIWSblv0#vAZQ?HAZP+;1!zoY3r>fWeUvC@PfI{(P)k5)QD``5Qj8ExX>?_BVQgDzZggEJHZ&=eXjDr"
+                ";XjO=4R!!6bb%&HvlxR3;KxjZ{0%!$j2xtpVhm?JkC}<97U1%w2U1%zdA53X;bX0k8Wm{o#a$$KWW^8X^bT%|BATwkvAVVo#"
+                "lxQqXCjxbclv0#vXJ}_=Ky;KY"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 3, 'C', False, aligned=True), float64, float64, float64, Literal[int](64), int64, Array(in"
+                "t64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(flo"
+                "at64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), List"
+                "Type(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCH1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};oXhmoOXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
+                "_?OVZ((#cG%O%9WGo;<DU@g?O(p_$hm=y3Xdq}HXdq|;Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3Y+"
+                "rU^Y;|RnOF)bSUu$J~luJO26JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B%Olfpwa$#&+X>N2~C^j@Hl#B>sX>@mKWOQ"
+                "hhOF)bUb7^O8Wn`3yj0Im~Z)9bZP1FK)hm=y3XgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TVZl?VR<N"
+                "KY;R$7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj}<7XkutUbd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 1, 'C', False, aligned=True), Literal[int](0), Array(float64, 2, 'C', False, aligned=True)"
+                ", Array(float64, 3, 'C', False, aligned=True), float64, float64, float64, int64, int64, Array(in"
+                "t64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(flo"
+                "at64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), List"
+                "Type(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDW0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_A7}z-1!xgy3r>fWeUvC@6lfo4AWH&hA!s6KBa9Vca&lpLC}wP"
+                "LVRSY$EFdyuEFeQElxQVQ8v=EQlv0#v0%!$j5oilehm?JkC}<RDA7~&;0cas;B4{Iw6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MK"
+                "B~2g#b%&HvlxPBI1!xtF4oPlwWoKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)G0E`4*Yh`(qO8|@$Uu<b~W"
+                "pZI`UvznJWnW`qV`ycRXg7=mZeeX@l#CBdX>?_BVQgDzZggEJFe#Lb2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1%Wt2@V0("
+                "FO!Qj};!XeVeNXdh@FXg6p#Xg_E_Xf0?hXf0?zbd)X"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), Literal[int](0), Array(float64, 2, 'C', False, aligned=True),"
+                " Array(float64, 3, 'C', False, aligned=True), float64, float64, float64, int64, int64, Array(int"
+                "64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(floa"
+                "t64, 3, 'C', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListT"
+                "ype(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCG1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj}-{Xa#5%j1Ea|bY*8{a!hG-WpZI`l#`Tb3r>fWeUvDS4qt3(b"
+                "Y*g3Y+rU^Y;|RnO8|@nUu$J~luH1N6JKm;bY*g3Y+rPFaAjX(VPj}zlxR4N1a4t%Wt5B$Olfpwa$#&+X>N2~C@?9Mj0j?Bba"
+                "!cFbZC@IK#T@+X=iR_WR!@E1z%%tWM!01Edq6ilv0#vMQ8$O1!xgy3r>fWeUvC@6=)!6Axi^jB4{IMB#aeda&lpLC}wPLVRS"
+                "Y$EFd#vEFeQElxQYRCIWSblv0#vAZQ?HAZR#fIA}m<KxhJJ1!xFp3r>fWeUvC@4rpCyDQI12DvTdYX>)W`d2nT0VRCX|c_?O"
+                "VZ((#cG%O%9WGo;<DP5FkEKMf@b%&HvlxSjTVrW2glr8"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(floa"
+                "t64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(flo"
+                "at64, 3, 'C', False, aligned=True), float64, float64, float64, int64, int64, Array(int64, 1, 'C'"
+                ", False, aligned=True), Array(int64, 1, 'C', False, aligned=True), ListType(Array(float64, 3, 'C"
+                "', False, aligned=True)), ListType(Array(float64, 3, 'C', False, aligned=True)), ListType(Array("
+                "float64, 3, 'C', False, aligned=True)), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDe0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xdq|;Xa#5yXbVn"
+                "<lzo&aXccH6Xdz1iXd-AMXe5jkVRCX|c_?OVZ((#cG%O%8WGo;<DU@g?O&bDrhm=y3XaZ;jXc1@&PKT6zlqhHwXdq}IO95yi"
+                "Xd`GOj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXeLb{0(FO!Qj};oXhmoOXa#5yXbVn<lzo&aXccH6Xdz1jXd-AMXe5jkVRCX|c"
+                "_?OVZ((#cG%O%9WGo;<DU@g?O(p_$hm=y3Xdq}HXdq}fXgFv<Xh3KJXa#5pXbVn<lzo&aXbxykXenq<Xex{!Olfm;RC#b^TV"
+                "Zl?VR<NKY;R$7HZ&|CGh{3vLn&R9Xe>=90(FO!Qj};^XjEuGbd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.advance": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(int64, 1, 'A', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int64, int64,"
+                " Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64)"
+            ),
+            "pickle": (
+                "fCQC!0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-O"
+                "B!{Dlv0#v8cP9a8;k)#lxQ7{6Jc_4VR<NNZge&@EFdvtEFeKClxQDKG6Hpnlv0#v0%!$j2xtpVhm?JkC}<978E6_y0%#j(9B"
+                "3Vk6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKA59wqb%&HvlxQ$$FlYj31!xFp3r>fWeUvC@4rnlF8cP9a8)zJ89gGuUa&lpLC~0"
+                "nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxRL^8FZ8`"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.ascend": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, '"
+                "C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False,"
+                " aligned=True), Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False"
+                ", aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, alig"
+                "ned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=Tr"
+                "ue))), float64, float64, bool)"
+            ),
+            "pickle": (
+                "fCQB&1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@&=jE@&=jE@%R11"
+                "&kYRb!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf71ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhHdXa#5pXbVn<lzo&aXbxx@Xc"
+                "|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$"
+                "KWW^8X^bT%|BATneuAVVpXXdg`*0(FO!Qj};uXaZ;jXb5NvPKT6zlqhHpXc=f4O95ybXdGxAj1^&Wa$$KWW^8X^bT%|BATeY"
+                "tAVVpXXdg`=0(FO!Qj};uXg+k5j0IzFb#8Q&O9qSuWOR9OWt3<FXa#65j0sh4X>V>+d2nTvlay!+PKT6zlqhI4XhUc|XgP<J"
+                "j0A3BZDo{<NL6lWZ*E&*a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#vE"
+                "FeQEU6hOkUt@1%Wt2@W0(FO!Qj};+jE_`xaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEF"
+                "fWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}w"
+                "PLVRSY$EFdyuEFeQEDU@hVO)mm<hm=y3Xc=f3XaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7fTX#hm=y3bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, '"
+                "C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False,"
+                " aligned=True), Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False"
+                ", aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, alig"
+                "ned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=Tr"
+                "ue))), float64, float64, Literal[bool](False))"
+            ),
+            "pickle": (
+                "fCQDN1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@&=jE@&=jE@%R11"
+                "&kYRb!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf71ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhHdXa#5pXbVn<lzo&aXbxx@Xc"
+                "|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$"
+                "KWW^8X^bT%|BATneuAVVpXXdg`*0(FO!Qj};uXaZ;jXb5NvPKT6zlqhHpXc=f4O95ybXdGxAj1^&Wa$$KWW^8X^bT%|BATeY"
+                "tAVVpXXdg`=0(FO!Qj};uXg+k5j0IzFb#8Q&O9qSuWOR9OWt3<FXa#65j0sh4X>V>+d2nTvlay!+PKT6zlqhI4XhUc|XgP<J"
+                "j0A3BZDo{<NL6lWZ*E&*a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#vE"
+                "FeQEU6hOkUt@1%Wt2@W0(FO!Qj};+jE_`xaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEF"
+                "fWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}w"
+                "PLVRSY$EFdyuEFeQEDU@hVO)mm<hm=y3Xc=f3XaZ;jXb+4ILT_(uWnpeiX>?_BVQiF>lxPc1hm?JkD2xtYY-x05a$#&=c42I"
+                "FWt54G1Yc`qd6bEa1a4t%Wt5B*Olfpwa$#&+VsCG3T_{FjY;$EPl#B&mV{c?-lub4Qj1ymMX>?_BVQgP?d2nT4V_{=xWt3<F"
+                "Xa#5wj0Zw*Z){~@Zj_UhXbVn<lzo&aXcUYDVsCG3lxP=A5_N}^Qj~Rvlv0#*lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.background_values": (
+        {
+            "text": (
+                "(Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQEK0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9PAsY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "9WGo;<DU^%_Ut@1%Wt2@O0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#v8E67%1!xFp3r>fWe"
+                "UvC@4rm!@8cPCb8)zJ89gG!Wa&lpLC}wPLVRSY$EFdyuEFeQElxQDK8v=EQlv0#vGjx<L"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.before": (
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int"
+                "64, 1, 'C', False, aligned=True), bool)"
+            ),
+            "pickle": (
+                "fCQC#0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj};SXd-9=Xa#5wj0Zw*Z){~@Zj_UhXbVn<lzo&aXcUYDVsCG3lxP@B5_N}^"
+                "Qj~O*E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int"
+                "64, 1, 'C', False, aligned=True), Literal[bool](False))"
+            ),
+            "pickle": (
+                "fCQEK0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv^j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%7WGo;<DU^%_Ut@1%Wt2@J0(FO!Qj};SXd-9=Xa#5wj1EF?Z){~@ZcJ%(WpZI`l#`Tb3r>fWeUvDS4qt3(bY*g3"
+                "Y+rU^Y;|RniHrnaYh`(qiHrnpVQpoUj1)|1bY*g3Y+GV)Z){yCMqzAoWhs=51z%%tWM!01HUf+jUu<b~WpZI`UvznJWnW`qV"
+                "`ycRXaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3b%&HvlysCX"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.best_intervals": (
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(b"
+                "ool, 3, 'C', False, aligned=True), Literal[int](6), Array(int64, 1, 'C', False, aligned=True), b"
+                "ool, float64)"
+            ),
+            "pickle": (
+                "fCQEC0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Hw)Z(($llay!+PKT6zlqhHvj0a|H"
+                "Z((#cG?Zu-OF(ECOB{8Flv0#v8%qOd9B3VA9*h-Xa&lpLC}wPLVRSY$EFd#vEFeQElxQGLCIWSblv0#v0%!$j2xtpVhm?JkC"
+                "}<970%!$j4~z#wZ*Od6VQ!R@lxPc1hm?JkC}<Rn1Y&P*Y?NpiOA>X5lv0#v8%qOd9B3VA9*h!Ua&lpLC}MAKY%Cx%WGo;<DU"
+                "@g+O+Ny4hm=y3XaZ;jXb+4INp5syXJv9sX>?_BVQiF>lxPc1hm?JkD2xtYY-x05a$#&=c42IFWt2+>j09h6WqFiK28<J5Y-x"
+                "05a$#&=ba`-PUt?ioXl0aW8jJ*PVQpoUj1Np{bY*g3Y+Gq=bX_PmDU^%|Vrg`DX=HS0luJO226Jg=Ze?VYh>QhaV{c?-lubM"
+                "Wb%&HvlxPBI1!xFp3r>fWeUvC@4rm%^8%qIb9B3VA9*h%Va&lpLC~0nVHZ&|CF=Q+tLn)MKAWb0xb%&HvlxR0-D|D1D"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(b"
+                "ool, 3, 'C', False, aligned=True), Literal[int](6), Array(int64, 1, 'C', False, aligned=True), L"
+                "iteral[bool](False), float64)"
+            ),
+            "pickle": (
+                "fCQCr0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Hw)Z(($llay!+PKT6zlqhHvj0a|H"
+                "Z((#cG?Zu-OF(ECOB{8Flv0#v8%qOd9B3VA9*h-Xa&lpLC}wPLVRSY$EFd#vEFeQElxQGLCIWSblv0#v0%!$j2xtpVhm?JkC"
+                "}<970%!$j4~z#wZ*Od6VQ!R@lxPc1hm?JkC}<Rn1Y&P*Y?NpiOA>X5lv0#v8%qOd9B3VA9*h!Ua&lpLC}MAKY%Cx%WGo;<DU"
+                "@g+O+Ny4hm=y3XaZ;jXb+4INp5syXJv9sX>?_BVQiF>lxPc1hm?JkD2xtYY-x05a$#&=c42IFWt2+>j09h6WqFiK28<J5Y-x"
+                "05a$#&=ba`-PUt?ioXl0aW8jJ*PVQpoUj1Np{bY*g3Y+Gq=bX_PmDU^%|Vrg`DX=HS0luJO226Jg=Ze?VYh>QhaV{c?-lubM"
+                "Wb%&HvlxPBI1!xFp3r>fWeUvC@4rm%^8%qIb9B3VA9*h%Va&lpLC~0nVHZ&|CF=Q+tLn)MKAWb0xb%&HvlxPBI1!xb94nl8l"
+                "Y-M3?Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)^j09h6WqFi|j0A3BZDo{<6ijJ!WpZI`TVii-Y+WcuVQh0{D"
+                "U^%_Ut@1%Wt2@e0*n)1Y-x05a$#&=ba`-PUt?ioXl0aWH+6@UQj};bbd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.best_starts": (
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal"
+                "[int](6), Array(int64, 1, 'C', False, aligned=True), bool, float64)"
+            ),
+            "pickle": (
+                "fCQDc0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Hw)Z(($llay!+PKT6zlqhHvj0a|H"
+                "Z((#cG?Zu-OF(ECOB{8Flv0#v8%qIb9B3VA9*h-Xa&lpLC}wPLVRSY$EFdvtEFeQElxQGLAOdxVlv0#v0%!$j4~z~;Zggd5W"
+                "pYeubY*g3Y?PCfXbVn<lzo&aj1FIHX>?_BVQgP^VQh6}luHJT1Yc`qd6Y{Aj1ymMX>?_BVQgP?d2nT4V_{=xWt3<dj0A3BZD"
+                "o{<4@_xvWpZI`TWM}|T_`pwl#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZO*{g1hm=y3XaZ;jXb5NvPKT6zlqhHpXc}"
+                "l6O95ycXdP%Cj1ysUa$$KWX>N2jG%O%7WGo;<DU@g+O(6nxhm=y3XaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}u"
+                "k7)ug$hm=y3Xe)G-E&"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Literal"
+                "[int](6), Array(int64, 1, 'C', False, aligned=True), Literal[bool](False), float64)"
+            ),
+            "pickle": (
+                "fCQB_0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Hw)Z(($llay!+PKT6zlqhHvj0a|H"
+                "Z((#cG?Zu-OF(ECOB{8Flv0#v8%qIb9B3VA9*h-Xa&lpLC}wPLVRSY$EFdvtEFeQElxQGLAOdxVlv0#v0%!$j4~z~;Zggd5W"
+                "pYeubY*g3Y?PCfXbVn<lzo&aj1FIHX>?_BVQgP^VQh6}luHJT1Yc`qd6Y{Aj1ymMX>?_BVQgP?d2nT4V_{=xWt3<dj0A3BZD"
+                "o{<4@_xvWpZI`TWM}|T_`pwl#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZO*{g1hm=y3XaZ;jXb5NvPKT6zlqhHpXc}"
+                "l6O95ycXdP%Cj1ysUa$$KWX>N2jG%O%7WGo;<DU@g+O(6nxhm=y3XaZ;jXb+4ILT_(uWnpeiX>?_BVQiF>lxPc1hm?JkD2xt"
+                "YY-x05a$#&=c42IFWt54G1Yc`qd6bEa1a4t%Wt5B*Olfpwa$#&+VsCG3T_{FjY;$EPl#B&mV{c?-lub4Qj1ymMX>?_BVQgP?"
+                "d2nT4V_{=xWt3<FXa#5wj0Zw*Z){~@Zj_UhXbVn<lzo&aXcUYDVsCG3lxP@B5_N}^Qj~Rvlv0#vD|D1D"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.context": (
+        {
+            "text": (
+                "(Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, "
+                "1, 'C', False, aligned=True), float64)"
+            ),
+            "pickle": (
+                "fCQEM0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9PAsY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "9WGo;<DU^%_Ut@1%Wt2@O0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|ibXd7r8XdR3dVRCX|c_?OVZ((#cG%O%8WGo;<DU@g*"
+                "O&bDrhm=y3XeMX^Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-OF)bUb7^O8Wn`3yX"
+                "ctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vGiVuflr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 3, 'A', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, "
+                "1, 'C', False, aligned=True), float64)"
+            ),
+            "pickle": (
+                "fCQEO0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9PAsY+-qCb##=B0YQ|E1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "9WGo;-DU^%_Ut@1%Wt2@S0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|ibXd8?HLzHM8j1^&Wa$$KWW^8X^bT%|BATneuAVVpX"
+                "Xdg`*0(FO!Qj};XXaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l"
+                "!#~-OB!{Dlv0#v8cP9a8)zhG9gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxQ?)8FZ8`"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.interval_scores": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, '"
+                "C', False, aligned=True), Tuple((Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, "
+                "'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', F"
+                "alse, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, "
+                "aligned=True))), float64)"
+            ),
+            "pickle": (
+                "fCQB=1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@%R11!xFp3r>fWe"
+                "UvC@4rnWA8cPCb8)zJ89gGuUa&lpLC~0nVHZ&|CGGr_uLn)MKA5AC%b%&HvlxQw!0%!${8*X)NVqq?0Z*pZWba`-Pb1q|VZg"
+                "gR3Ze?<Fl#B&bb#QEDl#`Tb3r>fWeUvDS1$23EWpk7$XaZ;jXb5NvPKT6zlqhHpXc=f4O9N;dXdGxAj1^&Wa$$KWW^8X^bT%"
+                "|BATwkvAVVpXXdg``0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|ibXd7r8XdR3dVRCX|c_?OVZ((#cG%O%8WGo;<DU@g*O&bD"
+                "rhm=y3XhUcMXa#5pXbVn<lzo&aXbxx@Xc|iaXd7r8XdR3dVRCX|c_?OVZ((#cG%O%7WGo;<DU@g*O&|hwhm=y3XhUd2bd-z*"
+                "V{dhCbd*a5j0I$Ld2nTvXaZ;jXf%uoRc>i-Zd7@2Wt5YYXbVn<lzo&aXgO#|XhUc|hm?#2ZeeX@l#EDKZfS3BTVZl?VR<NKY"
+                ";R$7HZ&|CF=Q+tLn$m_a&lpLC}wPLVRSY$EFdyuEFeQEEManTVR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO)dg;hm=y3Xi"
+                "<!hRCRD{Whh~Ca$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&"
+                "pia&lpLC}wPLVRSY$EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$egXj4ru0(FO"
+                "!Qj};Jbd)X"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.latent": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(int64, 1, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1,"
+                " 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2"
+                ", 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCy0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-O"
+                "B!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxPBI1!xFp3r>fWeUvC@4rnlF8cPCb8)zJ89g"
+                "GuUa&lpLC~0nVHZ&|CGGr_uLn)MKA5AC%b%&HvlxQ<(GiVuT0%!$j2xtpVhm?JkC}<978E6_y0%#j(9B3Vk6=8C6VR<NKY;R"
+                "$7HZ&|CGGr_uLn)MKA59wqb%&HvlxRJ4lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.prepare": (
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True"
+                "), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, "
+                "Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int6"
+                "4, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQC=0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie^WOR"
+                "9OWt3<FXa$TIZgp*9VJ>5Da%C=bd2nTOE^}jHY+-V9l#B&NY;R$7l#`Tb3r>fWeUvDS1a4t%Wt5BuW^8X^bT%}Uj0j?Bba!c"
+                "FbZC@IK#T=nV{c?-luI0Shm=y3j0A3EX>F8C1B?c2VR>(Lbd-z%LzIjJZeeX@l#CT&a&lpLC}wPLVRSY$EFd#vEFeQEl#B&m"
+                "V{c?-luafAb%&Hvl#B&rba`-PlxQc61a4t%Wt5B`Olfm;RC#b^TVZl?VR<NKY;R$7HZ&|CGh{3vLn&R9j0Im~Z)9bZO(z0%h"
+                "m=y3XaZ;jXc1@&PKT6zlqhHvXaZ;jXcdeHNp5syXJvAflay!+PKT6zlqhH#j0I_KbT%}UXdFvGj0SUQXKrO=l!#~@OB!{Dlv"
+                "0#vAWH&hA!s6KBa9Paa&lpLC~0nVHZ&|CGGr_uLn)MKB~2&-b%&HvlxPBI1!xgy3r>fWeUvC@6lgbSAWH#gA!s6KBa9Paa&l"
+                "pLC~0nVHZ&|CF=Q+tLn)MKB~2j$b%&HvlxRO_H)ua-KWIN_KXjBX"
+            ),
+        },
+        {
+            "text": (
+                "(ListType(Array(float64, 3, 'C', True, aligned=True)), Array(int64, 2, 'C', False, aligned=True)"
+                ", Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, A"
+                "rray(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64"
+                ", 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQDI0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cm0b!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf72ux{nbX0k8Wt5YYj0j?NX>4?9ZgZ5325(|&Wn"
+                "*-dlax+}lzo&aj0tIUWo=({d2nTvXaZ;jj2UiqZDL_AV{dY0E_8WtWpgfWaCvljaAk9pj0Hh*a$$Ltlay!+PKT6zlqie`ZFO"
+                "{EVr*rUiHrqgba`-PlxPBI1&kPOb!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($llay!+PKT6zlqie@ZeeX@l#B;vY;R$"
+                "7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0$81a4$$ZInv`j0S9Bd2e-el#BsGl#B#!VQpoUj2?1jVPtP^Y<VDIa&lpL"
+                "C}wPLVRSY$EFd#vEFeQEl#B&mV{c?-lufY$b%&Hvl#B&rba`-PlxQf71a4t%Wt5C4Olfm;RC#b^TXJP#WN&V4c_3kOa$$KWW"
+                "^8X^bT%|BATwkvAVVo#l#B&mV{c?-lufb%b%&HvlxPBI1!xgy3r>fWeUvC@6=(uz1!xwG2T5*pWoKn_l#`Tb3r>fWeUvC@8;"
+                "k{MZge&@lxQ7GK#T@+X=iR_WR!?#9!nZ^hm=y3Xdz1iXd-AMXe5jiVRCX|c_?XabT%|BATneuAVVpXXeLc40(FO!Qj}-{Xa#"
+                "5yXbVn<lzo&aXccHUXdz1hXd-AMXe5jiVRCX|c_?XabT%|BATeYtAVVpXXeLb|0(FO!Qj};wXgFv<Xh3K{Xh3w7E&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.relevant_samples": (
+        {
+            "text": (
+                "(Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64"
+                ", Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Arra"
+                "y(float64, 2, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQEM0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9PAsY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "9WGo;<DU^%_Ut@1%Wt2@O0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#v8E67%1!xFp3r>fWe"
+                "UvC@4rm!@8cPCb8)zJ89gG!Wa&lpLC}wPLVRSY$EFdyuEFeQElxQDK8v=EQlv0#vGiWn(lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.samples_value": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Literal[int](0), int64, Tuple((Array(float64, 3, 'C', False,"
+                " aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, align"
+                "ed=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=Tru"
+                "e), Array(float64, 2, 'C', False, aligned=True))), float64)"
+            ),
+            "pickle": (
+                "fCQC^1ONa40000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@%R11!xb94oPlwW"
+                "oKn_Olfpwa$#(glay!+PKT6zlqif2Uu<b~WpZI`Uv^<^b!C)G0E`4*Yh`(qO8|@$Uu<b~WpZI`UvznJWnW`qV`ycRXe*2aZe"
+                "eX@l#CBdX>?_BVQgDzZggEJFe#Lb2x4h;cWGpFXp~Dpj0SUQXKrO=l!%N4Ut@1%Wt2@V0(FO!Qj};bXaZ;jj2musZDL_AV{d"
+                "Y0E_8WtWpgfLZ*Fv9X>Mh5bCiq)RCRD{Wt5YYXbVn<lzo&aj0JRgaAk9pC};v`1!xFp3r>fWeUvC@4rm!@8cPFc8)zJ89gG!"
+                "Wa&lpLC}wPLVRSY$EFd#vEFeQElxQDKCIWSblv0#v0%!$j2xtpVhm?JkC}<978E6_y0%#j(9B3Vk6=8C6VR<NKY;R$7HZ&|C"
+                "GGr_uLn)MKA59wqb%&HvlxR$70%!$j2xtpVhm?JkC}<978E6_y0caa&9B3Vk6=8C6VR<NKY;R$7HZ&|CF=Q+tLn)MKA59<vb"
+                "%&HvlxR$7Omvit1!He@ZgiAO28;z{ba`-PlxPBI1!z5t2~}=sZ*Ek1aAlN}lxPc1hm?JkC}=`xQD{tPM~9S*1a4t%Wt5CaRc"
+                ">i-Zd+k;a$$KWW^8X^bT%|BATeYtAVVoEVRCX|c_?OVZ((#cG%O%8WGo;<DJ)@fa$$KWW^8X^bT%|BATwkvAVVo#l#B&mV{c"
+                "?-lua%Ib%&HvlxSLvk5qMVY-K26a&lpLC}wPLVRSY$EFd#vEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$"
+                "7HZ&|CGGr_uLn$mEVRCX|c_?OVZ((#cG%O%7WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEFfWWa$$KWW^8X^bT%|BATneu"
+                "AVVoBlxSQ{F9LOklv0#v8FZ8`"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), int64, int64, Tuple((Array(float64, 3, 'C', False, aligned=T"
+                "rue), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), "
+                "Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array("
+                "float64, 2, 'C', False, aligned=True))), float64)"
+            ),
+            "pickle": (
+                "fCQEH0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@&%gD`)~}1&kYRb"
+                "!}o{E@N+UWiE7iaAk8YV{dMBVQFq<a&wf71ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhHdXa#5pXbVn<lzo&aXbxx@Xc|icXd"
+                "7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8"
+                "X^bT%|BATneuAVVpXXdg`*0(FO!Qj};uXaZ;jXb5NvPKT6zlqhHpXc=f4O95ybXdGxAj1^&Wa$$KWW^8X^bT%|BATeYtAVVp"
+                "XXdg`=0(FO!Qj};uXg+k5j0IzFb#8Q&O9qSuWOR9OWt3<FXa#65j0sh4X>V>+d2nTvlay!+PKT6zlqhI4XhUc|XgP<Jj0A3B"
+                "ZDo{<NL6lWZ*E&*a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#vEFeQEU"
+                "6hOkUt@1%Wt2@W0(FO!Qj};+jE_`xaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEFfWWa$"
+                "$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}wPLVRS"
+                "Y$EFdyuEFeQEDU@hVO)mm<hm=y3Xc=^rE&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.search": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1,"
+                " 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', Fals"
+                "e, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
+                "=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, alig"
+                "ned=True), Array(float64, 3, 'C', False, aligned=True), float64, bool)"
+            ),
+            "pickle": (
+                "fCQCu0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-O"
+                "B!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxQ<(GiWntGiWntGiVuT0%!$j2xtpVhm?JkC}"
+                "<978E6_y0%#j(9B3Vk6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKA59wqb%&HvlxR3;CTJOG0%!$j4~z#wZ*Od6VQ!R@lxPc1hm?"
+                "JkC}<Rn1Y&P*Y?NphOA>X5lv0#*lr8"
+            ),
+        },
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1,"
+                " 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', Fals"
+                "e, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
+                "=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, alig"
+                "ned=True), Array(float64, 3, 'C', False, aligned=True), float64, Literal[bool](False))"
+            ),
+            "pickle": (
+                "fCQED0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-O"
+                "B!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxQ<(GiWntGiWntGiVuT0%!$j2xtpVhm?JkC}"
+                "<978E6_y0%#j(9B3Vk6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKA59wqb%&HvlxR3;CTJOG0%!$j4~z~%Z*Od6VQx%mbY*g3Y?P"
+                "CfXbVn<lzo&aj1FIHX>?_BVQgP^VQh6}l!=T4Uu$J~l!=T4ZeeX@l#CQiX>?_BVQgDsZ*Oc}C`Msyb7d)%j0Im~Z)9bZO*R6"
+                "I6JKm;bY*g3Y+rPFaAjX(VPj}zlxPBI1!xb92SRUeY-M3?l#`Tb3r>fWeUvC@6pRF7Z*OdrXctQob%&Hvly!%cQj~O*E&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.take_samples": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float"
+                "64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQB{0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%|BATneuAVVpXXdg`*0(FO!Qj};bXeMX^X"
+                "a#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0c"
+                "aa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#*lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.unique": (
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), int64, Array(int64, 1, 'C', False, aligned=True), bool)"
+            ),
+            "pickle": (
+                "fCQDa0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj};KXaZ;jXb5NvPKT6zlqhHpXc}l6O95ycXdP%Cj1ysUa$$KWX>N2jG%O%7"
+                "WGo;<DU@g+O(6nxhm=y3XaZ;jXb+4BLT_(uWnpfVlay!+PKT6zlqhHvj09qDZ)}uk7)ug$hm=y3bd)X"
+            ),
+        },
+        {
+            "text": (
+                "(Array(int64, 2, 'C', False, aligned=True), int64, Array(int64, 1, 'C', False, aligned=True), Li"
+                "teral[bool](False))"
+            ),
+            "pickle": (
+                "fCQB@0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq+Np5syXJvAflay!+PKT6zlqie@ZeeX@l#B&wZge"
+                "&@l#B>sX>@mKWOQhhOF)bUb7^O8Wn`3yj0Im~Z)9bZOB!{Dlv0$81a4$$ZInv_j0S9Bd2e-el#BsGl#B#!VQpoUj1ysUa$$K"
+                "WX>N2jG%O%8WGo;<DU^%_Ut@1%Wt2@Q0(FO!Qj};KXaZ;jXb5NvPKT6zlqhHpXc}l6O95ycXdP%Cj1ysUa$$KWX>N2jG%O%7"
+                "WGo;<DU@g+O(6nxhm=y3XaZ;jXb+4ILT_(uWnpeiX>?_BVQiF>lxPc1hm?JkD2xtYY-x05a$#&=c42IFWt54G1Yc`qd6bEa1"
+                "a4t%Wt5B*Olfpwa$#&+VsCG3T_{FjY;$EPl#B&mV{c?-lub4Qj1ymMX>?_BVQgP?d2nT4V_{=xWt3<FXa#5wj0Zw*Z){~@Zj"
+                "_UhXbVn<lzo&aXcUYDVsCG3lxP@B5_N}^Qj~Rvlv0#*lr8"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.unit_scores": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, '"
+                "C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Tuple((Array(float64, 3, 'C"
+                "', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', Fal"
+                "se, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, al"
+                "igned=True), Array(float64, 2, 'C', False, aligned=True))), float64, float64)"
+            ),
+            "pickle": (
+                "fCQEL0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@&=jE@&=j0%!${8"
+                "*X)NVqq?0Z*pZWba`-Pb1q|VZggR3Ze?<Fl#B&bb#QEDl#`Tb3r>fWeUvDS1$23EWpk7$XaZ;jXb5NvPKT6zlqhHpXc=f4O9"
+                "N;dXdGxAj1^&Wa$$KWW^8X^bT%|BATwkvAVVpXXdg``0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|ibXd7r8XdR3dVRCX|c_?"
+                "OVZ((#cG%O%8WGo;<DU@g*O&bDrhm=y3Xg+8HXa#5pXbVn<lzo&aXbxx@Xc|iaXd7r8XdR3dVRCX|c_?OVZ((#cG%O%7WGo;"
+                "<DU@g*O&|hwhm=y3Xg+8@bd-z*V{dhCbd*a5j0I$Ld2nTvXaZ;jXfKQjRc>i-Zd7@2Wt5YYXbVn<lzo&aXf$X;Xg+8;hm?#2"
+                "ZeeX@l#EDKZfS3BTVZl?VR<NKY;R$7HZ&|CF=Q+tLn$m_a&lpLC}wPLVRSY$EFdyuEFeQEEManTVR<NKY;R$7HZ&|CGh{3vL"
+                "n&R9j0Im~Z)9bZO)dg;hm=y3XiSWcRCRD{Whh~Ca$$KWW^8X^bT%|BATwkvAVVoEAYpQHVR<NKY;R$7HZ&|CGGr_uLn$mEVR"
+                "CX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}wPLVRSY$EFdvtEFeQEEFfWWa$$KWW^8X^bT%|BATneuAVVoEAYpQHVR<NKY;R"
+                "$7HZ&|CGGr_uLn$egXiiNp0(FO!Qj};JXc=^rE&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.value": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(i"
+                "nt64, 1, 'C', False, aligned=True), Tuple((Array(float64, 3, 'C', False, aligned=True), Array(fl"
+                "oat64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64,"
+                " 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C"
+                "', False, aligned=True))), float64)"
+            ),
+            "pickle": (
+                "fCQED0{{R30000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxxsXa#5wj0Z_>bY*8{a+H&lXbVn<lzo&aXcUYEX>N2jG?Zu-"
+                "OF)bUb7^O8Wn`3yXctQwb%&HvlxP}D0caa&9B3Vk6Jc_4VR<NNZge&@EFdvtEFeQElxQDKAp&)Wlv0#vE@%R11&kYRb!}o{E"
+                "@N+UWiE7iaAk8YV{dMBVQFq<a&wf71ypr#Y-N;_lxPc1hm?JkD2xSkd2nTOlqhHdXa#5pXbVn<lzo&aXbxx@Xc|icXd7r8Xd"
+                "R3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXc=f4O9E&cXdGxAj1^&Wa$$KWW^8X^bT%"
+                "|BATneuAVVpXXdg`*0(FO!Qj};uXaZ;jXb5NvPKT6zlqhHpXc=f4O95ybXdGxAj1^&Wa$$KWW^8X^bT%|BATeYtAVVpXXdg`"
+                "=0(FO!Qj};uXg+k5j0IzFb#8Q&O9qSuWOR9OWt3<FXa#65j0sh4X>V>+d2nTvlay!+PKT6zlqhI4XhUc|XgP<Jj0A3BZDo{<"
+                "NL6lWZ*E&*a&lpLC}wPLVRSY$EFdvtEFeQEEManTVR<NKY;R$7HZ&|CGGr_uLn$m_a&lpLC}wPLVRSY$EFd#vEFeQEU6hOkU"
+                "t@1%Wt2@W0(FO!Qj};+jE_`xaBO8LVRCX|c_?OVZ((#cG%O%9WGo;<DJ&pia&lpLC}wPLVRSY$EFdyuEFeQEEFfWWa$$KWW^"
+                "8X^bT%|BATneuAVVoEAYpQHVR<NKY;R$7HZ&|CF=Q+tLn$mEVRCX|c_?OVZ((#cG%O%8WGo;<DJ&pia&lpLC}wPLVRSY$EFd"
+                "yuEFeQEDU@hVO)mm<hm=y3Xc=^rE&"
+            ),
+        },
+    ),
+    "haplotype_reconstruction.science.assembly.refinement.seeded_search.wishes": (
+        {
+            "text": (
+                "(Array(float64, 4, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array"
+                "(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1,"
+                " 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', Fals"
+                "e, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned"
+                "=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, alig"
+                "ned=True), Array(float64, 3, 'C', False, aligned=True))"
+            ),
+            "pickle": (
+                "fCQCA0ssI20000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCvfNXOxT%U"
+                "vgz*Z*FsRa&=>LZ*r8Al#Cf}b!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`T<2x4_<Y;<XEbCiq*Z(?d?V|0|0lu"
+                "n0~eUvDS1!Q!2aAlNe0%!${7;bfKVqq?0Z*pZWba`-Pb1rjZVQgV?bCiq)Mr?0kbd-~nXbVn<lzo&aj0A3BZDo{<2WD(<VRS"
+                "Y$l#B>sX>@mKWOQhhOF)bTUt@1%Wt2-Cb%&Hvl#B#!WNB@bO9YGtY+-qCb##=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%"
+                "AWGo;<DU^%_Ut@1%Wt2@U0(FO!Qj}-{Xa#5pXbVn<lzo&aXbxx@Xc|icXd7r8XdR3dVRCX|c_?OVZ((#cG%O%9WGo;<DU@g*"
+                "O(p_$hm=y3XaZ;jXb5NvPKT6zlqhHpXaZ;jXb+4BNp5syXJvAflay!+PKT6zlqhHvj0I_KbT%}UXckLAj0SUQXKrO=l!#~-O"
+                "B!{Dlv0#v8cP9a8)zJ89gGuUa&lpLC~0nVHZ&|CF=Q+tLn)MKA59?wb%&HvlxQ<(GiWntGiWntGiVuT0%!$j2xtpVhm?JkC}"
+                "<978E6_y0%#j(9B3Vk6=8C6VR<NKY;R$7HZ&|CGGr_uLn)MKA59wqb%&HvlxR3;CUlf8"
+            ),
+        },
+    ),
+}
+
+
 def overloads_for(module, name):
     """The declared argument tuples of this importable numerical function."""
     key = module + "." + name
@@ -12574,5 +13992,6 @@ def overloads_for(module, name):
             *_WORKFLOW_SIGNATURES.get(key, ()),
             *_BOUNDARY_SIGNATURES.get(key, ()),
             *_EXCHANGE_SIGNATURES.get(key, ()),
+            *_RELEASE_SIGNATURES.get(key, ()),
         )
     )

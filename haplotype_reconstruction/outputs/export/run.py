@@ -200,6 +200,7 @@ def write_manifest(
     reference: str | None,
     contigs: list[dict],
     settings: ExportConfig | None = None,
+    analysis: dict | None = None,
 ) -> dict:
     """Write this release's DEST/manifest.json last, atomically, and return it.
 
@@ -227,6 +228,8 @@ def write_manifest(
         reference_vcf=reference,
         contigs=contigs,
     )
+    if analysis is not None:
+        manifest["analysis"] = analysis
     if settings is not None:
         manifest.update(
             products=list(settings.products),

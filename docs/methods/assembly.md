@@ -659,3 +659,11 @@ compile tasks before first scientific use is an application scheduling policy.
 A run that allows scientific tasks to race those tasks can still pay compilation
 cost in a worker, even with complete declarations. Init and scientific wall time
 are reported separately so a moved cost remains visible.
+
+
+Cooperative reconstruction claims the existing completion product on the direct
+route. Expanded completion claims each deterministic 16-block range under
+`<assembly-prefix>/completion/range<first-block>` and stores its complete typed
+reply. The original final gather takes the completion-product claim before
+linking/release and publication. Plans, evidence views and resident continuations
+remain local to each invocation; no claim spans an asynchronous expansion.

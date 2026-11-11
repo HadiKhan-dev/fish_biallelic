@@ -88,9 +88,9 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParame
     in enough bins, enough of the fit's painted bins and on chromosomes holding enough map units."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
-    edge_exposed = ordered_sum(weights[:, None] * exposure.edge_exposed, axis=0)
-    pair_exposed = ordered_sum(weights[:, None] * exposure.pair_exposed, axis=0)
-    total_bins = float(ordered_sum(weights * exposure.total_bins, axis=0))
+    edge_exposed = ordered_sum(exposure.edge_exposed, axis=0, weights=weights)
+    pair_exposed = ordered_sum(exposure.pair_exposed, axis=0, weights=weights)
+    total_bins = float(ordered_sum(exposure.total_bins, axis=0, weights=weights))
     edge_fraction = np.divide(edge_exposed, total_bins, out=np.zeros_like(edge_exposed), where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed), where=total_bins > 0.0)
     # Exposed chromosomes count by their map units (a short chromosome once), not one each.
@@ -132,7 +132,7 @@ def fit_scores(
     """
     alternatives = inputs.alternatives
     aggregate = alternatives_module.mix_m0(
-        ordered_sum(weights[:, None] * alternatives.log_likelihoods, axis=0),
+        ordered_sum(alternatives.log_likelihoods, axis=0, weights=weights),
         alternatives,
         config.selection.m0_contamination_probability,
     )

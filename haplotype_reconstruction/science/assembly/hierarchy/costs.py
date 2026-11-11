@@ -8,15 +8,26 @@ import math
 from dataclasses import replace
 
 from haplotype_reconstruction.contracts.assembly import JoinTask
-from haplotype_reconstruction.core.kernels import SAMPLES_PER_THREAD
+from haplotype_reconstruction.core.kernels import samples_per_thread
+
+from ..join.emissions import sites_per_bin
 
 # Cost only: estimated Python beam/archive residence in bytes per path-pair.
 POOL_BYTES_PER_PATH_PAIR = 200
 
 
 def batch_threads(task: JoinTask) -> int:
-    """Useful width of one sample kernel, not the whole join's independent refits."""
-    return max(1, len(task.samples) // SAMPLES_PER_THREAD)
+    """Useful sample width from the binned pair-recursion work of the batch."""
+    sites = [sum(panel.sites for panel in task.prepared[c.start : c.stop]) for c in task.components]
+    bin_size = sites_per_bin(sites, task.settings.join.max_bins)
+    bins = sum(math.ceil(count / bin_size) for count in sites)
+    branches = task.branches or (task.components,)
+    founders = max(component.founders for branch in branches for component in branch)
+    # Forward/backward pair recurrences make high-K samples substantial work.
+    # The common work-aware grain keeps small pair grids coarse and lets large
+    # ones use the live share even when the cohort contains few samples.
+    grain = samples_per_thread(bins * founders * founders)
+    return max(1, len(task.samples) // grain)
 
 
 def batch_work(task: JoinTask) -> int:

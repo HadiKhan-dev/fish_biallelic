@@ -858,6 +858,8 @@ def _task_peak_threads() -> int:
 
 def perform_task(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_gathers: bool = False) -> WorkerReply:
     global _ACTIVE_AFFINITY
+    from ..store.protocol import ClaimBusy
+    from .cooperation import Deferred
     from .graph import _readonly
     from .runtime import task_boundary
 
@@ -893,6 +895,8 @@ def perform_task(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_
                 value = _readonly(task.function(*args, **kwargs))
                 if keep_gathers and task.affinity is not None and isinstance(value, Expansion):
                     value = replace(value, gather=_kept_gather(value.gather, task.affinity))
+        except ClaimBusy as error:
+            value = Deferred(str(error))
         except bootstrap.RunInterrupted:
             raise
         except BaseException as error:
@@ -928,6 +932,9 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
     global _OWNER_CHANNEL, _SHARED_UNCLOSED
     from dataclasses import replace
 
+    from .cooperation import watch_coordinator
+
+    watch_coordinator()  # Before bootstrap, unpacking, CPU admission or a scientific call can block.
     _OWNER_CHANNEL = connection
     try:
         with bootstrap.signal_boundary(lambda: None):
@@ -1340,20 +1347,32 @@ def _call_packed(packed: PackedCall, values: tuple = (), /, **extra: Any) -> Any
     ``extra`` the engine's per-run arguments (its thread team)."""
     from .graph import resolve_results
 
+    kept_key = None
     if packed.kept is None:
         function, args, kwargs = _TransportUnpickler(io.BytesIO(packed.payload), _TASK_NUMBER).load()
     else:
         try:
             if _ACTIVE_AFFINITY is None:
                 raise KeyError(packed.kept)
-            function, args, kwargs = _RESIDENT.pop((_ACTIVE_AFFINITY, packed.kept))
+            kept_key = (_ACTIVE_AFFINITY, packed.kept)
+            function, args, kwargs = _RESIDENT[kept_key]
         except KeyError as error:
             raise InvariantError(f"kept continuation {packed.kept} is not on this worker") from error
     # Always, as the coordinator resolved every task (references or not): it rebuilds tuples, lists and mappings.
     results = dict(zip(packed.refs, values, strict=True))
     args, kwargs = resolve_results(args, results), resolve_results(kwargs, results)
     args, kwargs = _readonly((args, dict(kwargs, **extra)))
-    return function(*args, **kwargs)
+    from ..store.protocol import ClaimBusy
+    from .cooperation import Deferred
+
+    try:
+        value = function(*args, **kwargs)
+    except ClaimBusy:
+        raise  # Retry the same kept continuation with the same original references.
+    else:
+        if kept_key is not None and not isinstance(value, Deferred):
+            _RESIDENT.pop(kept_key)
+        return value
 
 
 def _shared_array(kind: str, reference: SharedArrayRef | MappedArrayRef, transposed: bool) -> np.ndarray:

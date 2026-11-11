@@ -130,7 +130,7 @@ def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], confi
             scores.total_bins,
             config.direction.chromosome_error_probability,
             scores.junction_dyads,
-            scores.junction_log_cdf,
+            scores.transmission_log_likelihood,
         ),
     )
     trace: dict = {}

@@ -113,7 +113,7 @@ FILTER/site-set/omission lines, the simulation note when appropriate, and column
 Observed [full sample](../examples/full.samples.header.vcf.txt) and
 [kept sample](../examples/kept.samples.header.vcf.txt) headers are captured from real
 produced files. Full and kept files each have one VCFv4.2 declaration and an
-explicit `haplotype_reconstruction_release=4.13` header. htslib's inserted line is
+explicit `haplotype_reconstruction_release=4.14` header. htslib's inserted line is
 `##FILTER=<ID=PASS,Description="All filters passed">`.
 
 ## VCF and BCF indexes
@@ -246,8 +246,8 @@ and component durations remain in assembly records, and task durations in run re
 Feedback searches belong to selection's context assemblies.
 
 Checkpoint layout markers, invocation records, export manifests and VCF/BCF
-headers identify the writer release. 4.13 refuses earlier checkpoints and exports;
-re-run their original inputs with 4.13 in a new output root. The published
+headers identify the writer release. 4.14 refuses earlier checkpoints and exports;
+re-run their original inputs with 4.14 in a new output root. The published
 format-1 kernel manifest and standalone payload-file codecs remain available.
 
 Task resource detail is retained in `run_records/*.tasks.jsonl`, including after
@@ -263,7 +263,7 @@ failed tasks retain measured publish times when their exception reaches the
 coordinator, or null when the worker dies without reporting them. Missing measurements for failed
 tasks are not estimated. Nested stage timers retain inclusive and exclusive
 wall time separately; summed task wall time can exceed invocation wall time.
-Invocation JSON records identify release 4.13 and use the current `run-record-v5`
+Invocation JSON records identify release 4.14 and use the current `run-record-v5`
 schema. Readers use the retained task log for detail and the bounded aggregates
 for status. Earlier invocation formats are refused.
 
@@ -435,7 +435,7 @@ order, plotting expected and called rates against Mb and an effective-meiosis st
 | `contigs` | Contigs counted, in configuration order |
 | `stages` | Per stage: `tie_classes` (`decisions`, `inside_tie`, `wide`, `boundary`, summed over class kinds) and `bands` (`comparisons`, `inside_band`, summed over threshold-band kinds) |
 | `kinds` | Per stage and kind: the four counts of `ties/decisions.csv`, summed over contigs and record groups |
-| `ambiguity` | Recorded ambiguity flags: discovery blocks whose selection was taken inside a tie (`ambiguous`, `tied_alternatives`) and the margin of each block's founder-count choice (`score_margin`); final founder-count calls marked ambiguous or closing a count cycle; refinement count decisions whose tied refits disagree |
+| `ambiguity` | Recorded ambiguity flags: discovery blocks whose selection was taken inside a tie (`ambiguous`, `tied_alternatives`) and the margin of each block's founder-count choice (`score_margin`); final founder-count calls marked ambiguous; refinement count decisions whose tied refits disagree |
 Counters come only from the declared evidence, discovery, selection, assembly,
 painting and pedigree sources, without duplicate final-assembly or context-refit
 counters. Band kinds are summarised separately. Finite discovery score margins use
@@ -471,7 +471,7 @@ and identity columns are listed in their own sections.
 | `painting/founder_support.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `break_before`, `break_after`, `marker_count`, `called_alleles`, `missing_alleles`, `observed_carrier_samples`, `called_sites_without_observed_named_carrier`, `minimum_observed_carriers`, `mean_observed_carriers`, `observed_pooled_candidate_samples`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate`, `support_basis` |
 | `painting/founder_support_windows.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `marker_count`, `called_alleles`, `missing_alleles`, `called_sites_without_observed_named_carrier`, `mean_observed_carriers`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate` |
 | `painting/assembly_search.csv (prefix)` | `contig`, `level`, `first_variant_1based`, `last_variant_1based` |
-| `painting/founder_counts.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `founder_rows`, `founder_count_ambiguous`, `undecided_count_cycles`, `count_step_founders_before`, `count_step_cycle`, `count_step_cycle_undecided`, `count_step_ambiguous_decisions`, `count_step_decisions`, `join_count_cycles`, `join_undecided_cycles`, `join_ambiguous_count_calls`, `feedback_join_count_cycles`, `feedback_join_undecided_cycles`, `feedback_join_ambiguous_count_calls` |
+| `painting/founder_counts.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `founder_rows`, `founder_count_ambiguous`, `undecided_count_cycles`, `count_step_founders_before`, `count_step_ambiguous_decisions`, `count_step_decisions`, `join_count_cycles`, `join_undecided_cycles`, `join_ambiguous_count_calls`, `feedback_join_count_cycles`, `feedback_join_undecided_cycles`, `feedback_join_ambiguous_count_calls` |
 | `painting/sample_switches.csv` | `contig`, `sample_index`, `sample`, `painted_components`, `painted_switches`, `cohort_median_switches`, `switches_over_cohort_median` |
 | `pedigree/tier_b_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `release_evidence` |
 | `pedigree/tier_b_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `release_evidence` |

@@ -622,6 +622,7 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `input_F0` | `float &#124; None` | state | () | nats | float64 | True | `None` |
 | `count_continuations` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `count_branch_evaluations` | `int` | state | () | 1 | int | True | `0` |
+| `branch_replays` | `int` | state | () | 1 | int | True | `0` |
 
 ## assembly.ComponentRefinement
 
@@ -659,6 +660,7 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `selected_branch` | `str &#124; None` | call | () | 1 | str | True | `None` |
 | `count_continuations` | `tuple` | state | () | 1 | tuple | True | `()` |
 | `count_branch_evaluations` | `int` | state | () | 1 | int | True | `0` |
+| `branch_replays` | `int` | state | () | 1 | int | True | `0` |
 | `work_counters` | `dict[str, Any]` | state | () | 1 | dict[str, Any] | True | `dict()` |
 | `polish` | `dict[str, Any]` | state | () | 1 | dict[str, Any] | True | `dict()` |
 | `window_stop` | `WindowStop &#124; None` | report | () | 1 | WindowStop &#124; None | True | `None` |
@@ -750,6 +752,15 @@ Extends `AcceptanceCounters`.
 | `deviation` | `float` | state | () | nats | float64 | True | `required` |
 | `accepted` | `int` | state | () | 1 | int | True | `required` |
 | `proposals` | `Mapping[str, Any]` | state | () | 1 | Mapping | True | `required` |
+
+## contigs.AnalysisContigs
+
+Source: [haplotype_reconstruction/contracts/contigs.py](../../haplotype_reconstruction/contracts/contigs.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `configured` | `tuple[str, ...]` | — | () | 1 | See type | True | `required` |
+| `excluded` | `tuple[str, ...]` | — | () | 1 | See type | True | `()` |
 
 ## discovery.DiscoveryPlan
 
@@ -1488,8 +1499,6 @@ Source: [haplotype_reconstruction/contracts/panels.py](../../haplotype_reconstru
 | `founders` | `int &#124; None` | call | () | 1 | int &#124; None | True | `required` |
 | `founders_before` | `int &#124; None` | call | () | 1 | int &#124; None | True | `required` |
 | `ambiguous` | `bool` | call | () | 1 | bool | True | `required` |
-| `count_cycle` | `bool` | call | () | 1 | bool | True | `required` |
-| `cycle_undecided` | `bool` | call | () | 1 | bool | True | `required` |
 | `decisions` | `tuple[CountStepDecision, ...]` | call | () | 1 | tuple[CountStepDecision, ...] | True | `required` |
 | `reason` | `str &#124; None` | call | () | 1 | str &#124; None | True | `None` |
 
@@ -1592,7 +1601,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `callable_bins` | `np.ndarray` | evidence | ('C', 'N') | painting bins | float64 | True | `required` |
 | `informative_markers` | `np.ndarray` | obs | ('C',) | 1 | int64 | True | `required` |
 | `junction_dyads` | `np.ndarray` | evidence | ('D', '2') | 1 | int64 | True | `required` |
-| `junction_log_cdf` | `np.ndarray` | evidence | ('C', 'D') | 1 | float64 | True | `required` |
+| `transmission_log_likelihood` | `np.ndarray` | evidence | ('C', 'D') | nats | float64 | True | `required` |
 | `scored_morgans` | `np.ndarray &#124; None` | evidence | ('C',) | Morgans | float64 | True | `None` |
 | `edge_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'E') | Morgans | float64 | True | `None` |
 | `pair_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'T') | Morgans | float64 | True | `None` |
@@ -2033,7 +2042,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
 
 ## pedigree.PedigreeResult
 
@@ -2703,11 +2712,11 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `scored_component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `junction_dyads` | `np.ndarray` | state | ('D', '2') | 1 | int64 | True | `required` |
-| `junction_log_cdf` | `np.ndarray` | state | ('D',) | nats | float64 | True | `required` |
+| `transmission_log_likelihood` | `np.ndarray` | state | ('D',) | nats | float64 | True | `required` |
 | `scored_morgans` | `float` | state | () | Morgans | float64 | True | `required` |
 | `edge_exposed_morgans` | `np.ndarray` | state | ('N', 'N') | Morgans | float64 | True | `required` |
 | `pair_exposed_morgans` | `np.ndarray` | state | ('T',) | Morgans | float64 | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 
 ## pedigree.CompactM1
 

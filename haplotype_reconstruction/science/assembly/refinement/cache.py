@@ -1,9 +1,9 @@
-"""Reuse exact window results without changing template order or charged logical work.
+"""Reuse window results without changing template order or charged logical work.
 
 Owns a per-search proposal cache and the bounded cross-root
 memo. Must not open storage, choose scientific budgets, or inspect free memory.
 Method: docs/methods/founder_refinement.md#fixed-k-search (RS04, RS06, RS11).
-Cache keys bind row/flank bytes, convention and frontier cap. A memo hit restores
+Cache keys bind row/flank bytes and convention. A memo hit restores
 its logical work receipt while doing no new physical programme work.
 """
 
@@ -29,11 +29,12 @@ __all__ = ["Orientation", "ProposalCache", "WindowMemo"]
 
 
 class WindowMemo:
-    """Exact window solutions within one immutable component solver.
+    """Hybrid window results within one immutable component solver.
 
     Scope fixes emissions, row domains, templates, coarse context and penalty.
-    Keys additionally compare every row/flank byte, dtype, shape, frontier cap and
-    explicit convention. Dictionary hashing is only an index, never equality.
+    Keys additionally compare every row/flank byte, dtype, shape and explicit
+    convention. The immutable solver fixes the hybrid frontier and search controls.
+    Dictionary hashing is only an index, never equality.
     Stored serialized results are immutable; each hit returns privately owned
     arrays and diagnostics. Concurrent misses may duplicate work, not decisions.
     No solver or engine reference is retained, avoiding large ownership cycles.
@@ -47,11 +48,11 @@ class WindowMemo:
         self.statistics = dict(calls=0, hits=0, evictions=0, peak_entry_bytes=0)
 
     @staticmethod
-    def key(index, a, c, X, fwd, bwd, frontier_bytes, convention):
+    def key(index, a, c, X, fwd, bwd, convention):
         def array(value):
             return value.dtype.str, value.shape, value.tobytes(order="C")
 
-        return (int(index), int(frontier_bytes), bool(convention), array(X[:, a:c]), array(fwd[a]), array(bwd[c]))
+        return (int(index), bool(convention), array(X[:, a:c]), array(fwd[a]), array(bwd[c]))
 
     @staticmethod
     def transient_bytes(a, c, X, fwd, bwd):
@@ -108,7 +109,7 @@ class ProposalCache:
     Invariant: the cached result of template t was solved from the rows windows[t][0] and the
     boundary messages fwd[a_t], bwd[c_t] held here (a boundary's messages are replaced only when
     every template ending there is re-solved). Every result is a pure function of its inputs (the
-    frontier cap is a fixed setting), fallbacks included."""
+    hybrid search controls are fixed), fallbacks included."""
 
     def __init__(self):
         self.fwd = {}

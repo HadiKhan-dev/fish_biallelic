@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 
 from ...core.errors import SettingsError
 
+KEY = "outputs/export"
+ANALYSIS_KEYS = (KEY,)
+
 if TYPE_CHECKING:
     from ...results.reader import Results
     from ...outputs.export.records import ExportConfig
@@ -16,7 +19,12 @@ def expected(reader: Results, contig: str, config: ExportConfig) -> str:
     from ...outputs.export.records import output_identity
     from ...store.identity import code_dependency_identity
 
+    from ...contracts.contigs import AnalysisContigs
+
+    selection = AnalysisContigs.from_manifest(reader.manifest)
     upstream: dict[str, str] = {}
+    if selection.excluded:
+        upstream["analysis_contigs"] = selection.namespace
     products = set(config.products)
     names = []
     if products & {"founders", "samples"}:

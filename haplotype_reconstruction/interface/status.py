@@ -16,6 +16,8 @@ from typing import Any
 from ..core.errors import InputError, SettingsError
 from ..engine.records import task_summaries
 from ..results.paths import RunPaths
+from ..results.reader import Results
+from ..stages.analysis import output_directory
 from ..stages.catalog import STAGES
 from ..store.status_index import completed_stages
 
@@ -68,7 +70,7 @@ def _progress(stage: str, file: Any) -> Any:
     return records.progress(file)
 
 
-def _configuration(directory: Path, manifest: dict[str, Any], store: Any) -> None:
+def _configuration(directory: Path, manifest: dict[str, Any], store: Any, *, analysis: Any = None) -> None:
     """Compare a present recorded settings file without reopening observation payloads."""
     path = directory / "config.toml"
     if not path.is_file():
@@ -79,7 +81,8 @@ def _configuration(directory: Path, manifest: dict[str, Any], store: Any) -> Non
     from .settings.load import load_settings
 
     settings = load_settings(path)
-    resolved = resolve(settings, sample_ids=manifest["sample_ids"], bound_seeds=manifest["realised_seeds"])
+    resolved = resolve(settings, sample_ids=manifest["sample_ids"],
+                       bound_seeds=manifest["realised_seeds"], analysis=analysis)
     candidate = resolved.manifest()
     _match_manifest(dict(manifest, **candidate), manifest, recombination=True)
     requested = canonical_json(candidate["parameters"]["recombination"])
@@ -90,7 +93,7 @@ def _configuration(directory: Path, manifest: dict[str, Any], store: Any) -> Non
     # The immutable configuration record is a small control binding, like the
     # run manifest. Status compares that choice without reconstructing products.
     # Results independently derives recombination's scientific identity before decoding it.
-    for contig in resolved.contigs:
+    for contig in resolved.analysis.included:
         file = store.contig(contig)
         if file.has("configuration/recombination"):
             metadata = publication_metadata(file, "configuration/recombination", ("schema", "parameters"))
@@ -144,9 +147,19 @@ def run_status(
         if manifest is None:
             raise OSError(f"{directory}: run has not been initialized; use haplotypes init")
         require_schema(manifest, 1)
-        _configuration(directory, manifest, store)
+        reader = Results(directory, checkpoints=root)
+        store = CheckpointStore(reader.checkpoint_location)
+        selection = reader.analysis
+        report["analysis"] = selection.document()
+        report["analysis_output"] = str(output_directory(directory, selection))
+        _configuration(directory, manifest, store, analysis=selection)
         report["run"] = dict(complete=completed_stages(store.run), contigs=manifest.get("contigs"), manifest=manifest)
-        report["markers"] = [str(path.relative_to(root)) for path in sorted((root / "markers").glob("*.done"))]
+        marker_root = root / "markers" / selection.namespace
+        markers = list(marker_root.glob("*.done"))
+        shared_init = root / "markers/init.done"
+        if selection.excluded and shared_init.is_file():
+            markers.append(shared_init)
+        report["markers"] = [str(path.relative_to(root)) for path in sorted(markers)]
         names = (
             list(contigs)
             if contigs is not None
@@ -155,6 +168,8 @@ def run_status(
         for name in names:
             file = store.contig(name)
             row: dict[str, Any] = dict(size_bytes=file.size(), stages={}, complete=[], work=[])
+            if name in selection.excluded:
+                row["excluded_from_analysis"] = True
             try:
                 row["complete"] = completed_stages(file)
                 for stage in _CONTIG_STAGES:
@@ -214,6 +229,11 @@ def format_status(report: dict[str, Any]) -> str:
                 + " > ".join(f"{stage['stage']} {stage.get('contig') or ''}".strip() for stage in row["active_stages"])
             )
     lines.append(f"Checkpoints: {report['checkpoints']}")
+    selection = report.get("analysis", {})
+    if selection.get("excluded_contigs"):
+        lines.append("  analysed contigs: " + ", ".join(selection["included_contigs"]))
+        lines.append("  excluded contigs: " + ", ".join(selection["excluded_contigs"]))
+        lines.append("  final outputs: " + report["analysis_output"])
     if report["run"] is not None:
         lines.append(
             "  complete: " + (" ".join(name.removeprefix("complete/") for name in report["run"]["complete"]) or "-")
@@ -223,6 +243,7 @@ def format_status(report: dict[str, Any]) -> str:
             lines.append(f"  {name}: unreadable ({row['error']})")
             continue
         text = " | ".join(f"{stage} {_describe(stage, progress)}" for stage, progress in row["stages"].items())
-        lines.append(f"  {name}: {text or 'not started'}")
+        lines.append(f"  {name}: {text or 'not started'}"
+                     + (" [excluded from final analysis]" if row.get("excluded_from_analysis") else ""))
     lines.extend(f"ERROR: {message}" for message in report["errors"])
     return "\n".join(lines)

@@ -134,6 +134,12 @@ be rerun on its chromosome or left for this finishing command to resume. The
 relatedness gather may overlap reconstruction because reconstruction has no
 relatedness dependency. Pedigree still needs both branches for all contigs.
 
+Family phase is per chromosome too, and inside the finishing `run` its chromosomes share that one node. For a
+large cohort, scatter it as well: run `haplotypes relatedness cross.toml` once every evidence job has exited (it may
+overlap reconstruction), `haplotypes pedigree cross.toml` once relatedness and every reconstruction have exited, then
+one `haplotypes phase cross.toml --contig chrN` job per chromosome on separate nodes, and let the finishing `run`
+complete recombination, export and reports.
+
 Safety conditions:
 
 - All jobs use the same fixed package sources, numerical-library policy, resolved

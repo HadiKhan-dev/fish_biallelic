@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ...contracts.contigs import AnalysisContigs
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import CandidatePanel, ChromosomeSummaryView, ExclusionRequest, ParentEligibility, Pedigree
 from ...contracts.roles import require_schema
@@ -47,12 +48,16 @@ __all__ = [
 ]
 
 PRODUCT = "pedigree"
-PREPARED = "pedigree/prepared"
-SCREEN = "pedigree/selective_screen"
-PANEL = "pedigree/panel"
-FLOORED_SCORES = "pedigree/floored_scores"
-EXCLUSION = "pedigree/exclusion"
+PREPARED = prepare.KEY
+SCREEN = screen.SCREEN
+PANEL = screen.PANEL
+FLOORED_SCORES = scores.KEY
+EXCLUSION = exclusion.KEY
 REQUEST = "pedigree/exclusion_request"
+
+# Prepared data depends on one contig; all other pedigree records depend on the analysed genome.
+SHARED_KEYS = (PREPARED,)
+ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, REQUEST)
 
 
 @dataclass(frozen=True)
@@ -79,7 +84,7 @@ def expected(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-3 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-4 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
     Exclusion is empty only for an empty request; otherwise it covers configured C.
@@ -130,7 +135,7 @@ def expected(
             sample_ids=sample_ids,
             configured_contigs=contigs,
             informative_contigs=informative_contigs,
-            product_schema=3,
+            product_schema=PedigreeAdapter.schema,
         ),
         numerical_policy or NumericalPolicy.current(),
         upstream,
@@ -185,7 +190,8 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         reverse_conventions=bool(manifest["ties"]["reverse"]),
     )
     policy = NumericalPolicy(**manifest["numerical_policy"])
-    sample_ids, contigs = tuple(manifest["sample_ids"]), tuple(manifest["contigs"])
+    sample_ids = tuple(manifest["sample_ids"])
+    contigs = AnalysisContigs.from_manifest(manifest).included
     eligibility = ParentEligibility.unrestricted(sample_ids)
 
     def bind(c: str) -> tuple[str, str, dict[str, Any]]:
@@ -251,6 +257,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
                 FLOORED_SCORES,
                 score_id_map[c],
                 ("contig", "component_count", "scored_component_count", "informative_markers"),
+                schemas=scores.ScoresAdapter.schema,
             )
             if value["contig"] != c or value["component_count"] != header["component_count"]:
                 raise InputError("score summary disagrees with its prepared chromosome")
@@ -319,7 +326,7 @@ class Reader:
     identity: str
     product: str = "pedigree"
     key: str = PRODUCT
-    schema: int = 3
+    schema: int = PedigreeAdapter.schema
 
     def decode(self, payload: Mapping[str, Any]) -> Pedigree | TieCounts:
         result = PedigreeAdapter().decode(payload)

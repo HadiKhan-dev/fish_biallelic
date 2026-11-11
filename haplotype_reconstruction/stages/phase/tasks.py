@@ -184,6 +184,7 @@ def publish_contig(
         reverse=expected.tie_reverse,
         code=expected.code,
         policy=expected.numerical_policy,
+        included_contigs=expected.parameters.get("included_contigs", ()),
     )
     if actual.identity != expected.identity:
         raise InvariantError("phase task inputs differ from its supplied derivation")

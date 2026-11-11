@@ -27,6 +27,7 @@ from ...store.store import CheckpointStore
 KEY = "recombination"
 BINDING_KEY = "identity/recombination"
 CONFIGURATION_KEY = "configuration/recombination"
+ANALYSIS_KEYS = (KEY, BINDING_KEY, CONFIGURATION_KEY, "complete/" + KEY)
 CODE_ROOTS = ("haplotype_reconstruction.stages.recombination.tasks",)
 
 

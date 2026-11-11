@@ -192,18 +192,16 @@ Source: [`FOUNDER_COUNT_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 4 | `last_variant_1based` | last variant coordinate, inclusive (bp). |
 | 5 | `founder_rows` | founder rows (1). |
 | 6 | `founder_count_ambiguous` | founder count ambiguous (1). |
-| 7 | `undecided_count_cycles` | undecided count cycles (1). |
+| 7 | `undecided_count_cycles` | undecided count cycles of the final and feedback join searches (1). |
 | 8 | `count_step_founders_before` | count step founders before (1). |
-| 9 | `count_step_cycle` | count step cycle (1). |
-| 10 | `count_step_cycle_undecided` | count step cycle undecided (1). |
-| 11 | `count_step_ambiguous_decisions` | count step ambiguous decisions (1). |
-| 12 | `count_step_decisions` | JSON list of the recorded count-step decisions (text). |
-| 13 | `join_count_cycles` | join count cycles (1). |
-| 14 | `join_undecided_cycles` | join undecided cycles (1). |
-| 15 | `join_ambiguous_count_calls` | join ambiguous count calls (1). |
-| 16 | `feedback_join_count_cycles` | feedback join count cycles (1). |
-| 17 | `feedback_join_undecided_cycles` | feedback join undecided cycles (1). |
-| 18 | `feedback_join_ambiguous_count_calls` | feedback join ambiguous count calls (1). |
+| 9 | `count_step_ambiguous_decisions` | count step ambiguous decisions (1). |
+| 10 | `count_step_decisions` | JSON list of the recorded count-step decisions (text). |
+| 11 | `join_count_cycles` | join count cycles (1). |
+| 12 | `join_undecided_cycles` | join undecided cycles (1). |
+| 13 | `join_ambiguous_count_calls` | join ambiguous count calls (1). |
+| 14 | `feedback_join_count_cycles` | feedback join count cycles (1). |
+| 15 | `feedback_join_undecided_cycles` | feedback join undecided cycles (1). |
+| 16 | `feedback_join_ambiguous_count_calls` | feedback join ambiguous count calls (1). |
 
 ## painting/sample_switches.csv
 

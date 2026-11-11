@@ -1,14 +1,9 @@
-"""Orientation evidence from painted junction counts (which of two linked samples is the parent).
+"""Orientation evidence from the joint transmission likelihood of painted homologue schedules.
 
-A transmitted homologue copies one parental homologue at each position and switches between the two at
-meiotic crossovers, so the parent's painted junctions are inherited together along a homologue
-(``junctions.linked_log_cdf``): the junctions sit on the parent's two homologues of its minimum-switch
-trajectory pair, the selector switches with the meiotic probability between bins, and an inherited junction is
-seen where the child is callable (its chromosome-wide callable fraction f_c, missing at random); new crossovers,
-co-parent and false junctions form a non-negative remainder. Per chromosome, L(p -> c) is proportional to
-P(inherited detected junctions <= J_c); with probability ``chromosome_error_probability`` the comparison is
-painting failure carrying no orientation evidence (two impossible directions are uninformative). The
-resulting log odds add over chromosomes (weighted by resampling multiplicity).
+For each chromosome compare the ordered dyads' joint log likelihoods
+(``transmission.log_likelihood``), allowing painting failure through
+``chromosome_error_probability``. Two impossible directions are uninformative.
+Log odds add over chromosomes, weighted by resampling multiplicity.
 A paired junction-density contrast only orders the acyclic graph search and is reported.
 
 Method: docs/methods/pedigree.md#finite-continuous-direction
@@ -69,11 +64,11 @@ def _order_probability(junctions, callable_bins, total_bins, multiplicity):
 
 @kernel(overloads=OVERLOADS["orientation._pair_log_odds"], cache=True, nogil=True)
 def _pair_log_odds(
-    log_cdf, forward_index, reverse_index, pair_child, pair_parent, callable_bins, total_bins, error_probability
+    log_likelihood, forward_index, reverse_index, pair_child, pair_parent, callable_bins, total_bins, error_probability
 ):
     """values[chrom, u] for the unordered dyads u (pair_parent -> pair_child against the reverse) where
-    ``compared``; log_cdf[chrom, d] over the ordered dyads (pedigree.junctions.linked_log_cdf)."""
-    chromosomes = log_cdf.shape[0]
+    ``compared``; log_likelihood[chrom, d] over the ordered dyads (pedigree.transmission.log_likelihood)."""
+    chromosomes = log_likelihood.shape[0]
     pairs = len(pair_child)
     values = np.zeros((chromosomes, pairs))
     compared = np.zeros((chromosomes, pairs), dtype=np.bool_)
@@ -89,8 +84,8 @@ def _pair_log_odds(
             fp = min(1.0, callable_bins[chrom, parent] / (2.0 * total_bins[chrom]))
             if fc <= 0.0 or fp <= 0.0:
                 continue
-            forward = log_cdf[chrom, forward_index[u]]
-            reverse = log_cdf[chrom, reverse_index[u]]
+            forward = log_likelihood[chrom, forward_index[u]]
+            reverse = log_likelihood[chrom, reverse_index[u]]
             if forward == -np.inf and reverse == -np.inf:
                 continue  # impossible both ways: uninformative
             difference = forward - reverse
@@ -152,16 +147,16 @@ def junction_evidence(
     total_bins: np.ndarray,
     error_probability: float,
     dyads: np.ndarray,
-    log_cdf: np.ndarray,
+    log_likelihood: np.ndarray,
 ) -> JunctionEvidence:
-    """Weight-independent junction evidence of the informative chromosomes (``dyads`` [D, 2] and ``log_cdf``
-    [C, D]: the linked transmission compatibilities of the scores)."""
+    """Weight-independent junction evidence of the informative chromosomes (``dyads`` [D, 2] and ``log_likelihood``
+    [C, D]: the joint transmission log likelihoods of the scores)."""
     junctions = np.ascontiguousarray(junctions, dtype=np.float64)
     callable_bins = np.ascontiguousarray(callable_bins, dtype=np.float64)
     total_bins = np.ascontiguousarray(total_bins, dtype=np.float64)
     child, parent, forward, reverse = _unordered_dyads(dyads, junctions.shape[1])
     values, compared = _pair_log_odds(
-        np.ascontiguousarray(log_cdf, dtype=np.float64).reshape(len(total_bins), -1),
+        np.ascontiguousarray(log_likelihood, dtype=np.float64).reshape(len(total_bins), -1),
         forward,
         reverse,
         child,

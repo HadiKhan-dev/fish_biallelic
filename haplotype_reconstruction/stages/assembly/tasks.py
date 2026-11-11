@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ...core.ties import TieSettings
 
 from ...core.errors import SettingsError
-from ..framework import Task, RecordKey, ResourceRequest
+from ..framework import Expansion, Task, RecordKey, ResourceRequest
 from ..context import StageRun
 from ..inputs.products import task_inputs
 from ..inputs.chain import _chain_evidence, _CHAIN_INPUTS
@@ -35,7 +35,7 @@ def run(
     ties: TieSettings,
     *,
     cores: int = 1,
-) -> Expansion:
+) -> Expansion | dict[RecordKey, str]:
     """Expand one assembly context/final role from checked selected panels and founder evidence."""
     from ...engine.graph import Expansion, ResultRef, Task, TaskKey
     from ...science.assembly.run import AssemblyInputs, Role
@@ -56,6 +56,7 @@ def run(
     )
     if reader.receipt(done, contig) is not None:
         return {RecordKey(contig, done.key): done.identity}
+    capability = assembly_records.expected(store, reader.manifest, contig=contig, round_name=context)
     previous = "l2" if context is None else "initial" if context == "l1" else "l1"
     request = selection_records.result_reader(
         store, reader.manifest, product="selected", contig=contig, stage="local_selection_" + previous
@@ -81,7 +82,7 @@ def run(
         resolved.parameters.assembly,
         Role.FINAL if context is None else Role.CONTEXT,
         None if context is None else int(context[1:]),
-        assembly_records.expected(store, reader.manifest, contig=contig, round_name=context),
+        capability,
         ties, child_key, task_cpu_ceiling(cores),
     )
     child = assembly_task(session)

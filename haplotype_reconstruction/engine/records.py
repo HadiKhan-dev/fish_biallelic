@@ -196,14 +196,18 @@ def record_tasks(record: Path, data: dict | None = None) -> list[dict]:
 
 
 def _add_task_summary(summaries: dict, entry: dict) -> None:
-    """One constant-size resource total per stage, including failed task outcomes."""
+    """Per-stage attempt resources, with successful calls and deferrals counted separately."""
     row = summaries.setdefault(
         entry["key"]["stage"],
         dict(tasks=0, wall_seconds=0.0, cpu_seconds=0.0, publish_lock_wait_seconds=0.0,
-             publish_fsync_seconds=0.0, peak_bytes=None, threads_start=0, threads_peak=0, failures=0),
+             publish_fsync_seconds=0.0, peak_bytes=None, threads_start=0, threads_peak=0,
+             failures=0, deferred=0, completed=0, expanded=0),
     )
     row["tasks"] += 1
     row["failures"] += int(entry.get("state") == "failed")
+    row["deferred"] += int(entry.get("state") == "deferred")
+    row["expanded"] += int(entry.get("state") == "expanded")
+    row["completed"] += int(entry.get("state") not in {"failed", "deferred", "expanded"})
     for name in ("wall_seconds", "cpu_seconds", "publish_lock_wait_seconds", "publish_fsync_seconds"):
         value = entry.get(name)
         if value is not None:
@@ -254,7 +258,7 @@ class RunRecorder:
     """
 
     PUBLISH_SECONDS = 5.0
-    PUBLISH_WAIT_WINDOW = 32  # most recent completed tasks per contig
+    PUBLISH_WAIT_WINDOW = 32  # most recent task attempts per contig
     PUBLISH_WAIT_MIN_TASKS = 8  # avoid warning on a single short task
 
     def __init__(
@@ -425,15 +429,22 @@ class RunRecorder:
             return RunRecord(self.data["schema"], self.data["state"], canonical_json(jsonable(self.data)))
 
     def task_finished(self, task, reply) -> None:
-        """Scheduler callback, emitted after every complete task/gather boundary; appends one task-log line.
+        """Scheduler attempt callback, including deferrals; appends one resource-bearing task-log line.
 
         ``finished_seconds`` is when the coordinator received the reply, in seconds since the run started; with
         ``wall_seconds`` it places the task on the run's timeline (where wall time goes, stage by stage)."""
+        from .cooperation import Deferred
+        from .graph import Expansion
+
         with self.lock:
             thread_seconds = reply.thread_seconds
             observed = sum(seconds for _, seconds in thread_seconds)
             entry = dict(
                 key=asdict(task.key),
+                state=(
+                    "deferred" if isinstance(reply.value, Deferred)
+                    else "expanded" if isinstance(reply.value, Expansion) else "complete"
+                ),
                 finished_seconds=round(time.monotonic() - self.start, 3),
                 wall_seconds=reply.wall_seconds,
                 cpu_seconds=reply.cpu_seconds,
@@ -459,7 +470,7 @@ class RunRecorder:
         self.publish()
 
     def _publish_progress(self, contig: str, entry: dict) -> None:
-        """Warn once per invocation/contig when recent completed tasks mostly waited to publish."""
+        """Warn once per invocation/contig when recent task attempts mostly waited to publish."""
         if contig == "run" or contig in self._publish_warned:
             return
         window = self._publish_windows.setdefault(contig, deque(maxlen=self.PUBLISH_WAIT_WINDOW))

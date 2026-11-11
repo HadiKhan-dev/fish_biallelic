@@ -9,6 +9,7 @@ nothing and creates no files. The only registry is this small kernel inventory.
 from __future__ import annotations
 
 import base64
+import itertools
 import os
 import pickle
 from collections.abc import Callable, Iterable, Iterator
@@ -48,6 +49,32 @@ def _unique_parfor_symbols() -> None:
 
 
 _unique_parfor_symbols()
+
+
+# Numba also tags the native symbol of every compiled function with a per-process counter
+# (numba.core.bytecode.FunctionIdentity._unique_ids, the "[abi:v<N>]" part of the name). Functions made by one
+# factory share a qualified name and differ only in that tag: numba's own sort implementations are such closures
+# (numba.misc.quicksort.make_quicksort_impl: one run_quicksort, make_res, partition per kind, comparison and argsort
+# flag). Worker processes forked alike start from the same counter value, so the argsort implementation compiled in
+# one worker and the value-sort implementation compiled in another can receive the same symbol for the same array
+# type. Both are stored in the kernel cache; a process that loads both links both callers to one of them: np.argsort
+# then returns sorted values read as indices (a crash), or np.sort returns a permutation read as values (silently
+# wrong numbers). Each process therefore starts the counter at its own random 56-bit offset, redrawn after a fork:
+# the tags of two processes never meet, and within a process they stay unique and increasing as before. No computed
+# value depends on a symbol name.
+def _new_function_ids() -> None:
+    from numba.core.bytecode import FunctionIdentity
+
+    FunctionIdentity._unique_ids = itertools.count(1 + int.from_bytes(os.urandom(7), "little"))
+
+
+def _unique_function_symbols() -> None:
+    """Start numba's function-identity counter at a per-process random offset (above), also in forked children."""
+    _new_function_ids()
+    os.register_at_fork(after_in_child=_new_function_ids)
+
+
+_unique_function_symbols()
 
 __all__ = [
     "KernelDeclaration",

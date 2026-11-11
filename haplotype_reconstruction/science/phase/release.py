@@ -46,7 +46,7 @@ from ...contracts.roles import record_field
 from . import release_kernels as kernels
 from .allele_evidence import own_terms
 from .model import LabelModel
-from .parameters import RELEASE_WINDOW, PhaseParameters
+from .parameters import RELEASE_ADVANCE_TERMS, RELEASE_WINDOW, PhaseParameters
 from .window import site_windows
 
 
@@ -174,6 +174,31 @@ def _orientation_certainty(
     return orientation
 
 
+def _piece_orientation(lp, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin, hi_bin, windowed=True):
+    """bin_orientation of the bins [lo_bin, hi_bin), float64 [hi_bin - lo_bin], under their label-pair posteriors
+    ``lp`` [hi_bin - lo_bin, S, S]: _orientation_certainty's values for those bins (a bin's certainty reads only its
+    own posterior and sites), with the same whole-bin site windows as workspace bound."""
+    bins = hi_bin - lo_bin
+    lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
+    hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
+    orientation = np.full(bins, np.nan)
+    if hi <= lo:
+        return orientation
+    for left, right in site_windows(site_bin, lo, hi, window=RELEASE_WINDOW) if windowed else ((lo, hi),):
+        local = site_bin[left:right] - lo_bin
+        ordered = kernels.site_posteriors(
+            lp,
+            local,
+            np.ascontiguousarray(alleles[:, left:right]),
+            gl[left:right],
+            epsilon,
+            *(np.ascontiguousarray(a[:, left:right]) for a in flips),
+        )
+        values = bin_orientation(ordered, local, tau_g, bins)
+        orientation[local[0] : local[-1] + 1] = values[local[0] : local[-1] + 1]
+    return orientation
+
+
 def _bridged_ties(ties, orientation, tau_s):
     """The painting-tie cuts (bins) that a sample anchored by its children bridges: those where the orientation
     certainty (``orientation``, bin_orientation under its children-anchored posterior) at the nearest bin with a
@@ -222,39 +247,69 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     alleles = ctx.site_alleles
     gl = ctx.site_gl
     flips = sample_flips(model, n, ctx)
-    every = np.ones((1, 1), dtype=np.bool_)
-    post = kernels.forward_backward(em, T0, T1, TG, -1, every)
-    gposts = label_pair_posterior(post, labs0, labs1, S)
     map0, map1 = model.X[n, 0], model.X[n, 1]
     het_bins = np.flatnonzero(map0 != map1)
+    partitioned = gauge and len(het_bins) > 0
+    if partitioned:
+        # The anchored posteriors below reuse the unanchored chain's messages.
+        alpha, beta = kernels.chain_messages(em, T0, T1, TG)
+        post = kernels.posterior_bins(alpha, beta)
+    else:
+        post = kernels.forward_backward(em, T0, T1, TG, -1, np.ones((1, 1), dtype=np.bool_))
+    gposts = label_pair_posterior(post, labs0, labs1, S)
     cuts = sorted({int(b) for b in forced if 0 < b < B})
     set_breaks = []
-    if gauge and len(het_bins):
+    if partitioned:
         posts = np.zeros((B, S, S))  # bins of a partition without an anchor: no phase
         het_conf = 1.0 - np.einsum("bxx->b", gposts)  # P(the label pair is heterozygous)
-        candidates = [int(b) for b in het_bins if het_conf[b] >= tau_p]
+        candidates = het_bins[het_conf[het_bins] >= tau_p]  # ascending
+        n0, n1, G = em.shape[1:]
+        advance = max(1, RELEASE_ADVANCE_TERMS // (n0 * n1 * (n0 + n1) * G))
+
+        def anchored(first, messages, lo, hi):
+            """Label-pair posteriors [hi - lo, S, S] of the bins [lo, hi) of the anchored chain from its forward
+            (``first``) and backward (``messages``) messages there."""
+            return label_pair_posterior(kernels.posterior_bins(first, messages), labs0[lo:hi], labs1[lo:hi], S)
+
         def partition(bounds):
-            # Hard cuts fix independent release intervals. Each anchored posterior
-            # still uses the complete chain, with exactly the same anchor search
-            # and continuation tests inside its interval.
+            # Hard cuts fix independent release intervals. Each anchored posterior is that of the complete chain
+            # restricted at the anchor bin, with the same anchor search and continuation tests inside its interval;
+            # it is evaluated where the interval reads it: back to the interval's start, and forward piece by piece
+            # until the continuation test fails (the restriction changes neither alpha before the anchor nor beta
+            # at and after it, and a bin's orientation certainty depends on that bin's posterior alone).
             start, hard = bounds
             breaks = []
             while start < hard:
                 if start > 0:
                     breaks.append(start)
-                anchor = next((b for b in candidates if start <= b < hard), None)
-                if anchor is None:
+                following = int(np.searchsorted(candidates, start))
+                if following == len(candidates) or candidates[following] >= hard:
                     break
+                anchor = int(candidates[following])
                 mask = labs0[anchor][:, None] < labs1[anchor][None, :]
-                lp = label_pair_posterior(kernels.forward_backward(em, T0, T1, TG, anchor, mask), labs0, labs1, S)
-                orientation = _orientation_certainty(
-                    lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, anchor, hard, B, windowed
-                )
-                stop = next(
-                    (int(b) for b in het_bins if anchor < b < hard and het_conf[b] >= tau_g and orientation[b] < tau_s),
-                    hard,
-                )
-                posts[start:stop] = lp[start:stop]
+                if anchor > start:
+                    before = kernels.backward_to(beta[anchor], em, T0, T1, TG, start, anchor, mask)
+                    posts[start:anchor] = anchored(alpha[start:anchor], before, start, anchor)
+                last = kernels.restricted(alpha[anchor], mask)
+                posts[anchor] = anchored(last[None], beta[anchor : anchor + 1], anchor, anchor + 1)[0]
+                stop, lo = hard, anchor + 1
+                while lo < hard:
+                    hi = min(hard, lo + advance)
+                    forward = kernels.forward_from(last, em, T0, T1, TG, lo, hi)
+                    lp = anchored(forward, beta[lo:hi], lo, hi)
+                    orientation = _piece_orientation(
+                        lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, lo, hi, windowed
+                    )
+                    tested = het_bins[np.searchsorted(het_bins, lo) : np.searchsorted(het_bins, hi)]
+                    failing = next(
+                        (int(b) for b in tested if het_conf[b] >= tau_g and orientation[b - lo] < tau_s), None
+                    )
+                    if failing is not None:
+                        posts[lo:failing] = lp[: failing - lo]
+                        stop = failing
+                        break
+                    posts[lo:hi] = lp
+                    lo, last = hi, forward[-1]
                 start = stop
             return breaks
 
@@ -266,6 +321,7 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
             else [partition(bounds) for bounds in intervals]
         )
         set_breaks = [edge for interval in released for edge in interval]
+        alpha = beta = None  # the chain messages are not read below
     else:
         posts = gposts
         set_breaks = cuts

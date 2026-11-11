@@ -15,7 +15,8 @@ unacknowledged suffix: readers ignore it, and the next writer truncates it (with
 
 Appends are serialised by a per-process thread lock plus ``flock`` on the file (coherent across nodes on a shared
 filesystem whose locks are cluster-wide), so threads, processes and nodes may append to one file. Inside the lock a
-writer refreshes its index, truncates a torn tail, and appends its pre-encoded record. The payload fsync
+writer refreshes its index to the end of data as reads see it (a size attribute may lag another node's append),
+truncates a torn tail, and appends its pre-encoded record. The payload fsync
 precedes the validating header; the final fsync runs outside the append lock, grouping complete headers when
 possible. Every publisher waits for a sync covering its header before returning. Readers take no
 lock: they index complete records only, by scanning record headers and trailers (never payloads), and refresh
@@ -234,6 +235,26 @@ class _Window:
         return self.data[relative : relative + count]
 
 
+def _data_end(fd, start):
+    """The end of the file's data as reads see it, or None if the byte before ``start`` does not exist.
+
+    A size attribute may lag another node's append: on a parallel file system the append lock (flock) and the
+    file size are kept by different services, and a process that has just been granted the lock was observed to
+    get, for a fraction of a millisecond, the size from before the previous holder's record. Reads are ordered by
+    the file system's own data locks, so under the append lock the end of data is established by reading from
+    the last byte the caller believes in, never taken from the attribute.
+    """
+    position = start - 1 if start else 0
+    count = len(os.pread(fd, _SCAN_WINDOW, position))
+    if start and not count:
+        return None
+    position += count
+    while count:
+        count = len(os.pread(fd, _SCAN_WINDOW, position))
+        position += count
+    return position
+
+
 def _file_header(kind, name, file_identity):
     name_bytes = name.encode()
     header = (
@@ -437,22 +458,41 @@ class CheckpointFile:
             )
 
     def _refresh(self, index, fd=None):
-        """Bring the index up to the file's current complete records (index lock held)."""
+        """Bring the index up to the file's current complete records (index lock held).
+
+        ``fd``: the descriptor that holds the append lock; the returned size is then the end of data as reads
+        see it (_data_end), which the appender may rely on. Without it the size attribute bounds the scan, and
+        a reader may see the file one append behind. Complete records are never removed (torn-tail recovery
+        only discards what no index holds), so a size below the indexed end of the same file is a lagging
+        attribute: the index is kept. Under the lock the last indexed byte must still be readable.
+        """
         try:
             status = os.stat(self.path) if fd is None else os.fstat(fd)
         except FileNotFoundError:
             index.reset(None)
             return 0
-        if status.st_ino != index.inode or status.st_size < index.end:
+        if status.st_ino != index.inode:
             index.reset(status.st_ino)
-        if status.st_size > index.end:
+        size = max(status.st_size, index.end)
+        if fd is not None:
+            end = _data_end(fd, size)
+            if end is None and size > index.end:
+                # The attribute is ahead of the data: another node has just discarded a torn tail.
+                end = _data_end(fd, index.end)
+            if end is None:
+                raise ValueError(
+                    f"{self.path}: checkpoint container is shorter than its indexed records "
+                    f"(indexed to byte {index.end}); refusing to continue"
+                )
+            size = end
+        if size > index.end:
             if fd is None:
                 with open(self.path, "rb") as handle:
-                    _scan(index, handle.fileno(), status.st_size, self.path)
+                    _scan(index, handle.fileno(), size, self.path)
             else:
-                _scan(index, fd, status.st_size, self.path)
+                _scan(index, fd, size, self.path)
         self._check_header(index)
-        return status.st_size
+        return size
 
     def _records(self):
         index = _index(self.path)

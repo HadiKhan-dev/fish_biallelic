@@ -471,7 +471,9 @@ class Checker:
             tokens = shlex.split(text, comments=True)
         except ValueError:
             tokens = text.split()
-        tokens = [token.strip("[]") for token in tokens]
+        # Optional usage brackets decorate tokens; array-valued assignments own
+        # their brackets and must reach the TOML parser intact.
+        tokens = [token.strip("[]") if "=" not in token else token for token in tokens]
         if tokens[:1] == ["haplotypes"]:
             rest = tokens[1:]
         elif tokens[:3] == ["python", "-m", "haplotype_reconstruction"]:

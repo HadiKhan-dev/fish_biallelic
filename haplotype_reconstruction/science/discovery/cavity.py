@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from haplotype_reconstruction.contracts.roles import record_field
+from haplotype_reconstruction.core.concurrency import ThreadSource, thread_count
 from haplotype_reconstruction.core.ties import BlockQuanta
 
 from .cavity_kernels import (
@@ -78,10 +79,18 @@ def _state_geometry(k: int, config: CavityScoreParameters) -> tuple[np.ndarray, 
 
 
 class CavityWorkspace:
-    """Evidence-only inputs of the cavity score of one block (the samples with depth)."""
+    """Evidence inputs for the samples with depth, and caller-owned team/map policies.
 
-    def __init__(self, likelihood: np.ndarray, config: CavityScoreParameters) -> None:
+    ``map_work`` is ordered and gives each concurrent candidate one native thread.
+    ``threads`` refreshes the caller's live team before a scoring batch.
+    """
+
+    def __init__(
+        self, likelihood: np.ndarray, config: CavityScoreParameters, *, threads: ThreadSource = 1, map_work=map
+    ) -> None:
         self.config = config
+        self.threads = threads
+        self.map_work = map_work
         self.likelihood = np.ascontiguousarray(likelihood, dtype=np.float64)
         floor = float(config.likelihood_floor)
         self.log_likelihood = _floor_log_likelihood_kernel(self.likelihood, floor)
@@ -138,7 +147,7 @@ def score_solutions(
     all_active = bool(np.all(active))
     samples = None if all_active else np.flatnonzero(active)
     n_sites = workspace.likelihood.shape[1]
-    scores = []
+    prepared = []
     for index, solution in enumerate(solutions):
         scored = solution if samples is None else restricted(solution, samples)
         kind, first, second, base = workspace.geometry(solution.k)
@@ -147,6 +156,10 @@ def score_solutions(
         else:
             mask = tie_masks[index] if samples is None else tie_masks[index][samples]
             mask = np.ascontiguousarray(mask, dtype=np.uint8)
+        prepared.append((solution, scored, kind, first, second, base, mask))
+
+    def score_one(arguments):
+        solution, scored, kind, first, second, base, mask = arguments
         sample_scores, failures = _score_mode_cavity_kernel(
             workspace.likelihood,
             workspace.log_likelihood,
@@ -172,14 +185,18 @@ def score_solutions(
         k = solution.k
         log_k_prior = -math.log(k) - math.log(k + 1)
         log_set_code = -log_haplotype_set_count(n_sites, k)
-        scores.append(
-            PanelScore(
-                solution=solution,
-                cavity_log_predictive=total,
-                log_k_prior=log_k_prior,
-                log_set_code=log_set_code,
-                log_score=total + log_k_prior + log_set_code,
-                mean_field_failures=int(failures),
-            )
+        return PanelScore(
+            solution=solution,
+            cavity_log_predictive=total,
+            log_k_prior=log_k_prior,
+            log_set_code=log_set_code,
+            log_score=total + log_k_prior + log_set_code,
+            mean_field_failures=int(failures),
         )
-    return tuple(scores)
+
+    # Preparation and geometry-cache writes finish before independent candidates run.
+    # The supplied ordered map owns the live CPU share and gives each item one native thread.
+    # A lone candidate retains the caller's internally parallel site/sample kernels.
+    team = thread_count(workspace.threads)
+    mapper = workspace.map_work if len(prepared) > 1 and team > 1 else map
+    return tuple(mapper(score_one, prepared))

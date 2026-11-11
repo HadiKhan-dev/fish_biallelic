@@ -228,6 +228,11 @@ SITE_WINDOW = 4096
 # posterior, call and bin orientation is the same at any size). It is large because each window costs one Python step
 # per sample: with 4096-site windows most of 112 release threads waited for the interpreter (chr3, 0.5x).
 RELEASE_WINDOW = 1 << 16
+# Forward steps of an anchored gauge release are taken in pieces of about this many transition terms (bins x block
+# states x predecessor states), and the continuation test is applied after each piece: a workspace size (the released
+# values do not depend on it). One piece is one Python step of the sample's thread, so it is kept large enough that
+# release threads do not queue for the interpreter, and small enough that a phase set that ends early wastes little.
+RELEASE_ADVANCE_TERMS = 1 << 22
 EMPTY_COMPONENT_BIN_SITES = 100
 
 

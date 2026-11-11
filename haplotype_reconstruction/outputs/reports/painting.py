@@ -8,7 +8,7 @@ and sample-switch tables of one painted chromosome.
   assembly_search.csv          every record of the final assembly's join searches (level, span, record fields)
   assembly_search_shadow_alternatives.csv  ordered shadow alternatives keyed by contig and assembly_search_row
   assembly_search_items.csv    unbudgeted symmetric/plateau collection items with parent, column and ordinal
-  founder_counts.csv           per component: how firmly its founder count is determined (final count step,
+  founder_counts.csv           per component: how firmly its founder count is determined (final count step;
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.csv          painted switches per sample relative to the cohort median
   label_continuity.csv         every accepted label-continuity move with its winners' switch directions and
@@ -253,14 +253,16 @@ def founder_count_table(painting, searches, feedback) -> list[dict]:
     """One row per component: how firmly its founder count is determined.
 
     FounderCountAmbiguous is the final count step's call (the converged count pass of the last assembly level,
-    which decides the reported count): True if any of its decisions has a bootstrap band containing zero, if it
-    cycled (an addition whose deletion round then deleted), or if a restored best-F panel fails its own deletion
-    test. Count cycles (a row that an addition of the same search created is deleted again) keep the deletion; a
-    cycle is undecided when that deletion is ambiguous and the cycle began with a decided deletion: the data could
-    not tell the two counts apart. Join* columns count the final assembly's join cycles, undecided cycles and
-    count decisions whose band contains zero over the component; Feedback* the same for the local-selection
-    context assemblies, whose panels shape the final assembly's input. UndecidedCountCycles sums the undecided
-    cycles of all three. Empty values: no count step or no join search covers the component.
+    which decides the reported count): True if any of its decisions has a bootstrap band containing zero, or if a
+    restored best-F panel fails its own deletion test. The final count step only deletes founders, so it cannot
+    cycle; count cycles occur in join searches. A join count cycle (a row that an addition of the same join search
+    created is deleted again) keeps the deletion; it is undecided when that deletion is ambiguous and the cycle
+    began with a decided deletion: the data could not tell the two counts apart. Join* columns count the final
+    assembly's join cycles, undecided cycles and count decisions whose band contains zero over the component;
+    Feedback* the same for the local-selection context assemblies, whose panels shape the final assembly's input.
+    UndecidedCountCycles is JoinUndecidedCycles plus FeedbackJoinUndecidedCycles (an uncovered side counts zero).
+    Empty values: no count step or no join search covers the component; UndecidedCountCycles is empty only when
+    the component has neither.
     """
     rows = []
     for component_index, component in enumerate(painting.components):
@@ -270,7 +272,7 @@ def founder_count_table(painting, searches, feedback) -> list[dict]:
         join = _count_calls(searches, first, last)
         fed = _count_calls(feedback, first, last)
         decisions = None if call is None else call.decisions
-        parts = [None if call is None else int(call.cycle_undecided), join[1], fed[1]]
+        undecided = [join[1], fed[1]]
         rows.append(
             dict(
                 Component=component_index,
@@ -279,11 +281,11 @@ def founder_count_table(painting, searches, feedback) -> list[dict]:
                 FounderRows=int(panel.released.shape[0]),
                 FounderCountAmbiguous=None if call is None else call.ambiguous,
                 UndecidedCountCycles=(
-                    None if all(part is None for part in parts) else sum(part or 0 for part in parts)
+                    None
+                    if call is None and all(part is None for part in undecided)
+                    else sum(part or 0 for part in undecided)
                 ),
                 CountStepFoundersBefore=None if call is None else call.founders_before,
-                CountStepCycle=None if call is None else call.count_cycle,
-                CountStepCycleUndecided=None if call is None else call.cycle_undecided,
                 CountStepAmbiguousDecisions=(
                     None if decisions is None else sum(bool(decision.ambiguous) for decision in decisions)
                 ),
@@ -678,8 +680,6 @@ FOUNDER_COUNT_COLUMNS = (
     "FounderCountAmbiguous",
     "UndecidedCountCycles",
     "CountStepFoundersBefore",
-    "CountStepCycle",
-    "CountStepCycleUndecided",
     "CountStepAmbiguousDecisions",
     "CountStepDecisions",
     "JoinCountCycles",
@@ -696,10 +696,8 @@ FOUNDER_COUNT_COLUMNS = (
     LastVariant1Based: last variant coordinate, inclusive (bp).
     FounderRows: founder rows (1).
     FounderCountAmbiguous: founder count ambiguous (1).
-    UndecidedCountCycles: undecided count cycles (1).
+    UndecidedCountCycles: undecided count cycles of the final and feedback join searches (1).
     CountStepFoundersBefore: count step founders before (1).
-    CountStepCycle: count step cycle (1).
-    CountStepCycleUndecided: count step cycle undecided (1).
     CountStepAmbiguousDecisions: count step ambiguous decisions (1).
     CountStepDecisions: JSON list of the recorded count-step decisions (text).
     JoinCountCycles: join count cycles (1).

@@ -489,6 +489,11 @@ class FixedKWorkspace:
     def threads(self, value: ThreadSource) -> None:
         self._threads = value if callable(value) else int(value)
 
+    def refresh_threads(self) -> int:
+        """Re-read the thread source at a work boundary whose kernels take the calling thread's team as it stands
+        (the batched frontier kernels): a live caller-owned source applies its current share when read."""
+        return self.threads
+
     def __init__(
         self,
         likelihoods: np.ndarray,

@@ -1,7 +1,7 @@
 ##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##source=haplotype-reconstruction
-##haplotype_reconstruction_release=4.13
+##haplotype_reconstruction_release=4.14
 ##contig=<ID=c,length=30>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown (withheld, or no painted carrier observes it) or outside the column's component; no imputation">
 ##founder_columns="cC_Hk is founder row k of release segment C of this chromosome. Founder labels are segment-local: columns of different segments (c0_H1, c1_H1) are not implied to be one founder. A column has calls only inside its segment's span (first to last panel position; ##component lines) and . outside it; inside the span . marks an allele the panel withholds"

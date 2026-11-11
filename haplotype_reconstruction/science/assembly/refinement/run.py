@@ -196,14 +196,12 @@ def _polish(engine, result, budget):
 
 
 def _count_call(refinement: ComponentRefinement) -> CountCall:
-    """The component's count call (founder_counts.tsv) from its refinement."""
+    """The component's count call (painting/founder_counts.csv) from its refinement."""
     if refinement.reason is not None:
         return CountCall(
             founders=None,
             founders_before=None,
             ambiguous=False,
-            count_cycle=False,
-            cycle_undecided=False,
             decisions=(),
             reason=refinement.reason,
         )
@@ -211,8 +209,6 @@ def _count_call(refinement: ComponentRefinement) -> CountCall:
         founders=refinement.founders,
         founders_before=refinement.founders_before,
         ambiguous=refinement.ambiguous,
-        count_cycle=False,
-        cycle_undecided=False,
         decisions=tuple(
             CountStepDecision(
                 kind=d.kind,
@@ -391,6 +387,7 @@ def refine_component(
         selected_branch=result.selected_branch,
         count_continuations=result.count_continuations,
         count_branch_evaluations=result.count_branch_evaluations,
+        branch_replays=result.branch_replays,
         polish=polish,
         window_stop=stop,
         work_counters=dict(

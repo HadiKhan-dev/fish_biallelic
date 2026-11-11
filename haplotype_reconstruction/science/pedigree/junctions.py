@@ -14,7 +14,7 @@ Method: docs/methods/pedigree.md#exposure-and-junction-counts
 
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
 
 import numpy as np
 from numba import prange
@@ -267,18 +267,48 @@ def _trace_schedules(pooled, trajectories, reverse):
     return output
 
 
+@dataclass(frozen=True)
+class ComponentSchedule:
+    """Transient component direction inputs and the count summaries used for graph ordering.
+
+    pairs int64 [N, B, 2]: minimum-switch trajectory indices; classes int64 [N, B, 2]:
+    corresponding local classes; known bool [N, B]: both painted labels present;
+    n_trajectories: distinct whole-component trajectories T. counts and callable_bins
+    int64 [N] retain the minimum switch count and observed haplotype-bin count.
+    """
+
+    pairs: np.ndarray
+    classes: np.ndarray
+    known: np.ndarray
+    n_trajectories: int
+    counts: np.ndarray
+    callable_bins: np.ndarray
+
+
 def schedules(
     state_classes: np.ndarray, named_alleles: np.ndarray, bin_sizes: np.ndarray, *, reverse: bool
-) -> np.ndarray:
-    """int64 [N, B, 2]: each sample's minimum-switch unordered pair of deduplicated whole-component trajectories
-    per bin (the junctions behind junction_counts, placed on the two parental homologues). Trajectories are
-    numbered in canonical allele-content order, so painted track order and class numbering do not matter."""
+) -> ComponentSchedule:
+    """Build a component's schedule, local classes, known-label mask, T and count summaries once.
+
+    Trajectories are numbered in canonical allele-content order, so painted track order
+    and class numbering do not matter. Counts sum the minimum boundary alignment costs
+    on the traced path, exactly the minimum in ``junction_counts``. Pooling and deduplication
+    share one marker pass with all transmission inputs; no second count pass is needed.
+    """
     labels = np.asarray(state_classes, dtype=np.int16)
     named = np.asarray(named_alleles, dtype=np.int8)
     sizes = np.asarray(bin_sizes, dtype=np.int64)
     n_samples, n_bins, _ = labels.shape
     if n_bins == 0 or len(named) == 0:
-        return np.zeros((n_samples, n_bins, 2), dtype=np.int64)
+        empty = np.zeros((n_samples, n_bins, 2), dtype=np.int64)
+        return ComponentSchedule(
+            empty,
+            empty.copy(),
+            np.zeros((n_samples, n_bins), dtype=np.bool_),
+            1,
+            np.zeros(n_samples, dtype=np.int64),
+            np.zeros(n_samples, dtype=np.int64),
+        )
     order = np.asarray(sorted(range(len(named)), key=lambda row: named[row].tobytes()), dtype=np.int64)
     inverse = np.empty(len(order), dtype=np.int64)
     inverse[order] = np.arange(len(order))
@@ -290,116 +320,20 @@ def schedules(
     mapping = _local_classes(np.ascontiguousarray(named[order]), starts, stops)
     pooled = _pooled_labels(np.ascontiguousarray(relabelled), mapping)
     trajectories = np.ascontiguousarray(mapping[:, _unique_trajectories(mapping)].T, dtype=np.int16)
-    return _trace_schedules(
+    pairs = _trace_schedules(
         pooled, trajectories, policy("pedigree.junction.trace", kind="probability", reverse=reverse).reverse
     )
-
-
-@kernel(overloads=OVERLOADS["junctions._linked_log_cdf"], cache=True, parallel=True, nogil=True)
-def _linked_log_cdf(dyads, pairs, bin_start, bin_stop, theta, theta_start, observed, detection, own):
-    """log P(detected inherited junctions of the parent <= observed[child]) for dyads [D, 2] (child, parent).
-
-    Per component the transmitted parental homologue starts uniform and switches with the meiotic selector
-    probability theta at each bin edge; a junction on the transmitted homologue (a change of its trajectory
-    between adjacent bins, under both homologue alignments that minimise the parent's switches there, averaged)
-    is inherited and detected with probability detection[child]. The count accumulates over the components
-    (independent phase per component). Counts above observed[child] are dropped and the retained mass is
-    renormalised per edge, accumulating its logarithm. A parent with at most observed[child] junctions gives 0.
-    """
-    output = np.zeros(len(dyads))
-    for task in prange(len(dyads)):
-        child = dyads[task, 0]
-        parent = dyads[task, 1]
-        limit = observed[child]
-        if limit >= own[parent]:
-            continue
-        detect_probability = detection[child]
-        current = np.zeros((2, limit + 1))
-        following = np.zeros((2, limit + 1))
-        current[0, 0] = 0.5
-        current[1, 0] = 0.5
-        total = 0.0
-        for component in range(len(bin_start)):
-            for count in range(limit + 1):
-                mass = current[0, count] + current[1, count]
-                current[0, count] = 0.5 * mass
-                current[1, count] = 0.5 * mass
-            first = bin_start[component]
-            for edge in range(bin_stop[component] - first - 1):
-                left = first + edge
-                a = pairs[parent, left, 0]
-                b = pairs[parent, left, 1]
-                c = pairs[parent, left + 1, 0]
-                d = pairs[parent, left + 1, 1]
-                straight = int(a != c) + int(b != d)
-                crossed = int(a != d) + int(b != c)
-                best = min(straight, crossed)
-                ways = int(straight == best) + int(crossed == best)
-                switch = theta[theta_start[component] + edge]
-                following[:, :] = 0.0
-                for swap in range(2):
-                    if (straight if swap == 0 else crossed) != best:
-                        continue
-                    for old in range(2):
-                        for jump in range(2):
-                            source = old ^ jump
-                            destination = source ^ swap
-                            changed = pairs[parent, left, source] != pairs[parent, left + 1, destination]
-                            detect = detect_probability if changed else 0.0
-                            weight = (switch if jump == 1 else 1.0 - switch) / ways
-                            for count in range(limit + 1):
-                                value = current[old, count] * weight
-                                following[destination, count] += value * (1.0 - detect)
-                                if count < limit:
-                                    following[destination, count + 1] += value * detect
-                mass = 0.0
-                for side in range(2):
-                    for count in range(limit + 1):
-                        mass += following[side, count]
-                if mass <= 0.0:
-                    total = -np.inf
-                    break
-                for side in range(2):
-                    for count in range(limit + 1):
-                        current[side, count] = following[side, count] / mass
-                total += math.log(mass)
-            if not np.isfinite(total):
-                break
-        output[task] = min(0.0, total)
-    return output
-
-
-def linked_log_cdf(
-    dyads: np.ndarray,
-    schedules_by_component: list,
-    theta_by_component: list,
-    observed: np.ndarray,
-    detection: np.ndarray,
-    own: np.ndarray,
-) -> np.ndarray:
-    """float64 [D]: _linked_log_cdf over a chromosome's components (schedules int64 [N, B_k, 2], selector
-    switch probabilities float64 [B_k - 1] per component)."""
-    sizes = np.asarray([value.shape[1] for value in schedules_by_component], dtype=np.int64)
-    bin_stop = np.cumsum(sizes)
-    bin_start = bin_stop - sizes
-    theta_sizes = np.asarray([len(value) for value in theta_by_component], dtype=np.int64)
-    theta_start = np.cumsum(theta_sizes) - theta_sizes
-    pairs = (
-        np.ascontiguousarray(np.concatenate(schedules_by_component, axis=1), dtype=np.int64)
-        if len(sizes)
-        else np.zeros((len(observed), 0, 2), dtype=np.int64)
-    )
-    theta = (
-        np.ascontiguousarray(np.concatenate(theta_by_component), dtype=np.float64) if len(theta_sizes) else np.zeros(0)
-    )
-    return _linked_log_cdf(
-        np.ascontiguousarray(dyads, dtype=np.int64),
+    bins = np.arange(n_bins)
+    classes = np.stack([trajectories[pairs[:, :, h], bins[None, :]] for h in range(2)], axis=2).astype(np.int64)
+    present = pooled >= 0
+    straight = np.count_nonzero(pairs[:, :-1] != pairs[:, 1:], axis=2)
+    crossed = np.count_nonzero(pairs[:, :-1] != pairs[:, 1:, ::-1], axis=2)
+    counts = np.sum(np.minimum(straight, crossed), axis=1, dtype=np.int64)
+    return ComponentSchedule(
         pairs,
-        bin_start,
-        bin_stop,
-        theta,
-        theta_start,
-        np.ascontiguousarray(observed, dtype=np.int64),
-        np.ascontiguousarray(detection, dtype=np.float64),
-        np.ascontiguousarray(own, dtype=np.int64),
+        classes,
+        np.all(present, axis=2),
+        int(len(trajectories)),
+        counts,
+        np.count_nonzero(present, axis=(1, 2)).astype(np.int64),
     )

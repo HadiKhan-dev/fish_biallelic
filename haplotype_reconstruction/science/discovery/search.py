@@ -109,8 +109,9 @@ class SearchSummary:
         heuristic cut search (reported here, not as a limit).
     stop_reason: "generated_neighbourhood_local_optimum", "incumbent_neighbourhood_search_limited"
         or "expansion_backstop".
-    certified: the selected panel's generated neighbourhood was completely generated and scored
-        without improvement (a local certificate, not a global one).
+    certified: the selected panel's generated, fixed-row-screened neighbourhood was completely
+        generated and scored without improvement (a local certificate, not a global one).
+        Deliberate ranked screen exclusions are outside that neighbourhood.
     Optional recorded diagnostics (defaults permit records that omit them):
     tie_quantum: the block's ``nll`` tie quantum (selection and archive orders).
     escalated, conventions: recorded metadata; neither field selects a search mode.
@@ -369,6 +370,7 @@ class SearchState:
         keep: tuple[str, ...] = (),
         diagnostics: BlockDiagnostics | None = None,
         threads: ThreadSource = 1,
+        map_work=map,
     ) -> None:
         self.reverse = reverse
         self.keep = tuple(keep)
@@ -391,7 +393,10 @@ class SearchState:
         self.residual_inputs = ResidualInputs(likelihood, observed, reverse=reverse, keep=keep, diagnostics=diagnostics)
         self.cuts = MaximumCuts(search.max_cut_ties, reverse=reverse, keep=keep)
         self.cavity_workspace = CavityWorkspace(
-            likelihood if bool(self.active.all()) else likelihood[self.active], config.cavity
+            likelihood if bool(self.active.all()) else likelihood[self.active],
+            config.cavity,
+            threads=threads,
+            map_work=map_work,
         )
         width = search.beam_width
         self.archive = _Archive(width, self.quanta, self.content, self.counter, observed, reverse=reverse)
@@ -738,10 +743,18 @@ def _search(
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
+    map_work=map,
 ) -> BlockSearch:
     """The search of a block whose samples are in canonical order (see search_block)."""
     forward = SearchState(
-        likelihood, observed, config, reverse=reverse, keep=keep, diagnostics=diagnostics, threads=threads
+        likelihood,
+        observed,
+        config,
+        reverse=reverse,
+        keep=keep,
+        diagnostics=diagnostics,
+        threads=threads,
+        map_work=map_work,
     )
     forward.run()
     omissions = [*forward.omissions, *forward.archive.omissions]

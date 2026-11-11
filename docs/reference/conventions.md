@@ -26,39 +26,40 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'assembly.alleles.ascent'` | `fixed_policy('assembly.alleles.ascent', self.improvement, reverse=reverse)` | [parameters.py:126](../../haplotype_reconstruction/science/assembly/alleles/parameters.py) |
 | `'assembly.completion.abundant'` | `ties.policy('assembly.completion.abundant', kind='probability')` | [occupancy.py:45](../../haplotype_reconstruction/science/assembly/completion/occupancy.py) |
 | `'assembly.completion.neighbor'` | `ties.policy('assembly.completion.neighbor', kind='probability')` | [occupancy.py:46](../../haplotype_reconstruction/science/assembly/completion/occupancy.py) |
-| `'assembly.join_proposals'` | `ties.policy('assembly.join_proposals', kind='join_proxy', reverse=reverse)` | [proposals.py:196](../../haplotype_reconstruction/science/assembly/join/proposals.py) |
+| `'assembly.join_proposals'` | `ties.policy('assembly.join_proposals', kind='join_proxy', reverse=reverse)` | [proposals.py:206](../../haplotype_reconstruction/science/assembly/join/proposals.py) |
 | `name` | `ties.policy(name, kind='join_ll', reverse=settings.reverse)` | [state.py:47](../../haplotype_reconstruction/science/assembly/join/state.py) |
 | `name` | `ties.policy(name, kind='join_ll_wide', reverse=settings.reverse)` | [state.py:49](../../haplotype_reconstruction/science/assembly/join/state.py) |
 | `name` | `ties.policy(name, kind='join_proxy', reverse=settings.reverse)` | [state.py:51](../../haplotype_reconstruction/science/assembly/join/state.py) |
-| `'assembly.refine.accept'` | `policy('assembly.refine.accept', reverse=reverse)` | [acceptance.py:1234](../../haplotype_reconstruction/science/assembly/refinement/acceptance.py) |
-| `'assembly.refine_death_class'` | `ties.policy('assembly.refine_death_class', kind='refine_F', reverse=engine.reverse)` | [count.py:541](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_refit'` | `ties.fixed_policy('assembly.refine_refit', quantum, reverse=reverse)` | [count.py:737](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_eligible'` | `ties.fixed_policy('assembly.refine_eligible', quantum, reverse=engine.reverse)` | [count.py:789](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', quantum, reverse=engine.reverse)` | [count.py:1165](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', scale), reverse=engine.reverse)` | [count.py:1184](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_eligible'` | `ties.fixed_policy('assembly.refine_eligible', tie_rules.quantum('count_margin'), reverse=reverse)` | [count.py:838](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [count.py:1891](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [count.py:2040](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
-| `'assembly.refine_converge'` | `ties.fixed_policy('assembly.refine_converge', quantum, reverse=self.reverse)` | [fit.py:1144](../../haplotype_reconstruction/science/assembly/refinement/fit.py) |
+| `'assembly.refine.accept'` | `policy('assembly.refine.accept', reverse=reverse)` | [acceptance.py:1231](../../haplotype_reconstruction/science/assembly/refinement/acceptance.py) |
+| `'assembly.refine_death_class'` | `ties.policy('assembly.refine_death_class', kind='refine_F', reverse=engine.reverse)` | [count.py:552](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_refit'` | `ties.fixed_policy('assembly.refine_refit', quantum, reverse=reverse)` | [count.py:748](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_eligible'` | `ties.fixed_policy('assembly.refine_eligible', quantum, reverse=engine.reverse)` | [count.py:800](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', quantum, reverse=engine.reverse)` | [count.py:1176](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', scale), reverse=engine.reverse)` | [count.py:1195](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_eligible'` | `ties.fixed_policy('assembly.refine_eligible', tie_rules.quantum('count_margin'), reverse=reverse)` | [count.py:849](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [count.py:2003](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_terminal'` | `ties.fixed_policy('assembly.refine_terminal', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [count.py:2152](../../haplotype_reconstruction/science/assembly/refinement/count.py) |
+| `'assembly.refine_converge'` | `ties.fixed_policy('assembly.refine_converge', quantum, reverse=self.reverse)` | [fit.py:1167](../../haplotype_reconstruction/science/assembly/refinement/fit.py) |
 | `'assembly.refine.accept'` | `policy('assembly.refine.accept')` | [parameters.py:18](../../haplotype_reconstruction/science/assembly/refinement/parameters.py) |
 | `'assembly.refine.polish'` | `ties.fixed_policy('assembly.refine.polish', tie_rules.quantum('refine_F', max((abs(v) for v in values))), reverse=engine.reverse)` | [run.py:165](../../haplotype_reconstruction/science/assembly/refinement/run.py) |
-| `'discovery.fixed_k.a_band'` | `fixed_policy('discovery.fixed_k.a_band', self.quanta.sample, reverse=self.reverse)` | [workspace.py:515](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
-| `'discovery.fixed_k.h_flip'` | `fixed_policy('discovery.fixed_k.h_flip', self.quanta.h_step, reverse=self.reverse)` | [workspace.py:516](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
-| `'discovery.fixed_k.cycle'` | `fixed_policy('discovery.fixed_k.cycle', self.quanta.nll, reverse=self.reverse)` | [workspace.py:517](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
-| `'discovery.k1'` | `fixed_policy('discovery.k1', sample_quantum, reverse=reverse)` | [moves.py:288](../../haplotype_reconstruction/science/discovery/moves.py) |
-| `'discovery.data_birth'` | `fixed_policy('discovery.data_birth', quantum, reverse=reverse)` | [moves.py:842](../../haplotype_reconstruction/science/discovery/moves.py) |
-| `'discovery.replacement'` | `fixed_policy('discovery.replacement', _nll_quantum(pool, None), reverse=workspace.reverse)` | [moves.py:1189](../../haplotype_reconstruction/science/discovery/moves.py) |
-| `'discovery.k1'` | `fixed_policy('discovery.k1', workspace.quanta.nll, reverse=workspace.reverse)` | [moves.py:349](../../haplotype_reconstruction/science/discovery/moves.py) |
-| `'discovery.data_birth'` | `fixed_policy('discovery.data_birth', workspace.quanta.nll, reverse=workspace.reverse)` | [moves.py:1074](../../haplotype_reconstruction/science/discovery/moves.py) |
-| `'discovery.panel.dedup'` | `fixed_policy('discovery.panel.dedup', q, reverse=reverse)` | [panel.py:451](../../haplotype_reconstruction/science/discovery/panel.py) |
-| `'discovery.panel.order'` | `fixed_policy('discovery.panel.order', q, reverse=reverse)` | [panel.py:434](../../haplotype_reconstruction/science/discovery/panel.py) |
+| `'discovery.fixed_k.a_band'` | `fixed_policy('discovery.fixed_k.a_band', self.quanta.sample, reverse=self.reverse)` | [workspace.py:520](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.fixed_k.h_flip'` | `fixed_policy('discovery.fixed_k.h_flip', self.quanta.h_step, reverse=self.reverse)` | [workspace.py:521](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.fixed_k.cycle'` | `fixed_policy('discovery.fixed_k.cycle', self.quanta.nll, reverse=self.reverse)` | [workspace.py:522](../../haplotype_reconstruction/science/discovery/fixed_k/workspace.py) |
+| `'discovery.k1'` | `fixed_policy('discovery.k1', sample_quantum, reverse=reverse)` | [moves.py:328](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.data_birth'` | `fixed_policy('discovery.data_birth', quantum, reverse=reverse)` | [moves.py:882](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.replacement'` | `fixed_policy('discovery.replacement', _nll_quantum(pool, None), reverse=workspace.reverse)` | [moves.py:1235](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.start_screen'` | `fixed_policy('discovery.start_screen', workspace.quanta.nll, reverse=workspace.reverse)` | [moves.py:155](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.k1'` | `fixed_policy('discovery.k1', workspace.quanta.nll, reverse=workspace.reverse)` | [moves.py:389](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.data_birth'` | `fixed_policy('discovery.data_birth', workspace.quanta.nll, reverse=workspace.reverse)` | [moves.py:1114](../../haplotype_reconstruction/science/discovery/moves.py) |
+| `'discovery.panel.dedup'` | `fixed_policy('discovery.panel.dedup', q, reverse=reverse)` | [panel.py:474](../../haplotype_reconstruction/science/discovery/panel.py) |
+| `'discovery.panel.order'` | `fixed_policy('discovery.panel.order', q, reverse=reverse)` | [panel.py:457](../../haplotype_reconstruction/science/discovery/panel.py) |
 | `'discovery.release.cell'` | `fixed_policy('discovery.release.cell', (quanta if quanta is not None else BlockQuanta.floors()).cell, reverse=_CELL_BAND_REVERSE)` | [release.py:60](../../haplotype_reconstruction/science/discovery/release.py) |
-| `'discovery.selection'` | `fixed_policy('discovery.selection', quantum, reverse=reverse)` | [search.py:205](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:296](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:316](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quanta.nll, reverse=self.reverse)` | [search.py:569](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.selection'` | `fixed_policy('discovery.selection', quantum, reverse=reverse)` | [search.py:206](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:297](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:317](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quanta.nll, reverse=self.reverse)` | [search.py:574](../../haplotype_reconstruction/science/discovery/search.py) |
 | `'painting.relabel_rank'` | `ties.policy('painting.relabel_rank', kind='nll', reverse=convention_reverse)` | [label_continuity.py:878](../../haplotype_reconstruction/science/painting/label_continuity.py) |
-| `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:294](../../haplotype_reconstruction/science/pedigree/junctions.py) |
+| `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:324](../../haplotype_reconstruction/science/pedigree/junctions.py) |
 | `'pedigree.screen.rank'` | `tie_rules.policy('pedigree.screen.rank', kind='probability', reverse=reverse)` | [panel.py:176](../../haplotype_reconstruction/science/pedigree/panel.py) |
 | `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:460](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'pedigree.bridge.search'` | `policy('pedigree.bridge.search', kind='probability', reverse=reverse)` | [projection.py:462](../../haplotype_reconstruction/science/pedigree/projection.py) |

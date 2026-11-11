@@ -17,7 +17,9 @@ from ...core.errors import InputError
 
 __all__ = ["stack"]
 
-_STACKED = ("zero", "two", "pair_explained", "pair_exposed", "junctions", "callable_bins", "junction_log_cdf")
+_STACKED = (
+    "zero", "two", "pair_explained", "pair_exposed", "junctions", "callable_bins", "transmission_log_likelihood",
+)
 _EDGES = ("one_floored", "edge_matched", "edge_exposed", "edge_exposed_morgans")
 
 
@@ -87,7 +89,7 @@ def stack(
         callable_bins=gathered("callable_bins"),
         informative_markers=np.asarray(markers, dtype=np.int64),
         junction_dyads=dyads,
-        junction_log_cdf=gathered("junction_log_cdf"),
+        transmission_log_likelihood=gathered("transmission_log_likelihood"),
         scored_morgans=np.asarray(morgans, dtype=np.float64),
         edge_exposed_morgans=gathered("edge_exposed_morgans"),
         pair_exposed_morgans=np.ascontiguousarray(np.stack(pair_morgans), dtype=np.float64),

@@ -8,7 +8,7 @@ Method: docs/methods/assembly.md (joint completion and publication).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
@@ -17,10 +17,11 @@ import numpy as np
 
 from haplotype_reconstruction.contracts.assembly import CompletionProduct
 from haplotype_reconstruction.contracts.panels import LocalPanel
-from haplotype_reconstruction.contracts.payload import to_payload
+from haplotype_reconstruction.contracts.payload import from_payload, to_payload
+from haplotype_reconstruction.contracts.roles import require_schema
 from haplotype_reconstruction.core.ties import TieSettings
 from haplotype_reconstruction.engine.cpu import thread_team
-from haplotype_reconstruction.engine.graph import ResourceRequest, ResultRef, Task, TaskKey
+from haplotype_reconstruction.engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from haplotype_reconstruction.engine.workers import (
     SharedArrayRef,
     attach_shared_array,
@@ -41,6 +42,7 @@ from haplotype_reconstruction.science.assembly.completion.run import (
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.run import AssemblyInputs
 from haplotype_reconstruction.stages.framework import Expansion
+from haplotype_reconstruction.store.protocol import claim
 
 from .records import COMPLETION, RecordCapability, decode_completion, encode_completion
 
@@ -56,17 +58,25 @@ def complete_stage(
 ) -> CompletionProduct:
     """Resume completed preparation, or execute assembly and publish once."""
     ties = TieSettings() if ties is None else ties
-    stored = None if records is None else records.load(COMPLETION)
-    if stored is not None:
-        return decode_completion(stored)
-    with thread_team(default=cores):
-        prepared, summary = complete(
-            inputs.panels, inputs.evidence, parameters, CompletionWorkspace(ties=ties, map_tasks=map_tasks)
-        )
-    product = CompletionProduct(tuple(prepared), to_payload(summary))
-    if records is not None:
-        records.save(COMPLETION, encode_completion(product))
-    return product
+    ownership = (
+        nullcontext(True)
+        if records is None
+        else claim(records.file, records.key(COMPLETION), records.derivation(COMPLETION), blocking=False)
+    )
+    with ownership as needed:
+        if not needed:
+            assert records is not None
+            stored = records.load(COMPLETION)
+            assert stored is not None
+            return decode_completion(stored)
+        with thread_team(default=cores):
+            prepared, summary = complete(
+                inputs.panels, inputs.evidence, parameters, CompletionWorkspace(ties=ties, map_tasks=map_tasks)
+            )
+        product = CompletionProduct(tuple(prepared), to_payload(summary))
+        if records is not None:
+            records.save(COMPLETION, encode_completion(product))
+        return product
 
 
 # Blocks per completion task. A block of 200 sites at 116 samples is ~50 ms of one thread's work, so 16 blocks keep a
@@ -82,9 +92,22 @@ def complete_range(
     parameters: CompletionParameters,
     folds: np.ndarray,
     settings: np.ndarray,
+    records: RecordCapability | None = None,
+    first: int = 0,
 ) -> tuple[CompletionBlockResult, ...]:
     """Complete a consecutive run of blocks (one numeric thread); the contig's evidence
     arrives as shared segments, attached without a copy."""
+    if records is not None:
+        name = f"{COMPLETION}/range{first:06d}"
+        with claim(records.file, records.key(name), records.derivation(name), blocking=False) as needed:
+            if not needed:
+                saved = records.load(name)
+                assert saved is not None
+                require_schema(saved, 1)
+                return tuple(from_payload(CompletionBlockResult, item) for item in saved["blocks"])
+            result = complete_range(panels, inference, neutral, observed, parameters, folds, settings)
+            records.save(name, dict(schema=1, blocks=[to_payload(item) for item in result]))
+            return result
     with ExitStack() as stack, thread_team(1):
         neutral = stack.enter_context(attached_array(neutral))
         observed = stack.enter_context(attached_array(observed))
@@ -105,15 +128,26 @@ def finish_range_completion(
 ) -> Any:
     """The completion's gather: link, gate and release from the ranges' results in block order, publish once, then
     continue the assembly (``then(product, cores=cores)``)."""
-    results = tuple(result for part in parts for result in part)
-    with thread_team(default=cores):
-        prepared, summary = finish_completion(
-            inputs.panels, inputs.evidence, parameters, CompletionWorkspace(ties=ties), plan, results
-        )
-    product = CompletionProduct(tuple(prepared), to_payload(summary))
-    if records is not None:
-        records.save(COMPLETION, encode_completion(product))
-    return then(product, cores=cores)
+    ownership = (
+        nullcontext(True)
+        if records is None
+        else claim(records.file, records.key(COMPLETION), records.derivation(COMPLETION), blocking=False)
+    )
+    with ownership as needed:
+        if not needed:
+            assert records is not None
+            stored = records.load(COMPLETION)
+            assert stored is not None
+            return then(decode_completion(stored), cores=cores)
+        results = tuple(result for part in parts for result in part)
+        with thread_team(default=cores):
+            prepared, summary = finish_completion(
+                inputs.panels, inputs.evidence, parameters, CompletionWorkspace(ties=ties), plan, results
+            )
+        product = CompletionProduct(tuple(prepared), to_payload(summary))
+        if records is not None:
+            records.save(COMPLETION, encode_completion(product))
+        return then(product, cores=cores)
 
 
 def expand_completion(
@@ -158,7 +192,12 @@ def expand_completion(
                     parameters,
                     plan.fold_plan.folds,
                     plan.settings,
+                    records,
+                    first,
                 ),
+                outputs=()
+                if records is None
+                else (RecordKey(parent.scope, records.key(f"{COMPLETION}/range{first:06d}")),),
                 resources=ResourceRequest(1, 1, working),
             )
         )
@@ -168,6 +207,7 @@ def expand_completion(
         args=(inputs, parameters, records, ties, plan, tuple(ResultRef(t.key) for t in tasks), then),
         depends_on=tuple(t.key for t in tasks),
         affinity=parent.scope,
+        outputs=() if records is None else (RecordKey(parent.scope, records.key(COMPLETION)),),
         resources=ResourceRequest(1, max_cores),
         thread_argument="cores",
     )

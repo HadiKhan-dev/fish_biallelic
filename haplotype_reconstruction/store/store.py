@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from ..core.errors import InvariantError, SettingsError
 from . import codec
 from .container import CheckpointFile, CheckpointMismatch, RecordInfo
+from .namespace import NamespacedFile, StoreLocation
 from .identity import jsonable
 from .releases import CURRENT_RELEASE, unsupported_release
 
@@ -45,6 +46,7 @@ class CheckpointStore:
     """
 
     def __init__(self, root, *, nthreads=1, clevel=None):
+        self.location = root if isinstance(root, StoreLocation) else None
         self.root = os.fspath(root)
         self.nthreads = codec.thread_setting(nthreads)
         self.clevel = codec.CLEVEL if clevel is None else int(clevel)
@@ -59,18 +61,18 @@ class CheckpointStore:
     @property
     def run(self) -> CheckpointFile:
         """The genome-wide container, run.ckpt."""
-        return CheckpointFile(os.path.join(self.root, RUN_FILE), kind="run", nthreads=self.nthreads, clevel=self.clevel)
+        return self._file(os.path.join(self.root, RUN_FILE), kind="run")
 
     def contig(self, name) -> CheckpointFile:
         """The container of one chromosome (created by its first put)."""
         name = _path_token(name, "contig")
-        return CheckpointFile(
-            os.path.join(self.root, CONTIG_DIRECTORY, name + CONTIG_SUFFIX),
-            kind="contig",
-            name=name,
-            nthreads=self.nthreads,
-            clevel=self.clevel,
-        )
+        return self._file(os.path.join(self.root, CONTIG_DIRECTORY, name + CONTIG_SUFFIX), kind="contig", name=name)
+
+    def _file(self, path, **kwargs):
+        options = dict(nthreads=self.nthreads, clevel=self.clevel, **kwargs)
+        if self.location is not None:
+            return NamespacedFile(path, location=self.location, **options)
+        return CheckpointFile(path, **options)
 
     def contig_names(self) -> tuple[str, ...]:
         """Chromosomes that have a container, sorted by name."""
@@ -194,7 +196,10 @@ class CheckpointStore:
         """The run manifest ``manifest/<key>`` (e.g. "run": kind, contigs, sample_ids, source), or None."""
         run = self.run
         name = f"manifest/{key}"
-        return run.get(name) if run.has(name) else None
+        result = run.get(name) if run.has(name) else None
+        if result is not None and key == "run" and self.location is not None:
+            result.update(self.location.manifest_fields)
+        return result
 
     def control(self, key: str) -> dict | None:
         """A run-scope control record bound at ``init`` (e.g. the simulation manifest), or None.

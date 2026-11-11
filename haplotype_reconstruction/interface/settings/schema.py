@@ -1,6 +1,6 @@
 """The run configuration: one typed tree of user settings (TOML sections), strictly validated.
 
-Sections: run (where results go, where to stop), execution (CPUs, lanes, scratch; never part of any scientific
+Sections: run (where results go, final-analysis contigs, where to stop), execution (CPUs, lanes, scratch; never part of any scientific
 identity), input (VCF or simulation, contigs), quality (evidence QC and read calibration), genetic_map (inference
 prior), pedigree, family_phase, recombination, export (the final founder and sample VCFs), simulation (+ reads;
 generating parameters only). Stage-internal constants are not settings: they are the defaults of each stage's own
@@ -58,6 +58,11 @@ class RunSection:
     )
     checkpoints: Path | None = setting(
         None, "path", "Checkpoint directory; default OUTPUT/checkpoints.", affects_results=False
+    )
+    exclude_contigs: tuple[str, ...] = setting(
+        (), "strings", "Configured contigs to omit from pedigree and final downstream analysis. "
+        "Evidence and relatedness still use every input contig; run skips excluded reconstruction "
+        "and retains its existing records. Change this set on resume to compute separate final products.",
     )
     stop_after: str = setting(
         "",
@@ -276,7 +281,7 @@ class Settings:
 
     version: int = setting(4, "int", "Settings schema version (4).", affects_results=False)
     preset: str = setting("", "str", "Built-in base configuration: tromau or generic.", ("", "tromau", "generic"))
-    run: RunSection = section(RunSection, "Where results go and where to stop.")
+    run: RunSection = section(RunSection, "Output paths, final-analysis contigs and where to stop.")
     execution: ExecutionSection = section(ExecutionSection, "CPUs, lanes and scratch (never part of results).")
     input: InputSection = section(InputSection, "Observations and contigs.")
     quality: QualitySection = section(QualitySection, "Evidence quality control and read model.")

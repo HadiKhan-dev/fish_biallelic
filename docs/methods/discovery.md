@@ -152,18 +152,18 @@ Cost and scope: O(N_a^2 L). These terms describe the unit’s work/storage dimen
 <a id="di14"></a>
 ## di14 Death moves
 
-Generate deletion starts from the current panel and put the complete death bucket before gauge proposals. Fit admitted starts with the fixed-K machinery and carry tied endpoint families. Death ordering and whole-bucket admission are part of the search.
+Generate one deletion start for every founder row. Rank the fixed-row assignment-only NLLs within K and admit the leading whole classes under `death_screen_width`, extending a straddling class through twice that width. Refit admitted starts with both usage schedules. Return admitted starts in their original order before the death/gauge family budget. This predictive screen defines the searched neighbourhood; it is not a bound on a converged endpoint.
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Parameters by name: `death_screen_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: Up to K deletion starts per expanded parent, each with the fixed-count fit cost.
+Cost and scope: Up to K assignment-only scores, O(N B K³) per parent, followed by a K-independent number of admitted full-fit starts, O(I N L K²) with fixed screen width and iteration bound I. Row-collapse descendants in the shared refitter are additional work.
 
 <a id="di15"></a>
 ## di15 Gauge rewires and death/gauge family admission
 
-Generate gauge rewires, deduplicate each death/gauge start bucket by content, and admit deaths first under the complete-class proposal budget. Use one heuristic cut search at every K and record its use. Keep at most eight times `max_cut_ties` cuts (32 by default): the canonical prefix of the complete found family at its best found weight. Record any truncation as `tie_class_truncated`, cause `gauge_tie_class_truncated`, so it sets search limits and `search_incomplete` and prevents a generated-neighbourhood certificate. Its count is exact for the found family and a lower bound on all cuts at that weight; it does not count certified global maximum cuts. The scope states the weight and retained count. This cut budget is separate from the later whole-class death/gauge start budget. Fit admitted starts before considering births.
+Generate gauge rewires, deduplicate each death/gauge start bucket by content, and admit deaths first under the complete-class proposal budget. Use one heuristic cut search at every K and record its use. Keep at most eight times `max_cut_ties` cuts (32 by default): the canonical prefix of the complete found family at its best found weight. Record any truncation as `tie_class_truncated`, cause `gauge_tie_class_truncated`, so it sets search limits and `search_incomplete` and prevents a generated-neighbourhood certificate. Its count is exact for the found family and a lower bound on all cuts at that weight; it does not count certified global maximum cuts. The scope states the weight and retained count. This cut budget is separate from the later whole-class death/gauge start budget. Before the death/gauge family budget, screen deduplicated gauge starts by fixed-row NLL at `gauge_screen_width`, independently of deaths and independently within each K. Keep whole NLL classes through twice the screen width and restore input order for the refit. Record exclusions as `gauge_screen_ranked_truncation`; corresponding death exclusions use `death_screen_ranked_truncation`. These are deliberate ranked-neighbourhood decisions, including omission of an overlarge straddling class, and do not claim an exhaustive fitted neighbourhood. Fit admitted starts before considering data births, which bypass this screen.
 
 The cut search pins vertex zero on side False and visits the other vertices by descending weighted degree, with index ties following convention d9. Run strictly improving single-vertex searches from every unpinned singleton, an alternating start and `GAUGE_CUT_GW_PLANES` Goemans-Williamson starts; retain the distinct endpoints at the best integer (cross, within) weight. Move gains are initialized once and updated exactly after each move. The endpoints are locally optimal with respect to unpinned vertices; the search does not certify a global maximum.
 
@@ -173,7 +173,7 @@ The SDP only supplies extra valid cuts. Integer local search scores every endpoi
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`, `GAUGE_CUT_GW_PLANES`, `GAUGE_CUT_GW_SEED`, `GAUGE_CUT_SDP_SWEEPS`, `GAUGE_CUT_SDP_TOLERANCE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `gauge_screen_width`, `death_screen_width`, `max_cut_ties`, `max_proposals_per_expansion`, `MAX_CUT_CACHE_ENTRIES`, `GAUGE_CUT_GW_PLANES`, `GAUGE_CUT_GW_SEED`, `GAUGE_CUT_SDP_SWEEPS`, `GAUGE_CUT_SDP_TOLERANCE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: For total integer edge weight W ≤ N, local search costs O(K² + K W) per start, and the K + P starts cost O((K + P)(K² + K W)), P = 16. Mixing costs O(T K² √K), T ≤ 2000; rounding costs O(P K √K). With fixed P and T this is O(K³ + K² W + T K² √K), polynomial with at most cubic K dependence. The complete found family has at most K + P members. Cache eviction changes recomputation only.
 
@@ -213,22 +213,22 @@ Cost and scope: O(R^2 ceil(L/64)); O(E A ceil(A/64)); O(A^3 ceil(A/64)). These t
 <a id="di19"></a>
 ## di19 Soft candidate consensus, emission order and soft births
 
-Form each soft candidate’s consensus from its supporting residual records, order candidates by the declared support classes, then fit soft births. Integer support classes and probability bands preserve complete alternatives. Equal support does not authorise choosing a single arbitrary candidate.
+Form each soft candidate’s consensus from its supporting residual records and order candidates by the declared support classes. Harden and deduplicate novel rows, then screen the resulting soft-birth starts by their assignment-only NLL within K under `soft_birth_screen_width`. Only leading whole NLL classes are fully refitted; straddling classes fit through twice the width, and larger classes are omitted whole. Record all screen exclusions as `soft_birth_screen_ranked_truncation`. The emitted-row count precedes screening; the omitted-start count includes the screen. Integer support classes and probability bands preserve complete alternatives during generation. Data births are not screened.
 
 Implementation: [science/discovery/residual_births.py](../../haplotype_reconstruction/science/discovery/residual_births.py), [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `candidate_call_probability`, `min_candidate_known_fraction`, `min_dedup_joint_known_fraction`, `min_dedup_bidirectional_coverage`, `dedup_hamming_fraction`, `min_unique_sample_support`, `min_effective_sample_support`, `max_proposals_per_expansion`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `soft_birth_screen_width`, `candidate_call_probability`, `min_candidate_known_fraction`, `min_dedup_joint_known_fraction`, `min_dedup_bidirectional_coverage`, `dedup_hamming_fraction`, `min_unique_sample_support`, `min_effective_sample_support`, `max_proposals_per_expansion`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(members x L); O(C (K + C) L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="di20"></a>
 ## di20 Birth-delete replacements
 
-Use ranked birth classes to generate birth-delete replacements, fitting and deduplicating them in the declared order. Later classes are reached only while the replacement budget has room. This is a bounded neighbourhood, not exhaustive fixed-count search.
+Use ranked birth classes to generate birth-delete replacements under the existing complete-class replacement budget. Rank the admitted starts by assignment-only NLL within each K, keep leading whole classes under `replacement_screen_width` with a twice-width straddling allowance, and refit in their original order. Record screen exclusions as `replacement_screen_ranked_truncation`, in addition to generation omissions. This is a screened neighbourhood, not exhaustive fixed-count search.
 
 Implementation: [science/discovery/moves.py](../../haplotype_reconstruction/science/discovery/moves.py).
 
-Parameters by name: `max_replacement_children`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_replacement_children`, `replacement_screen_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: The replacement budget bounds fitted starts per call; the offered neighbourhood grows with births times K.
 
@@ -268,18 +268,18 @@ Cost and scope: O(n log n). These terms describe the unit’s work/storage dimen
 <a id="di24"></a>
 ## di24 Expansion loop (phases, improvement, replacements, bridge, expansion backstop, stop)
 
-Expand every parent in a selected class before testing improvement. Run the declared death/gauge, birth and replacement phases, refresh scores after each phase, and compare with the pre-expansion value. Bridge and backstop rules retain whole straddling classes within their hard allowance; accumulate every omission and heuristic-cut flag.
+Expand every parent in a selected class before testing improvement. Deaths, gauge rewires, soft births and replacements use their separate fixed-row NLL screens before complete refits; data births, including bridge data births, retain their full existing route. A small family already within its screen width needs no preliminary score. Assignment-only scores reuse the ordinary fit caches when the ordered panel agrees with the subsequent refit. Refresh cavity scores and compare with the pre-expansion value. Bridge and backstop rules retain whole straddling classes within their hard allowance; accumulate every omission and heuristic-cut flag. Fixed-row ranking is a predictive search assumption, not an admissible convergence bound.
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
-Parameters by name: `expansion_backstop_base`, `expansion_backstop_per_founder`, `beam_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `expansion_backstop_base`, `expansion_backstop_per_founder`, `beam_width`, `death_screen_width`, `gauge_screen_width`, `soft_birth_screen_width`, `replacement_screen_width`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(K); O(max_iterations · N K² L / 10); O(N L K⁴). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: The screens bound admitted initial full-fit starts per expansion independently of K for these four phases. With O(R) expansions through highest searched count R, their full-fit component is O(I N L R³) for fixed widths and before row-collapse descendants. This does not make the whole block cubic: scoring all K deletions with full assignment evaluations costs O(N B K³) per expansion and O(N B R⁴) over the ladder. Unscreened data births still admit O(K) starts per expansion, leaving O(I N L R⁴) full-fit work. Replacement enumeration and gauge generation can also contribute quartic work across expansions. Residual geometry and collapse descendants require their own bounds. Frontier partitioning improves a numerical constant, not these powers. The combined candidate still exceeds the cubic design requirement.
 
 <a id="di25"></a>
 ## di25 Search status: limits, omissions, search_incomplete, unresolved, certification
 
-Derive incomplete, unresolved, omission and certification fields after search. These diagnostics do not steer another search step. An unresolved block has no usable panel; a bounded but resolved result remains explicitly distinguishable from a certified search.
+Derive incomplete, unresolved, omission and certification fields after search. These diagnostics do not steer another search step. An unresolved block has no usable panel; a bounded but resolved result remains explicitly distinguishable from a certified search. The four `*_screen_ranked_truncation` causes describe starts deliberately excluded by fixed-row ranking. They do not set `search_incomplete` or computational-limit flags. Certification, when otherwise available, covers the generated and screened neighbourhood, not the excluded starts or all possible refitted neighbours. Computational omissions elsewhere, including gauge-cut truncations, still prevent certification.
 
 Implementation: [science/discovery/search.py](../../haplotype_reconstruction/science/discovery/search.py).
 
@@ -343,3 +343,14 @@ Cost and scope: Constant work for a disabled event; enabled recording grows with
 
 
 Pair-backed evidence-v2 observation masks use the same lazy block intervals as GL declarations. A task gathers its original bool block before the unchanged discovery kernels; declaring all blocks does not recreate a resident whole-contig mask.
+
+
+### Emission frontier partitioning
+
+Fixed-K starts share emission contractions within a frontier. A frontier is split
+recursively when its shared emission tile cannot retain the target sample-vector
+width within the numerical worker's scratch allowance. Each part evaluates every
+state and sample of its panels; concatenation restores the original start order.
+A single panel may use a narrower sample tile. This partition controls scratch
+and locality only: it imposes no founder, start, iteration or state budget, and
+leaves each state's ascending-bin summation and switching recurrence unchanged.

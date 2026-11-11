@@ -178,6 +178,7 @@ class PhasedSamplesAdapter:
 
 KEY = "phase"
 BINDING_KEY = "identity/phase"
+ANALYSIS_KEYS = (KEY, BINDING_KEY, "complete/" + KEY)
 CODE_ROOTS = ("haplotype_reconstruction.stages.phase.tasks",)
 
 
@@ -190,6 +191,7 @@ def derivation(
     reverse: bool = False,
     code: CodeIdentity | None = None,
     policy: NumericalPolicy | None = None,
+    included_contigs: tuple[str, ...] = (),
 ) -> Derivation:
     """Bind both solves and release to canonical upstream identities; buffer routes are excluded."""
     from dataclasses import asdict
@@ -202,7 +204,8 @@ def derivation(
         raise InvariantError("phase requires every upstream derivation identity")
     return Derivation(
         code_dependency_identity(CODE_ROOTS) if code is None else code,
-        dict(contig=contig, sample_ids=tuple(sample_ids), phase=parameters),
+        dict(contig=contig, sample_ids=tuple(sample_ids), phase=parameters,
+             **(dict(included_contigs=included_contigs) if included_contigs else {})),
         NumericalPolicy.current() if policy is None else policy,
         asdict(identities),
         tie_reverse=bool(reverse),
@@ -340,6 +343,9 @@ def expected(
         manifest["map_identities"][contig],
     )
     parameters = from_payload(PhaseParameters, manifest["parameters"]["family_phase"])
+    from ...contracts.contigs import AnalysisContigs
+
+    selection = AnalysisContigs.from_manifest(manifest)
     expected = derivation(
         contig,
         tuple(manifest["sample_ids"]),
@@ -347,6 +353,7 @@ def expected(
         parameters,
         reverse=manifest["ties"]["reverse"],
         policy=NumericalPolicy(**manifest["numerical_policy"]),
+        **selection.identity_inputs,
     )
     return expected
 

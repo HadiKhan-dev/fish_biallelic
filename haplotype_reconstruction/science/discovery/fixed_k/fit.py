@@ -451,19 +451,21 @@ def _batched_assignments(workspace, batch):
     n_bins = workspace.n_bins
     bytes_per_sample = 8 * ((len(pair_i) + len(rows)) * (n_bins + 1) + len(first) + k + 4)
     tile_width = min(_FRONTIER_TILE_SAMPLES, _FRONTIER_TILE_BYTES // bytes_per_sample)
-    if tile_width < 1:
-        if b > 1:
-            # Too many distinct rows/pairs for one tile: split the frontier (each panel's
-            # transition is independent of its batch-mates, so the results are identical).
-            half = b // 2
-            left = _batched_assignments(workspace, batch[:half])
-            right = _batched_assignments(workspace, batch[half:])
-            return tuple(np.concatenate((x, y)) for x, y in zip(left, right, strict=False))
-        tile_width = 1
+    if b > 1 and tile_width < min(_FRONTIER_TILE_SAMPLES, workspace.samples):
+        # Preserve the sample-vector width before sharing another panel's emissions.
+        # Splitting partitions independent A(H) calls; no state or start is discarded.
+        half = b // 2
+        left = _batched_assignments(workspace, batch[:half])
+        right = _batched_assignments(workspace, batch[half:])
+        return tuple(np.concatenate((x, y)) for x, y in zip(left, right, strict=False))
+    tile_width = max(1, tile_width)
     tables = workspace.patterns
     patterns = _row_patterns(rows, workspace.snps_per_bin, n_bins)
     row_slots = tables.slots(patterns)
     pair_slots = tables.slots(patterns[pair_i] & patterns[pair_j])
+    # The batched kernels below run on the calling thread's team: bring it to the block's live share first,
+    # as the scalar A/H route does when it chooses its kernel.
+    workspace.refresh_threads()
     assignments, cost, unknown_slots, mask = _assign_frontier(
         workspace.c0b,
         tables.diff1_table,
@@ -549,6 +551,7 @@ def _transition_batch(workspace, matrices, keys, schedule_reverse=False):
         unknown_slots = np.stack([record[2] for record in records])
         mask = np.stack([assignment_tie_mask(record[0], k, record[4], record[5]) for record in records])
     commuting = np.empty(len(matrices), dtype=np.bool_)
+    workspace.refresh_threads()
     following, changes, usage_ties = _update_frontier(
         batch,
         assignments,
@@ -651,19 +654,22 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial, schedule_rev
 
     assignment_only = limit == 0
     while active:
+        # Every live trajectory has advanced the same number of sweeps. At the
+        # limit, only A(H) is consumed; another H sweep cannot change the endpoint.
+        only_assignments = assignment_only or completed[active[0]] >= limit
         missing = {}
         for index in active:
             key = state_keys[index]
             cached = (
                 workspace.cached_assignment(key)
-                if assignment_only
+                if only_assignments
                 else workspace.cached_transition(key, schedule_reverse)
             )
             if cached is None:
                 missing.setdefault(key, None)
         if missing:
             matrices = [workspace.state_from_key(key) for key in missing]
-            if assignment_only:
+            if only_assignments:
                 if len(matrices) == 1:
                     _assignment_scalar(workspace, matrices[0], next(iter(missing)))
                 else:
@@ -676,7 +682,7 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial, schedule_rev
         next_active = []
         for index in active:
             key = state_keys[index]
-            if assignment_only:
+            if only_assignments:
                 record, next_key, changes, tied = workspace.cached_assignment(key), None, 0, False
             else:
                 record, next_key, changes, tied = workspace.cached_transition(key, schedule_reverse)

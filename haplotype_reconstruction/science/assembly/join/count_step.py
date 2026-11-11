@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from haplotype_reconstruction.core import ties
+from haplotype_reconstruction.core.kernels import bounded_team
 
 from .. import orders as tie_rules
 from ..count_rule import criterion as count_criterion
@@ -444,7 +445,10 @@ class CountStep:
         need = np.flatnonzero(bound > base + SPARSE_RELATIVE * (1.0 + np.abs(base)))
         values = base.copy()
         if len(need):
-            values[need] = score_samples(*self.layout.arrays(), self.rows(panel), self.penalty, need.astype(np.int64))
+            with bounded_team(len(need)):
+                values[need] = score_samples(
+                    *self.layout.arrays(), self.rows(panel), self.penalty, need.astype(np.int64)
+                )
             self._counted(samples=len(need))
         return values
 

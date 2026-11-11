@@ -842,6 +842,7 @@ class CountPass:
     input_F0: float | None = record_field("state", dtype="float64", units="nats", default=None)
     count_continuations: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_branch_evaluations: int = record_field("state", dtype="int", units="1", default=0)
+    branch_replays: int = record_field("state", dtype="int", units="1", default=0)
 
 
 @dataclass(frozen=True)
@@ -882,6 +883,7 @@ class ComponentRefinement:
     selected_branch: str | None = record_field("call", dtype="str", units="1", default=None)
     count_continuations: tuple = record_field("state", dtype="tuple", units="1", default=())
     count_branch_evaluations: int = record_field("state", dtype="int", units="1", default=0)
+    branch_replays: int = record_field("state", dtype="int", units="1", default=0)
     work_counters: dict[str, Any] = record_field("state", dtype="dict[str, Any]", units="1", default_factory=dict)
     polish: dict[str, Any] = record_field("state", dtype="dict[str, Any]", units="1", default_factory=dict)
 

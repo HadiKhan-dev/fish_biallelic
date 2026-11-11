@@ -180,13 +180,13 @@ Cost and scope: Exact full rescoring and minimum-switch scoring for retained cla
 <a id="rc17"></a>
 ## rc17 Bounded count continuation (incoming roots, fit ties, count choices; leaf budget) and terminal release
 
-Run the nominal pass, then alternative input roots in sorted order. Expand the first unhandled continuation event breadth-first, retaining the nominal state and replaying other options from the original input with the same stream. Enforce the leaf budget before expansion and keep overflow unresolved. Compare winning F classes per count, prefer the smallest count and then fewest switches. Verification requires complete source coverage and finished matching histories; merely starting every option is insufficient. Preserve unverified histories separately from biological terminal alternatives.
+Run the nominal pass, then alternative input roots in sorted order. An input root of the nominal count follows the nominal pass's adopted deletions instead of deciding the count again: it is converged from its own start, the corresponding founder (unique mutual nearest row) is deleted at each adopted round, and it is re-converged after each, so it ends at its own panel of the nominal final count; a root whose panels meet the nominal root's is the nominal history from there on. A root of another count, a root without an unambiguous founder correspondence, a root one of whose fits ends in tied endpoints, and every root when the nominal pass restored a best-F panel run their own complete pass (in a branch of their own, so no fit record of the abandoned replay is read). Expand the first unhandled continuation event breadth-first, retaining the nominal state and replaying other options from the original input with the same stream. Enforce the leaf budget before expansion and keep overflow unresolved. Compare winning F classes per count, prefer the smallest count and then fewest switches. Verification requires complete source coverage and finished matching histories; merely starting every option is insufficient. Preserve unverified histories separately from biological terminal alternatives.
 
 Implementation: [science/assembly/refinement/count.py](../../haplotype_reconstruction/science/assembly/refinement/count.py).
 
 Parameters by name: `alternative_branches`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: At most the alternative_branches leaf budget of complete count histories, with exact fit reuse; overflow remains unresolved.
+Cost and scope: At most the alternative_branches leaf budget of complete count histories, with exact fit reuse; overflow remains unresolved. A root that follows the nominal decisions costs one fit plus one per adopted deletion. Its own count decisions are not evaluated: a root whose decisions would have differed from the nominal root's is not detected.
 
 <a id="rc18"></a>
 ## rc18 Component release families, pass-through and the window-work stop
@@ -226,7 +226,7 @@ Cost and scope: Independent component costs plus shared-evidence and task-bounda
 <a id="rc21"></a>
 ## rc21 Records, resume and census
 
-Publish typed component and level records under their derivations, reusing only compatible complete products. Resume fits from complete done records or ordered saved sweeps, rebuilding transient messages and proposals. Branch records bind forced fit panels and count overrides as well as their input. Aggregate typed census fields after assembling all components; timings and report formatting remain outside science.
+Publish typed component and level records under their derivations, reusing only compatible complete products. A component whose work (samples × sites × K³, the same estimate that orders component tasks) reaches `FIT_RECORD_WORK` also publishes every completed sweep and fit under its own scope before its component record, so that a rerun of an interrupted component resumes its fits from complete done records or ordered saved sweeps, rebuilding transient messages and proposals; smaller components take about a minute or less and are recomputed. Branch records bind forced fit panels and count overrides as well as their input. Aggregate typed census fields after assembling all components; timings and report formatting remain outside science.
 
 Implementation: [stages/assembly/records.py](../../haplotype_reconstruction/stages/assembly/records.py), [stages/assembly/refinement.py](../../haplotype_reconstruction/stages/assembly/refinement.py).
 
@@ -279,42 +279,45 @@ Parameters by name: `proposal_max_bins`, `proposal_min_sites_per_bin`. Values an
 Cost and scope: Fine/coarse template counts scale with B and context spans divided by named strides, each with K focal problems; alphabet pair tables are quadratic in alphabet size.
 
 <a id="rs05"></a>
-## rs05 Canonical window programme (exact surrogate maximiser per founder and window)
+## rs05 Hybrid window search
 
-Try the box certificate, then the main programme with its ordered children, bound pruning and dominance tests. Restart only after the initial backstop and when the final frontier permits it; the restart uses feasible beam/dual bounds and the declared beam cap. A final frontier or truncated-beam fallback keeps the incumbent; an unexplained lost answer raises. Retain an incumbent within tolerance, otherwise fix canonical rows by restricted programmes in order. This bounded solver does not certify an optimum when a fallback occurs.
+The surrogate H sums per-sample Viterbi maxima under the fixed Potts switch penalty. First try the relaxed box certificate. Otherwise run the exact frontier programme, retaining at most `HYBRID_FRONTIER` (64) partial paths, with its ordered children, bound pruning, dominance tests and canonical restricted programmes. A completed programme supplies its answer: retain an incumbent within tolerance, otherwise take the first qualifying path in incumbent-first content order.
 
-Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py).
+If that frontier is exceeded, use seeded search. Each relevant sample supplies its preferred whole-unit row path; score each distinct wish and all its contiguous restrictions to the incumbent. Ascend from the incumbent, the best six whole wishes and the best six distinct restrictions. Each ascent takes the best improving single-unit move, with canonical content ties, for at most 32 iterations. Samples whose relaxed upper bound cannot exceed their background-only score within the relative arithmetic margin contribute a constant and are omitted from the search. Rescore the chosen path with the ordinary H recurrence; that score alone determines whether it is an improving offer. Site-level F scoring and the acceptance guards decide acceptance. The seeded answer is a single-unit local optimum when ascent converges; the iteration limit can stop it before stationarity. Exact rescoring certifies the returned offer's score, not global optimality.
 
-Parameters by name: `CANONICAL_TOL`, `DOMINANCE_TOLERANCE`, `BOX_ARITHMETIC_MARGIN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py), [science/assembly/refinement/seeded_search.py](../../haplotype_reconstruction/science/assembly/refinement/seeded_search.py).
 
-Cost and scope: O(W S R (b K + b^2)); O(S (b K + b^2)); O(children x kept x S x Q(b + 1)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Parameters by name: `HYBRID_FRONTIER`, `SEED_STARTS`, `INTERVAL_SEED_STARTS`, `LOCAL_ITERATIONS`, `RELEVANCE_MARGIN`, `CANONICAL_TOL`, `DOMINANCE_TOLERANCE`, `BOX_ARITHMETIC_MARGIN`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: The exact attempt has a fixed frontier. Seeded background preparation costs O(N B² Q), where B is total window bins and Q=K(K+1)/2. Wishes number at most N; ascent starts and iterations have fixed limits. Every kernel states its loop-domain complexity.
 
 <a id="rs06"></a>
-## rs06 Window-programme frontier cap and memory-budget retry schedule
+## rs06 Shared messages and bounded search storage
 
-**Accretion:** A fixed frontier cap and deterministic retries bound each window programme.
+**Accretion:** Shared max-plus messages reuse unchanged path segments, and storage admission follows the actual problem dimensions and fixed frontier.
 
-Start at the dimension-derived first programme budget and increase it by the fixed growth schedule up to the scientific frontier cap. Retry only pending focal problems, preserving their order and the same template work account. The final frontier fallback retains the incumbent. Available machine memory may delay execution but cannot change this schedule or its charged retries.
+After bin t the background-eliminated state consists of K focal values and the maxima of earlier bins. A fixed suffix is max-plus linear in this state, with covector `(beta, gamma, const)`: its value is `max(const, max_c focal[c]+beta[c], max_j maxima[j]+gamma[j])`. One forward and one backward pass of the incumbent produce every unit-boundary state and suffix covector. Advancing each seed from each starting unit scores all its restrictions; advancing each candidate row only across its unit scores all single-unit moves. These scores equal individual path scores, including units containing several bins.
 
-Implementation: [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py).
+Storage follows the actual sample, founder, row, unit and bin counts. The exact attempt uses 64 kept paths; admission reserves its frontier, gathered emissions, background runs, restrictions and boundary covectors. Live memory may delay execution but never selects a different route or order.
 
-Parameters by name: `frontier_bytes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Implementation: [science/assembly/refinement/costs.py](../../haplotype_reconstruction/science/assembly/refinement/costs.py), [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py), [science/assembly/refinement/seeded_search.py](../../haplotype_reconstruction/science/assembly/refinement/seeded_search.py).
 
-Cost and scope: Retries repeat pending programme work; the frontier-byte cap fixes the allowed state count, while the programme beam may bind earlier.
+Parameters by name: `HYBRID_FRONTIER`, `SEED_STARTS`, `INTERVAL_SEED_STARTS`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(N (B R K+B Q+B²)+N W²+W(B+K)) seeded storage for W units and largest alphabet R, plus the fixed frontier and window-shared tables. Storage admission changes scheduling only.
 
 <a id="rs07"></a>
 ## rs07 Per-template window work account and whole-component stop
 
-**Accretion:** Per-template work accounts bound the search independently of live memory.
+**Accretion:** A deterministic work account bounds each template and propagates exhaustion to the component.
 
-Allocate one work account per template, scaled from all evidence rows, window dimensions and the founder/alphabet size. Debit focal solves, retries, restarts, dominance, dual and canonical-fixing work in the declared integer order. Exhaustion discards every focal result of the template and propagates the component stop. The work ledger records deterministic logical-prefix work witnesses; physical work performed concurrently is separate. The bound is per template, not a whole-component complexity guarantee.
-
+Allocate one work account per template, scaled from all evidence rows, window dimensions and founder/alphabet size. Debit the box, exact programme and canonical fixing in their declared order. Before seeded allocation, precharge its bounded preparation, wishes, restriction scores, ranking, ascent and ordinary rescore domains. Exhaustion discards every focal result of the template and propagates the component stop. The ledger records deterministic logical-prefix work; physical work performed concurrently is separate. Focal chunks run through the engine's thread map, and merge into the one-call account with window-shared debits counted once. If that account would be exhausted, one call supplies the deterministic stop receipt.
 
 Implementation: [science/assembly/refinement/parameters.py](../../haplotype_reconstruction/science/assembly/refinement/parameters.py), [science/assembly/refinement/proposals.py](../../haplotype_reconstruction/science/assembly/refinement/proposals.py), [science/assembly/refinement/work_limit.py](../../haplotype_reconstruction/science/assembly/refinement/work_limit.py).
 
 Parameters by name: `window_work_coefficient`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: The charged allowance is window_work_coefficient times N W b² max(K,R)³ per template; it does not bound the number of templates, sweeps or fits.
+Cost and scope: The charged allowance is window_work_coefficient times N W b² max(K,R)³ per template, for largest unit bin count b. It bounds admitted work, not the number of templates, sweeps or fits.
 
 <a id="rs08"></a>
 ## rs08 Gauss-Seidel acceptance pass (junction walk, exchanges then content, caps)

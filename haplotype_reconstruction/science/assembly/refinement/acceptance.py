@@ -787,7 +787,6 @@ def pass_chunk(
     pa,
     pb,
     guarded,
-    exchanges,
     exchanges_parallel,
     acc,
     ahead0,
@@ -844,7 +843,7 @@ def pass_chunk(
             local[p // JUNCTION_BATCH] = f
             local_cnt[p // JUNCTION_BATCH] = fcnt
         accepted_here = False
-        if p >= 1 and exchanges:
+        if p >= 1:
             first_look = True
             n_exchanged = 0
             while True:
@@ -1202,7 +1201,6 @@ def accept_pass(
     window,
     guarded,
     budget,
-    exchanges=True,
     start_fwd=None,
     start_fcnt=None,
     scale=0.0,
@@ -1218,14 +1216,13 @@ def accept_pass(
     costs of the panel's K in this orientation (stages.assembly.storage.Windows.view; the pass covers the stretch
     ahead of its junction as it moves). props: the content proposals
     {junction: [(MOVE_FINE | MOVE_COARSE, end block, founder, rows)]}. guarded: the shared-junction
-    guard applies to coarse moves (a search with an L1 context). exchanges=False scores and applies
-    content proposals only. start_fwd / start_fcnt: the
+    guard applies to coarse moves (a search with an L1 context). Every pass scores founder exchanges
+    at each junction as well as the content proposals. start_fwd / start_fcnt: the
     forward messages (and counts) of X itself in this orientation, if known; until the first
     accepted move the carried forward message is read from them. budget: the live thread share
     (the explicit stage team), re-read before every JUNCTION_BATCH junctions. scale: |F| of the pass's
     start panel (the tie quantum's scale, tie_rules.quantum("refine_F", scale)). reverse (required): the content-order
-    convention of the pass. The fixed-K search passes ``first == "rev"``; a copy-only pass
-    passes the run's TieSettings reversal.
+    convention of the pass; the fixed-K search passes ``first == "rev"``.
     optimistic (unguarded passes only): the pass stops, with counters["lex_abort"] = 1 and X
     partly edited, at the first coarse item whose gain exceeds TOL; until then a guarded pass of the
     same inputs makes exactly the same decisions (its gains and orders equal the plain ones).
@@ -1308,7 +1305,6 @@ def accept_pass(
                 pa,
                 pb,
                 bool(guarded),
-                bool(exchanges),
                 parallel_exchanges(samples, founders, team),
                 acc,
                 ahead,

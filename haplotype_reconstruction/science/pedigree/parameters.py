@@ -4,7 +4,8 @@ Only ``evidence_calibration`` is a user setting
 (TOML ``[pedigree] evidence_calibration``); the groups below are internal model constants, documented
 here and in docs/configuration.md. Each group is bound into the identity of exactly the records it
 affects: ``preparation`` into prepared factors, ``scoring`` into screens and scores, ``panel`` into the
-M2 candidate panel, the rest into the genome-wide decision.
+M2 candidate panel, direction mismatch probability into scores, and the remaining decision parameters
+into the genome-wide decision.
 
 Thresholds label evidence tiers; they are not biological acceptance probabilities.
 
@@ -42,6 +43,7 @@ __all__ = [
     "PEDIGREE_WORKSPACE",
     "INFORMATIVE_GL_SPREAD",
     "SELECTOR_SWITCH_FLOOR",
+    "TRANSMISSION_SWITCH_FLOOR",
     "HALL_ULPS",
     "HUB_MASS_TIE",
     "SITE_POLYNOMIAL_THRESHOLD",
@@ -421,7 +423,20 @@ class ExposureParameters:
 
 @dataclass(frozen=True)
 class DirectionParameters:
-    """Junction-count orientation and the reciprocal / short-ancestry family factors."""
+    """Joint-transmission orientation and the reciprocal / short-ancestry family factors."""
+
+    mismatch_probability: float = field(
+        default=0.01,
+        metadata={
+            "provenance": (
+                "PS19/PD06; dimensionless per-bin probability 0.01 that a meiotic copy has a different painted "
+                "local class. Allows painting disagreement without making a direction impossible. Decision "
+                "replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau "
+                "cross and large known-truth simulations; 0.1 added false full-fit edges in a "
+                "30-founder known-truth simulation."
+            ),
+        },
+    )
 
     # Probability that one chromosome's junction comparison of a pair is painting failure.
     chromosome_error_probability: float = field(
@@ -840,6 +855,15 @@ class ScoringNumerics:
             ),
         },
     )
+    transmission_switch_floor: float = field(
+        default=1e-12,
+        metadata={
+            "provenance": (
+                "PS19; dimensionless probability floor 1e-12 keeps the scheduled joint transmission "
+                "and founder-mosaic log transitions finite at equal map positions."
+            ),
+        },
+    )
     selector_switch_floor: float = field(
         default=1e-15,
         metadata={
@@ -1130,6 +1154,7 @@ SCORING_NUMERICS = ScoringNumerics()
 PEDIGREE_WORKSPACE = PedigreeWorkspace()
 INFORMATIVE_GL_SPREAD = SCORING_NUMERICS.informative_gl_spread
 SELECTOR_SWITCH_FLOOR = SCORING_NUMERICS.selector_switch_floor
+TRANSMISSION_SWITCH_FLOOR = SCORING_NUMERICS.transmission_switch_floor
 HALL_ULPS = SCORING_NUMERICS.hall_ulps
 HUB_MASS_TIE = SCORING_NUMERICS.hub_mass_tie
 SITE_POLYNOMIAL_THRESHOLD = SCORING_NUMERICS.site_polynomial_threshold

@@ -30,9 +30,9 @@ KEY = "pedigree/floored_scores"
 
 
 class ScoresAdapter:
-    """Schema-1 score product: the M1 field is already the fixed genome profile."""
+    """Schema-2 score product: the M1 field is already the fixed genome profile."""
 
-    schema = 1
+    schema = 2
 
     def encode(self, value: ChromosomeScores) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value)}
@@ -56,7 +56,13 @@ def derivation(
     reverse = parameters.reverse_conventions if reverse is None else reverse
     return Derivation(
         code_dependency_identity((__name__,)),
-        dict(scoring=parameters.scoring, exposure=parameters.exposure, m1_values="fixed-genome-profile"),
+        dict(
+            scoring=parameters.scoring,
+            exposure=parameters.exposure,
+            direction_mismatch_probability=parameters.direction.mismatch_probability,
+            score_schema=ScoresAdapter.schema,
+            m1_values="fixed-genome-profile",
+        ),
         numerical_policy or NumericalPolicy.current(),
         dict(prepared=prepared_identity, screen=screen_identity, trios=array_digest(panel.trios)),
         reverse,

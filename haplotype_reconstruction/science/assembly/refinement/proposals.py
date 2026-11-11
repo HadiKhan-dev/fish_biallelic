@@ -1,63 +1,12 @@
-"""Window proposals: exact founder-row maximisers of a binned surrogate on bounded windows.
+"""Hybrid window proposals for the binned max-plus surrogate H.
 
-Owns template enumeration, the surrogate programme and charged-work bounds.
-Retries, caps and phase debits decide outcomes and remain scientific state.
-Long kernels stay whole to expose recurrence, pruning, restart and canonical-fixing order; splitting
-those loops would obscure the shared work account and the exact sequence of incumbent checks.
-Method: docs/methods/founder_refinement.md#window-programme (RS04–RS07).
-
-Retry/debit order is scientific; an exhausted template discards all focal results.
-
-
-Window problem (one founder f, a window of W units: prepared blocks for fine windows, L1 spans for
-coarse copy moves): maximise the binned surrogate
-
-    H(x) = sum_s max over bin-constant state paths [fwd_s(a) (x) bins of [a, c) with rows (X_-f, x) (x) bwd_s(c)]
-
-over f's rows x (one alphabet per unit, every other founder fixed). The rest of the component enters
-exactly through the current panel's normalised flank messages; the interior uses the component's
-binned emissions (component_workspace.binned_emissions, bins of at least the level's minimum size) with a
-switch-then-emission bin recursion. The surrogate only proposes: every proposal is re-scored
-exactly against the current panel by the acceptance pass.
-
-Solver (solve_focal, one nogil call per focal founder). The box bound (every sample choosing f's
-later rows freely) certifies windows whose incumbent is already optimal without a programme.
-Otherwise an exact forward frontier dynamic programme runs: a partial path keeps its closed
-normalised per-sample message; it is dropped only if another partial path y is at least as good for
-EVERY completion, sum_s max_z (M_p - M_y) + (T_p - T_y) <= tol (closed-message dominance), or if a
-valid upper bound on all its completions lies below a feasible value. A programme whose frontier
-passes EXPLORE_FRONTIER restarts with tighter pruning: Lagrangian suffix bounds (each sample
-chooses f's later rows freely but pays zero-sum multipliers lam_s(unit, row), which cancel on every
-common path; the multipliers come from block-coordinate sweeps that equalise the samples'
-max-marginals) and the best feasible value among the incumbent, a beam and the dual's decoded
-consensus paths. Pruning keeps every path within the margin of a feasible value, so the optimum and
-the canonical answer are unchanged — except where the restarted programme's BEAM_CAP binds:
-there it keeps the BEAM_CAP best children per unit, so its answer (and a canonical
-restricted programme's reachability test) is approximate; every such unit is counted
-(beam_truncations in the window receipts, sweep statistics and fit/component work counters), and a
-main programme that loses its feasible witness that way keeps the incumbent with status BEAM_LIMIT
-(a reported beam fallback, never retried at a larger memory budget). A programme whose frontier would
-exceed the fixed cap
-RefinementParameters.frontier_bytes (frontier_limit) stops and keeps the incumbent (a reported
-fallback; it binds at no reference size). Large programmes follow the fixed retry schedule
-(programme_budgets): a solve that passes a budget is repeated within the next
-one, so the result always equals one solve at the cap.
-
-Canonical answer (a pure function of the problem): among paths within tol = CANONICAL_TOL + 1e-9 |H(incumbent)|
-of the optimum, the incumbent if it is one, else the lexicographically first path, units left to right, each in the order (incumbent
-row, then ascending index), found by exact restricted programmes.
-
-Shared background: only the K states containing f depend on f's row, so children carry their K focal
-values and per-bin switch floors and the background enters through per-unit tables
-(window_dp). Work that does not depend on a focal founder, a row or a child is done once: the
-per-state unit sums once per window for all its focal problems (_state_tables; per focal only the
-background's segment maxima differ), with the closed start message and the incumbent's value; a
-parent's row-independent quantities once per parent (_parent, _parent_floor); and a child sample
-whose focal states can reach neither a bin maximum of the background nor the closing floor (an
-upper bound by monotone rounding) takes the parent's shared outcome. Maxima over states use
-interleaved running maxima (objective.row_max): the values of a sequential scan. The all-state
-reference recursions of the box bound and the programme are kept as tests (tests/oracle/fast/refinement), which check
-that the shared-background forms give the same answers.
+The box certificate precedes an exact frontier programme with at most 64 kept
+paths. Overflow selects heuristic seeded search with shared max-plus messages;
+the ordinary recurrence rescores its offer without an optimality certificate.
+Seeded search does not count as a beam truncation. Exact site-level F and the
+acceptance guards decide which proposals enter the panel. Canonical ties prefer
+the incumbent, then content order. One template account covers all focal work;
+exhaustion discards the whole template, independently of its thread-map width.
 """
 
 from __future__ import annotations
@@ -69,13 +18,14 @@ from numba import prange
 from numba.typed import List
 
 from haplotype_reconstruction.core.errors import InputError, InvariantError, SettingsError
-from haplotype_reconstruction.core.kernels import kernel
+from haplotype_reconstruction.core.kernels import THREAD_WORK_FLOOR, kernel
 
+from . import seeded_search
+from .costs import seeded_search_bytes
 from .emissions import pair_index
 from .objective import row_max
 from .overloads import overloads_for
 from .parameters import (
-    BEAM_CAP,
     BOX_ARITHMETIC_MARGIN,
     CANONICAL_SKIP_ABSOLUTE_MARGIN,
     CANONICAL_SKIP_RELATIVE_MARGIN,
@@ -85,10 +35,13 @@ from .parameters import (
     DOMINANCE_ABSOLUTE_MARGIN,
     DOMINANCE_RELATIVE_MARGIN,
     DOMINANCE_TOLERANCE,
-    DUAL_RELATIVE_SLACK,
     FINE_STRIDE,
     FINE_WINDOW,
+    HYBRID_FRONTIER,
+    INTERVAL_SEED_STARTS,
+    LOCAL_ITERATIONS,
     PROGRAMME_RELATIVE_MARGIN,
+    SEED_STARTS,
 )
 from .work_limit import WindowWorkState
 
@@ -96,39 +49,27 @@ from .work_limit import WindowWorkState
 STORE_BYTES = 128 * 1024**2
 
 OK, INFEASIBLE, BACKSTOP = 0, 1, 2
-# Empty arrays: disable _child's floor shortcut (the beam and the canonical-tie scan; read only).
+# Empty arrays disable _child's floor shortcut during canonical fixing (read only).
 NO_FLOOR = np.empty(0)
 NO_FLOOR2 = np.empty((0, 0))
-# A programme whose frontier passes EXPLORE_FRONTIER restarts with tighter pruning (work only, never
-# the answer): the Lagrangian suffix bounds of the window problem and the best feasible value among
-# the incumbent, a BEAM_WIDTH-wide beam and the dual's decoded paths. The multiplier search runs
-# block-coordinate sweeps until its bound is within the canonical tolerance of a feasible value, at
-# most DUAL_SWEEPS (a sweep can leave the bound unchanged while the decoded paths still improve);
-# any zero-sum multipliers give valid bounds, so the limit never decides an answer.
-EXPLORE_FRONTIER = 256
-BEAM_WIDTH = 16
-# A programme past the Lagrangian restart keeps at most BEAM_CAP partial paths per
-# unit (child order: prefix value, incumbent row first, parent, row), bounding the retained frontier.
-# The cap is above every
-# tightened post-dominance frontier measured in component replays (at most 270). A binding cap makes that
-# programme approximate (the best path the beam keeps; proposals only, acceptance stays exact): every
-# unit where it dropped a child whose bound still reached the programme's floor is counted
-# (beam_truncations in the window receipts and sweep proposal stats), and a main programme that loses
-# its feasible witness that way keeps the incumbent as a reported fallback (solve_focal).
-DUAL_SWEEPS = 100
-
-# solve_focal statuses (BEAM_LIMIT: the beam-capped main programme lost its witness; the
-# incumbent is kept and reported, and a larger memory budget would not help, so it is not retried)
+# Focal statuses. BEAM_LIMIT is retained for existing receipt readers; the exact
+# hybrid attempt stops on frontier overflow and never truncates a beam.
 UNCHANGED, CHANGED, FRONTIER_LIMIT, LOST = 0, 1, 2, 3
 BEAM_LIMIT = 5
 
 # Artifact-only numerical work account; caller supplies an explicit budget, default off.
 WORK_LIMIT = 4
+# work[WINDOW_SHARED], work[WINDOW_SHARED + 1]: the units of solve_template's window-shared debits (phases 0 and 13,
+# once per call whatever its focal count), which merge_focal_chunks counts once per template.
+WINDOW_SHARED = 22
 
 
 @kernel(overloads=overloads_for(__name__, "_debit"), cache=True, nogil=True)
 def _debit(work, phase, a, b=1, c=1, d=1, e=1, f=1):
-    """Charge ceil(product / 2**shift), once, for positive loop-domain factors."""
+    """Charge ceil(product / 2**shift), once, for positive loop-domain factors.
+
+    O(1) time and storage.
+    """
     if len(work) == 0:
         return
     shift = work[20]
@@ -177,7 +118,10 @@ def _debit(work, phase, a, b=1, c=1, d=1, e=1, f=1):
 
 @kernel(overloads=overloads_for(__name__, "_charge_window"), cache=True, nogil=True)
 def _charge_window(work, phase, emissions, cols, domain):
-    """Conservative normalized loop domains; factor128 is not a literal FLOP count."""
+    """Conservative normalized loop domains; factor128 is not a literal FLOP count.
+
+    O(W) dimension scan; debits normalized loop domains.
+    """
     if len(work) == 0:
         return
     n, w, k = emissions[0].shape[0], len(emissions), cols.shape[1]
@@ -190,18 +134,6 @@ def _charge_window(work, phase, emissions, cols, domain):
         _debit(work, phase, 128, w * (k + r + 1) + q + 1)
     elif phase == 1:
         _debit(work, phase, 128, n, w, q * (b + 1) + r * (b * k + b * b + 1) + q + b * b + k + r + 1)
-    elif phase == 2:
-        _debit(work, phase, 128, n, w, q * (b + 1) + r * (b * k + b * b + 1) + k + r + 1)
-    elif phase == 10:
-        children, levels, power = BEAM_WIDTH * r, 1, 2
-        while power < children:
-            levels += 1
-            power *= 2
-        _debit(work, phase, 128, n, w, (BEAM_WIDTH + 1) * q * (b + 1) + BEAM_WIDTH * r * (b * k + b * b + 1))
-        _debit(work, phase, 128, w, 4, children, levels + 2)
-    elif phase == 11:
-        # Conservative after the exact row-max hoist; no policy coefficient retuning.
-        _debit(work, phase, 128, n, w, q * (b + 1) * (r + 1) + (b * k + b * b + 1) * (r + 1) + q + r + 1)
     elif phase == 12:
         _debit(work, phase, 128, n, w, (r + 1) * (q * (b + 1) + b * k + b * b + 1) + q * (b + 1))
         _debit(work, phase, 128, w, w, r + 1, r + 1)
@@ -209,15 +141,15 @@ def _charge_window(work, phase, emissions, cols, domain):
         _debit(work, phase, 128, n, w * (q * (b + 1) + 1) + q + 1)
     elif phase == 14:
         _debit(work, phase, 128, 4 * n * q + w + 1)
-    elif phase == 15:
-        _debit(work, phase, 128, n, w, r + q + 1)
-        _debit(work, phase, 128, w + 1)
 
 
 @kernel(overloads=overloads_for(__name__, "_sum_max"), inline="always", nogil=True)
 def _sum_max(a, b):
-    """max_z (a[z] + b[z]) (non-empty, no NaN) with four interleaved running maxima: the maximum of
-    the same sums as a sequential scan."""
+    """max_z (a[z] + b[z]) (non-empty, no NaN) with four interleaved running maxima: the maximum of the same sums
+    as a sequential scan.
+
+    O(Q) time for Q entries.
+    """
     n = len(a)
     m0 = a[0] + b[0]
     m1 = m0
@@ -254,7 +186,10 @@ def _sum_max(a, b):
 
 @kernel(overloads=overloads_for(__name__, "_diff_max"), inline="always", nogil=True)
 def _diff_max(a, b):
-    """max_z (a[z] - b[z]) (non-empty, no NaN) with four interleaved running maxima."""
+    """max_z (a[z] - b[z]) (non-empty, no NaN) with four interleaved running maxima.
+
+    O(Q) time for Q entries.
+    """
     n = len(a)
     m0 = a[0] - b[0]
     m1 = m0
@@ -291,7 +226,10 @@ def _diff_max(a, b):
 
 @kernel(overloads=overloads_for(__name__, "_extend"), cache=True, nogil=True)
 def _extend(parent_n, parent_c, emis, col, focal, row, first, second, penalty, out_n, out_c):
-    """Closed normalised message of a partial path extended by `row` on one unit."""
+    """Closed normalised message of a partial path extended by `row` on one unit.
+
+    O(N b Q) time for N samples, b unit bins and Q pair states.
+    """
     samples, states = parent_n.shape
     bins = emis.shape[2]
     total = 0.0
@@ -323,7 +261,10 @@ def _extend(parent_n, parent_c, emis, col, focal, row, first, second, penalty, o
 
 @kernel(overloads=overloads_for(__name__, "_join"), cache=True, nogil=True)
 def _join(msg_n, msg_c, tail):
-    """sum_s [C_s + max_z (N_s(z) + tail_s(z))]."""
+    """sum_s [C_s + max_z (N_s(z) + tail_s(z))].
+
+    O(N Q) time.
+    """
     samples = msg_n.shape[0]
     total = 0.0
     for s in range(samples):
@@ -333,7 +274,10 @@ def _join(msg_n, msg_c, tail):
 
 @kernel(overloads=overloads_for(__name__, "_dominance"), cache=True, nogil=True)
 def _dominance(n_i, t_i, n_j, t_j, tol):
-    """True iff no completion makes i better than j by more than tol."""
+    """True iff no completion makes i better than j by more than tol.
+
+    O(N Q) time.
+    """
     samples = n_i.shape[0]
     d = t_i - t_j
     if d > tol:
@@ -347,7 +291,10 @@ def _dominance(n_i, t_i, n_j, t_j, tol):
 
 @kernel(overloads=overloads_for(__name__, "_stable_order"), cache=True, nogil=True)
 def _stable_order(keys_float, keys_inc, par, cho):
-    """Order by (-T, incumbent row first, parent, row), stable and deterministic."""
+    """Order by (-T, incumbent row first, parent, row), stable and deterministic.
+
+    O(C log C) time for C children.
+    """
     order = np.argsort(cho, kind="mergesort")
     order = order[np.argsort(par[order], kind="mergesort")]
     order = order[np.argsort(-keys_inc[order], kind="mergesort")]
@@ -376,7 +323,10 @@ def _stable_order(keys_float, keys_inc, par, cho):
 # --------------------------------------------------------------------------------------
 @kernel(overloads=overloads_for(__name__, "_focal_layout"), cache=True, nogil=True)
 def _focal_layout(focal, first, second):
-    """fz[c] = state {f, c}; bg = the states without f (in state order)."""
+    """fz[c] = state {f, c}; bg = the states without f (in state order).
+
+    O(Q) time.
+    """
     states = len(first)
     founders = second[states - 1] + 1
     fz = np.empty(founders, np.int64)
@@ -397,11 +347,14 @@ def _focal_layout(focal, first, second):
 
 @kernel(overloads=overloads_for(__name__, "_state_tables"), cache=True, nogil=True)
 def _state_tables(emis, col, first, second):
-    """Focal-independent sums of one unit for every state z (rows fixed by col), shared by every
-    focal problem of a window: P[s, z, k] = sum_{m <= k} e_m(z), T[s, z, k] = sum_{m >= k} e_m(z)
-    (T[.., t] = 0) and, per (s, a, c) with a <= c, the largest run sum sum_{m=a}^{c} e_m(z) over
-    all states (best), the founders (bx, by) of the first state attaining it and the largest over
-    the states without founder bx (mx) and without founder by (my)."""
+    """Focal-independent sums of one unit for every state z (rows fixed by col), shared by every focal problem of a
+    window: P[s, z, k] = sum_{m <= k} e_m(z), T[s, z, k] = sum_{m >= k} e_m(z) (T[.., t] = 0) and, per (s, a, c)
+    with a <= c, the largest run sum sum_{m=a}^{c} e_m(z) over all states (best), the founders (bx, by) of the
+    first state attaining it and the largest over the states without founder bx (mx) and without founder by
+    (my).
+
+    O(N Q b^2) time.
+    """
     samples = emis.shape[0]
     bins = emis.shape[2]
     states = len(first)
@@ -449,9 +402,12 @@ def _state_tables(emis, col, first, second):
 
 @kernel(overloads=overloads_for(__name__, "_unit_tables"), cache=True, nogil=True)
 def _unit_tables(P, T, best, bx, by, mx, my, focal, bg):
-    """Background sums of one unit for focal founder f (from _state_tables): prefix[s, b, k] =
-    sum_{m <= k} e_m, suffix[s, b, k] = sum_{m >= k} e_m (suffix[.., t] = 0) of background state
-    bg[b], and seg[s, a, c] = max_b sum_{m=a}^{c} e_m over the background (the states without f)."""
+    """Background sums of one unit for focal founder f (from _state_tables): prefix[s, b, k] = sum_{m <= k} e_m,
+    suffix[s, b, k] = sum_{m >= k} e_m (suffix[.., t] = 0) of background state bg[b], and seg[s, a, c] = max_b
+    sum_{m=a}^{c} e_m over the background (the states without f).
+
+    O(N Q b^2) time.
+    """
     samples = P.shape[0]
     bins = P.shape[2]
     nb = len(bg)
@@ -480,12 +436,13 @@ def _unit_tables(P, T, best, bx, by, mx, my, focal, bg):
 def window_box(emissions, cols, cands, offsets, focal, first, second, penalty, end, fz, bg, prefixes, suffixes, segs):
     """U[u] >= the value of units u.. plus the end flank from any state, per sample.
 
-    Each sample may choose f's row of every later unit freely (a relaxation); the
-    backward bin recursion is emission-then-switch, matching the forward one. Shared
-    background: per row only the K focal states and t switch maxima m_k are carried; the
-    background states take max over rows of the floors, which commutes with the
-    (monotone) float subtraction of the penalty, so one-bin units equal the all-state
-    reference recursion (tests) bitwise.
+    Each sample may choose f's row of every later unit freely (a relaxation); the backward bin recursion is
+    emission-then-switch, matching the forward one. Shared background: per row only the K focal states and t
+    switch maxima m_k are carried; the background states take max over rows of the floors, which commutes with
+    the (monotone) float subtraction of the penalty, so one-bin units equal the all-state reference recursion
+    (tests) bitwise.
+
+    O(N W (Q (b+1)+R (b K+b^2))) time.
     """
     units = len(emissions)
     samples, states = end.shape
@@ -582,13 +539,15 @@ def window_box(emissions, cols, cands, offsets, focal, first, second, penalty, e
 
 @kernel(overloads=overloads_for(__name__, "_parent"), cache=True, nogil=True)
 def _parent(parent_n, bg, fz, prefix, unext, penalty, pmax, pb, tp, hi, lo, arg, a0, background):
-    """Row-independent tables of one parent on one unit, per sample: the parent's maximum pmax,
-    pb[s, k] = max_b P_k[b] (the background chain after bin k without later floors), tp[s] =
-    max_b (P_{t-1}[b] + U[b]), the extremes and the argmax of P_{t-1} over the background (the
-    dominance shortcuts), the focal states after the unit's first switch a0[s, c] = max(N[fz[c]],
-    pmax - pen) (every child's first step) and, when `background` has rows, the background states
-    P_{t-1}[z] of every child (its shared form: max(N[z], pmax - pen) + E_{0..t-1}[z]). One pass
-    over the background serves all of them; computed once per parent, not per child."""
+    """Row-independent tables of one parent on one unit, per sample: the parent's maximum pmax, pb[s, k] = max_b
+    P_k[b] (the background chain after bin k without later floors), tp[s] = max_b (P_{t-1}[b] + U[b]), the
+    extremes and the argmax of P_{t-1} over the background (the dominance shortcuts), the focal states after the
+    unit's first switch a0[s, c] = max(N[fz[c]], pmax - pen) (every child's first step) and, when `background`
+    has rows, the background states P_{t-1}[z] of every child (its shared form: max(N[z], pmax - pen) +
+    E_{0..t-1}[z]). One pass over the background serves all of them; computed once per parent, not per child.
+
+    O(N (Q b+K+b^2)) time.
+    """
     samples = parent_n.shape[0]
     bins = prefix.shape[2]
     nb = len(bg)
@@ -635,10 +594,13 @@ def _parent(parent_n, bg, fz, prefix, unext, penalty, pmax, pb, tp, hi, lo, arg,
 
 @kernel(overloads=overloads_for(__name__, "_parent_one_bin"), cache=True, nogil=True)
 def _parent_one_bin(parent_n, bg, fz, prefix, unext, penalty, pmax, pb, tp, hi, lo, arg, a0, background, store):
-    """_parent on a one-bin unit: the background values P[b] = max(N[bg[b]], pmax - pen) + e[b] first,
-    then their maximum (= pb, = hi) with its first index (arg), minimum (lo) and the bound term
-    tp = max_b (P[b] + U[bg[b]]) by four interleaved running extremes each, combined so that the
-    values (and the first index of the maximum) are those of the sequential scan."""
+    """_parent on a one-bin unit: the background values P[b] = max(N[bg[b]], pmax - pen) + e[b] first, then their
+    maximum (= pb, = hi) with its first index (arg), minimum (lo) and the bound term tp = max_b (P[b] +
+    U[bg[b]]) by four interleaved running extremes each, combined so that the values (and the first index of the
+    maximum) are those of the sequential scan.
+
+    O(N (Q+K)) time.
+    """
     samples = parent_n.shape[0]
     nb = len(bg)
     founders = len(fz)
@@ -757,7 +719,10 @@ def _parent_one_bin(parent_n, bg, fz, prefix, unext, penalty, pmax, pb, tp, hi, 
 
 @kernel(overloads=overloads_for(__name__, "_row_pairs"), cache=True, nogil=True)
 def _row_pairs(row, col, focal, first, second, fz, out_a, out_b):
-    """Emission row indices (out_a[c], out_b[c]) of the focal states {f, c} when f takes `row`."""
+    """Emission row indices (out_a[c], out_b[c]) of the focal states {f, c} when f takes `row`.
+
+    O(K) time.
+    """
     for c in range(len(fz)):
         z = fz[c]
         out_a[c] = row if first[z] == focal else col[first[z]]
@@ -766,7 +731,10 @@ def _row_pairs(row, col, focal, first, second, fz, out_a, out_b):
 
 @kernel(overloads=overloads_for(__name__, "_unit_rows"), cache=True, nogil=True)
 def _unit_rows(cands, begin, rows, col, focal, first, second, fz):
-    """_row_pairs of a unit's candidate rows cands[begin:begin + rows]: (rows, K) int64 arrays."""
+    """_row_pairs of a unit's candidate rows cands[begin:begin + rows]: (rows, K) int64 arrays.
+
+    O(R K) time.
+    """
     founders = len(fz)
     ra = np.empty((rows, founders), np.int64)
     rb = np.empty((rows, founders), np.int64)
@@ -777,7 +745,10 @@ def _unit_rows(cands, begin, rows, col, focal, first, second, fz):
 
 @kernel(overloads=overloads_for(__name__, "_focal_values"), cache=True, nogil=True)
 def _focal_values(values, fz):
-    """values[:, fz] as a contiguous (S, K) array."""
+    """values[:, fz] as a contiguous (S, K) array.
+
+    O(N K) time.
+    """
     samples = values.shape[0]
     out = np.empty((samples, len(fz)))
     for s in range(samples):
@@ -788,8 +759,11 @@ def _focal_values(values, fz):
 
 @kernel(overloads=overloads_for(__name__, "_row_maxima"), cache=True, nogil=True)
 def _row_maxima(emis, ra, rb):
-    """emax[g, s, k] = max_c e_k(ra[g, c], rb[g, c]): the largest bin-k emission of any focal
-    state of a child taking row g (with _parent_floor, the floor test of _child)."""
+    """emax[g, s, k] = max_c e_k(ra[g, c], rb[g, c]): the largest bin-k emission of any focal state of a child
+    taking row g (with _parent_floor, the floor test of _child).
+
+    O(N R b K) time.
+    """
     rows, founders = ra.shape
     samples = emis.shape[0]
     bins = emis.shape[2]
@@ -808,12 +782,14 @@ def _row_maxima(emis, ra, rb):
 
 @kernel(overloads=overloads_for(__name__, "_parent_floor"), cache=True, nogil=True)
 def _parent_floor(parent_c, pmax, pb, tp, a0, seg, te, ubmax, ufz, penalty, amax, fmb, fs, fm, flo, fd, fcs, fsb):
-    """The outcome every child of the parent shares in sample s when its focal states never reach
-    the background's maximum within the unit nor its closing floor (_child's floor test): the
-    bin maxima fmb[s, k] and switch floors fs[s, k] are then the background's (pb and the
-    earlier floors through seg), the unit-end maximum fm, every closed focal value fd = lo - m,
-    and the sample's terms of the child's total (fcs) and bound (fsb) are fixed. Computed by
-    _child's operations in its order; amax[s] = max_c a0[s, c] starts the test."""
+    """The outcome every child of the parent shares in sample s when its focal states never reach the background's
+    maximum within the unit nor its closing floor (_child's floor test): the bin maxima fmb[s, k] and switch
+    floors fs[s, k] are then the background's (pb and the earlier floors through seg), the unit-end maximum fm,
+    every closed focal value fd = lo - m, and the sample's terms of the child's total (fcs) and bound (fsb) are
+    fixed. Computed by _child's operations in its order; amax[s] = max_c a0[s, c] starts the test.
+
+    O(N (K+b^2)) time.
+    """
     samples, founders = a0.shape
     bins = pb.shape[1]
     for s in range(samples):
@@ -886,23 +862,21 @@ def _child(
     fd,
     fcs,
     fsb,
-    out_b,
 ):
     """One child (a parent extended by one row on one unit) without its background states.
 
-    From the parent's tables (_parent: pmax, pb, tp, a0), the unit's suffix bound at the focal
-    states ufz = U[u + 1][:, fz] and the row's focal emission indices ra, rb (_row_pairs); fills
-    per sample the unit-end maximum out_m, the closed focal values out_f and the switch floors
-    out_s[k] = m_k - pen; returns the child's total (sum of its constants, the reference's
-    ordering key) and its bound (the reference's _join against U[u + 1]); when out_b has entries,
-    out_b[s] = the sample's term of the bound (the dual sweep's max-marginal).
+    From the parent's tables (_parent: pmax, pb, tp, a0), the unit's suffix bound at the focal states ufz = U[u
+    + 1][:, fz] and the row's focal emission indices ra, rb (_row_pairs); fills per sample the unit-end maximum
+    out_m, the closed focal values out_f and the switch floors out_s[k] = m_k - pen; returns the child's total
+    (sum of its constants, the reference's ordering key) and its bound (the reference's _join against U[u + 1]);
 
-    Floor shortcut (when amax has entries: _parent_floor and the row's _row_maxima emax): X_k, an
-    upper bound on every focal state after bin k (X_0 = amax + emax_0, X_k = max(X_{k-1}, fs_k) +
-    emax_k; rounding is monotone), is checked against the background's maximum of each next bin
-    and the closing floor. A sample that passes never lets a focal state set a maximum or close
-    above the floor, so it takes the parent's shared outcome: the values the full computation
-    produces.
+    Floor shortcut (when amax has entries: _parent_floor and the row's _row_maxima emax): X_k, an upper bound on
+    every focal state after bin k (X_0 = amax + emax_0, X_k = max(X_{k-1}, fs_k) + emax_k; rounding is
+    monotone), is checked against the background's maximum of each next bin and the closing floor. A sample that
+    passes never lets a focal state set a maximum or close above the floor, so it takes the parent's shared
+    outcome: the values the full computation produces.
+
+    O(N (b K+b^2)) time.
     """
     samples = a0.shape[0]
     founders = a0.shape[1]
@@ -911,7 +885,6 @@ def _child(
     total = 0.0
     bound = 0.0
     floor = len(amax) > 0
-    terms = len(out_b) > 0
     for s in range(samples):
         sw = pmax[s] - penalty
         out_s[s, 0] = sw
@@ -935,8 +908,6 @@ def _child(
                     out_f[s, c] = d
                 total += fcs[s]
                 bound += fsb[s]
-                if terms:
-                    out_b[s] = fsb[s]
                 continue
         if bins == 1:
             # The unit-end maximum over the background (pb) and the focal states, taken as the
@@ -997,14 +968,15 @@ def _child(
                 best = w
         term = cs + best
         bound += term
-        if terms:
-            out_b[s] = term
     return total, bound
 
 
 @kernel(overloads=overloads_for(__name__, "_parent_alone"), cache=True, nogil=True)
 def _parent_alone(parent_n, bg, fz, prefix, unext, penalty):
-    """_parent's tables of one parent for its children's totals and bounds: (pmax, pb, tp, a0)."""
+    """_parent's tables of one parent for its children's totals and bounds: (pmax, pb, tp, a0).
+
+    O(N (Q b+K)) time.
+    """
     samples, states = parent_n.shape
     bins = prefix.shape[2]
     pmax = np.empty(samples)
@@ -1032,10 +1004,13 @@ def _parent_alone(parent_n, bg, fz, prefix, unext, penalty):
 
 @kernel(overloads=overloads_for(__name__, "_assemble_one_bin"), cache=True, nogil=True)
 def _assemble_one_bin(parent_c, background, bg, fz, m_i, f_i, penalty, out_n, out_c):
-    """The closed message of a one-bin child from its parent's shared background (_parent) and its
-    own focal values (_child): the values _extend computes, by the same operations (the unit-end
-    maximum m_i and the closed focal values are the child's; background states close as
-    max(P[z], m - pen) - m; constants parent_c + m). Returns the child's total."""
+    """The closed message of a one-bin child from its parent's shared background (_parent) and its own focal values
+    (_child): the values _extend computes, by the same operations (the unit-end maximum m_i and the closed focal
+    values are the child's; background states close as max(P[z], m - pen) - m; constants parent_c + m). Returns
+    the child's total.
+
+    O(N Q) time.
+    """
     samples = len(m_i)
     total = 0.0
     for s in range(samples):
@@ -1056,7 +1031,10 @@ def _assemble_one_bin(parent_c, background, bg, fz, m_i, f_i, penalty, out_n, ou
 
 @kernel(overloads=overloads_for(__name__, "_background_value"), cache=True, nogil=True)
 def _background_value(p_last, m, floors, suffix_b, bins, penalty):
-    """Closed background value max(-pen, P_{t-1} - M, max_{l >= 1} (s_l - M + E_{l..t-1}))."""
+    """Closed background value max(-pen, P_{t-1} - M, max_{l >= 1} (s_l - M + E_{l..t-1})).
+
+    O(b) time.
+    """
     v = p_last - m
     for l in range(1, bins):
         w = floors[l] - m + suffix_b[l]
@@ -1071,15 +1049,16 @@ def _background_value(p_last, m, floors, suffix_b, bins, penalty):
 def _same_parent_bounds(
     mi, fi, si, ti, mj, fj, sj, tj, bins, pmax, hi, lo, arg, parent_n, bg, prefix, suffix, probes, penalty, stop_above
 ):
-    """Upper and lower bounds on d(i, j) = t_i - t_j + sum_s max_z (n_i - n_j) for two
-    children of one parent, from their focal values and floors.
+    """Upper and lower bounds on d(i, j) = t_i - t_j + sum_s max_z (n_i - n_j) for two children of one parent, from
+    their focal values and floors.
 
-    Focal states are compared directly. Background: one bin -> the closed values are
-    max(P - M, -pen), a monotone function of the shared P, so the largest difference is
-    at the extremes of P (bounds equal); several bins -> upper bound
-    max(0, max_l alpha_i,l - alpha_j,l) (alpha_0 = -M, alpha_l = s_l - M) and, as the lower
-    bound, the exact difference at probe states (the argmax of P_{t-1} and of each
-    E_{l..t-1}). Stops once the lower bound exceeds stop_above (upper returned as inf).
+    Focal states are compared directly. Background: one bin -> the closed values are max(P - M, -pen), a
+    monotone function of the shared P, so the largest difference is at the extremes of P (bounds equal); several
+    bins -> upper bound max(0, max_l alpha_i,l - alpha_j,l) (alpha_0 = -M, alpha_l = s_l - M) and, as the lower
+    bound, the exact difference at probe states (the argmax of P_{t-1} and of each E_{l..t-1}). Stops once the
+    lower bound exceeds stop_above (upper returned as inf).
+
+    O(N (K+b^2)) time.
     """
     samples = fi.shape[0]
     founders = fi.shape[1]
@@ -1131,13 +1110,19 @@ def _same_parent_bounds(
 
 @kernel(overloads=overloads_for(__name__, "_safety"), cache=True, nogil=True)
 def _safety(ti, tj, tk):
-    """Float margin around a dominance threshold (covers both arithmetics' rounding)."""
+    """Float margin around a dominance threshold (covers both arithmetics' rounding).
+
+    O(1) time.
+    """
     return DOMINANCE_ABSOLUTE_MARGIN + DOMINANCE_RELATIVE_MARGIN * (abs(ti) + abs(tj) + abs(tk))
 
 
 @kernel(overloads=overloads_for(__name__, "_dominance_value"), cache=True, nogil=True)
 def _dominance_value(n_i, t_i, n_j, t_j, tol):
-    """_dominance with the accumulated value: (dominated, d), d complete when dominated."""
+    """_dominance with the accumulated value: (dominated, d), d complete when dominated.
+
+    O(N Q) time.
+    """
     samples = n_i.shape[0]
     d = t_i - t_j
     if d > tol:
@@ -1151,8 +1136,11 @@ def _dominance_value(n_i, t_i, n_j, t_j, tol):
 
 @kernel(overloads=overloads_for(__name__, "_one_bin_background"), cache=True, nogil=True)
 def _one_bin_background(parent_n, pmax, emis, col, first, second, bg, penalty, out):
-    """Background states of every child of a parent on a one-bin unit, before closing:
-    max(N[z], m - pen) + e[z] (the reference's _extend arithmetic, shared by all rows)."""
+    """Background states of every child of a parent on a one-bin unit, before closing: max(N[z], m - pen) + e[z]
+    (the reference's _extend arithmetic, shared by all rows).
+
+    O(N Q) time.
+    """
     samples = parent_n.shape[0]
     for s in range(samples):
         sw = pmax[s] - penalty
@@ -1166,9 +1154,12 @@ def _one_bin_background(parent_n, pmax, emis, col, first, second, bg, penalty, o
 
 @kernel(overloads=overloads_for(__name__, "_cross_lower_bound"), cache=True, nogil=True)
 def _cross_lower_bound(m_i, f_i, t_i, background, fz, probe, n_j, t_j, penalty, one_bin, s_i, suffix, bins, threshold):
-    """True when a lower bound of d(i, j) exceeds threshold: the running sum of the
-    per-sample maxima restricted to the focal states and the background state where the
-    parent's shared chain is largest (O(K) per sample, stopping as soon as it exceeds)."""
+    """True when a lower bound of d(i, j) exceeds threshold: the running sum of the per-sample maxima restricted to
+    the focal states and the background state where the parent's shared chain is largest (O(K) per sample,
+    stopping as soon as it exceeds).
+
+    O(N (Q+b+K)) time.
+    """
     samples = f_i.shape[0]
     d = t_i - t_j
     if d > threshold:
@@ -1200,11 +1191,13 @@ def _cross_lower_bound(m_i, f_i, t_i, background, fz, probe, n_j, t_j, penalty, 
 
 @kernel(overloads=overloads_for(__name__, "_dominance_one_bin"), cache=True, nogil=True)
 def _dominance_one_bin(m_i, f_i, t_i, background, fz, bg, n_j, t_j, tol, penalty):
-    """_dominance_value(n_i, t_i, n_j, t_j, tol) for a one-bin child kept in shared form:
-    every closed entry of n_i is formed with the reference's operations (focal values
-    f_i; background max(x, M - pen) - M from the parent's shared x), so the values,
-    the per-sample maxima, the accumulation order and the early exit are the
-    reference's."""
+    """_dominance_value(n_i, t_i, n_j, t_j, tol) for a one-bin child kept in shared form: every closed entry of n_i
+    is formed with the reference's operations (focal values f_i; background max(x, M - pen) - M from the
+    parent's shared x), so the values, the per-sample maxima, the accumulation order and the early exit are the
+    reference's.
+
+    O(N Q) time.
+    """
     samples = f_i.shape[0]
     d = t_i - t_j
     if d > tol:
@@ -1233,7 +1226,10 @@ def _dominance_one_bin(m_i, f_i, t_i, background, fz, bg, n_j, t_j, tol, penalty
 
 @kernel(overloads=overloads_for(__name__, "_multi_bin_background"), cache=True, nogil=True)
 def _multi_bin_background(parent_n, pmax, prefix, bg, penalty, out):
-    """P_{t-1}[z] = max(N[z], m - pen) + E_{0..t-1}[z] of a parent's background states."""
+    """P_{t-1}[z] = max(N[z], m - pen) + E_{0..t-1}[z] of a parent's background states.
+
+    O(N Q b) time.
+    """
     samples = parent_n.shape[0]
     bins = prefix.shape[2]
     for s in range(samples):
@@ -1248,10 +1244,12 @@ def _multi_bin_background(parent_n, pmax, prefix, bg, penalty, out):
 
 @kernel(overloads=overloads_for(__name__, "_dominance_multi_bin"), cache=True, nogil=True)
 def _dominance_multi_bin(m_i, f_i, s_i, t_i, p_last, suffix, fz, bg, n_j, t_j, tol, penalty):
-    """_dominance of a multi-bin child in shared form against a materialised path: 1
-    dominated, 0 not, -1 open (the closed background values are formed from the
-    decomposition, exact in real arithmetic; decided only clear of tol by the float
-    margin, the caller materialises otherwise)."""
+    """_dominance of a multi-bin child in shared form against a materialised path: 1 dominated, 0 not, -1 open (the
+    closed background values are formed from the decomposition, exact in real arithmetic; decided only clear of
+    tol by the float margin, the caller materialises otherwise).
+
+    O(N Q b) time.
+    """
     samples = f_i.shape[0]
     bins = s_i.shape[1]
     safety = _safety(t_i, t_j, 0.0)
@@ -1280,8 +1278,11 @@ def _dominance_multi_bin(m_i, f_i, s_i, t_i, p_last, suffix, fz, bg, n_j, t_j, t
 
 @kernel(overloads=overloads_for(__name__, "_rows3"), cache=True, nogil=True)
 def _rows3(buffer, rows, a, b):
-    """A scratch array of at least `rows` leading entries (a fresh one only when `buffer` is too
-    small; contents are not kept)."""
+    """A scratch array of at least `rows` leading entries (a fresh one only when `buffer` is too small; contents
+    are not kept).
+
+    O(1) view construction.
+    """
     if buffer.shape[0] >= rows:
         return buffer
     return np.empty((max(rows, 2 * buffer.shape[0]), a, b))
@@ -1289,6 +1290,7 @@ def _rows3(buffer, rows, a, b):
 
 @kernel(overloads=overloads_for(__name__, "_rows2"), cache=True, nogil=True)
 def _rows2(buffer, rows, a):
+    """O(1) view construction."""
     if buffer.shape[0] >= rows:
         return buffer
     return np.empty((max(rows, 2 * buffer.shape[0]), a))
@@ -1321,23 +1323,18 @@ def window_dp(
     suffixes,
     segs,
     work,
-    beam=0,
 ):
     """Exact maximum of H over f's rows on units unit0.. from one partial path.
 
-    Returns (status, value, path of units unit0.., maximum frontier, truncated units). status 1:
-    no path reaches lower - margin; status 2: the frontier exceeded `backstop`. With beam > 0
-    at most `beam` children are kept per unit (existing child order); truncated counts the units
-    where the cut dropped a child whose bound still reached lower - margin: the result is then
-    approximate (the best path the beam found), recorded in work[21] when the account has it.
-    The all-state programme (tests) with the same child order, bound pruning, dominance
-    decisions and kept messages: children are formed per parent from the shared
-    background (O(S (t K + t^2)) each instead of O(S t Q)); a child's full message is
-    materialised (_extend) only when it is kept or must be compared with a child of
-    another parent. A child dominated by a kept path j, through an earlier sibling c
-    dominated by j, is dropped when d(i, c) + d(c, j) <= tol clears the float margin
-    (d is subadditive). Work arrays are reused across units (the frontier and the kept
-    paths swap buffers); their sizes never change a value or a decision.
+    Returns (status, value, path of units unit0.., maximum frontier, zero). Status 1 means no path reaches
+    lower-margin; status 2 means the frontier exceeded backstop. With fixed frontier F, time per unit is O(N
+    (F^2 R (Q (b+1)+b K+b^2)+F Q b^2)); Q=K(K+1)/2. The all-state programme (tests) with the same child order,
+    bound pruning, dominance decisions and kept messages: children are formed per parent from the shared
+    background (O(S (t K + t^2)) each instead of O(S t Q)); a child's full message is materialised (_extend)
+    only when it is kept or must be compared with a child of another parent. A child dominated by a kept path j,
+    through an earlier sibling c dominated by j, is dropped when d(i, c) + d(c, j) <= tol clears the float
+    margin (d is subadditive). Work arrays are reused across units (the frontier and the kept paths swap
+    buffers); their sizes never change a value or a decision.
     """
     units = len(emissions)
     samples, states = start_n.shape
@@ -1370,7 +1367,6 @@ def window_dp(
     no_background = np.empty((0, states))
     c_m = np.empty((0, samples))
     c_f = np.empty((0, samples, founders))
-    no_terms = np.empty(0)
     for u in range(unit0, units):
         emis = emissions[u]
         col = cols[u]
@@ -1519,7 +1515,6 @@ def window_dp(
                 p_fd[p],
                 p_fcs[p],
                 p_fsb[p],
-                no_terms,
             )
         alive = 0
         for i in range(children):
@@ -1561,14 +1556,6 @@ def window_dp(
         mat_c = np.empty(samples)
         cell_cost = states * (bins + 1) + bins * founders + bins * bins + 1
         for position in range(children):
-            if beam > 0 and count >= beam:
-                for later in range(position, children):
-                    if bounds[order[later]] >= lower - margin:
-                        truncated += 1
-                        if len(work) > 21:
-                            work[21] += 1
-                        break
-                break
             _debit(work, 6, 128, samples, cell_cost)
             i = order[position]
             if bounds[i] < lower - margin:
@@ -1606,7 +1593,6 @@ def window_dp(
                     p_fd[p],
                     p_fcs[p],
                     p_fsb[p],
-                    no_terms,
                 )
             materialised = False
             mat_t = 0.0
@@ -1965,7 +1951,10 @@ def window_dp(
 
 @kernel(overloads=overloads_for(__name__, "path_value"), cache=True, nogil=True)
 def path_value(emissions, cols, focal, rows, first, second, penalty, start_n, start_c, end):
-    """H of one complete path, in the dynamic programme's arithmetic."""
+    """H of one complete path, in the dynamic programme's arithmetic.
+
+    O(N B Q) time for B total window bins.
+    """
     samples, states = start_n.shape
     n = start_n.copy()
     c = start_c.copy()
@@ -1980,8 +1969,10 @@ def path_value(emissions, cols, focal, rows, first, second, penalty, start_n, st
 
 @kernel(overloads=overloads_for(__name__, "_closed_start"), cache=True, nogil=True)
 def _closed_start(start, penalty):
-    """The closed normalised start message (maximum 0, entries >= -penalty) and the
-    per-sample maxima subtracted."""
+    """The closed normalised start message (maximum 0, entries >= -penalty) and the per-sample maxima subtracted.
+
+    O(N Q) time.
+    """
     samples, states = start.shape
     out = np.empty((samples, states))
     top = np.empty(samples)
@@ -1995,8 +1986,11 @@ def _closed_start(start, penalty):
 
 @kernel(overloads=overloads_for(__name__, "_closed_end"), cache=True, nogil=True)
 def _closed_end(end, penalty):
-    """The closed end message: per sample max(end - max(end), -penalty) (maximum 0, entries >=
-    -penalty), the stored backward message's Potts closure."""
+    """The closed end message: per sample max(end - max(end), -penalty) (maximum 0, entries >= -penalty), the
+    stored backward message's Potts closure.
+
+    O(N Q) time.
+    """
     samples, states = end.shape
     out = np.empty((samples, states))
     for s in range(samples):
@@ -2006,615 +2000,12 @@ def _closed_end(end, penalty):
     return out
 
 
-@kernel(overloads=overloads_for(__name__, "_beam_value"), cache=True, nogil=True)
-def _beam_value(
-    emissions,
-    cols,
-    cands,
-    offsets,
-    focal,
-    first,
-    second,
-    penalty,
-    start_n,
-    start_c,
-    end,
-    upper,
-    width,
-    fz,
-    bg,
-    prefixes,
-    suffixes,
-    segs,
-):
-    """H of the best path a beam finds: per unit only the `width` partial paths of largest
-    total are extended (no dominance tests). A feasible value of the window problem
-    (exactly the programme's arithmetic for that path), used to raise the pruning bound."""
-    units = len(emissions)
-    samples, states = start_n.shape
-    founders = len(fz)
-    beam_n = np.empty((1, samples, states))
-    beam_c = np.empty((1, samples))
-    beam_n[0] = start_n
-    beam_c[0] = start_c
-    no_terms = np.empty(0)
-    for u in range(units):
-        emis = emissions[u]
-        col = cols[u]
-        bins = emis.shape[2]
-        begin, stop = offsets[u], offsets[u + 1]
-        rows = stop - begin
-        unext = upper[u + 1]
-        prefix, suffix, seg = prefixes[u], suffixes[u], segs[u]
-        te = np.full((samples, bins), -np.inf)
-        ubmax = np.full(samples, -np.inf)
-        for s in range(samples):
-            for b in range(len(bg)):
-                ub = unext[s, bg[b]]
-                if ub > ubmax[s]:
-                    ubmax[s] = ub
-                for l in range(1, bins):
-                    v = suffix[s, b, l] + ub
-                    if v > te[s, l]:
-                        te[s, l] = v
-        parents = beam_n.shape[0]
-        children = parents * rows
-        totals = np.empty(children)
-        lazy_m = np.empty(samples)
-        lazy_f = np.empty((samples, founders))
-        lazy_s = np.empty((samples, bins))
-        ufz = _focal_values(unext, fz)
-        ra, rb = _unit_rows(cands, begin, rows, col, focal, first, second, fz)
-        for p in range(parents):
-            pm, pbv, tpv, a0 = _parent_alone(beam_n[p], bg, fz, prefix, unext, penalty)
-            for r in range(rows):
-                totals[p * rows + r], _ = _child(
-                    beam_c[p],
-                    pm,
-                    pbv,
-                    tpv,
-                    a0,
-                    seg,
-                    te,
-                    ubmax,
-                    ufz,
-                    emis,
-                    ra[r],
-                    rb[r],
-                    penalty,
-                    lazy_m,
-                    lazy_f,
-                    lazy_s,
-                    NO_FLOOR,
-                    NO_FLOOR2,
-                    NO_FLOOR2,
-                    NO_FLOOR2,
-                    NO_FLOOR,
-                    NO_FLOOR,
-                    NO_FLOOR,
-                    NO_FLOOR,
-                    NO_FLOOR,
-                    no_terms,
-                )
-        order = np.argsort(-totals, kind="mergesort")
-        keep = min(width, children)
-        new_n = np.empty((keep, samples, states))
-        new_c = np.empty((keep, samples))
-        for x in range(keep):
-            i = order[x]
-            _extend(
-                beam_n[i // rows],
-                beam_c[i // rows],
-                emis,
-                col,
-                focal,
-                cands[begin + i % rows],
-                first,
-                second,
-                penalty,
-                new_n[x],
-                new_c[x],
-            )
-        beam_n, beam_c = new_n, new_c
-    best = -np.inf
-    for x in range(beam_n.shape[0]):
-        value = _join(beam_n[x], beam_c[x], end)
-        if value > best:
-            best = value
-    return best
-
-
-@kernel(overloads=overloads_for(__name__, "window_box_dual"), cache=True, nogil=True)
-def window_box_dual(
-    emissions, cols, cands, offsets, focal, first, second, penalty, end, fz, bg, prefixes, suffixes, segs, lam
-):
-    """window_box with multipliers: U[u] >= max over each sample's own choice of f's rows on
-    units u.. of (their value plus the end flank plus sum_{v >= u} lam[s, g_v]), per sample.
-
-    lam[s, g] is paid by sample s for choosing candidate g. If sum_s lam[s, g] = 0 for every
-    candidate of the later units, the multipliers of a common completion cancel, so
-    _join(child, U[u + 1]) bounds the child's completions as window_box does (lam = 0 is the
-    box). Every state of row g's backward pass is shifted by lam[s, g]: the focal states and
-    the row's switch maxima take it per row, the background no-switch chain the largest.
-    """
-    units = len(emissions)
-    samples, states = end.shape
-    founders = len(fz)
-    nb = len(bg)
-    upper = np.empty((units + 1, samples, states))
-    upper[units] = end
-    yf = np.empty(founders)
-    for u in range(units - 1, -1, -1):
-        emis = emissions[u]
-        bins = emis.shape[2]
-        col = cols[u]
-        prefix, suffix, seg = prefixes[u], suffixes[u], segs[u]
-        best_m = np.empty(bins)
-        mrow = np.empty(bins)
-        ue = np.empty(bins)
-        begin = offsets[u]
-        rows = offsets[u + 1] - begin
-        ra, rb = _unit_rows(cands, begin, rows, col, focal, first, second, fz)
-        start = np.empty(founders)
-        top = np.empty(founders)
-        for s in range(samples):
-            for k in range(bins):
-                ue[k] = -np.inf
-            for b in range(nb):
-                ub = upper[u + 1, s, bg[b]]
-                for k in range(bins):
-                    v = ub + suffix[s, b, k]
-                    if v > ue[k]:
-                        ue[k] = v
-            for c in range(founders):
-                start[c] = upper[u + 1, s, fz[c]]
-                top[c] = -np.inf
-            for k in range(bins):
-                best_m[k] = -np.inf
-            lam_max = -np.inf
-            for g in range(rows):
-                ga = ra[g]
-                gb = rb[g]
-                shift = lam[s, begin + g]
-                if shift > lam_max:
-                    lam_max = shift
-                if bins == 1:
-                    # The general step below for one bin, its passes merged (same operations and
-                    # comparison order per value).
-                    m = ue[0]
-                    for c in range(founders):
-                        y = start[c] + emis[s, pair_index(ga[c], gb[c]), 0]
-                        yf[c] = y
-                        if y > m:
-                            m = y
-                    sw = m - penalty
-                    for c in range(founders):
-                        y = yf[c]
-                        if sw > y:
-                            y = sw
-                        v = y + shift
-                        if v > top[c]:
-                            top[c] = v
-                    v = m + shift
-                    if v > best_m[0]:
-                        best_m[0] = v
-                    continue
-                for c in range(founders):
-                    yf[c] = start[c]
-                for k in range(bins - 1, -1, -1):
-                    m = ue[k]
-                    for l in range(k + 1, bins):
-                        v = mrow[l] - penalty + seg[s, k, l - 1]
-                        if v > m:
-                            m = v
-                    for c in range(founders):
-                        yf[c] += emis[s, pair_index(ga[c], gb[c]), k]
-                        if yf[c] > m:
-                            m = yf[c]
-                    mrow[k] = m
-                    sw = m - penalty
-                    for c in range(founders):
-                        if sw > yf[c]:
-                            yf[c] = sw
-                for c in range(founders):
-                    v = yf[c] + shift
-                    if v > top[c]:
-                        top[c] = v
-                for k in range(bins):
-                    v = mrow[k] + shift
-                    if v > best_m[k]:
-                        best_m[k] = v
-            for c in range(founders):
-                upper[u, s, fz[c]] = top[c]
-            for b in range(nb):
-                z = bg[b]
-                v = upper[u + 1, s, z] + suffix[s, b, 0] + lam_max
-                for k in range(bins):
-                    w = best_m[k] - penalty + (prefix[s, b, k - 1] if k > 0 else 0.0)
-                    if w > v:
-                        v = w
-                upper[u, s, z] = v
-    return upper
-
-
-@kernel(overloads=overloads_for(__name__, "_dual_sweep"), cache=True, nogil=True)
-def _dual_sweep(
-    emissions,
-    cols,
-    cands,
-    offsets,
-    focal,
-    incumbent,
-    first,
-    second,
-    penalty,
-    start_n,
-    start_c,
-    upper,
-    lam,
-    fz,
-    bg,
-    prefixes,
-    suffixes,
-    segs,
-    decoded,
-):
-    """One forward block-coordinate sweep of the Lagrangian dual of the window problem.
-
-    Every sample keeps its own copy of f's rows and pays lam[s, g] for candidate g (sum_s
-    lam[s, g] = 0). Unit by unit: theta[g, s] = sample s's max-marginal of candidate g (its
-    best relaxed value with f's row of unit u fixed to g: its relaxed forward message, unit u
-    with row g, and the suffix bound `upper` of the later units, without unit u's
-    multipliers); unit u's multipliers become mean_s theta[g] - theta[g, s] (the last sample
-    takes minus the others' sum), the exact minimiser of the dual over them; decoded[u] = the
-    candidate of largest mean (ties: the incumbent's row, then the first); the relaxed forward
-    message advances through unit u, each state taking its best candidate with the new
-    multipliers. `upper` = window_box_dual of the multipliers at the start of the sweep (the
-    later units are not yet updated when unit u is). Children are formed as in the
-    programme (_child); the background states of the advanced message from the
-    parent's shared chain and the rows' switch floors.
-    """
-    units = len(emissions)
-    samples, states = start_n.shape
-    founders = len(fz)
-    nb = len(bg)
-    an = start_n.copy()
-    ac = start_c.copy()
-    new = np.empty(states)
-    # The parent's shared background and the children's floor tables (_parent, _parent_floor), per unit.
-    background = np.empty((samples, states))
-    amax = np.empty(samples)
-    fm = np.empty(samples)
-    flo = np.empty(samples)
-    fd = np.empty(samples)
-    fcs = np.empty(samples)
-    fsb = np.empty(samples)
-    for u in range(units):
-        emis = emissions[u]
-        col = cols[u]
-        bins = emis.shape[2]
-        begin = offsets[u]
-        rows = offsets[u + 1] - begin
-        unext = upper[u + 1]
-        prefix, suffix, seg = prefixes[u], suffixes[u], segs[u]
-        te = np.full((samples, bins), -np.inf)
-        ubmax = np.full(samples, -np.inf)
-        for s in range(samples):
-            for b in range(nb):
-                ub = unext[s, bg[b]]
-                if ub > ubmax[s]:
-                    ubmax[s] = ub
-                for l in range(1, bins):
-                    v = suffix[s, b, l] + ub
-                    if v > te[s, l]:
-                        te[s, l] = v
-        pm = np.empty(samples)
-        pbv = np.empty((samples, bins))
-        tpv = np.empty(samples)
-        a0 = np.empty((samples, founders))
-        _parent(
-            an,
-            bg,
-            fz,
-            prefix,
-            unext,
-            penalty,
-            pm,
-            pbv,
-            tpv,
-            np.empty(samples),
-            np.empty(samples),
-            np.empty(samples, np.int64),
-            a0,
-            background,
-        )
-        ufz = _focal_values(unext, fz)
-        ra, rb = _unit_rows(cands, begin, rows, col, focal, first, second, fz)
-        emax = _row_maxima(emis, ra, rb)
-        fmb = np.empty((samples, bins))
-        fs = np.empty((samples, bins))
-        _parent_floor(ac, pm, pbv, tpv, a0, seg, te, ubmax, ufz, penalty, amax, fmb, fs, fm, flo, fd, fcs, fsb)
-        rm = np.empty((rows, samples))
-        rf = np.empty((rows, samples, founders))
-        rs = np.empty((rows, samples, bins))
-        theta = np.empty((rows, samples))
-        for g in range(rows):
-            # theta[g, s]: the child's per-sample join with U[u + 1] (its bound terms).
-            _child(
-                ac,
-                pm,
-                pbv,
-                tpv,
-                a0,
-                seg,
-                te,
-                ubmax,
-                ufz,
-                emis,
-                ra[g],
-                rb[g],
-                penalty,
-                rm[g],
-                rf[g],
-                rs[g],
-                amax,
-                emax[g],
-                fmb,
-                fs,
-                fm,
-                flo,
-                fd,
-                fcs,
-                fsb,
-                theta[g],
-            )
-        chosen = 0
-        top = -np.inf
-        for g in range(rows):
-            mean = 0.0
-            for s in range(samples):
-                mean += theta[g, s]
-            mean /= samples
-            rest = 0.0
-            for s in range(samples - 1):
-                lam[s, begin + g] = mean - theta[g, s]
-                rest += lam[s, begin + g]
-            lam[samples - 1, begin + g] = -rest
-            if mean > top or (mean == top and cands[begin + g] == incumbent[u]):
-                top = mean
-                chosen = g
-        decoded[u] = cands[begin + chosen]
-        for s in range(samples):
-            lam_max = -np.inf
-            floor = -np.inf
-            for g in range(rows):
-                x = lam[s, begin + g]
-                if x > lam_max:
-                    lam_max = x
-                y = x + rm[g, s]
-                if y > floor:
-                    floor = y
-            floor -= penalty
-            for c in range(founders):
-                v = -np.inf
-                for g in range(rows):
-                    y = lam[s, begin + g] + rm[g, s] + rf[g, s, c]
-                    if y > v:
-                        v = y
-                new[fz[c]] = v
-            if bins > 1:
-                # Child scoring has finished with te. Reuse it for the row maxima,
-                # which are shared by every background state of this sample/bin.
-                for l in range(1, bins):
-                    w = -np.inf
-                    for g in range(rows):
-                        y = lam[s, begin + g] + rs[g, s, l]
-                        if y > w:
-                            w = y
-                    te[s, l] = w
-            for b in range(nb):
-                z = bg[b]
-                # max(N[z], pmax - pen) + E_{0..t-1}[z]: the parent's shared background (_parent).
-                v = background[s, z] + lam_max
-                if bins > 1:
-                    for l in range(1, bins):
-                        w = te[s, l] + suffix[s, b, l]
-                        if w > v:
-                            v = w
-                if floor > v:
-                    v = floor
-                new[z] = v
-            mx = row_max(new)
-            for z in range(states):
-                an[s, z] = new[z] - mx
-            ac[s] += mx
-
-
-@kernel(overloads=overloads_for(__name__, "_dual_bounds"), cache=True, nogil=True)
-def _dual_bounds(
-    emissions,
-    cols,
-    cands,
-    offsets,
-    focal,
-    incumbent,
-    first,
-    second,
-    penalty,
-    start_n,
-    start_c,
-    end,
-    feasible,
-    tol,
-    fz,
-    bg,
-    prefixes,
-    suffixes,
-    segs,
-    work,
-):
-    """Lagrangian suffix bounds of one window problem for a programme's restart.
-
-    Forward block-coordinate sweeps from zero multipliers (the box); each sweep's decoded
-    consensus path is a feasible value (path_value, the programme's arithmetic). Stops when
-    the dual bound is within tol of the best feasible value or after DUAL_SWEEPS. Returns
-    (upper, slack, best feasible value, dual bound, sweeps): upper = window_box_dual of the
-    final multipliers; slack covers
-    their float residual from zero sum (sum over units of the largest |sum_s lam| of a
-    candidate, plus a rounding allowance) and is added to every pruning margin that uses it.
-    """
-    _charge_window(work, 15, emissions, cols, offsets)
-    units = len(emissions)
-    samples = start_n.shape[0]
-    lam = np.zeros((samples, len(cands)))
-    decoded = np.empty(units, np.int64)
-    _charge_window(work, 2, emissions, cols, offsets)
-    upper = window_box_dual(
-        emissions, cols, cands, offsets, focal, first, second, penalty, end, fz, bg, prefixes, suffixes, segs, lam
-    )
-    bound = _join(start_n, start_c, upper[0])
-    best = feasible
-    sweeps = 0
-    # The last decoded path and its value: a sweep that decodes the same path has the same value.
-    held = np.full(units, -1, np.int64)
-    held_value = -np.inf
-    while sweeps < DUAL_SWEEPS and bound > best + tol:
-        _charge_window(work, 11, emissions, cols, offsets)
-        _dual_sweep(
-            emissions,
-            cols,
-            cands,
-            offsets,
-            focal,
-            incumbent,
-            first,
-            second,
-            penalty,
-            start_n,
-            start_c,
-            upper,
-            lam,
-            fz,
-            bg,
-            prefixes,
-            suffixes,
-            segs,
-            decoded,
-        )
-        sweeps += 1
-        same = True
-        for u in range(units):
-            if decoded[u] != held[u]:
-                same = False
-        if not same:
-            _charge_window(work, 13, emissions, cols, offsets)
-            held_value = path_value(emissions, cols, focal, decoded, first, second, penalty, start_n, start_c, end)
-            held[:] = decoded
-        value = held_value
-        if value > best:
-            best = value
-        _charge_window(work, 2, emissions, cols, offsets)
-        upper = window_box_dual(
-            emissions, cols, cands, offsets, focal, first, second, penalty, end, fz, bg, prefixes, suffixes, segs, lam
-        )
-        bound = _join(start_n, start_c, upper[0])
-    slack = 0.0
-    for u in range(units):
-        worst = 0.0
-        scale = 0.0
-        for g in range(offsets[u], offsets[u + 1]):
-            total = 0.0
-            for s in range(samples):
-                total += lam[s, g]
-                if abs(lam[s, g]) > scale:
-                    scale = abs(lam[s, g])
-            if abs(total) > worst:
-                worst = abs(total)
-        slack += worst + DUAL_RELATIVE_SLACK * samples * scale
-    return upper, slack, best, bound, sweeps
-
-
-@kernel(overloads=overloads_for(__name__, "_tighten"), cache=True, nogil=True)
-def _tighten(
-    emissions,
-    cols,
-    cands,
-    offsets,
-    focal,
-    incumbent,
-    first,
-    second,
-    penalty,
-    start_n,
-    start_c,
-    end,
-    upper,
-    lower,
-    tol,
-    fz,
-    bg,
-    prefixes,
-    suffixes,
-    segs,
-    work,
-):
-    """Tighter pruning for the restart of a programme whose frontier passed EXPLORE_FRONTIER:
-    the Lagrangian suffix bounds (_dual_bounds) and the best feasible value among `lower`, a
-    beam (_beam_value) and the dual's decoded paths, each less 1e-9 relative. Returns
-    (upper, lower, margin, slack); margin is solve's pruning margin plus the slack."""
-    _charge_window(work, 10, emissions, cols, offsets)
-    units = len(emissions)
-    hint = _beam_value(
-        emissions,
-        cols,
-        cands,
-        offsets,
-        focal,
-        first,
-        second,
-        penalty,
-        start_n,
-        start_c,
-        end,
-        upper,
-        BEAM_WIDTH,
-        fz,
-        bg,
-        prefixes,
-        suffixes,
-        segs,
-    )
-    lower = max(lower, hint - PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(hint)))
-    dual_upper, slack, found, _, _ = _dual_bounds(
-        emissions,
-        cols,
-        cands,
-        offsets,
-        focal,
-        incumbent,
-        first,
-        second,
-        penalty,
-        start_n,
-        start_c,
-        end,
-        lower,
-        tol,
-        fz,
-        bg,
-        prefixes,
-        suffixes,
-        segs,
-        work,
-    )
-    lower = max(lower, found - PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(found)))
-    margin = tol + (units + 1) * DOMINANCE_TOLERANCE + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(lower)) + slack
-    return dual_upper, lower, margin, slack
-
-
 @kernel(overloads=overloads_for(__name__, "_restrict_unit"), cache=True, nogil=True)
 def _restrict_unit(cands, offsets, u, rows):
-    """cands / offsets with unit u's alphabet replaced by rows."""
+    """cands / offsets with unit u's alphabet replaced by rows.
+
+    O(C) time for C candidate rows over the window.
+    """
     units = len(offsets) - 1
     delta = len(rows) - (offsets[u + 1] - offsets[u])
     offsets2 = offsets.copy()
@@ -2631,15 +2022,11 @@ def _restrict_unit(cands, offsets, u, rows):
 def _restricted_programme(
     emissions,
     cols,
-    cands,
-    offsets,
     focal,
     incumbent,
     first,
     second,
     penalty,
-    start_n,
-    start_c,
     end,
     alphabet,
     alphabet_offsets,
@@ -2655,20 +2042,10 @@ def _restricted_programme(
     prefixes,
     suffixes,
     segs,
-    slack,
-    tightened,
-    optimum,
-    tol,
     work,
 ):
-    """One canonical-tie programme (from a partial path on units unit0.., alphabet given by
-    alphabet/alphabet_offsets, pruned below target, dominance tolerance 0). Until the
-    problem's Lagrangian bounds exist (tightened False) it runs with EXPLORE_FRONTIER as its
-    backstop; a programme that passes it computes them once for the problem (_dual_bounds,
-    full alphabet: valid suffix bounds for every partial path) and reruns. Returns (status,
-    found, tail, frontier, upper, slack, tightened)."""
-    _charge_window(work, 14, emissions, cols, offsets)
-    limit = backstop if tightened else min(backstop, EXPLORE_FRONTIER)
+    """Canonical reachability under box bounds. One window_dp, O(W N (F^2 R (Q (b+1)+b K+b^2)+F Q b^2))."""
+    _charge_window(work, 14, emissions, cols, alphabet_offsets)
     status, found, tail, reached, _ = window_dp(
         emissions,
         cols,
@@ -2685,9 +2062,9 @@ def _restricted_programme(
         end,
         upper,
         target,
-        PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(target)) + slack,
+        PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(target)),
         0.0,
-        limit,
+        backstop,
         store_limit,
         fz,
         bg,
@@ -2695,63 +2072,8 @@ def _restricted_programme(
         suffixes,
         segs,
         work,
-        BEAM_CAP if tightened else 0,
     )
-    if status == BACKSTOP and not tightened and backstop > EXPLORE_FRONTIER:
-        upper, slack, _, _, _ = _dual_bounds(
-            emissions,
-            cols,
-            cands,
-            offsets,
-            focal,
-            incumbent,
-            first,
-            second,
-            penalty,
-            start_n,
-            start_c,
-            end,
-            optimum,
-            tol,
-            fz,
-            bg,
-            prefixes,
-            suffixes,
-            segs,
-            work,
-        )
-        tightened = True
-        status, found, tail, again, _ = window_dp(
-            emissions,
-            cols,
-            alphabet,
-            alphabet_offsets,
-            focal,
-            incumbent,
-            first,
-            second,
-            penalty,
-            prefix_n.copy(),
-            prefix_c.copy(),
-            unit0,
-            end,
-            upper,
-            target,
-            PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(target)) + slack,
-            0.0,
-            backstop,
-            store_limit,
-            fz,
-            bg,
-            prefixes,
-            suffixes,
-            segs,
-            work,
-            BEAM_CAP,
-        )
-        if again > reached:
-            reached = again
-    return status, found, tail, reached, upper, slack, tightened
+    return status, found, tail, reached
 
 
 @kernel(overloads=overloads_for(__name__, "_canonical_restricted"), cache=True, nogil=True)
@@ -2778,22 +2100,13 @@ def _canonical_restricted(
     prefixes,
     suffixes,
     segs,
-    slack,
-    tightened,
-    optimum,
-    tol,
     work,
 ):
-    """The lexicographically first path reaching target by restricted programmes (solve's
-    unit-by-unit rule): rows ordered before the current choice are tried in order; a row
-    whose suffix bound (the box, or the Lagrangian bounds once computed, whose float slack
-    widens every margin) cannot reach the target is skipped without a programme. When
-    several rows remain, one programme with unit u's alphabet restricted to them comes
-    first: it finds the best completion over all of them, so if it misses the target every
-    row alone does too and none is tried. Every programme takes the EXPLORE_FRONTIER restart
-    of _restricted_programme until the Lagrangian bounds exist (tightened: the main
-    programme restarted; optimum = its value). Returns (status, path, programmes run,
-    frontier)."""
+    """First path reaching target in incumbent-first content order.
+
+    Box bounds skip impossible rows; restricted programmes test remaining rows. At most W(R+1) programmes; each
+    uses the same bounded frontier. The row advance costs O(N b Q), and bound tests O(N R (b K+b^2)) per unit.
+    """
     _charge_window(work, 12, emissions, cols, offsets)
     units = len(emissions)
     samples, states = start_n.shape
@@ -2807,7 +2120,6 @@ def _canonical_restricted(
     lazy_f = np.empty((samples, founders))
     row_a = np.empty(founders, np.int64)
     row_b = np.empty(founders, np.int64)
-    no_terms = np.empty(0)
     fixing = 0
     frontier = 0
     for u in range(units):
@@ -2816,7 +2128,6 @@ def _canonical_restricted(
             - PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(target))
             - CANONICAL_SKIP_ABSOLUTE_MARGIN
             - CANONICAL_SKIP_RELATIVE_MARGIN * abs(target)
-            - slack
         )
         held = incumbent[u]
         count = offsets[u + 1] - offsets[u]
@@ -2876,7 +2187,6 @@ def _canonical_restricted(
                 NO_FLOOR,
                 NO_FLOOR,
                 NO_FLOOR,
-                no_terms,
             )
             if bound < skip_below:
                 continue
@@ -2886,18 +2196,14 @@ def _canonical_restricted(
         if n_tests > 1:
             cands2, offsets2 = _restrict_unit(cands, offsets, u, tests[:n_tests])
             fixing += 1
-            status, found, _, reached, upper, slack, tightened = _restricted_programme(
+            status, found, _, reached = _restricted_programme(
                 emissions,
                 cols,
-                cands,
-                offsets,
                 focal,
                 incumbent,
                 first,
                 second,
                 penalty,
-                start_n,
-                start_c,
                 end,
                 cands2,
                 offsets2,
@@ -2913,10 +2219,6 @@ def _canonical_restricted(
                 prefixes,
                 suffixes,
                 segs,
-                slack,
-                tightened,
-                optimum,
-                tol,
                 work,
             )
             if status == BACKSTOP:
@@ -2928,18 +2230,14 @@ def _canonical_restricted(
             r = tests[x]
             _extend(prefix_n, prefix_c, emis, cols[u], focal, r, first, second, penalty, out_n, out_c)
             fixing += 1
-            status, found, tail, reached, upper, slack, tightened = _restricted_programme(
+            status, found, tail, reached = _restricted_programme(
                 emissions,
                 cols,
-                cands,
-                offsets,
                 focal,
                 incumbent,
                 first,
                 second,
                 penalty,
-                start_n,
-                start_c,
                 end,
                 cands,
                 offsets,
@@ -2955,10 +2253,6 @@ def _canonical_restricted(
                 prefixes,
                 suffixes,
                 segs,
-                slack,
-                tightened,
-                optimum,
-                tol,
                 work,
             )
             if status == BACKSTOP:
@@ -2975,8 +2269,8 @@ def _canonical_restricted(
     return OK, best, fixing, frontier
 
 
-@kernel(overloads=overloads_for(__name__, "solve_focal"), cache=True, nogil=True)
-def solve_focal(
+@kernel(overloads=overloads_for(__name__, "solve_focal_reference"), cache=True, nogil=True)
+def solve_focal_reference(
     emissions,
     cols,
     cands,
@@ -2995,19 +2289,21 @@ def solve_focal(
     store_limit,
     work,
 ):
-    """The canonical exact maximiser of one founder's window problem (module docstring).
+    """The canonical exact maximiser of one founder's window problem when completed.
 
-    start_n, start_c: the closed start message (_closed_start); incumbent_value: H of the panel's
-    own rows; tables: the window's per-unit _state_tables (all three shared by the window's focal
-    problems). Returns (status, rows, box_certified, dp, frontier, fixing_dps); status UNCHANGED =
-    the incumbent is the canonical answer, CHANGED = rows is a different canonical answer,
-    FRONTIER_LIMIT = a frontier exceeded `backstop` (the caller keeps the incumbent), LOST = the
-    programme lost every feasible path (an internal error). The canonical-tie order: incumbent
-    row first, then ascending index.
+    start_n, start_c: the closed start message (_closed_start); incumbent_value: H of the panel's own rows;
+    tables: the window's per-unit _state_tables (all three shared by the window's focal problems). Returns
+    (status, rows, box_certified, dp, frontier, fixing_dps); status UNCHANGED = the incumbent is the canonical
+    answer, CHANGED = rows is a different canonical answer, FRONTIER_LIMIT = a frontier exceeded `backstop`
+    without an optimality certificate, LOST = the programme lost every feasible path (an internal error). The
+    canonical-tie order: incumbent row first, then ascending index.
+
+    At fixed frontier F, at most W(R+1) restricted programmes give O(N W^2 F^2 R^2 Q (b+1)^2) time before work-
+    account stops.
     """
     _charge_window(work, 1, emissions, cols, offsets)
     units = len(emissions)
-    rows = np.empty(units, np.int64)
+    rows = incumbent.copy()
     fz, bg = _focal_layout(focal, first, second)
     prefixes = List()
     suffixes = List()
@@ -3045,7 +2341,7 @@ def solve_focal(
         lower,
         margin,
         DOMINANCE_TOLERANCE,
-        min(backstop, EXPLORE_FRONTIER),
+        backstop,
         store_limit,
         fz,
         bg,
@@ -3054,71 +2350,8 @@ def solve_focal(
         segs,
         work,
     )
-    slack = 0.0
-    tightened = False
-    if status == BACKSTOP and backstop > EXPLORE_FRONTIER:
-        # A large frontier: restart with the Lagrangian suffix bounds and the best feasible
-        # value of a beam and the dual's decoded paths.
-        tightened = True
-        upper, lower, margin, slack = _tighten(
-            emissions,
-            cols,
-            cands,
-            offsets,
-            focal,
-            incumbent,
-            first,
-            second,
-            penalty,
-            start_n,
-            start_c,
-            end,
-            upper,
-            lower,
-            tol,
-            fz,
-            bg,
-            prefixes,
-            suffixes,
-            segs,
-            work,
-        )
-        status, value, path, reached, truncated = window_dp(
-            emissions,
-            cols,
-            cands,
-            offsets,
-            focal,
-            incumbent,
-            first,
-            second,
-            penalty,
-            start_n,
-            start_c,
-            0,
-            end,
-            upper,
-            lower,
-            margin,
-            DOMINANCE_TOLERANCE,
-            backstop,
-            store_limit,
-            fz,
-            bg,
-            prefixes,
-            suffixes,
-            segs,
-            work,
-            BEAM_CAP,
-        )
-        if reached > frontier:
-            frontier = reached
     if status == BACKSTOP:
         return FRONTIER_LIMIT, rows, False, True, frontier, 0
-    if status != OK and truncated:
-        # A capped programme that lost its feasible witness keeps the incumbent (a reported beam
-        # fallback) instead of claiming infeasibility.
-        return BEAM_LIMIT, rows, False, True, frontier, 0
     if status != OK:
         return LOST, rows, False, True, frontier, 0
     if incumbent_value >= value - tol:
@@ -3148,10 +2381,6 @@ def solve_focal(
         prefixes,
         suffixes,
         segs,
-        slack,
-        tightened,
-        value,
-        tol,
         work,
     )
     if reached > frontier:
@@ -3166,22 +2395,151 @@ def solve_focal(
     return (CHANGED if changed else UNCHANGED), rows, False, True, frontier, fixing
 
 
+@kernel(overloads=overloads_for(__name__, "solve_focal"), cache=True, nogil=True)
+def solve_focal(
+    emissions,
+    cols,
+    cands,
+    offsets,
+    focal,
+    incumbent,
+    first,
+    second,
+    penalty,
+    start_n,
+    start_c,
+    end,
+    incumbent_value,
+    tables,
+    store_limit,
+    work,
+):
+    """Box certificate, frontier-64 exact attempt, heuristic seeded answer on overflow.
+
+    The seeded offer is rescored by ordinary H, carries no optimality certificate and does not count as a
+    beam truncation.
+
+    Preparation is O(N B (Q+R K)); seeded search is polynomial in its declared domains (seeded_search.search).
+    Ordinary H rescoring is O(N B Q). Returns the exact solver's six-field status/rows/box/dp/frontier/fixing
+    tuple.
+    """
+    _charge_window(work, 1, emissions, cols, offsets)
+    units = len(emissions)
+    fz, bg = _focal_layout(focal, first, second)
+    prefixes, suffixes, segs = List(), List(), List()
+    for u in range(units):
+        P, T, best, bx, by, mx, my = tables[u]
+        prefix, suffix, seg = _unit_tables(P, T, best, bx, by, mx, my, focal, bg)
+        prefixes.append(prefix)
+        suffixes.append(suffix)
+        segs.append(seg)
+    upper = window_box(
+        emissions,
+        cols,
+        cands,
+        offsets,
+        focal,
+        first,
+        second,
+        penalty,
+        end,
+        fz,
+        bg,
+        prefixes,
+        suffixes,
+        segs,
+    )
+    tol = CANONICAL_TOL + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(incumbent_value))
+    certificate = incumbent_value + tol - BOX_ARITHMETIC_MARGIN * max(1.0, abs(incumbent_value))
+    if _join(start_n, start_c, upper[0]) <= certificate:
+        return UNCHANGED, incumbent.copy(), True, False, 0, 0
+    st, exact_rows, exact_box, exact_dp, exact_frontier, exact_fixing = solve_focal_reference(
+        emissions,
+        cols,
+        cands,
+        offsets,
+        focal,
+        incumbent,
+        first,
+        second,
+        penalty,
+        start_n,
+        start_c,
+        end,
+        incumbent_value,
+        tables,
+        HYBRID_FRONTIER,
+        store_limit,
+        work,
+    )
+    if st != FRONTIER_LIMIT and st != BEAM_LIMIT:
+        return st, exact_rows, exact_box, exact_dp, exact_frontier, exact_fixing
+    samples, states = start_n.shape
+    total_bins = 0
+    max_rows = 0
+    reversed_order = False
+    for u in range(units):
+        total_bins += emissions[u].shape[2]
+        max_rows = max(max_rows, offsets[u + 1] - offsets[u])
+        if offsets[u + 1] - offsets[u] > 1:
+            reversed_order = cands[offsets[u]] > cands[offsets[u + 1] - 1]
+    # Bound every search domain before allocating the gathered emissions.
+    # N samples, W units, B bins, R rows, Q pair states, P<=N+1 wishes,
+    # L<=13 starts, I<=32 ascent sweeps. Factor 128 is the account's common
+    # normalization, not a literal FLOP estimate; method: refinement.md rs07.
+    seeds = samples + 1
+    starts = 1 + SEED_STARTS + INTERVAL_SEED_STARTS
+    _debit(work, 15, 128, samples, total_bins + units + 1, states + max_rows * len(fz) + 1)
+    _debit(work, 15, 128, samples, total_bins, total_bins, states + 1)
+    _debit(work, 15, 128, samples, max_rows, total_bins, len(fz) + total_bins + 1)
+    _debit(work, 15, 128, seeds, seeds, units)
+    _debit(work, 15, 128, samples, units, units, total_bins)
+    _debit(work, 15, 128, samples, seeds, units, total_bins * (len(fz) + total_bins + 1) + units * len(fz))
+    _debit(work, 15, 128, INTERVAL_SEED_STARTS + SEED_STARTS + 1, seeds, units, units * (units + 1))
+    _debit(
+        work,
+        15,
+        128,
+        starts,
+        LOCAL_ITERATIONS,
+        samples,
+        (max_rows + 1) * total_bins * (len(fz) + total_bins + 1) + units * total_bins,
+    )
+    _debit(work, 15, 128, starts, LOCAL_ITERATIONS, len(cands) + 1, units)
+    _debit(work, 15, 128, samples, total_bins, states + 1)
+    fe, be, unit, bins = seeded_search.prepare(emissions, cols, cands, offsets, focal, first, second, fz, bg)
+    start = start_n + start_c.reshape((len(start_c), 1))
+    best, value, stats = seeded_search.search(
+        fe, be, unit, bins, cands, offsets, incumbent, fz, bg, penalty, start, end, upper, tol, reversed_order
+    )
+    # The shared-background evaluator is mathematical elimination of the same
+    # max-plus chain. The ordinary recurrence remains the final score authority.
+    exact = path_value(emissions, cols, focal, best, first, second, penalty, start_n, start_c, end)
+    stats[0] += 1
+    changed = exact > incumbent_value + tol
+    return (CHANGED if changed else UNCHANGED), best, False, True, exact_frontier, exact_fixing
+
+
 @kernel(overloads=overloads_for(__name__, "solve_template"), cache=True, nogil=True)
-def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop, store_limit, reverse, work):
+def solve_template(emissions, cols, sizes, focals, penalty, start, end, store_limit, reverse, work):
     """Every listed focal founder's problem of one window (shared emissions and flanks).
 
-    cols[u, k] is founder k's row on unit u (the focal's incumbent); the alphabet of
-    unit u is 0..sizes[u]-1. backstop: the largest frontier a programme may hold.
+    cols[u, k] is founder k's row on unit u (the focal's incumbent); the alphabet of unit u is 0..sizes[u]-1.
     Returns per focal (status, rows, box_certified, dp, frontier, fixing_dps) as arrays.
 
-    The flanks are the exact objective's messages (per-homologue transitions), whose
-    entries can lie more than `penalty` below their maximum (a change of both homologues costs 2c).
-    The surrogate's bounds assume Potts-closed flanks, so both the start (_closed_start) and the end
-    (_closed_end) are closed here: the surrogate is a Potts window between relaxed flanks
-    (proposals only).
+    The flanks are the exact objective's messages (per-homologue transitions), whose entries can lie more than
+    `penalty` below their maximum (a change of both homologues costs 2c). The surrogate's bounds assume Potts-
+    closed flanks, so both the start (_closed_start) and the end (_closed_end) are closed here: the surrogate is
+    a Potts window between relaxed flanks (proposals only).
+
+    O(K) focal calls sharing O(N W Q b^2) tables; the template account bounds admitted work.
     """
     end = _closed_end(end, penalty)
+    shared = len(work) > WINDOW_SHARED + 1
+    used = work[1] if shared else 0
     _charge_window(work, 0, emissions, cols, sizes)
+    if shared:
+        work[WINDOW_SHARED] += work[1] - used
     units = len(emissions)
     founders = cols.shape[1]
     offsets = np.zeros(units + 1, np.int64)
@@ -3215,7 +2573,10 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
     # the same operations for every focal) and the per-state unit sums.
     start_n, start_c = _closed_start(start, penalty)
     k0 = focals[0]
+    used = work[1] if shared else 0
     _charge_window(work, 13, emissions, cols, offsets)
+    if shared:
+        work[WINDOW_SHARED + 1] += work[1] - used
     incumbent_value = path_value(
         emissions, cols, k0, np.ascontiguousarray(cols[:, k0]), first, second, penalty, start_n, start_c, end
     )
@@ -3240,7 +2601,6 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
             end,
             incumbent_value,
             tables,
-            backstop,
             store_limit,
             work,
         )
@@ -3255,7 +2615,10 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
 
 @kernel(overloads=overloads_for(__name__, "slice_list"), cache=True, nogil=True)
 def slice_list(items, a, c):
-    """Typed list of items[a:c] (without a Python-level list construction)."""
+    """Typed list of items[a:c] (without a Python-level list construction).
+
+    O(W) time for W selected units.
+    """
     out = List()
     for i in range(a, c):
         out.append(items[i])
@@ -3264,14 +2627,16 @@ def slice_list(items, a, c):
 
 @kernel(overloads=overloads_for(__name__, "gather_macro"), cache=True, parallel=True, nogil=True)
 def gather_macro(emissions, groups, rows_by_group):
-    """Coarse-unit emissions: for L1 span groups[g] = (first, end) prepared blocks and its
-    alphabet rows_by_group[g] (A_g row tuples over the span), out[g][s, pair_index(a, b), :] concatenates
-    the blocks' binned emissions of the row pairs (rows[a, block], rows[b, block]).
+    """Coarse-unit emissions: for L1 span groups[g] = (first, end) prepared blocks and its alphabet
+    rows_by_group[g] (A_g row tuples over the span), out[g][s, pair_index(a, b), :] concatenates the blocks'
+    binned emissions of the row pairs (rows[a, block], rows[b, block]).
 
-    One task per group, which reads each source block of its group from the typed List once and
-    copies it for every sample: every List element read updates a reference count shared by all
-    threads, including the window workers that gather their problems concurrently from the
-    component's one List, so reads per (group, sample, block) serialised them.
+    One task per group, which reads each source block of its group from the typed List once and copies it for
+    every sample: every List element read updates a reference count shared by all threads, including the window
+    workers that gather their problems concurrently from the component's one List, so reads per (group, sample,
+    block) serialised them.
+
+    O(N sum_g A_g^2 B_g) time for group alphabet A_g and bin count B_g.
     """
     outputs = List()
     for group in range(len(groups)):
@@ -3319,39 +2684,6 @@ def window_templates(blocks, groups):
     return tasks
 
 
-# A window's programmes are first solved within a first budget (covered by the window solve's own memory
-# estimate, WindowSolver.template_bytes); programmes whose frontier passes it are solved again within budgets
-# PROGRAMME_GROWTH times larger, each a deterministic retry, independent of live memory, up to
-# RefinementParameters.frontier_bytes. A solve that stays within a budget computes exactly what a solve at the
-# cap computes, so results never depend on the budgets or on pacing; a repeat costs at most the passed budget's
-# work. The first budget holds a frontier just past the EXPLORE_FRONTIER restart trigger (every reference and
-# K = 30 frontier so far stopped there, at 257 paths), and at least PROGRAMME_FIRST_BYTES; a window solve's own
-# estimate plans for PLANNING_FRONTIER paths (most programmes stay far below the trigger or are certified).
-PROGRAMME_FIRST_BYTES = 256 << 20
-PROGRAMME_GROWTH = 8
-PLANNING_FRONTIER = EXPLORE_FRONTIER // 4 + 1
-
-
-def programme_budgets(frontier_bytes, samples, founders, bins):
-    """The frontier budgets (bytes) a window's programmes are solved within, smallest first, ending at the cap."""
-    entry = 4 * 8 * samples * (founders * (founders + 1) // 2 + founders + bins + 2)
-    budgets = [min(int(frontier_bytes), max(PROGRAMME_FIRST_BYTES, entry * (EXPLORE_FRONTIER + 1)))]
-    while budgets[-1] < frontier_bytes:
-        budgets.append(min(int(frontier_bytes), budgets[-1] * PROGRAMME_GROWTH))
-    return budgets
-
-
-def frontier_limit(frontier_bytes, samples, founders, bins):
-    """Largest frontier (kept partial paths per unit) a programme may hold within frontier_bytes
-    (None: no cap): a kept path stores S x (Q + K + bins + 2) float64 values, and
-    growth and the next unit's copy hold up to four times the frontier at once."""
-    if frontier_bytes is None:
-        return 2**62
-    states = founders * (founders + 1) // 2
-    entry = 8 * samples * (states + founders + bins + 2)
-    return max(1, int(frontier_bytes) // (4 * entry))
-
-
 def _work_shape_terms(samples, width, founders, rows, bins, frontier):
     """Python integers for shape expressions formed before compiled factored debits."""
     n, w, k, r, b, p = map(int, (samples, width, founders, rows, bins, frontier))
@@ -3364,8 +2696,6 @@ def _work_shape_terms(samples, width, founders, rows, bins, frontier):
         q * (b + 1) ** 2 + k + r + 1,
         w * (k + r + 1) + q + 1,
         q * (b + 1) + r * row + q + b * b + k + r + 1,
-        (BEAM_WIDTH + 1) * q * (b + 1) + BEAM_WIDTH * r * row,
-        q * (b + 1) * (r + 1) + row * (r + 1) + q + r + 1,
         (r + 1) * (q * (b + 1) + row) + q * (b + 1),
         w * (q * (b + 1) + 1) + q + 1,
         4 * n * q + w + 1,
@@ -3374,9 +2704,15 @@ def _work_shape_terms(samples, width, founders, rows, bins, frontier):
         n * (q + k + b + 1) + w + 1,
         p + r + 1,
         # Children, sort doubling, frontier/history growth and storage comparison.
-        2 * max(p, BEAM_WIDTH) * r,
+        2 * p * r,
         p * r * (k + b + 1),
         2 * p * w,
+        n + 1,
+        w * b + w + 1,
+        q + r * k + 1,
+        (w * b) * (k + w * b + 1) + w * k,
+        (r + 1) * w * b * (k + w * b + 1) + w * w * b,
+        w * (w + 1),
     )
 
 
@@ -3391,8 +2727,8 @@ def _new_work(work_budget, samples, width, founders, rows, bins, frontier):
         raise SettingsError("window work budget exceeds scaled int64 accounting range")
     if max(_work_shape_terms(samples, width, founders, rows, bins, frontier)) >= 2**63:
         raise SettingsError("window work shape exceeds supported int64 accounting")
-    # work[21]: beam-truncated programme units (approximate window solves).
-    work = np.zeros(22, np.int64)
+    # work[21]: reserved zero for existing beam-truncation receipt readers; work[22:24]: shared debits.
+    work = np.zeros(WINDOW_SHARED + 2, np.int64)
     work[0], work[20] = budget >> shift, shift
     return work
 
@@ -3413,14 +2749,55 @@ def _work_receipt(work, budget):
     )
 
 
+def focal_chunks(samples, units, bins, founders, focals):
+    """The most chunks a template's focal problems are worth splitting into: each chunk keeps at least
+    THREAD_WORK_FLOOR cells of focal work (a focal problem's sample-unit-state-bin cells, samples x units x
+    states x (bins + 1), a lower bound on its work), the work floor of the sample kernels' threads, so a chunk's
+    fixed costs (its thread and its own copy of the window-shared tables) stay small beside its work. Chunks
+    change scheduling only (merge_focal_chunks).
+    """
+    states = founders * (founders + 1) // 2
+    cells = samples * units * states * (bins + 1)
+    return max(1, min(focals, focals * cells // THREAD_WORK_FLOOR))
+
+
+def merge_focal_chunks(chunks):
+    """Merge independent focal chunks into the one-template result and account.
+
+    Every chunk solves once and pays the same window-shared debits. Count them once in the merged account. If
+    any chunk or the total exhausts the allowance, return None so the single call supplies the deterministic
+    stop receipt.
+    """
+    if any(work[2] == WORK_LIMIT for _, _, work in chunks):
+        return None
+    work = chunks[0][2].copy()
+    budget = int(work[0]) + int(work[1])
+    for _, _, other in chunks[1:]:
+        work[1] += other[1]
+        work[4:20] += other[4:20]
+        work[21:] += other[21:]
+    for phase, slot in ((0, WINDOW_SHARED), (13, WINDOW_SHARED + 1)):
+        repeated = int(work[slot]) - int(chunks[0][2][slot])
+        work[4 + phase] -= repeated
+        work[slot] -= repeated
+        work[1] -= repeated
+    if int(work[1]) > budget:
+        return None
+    work[0] = budget - int(work[1])
+    solved = {}
+    for part, _, _ in chunks:
+        solved.update(part)
+    return solved, 0, work
+
+
 class WindowSolver:
-    """The window problems of one component: templates, coarse alphabets and their exact solves.
+    """The window problems of one component: templates, coarse alphabets and their hybrid solves.
 
     arrays: the prepared blocks' binned emissions float64 (S, R_b * (R_b + 1) // 2, bins_b) (workspace).
     context: None, or (groups, paths) of the L1 context (run.macro_context): groups[u] = (first,
     end) prepared blocks of L1 span u (fully contained spans; uncovered edges are allowed), paths[u] = int64[P_u, end -
     first] the distinct L1 row paths offered on that span. penalty: SWITCH_PENALTY. Every solve
-    takes frontier_bytes, the memory one programme's frontier may hold (frontier_limit).
+    uses a fixed frontier and dimension-derived seeded-search storage.
     """
 
     def __init__(self, arrays, context, penalty, work_coefficient, source_start=0):
@@ -3455,10 +2832,11 @@ class WindowSolver:
     def template_bytes(self, kind, a, c, samples, founders):
         """Planned bytes of one window solve (the search's item estimate): the window's per-state
         unit sums (_state_tables) and one focal problem's unit tables (each two per unit and bin plus one per unit)
-        and box bounds of S x Q float64, a planned frontier of PLANNING_FRONTIER paths (two and a half copies of S
+        and box bounds of S x Q float64, a planned frontier of HYBRID_FRONTIER paths (two and a half copies of S
         (Q + K + bins + 2) float64 each) and, for coarse windows, the gathered span emissions (S x A(A+1)/2 x bins
-        float64 per unit, A <= founders + context paths) and their multi-bin tables. Growth past the first frontier
-        budget follows the declared retry schedule (programme_budgets)."""
+        float64 per unit, A <= founders + context paths) and their multi-bin tables.
+        The seeded search holds gathered emissions, background runs, wish restrictions,
+        boundary focal values and suffix covectors for one active focal."""
         states = founders * (founders + 1) // 2
         if kind == "fine":
             unit_bins = [int(array.shape[2]) for array in self.arrays[a:c]]
@@ -3469,7 +2847,7 @@ class WindowSolver:
             alphabets = [founders + len(context[u]) for u in range(a, c)]
         bins = max(unit_bins)
         tables = 8 * samples * states * (4 * sum(unit_bins) + 2 * len(unit_bins) + 1)
-        frontier = 20 * samples * (states + founders + bins + 2) * PLANNING_FRONTIER
+        frontier = 20 * samples * (states + founders + bins + 2) * HYBRID_FRONTIER
         coarse = (
             0
             if alphabets is None
@@ -3478,12 +2856,20 @@ class WindowSolver:
                 for width, unit in zip(alphabets, unit_bins, strict=True)
             )
         )
-        return tables + frontier + coarse
+        total_bins = sum(unit_bins)
+        rows = max(self.sizes[a:c]) if alphabets is None else max(alphabets)
+        search = seeded_search_bytes(samples, len(unit_bins), total_bins, rows, founders)
+        return tables + frontier + coarse + search
 
-    def _template(self, emissions, bins, cols, sizes, start, end, frontier_bytes, focals=None, convention=False):
+    def _template(self, emissions, bins, cols, sizes, start, end, focals=None, convention=False, team=None):
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
-        unit's bins). Returns [(focal, unit choices or None, diagnostic)]; a frontier fallback
-        keeps the incumbent."""
+        unit's bins). Returns [(focal, unit choices or None, diagnostic)].
+
+        team: None, or the template's CPU share (a RefinementExecution). With more than one CPU and enough work
+        (focal_chunks), the focal problems, which are independent, run as interleaved chunks on the team's map,
+        each with its own account, and merge_focal_chunks merges them into the one-call result; when the merged
+        account shows the one-call account exhausted, the template is solved in one call, which gives its
+        exhaustion receipt."""
         # The exact objective's backward messages end with a per-homologue transition
         # (up to 2c below the maximum, c map-derived), while the surrogate's bounds and dominance
         # assume a flank closed under its own flat switch (entries >= max - penalty). Close the end
@@ -3505,67 +2891,56 @@ class WindowSolver:
         focals = np.arange(founders, dtype=np.int64) if focals is None else np.asarray(focals, np.int64)
         samples, states = start.shape
         store_limit = max(1, STORE_BYTES // max(1, 8 * samples * states))
-        budgets = programme_budgets(frontier_bytes, samples, founders, bins)
         cols = np.ascontiguousarray(cols, np.int64)
         sizes = np.asarray(sizes, np.int64)
-        work = _new_work(
-            work_budget, samples, width, founders, rows, bins, frontier_limit(budgets[-1], samples, founders, bins)
+        account = (
+            work_budget,
+            samples,
+            width,
+            founders,
+            rows,
+            bins,
+            HYBRID_FRONTIER,
         )
-        solved, pending = {}, focals
-        for step, budget_bytes in enumerate(budgets):
-            final = step == len(budgets) - 1
-            limit = frontier_limit(budget_bytes, samples, founders, bins)
-            try:
-                status, rows, box, dp, frontier, fixing = solve_template(
-                    emissions,
-                    cols,
-                    sizes,
-                    pending,
-                    self.penalty,
-                    start,
-                    end,
-                    int(limit),
-                    int(store_limit),
-                    bool(convention),
-                    work,
+
+        def solve_chunk(chosen):
+            return self._solve_chunk(emissions, cols, sizes, chosen, start, end, store_limit, convention, account)
+
+        chunks = 1
+        if team is not None:
+            chunks = min(len(focals), int(team.threads()), focal_chunks(samples, width, bins, founders, len(focals)))
+        solution = None
+        if chunks > 1:
+            # Contiguous chunks: the kernels' declared signatures take C-ordered focal lists.
+            parts = [np.ascontiguousarray(focals[c::chunks]) for c in range(chunks)]
+            solution = merge_focal_chunks(team.thread_map(solve_chunk, parts, label="founder_refinement focal chunks"))
+        solved, step, work = solve_chunk(focals) if solution is None else solution
+        if work[2] == WORK_LIMIT:
+            # Discard every focal result of the template.
+            out = [
+                (
+                    int(k),
+                    None,
+                    dict(
+                        certified=False,
+                        dp=False,
+                        frontier=0,
+                        fixing_dps=0,
+                        fallback=False,
+                        status=WORK_LIMIT,
+                        work_limit=True,
+                        work_phase=int(work[3]),
+                        work_retries=step,
+                        work_discarded=len(solved),
+                    ),
                 )
-            except RuntimeError:
-                if work[2] != WORK_LIMIT:
-                    raise
-                # Discard ALL focal results, including successes saved by earlier retries.
-                out = [
-                    (
-                        int(k),
-                        None,
-                        dict(
-                            certified=False,
-                            dp=False,
-                            frontier=0,
-                            fixing_dps=0,
-                            fallback=False,
-                            status=WORK_LIMIT,
-                            work_limit=True,
-                            work_phase=int(work[3]),
-                            work_retries=step,
-                            work_discarded=len(solved),
-                        ),
-                    )
-                    for k in focals
-                ]
-                if out:
-                    out[0][2].update(
-                        _work_receipt(work, work_budget), work_coefficient=self.work_coefficient, work_shape=work_shape
-                    )
-                return out
-            again = []
-            for i, k in enumerate(pending):
-                if status[i] == FRONTIER_LIMIT and not final:
-                    again.append(k)
-                else:
-                    solved[int(k)] = (status[i], rows[i].copy(), box[i], dp[i], frontier[i], fixing[i])
-            if not again:
-                break
-            pending = np.asarray(again, np.int64)
+                for k in focals
+            ]
+            if out:
+                out[0][2].update(
+                    _work_receipt(work, work_budget), work_coefficient=self.work_coefficient, work_shape=work_shape
+                )
+            return out
         out = []
         for k in focals:
             status, rows, box, dp, frontier, fixing = solved[int(k)]
@@ -3594,20 +2969,55 @@ class WindowSolver:
             )
         return out
 
-    def fine(self, X, fwd, bwd, a, c, frontier_bytes, focals=None, convention=False, *, ordinal=None):
+    def _solve_chunk(self, emissions, cols, sizes, focals, start, end, store_limit, convention, account):
+        """Solve listed focals once; the merger owns the one-template account."""
+        work = _new_work(*account)
+        solved = {}
+        try:
+            status, rows, box, dp, frontier, fixing = solve_template(
+                emissions,
+                cols,
+                sizes,
+                focals,
+                self.penalty,
+                start,
+                end,
+                int(store_limit),
+                bool(convention),
+                work,
+            )
+        except RuntimeError:
+            if work[2] != WORK_LIMIT:
+                raise
+            return solved, 0, work
+        for i, k in enumerate(focals):
+            solved[int(k)] = (status[i], rows[i].copy(), box[i], dp[i], frontier[i], fixing[i])
+        return solved, 0, work
+
+    def focal_chunk_cap(self, index, samples, founders):
+        """focal_chunks of template ``index`` for a panel of ``founders``: the most CPUs its solve can use."""
+        kind, a, c = self.templates[index]
+        if kind == "fine":
+            bins = max(int(self.arrays[b].shape[2]) for b in range(a, c))
+        else:
+            groups = self.coarse[0]
+            bins = max(sum(int(self.arrays[b].shape[2]) for b in range(*groups[unit])) for unit in range(a, c))
+        return focal_chunks(samples, c - a, bins, founders, founders)
+
+    def fine(self, X, fwd, bwd, a, c, focals=None, convention=False, *, ordinal=None, team=None):
         """Proposals of every (listed) founder on blocks [a, c): [(kind, a, c, k, rows | None,
-        diagnostic)]."""
+        diagnostic)]; team: the solve's CPU share or None (_template)."""
         self.work.check(ordinal)
         emissions = slice_list(self.emissions, a, c)
         sizes = self.sizes[a:c]
         bins = max(self.arrays[b].shape[2] for b in range(a, c))
-        solved = self._template(emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], frontier_bytes, focals, convention)
+        solved = self._template(emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], focals, convention, team)
         self.work.finish_bound(
             ordinal, solved, X, "fine", [(b, b + 1) for b in range(a, c)], sizes, None, bool(convention)
         )
         return [("fine", a, c, k, rows, diagnostic) for k, rows, diagnostic in solved]
 
-    def coarse_window(self, X, fwd, bwd, i, j, frontier_bytes, convention=False, *, ordinal=None):
+    def coarse_window(self, X, fwd, bwd, i, j, convention=False, *, ordinal=None, team=None):
         """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
         tuples the founders use there and the L1 context paths, sorted lexicographically. The
         window programme's canonical-tie order "incumbent, then ascending index" therefore
@@ -3634,7 +3044,7 @@ class WindowSolver:
         a, c = groups[i][0], groups[j - 1][1]
         bins = max(sum(self.arrays[b].shape[2] for b in range(*groups[unit])) for unit in range(i, j))
         sizes = [len(x) for x in alphabets]
-        solved = self._template(emissions, bins, cols, sizes, fwd[a], bwd[c], frontier_bytes, convention=convention)
+        solved = self._template(emissions, bins, cols, sizes, fwd[a], bwd[c], convention=convention, team=team)
         self.work.finish_bound(ordinal, solved, X, "coarse", groups[i:j], sizes, alphabets, bool(convention))
         out = []
         for k, choice, diagnostic in solved:
@@ -3646,26 +3056,27 @@ class WindowSolver:
             out.append(("coarse", a, c, k, rows, diagnostic))
         return out
 
-    def solve(self, index, X, fwd, bwd, frontier_bytes, convention=False, *, ordinal=None):
+    def solve(self, index, X, fwd, bwd, convention=False, *, ordinal=None, team=None):
         """The proposals of template `index` for panel X with messages fwd, bwd (a pure function of
-        X's rows in the window and the flank messages fwd[a], bwd[c], unless a frontier fallback)."""
+        X's rows in the window and the flank messages fwd[a], bwd[c], within its work account);
+        team: the solve's CPU share or None (_template)."""
         kind, a, c = self.templates[index]
         if kind == "fine":
-            return self.fine(X, fwd, bwd, a, c, frontier_bytes, convention=convention, ordinal=ordinal)
-        return self.coarse_window(X, fwd, bwd, a, c, frontier_bytes, convention, ordinal=ordinal)
+            return self.fine(X, fwd, bwd, a, c, convention=convention, ordinal=ordinal, team=team)
+        return self.coarse_window(X, fwd, bwd, a, c, convention, ordinal=ordinal, team=team)
 
 
 __all__ = [
     "window_box",
     "window_dp",
     "path_value",
-    "window_box_dual",
     "solve_focal",
+    "solve_focal_reference",
     "solve_template",
     "slice_list",
     "gather_macro",
     "window_templates",
-    "programme_budgets",
-    "frontier_limit",
+    "focal_chunks",
+    "merge_focal_chunks",
     "WindowSolver",
 ]

@@ -268,7 +268,7 @@ def reach(multiplicities: np.ndarray, units: np.ndarray, config: PedigreeParamet
     units = np.asarray(units, dtype=np.float64)
     minimum_units = config.exposure.minimum_exposed_units
     minimum = int(np.ceil(minimum_units))
-    drawn = ordered_sum(units[:, None] * (multiplicities > 0).T, axis=0) if len(multiplicities) else np.zeros(0)
+    drawn = ordered_sum((multiplicities > 0).T, axis=0, weights=units) if len(multiplicities) else np.zeros(0)
     max_bootstrap = float(np.mean(drawn >= minimum_units)) if len(drawn) else 0.0
     left = ordered_sum(units) - units
     max_loco = float(np.mean(left >= minimum_units)) if n_contigs > 1 else 0.0

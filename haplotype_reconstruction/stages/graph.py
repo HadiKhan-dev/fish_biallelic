@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..core.errors import SettingsError
+from ..contracts.contigs import AnalysisContigs
 from .catalog import STAGES
 from ..engine.graph import RecordKey, Task, TaskKey
 from ..store.container import CheckpointFile
@@ -57,6 +58,7 @@ class RunGraph:
 
     contigs: tuple[str, ...]
     nodes: tuple[Node, ...]
+    analysis: AnalysisContigs | None = None
 
     @property
     def edges(self) -> tuple[tuple[TaskKey, TaskKey], ...]:
@@ -102,7 +104,9 @@ def _key(stage: str, contig: str = "run", round_: str = "") -> TaskKey:
     return TaskKey(stage, "run" if contig == "run" else "contig", contig, round_)
 
 
-def build_graph(contigs: Sequence[str], *, output_nodes: Sequence[Node] = ()) -> RunGraph:
+def build_graph(
+    contigs: Sequence[str], *, output_nodes: Sequence[Node] = (), analysis: AnalysisContigs | None = None
+) -> RunGraph:
     """Carry ENG-03/05 as model edges; context assemblies share contig affinity.
 
     The initial selection has no context. L1 and L2 contexts consume the previous
@@ -112,6 +116,7 @@ def build_graph(contigs: Sequence[str], *, output_nodes: Sequence[Node] = ()) ->
     order = tuple(contigs)
     if len(set(order)) != len(order) or "run" in order:
         raise SettingsError("contig identifiers must be unique and must not be 'run'")
+    analysis = AnalysisContigs(order) if analysis is None else analysis
     init = _key("init")
     nodes = [Node(init, content_inputs=("resolved_configuration", "source_descriptor"))]
     for c in order:
@@ -142,11 +147,12 @@ def build_graph(contigs: Sequence[str], *, output_nodes: Sequence[Node] = ()) ->
     nodes.append(
         Node(
             pedigree,
-            (relatedness,) + tuple(_key("painting", c) for c in order) + tuple(_key("evidence", c) for c in order),
+            (relatedness,) + tuple(_key("painting", c) for c in analysis.included)
+            + tuple(_key("evidence", c) for c in analysis.included),
             ("maps", "relatedness/families"),
         )
     )
-    for c in order:
+    for c in analysis.included:
         phase = _key("phase", c)
         nodes.extend(
             (
@@ -165,7 +171,7 @@ def build_graph(contigs: Sequence[str], *, output_nodes: Sequence[Node] = ()) ->
     for node in nodes:
         if set(node.dependencies) - indexed.keys():
             raise SettingsError(f"{node.key}: undeclared graph dependency")
-    graph = RunGraph(order, tuple(nodes))
+    graph = RunGraph(order, tuple(nodes), analysis)
     # Detect cycles even in user-supplied output nodes.
     done: set[TaskKey] = set()
     while len(done) < len(nodes):
@@ -199,7 +205,12 @@ def workflow_cut(
         wanted = {contig}
     if wanted - set(graph.contigs):
         raise SettingsError(f"unknown contigs: {sorted(wanted - set(graph.contigs))}")
-    scatter = tuple(c for c in graph.contigs if c in wanted)
+    requested = tuple(c for c in graph.contigs if c in wanted)
+    scatter = requested
+    if step == "run" and graph.analysis is not None:
+        # Run cuts spend reconstruction only on the included axis. Evidence is
+        # retained separately because relatedness still consumes the configured genome.
+        scatter = tuple(c for c in requested if c in graph.analysis.included)
     if max_contigs is not None:
         if step != "run" or max_contigs < 0:
             raise SettingsError("max_contigs is a nonnegative run limit")
@@ -217,10 +228,15 @@ def workflow_cut(
             targets = [_key(stop_after, c) for c in scatter]
         else:
             targets = [n.key for n in graph.nodes if n.key.scope == "run" or n.key.scope in scatter]
+        if graph.analysis is not None:
+            targets.extend(_key("evidence", c) for c in requested if c in graph.analysis.excluded)
         selected = set(graph.closure(targets))
         # A restricted run never schedules scattered work outside its selection;
         # global gathers retain these as identity-checked prerequisites.
-        selected = {k for k in selected if k.scope == "run" or k.scope in scatter}
+        selected = {
+            k for k in selected
+            if k.scope == "run" or k.scope in scatter or (k.stage == "evidence" and k.scope in requested)
+        }
         for node in graph.nodes:
             if node.key.stage in {"relatedness", "refit"} and set(node.dependencies) <= selected:
                 if node.key.scope == "run" or node.key.scope in scatter:

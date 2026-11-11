@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from ..core.errors import InvariantError, ResourceError, SettingsError
+from .cooperation import HEARTBEAT_SECONDS, POLL_SECONDS, Deferred
 from .cpu import CPU_POLL_SECONDS, FixedBudget, read_counter
 from .graph import (
     RELEASED_RESULT,
@@ -178,6 +179,7 @@ class _GraphProgress:
         self.lock = threading.RLock()
         self.closed = False
         self.timer: threading.Timer | None = None
+        self.last_heartbeat = time.monotonic()
         self.add(tasks)
 
     def add(self, tasks):
@@ -217,6 +219,16 @@ class _GraphProgress:
                 return
             self.emit(periodic=True)
             self._arm()
+
+    def heartbeat(self):
+        """Observe a wholly deferred frontier; retries do not reset its cadence."""
+        if not self.enabled:
+            return
+        with self.lock:
+            now = time.monotonic()
+            if not self.closed and now - self.last_heartbeat >= HEARTBEAT_SECONDS:
+                self.emit(periodic=True)
+                self.last_heartbeat = now
 
     def emit(self, *, periodic=False):
         if not self.enabled:
@@ -347,6 +359,7 @@ class _GraphRun:
             raise SettingsError(
                 "an executing task must return Expansion; nested or overlapping graph executors are not allowed"
             )
+        self.deferred: dict[TaskKey, float] = {}
         self.tasks = tuple(self.tasks)
         self.results = dict(self.initial_results or {})
         if set(self.results) & {task.key for task in self.tasks}:
@@ -440,6 +453,7 @@ class _GraphRun:
         )
 
     def completed(self, worker: int, reply: Any):
+        assert self.governor is not None
         for message in reply.diagnostics:
             _LOG.info("%s", message)
         task = self.indexed[reply.key]
@@ -452,8 +466,34 @@ class _GraphRun:
             if identity[0] == worker and identity[1] not in reply.resident_affinities:
                 resident.release()
                 del self.residents[identity]
+        if isinstance(reply.value, Deferred):
+            if reply.key in self.gathers:
+                parent = self.gathers[reply.key][0]
+                self.governor.suspend(token.id)
+                self.requests[parent] = token
+            elif (
+                task.affinity is not None
+                and task.affinity in reply.resident_affinities
+                and (worker, task.affinity) not in self.residents
+            ):
+                self.governor.rest(token.id)
+                self.residents[worker, task.affinity] = token
+            else:
+                token.release(reply.peak_bytes)
+            if self.on_task is not None:
+                self.on_task(task, reply)
+            if reply.key not in self.deferred:
+                _LOG.info("[cooperate] waiting: %s", reply.value.reason)
+            self.deferred[reply.key] = time.monotonic() + POLL_SECONDS
+            self.pending.add(reply.key)
+            if reply.key not in self.pending_order:
+                self.pending_order.append(reply.key)
+            return
+        self.deferred.pop(reply.key, None)
         if isinstance(reply.value, Expansion):
             self.accept_expansion(task, reply, worker, token)
+            if self.on_task is not None:
+                self.on_task(task, reply)
             return
         self.results[reply.key] = _readonly(reply.value)
         finished = reply.key
@@ -619,12 +659,16 @@ class _GraphRun:
         # priorities may change between passes, and new expansions append here.
         self.pending_order = [key for key in self.pending_order if key in self.pending]
         self.pending_order.sort(key=self.task_order)
-        ready = [
+        eligible = [
             key
             for key in self.pending_order
             if all(dependency in self.results for dependency in self.indexed[key].depends_on)
         ]
-        if not ready and not self.running:
+        ready = eligible
+        if self.deferred:
+            now = time.monotonic()
+            ready = [key for key in eligible if self.deferred.get(key, 0.0) <= now]
+        if not eligible and not self.running:
             raise InvariantError("graph has unfinished work but no executable dependency")
         return ready
 
@@ -840,11 +884,15 @@ class _GraphRun:
         self.expected = {key: lane for key, lane in counted.items() if key not in sent}
 
     def receive(self, ready, dispatched):
+        timeout = CPU_POLL_SECONDS
+        if self.deferred and not ready and not self.running:
+            self.progress.heartbeat()
+            timeout = max(CPU_POLL_SECONDS, min(self.deferred.values()) - time.monotonic())
         if self.group is not None:
             if ready and all(k not in self.pending for k in ready):
                 for counters in self.group.authority.groups:
                     counters.open_gate()
-            for worker, reply in self.group.receive(timeout=0.0 if dispatched else CPU_POLL_SECONDS):
+            for worker, reply in self.group.receive(timeout=0.0 if dispatched else timeout):
                 self.completed(worker, reply)
             for worker, released_affinities in self.group.released:
                 for identity, resident in tuple(self.residents.items()):
@@ -854,9 +902,9 @@ class _GraphRun:
             self.group.released.clear()
             self.group.reclaim_attachments()
         elif not dispatched:
-            if not ready and (not self.running):
+            if not ready and not self.running and not self.deferred:
                 raise InvariantError("graph has pending work but no executable dependency")
-            time.sleep(WAKE_SECONDS)
+            time.sleep(timeout if self.deferred else WAKE_SECONDS)
 
     def run(self):
         if not self.prepare():
@@ -903,4 +951,8 @@ class _GraphRun:
             if self.injected_governor:
                 set_governor(self.previous_governor)
         order = (*self.original_order, *sorted(self.results.keys() - set(self.original_order)))
-        return {key: self.results[key] for key in order if self.retain_intermediates or key in self.public_keys}
+        return {
+            key: self.results[key]
+            for key in order
+            if key in self.results and (self.retain_intermediates or key in self.public_keys)
+        }

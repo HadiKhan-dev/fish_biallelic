@@ -2,8 +2,8 @@
 
 Owns component, fit, proposal, beam and guard working-set models; never changes a
 scientific cap, candidate, order or fallback. Method: docs/methods/founder_refinement.md#memory
-(RC01/RC20, RS06). The planned frontier is a cost estimate, not the maximum
-scientific frontier. Parent tasks reserve all simultaneously live child estimates.
+(RC01/RC20, RS06). Parent tasks reserve all simultaneously live child estimates,
+including the fixed exact frontier and the seeded search's dimension-derived arrays.
 """
 
 from __future__ import annotations
@@ -13,14 +13,38 @@ import math
 import numpy as np
 
 from . import checkpoints
-from .parameters import COUNT_FANOUT_BYTES, FAMILY_BYTES, SCORE_LEDGER_BYTES
+from .parameters import (
+    COUNT_FANOUT_BYTES,
+    FAMILY_BYTES,
+    HYBRID_FRONTIER,
+    INTERVAL_SEED_STARTS,
+    SCORE_LEDGER_BYTES,
+    SEED_STARTS,
+)
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
-__all__ = ["component_bytes", "fit_bytes", "traceback_bytes", "component_task_bytes"]
+__all__ = ["component_bytes", "component_work", "fit_bytes", "traceback_bytes", "component_task_bytes"]
 
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
 COMPONENT_BASE_BYTES = 64 << 20
+
+
+def seeded_search_bytes(samples, units, bins, rows, founders):
+    """Dimension-only peak storage of one seeded focal solve, in bytes.
+
+    Two gathered emission sets and contexts coexist while relevant samples are
+    selected. Restriction scores, validity/taken masks, wishes, forward states
+    and suffix covectors remain dimension-derived. O(N (B R K+B Q+B^2)+N W^2
+    +W(B+K)) bytes; no live-memory or scientific decision enters this estimate.
+    """
+    states = founders * (founders + 1) // 2
+    emissions = 16 * samples * (bins * rows * founders + bins * states + bins**2)
+    flanks = 16 * samples * states * (units + 3)
+    restrictions = 64 * (samples + 1) * units * (units + 1)
+    covectors = 32 * (units + 1) * (bins + founders)
+    endpoints = 24 * (1 + SEED_STARTS + INTERVAL_SEED_STARTS) * units
+    return emissions + flanks + restrictions + covectors + endpoints
 
 
 def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
@@ -52,6 +76,13 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
         width = min(sites, window_sites(samples))
         tables = samples * width * 28 + samples * min(partials, width) * PARTIAL_SITE_BYTES
     return tables + 12 * samples * sites + emissions + leaves + beam_table + COMPONENT_BASE_BYTES
+
+
+def component_work(samples: int, sites: int, founders: int) -> int:
+    """Dimension-based work of one component's count search (samples x sites x K^3): a deletion round
+    fits O(K) panels whose message passes cost O(K^2) per sample and site. A ranking and threshold
+    quantity, not a time: it orders component tasks and decides which record their fits."""
+    return int(samples) * int(sites) * int(founders) ** 3
 
 
 def fit_bytes(workspace, founders, guarded, cached_boundaries, polish=False):
@@ -107,10 +138,10 @@ def traceback_bytes(samples: int, sites: int, founders: int, threads: int) -> in
 def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin, context, cores, incoming=()) -> int:
     """Parent estimate including simultaneously live child work, from dimensions.
 
-    The supported count pass reaches at most twice its incoming K. Alternative
-    root panels contribute their own K. Each declared core may own one independent
-    fit, proposal or shadow worker; sequential branch histories share these buffers.
-    No free-memory reading or admission result enters a scientific decision.
+    The count pass only deletes founders, so no panel exceeds the largest root K:
+    the incoming K or an alternative root panel's own K. Each declared core may own
+    one independent fit, proposal or shadow worker; sequential branch histories share
+    these buffers. No free-memory reading or admission result enters a scientific decision.
     """
     blocks = len(panels)
     if blocks < 2 or founders < 2:
@@ -119,7 +150,7 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     roots = [founders]
     for family in incoming:
         roots.extend(len(panel) for panel in family.get("panels", ()) if len(panel))
-    maximum_k = 2 * max(roots)
+    maximum_k = max(roots)
     q = maximum_k * (maximum_k + 1) // 2
     bin_size = max(int(min_sites_per_bin), math.ceil(sites / config.proposal_max_bins))
     bins = [(panel.sites + bin_size - 1) // bin_size for panel in panels]
@@ -144,12 +175,14 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     maximum_units = min(8, blocks)
     maximum_total_bins = max(fine_bins)
     coarse = 0
+    maximum_rows = max(panel.rows for panel in panels)
     if context is not None:
         groups, paths = context
         coarse_bins = [sum(bins[a:c]) for a, c in groups]
         maximum_bin = max(maximum_bin, max(coarse_bins))
         maximum_total_bins = max(maximum_total_bins, max(sum(coarse_bins[a : a + 4]) for a in range(len(groups))))
         widths = [maximum_k + len(rows) for rows in paths]
+        maximum_rows = max(maximum_rows, max(widths))
         coarse = sum(
             sorted(
                 (
@@ -161,7 +194,8 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
         )
     proposal = (
         8 * samples * q * (4 * maximum_total_bins + 2 * maximum_units + 1)
-        + 20 * samples * (q + maximum_k + maximum_bin + 2) * 65
+        + 20 * samples * (q + maximum_k + maximum_bin + 2) * HYBRID_FRONTIER
+        + seeded_search_bytes(samples, maximum_units, maximum_total_bins, maximum_rows, maximum_k)
         + coarse
     )
     width = min(sites, window_sites(samples))

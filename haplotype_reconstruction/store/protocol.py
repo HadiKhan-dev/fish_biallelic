@@ -45,6 +45,7 @@ __all__ = [
     "read_output",
     "is_complete",
     "claim",
+    "ClaimBusy",
     "mark_complete",
 ]
 
@@ -457,9 +458,16 @@ def _ensure_directory(path: Path) -> None:
     raise failure
 
 
+class ClaimBusy(Exception):
+    """A non-blocking record claim is held by a live competing process."""
+
+
 @contextmanager
-def claim(file: CheckpointFile, key: str, identity: str) -> Iterator[bool]:
-    """Claim one result; yield whether it needs computation, waiting for a competing writer.
+def claim(file: CheckpointFile, key: str, identity: str, *, blocking: bool = True) -> Iterator[bool]:
+    """Claim one result; yield whether it needs computation.
+
+    With blocking=False, a held incomplete record raises ClaimBusy immediately.
+    Completed records still yield False and identity mismatches still raise.
 
     The kernel releases flock on process death. A lock file stays in place while its record is
     incomplete, so waiting writers never split across different inodes. Once the record is complete
@@ -467,11 +475,17 @@ def claim(file: CheckpointFile, key: str, identity: str) -> Iterator[bool]:
     computes nothing, whichever inode it locks, so a contig keeps one container file rather than one
     lock file per record. Lock files hold no completion state.
     """
+    if not blocking and is_complete(file, {key: identity}):
+        yield False
+        return
     path = Path(file.path)
     _ensure_directory(path.parent)
     lock = path.with_name(f".{path.name}.{json_digest(key)}.claim")
     with lock.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ClaimBusy(f"{file.label}:{key}") from None
         completed = False
         try:
             yield not is_complete(file, {key: identity})

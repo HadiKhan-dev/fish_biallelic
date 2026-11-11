@@ -162,13 +162,15 @@ class RefinementTeam:
         sizes: int | Sequence[int] = 0,
         *,
         label: str = "",
+        caps: Sequence[int] | None = None,
     ) -> Iterator[tuple[int, _R]]:
         """Run ordered child tasks on live fair shares, joining every child on failure.
 
         Each running child holds its fair share of this team: survivors take the CPUs of finished peers at their next
         boundary, and a child only ever takes free CPUs, so the claims never sum above the team. Kernel thread
         counts never decide a result (refinement is exact across 1/4/16 threads), so shares are a schedule, not
-        science. Results are yielded in index order.
+        science. caps[i] (optional) is the most CPUs child i can use: its share never exceeds it, so CPUs it could
+        not use stay free for the enclosing task's other work. Results are yielded in index order.
         """
         functions = list(functions)
         if not functions:
@@ -183,7 +185,7 @@ class RefinementTeam:
         # into freed CPUs and returns them when a peer is short, and a nested team grows when its own siblings finish
         # The team's claim keeps the CPUs
         # its running children hold until they shrink at their own boundaries or finish.
-        shares = _Shares(self.cores)
+        shares = _Shares(self.cores, caps)
 
         def run(item: tuple[int, Callable[[RefinementExecution], _R]]) -> tuple[int, _R]:
             index, function = item
@@ -253,7 +255,8 @@ class _Shares:
 
     A child's share is the team's live CPU count (``limit``, published by the team's coordinating thread at its
     boundaries) divided among the running children, the remainder to the lowest indices; for a nested team that count
-    is its own live share, so nested children grow as their parent's peers finish.
+    is its own live share, so nested children grow as their parent's peers finish. A child's share never exceeds its
+    cap (``caps[index]``, when given): the most CPUs it can use.
     A child above its share returns the excess at its own boundary, never below the CPUs its own running children use
     (``hold``); below it, it takes only CPUs no peer holds.
     A child is admitted by reserving its first CPU (reserve) before it is submitted, so an early starter never takes
@@ -261,8 +264,9 @@ class _Shares:
     so running children above their share return CPUs for it (the engine's `_Slots.admit` and `waiting`).
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, caps: Sequence[int] | None = None) -> None:
         self.limit = max(1, int(limit))
+        self.caps = None if caps is None else [max(1, int(cap)) for cap in caps]
         self.claims: dict[int, int] = {}
         self.waiting = 0
         self.lock = threading.RLock()
@@ -301,7 +305,8 @@ class _Shares:
             rank = sum(other < index for other in self.claims)
             mine = self.claims.get(index, 1)
             free = cores - sum(value for other, value in self.claims.items() if other != index)
-            claim, self.claims[index] = fair_claim(cores, count, rank, mine, free, hold=hold)
+            cap = None if self.caps is None else self.caps[index]
+            claim, self.claims[index] = fair_claim(cores, count, rank, mine, free, cap=cap, hold=hold)
             return claim
 
 

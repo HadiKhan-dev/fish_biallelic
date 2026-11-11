@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..store.namespace import StoreLocation
 
 
 @dataclass(frozen=True)
 class StageRun:
     """Explicit run capabilities; scientific settings are already resolved."""
 
-    root: str
+    root: str | StoreLocation
     output: str
     resolved: Any
     maps: Any

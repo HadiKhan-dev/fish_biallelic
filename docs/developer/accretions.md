@@ -51,7 +51,7 @@ These are algebraic factors, not measured operation counts or timings. See [cost
 | refinement-count / [RC04](../methods/refinement.md#rc04) | Evidence windows: resident or streamed route, leases, cover, exact fallback | execution route with exact fallback, no candidate filter. |
 | refinement-count / [RC07](../methods/refinement.md#rc07) | SW5 message storage route: dense or 16-block checkpoints; reconstruction reader and view lifetimes | exact recurrences in both storage routes. |
 | refinement-count / [RC20](../methods/refinement.md#rc20) | Level orchestration: scheduling, worker pools, memory admission | ordered orchestration and memory admission. |
-| refinement-search / [RS06](../methods/refinement.md#rs06) | Window-programme frontier cap and memory-budget retry schedule | Frontier and retry limits bound window programmes; fallbacks are reported. |
+| refinement-search / [RS06](../methods/refinement.md#rs06) | Shared messages and bounded search storage | Shared max-plus messages reuse unchanged path segments; storage admission follows actual problem dimensions and the fixed frontier. |
 | refinement-search / [RS07](../methods/refinement.md#rs07) | Per-template window work account and whole-component stop | The per-template work account stops an unfinished component and reports its domain. |
 | refinement-search / [RS18](../methods/refinement.md#rs18) | Weak label junctions (diagnostic) | reported intervals only. |
 | relatedness / [RL04](../methods/relatedness.md#rl04) | Pairwise three-state IBD chain and its genome-wide summaries | optional output (decision 0d); independent of family fit and pedigree. |

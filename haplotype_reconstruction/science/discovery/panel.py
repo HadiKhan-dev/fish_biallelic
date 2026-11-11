@@ -222,6 +222,41 @@ def _state_pairs(k):
     )
 
 
+@kernel(
+    overloads=tuple(
+        (
+            numba.types.Array(numba.int64, 1, "C", readonly=readonly),
+            numba.types.Array(numba.int32, 1, "C", readonly=readonly),
+            numba.types.Array(numba.int64, 1, "C", readonly=False),
+            numba.types.Array(numba.int64, 1, "C", readonly=True),
+            numba.types.Array(numba.int64, 1, "C", readonly=True),
+            numba.int64,
+        )
+        for readonly in (False, True)
+    ),
+    cache=True,
+    nogil=True,
+)
+def _remap_tie_states(offsets, states, inverse, first, second, k):
+    """Relabel tied states by the founder permutation; preserve sorted membership per sample."""
+    n_pairs = k * (k + 1) // 2
+    remapped = np.empty(len(states), dtype=np.int32)
+    for index in range(len(states)):
+        a, b = first[states[index]], second[states[index]]
+        a = inverse[a] if a < k else k
+        b = inverse[b] if b < k else k
+        lo, hi = min(a, b), max(a, b)
+        if hi < k:
+            remapped[index] = lo * k - lo * (lo - 1) // 2 + hi - lo
+        elif lo < k:
+            remapped[index] = n_pairs + lo
+        else:
+            remapped[index] = n_pairs + k
+    for sample in range(len(offsets) - 1):
+        remapped[offsets[sample] : offsets[sample + 1]].sort()
+    return remapped
+
+
 def canonical_solution(
     fit: FitResult, workspace: FixedKWorkspace | None, quanta: BlockQuanta | None = None
 ) -> FixedKSolution:
@@ -240,19 +275,7 @@ def canonical_solution(
     if offsets is not None:
         k = len(haplotypes)
         state_first, state_second = _state_pairs(k)
-        mapping = np.append(inverse, k)
-        a = mapping[state_first[states]]
-        b = mapping[state_second[states]]
-        lo, hi = np.minimum(a, b), np.maximum(a, b)
-        n_pairs = k * (k + 1) // 2
-        remapped = np.where(
-            hi < k, lo * k - lo * (lo - 1) // 2 + hi - lo, np.where(lo < k, n_pairs + lo, n_pairs + k)
-        ).astype(np.int64)
-        # Each sample's state IDs sorted ascending, all segments in one sort: state IDs lie in
-        # [0, n_pairs + k], so segment * (n_pairs + k + 1) + ID orders by segment first, then ID.
-        segment = np.repeat(np.arange(len(offsets) - 1, dtype=np.int64), np.diff(offsets))
-        stride = segment * (n_pairs + k + 1)
-        states = _readonly((np.sort(stride + remapped) - stride).astype(np.int32))
+        states = _readonly(_remap_tie_states(offsets, states, inverse, state_first, state_second, k))
     certified = bool(workspace is not None and workspace.certifies_fixed_point(haplotypes))
     return FixedKSolution(
         haplotypes=_readonly(haplotypes),
@@ -444,7 +467,7 @@ def deduplicate(
 ) -> tuple[FixedKSolution, ...]:
     """Distinct complete panels (by key), each with its lowest-NLL fit (a later fit replaces an
     earlier one only when better by more than the ``nll`` quantum), in tie-class order of NLL, then
-    smaller K, then key (sort_solutions; 2.0's (nll, K, key) order with tie classes), optionally the
+    smaller K, then key (sort_solutions: the (nll, K, key) order with tie classes), optionally the
     first beam_width (the cut falls inside a class by K and key)."""
     solutions = [solution for solution in solutions if has_distinct_rows(solution)]
     q = _nll_quantum(solutions, quanta)

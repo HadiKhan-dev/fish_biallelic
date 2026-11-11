@@ -21,6 +21,7 @@ from dataclasses import asdict, replace
 import numpy as np
 
 from ...contracts.discovery import DiscoveryBlockResult, DiscoveryPlan
+from ...core.concurrency import threaded_each
 from ...core.errors import InvariantError
 from ...core.ties import TieSettings
 from ...science.discovery.diagnostics import BlockDiagnostics, DiagnosticOptions
@@ -30,7 +31,7 @@ from ...science.discovery.release import DiscoveredBlock
 from ...science.discovery.run import BlockEvidence, discover_block
 from ...store.container import CheckpointFile
 from ...store.protocol import claim, mark_complete, publish, resume
-from ..framework import ALL_CORES, RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, Expansion, RecordKey, ResourceRequest, Task, TaskKey
 from .records import PLAN, BlockAdapter, PlanAdapter, block_key, diagnostic_key
 
 __all__ = [
@@ -93,7 +94,7 @@ def execute_block(
     """Resume or compute one block; publish diagnostics before the complete scientific record."""
     key = block_key(evidence.block)
     adapter = BlockAdapter()
-    with claim(file, key, identity) as needed:
+    with claim(file, key, identity, blocking=False) as needed:
         if not needed:
             record = resume(file, key, identity)
             if record is None:
@@ -101,8 +102,7 @@ def execute_block(
             return adapter.decode(record.payload).result
         collector = BlockDiagnostics(diagnostics)
         wall, cpu = time.perf_counter(), time.process_time()
-        # the block reads its task's live share at every kernel choice (a heavy block that started on
-        # one CPU beside its siblings ran serially to the end, 50 s for chr1 0.5x block 287; 11 s on 32 threads).
+        # Refresh the task's live share at numerical and candidate-map boundaries.
         from ...engine.cpu import share_reader
 
         result = discover_block(
@@ -112,6 +112,7 @@ def execute_block(
             keep=ties.keep,
             diagnostics=collector,
             threads=share_reader(),
+            map_work=threaded_each,
         )
         measured = replace(
             collector.snapshot(), wall_seconds=time.perf_counter() - wall, cpu_seconds=time.process_time() - cpu

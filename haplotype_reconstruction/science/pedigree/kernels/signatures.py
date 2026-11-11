@@ -1629,17 +1629,30 @@ OVERLOADS = {
             types.float64,
         ),
     ),
-    "junctions._linked_log_cdf": (
+    "transmission._log_likelihood": (
         (
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+        ),
+        (
+            types.Array(types.int64, 2, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
         ),
     ),
     "junctions._local_classes": (

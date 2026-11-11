@@ -39,3 +39,10 @@ See [LS25](./selection.md#ls25) for the model, decision order, parameters and li
 ## search
 
 See [LS08](./selection.md#ls08) for the model, decision order, parameters and limits.
+
+
+Context-refit components publish their full replies under
+`selection/refit/<contig>:<component>/<round>`, derived from the same round
+identity. A non-blocking claim covers fitting and publication. Resume decodes the
+proposals, counts and report, then the original ordered proposals gather combines
+them. Concurrent reconstruction changes only which process supplies each reply.

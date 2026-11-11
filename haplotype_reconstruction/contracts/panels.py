@@ -145,10 +145,8 @@ class CountCall:
     """How firmly one component's founder count is determined (its last count step).
 
     founders / founders_before: K after / before the count step (None when no step ran).
-    ambiguous: some decision's band contains zero, the step cycled, or the restored best-F panel
-        fails its own deletion test (founder refinement's definition).
-    count_cycle: an addition was followed by a deletion of a row the same search created.
-    cycle_undecided: that cycle began with a decided deletion and closed ambiguously.
+    ambiguous: some decision's band contains zero, or the restored best-F panel fails its own
+        deletion test (founder refinement's definition).
     decisions: the step's decisions in order.
     reason: why no count step ran ("single_block_or_founder"), else None.
     """
@@ -156,8 +154,6 @@ class CountCall:
     founders: int | None = record_field("call", axes=(), units="1", dtype="int | None")
     founders_before: int | None = record_field("call", axes=(), units="1", dtype="int | None")
     ambiguous: bool = record_field("call", axes=(), units="1", dtype="bool")
-    count_cycle: bool = record_field("call", axes=(), units="1", dtype="bool")
-    cycle_undecided: bool = record_field("call", axes=(), units="1", dtype="bool")
     decisions: tuple[CountStepDecision, ...] = record_field(
         "call", axes=(), units="1", dtype="tuple[CountStepDecision, ...]"
     )

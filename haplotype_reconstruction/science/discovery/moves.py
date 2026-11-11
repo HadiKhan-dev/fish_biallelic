@@ -2,15 +2,16 @@
 fixed-K fitter refits them and the cavity score decides).
 
 Owns: the K = 1 initial starts, death, gauge-rewire, data-birth, soft-birth and birth-delete replacement
-generators, their growth tables (GrowthInputs) and the maximum-cut cache.
-Must not: score or select panels (the cavity score and search.py decide), read storage, the environment or a clock,
+generators, fitted-panel move screening, their growth tables (GrowthInputs) and the maximum-cut cache.
+Must not: cavity-score or select released panels (search.py decides), read storage, the environment or a clock,
 or log.
 Method: docs/methods/discovery.md, units di13-di16 and di19-di20.
 Identity: death/gauge start families are admitted whole through twice ``max_proposals_per_expansion``; data births
 consume whole excess/coverage tie groups (budgets ``data_birth_attempts``,
 ``data_birth_children``, ``data_birth_tie_budget_factor``); gauge rewires use the best-found cuts of one
 heuristic search at every K, with canonical cut-family truncation; replacements follow births in tie-class order
-(``max_replacement_children``).
+(``max_replacement_children``). Death, gauge, soft-birth and replacement starts then use their
+per-K fixed-row NLL screening widths before complete refits; data births are not screened.
 
 * K = 1 data seeds: HDBSCAN clusters of samples by expected genotype agreement, each pooled
   into one row (fallback: the most decisive sample's dosage row).
@@ -128,6 +129,45 @@ _TINY = np.finfo(np.float64).tiny
 # Maximum-cut results memoised per block search (an exact memo of a pure function).
 # Assignment-only replacement screening retains at most this many starts and this estimated
 # worst-case compact-membership payload per batch. These are memory bounds, not search budgets.
+
+
+def _screen_starts(workspace, starts, width, phase, omissions):
+    """Refit leaders of the fixed-row NLL classes, independently at each K.
+
+    This predictive ranking defines the fitted-panel move neighbourhood; it is not
+    an admissible bound on a converged fit. Keep whole classes through twice the
+    width, return starts in their original order, and record every exclusion as a
+    ranked truncation. A cached assignment-only fit is reusable by the full refit.
+    Data-birth seeds have no such ranking assumption and never enter this screen.
+    """
+    starts = list(starts)
+    by_k: dict[int, list[int]] = {}
+    for index, start in enumerate(starts):
+        by_k.setdefault(len(start), []).append(index)
+    chosen = set()
+    for k, indices in by_k.items():
+        if len(indices) <= width:
+            chosen.update(indices)
+            continue
+        fits = fit_starts(workspace, [starts[index] for index in indices], 0)
+        classes = tie_classes(
+            [float(fit[5]) for fit in fits],
+            fixed_policy("discovery.start_screen", workspace.quanta.nll, reverse=workspace.reverse).quantum(),
+            reverse=workspace.reverse,
+        )
+        ordered = [indices[int(index)] for index in classes.order]
+        kept, _ = whole_class_cut(
+            ordered, [int(classes.classes[int(index)]) for index in classes.order], width
+        )
+        chosen.update(kept)
+        _note_omission(
+            omissions,
+            phase + "_screen_ranked_truncation",
+            len(indices) - len(kept),
+            f"K={k} {phase} fixed-row NLL screen",
+            kind="ranked_truncation",
+        )
+    return [start for index, start in enumerate(starts) if index in chosen]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1108,7 +1148,7 @@ def _hardened_rows(soft, likelihoods, counter=None, *, reverse: bool = False, ke
 @dataclass(frozen=True)
 class SoftBirths:
     """K + 1 refits of soft-residual birth starts: children, novel rows emitted, starts
-    omitted by the generator size."""
+    omitted by generation or fixed-row screening."""
 
     children: tuple[FixedKSolution, ...] = record_field("state", dtype="tuple[FixedKSolution, ...]")
     emitted: int = record_field("state", dtype="int64")
@@ -1149,13 +1189,18 @@ def soft_births(
             for row in _hardened_rows(soft, likelihoods, counter, reverse=workspace.reverse, keep=residual_inputs.keep)
             if np.asarray(row, dtype=np.int8).tobytes() not in existing
         ]
+        emitted = len(starts)
+        starts = _screen_starts(workspace, starts, config.search.soft_birth_screen_width, "soft_birth", omissions)
         synchronized, refitted = cast(
             tuple[tuple[FixedKSolution, ...], tuple[FixedKSolution, ...]],
             fit_panels(workspace, starts, config.model.max_iterations),
         )
         children = deduplicate((*synchronized, *refitted), reverse=workspace.reverse)
         result = SoftBirths(
-            tuple(child for child in children if child.k == solution.k + 1), len(starts), 0, tuple(omissions)
+            tuple(child for child in children if child.k == solution.k + 1),
+            emitted,
+            emitted - len(starts),
+            tuple(omissions),
         )
     cache[key] = result
     return result
@@ -1175,7 +1220,8 @@ def replacements(
     whole, and lower-ranked classes are counted separately.
 
     ``parent``: the K-founder panel; ``births``: its fitted K + 1 children (others are ignored); ``config``:
-    DiscoveryParameters. The starts are refitted with ``workspace`` (fit_panels), which updates the workspace's fit
+    DiscoveryParameters. Fixed-row NLL screening then retains the leading whole classes
+    under ``replacement_screen_width`` before the starts are refitted (fit_panels), which updates the workspace's fit
     cache and its fit-schedule, evaluation and sweep counters. Returns (the distinct fitted K-founder children, the
     number of omitted starts). Appends whole-class omissions to ``omissions``; mutates nothing else.
     """
@@ -1214,6 +1260,9 @@ def replacements(
     omitted = len(descriptors) - len(retained)
     descriptors = retained
     starts = [np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0)) for birth, deleted in descriptors]
+    admitted = len(starts)
+    starts = _screen_starts(workspace, starts, config.search.replacement_screen_width, "replacement", omissions)
+    omitted += admitted - len(starts)
     synchronized, refitted = cast(
         tuple[tuple[FixedKSolution, ...], tuple[FixedKSolution, ...]],
         fit_panels(workspace, starts, config.model.max_iterations),
@@ -1246,7 +1295,8 @@ def ordinary_moves(
 ) -> OrdinaryMoves:
     """Whole death and gauge proposal families, in that search-priority order, then births.
 
-    Admit whole families through twice max_proposals_per_expansion; never choose a byte prefix.
+    Screen death and gauge buckets separately by fixed-row NLL, then admit whole
+    families through twice max_proposals_per_expansion. Data births bypass screening.
     """
     search = config.search
     buckets: dict[int, list[np.ndarray]] = {-1: [], 0: []}
@@ -1269,6 +1319,11 @@ def ordinary_moves(
             by_key[key] for key in sorted(by_key, reverse=rev("d9p", reverse=workspace.reverse, keep=cuts.keep))
         ]
     total = sum(len(starts) for starts in unique.values())
+    for offset, phase, width in (
+        (-1, "death", search.death_screen_width),
+        (0, "gauge", search.gauge_screen_width),
+    ):
+        unique[offset] = _screen_starts(workspace, unique[offset], width, phase, omissions)
     ordered = [start for offset in (-1, 0) for start in unique[offset]]
     classes = [offset for offset in (-1, 0) for start in unique[offset]]
     retained, _ = whole_class_cut(

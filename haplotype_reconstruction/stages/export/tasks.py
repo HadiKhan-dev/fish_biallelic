@@ -16,7 +16,7 @@ from . import records
 
 def _open_run(output, root):
     """Read immutable source products and publish outputs through a separate store capability."""
-    return Results(output, checkpoints=root, nthreads=TASK_THREADS), CheckpointStore(root, nthreads=TASK_THREADS)
+    return Results(output, checkpoints=root, nthreads=TASK_THREADS, exclude_contigs=()), CheckpointStore(root, nthreads=TASK_THREADS)
 
 
 def map_writers(function, items):
@@ -42,7 +42,7 @@ def run(root: str, output: str, contig: str, full_length: bool) -> str:
     config = ExportConfig(full_length=full_length)
     identity = records.expected(reader, contig, config)
     file = store.contig(contig)
-    previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
+    previous = read_output(file, records.KEY, identity=lambda payload: payload["identity"])
     if previous is not None:
         require_schema(previous.payload, SCHEMA)
         if previous.payload["identity"] != identity:
@@ -50,8 +50,8 @@ def run(root: str, output: str, contig: str, full_length: bool) -> str:
             # published, the old record must not certify them (an interrupted replacement could leave one product
             # rerendered under it); it keeps listing its files so the replacement still retires them.
             replacing = dict(previous.payload, identity=f"replacing:{identity}")
-            publish_output(file, "outputs/export", replacing["identity"], replacing, supersede=True)
-            previous = read_output(file, "outputs/export", identity=lambda payload: payload["identity"])
+            publish_output(file, records.KEY, replacing["identity"], replacing, supersede=True)
+            previous = read_output(file, records.KEY, identity=lambda payload: payload["identity"])
     record = write(
         reader,
         Path(output) / "export",
@@ -63,7 +63,7 @@ def run(root: str, output: str, contig: str, full_length: bool) -> str:
     )
     publish_output(
         file,
-        "outputs/export",
+        records.KEY,
         record.identity,
         dict(schema=record.schema, identity=record.identity, entry=dict(record.entry)),
         supersede=True,
@@ -78,7 +78,7 @@ def manifest_part(root: str, output: str, contig: str, full_length: bool):
     from ...store.protocol import read_output
 
     reader, store = _open_run(output, root)
-    record = read_output(store.contig(contig), "outputs/export", identity=lambda p: p["identity"])
+    record = read_output(store.contig(contig), records.KEY, identity=lambda p: p["identity"])
     if record is None:
         raise SettingsError(f"{contig}: export record is missing")
     expected = records.expected(reader, contig, ExportConfig(full_length=full_length))
@@ -110,6 +110,7 @@ def write_manifest(root: str, output: str, contigs: tuple[str, ...], full_length
         reference=reader.manifest["source"].get("reference_vcf"),
         contigs=list(entries),
         settings=ExportConfig(full_length=full_length),
+        analysis=reader.analysis.document() if reader.analysis.excluded else None,
     )
 
 
@@ -117,16 +118,17 @@ def task(key, context: StageRun, *, full_length=False) -> Task:
     """Declare export after sites, release and phase, with the existing writer team."""
     return Task(key, run, (context.root, context.output, key.scope, full_length),
                 depends_on=tuple(TaskKey(stage, "contig", key.scope) for stage in ("sites", "release", "phase")),
-                outputs=(RecordKey(key.scope, "outputs/export"),), resources=ResourceRequest(1, context.cores))
+                outputs=(RecordKey(key.scope, records.KEY),), resources=ResourceRequest(1, context.cores))
 
 
-def manifest_tasks(context: StageRun, *, full_length=False):
-    """Gather independent export checks in configured chromosome order."""
+def manifest_tasks(context: StageRun, *, full_length=False, contigs=None):
+    """Gather independent export checks in analysed chromosome order."""
+    contigs = context.resolved.analysis.included if contigs is None else tuple(contigs)
     parts = tuple(Task(TaskKey("report", "contig", c, "export_manifest"), manifest_part,
                        (context.root, context.output, c, full_length),
                        depends_on=(TaskKey("export", "contig", c),), resources=ResourceRequest(1, context.cores))
-                  for c in context.resolved.contigs)
+                  for c in contigs)
     gather = Task(TaskKey("report", "run", "run", "export_manifest"), write_manifest,
-                  (context.root, context.output, context.resolved.contigs, full_length,
+                  (context.root, context.output, contigs, full_length,
                    tuple(ResultRef(task.key) for task in parts)), depends_on=tuple(task.key for task in parts))
     return (*parts, gather)

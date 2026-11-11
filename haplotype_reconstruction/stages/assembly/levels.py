@@ -43,7 +43,7 @@ def execute_join(
 ) -> JoinRecord:
     """Execute one whole batch and atomically publish it before returning."""
     if records is not None:
-        with claim(records.file, JOINS + identity, identity) as needed:
+        with claim(records.file, JOINS + identity, identity, blocking=False) as needed:
             if not needed:
                 stored = load_join(records.file, identity, index=task.index)
                 assert stored is not None

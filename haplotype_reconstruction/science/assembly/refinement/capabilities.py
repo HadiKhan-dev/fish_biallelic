@@ -54,6 +54,7 @@ class RefinementExecution(Protocol):
         sizes: int | Sequence[int] = 0,
         *,
         label: str = "",
+        caps: Sequence[int] | None = None,
     ) -> Iterator[tuple[int, _R]]: ...
 
 

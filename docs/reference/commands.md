@@ -111,7 +111,7 @@ Gather relatedness from every contig's evidence.
 
 ## reconstruct
 
-Reconstruct and refit one contig.
+Reconstruct and refit one contig; concurrent invocations share unclaimed units.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|

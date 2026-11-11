@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
 from ...contracts.payload import from_payload
 from ...contracts.pedigree import (
@@ -615,7 +616,8 @@ def run_stored(
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
     configured_parameters = from_payload(PedigreeParameters, manifest["parameters"]["pedigree"])
-    precheck(len(manifest["sample_ids"]), len(manifest["contigs"]), configured_parameters, basis="configured")
+    precheck(len(manifest["sample_ids"]), len(AnalysisContigs.from_manifest(manifest).included),
+             configured_parameters, basis="configured")
     reader = result_reader(store, manifest, product="pedigree")
     if reader is not None:
         cached = load_product(store.run, PRODUCT, reader.identity, PedigreeAdapter())

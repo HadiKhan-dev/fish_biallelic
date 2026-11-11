@@ -7,6 +7,7 @@ The stage chooses evidence/message storage and measures elapsed component time.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,6 +20,7 @@ from haplotype_reconstruction.engine.cpu import current_budget
 from haplotype_reconstruction.engine.graph import Expansion, ResultRef
 from haplotype_reconstruction.science.assembly.parameters import AssemblyParameters
 from haplotype_reconstruction.science.assembly.refinement.capabilities import RefinementExecution, RefinementRecords
+from haplotype_reconstruction.store.protocol import claim
 
 if TYPE_CHECKING:
     from .final import AssemblySession, HierarchyState
@@ -33,6 +35,12 @@ from haplotype_reconstruction.science.assembly.refinement.window import RESIDENT
 
 from .completion import attached_scoring
 from .storage import StoragePlan, Windows
+
+# A component whose count-search work (costs.component_work: samples x sites x K^3) reaches this
+# records every completed sweep and fit, so that an interrupted component resumes from them. Below
+# it a component takes under about a minute (TroMau census: median 41 s near the threshold, at
+# most 48 s below it), so recomputing it costs little and its records would only add I/O.
+FIT_RECORD_WORK = 500_000_000
 
 
 def refine_component(
@@ -106,10 +114,11 @@ def refine(
 
     Results and continuation families return in genomic component order. Each
     component's identity binds its exact ordered coarse context.
-    The native fit-record threshold is an I/O policy; direct replay may force it.
+    Components whose work reaches FIT_RECORD_WORK record their sweeps and fits (an I/O policy with
+    no scientific effect); direct replay may request it for any component.
     """
     from haplotype_reconstruction.engine.graph import ResourceRequest, Task
-    from haplotype_reconstruction.science.assembly.refinement.costs import component_task_bytes
+    from haplotype_reconstruction.science.assembly.refinement.costs import component_task_bytes, component_work
     from haplotype_reconstruction.science.assembly.refinement.run import bin_floor, macro_context
     from haplotype_reconstruction.stages.framework import Expansion
 
@@ -155,6 +164,7 @@ def refine(
                 results.append(_decode_component(saved))
                 continue
         key = replace(session.parent, unit=f"{session.parent.unit}.refine{state.level}.{name}")
+        work = component_work(session.inputs.evidence.samples, sum(panel.sites for panel in panels), component.founders)
         working = component_task_bytes(
             panels,
             session.inputs.evidence.samples,
@@ -178,12 +188,8 @@ def refine(
                 bound,
                 incoming,
             ),
-            resources=ResourceRequest(
-                1,
-                session.max_cores,
-                working_set_bytes=working,
-                cost=session.inputs.evidence.samples * sum(panel.sites for panel in panels) * component.founders**3,
-            ),
+            kwargs=dict(record_fits=work >= FIT_RECORD_WORK),
+            resources=ResourceRequest(1, session.max_cores, working_set_bytes=working, cost=work),
             # Components are independent (each records its own scope): not pinned, so they run side by side across
             # the contig's lane rather than one at a time on the parent's worker.
             thread_argument="cores",
@@ -222,39 +228,51 @@ def _component_stage(
     *,
     cores: int = 1,
     storage: StoragePlan | None = None,
-    force_fit_records: bool = False,
+    record_fits: bool = False,
 ) -> tuple[FounderComponent, ComponentRefinement]:
-    """Run and atomically record one independently resumable component."""
+    """Run and atomically record one independently resumable component.
+
+    With ``record_fits`` (and a record scope) every completed sweep and fit is published under the
+    component's identity-checked scope before the component record, so that a rerun of an interrupted
+    component resumes its fits exactly where they stopped (fit.SweepEngine).
+    """
     from haplotype_reconstruction.science.assembly.refinement.component_workspace import component_evidence
 
     from .records import encode_components, encode_refinement
     from .team import RefinementTeam
 
     name = f"{number:05d}"
-    fit_records = (
-        None
-        if records is None or (not force_fit_records and component.stop - component.start <= 100)
-        else records.scoped(name + "/fit", nthreads=1)
+    ownership = (
+        nullcontext(True)
+        if records is None
+        else claim(records.file, records.key(name), records.derivation(name), blocking=False)
     )
-    team = RefinementTeam(cores, current_budget())
-    # Work of one sample's component messages (core.kernels.sample_team): sites x K^2 diplotype cells.
-    team.sample_work = int(sum(panel.sites for panel in panels)) * int(component.founders) ** 2
-    with attached_scoring(evidence) as scoring:
-        result = refine_component(
-            number,
-            component,
-            panels,
-            component_evidence(scoring, panels),
-            context,
-            settings,
-            team,
-            fit_records,
-            incoming=incoming,
-            storage=storage,
-        )
-    if records is not None:
-        records.save(name, dict(component=encode_components([result[0]]), refinement=encode_refinement(result[1])))
-    return result
+    with ownership as needed:
+        if not needed:
+            assert records is not None
+            saved = records.load(name)
+            assert saved is not None
+            return _decode_component(saved)
+        fit_records = None if records is None or not record_fits else records.scoped(name + "/fit", nthreads=1)
+        team = RefinementTeam(cores, current_budget())
+        # Work of one sample's component messages (core.kernels.sample_team): sites x K^2 diplotype cells.
+        team.sample_work = int(sum(panel.sites for panel in panels)) * int(component.founders) ** 2
+        with attached_scoring(evidence) as scoring:
+            result = refine_component(
+                number,
+                component,
+                panels,
+                component_evidence(scoring, panels),
+                context,
+                settings,
+                team,
+                fit_records,
+                incoming=incoming,
+                storage=storage,
+            )
+        if records is not None:
+            records.save(name, dict(component=encode_components([result[0]]), refinement=encode_refinement(result[1])))
+        return result
 
 
 def _gather_level(

@@ -79,6 +79,7 @@ def search_block(
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
+    map_work=map,
 ) -> BlockSearch:
     """Search neutralised float64[N,L,3] evidence in the explicit canonical sample order.
 
@@ -99,7 +100,16 @@ def search_block(
     if order is not None:
         likelihood = np.ascontiguousarray(likelihood[order])
         observed = np.ascontiguousarray(observed[order])
-    result = _search(likelihood, observed, config, reverse=reverse, keep=keep, diagnostics=diagnostics, threads=threads)
+    result = _search(
+        likelihood,
+        observed,
+        config,
+        reverse=reverse,
+        keep=keep,
+        diagnostics=diagnostics,
+        threads=threads,
+        map_work=map_work,
+    )
     if order is None or result.selected is None:
         return result
     inverse = inverse_permutation(order)
@@ -118,11 +128,13 @@ def discover_block(
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
+    map_work=map,
 ) -> DiscoveredBlock | None:
     """Search one founder-view block and release alleles; None means uninformative.
 
     The input is unchanged. Returned arrays belong to this result. Configuration,
     thread team and convention are explicit; no resources or clocks are consulted.
+    ``map_work`` is ordered, with one native thread per concurrent cavity candidate.
     """
     if not evidence.informative:
         return None
@@ -142,6 +154,7 @@ def discover_block(
         keep=keep,
         diagnostics=diagnostics,
         threads=threads,
+        map_work=map_work,
     )
     return materialise(
         evidence.block,

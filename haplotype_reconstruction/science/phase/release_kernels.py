@@ -66,6 +66,49 @@ _OVERLOADS = {
             types.Array(types.boolean, 2, "C", False, aligned=True),
         ),
     ),
+    "chain_messages": (
+        (
+            types.Array(types.float64, 4, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+        ),
+    ),
+    "posterior_bins": (
+        (
+            types.Array(types.float64, 4, "C", False, aligned=True),
+            types.Array(types.float64, 4, "C", False, aligned=True),
+        ),
+    ),
+    "restricted": (
+        (
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.boolean, 2, "C", False, aligned=True),
+        ),
+    ),
+    "forward_from": (
+        (
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 4, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.int64,
+            types.int64,
+        ),
+    ),
+    "backward_to": (
+        (
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 4, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.Array(types.float64, 3, "C", False, aligned=True),
+            types.int64,
+            types.int64,
+            types.Array(types.boolean, 2, "C", False, aligned=True),
+        ),
+    ),
     "_flip_pair": (
         (
             types.float64,
@@ -299,6 +342,14 @@ def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask):
                         v = NEG
                     nxt[s0, s1, g] = v
         beta[b] = _step_back(nxt, T0[b + 1], T1[b + 1], TG[b + 1], G)
+    return posterior_bins(alpha, beta)
+
+
+@kernel(overloads=_OVERLOADS["posterior_bins"], cache=True, nogil=True)
+def posterior_bins(alpha, beta):
+    """Posteriors post[b, s0, s1] (gauge summed) of the bins whose forward and backward messages are alpha[b] and
+    beta[b] ([m, n0, n1, G] each); every bin is normalised by its own total."""
+    B, n0, n1, G = alpha.shape
     post = np.zeros((B, n0, n1))
     for b in range(B):
         z = NEG
@@ -315,6 +366,88 @@ def forward_backward(em, T0, T1, TG, anchor_bin, anchor_mask):
                         acc += math.exp(v)
                 post[b, s0, s1] = acc
     return post
+
+
+# The chain restricted at one bin shares most of its messages with the unrestricted chain: the restriction acts on the
+# state at the anchor bin only, so alpha before the anchor and beta at and after it are the unrestricted ones. The four
+# kernels below give the others where they are needed, by the recursion of forward_backward (the same operations in
+# the same order: the posteriors assembled from them are those of forward_backward with that anchor).
+@kernel(overloads=_OVERLOADS["chain_messages"], cache=True, nogil=True)
+def chain_messages(em, T0, T1, TG):
+    """(alpha, beta), [B, n0, n1, G] each: the forward and backward messages of the unrestricted chain
+    (forward_backward's, anchor_bin = -1). The gauge starts at 0."""
+    B, n0, n1, G = em.shape
+    alpha = np.full((B, n0, n1, G), NEG)
+    for s0 in range(n0):
+        for s1 in range(n1):
+            alpha[0, s0, s1, 0] = em[0, s0, s1, 0]
+    for b in range(1, B):
+        step = _step(alpha[b - 1], T0[b], T1[b], TG[b], G)
+        for s0 in range(n0):
+            for s1 in range(n1):
+                for g in range(G):
+                    alpha[b, s0, s1, g] = step[s0, s1, g] + em[b, s0, s1, g]
+    beta = np.zeros((B, n0, n1, G))
+    for b in range(B - 2, -1, -1):
+        nxt = np.empty((n0, n1, G))
+        for s0 in range(n0):
+            for s1 in range(n1):
+                for g in range(G):
+                    nxt[s0, s1, g] = beta[b + 1, s0, s1, g] + em[b + 1, s0, s1, g]
+        beta[b] = _step_back(nxt, T0[b + 1], T1[b + 1], TG[b + 1], G)
+    return alpha, beta
+
+
+@kernel(overloads=_OVERLOADS["restricted"], cache=True, nogil=True)
+def restricted(state, anchor_mask):
+    """The forward message ``state`` [n0, n1, G] of a bin with every (s0, s1) outside anchor_mask made impossible:
+    alpha at the anchor bin of the chain restricted there."""
+    n0, n1, G = state.shape
+    out = state.copy()
+    for s0 in range(n0):
+        for s1 in range(n1):
+            if not anchor_mask[s0, s1]:
+                for g in range(G):
+                    out[s0, s1, g] = NEG
+    return out
+
+
+@kernel(overloads=_OVERLOADS["forward_from"], cache=True, nogil=True)
+def forward_from(prev, em, T0, T1, TG, lo, hi):
+    """alpha [hi - lo, n0, n1, G] of the bins [lo, hi), continuing the forward recursion from prev = alpha[lo - 1]."""
+    n0, n1, G = prev.shape
+    out = np.empty((hi - lo, n0, n1, G))
+    last = prev
+    for b in range(lo, hi):
+        step = _step(last, T0[b], T1[b], TG[b], G)
+        for s0 in range(n0):
+            for s1 in range(n1):
+                for g in range(G):
+                    out[b - lo, s0, s1, g] = step[s0, s1, g] + em[b, s0, s1, g]
+        last = out[b - lo]
+    return out
+
+
+@kernel(overloads=_OVERLOADS["backward_to"], cache=True, nogil=True)
+def backward_to(beta_anchor, em, T0, T1, TG, lo, anchor, anchor_mask):
+    """beta [anchor - lo, n0, n1, G] of the bins [lo, anchor) of the chain whose state at ``anchor`` is restricted to
+    anchor_mask, from beta_anchor = beta at the anchor bin (the unrestricted chain's)."""
+    n0, n1, G = beta_anchor.shape
+    out = np.empty((anchor - lo, n0, n1, G))
+    for b in range(anchor - 1, lo - 1, -1):
+        nxt = np.empty((n0, n1, G))
+        for s0 in range(n0):
+            for s1 in range(n1):
+                for g in range(G):
+                    if b + 1 == anchor:
+                        v = beta_anchor[s0, s1, g] + em[anchor, s0, s1, g]
+                        if not anchor_mask[s0, s1]:
+                            v = NEG
+                    else:
+                        v = out[b + 1 - lo, s0, s1, g] + em[b + 1, s0, s1, g]
+                    nxt[s0, s1, g] = v
+        out[b - lo] = _step_back(nxt, T0[b + 1], T1[b + 1], TG[b + 1], G)
+    return out
 
 
 @kernel(overloads=_OVERLOADS["_flip_pair"], cache=True, nogil=True)
@@ -470,4 +603,15 @@ def orientation(ordered, site_bin, tau_g, B):
     return out
 
 
-__all__ = ["block_tables", "forward_backward", "label_pairs", "orientation", "site_posteriors"]
+__all__ = [
+    "backward_to",
+    "block_tables",
+    "chain_messages",
+    "forward_backward",
+    "forward_from",
+    "label_pairs",
+    "orientation",
+    "posterior_bins",
+    "restricted",
+    "site_posteriors",
+]

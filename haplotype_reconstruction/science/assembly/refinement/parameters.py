@@ -2,8 +2,8 @@
 
 Owns parameter meaning and provenance, not configuration loading.
 Method: docs/methods/founder_refinement.md#fixed-k-search (RS01, RS05–RS11).
-Frontier retries and work debits are scientific state because binding stops a
-search. A live-memory admission rule must never replace them.
+The frontier switch and work debits are scientific state. Live-memory admission
+may delay a solve but never changes its route, limits or search order.
 """
 
 from __future__ import annotations
@@ -36,25 +36,38 @@ EXACT_GAIN_ABSOLUTE = 1e-6
 PAIR_TABLE_BYTES = 1 << 31
 # Minimum per-sample gain for inclusion in the shared-switch guard (nats).
 AFFECTED_GAIN_TOLERANCE = 1e-9
-# Roundoff allowances for programme, dominance, dual and canonical-skip comparisons.
+# Roundoff allowances for programme, dominance and canonical-skip comparisons.
 # Absolute margins are nats; relative margins and slack coefficients are dimensionless.
 PROGRAMME_RELATIVE_MARGIN = 1e-9
 DOMINANCE_ABSOLUTE_MARGIN = 1e-9
 DOMINANCE_RELATIVE_MARGIN = 1e-13
-DUAL_RELATIVE_SLACK = 1e-12
 CANONICAL_SKIP_ABSOLUTE_MARGIN = 1e-9
 CANONICAL_SKIP_RELATIVE_MARGIN = 1e-12
 
 # Fixed frontier and work limits for a complete component fit.
-DEFAULT_FRONTIER_BYTES = 128 << 30
 DEFAULT_WINDOW_WORK_COEFFICIENT = 1 << 25
 
 # Uniform diplotype state-change cost of the binned surrogate (nats); exact
 # acceptance uses map-derived per-homologue costs instead.
 SWITCH_PENALTY = 20.0
-# Maximum partial paths per unit after the Lagrangian restart (paths). A binding
-# cap makes the programme approximate and is reported in its beam-truncation receipt.
-BEAM_CAP = 512
+# Exact-programme frontier (kept paths) above which a template takes the seeded
+# search. In component replays of two known-truth simulations (6 and 30
+# founders) 1.05% and 3.4% of templates exceeded it, and every released panel
+# row equalled the exact programme's; the templates of a real chromosome with
+# 27 to 30 local founders all exceeded it.
+HYBRID_FRONTIER = 64
+# Ascent starts (paths), whole wishes and restrictions: six plus six match exact
+# gain on all six captured K13-K28 templates; three plus three reach 95.5% at K28.
+SEED_STARTS = 6
+# Restriction starts (paths): six plus six match exact gain on all six captured
+# K13-K28 templates; three plus three reach 95.5% at K28.
+INTERVAL_SEED_STARTS = 6
+# Relative arithmetic allowance (dimensionless) between a sample's relaxed bound
+# and background recurrence; suppresses last-bit relevance differences.
+RELEVANCE_MARGIN = 1e-9
+# Maximum improving single-unit ascent sweeps per start (iterations). Bounds work
+# even when a discrete row path has a long sequence of small improvements.
+LOCAL_ITERATIONS = 32
 # Fine templates cover prepared blocks; coarse templates cover L1 spans.
 # The final window is also included when its end falls between regular strides.
 FINE_WINDOW = 8
@@ -82,15 +95,10 @@ class RefinementParameters:
         so small early components do not each receive a chromosome's bin budget.
         The surrogate proposes moves; acceptance scores every site exactly.
     sweep_limit: sweeps per fixed-K search; reaching it records nonconvergence.
-    frontier_bytes: largest window-programme frontier in bytes, counted as four
-        copies of S x (Q + K + bins + 2) float64 per retained path. A programme
-        that would exceed it keeps the incumbent and reports a fallback. The fixed
-        128 GiB cap makes results independent of live memory. The stage admits the
-        memory required by each retry of proposals.programme_budgets.
     window_work_coefficient: positive dimensionless C in the per-template charged-work
         bound C * N * W * b^2 * max(K, R)^3. N is full sample count, W template unit
         count, b largest actual bin count, K current founder count, and R largest
-        actual alphabet. One account covers every focal and retry. Exhaustion in
+        actual alphabet. One account covers every focal, its exact attempt and its seeded search. Exhaustion in
         the count pass discards the entire component refinement/count attempt,
         preserves input rows and families, and releases unevaluated source domains.
         The value 2^25 is the next power of two above twice the largest measured
@@ -126,10 +134,6 @@ class RefinementParameters:
         default=100,
         metadata={"provenance": "Maximum sweeps per fixed-K search (sweeps); reaching it records nonconvergence."},
     )
-    frontier_bytes: int = field(
-        default=DEFAULT_FRONTIER_BYTES,
-        metadata={"provenance": "Fixed 128 GiB frontier cap in bytes, independent of live memory."},
-    )
     window_work_coefficient: int = field(
         default=DEFAULT_WINDOW_WORK_COEFFICIENT,
         metadata={
@@ -141,18 +145,13 @@ class RefinementParameters:
     )
     alternative_branches: int = field(
         default=16,
-        metadata={
-            "provenance": (
-                "Count-continuation leaf budget (histories); overflow retains the unresolved class."
-            )
-        },
+        metadata={"provenance": ("Count-continuation leaf budget (histories); overflow retains the unresolved class.")},
     )
     genotype_error: float = field(
         default=DEFAULT_GENOTYPE_ERROR,
         metadata={
             "provenance": (
-                "Uniform-genotype mixture probability (0.01) in the fixed robust emission; recorded "
-                "for validation."
+                "Uniform-genotype mixture probability (0.01) in the fixed robust emission; recorded for validation."
             )
         },
     )
@@ -160,8 +159,7 @@ class RefinementParameters:
         default=DEFAULT_RESET_RATE,
         metadata={
             "provenance": (
-                "Ancestry-reset opportunities per Morgan per homologue; multiplies each physical-edge "
-                "map distance."
+                "Ancestry-reset opportunities per Morgan per homologue; multiplies each physical-edge map distance."
             )
         },
     )
@@ -172,10 +170,7 @@ class RefinementParameters:
     polish: bool = field(
         default=True,
         metadata={
-            "provenance": (
-                "Boolean post-count fixed-K polish switch; offers extra move families without changing "
-                "K."
-            )
+            "provenance": ("Boolean post-count fixed-K polish switch; offers extra move families without changing K.")
         },
     )
 
@@ -208,13 +203,32 @@ FAMILY_BYTES = 1 << 30
 COUNT_FANOUT_BYTES = 4 << 30
 
 PARAMETER_PROVENANCE = {
-    "BOX_ARITHMETIC_MARGIN": "Dimensionless relative margin between box-bound and programme sums; certifies only clear bounds.",
-    "CONTENT_FULL_ROUNDS": "Full content reranking cap per junction (rounds); remaining candidates follow the last full ranking.",
+    "HYBRID_FRONTIER": (
+        "Kept paths. In component replays of two known-truth simulations (6 and 30 founders) 1.05% and "
+        "3.4% of templates exceeded it, and every released panel row equalled the exact programme's; the "
+        "templates of a real chromosome with 27 to 30 local founders all exceeded it."
+    ),
+    "SEED_STARTS": (
+        "Whole-wish starts (paths); six whole plus six restriction starts match exact gain on all six "
+        "captured K13-K28 templates; three plus three reach 95.5% at K28."
+    ),
+    "INTERVAL_SEED_STARTS": (
+        "Restriction starts (paths); six whole plus six restriction starts match exact gain on all six "
+        "captured K13-K28 templates; three plus three reach 95.5% at K28."
+    ),
+    "RELEVANCE_MARGIN": "Relative arithmetic allowance (dimensionless) for background relevance comparisons.",
+    "LOCAL_ITERATIONS": "Single-unit ascent limit per start (iterations); bounds improvement-chain work.",
+    "BOX_ARITHMETIC_MARGIN": (
+        "Dimensionless relative margin between box-bound and programme sums; certifies only clear bounds."
+    ),
+    "CONTENT_FULL_ROUNDS": (
+        "Full content reranking cap per junction (rounds); remaining candidates follow the last full ranking."
+    ),
     "EXCHANGE_ROUNDS": "Suffix-exchange acceptance cap per junction (rounds).",
-    "DEFAULT_FRONTIER_BYTES": "Fixed frontier cap in bytes, independent of live memory.",
-    "DEFAULT_WINDOW_WORK_COEFFICIENT": "Dimensionless per-template work coefficient, above twice the measured normalized-charge maximum.",
+    "DEFAULT_WINDOW_WORK_COEFFICIENT": (
+        "Dimensionless per-template work coefficient, above twice the measured normalized-charge maximum."
+    ),
     "SWITCH_PENALTY": "Uniform diplotype state-change penalty in the binned proposal surrogate (nats).",
-    "BEAM_CAP": "Retained partial paths per unit after restart (paths); truncation is reported as approximate search.",
     "FINE_WINDOW": "Fine proposal window width (prepared blocks).",
     "FINE_STRIDE": "Fine proposal window stride (prepared blocks).",
     "COARSE_WINDOW": "Coarse proposal window width (L1 spans).",
@@ -230,9 +244,20 @@ PARAMETER_PROVENANCE = {
     "WINDOW_MEMO_BYTES": "Cached window-solve result budget per component (bytes).",
     "WINDOW_MEMO_OVERHEAD": "Per-entry accounting overhead in the window-solve memo (bytes).",
     "WINDOW_MEMO_ENTRIES": "Maximum window-solve memo entries (entries), bounding metadata residence.",
-    "SCORE_LEDGER_ENTRIES": "Cumulative per-sample/shadow score miss admissions per component (entries); fitted publications remain unconditional.",
-    "SCORE_LEDGER_BYTES": "Retained miss-score allowance per component (bytes), including vectors, panel keys and metadata; reserved once across branches.",
-    "SCORE_LEDGER_ENTRY_OVERHEAD": "Conservative miss-entry bookkeeping allowance (bytes) for dictionary storage, admission counters and allocator slack.",
+    "SCORE_LEDGER_ENTRIES": (
+        "Cumulative per-sample/shadow score miss admissions per component (entries); fitted publications "
+        "remain unconditional."
+    ),
+    "SCORE_LEDGER_BYTES": (
+        "Retained miss-score allowance per component (bytes), including vectors, panel keys and metadata; "
+        "reserved once across branches."
+    ),
+    "SCORE_LEDGER_ENTRY_OVERHEAD": (
+        "Conservative miss-entry bookkeeping allowance (bytes) for dictionary storage, admission counters "
+        "and allocator slack."
+    ),
     "FAMILY_BYTES": "Shadow-family scoring array budget (bytes); larger families are scored member by member.",
-    "COUNT_FANOUT_BYTES": "Concurrent count-scoring and shadow-decision transient budget (bytes); larger items run alone.",
+    "COUNT_FANOUT_BYTES": (
+        "Concurrent count-scoring and shadow-decision transient budget (bytes); larger items run alone."
+    ),
 }

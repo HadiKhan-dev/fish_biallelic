@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,10 +20,22 @@ sys.path.insert(0, str(ROOT))
 from haplotype_reconstruction.core.files import atomic_path  # noqa: E402
 
 
+def kernel_table() -> str:
+    """The declared-kernel reference of the roots its page names, rendered in a fresh interpreter.
+
+    A fresh process imports only those roots, so the table never lists kernels that the other
+    generators happened to import.
+    """
+    command = [sys.executable, str(ROOT / "tools/generate_kernel_table.py"), "--page-roots", "--stdout"]
+    environment = dict(os.environ, PYTHONPATH=str(ROOT))
+    return subprocess.run(command, cwd=ROOT, env=environment, check=True, capture_output=True, text=True).stdout
+
+
 def generated() -> dict[str, str]:
     pages = {f"docs/reference/{name}": value for name, value in generate_references.generated().items()}
     for module in (generate_conventions, generate_environment, generate_outputs, generate_records):
         pages[module.TARGET.relative_to(ROOT).as_posix()] = module.render()
+    pages["docs/developer/kernels.md"] = kernel_table()
     return pages
 
 

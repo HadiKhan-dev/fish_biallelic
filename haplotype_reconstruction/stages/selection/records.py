@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.panels import LocalPanel
@@ -51,6 +51,10 @@ __all__ = [
     "result_reader",
     "progress",
 ]
+
+if TYPE_CHECKING:
+    from ...science.selection.context_refit import RefitFinished
+
 
 ROUNDS = ("initial", "l1", "l2")
 SCHEMA = 1
@@ -166,6 +170,25 @@ class SelectionRecords:
 
     def derivation(self, kind: str, index: int | None = None) -> str:
         return json_digest(dict(round=self.identity, record=kind, index=index, schema=SCHEMA))
+
+    def load_refit(self, index: int) -> RefitFinished | None:
+        """Restore one context component's exact worker reply under the round binding."""
+        saved = resume(self.file, self.key("refit", index), self.derivation("refit", index))
+        if saved is None:
+            return None
+        value = saved.payload
+        if value["schema"] != SCHEMA:
+            raise InvariantError("selection context refit schema differs")
+        changes, fills, sites, founders = value["counts"]
+        return (value["index"], [from_payload(ContextProposal, item) for item in value["proposals"]],
+                changes, fills, sites, founders, value["report"])
+
+    def save_refit(self, result: RefitFinished) -> None:
+        """Publish only after the whole context refit component has finished."""
+        index, proposals, changes, fills, sites, founders, report = result
+        payload = dict(schema=SCHEMA, index=index, proposals=[to_payload(item) for item in proposals],
+                       counts=(changes, fills, sites, founders), report=report)
+        publish(self.file, self.key("refit", index), self.derivation("refit", index), payload)
 
     def load_proposals(self) -> tuple[ContextProposal, ...] | None:
         saved = resume(self.file, self.key("proposals"), self.derivation("proposals"))

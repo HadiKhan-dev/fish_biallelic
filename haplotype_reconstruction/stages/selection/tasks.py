@@ -58,7 +58,7 @@ from ...science.selection.parameters import (
 )
 from ...science.selection.rounds import BlockSelection, BlockTask, block_task_bytes, select_task
 from ...science.selection.run import initial_tasks, round_tasks
-from ...store.protocol import claim
+from ...store.protocol import ClaimBusy, claim
 from ...store.store import CheckpointStore
 from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from .records import ROUNDS, SelectionRecords
@@ -116,7 +116,9 @@ def _run_block(
 
     if scope is None:
         return compute()
-    with claim(scope.file, scope.key("block", block.index), scope.derivation("block", block.index)) as needed:
+    with claim(
+        scope.file, scope.key("block", block.index), scope.derivation("block", block.index), blocking=False
+    ) as needed:
         if not needed:
             saved = scope.load_block(block.index, memos=retain_memo)
             assert saved is not None
@@ -145,9 +147,10 @@ def _run_blocks(
     from ...engine.cpu import current_budget
 
     results = []
+    busy = None
     for block in blocks:
-        results.append(
-            _run_block(
+        try:
+            result = _run_block(
                 block,
                 settings,
                 evidence,
@@ -158,7 +161,12 @@ def _run_blocks(
                 memo_scope=memo_scope,
                 retain_memo=retain_memos,
             )
-        )
+        except ClaimBusy as error:
+            busy = error
+        else:
+            results.append(result)
+    if busy is not None:
+        raise busy
     return tuple(results)
 
 
@@ -296,8 +304,19 @@ def _run_refit(
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
+    scope: SelectionRecords | None = None,
 ) -> RefitFinished:
     """Gather one component's private evidence and finish it on its allocated team."""
+    if scope is not None:
+        with claim(scope.file, scope.key("refit", task.index), scope.derivation("refit", task.index),
+                   blocking=False) as needed:
+            if not needed:
+                saved = scope.load_refit(task.index)
+                assert saved is not None
+                return saved
+            result = _run_refit(task, likelihoods, observed, reverse=reverse, census_sink=census_sink, threads=threads)
+            scope.save_refit(result)
+            return result
     gl = gather_likelihoods(likelihoods, task.columns)
     seen = np.ascontiguousarray(observed[:, task.columns])
     with thread_team(default=threads):
@@ -411,7 +430,8 @@ def context_expansion(
             TaskKey("selection", f"refit:{spec.index:06d}", contig, round_name),
             _run_refit,
             args=(spec, evidence.likelihoods, observed),
-            kwargs=dict(reverse=reverse, census_sink=census_sink),
+            kwargs=dict(reverse=reverse, census_sink=census_sink, scope=scope),
+            outputs=() if scope is None else (RecordKey(contig, scope.key("refit", spec.index)),),
             resources=ResourceRequest(
                 1, max_threads, refit_task_bytes(observed.shape[0], len(spec.columns), len(spec.starts), len(spec.h))
             ),
@@ -560,6 +580,7 @@ def _enter_round(
     # Each earlier round's completion is verified here, once; the loads below then check only the records they read.
     if any(earlier.selected() is None for earlier in scopes[:index]):
         raise InvariantError(f"selection {round_name} requires all preceding selected rounds")
+    proposals = None if index == 0 else scope.load_proposals()
     discovered, evidence = session.load_inputs()
     previous = None if index == 0 else scopes[index - 1].load_selections(memos=False)
     state = RoundState(
@@ -573,7 +594,6 @@ def _enter_round(
     )
     if index == 0:
         return _expand_blocks(state, None)
-    proposals = scope.load_proposals()
     if proposals is not None:
         return _expand_blocks(state, proposals)
     if load_context is None:
@@ -680,7 +700,7 @@ def run(
     ties: TieSettings,
     *,
     cores: int = 1,
-) -> Expansion:
+) -> Expansion | dict[RecordKey, str]:
     """Expand precisely one selection round, consuming the preceding context assembly."""
     from ...engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
     from ..discovery import records as discovery_records

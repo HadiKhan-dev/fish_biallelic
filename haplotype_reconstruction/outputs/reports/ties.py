@@ -12,8 +12,8 @@ decoding only the summary entries of the records; it never feeds back into infer
   ties/summary.json    per stage the tie-class decisions and band comparisons, the counts per kind, and the
                        recorded ambiguity flags: discovery blocks whose selection was taken inside a tie
                        (``ambiguous``, ``tied_alternatives``) and the margin of each block's founder-count choice
-                       (``score_margin``); final founder-count calls marked ambiguous or closing a count cycle, and
-                       refinement count decisions whose tied refits disagree
+                       (``score_margin``); final founder-count calls marked ambiguous, and refinement count
+                       decisions whose tied refits disagree
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ class _Ambiguity:
         self.backstops = Counter()
         self.mean_field_measured_blocks = 0
         self.selected_mean_field_failures = self.other_mean_field_failures = 0
-        self.count_calls = self.ambiguous_calls = self.count_cycles = self.undecided_cycles = 0
+        self.count_calls = self.ambiguous_calls = 0
         self.tied_refits = self.disagreeing_refits = 0
 
     def discovery(self, payload) -> None:
@@ -118,8 +118,6 @@ class _Ambiguity:
                 continue
             self.count_calls += 1
             self.ambiguous_calls += int(bool(call.ambiguous))
-            self.count_cycles += int(bool(call.count_cycle))
-            self.undecided_cycles += int(bool(call.cycle_undecided))
 
     def merge(self, other: _Ambiguity) -> None:
         for name, value in vars(other).items():
@@ -158,8 +156,6 @@ class _Ambiguity:
             assembly=dict(
                 count_calls=self.count_calls,
                 ambiguous=self.ambiguous_calls,
-                count_cycles=self.count_cycles,
-                undecided_count_cycles=self.undecided_cycles,
                 tied_refit_decisions=self.tied_refits,
                 tied_refits_disagree=self.disagreeing_refits,
             ),

@@ -39,7 +39,7 @@ class ProductInputs:
 
     def __init__(self, checkpoints, *, nthreads=1):
         self.checkpoints = Path(checkpoints)
-        self._store = CheckpointStore(self.checkpoints, nthreads=nthreads)
+        self._store = CheckpointStore(checkpoints, nthreads=nthreads)
         self._store.check_layout()
         manifest = self._store.manifest("run")
         if manifest is None:

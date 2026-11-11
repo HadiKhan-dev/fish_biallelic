@@ -476,7 +476,7 @@ def plan_evaluation(
     automatic = requested in (("available",), ("all",))
     if not automatic and {"all", "available"} & set(requested):
         raise InputError("all/available cannot be mixed with explicit stages")
-    selected = tuple(manifest.contigs)
+    selected = tuple(reader.contigs)
     if contigs is not None:
         if len(set(contigs)) != len(contigs) or set(contigs) - set(selected):
             raise InputError("evaluation contigs must be unique names in this simulation")

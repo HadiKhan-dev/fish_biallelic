@@ -1,5 +1,164 @@
 # Changelog
 
+## 4.14.0 (11 November 2026)
+
+This release lets one chromosome run on several nodes at once, bounds the two searches that produced multi-hour units
+at high founder counts (refinement windows and discovery's follow-up moves), corrects the pedigree's direction
+evidence, removes a per-phase-set pass over the whole chain from the family-phase release of samples the pedigree does
+not link, and fixes a compiled-kernel symbol collision that could crash a worker or leave a sort wrong in earlier
+releases. 4.14 does not read or resume 4.13 checkpoints or exports.
+
+**Compiled kernels: colliding symbols.** Numba names every compiled function with a counter that each process starts
+at one. Its own sort routines are closures of one factory, told apart only by that counter, so two worker processes
+could compile different routines (an index sort and a value sort of the same array type, say) under one symbol. Both
+entered the kernel cache, and a process that later loaded both ran one routine for both callers: `argsort` returned
+sorted values that were then read as indices (a worker crash with signal 11, observed in the join's splice scores), or
+`sort` returned its input unsorted without an error, depending on which kernel was loaded first. Whether a cache holds
+such a pair is decided by chance when its kernels are first compiled. The counter now starts at a random 56-bit value
+in every process and is redrawn after a fork, so symbols compiled in different processes no longer coincide. Only
+4.13.0 can be affected: it is the first release whose kernels hold a value sort and an index sort of the same array
+type (the merge certificates of local selection beside the index sorts of the join, the refinement and the painting);
+earlier releases sort integer arrays by value and floating-point arrays by index only. In 4.13.0 about 7% of fresh
+runs of a small simulation crashed (4 of 56); in the silent order the merge certificates read unsorted values, which
+can change local selection's merge screen. A 4.13.0 run that compiled its kernels itself and did not crash cannot be
+shown clean from its outputs: recompute results that matter with 4.14.
+
+**One chromosome on several nodes.** Concurrent `haplotypes reconstruct CONFIG --contig C` invocations share discovery
+and selection blocks, selection context refits, founder completion, assembly batches, refinement components, painting
+and founder refit through non-blocking record claims. Every invocation runs the same cut and finishes through refit.
+Busy tasks release CPUs and retry after five seconds, with a 30-second heartbeat. Workers release claims on
+coordinator death. Scientific functions and ordered gathers remain unchanged; context refits and completion ranges
+gain lossless intermediate records. All processes must use the same fixed source tree and checkpoint root; changed
+code identities require fresh checkpoints. The checkpoint container now establishes the end of its data under the
+append lock by reading, not from the file's size attribute: on a parallel file system the lock and the size are kept
+by different services, and a process that had just been granted the lock was observed to get, for a fraction of a
+millisecond, the size from before the previous holder's record, so that it overwrote that record. A size below the
+indexed end no longer resets a reader's index. One invocation on one node was not affected by either.
+
+**Excluding contigs.** `exclude_contigs` names configured contigs to leave out of the pedigree and of every later
+stage. Evidence and relatedness still read every input contig; `run` does not reconstruct an excluded contig, and
+keeps any records it already has. The final products of each contig set live side by side, so the set can be changed
+on resume without recomputing the included contigs.
+
+**Founder refinement: window search.** A window template is solved by the exact bounded-frontier programme while its
+frontier stays within 64 kept paths. A template that exceeds it is solved by a seeded search instead of the restart
+ladder, whose cost grew as K⁴ to K⁶: the search starts from the paths that single samples favour (six whole paths
+and six restrictions of a path to an interval), improves each by single-unit ascent, and scores every restriction and
+every single-unit change of a start from one forward and one backward pass of max-plus messages. The returned path is
+rescored by the ordinary surrogate, and acceptance is unchanged. The seeded search is a heuristic above the frontier:
+it carries no optimality certificate. In component replays of two known-truth simulations (6 and 30 founders) every
+released panel row equals the exact programme's. On eight saved components of real chromosomes with 12 to 23 local
+founders the founder count equals the exact programme's on four and differs by one or two on four, in 13 to 71 minutes
+instead of 38 to 179. The focal solves of one template also share the caller's CPUs in contiguous chunks, with
+identical results.
+
+**Founder refinement: tied incoming roots.** A join can hand a component several starting panels of exactly equal
+likelihood (typically two founders exchanging their row at one block). Every such root used to run a complete count
+pass, so a component with four tied roots cost four passes. Now the nominal root runs the pass, and each root of the
+same count follows the deletions that pass adopted: it is converged from its own start and re-converged after each
+adopted deletion of the corresponding founder, and its terminal panel enters the unchanged terminal comparison, so a
+tie that survives the pass is still released as a family. A root costs one fit plus one per adopted deletion instead
+of a pass. This is a search-rule change: a root whose own count decisions would have differed from the nominal root's
+is no longer detected (none did in the components examined). Roots of another count, roots without an unambiguous
+founder correspondence, roots one of whose fits ends in tied endpoints, and all roots after a best-F restoration keep
+their own pass. The component record gains `branch_replays`.
+
+**Discovery: screened follow-up moves.** Within each founder count, deaths, gauge rewires, soft births and
+replacements are ranked by their likelihood before any fitting iteration, and only the leading classes are fitted (6
+deaths, 6 gauge rewires, 12 soft births and 12 replacements, in whole tie classes). Data births are fitted as before.
+This is a declared restriction of the search and can change discovery panels: the omitted moves are recorded, and the
+neighbourhood certificate covers the screened neighbourhood only. Frontier batches are also partitioned by
+sample-vector width, which changes no result. On 60 blocks of a real cross, stratified by founder count, discovery took
+3.9 core-hours instead of 19.9 and its longest block 17 CPU-minutes instead of 180; cost grew as the cube of the highest
+fitted founder count instead of its fourth power. At the discovery stage of two known-truth simulations the truth
+metrics agree within half a percent (one-to-one founder errors 296 against 306, and 6,256 against 6,301).
+
+**Assembly joins.** The sample team of a batch is sized by its pair work (bins times the square of the largest local
+founder count) instead of a fixed eight samples per thread, so a batch of few samples and many founders uses the CPUs
+it holds; prefix scores reuse integer pair addresses; and sparse kernels use only the lanes that hold samples.
+Candidates, bounds, pruning thresholds and decisions are unchanged, and saved batches reproduce their records. On
+three upper-level batches of a real 52-sample chromosome with 25 to 31 founders, alone on a node, the join took 3.5 to
+5.5 minutes instead of 8.6 to 10.5.
+
+**Pedigree direction: joint transmission evidence.** Direction now scores a child's scheduled homologue as a meiotic
+copy of the candidate parent's two, with the other three homologues modelled as founder mosaics. It replaces the
+inherited-junction count bound, which can favour reversed directions when a parent's painted junctions all lie on the
+homologue it did not transmit in a descendant-rooted founder frame. The per-bin painting mismatch probability is 0.01;
+the founder-mosaic change probability theta / (T − 1) is derived. A shared unrecombined homologue gives near-neutral
+evidence, with small residuals from alternative mismatch paths; trio evidence decides those pairs. Orientation log
+odds, pedigree calls, release tiers, edges and downstream phase/recombination outputs may change. Saved decision
+replays of a real multi-generation cross change three samples at Tier B; a 30-founder known-truth replay loses one net
+true Tier-B edge (12 to 11). These are scientific changes, not a claim of real-data accuracy. Other direction
+corrections, calibration, resampling, tiers, guard and the reported junction-density graph-order contrast retain their
+definitions. The stored field is `transmission_log_likelihood` (nats), in chromosome score schema 2 and pedigree
+product schema 4. Changed code identities refuse old stage checkpoints; old count bounds are never decoded as
+likelihoods.
+
+**Family phase: samples without a linked parent or child.** Such a sample's chromosome is released as phase sets, each
+anchored at its first confidently heterozygous bin. Every phase set used to cost one forward-backward pass over the
+complete chain, so a sample cost phase sets times bins times states cubed, and a chromosome whose pedigree links no
+sample became the longest unit of a run (over five hours of phase on a whole node for one 52-sample chromosome with 32
+founder states). The anchor restricts the state at one bin, which changes neither the forward messages before that bin
+nor the backward messages at and after it. The release now computes the unrestricted messages once and, for each phase
+set, only what the set reads: the backward messages down to the set's start and the forward messages until the set
+ends, taken in pieces with the continuation test after each (the last piece may run past the set's end). These are the
+same operations in the same order as the complete pass, so the posteriors are the same numbers (a test compares them
+bit for bit) and every released call, phase and set is unchanged; a sample's message computation is now linear in the
+chromosome's length, whatever the number of its phase sets. On a 52-sample chromosome with 25 founder states and about
+945 phase sets per sample the phase task took 89 s and 0.70 CPU-hours instead of 309 minutes and 137.65 CPU-hours, and
+released an identical phase product (every call, flag and phase break); with 32 states it took 183 s and 2.3 CPU-hours
+(on a 76-CPU node) instead of 5 hours 40 minutes and 608.9 CPU-hours (on a 112-CPU node), again with an identical
+product.
+
+**Output format changes.** The final count step's cycle fields are removed. They have been constant since 4.12, whose
+final count step only deletes founders and so cannot close a count cycle; a constant column reads as a measurement
+that never fires.
+- `painting/founder_counts.csv` loses the columns `count_step_cycle` and `count_step_cycle_undecided` (always false
+  where a count step covered the component). The later columns move up by two; read the table by column name.
+  `undecided_count_cycles` keeps its meaning and its values: it is the sum of `join_undecided_cycles` and
+  `feedback_join_undecided_cycles`, the only terms that could be non-zero. The join columns are unchanged.
+- `ties/summary.json` loses `ambiguity.assembly.count_cycles` and `ambiguity.assembly.undecided_count_cycles` (always
+  zero). `count_calls`, `ambiguous`, `tied_refit_decisions` and `tied_refits_disagree` are unchanged.
+- The stored count call of an assembly component (`CountCall`) loses `count_cycle` and `cycle_undecided`. Assembly
+  checkpoints of earlier trees are not read: their records carry another code identity, so a resume is refused and the
+  run is repeated in a new output root.
+
+The count-cycle column removal leaves founder panels, counts and paintings unchanged.
+
+Validation: the test suite (4,201 tests), the stage tier (347 tests in four shards; 2 skipped) and the documentation
+check pass. The end-to-end matrix of thirteen cases (twelve simulated crosses and TroMau) was compared with the latest
+earlier run of each case (4.13.0 for six, 4.11.0 for seven). Every case completes and no worker is lost.
+- Seven simulations have identical truth metrics: two backcross designs, a reversed run and a sample-order
+  permutation of the 80-sample cross, and three further designs.
+- Four differ by a few alleles: the standard cross (founder errors 397,520 to 397,516, genotype errors 16,769 to
+  16,768, phase sets 404 to 403), the stress cross (founder errors 3,928 to 3,926, missing founder alleles 3,467 to
+  3,470), a three-generation cross (missing founder alleles 2,660 to 2,663) and a sibling-rich cross (correct parent
+  states 96 to 97).
+- The 30-founder cross is slightly worse on founders: 2,781 to 2,955 wrong alleles (2,453 to 2,589 per million called,
+  with 0.7% more alleles called), genotype errors 1,300 to 1,303, phase switch errors 26 to 28, correct parent states
+  23 to 24. This is the cost of discovery's screened follow-up moves.
+- TroMau: the released pedigree (Tier B) is identical for all 116 samples, and one sample loses its Tier A pair.
+  Founder counts are unchanged on every chromosome. Phased heterozygous calls rose by 0.03% (96,815,384 to
+  96,842,678), with 27,596 phase sets instead of 28,241 and 889 crossovers instead of 892. On one 76-CPU node the run
+  took 4,787 s against 4,785 s.
+- Tied incoming roots: twelve components of real runs were replayed from saved inputs under the earlier and the new
+  rule. Released rows, objective, release families and count decisions are identical in all twelve; the largest cost
+  16,723 CPU-seconds instead of 41,705.
+- Several nodes: 48- and 320-sample simulations reconstructed by several invocations on distinct nodes release the
+  results of one invocation, also when one of them is killed mid-run. One chromosome of each of two real crosses (52
+  and 304 samples, about 2,700 blocks each) ran on four 112-CPU nodes: every selection round of the first was complete
+  after 50 minutes against 126 on one node, and discovery of the second after 23 minutes against 49. More than 30
+  node-hours of concurrent appends to one container showed no fault.
+- Family phase: the matrix was run before and after the release change above. Every published file of the thirteen
+  cases is identical in the two runs (TroMau: 183 files, 11.8 million VCF records), and TroMau's phase stage took 406
+  task-seconds instead of 983.
+
+Limits seen in those two runs. A join batch or a refinement component is one unit, run by one invocation, and a node
+claims every ready task it has CPUs for, so the last tasks of a level can sit on one node while the others wait. The
+longest units are now level-1 join batches (up to 65 and 100 minutes; their search is bound by one thread, and on
+saved batches it is 10 to 12% faster than under 4.13.0), where 4.11.0 had level-1 refinement components of more than
+six hours (now at most 33 minutes).
+
 ## 4.13.0 (10 November 2026)
 
 This release bounds the founder-count scaling of five searches, so that no stage grows faster than K³ except where

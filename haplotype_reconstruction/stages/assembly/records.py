@@ -358,8 +358,6 @@ def _encode_count_call(call: CountCall | None) -> dict[str, Any] | None:
         founders=call.founders,
         founders_before=call.founders_before,
         ambiguous=call.ambiguous,
-        count_cycle=call.count_cycle,
-        cycle_undecided=call.cycle_undecided,
         reason=call.reason,
         decisions=[
             dict(
@@ -395,8 +393,6 @@ def _decode_count_call(value: Mapping[str, Any] | None) -> CountCall | None:
         founders=value["founders"],
         founders_before=value["founders_before"],
         ambiguous=value["ambiguous"],
-        count_cycle=value["count_cycle"],
-        cycle_undecided=value["cycle_undecided"],
         decisions=decisions,
         reason=value["reason"],
     )

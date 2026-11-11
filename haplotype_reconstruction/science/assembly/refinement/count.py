@@ -46,6 +46,17 @@ other sample's F_s is exactly 0 for every panel. The decisions choose K; the pan
 K is the best-F converged fit computed at K during the pass (with the restored panel's adjacent-K
 deletion comparison reported, and the call flagged ambiguous when it fails its own deletion test).
 The chosen K is the working set of the next join; deletion stops at K = 2.
+
+Incoming roots (count_pass): a whole-span family of the join gives alternative starting panels of equal join
+likelihood. The nominal root runs the complete pass. A root of the nominal count is not asked the count
+questions again: it is converged from its own start and then follows the deletions the nominal pass
+adopted (the corresponding founder at each round, _corresponding_founder), re-converging after each, so it
+ends at its own panel of the nominal pass's final count (_replayed_root). Its terminal enters the
+ordinary terminal comparison, so a tie between roots that survives the pass is still released as a
+family. A root whose panels meet the nominal root's is the nominal history from there on. A root of
+another count, a root without an unambiguous founder correspondence, a root one of whose fits ends in
+tied endpoints (those are alternatives only a complete pass continues), and every root when the nominal
+pass restored a best-F panel run their own complete pass.
 """
 
 from __future__ import annotations
@@ -54,7 +65,7 @@ import hashlib
 import itertools
 import math
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -753,10 +764,10 @@ def _refit_choice(values, keys, scale, counter=None, census_key=None, *, reverse
 
 
 def _resulting_panel(X, refit_rows, accept_larger):
-    """Content key of the larger or smaller panel selected by the count decision."""
-    refit_rows = np.asarray(refit_rows)
-    takes_refit = accept_larger if len(refit_rows) > len(X) else not accept_larger
-    return tie_rules.panel_key(refit_rows if takes_refit else X)
+    """Content key of the panel a deletion decision selects: the incumbent X when it keeps the larger panel, else
+    the refit. Every count refit is a deletion refit (deletion_round fits X without one founder, and a fit never
+    changes its number of founders), so the refit is always the smaller panel."""
+    return tie_rules.panel_key(X if accept_larger else refit_rows)
 
 
 def _tied_resolution(members, pick, outcomes, refits, X, engine, budget):
@@ -1232,19 +1243,99 @@ def _uncontinued_families(ancestry, founders, live_panels=()):
 
 
 # ------------------------------------------------------------------ the pass
+@dataclass
+class _DeletionPath:
+    """The panels one count pass adopted in order: its converged start, then, for each accepted deletion,
+    (round label, deleted founder of the panel before, converged panel after)."""
+
+    start: NDArray[np.int64] | None = None
+    steps: list[tuple[str, int, NDArray[np.int64]]] = field(default_factory=list)
+
+    @property
+    def end(self) -> NDArray[np.int64] | None:
+        return self.steps[-1][2] if self.steps else self.start
+
+
+# A root whose panels met the nominal root's: its history is the nominal history from there on.
+_MERGED = object()
+
+
+def _corresponding_founder(reference, panel, founder):
+    """The row of ``panel`` that is founder ``founder`` of ``reference``, or None.
+
+    reference, panel: int64 K x B panels of one count that differ in the few cells two tied roots differ
+    in. Founders correspond when, for every founder, each panel's row is the other's unique nearest row
+    (fewest differing cells). Any ambiguity returns None: the caller then gives the root its own pass."""
+    if reference.shape != panel.shape:
+        return None
+    differing = np.count_nonzero(reference[:, None, :] != panel[None, :, :], axis=2)
+    nearest, back = differing.argmin(axis=1), differing.argmin(axis=0)
+    if not np.array_equal(back[nearest], np.arange(len(reference))):
+        return None
+    if len(reference) > 1:
+        by_row, by_column = np.sort(differing, axis=1), np.sort(differing, axis=0)
+        if np.any(by_row[:, 0] == by_row[:, 1]) or np.any(by_column[0] == by_column[1]):
+            return None
+    return int(nearest[founder])
+
+
+def _replayed_root(worker, start, point, path, budget):
+    """A tied incoming root taken through the nominal pass's adopted deletions (module docstring).
+
+    worker: the root's branch engine; start: its int64 K x B panel; point, path: the nominal root's
+    CountPass and _DeletionPath. Returns the root's terminal as a CountPass carrying the nominal decisions
+    and the root's own fits, final panel, scores and F; _MERGED when its panels meet the nominal root's;
+    None without an unambiguous founder correspondence or when one of its fits ends in tied endpoints."""
+    worker.ledger.start_count_pass()
+    fits = [worker.converge(start, "start", budget)]
+    for label, founder, _ in path.steps:
+        fit = fits[-1]
+        reference = path.start if len(fits) == 1 else path.steps[len(fits) - 2][2]
+        if len(fit.summary.tied_panels) > 1:
+            return None
+        if np.array_equal(fit.rows, reference):
+            return _MERGED
+        match = _corresponding_founder(reference, fit.rows, founder)
+        if match is None:
+            return None
+        fits.append(worker.converge(np.delete(fit.rows, match, axis=0), f"{label}.del{match}", budget))
+    fit = fits[-1]
+    if len(fit.summary.tied_panels) > 1:
+        return None
+    if np.array_equal(fit.rows, path.end):
+        return _MERGED
+    scores = worker.fit_scores(fit.summary.label, fit.rows, budget)
+    return replace(
+        point,
+        rows=fit.rows,
+        scores=scores,
+        F=panel_objective(scores),
+        fits=tuple(item.summary for item in fits),
+        final_fit=fit.summary.label,
+        weak_junctions=fit.weak_junctions,
+        live_alternatives=(),
+        unresolved_alternatives=(),
+        continuation_families=(),
+        count_unverified=(),
+    )
+
+
 def keep_margin(F):
     """Margin of the best-F keep, the cycle keep and the restore: max(TOL, the tie quantum at F)."""
     return max(TOL, tie_rules.quantum("refine_F", F))
 
 
-def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, counter=None, census_prefix=None):
+def _count_pass_point(
+    engine, geometry, start, cost, rule, budget, seed_key, counter=None, census_prefix=None, path=None
+):
     """Converged fixed-K fit and converged count decisions for one component (module docstring).
 
     engine: the component's fit.SweepEngine; geometry: count_geometry.RowGeometry of its prepared
     panels; start: int64 K x B starting rows; cost: the per-founder cost c; rule: CountRuleParameters;
     seed_key: the component's bootstrap key;
     counter: the component's tie-class counter (tie_rules.SharedCounter) or None; census_prefix: its
-    valley-census key prefix or None. Returns a CountPass."""
+    valley-census key prefix or None; path: a _DeletionPath that receives the adopted panels, or None.
+    Returns a CountPass."""
     engine.ledger.start_count_pass()
     ws = engine.workspace
     # Per-sample vectors enter the count rule restricted to the informative samples (cost's S);
@@ -1294,6 +1385,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, cou
     capture(fit)
     adopt(fit)
     X = fit.rows
+    if path is not None:
+        path.start = X
     scores = engine.fit_scores(fit.summary.label, X, budget)
     round_index = 0
     # Best-F converged fit computed at each K: (F, panel, fit label, per-sample scores, fit).
@@ -1562,6 +1655,8 @@ def _count_pass_point(engine, geometry, start, cost, rule, budget, seed_key, cou
             break
         final, X, scores = smaller, smaller.rows, smaller_scores
         adopt(final)
+        if path is not None:
+            path.steps.append((entry.round, int(cast(str, entry.smaller_fit).rsplit(".del", 1)[1]), X))
     replaced = None
     held = best_at[len(X)]
     if held[0] > panel_objective(scores) + keep_margin(panel_objective(scores)):
@@ -1655,7 +1750,7 @@ def count_pass(
     its evaluated alternative. No intermediate panel is a fresh count-pass root.
     """
 
-    def run(worker, incoming, incoming_seed):
+    def run(worker, incoming, incoming_seed, path=None):
         return _count_pass_point(
             worker,
             geometry,
@@ -1666,6 +1761,7 @@ def count_pass(
             incoming_seed,
             counter=counter,
             census_prefix=worker.census_prefix,
+            path=path,
         )
 
     def branch_worker(fit_choices, count_choices, input_key):
@@ -1702,7 +1798,8 @@ def count_pass(
     family: dict[str, Any]
     event: tuple[str, Any, dict[str, Any]] | dict[str, Any] | None
     engine.ledger.forced_count_choices = {}
-    initial = run(engine, start, seed_key)
+    nominal_path = _DeletionPath()
+    initial = run(engine, start, seed_key, nominal_path)
     nominal_input = tie_rules.panel_key(start)
     input_keys = tuple(
         sorted({nominal_input, *(tie_rules.panel_key(np.asarray(panel)) for panel in alternative_starts)})
@@ -1805,16 +1902,31 @@ def count_pass(
             input_key=nominal_input,
         )
     ]
-    evaluations, reused, count_evaluations = 1, 0, 0
+    evaluations, reused, count_evaluations, replays = 1, 0, 0, 0
+    # The returned panel must be the end of the adopted deletions: a restored best-F panel has no such path.
+    replayable = initial.best_f_replacement is None and np.array_equal(initial.rows, nominal_path.end)
     for panel in input_keys:
         if panel == nominal_input:
             continue
-        branch = branch_worker({}, {}, panel)
         incoming = np.asarray(panel, np.int64)
-        # Same bootstrap stream; each root retains its ordinary 2 * incoming K bound.
-        result = run(branch, incoming, seed_key)
-        evaluations += 1
-        reused += branch.reused_fits
+        result = None
+        if replayable and len(panel) == len(nominal_input):
+            # A replay has its own branch identity, hence its own fit records: its fit labels name the
+            # nominal pass's deletions, which a later complete pass of the same root may not repeat.
+            branch = branch_worker({}, {}, ("replay", panel))
+            result = _replayed_root(branch, incoming, initial, nominal_path, budget)
+            # Fits the replay took from the shared ledger count as reused whether or not the replay stands.
+            reused += branch.reused_fits
+            if result is not None:
+                replays += 1
+            if result is _MERGED:
+                continue
+        if result is None:
+            branch = branch_worker({}, {}, panel)
+            # Same bootstrap stream; each root retains its ordinary 2 * incoming K bound.
+            result = run(branch, incoming, seed_key)
+            evaluations += 1
+            reused += branch.reused_fits
         pending.append(
             dict(
                 choices={},
@@ -2107,6 +2219,7 @@ def count_pass(
         input_F0=initial.input_F0,
         count_continuations=tuple(count_reports),
         count_branch_evaluations=count_evaluations,
+        branch_replays=replays,
     )
 
 

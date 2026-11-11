@@ -337,6 +337,10 @@ class SearchParameters:
     expansion_backstop_base/_per_founder, exact_score_backstop_base/_per_founder: reported
         backstops, K = the largest K represented in the search archive.
     max_proposals_per_expansion: generator size of deaths + gauge rewires, and of soft births.
+    death_screen_width, gauge_screen_width: fixed-row NLL screening widths per K for deaths
+        and gauge rewires before full refits; whole classes straddle through twice the width.
+    soft_birth_screen_width, replacement_screen_width: corresponding per-K widths for
+        soft births and birth-delete replacements. Data births are never screened.
     data_start_beam_width: K=1 data-seed fits kept as search starts.
     data_seed_count: soft-cluster seeds tried for K=1.
     seed_min_cluster_size: HDBSCAN minimum cluster size of the K=1 seeds.
@@ -423,6 +427,54 @@ class SearchParameters:
             ),
         },
     )
+    death_screen_width: int = field(
+        default=6,
+        metadata={
+            "units": "starts per K before full refit (whole classes; straddle 2x)",
+            "provenance": (
+                "Fixed-row NLL screening width for deletion starts. "
+                "One expansion-beam width of fixed-row leaders represents the nearby deletion basins. "
+                "The screen predicts fitted endpoints for these moves; data births are excluded."
+            ),
+        },
+    )
+
+    gauge_screen_width: int = field(
+        default=6,
+        metadata={
+            "units": "starts per K before full refit (whole classes; straddle 2x)",
+            "provenance": (
+                "Fixed-row NLL screening width for gauge-rewire starts. "
+                "One expansion-beam width of fixed-row leaders represents the nearby gauge basins. "
+                "The screen predicts fitted endpoints for these moves; data births are excluded."
+            ),
+        },
+    )
+
+    soft_birth_screen_width: int = field(
+        default=12,
+        metadata={
+            "units": "starts per K before full refit (whole classes; straddle 2x)",
+            "provenance": (
+                "Fixed-row NLL screening width for soft-birth starts. "
+                "Two expansion-beam widths retain a broader set of residual-consensus basins. "
+                "The screen predicts fitted endpoints for these moves; data births are excluded."
+            ),
+        },
+    )
+
+    replacement_screen_width: int = field(
+        default=12,
+        metadata={
+            "units": "starts per K before full refit (whole classes; straddle 2x)",
+            "provenance": (
+                "Fixed-row NLL screening width for birth-delete replacement starts. "
+                "Two expansion-beam widths retain a broader set of replacement basins. "
+                "The screen predicts fitted endpoints for these moves; data births are excluded."
+            ),
+        },
+    )
+
     data_start_beam_width: int = field(
         default=6,
         metadata={

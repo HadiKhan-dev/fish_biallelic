@@ -54,7 +54,7 @@ def run_contig(
         raise InvariantError("refit evidence payload binding differs")
     if painting.contig != evidence.contig or painting.sample_ids != tuple(evidence.sample_ids):
         raise InvariantError("refit painting/evidence contig or sample axes differ")
-    with claim(file, records.FOUNDER_REFIT, expected) as needed:
+    with claim(file, records.FOUNDER_REFIT, expected, blocking=False) as needed:
         if not needed:
             result = records.load(file, expected, painting=painting)
             if result is None:

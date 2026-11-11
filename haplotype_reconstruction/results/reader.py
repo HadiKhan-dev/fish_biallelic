@@ -8,23 +8,28 @@ I/O here. Each stage owns its product decoder and expected derivation.
 
 from __future__ import annotations
 
-import json
 import importlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..contracts.contigs import AnalysisContigs
 from ..contracts.roles import require_schema
 from ..core.digest import json_digest
 from ..core.errors import InputError, InvariantError, SettingsError
-from ..store.container import CheckpointMismatch
-from ..store.protocol import read_items
-from .order import recorded_input_order
-from .protocol import ProductInputs, ProductReader
+from ..stages.analysis.records import DEFINITION
+from ..stages.analysis.records import location as analysis_location
 from ..stages.catalog import STAGES
+from ..store.container import CheckpointMismatch
+from ..store.namespace import StoreLocation
+from ..store.protocol import read_items
+from ..store.store import CheckpointStore
+from .order import recorded_input_order
 from .panels import FOUNDER_STAGES, StagePanel
-from .paths import RunPaths
+from .paths import RunPaths, active_exclusions
+from .protocol import ProductInputs, ProductReader
 
 if TYPE_CHECKING:
     import numpy as np
@@ -130,13 +135,44 @@ class Results(ProductInputs):
     including output_selection.json, so an off/on/off change is visible immediately.
     """
 
-    def __init__(self, path: str | Path, *, checkpoints: str | Path | None = None, nthreads: Any = 1) -> None:
+    def __init__(
+        self, path: str | Path, *, checkpoints: str | Path | None = None, nthreads: Any = 1,
+        exclude_contigs: tuple[str, ...] | None = None,
+    ) -> None:
         paths = RunPaths.from_directory(path)
         self.root = paths.output
         self.checkpoints = paths.checkpoints if checkpoints is None else Path(checkpoints).expanduser().resolve()
         if not self.checkpoints.is_dir():
             raise SettingsError(f"{self.root}: run has not been initialized; use haplotypes init")
-        super().__init__(self.checkpoints, nthreads=nthreads)
+        location = checkpoints if isinstance(checkpoints, StoreLocation) else self.checkpoints
+        if not isinstance(location, StoreLocation):
+            store = CheckpointStore(location, nthreads=nthreads)
+            manifest = store.manifest("run")
+            if manifest is not None:
+                if exclude_contigs is None:
+                    active = active_exclusions(self.root)
+                    exclude_contigs = () if active is None else active
+                selection = AnalysisContigs(tuple(manifest["contigs"]), tuple(exclude_contigs))
+                if selection.excluded:
+                    definition = store.control(DEFINITION + selection.namespace)
+                    if definition is None:
+                        raise SettingsError("this included-contig set has not been run")
+                    location = analysis_location(location, selection)
+        super().__init__(location, nthreads=nthreads)
+
+    @property
+    def analysis(self) -> AnalysisContigs:
+        return AnalysisContigs.from_manifest(self._manifest)
+
+    @property
+    def contigs(self) -> tuple[str, ...]:
+        """The included axis of this reader's explicit final-analysis selection."""
+        return self.analysis.included
+
+    @property
+    def checkpoint_location(self):
+        """Explicit record scope for companion readers, independent of the active selection."""
+        return self._store.location or self.checkpoints
 
     @property
     def input_sample_ids(self) -> tuple[str, ...] | None:
@@ -317,7 +353,7 @@ class Results(ProductInputs):
         if (
             saved.identity != source["input_identity"]
             or saved.seed != self._manifest["realised_seeds"]["simulation"]
-            or tuple(saved.contigs) != self.contigs
+            or tuple(saved.contigs) != tuple(self._manifest["contigs"])
         ):
             raise CheckpointMismatch("simulation manifest differs from the initialized source; use a new output root")
         return saved

@@ -215,7 +215,7 @@ def run_contig(
 ) -> Painting:
     """Resume or execute model -> continuity -> decode -> release; publish product last."""
     complete = {records.PAINTING: expected, records.SUMMARY: expected, records.IDENTITY: expected}
-    with claim(file, records.PAINTING, expected) as needed:
+    with claim(file, records.PAINTING, expected, blocking=False) as needed:
         if not needed:
             result = records.load(file, expected, assembly=assembly)
             if result is None:

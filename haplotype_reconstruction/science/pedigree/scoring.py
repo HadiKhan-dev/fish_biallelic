@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ...contracts.pedigree import ChromosomeScores, PreparedChromosome
-from . import exposure, forward, junctions
+from . import exposure, forward, junctions, transmission
 from .eligibility import ParentEligibility
 from .parameters import PedigreeParameters
 from .resident import ResidentComponent, resident
@@ -80,13 +80,11 @@ def score_chromosome(
             state.projection, state.terms, trios, component_screen.zero, component_screen.one, claim_threads
         )
         claim_threads()
-        counts, callable_bins = junctions.junction_counts(
-            component.state_classes, component.named_alleles, component.bin_sizes
+        schedule = junctions.schedules(
+            component.state_classes, component.named_alleles, component.bin_sizes, reverse=reverse
         )
-        claim_threads()
-        schedules.append(
-            junctions.schedules(component.state_classes, component.named_alleles, component.bin_sizes, reverse=reverse)
-        )
+        counts, callable_bins = schedule.counts, schedule.callable_bins
+        schedules.append(schedule)
         thetas.append(np.ascontiguousarray(component.selector_switch_probability, dtype=np.float64))
         assert state.pair_masses is not None  # states scored here are resident with their pair masses (the default)
         (matched, exposed, explained, pair_exposed, exposed_morgans, pair_morgans) = exposure.expected_structure(
@@ -119,18 +117,16 @@ def score_chromosome(
     def total(position):
         return np.sum(np.stack([part[position] for part in parts]), axis=0)
 
-    # Linked junction transmission for every dyad the decision orients (both directions of each
-    # eligible edge): the child's chromosome-wide callable fraction thins the inherited junctions.
-    own = total(7).astype(np.int64)
-    total_bins = float(sum(component.n_bins for component in prepared.components))
-    detection = np.minimum(1.0, total(8) / (2.0 * total_bins)) if total_bins > 0 else np.zeros(len(own))
+    # Joint transmission evidence for both directions of every edge the decision orients.
     oriented = required.copy()
     np.fill_diagonal(oriented, False)
     dyads = np.ascontiguousarray(np.argwhere(oriented), dtype=np.int64)
-    junction_log_cdf = np.zeros(len(dyads))
+    transmission_log_likelihood = np.zeros(len(dyads))
     if len(dyads):
         claim_threads()
-        junction_log_cdf = junctions.linked_log_cdf(dyads, schedules, thetas, own, detection, own)
+        transmission_log_likelihood = transmission.log_likelihood(
+            dyads, schedules, thetas, config.direction.mismatch_probability
+        )
 
     return ChromosomeScores(
         contig=prepared.contig,
@@ -148,7 +144,7 @@ def score_chromosome(
         component_count=prepared.component_count,
         scored_component_count=len(prepared.components),
         junction_dyads=dyads,
-        junction_log_cdf=junction_log_cdf,
+        transmission_log_likelihood=transmission_log_likelihood,
         scored_morgans=scored_morgans(prepared, config.exposure.unit_morgans),
         edge_exposed_morgans=total(9),
         pair_exposed_morgans=total(10),

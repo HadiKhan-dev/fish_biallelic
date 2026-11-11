@@ -69,8 +69,8 @@ def sample_lines(prefix, prefix_ends, kept, codes, phase_sets, out, line_ends):
                 out[position + 3] = _COLON
                 position += 4
                 if phase_set > _INT32_MAX:
-                    # htslib's VCF writer (4.9.0, and the BCF route) stores FORMAT integers as int32: a larger PS is
-                    # written missing, the genotype staying phased.
+                    # VCF/BCF FORMAT integers are int32 (htslib's writers store them so): a larger PS is written
+                    # missing, the genotype staying phased.
                     out[position] = _DOT
                     position += 1
                     continue

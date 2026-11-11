@@ -39,7 +39,7 @@ import numba
 import numpy as np
 from numba import prange
 
-from haplotype_reconstruction.core.kernels import kernel
+from haplotype_reconstruction.core.kernels import bounded_team, kernel
 
 from ..parameters import SPARSE_ABSOLUTE, SPARSE_RELATIVE
 from .emissions import pair_index
@@ -1231,26 +1231,28 @@ class PanelForwards:
         values = lower.copy()
         if not len(candidates):
             return values, 0
-        upper = move_bounds(
-            *self.layout.arrays(),
-            self.rows,
-            self.penalty,
-            self.total_bins,
-            self.forward,
-            self.index,
-            self.excluded,
-            self.second,
-            self.pairs,
-            np.ascontiguousarray(np.reshape(new_row, (1, -1)), dtype=np.int64),
-            int(founder),
-            -1,
-            candidates,
-        )
+        with bounded_team(len(candidates)):
+            upper = move_bounds(
+                *self.layout.arrays(),
+                self.rows,
+                self.penalty,
+                self.total_bins,
+                self.forward,
+                self.index,
+                self.excluded,
+                self.second,
+                self.pairs,
+                np.ascontiguousarray(np.reshape(new_row, (1, -1)), dtype=np.int64),
+                int(founder),
+                -1,
+                candidates,
+            )
         need = candidates[upper > tolerance[candidates]]
         if len(need):
-            values[need] = score_samples(
-                *self.layout.arrays(), np.ascontiguousarray(trial_rows, dtype=np.int64), self.penalty, need
-            )
+            with bounded_team(len(need)):
+                values[need] = score_samples(
+                    *self.layout.arrays(), np.ascontiguousarray(trial_rows, dtype=np.int64), self.penalty, need
+                )
         return values, len(need)
 
 

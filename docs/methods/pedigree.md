@@ -207,16 +207,28 @@ Parameters by name: `junction_unreachable_state`, `junction_unreachable_count`. 
 Cost and scope: O(N B J²); O(J²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps19"></a>
-## ps19 Junction schedules and the linked junction log CDF
+## ps19 Minimum-switch schedules and joint transmission likelihood
 
-Canonicalise trajectory content, trace the first minimum path in pair order or the last under reversal, and construct a junction schedule. Propagate the linked inheritance/count recurrence per ordered dyad, resetting the transmitted homologue law at each component. Drop counts above the child total and accumulate retained log mass. Zero retained mass yields negative infinity. Alternative equally parsimonious placements are not integrated. The explicit tie convention determines placement, and dyad arrays have C layout.
+Canonicalise selected-marker trajectory content and pool locally identical classes. Trace each sample's
+minimum-switch unordered trajectory pair per bin, taking the first minimum path in pair order or the last under
+the explicit reversal convention. Alternative equally parsimonious whole paths are not integrated. Build the
+schedule, its local homologue classes, the mask of bins with both painted labels known and the number T of distinct
+whole-component trajectories together. Count summaries for graph ordering come from that same trace.
 
+The direction evidence is the joint likelihood of the two samples' scheduled homologues, defined in
+[PD06](#finite-continuous-direction). Reset its four-state phase law independently at each component.
 
-Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py),
+[science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py),
+[science/pedigree/transmission.py](../../haplotype_reconstruction/science/pedigree/transmission.py),
+[science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
 
-Parameters: no additional parameters for this unit. The explicit tie convention determines the junction placement.
+Parameters by name: `mismatch_probability`, `transmission_switch_floor`. Values and rationale are in the
+[generated parameter reference](../reference/parameters.md). The founder-mosaic junction probability is derived
+from theta and T, rather than set by an additional parameter.
 
-Cost and scope: O(N B J²); O(D Σ_k B_k (J_c + 1)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: schedule construction O(N B T²) time and O(B T²) traceback workspace per active sample;
+likelihood O(D B) time with four states and constant workspace per dyad. Stored direction inputs take O(N B).
 
 <a id="ps20"></a>
 ## ps20 Full-marker exclusion e-value
@@ -308,16 +320,62 @@ Parameters by name: `minimum_edge_exposed_bins`, `minimum_pair_exposed_bins`, `m
 
 Cost and scope: O(C (E + T)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
+<a id="finite-continuous-direction"></a>
 <a id="pd06"></a>
-## pd06 Linked-junction orientation evidence and the direction correction
+## pd06 Joint-transmission orientation evidence and the direction correction
 
-Compare linked-junction log CDFs per chromosome only with positive bins and callability. Skip jointly impossible or exactly equal directions; transform the signed difference through the chromosome-error mixture. Sum in contig order and add the robust direction term to finite configuration scores. This intermediate direction evidence is distinct from the final release orientation log odds.
+For an ordered dyad (child c, parent p), score the joint likelihood of their four scheduled homologues.
+One homologue of c is a meiotic copy of p's two scheduled homologues. The hidden state is (h, s): which child
+homologue is copied, and which parental homologue the meiotic selector carries. At the start of each component
+these four states have independent uniform probability 1/4. Direction-common founder starting factors are omitted.
+At a bin boundary, the selector stays with probability 1 − theta and switches with probability theta, using the
+prepared meiotic selector probabilities (numerically bounded by `transmission_switch_floor` and 1/2).
 
-Implementation: [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
+At an informative bin the emission is 1 − delta if the copied child's and selected parent's local painted classes
+agree, and delta otherwise, where delta = `DirectionParameters.mismatch_probability` = 0.01. If either sample
+has an unknown painted label in that bin, the copy emission is 1: the bin supplies no class comparison. Scheduled
+continuity and mosaic transition terms remain in the calculation through those bins.
 
-Parameters by name: `chromosome_error_probability`, `pair_failure_probability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+The direction leaves three homologues unexplained by copying: p's two and c's other one. Each is a founder mosaic.
+At a boundary its trajectory stays with probability 1 − theta; a specified change to another trajectory has
+probability theta / (T − 1), derived by dividing the change mass uniformly over the other T − 1 distinct
+whole-component trajectories. This is not a free junction-rate constant. When T = 1, no trajectory change is
+possible. At each boundary, preserve only homologue alignments that minimise that sample's switches, averaging
+straight and crossed alignments equally when tied. Apply this independently to parent and child. Sum over the
+four-state paths, rescaling at each bin and accumulating natural log mass, and add independent component log
+likelihoods. The stored quantity is `transmission_log_likelihood`, in nats.
 
-Cost and scope: O(C U). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+For each chromosome compare the forward and reverse joint log likelihoods. With d = log L(c ← p) − log L(p ← c)
+and epsilon = `chromosome_error_probability`, its robust orientation log odds are
+
+`log[(1 − epsilon) sigmoid(d) + epsilon/2] − log[(1 − epsilon) sigmoid(−d) + epsilon/2]`.
+
+Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
+contig order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
+configuration scores. Reciprocal messages, calibration, resampling, release tiers and the sibling guard retain their
+existing definitions. The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
+and reports; it is a separate quantity. This intermediate direction evidence differs from final released
+orientation log odds.
+
+**Identifiability limit.** A parent-offspring pair sharing one unrecombined homologue on every chromosome is
+near-neutral under this evidence. Alternative mismatch paths can leave residual direction odds of a fraction of a
+nat rather than exactly zero. The shared homologue itself does not identify direction, and the trio likelihood
+decides these cases. A child homologue that recombines the parent's two can supply direction. Painted junction
+totals do not identify biological ages in an inferred founder frame.
+
+Validation uses constructed schedules, independent Python path sums, homologue-order symmetries, saved likelihood
+and decision replays, and known-truth simulations. Inspect lost, gained and reversed true edges separately: net
+edge counts can hide losses. Direction log odds determine pedigree calls, release tiers and edges, and can affect
+subsequent phase and recombination outputs.
+
+Implementation: [science/pedigree/transmission.py](../../haplotype_reconstruction/science/pedigree/transmission.py),
+[science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
+
+Parameters by name: `mismatch_probability`, `transmission_switch_floor`, `chromosome_error_probability`,
+`pair_failure_probability`. Values and rationale are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(D B) for the likelihood and O(C U) for the chromosome contrasts; the likelihood has four states,
+independent of founder count once the schedules are built.
 
 <a id="pd07"></a>
 ## pd07 Junction-density order probability (graph visit order, role probability)
@@ -590,10 +648,6 @@ Cost and scope: Sum of preparation, scoring, decision, resampling, exclusion and
 <a id="exposure-and-junction-counts"></a>
 
 **Exposure and junction counts:** see [PS17](#ps17).
-
-<a id="finite-continuous-direction"></a>
-
-**Finite continuous direction:** see [PD06](#pd06).
 
 <a id="full-marker-mendelian-exclusion-of-m0-and-m1-counts"></a>
 

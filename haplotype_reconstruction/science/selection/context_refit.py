@@ -574,7 +574,7 @@ def refit_tasks(
         inference = np.asarray(component.inference, np.int8)
         # Distinct founder rows in content order; the released template of duplicate inference
         # rows is their consensus (an allele where every duplicate's released call
-        # agrees, -1 elsewhere; 2.1 kept the first occurrence's, a convention).
+        # agrees, -1 where they disagree).
         h, inverse = unique_rows(inference, return_inverse=True)
         h = np.ascontiguousarray(h)
         template = _consensus_rows(np.asarray(component.released), inverse, len(h))

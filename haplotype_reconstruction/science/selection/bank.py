@@ -512,7 +512,7 @@ def candidate_bank(
         )
         distinct: dict[bytes, np.ndarray] = {}
         for calls, latent in released_starts:
-            # A start as 2.1 passes it (duplicate rows weigh its initial frequencies); one start per
+            # Duplicate rows determine a start's initial frequency mass; deduplicate starts by their
             # canonical (rows, frequencies) identity.
             panel = np.where(calls >= 0, calls, latent).astype(np.int64)
             rows, mass = canonical_start(panel)

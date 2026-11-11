@@ -1,9 +1,9 @@
 """Publish complete pedigree records as plain stored-field dictionaries and lists.
 
 The record codec owns recursive field/schema/type validation. This pedigree adapter owns only
-whole-product completeness: a cold reader never repairs reports or reruns science.
-The tagged pilot format is confined to its historical oracle fixture decoder;
-changed code identities refuse those provisional run publications.
+whole-product completeness of schema-4 products: composed reports and views, a search row for
+every sample and a summary for every configured chromosome. A cold reader never repairs reports
+or reruns science.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ __all__ = ["PedigreeAdapter"]
 
 
 class PedigreeAdapter:
-    """Lossless schema-3 fields, decoded to read-only arrays by the shared record codec codec."""
+    """Lossless schema-4 fields, decoded to read-only arrays by the shared record codec codec."""
 
-    schema = 3
+    schema = 4
 
     def encode(self, product: records.Pedigree) -> Mapping[str, Any]:
         require_schema({"schema": product.schema}, self.schema)
@@ -37,7 +37,7 @@ class PedigreeAdapter:
 
 
 def _complete(product: records.Pedigree) -> None:
-    """Refuse partial pilot products: a reader never repairs absent report/scientific state."""
+    """Refuse an incomplete product: a reader never repairs absent report/scientific state."""
     if not product.reports_complete:
         raise InputError("pedigree report inputs are incomplete; finish PE2/PE3 report composition before publication")
     if product.views.relative_contrasts is None or product.views.sibling_guard is None:

@@ -326,3 +326,41 @@ Implementation: [engine/records.py](../../haplotype_reconstruction/engine/record
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
 Cost and scope: One bounded record/log update per task or stage boundary; no scientific result scan for ordinary progress.
+
+
+## Cooperative reconstruction
+
+Concurrent `reconstruct CONFIG --contig C` invocations use the same production
+cut through founder refit. Every scientific unit takes a non-blocking claim on
+its ordinary identity-keyed result record. Discovery and selection blocks,
+assembly batches, refinement components, painting and refit reuse existing
+records. Selection context components and founder-completion ranges persist their
+complete worker replies in new intermediate records. Small completion and the
+expanded completion's final linking/release gather claim the whole product.
+Cheap deterministic planning and ordered reply composition can repeat locally.
+
+ClaimBusy returns a deferred attempt, without a result or satisfied dependency.
+The scheduler releases the unit's admission token and task CPU seat, runs other
+ready work, and retries after five seconds. Resident continuation inputs remain
+accounted; an affinity gather is borrowed until its call succeeds, including when
+it returns another expansion. A fully busy frontier waits until the next retry
+and emits a 30-second heartbeat. There is no early idle exit. Deferred and
+expanded attempts contribute CPU/wall/publication costs to run records; completion
+counts are distinct from attempt counts. Every graph worker watches its
+coordinator's multiprocessing parent sentinel before admission, releasing claims
+on coordinator death without PID leases or lock-file deletion.
+
+Only checkpoint records and filesystem locks cross nodes. Worker pools, CPU
+shares, memory governors, resident arrays, shared-memory segments and kernel
+runtimes belong to each invocation. Each node needs its standalone memory budget.
+Scientific identity excludes process count, host and resource assignment.
+Physical append order, runtime durations, placement and diagnostic reuse counts
+can differ. Scientific functions, unit inputs and gathers' ordering stay unchanged.
+Alone, a process meets no competing claim and follows the ordinary computation
+or resume branch. With peers, the same ordered gather consumes their ordinary
+published records. See the [command guide](../user/quickstart.md#run-one-chromosome-on-multiple-nodes).
+
+Cross-node coherent flock and shared-file visibility are deployment requirements.
+Append payload copying and fsync serialize on the container lock. Process death
+releases kernel locks, but node-loss reclamation and a live hung filesystem call
+are filesystem boundaries; the retry interval is not a takeover lease.

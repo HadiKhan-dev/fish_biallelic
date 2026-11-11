@@ -52,6 +52,17 @@ def prefix_scores(flat, block_start, block_haps, block_bins, local, candidates, 
     starts = np.zeros(blocks + 1, np.bool_)
     for b in range(blocks):
         starts[b + 1] = starts[b] or block_bins[b] > 0
+    largest = 0
+    for block in range(blocks):
+        largest = max(largest, block_haps[block])
+    # Local pair addresses are invariant across samples, candidates sharing a cell,
+    # and bins. Cache their integer offsets before the recurrence's hot mate loop.
+    mate_offsets = np.empty((blocks, largest, k + 1), np.int64)
+    for block in range(blocks):
+        for candidate in range(block_haps[block]):
+            for mate in range(k + 1):
+                partner = local[mate, block] if mate < k else candidate
+                mate_offsets[block, candidate, mate] = pair_index(candidate, partner) * block_bins[block]
     for sample in prange(samples):
         # The row after block b remains valid while that prefix is shared.
         prefix_dp = np.zeros((blocks + 1, k + 1))
@@ -67,8 +78,7 @@ def prefix_scores(flat, block_start, block_haps, block_bins, local, candidates, 
                 for site in range(bins):
                     switch_base = max_range(dp, 0, k + 1, -np.inf) - penalty
                     for mate in range(k + 1):
-                        partner = local[mate, b] if mate < k else c
-                        e = flat[row + pair_index(c, partner) * bins + site]
+                        e = flat[row + mate_offsets[b, c, mate] + site]
                         dp[mate] = (max(dp[mate], switch_base) if started else 0.0) + e
                     started = True
             result[sample, candidate] = max_range(prefix_dp[blocks], 0, k + 1, -np.inf)

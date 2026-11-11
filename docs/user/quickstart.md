@@ -119,3 +119,49 @@ memory because candidate fragments use the largest propensity within a sample.
 compensates the surviving depth in expectation. The settings reference lists
 [all read-model keys](../reference/settings.md#simulationreads); the
 [simulation methods](../methods/simulation.md#ou27) give the count law and draw order.
+
+
+## Run one chromosome on multiple nodes
+
+Initialize the run and prepare the contig's evidence as usual. On each allocated
+node, start the same command using the same fixed source tree, configuration,
+output directory and checkpoint root:
+
+```bash
+haplotypes reconstruct CONFIG --contig chr3 --cores 76 --memory-limit 240G
+```
+
+Additional invocations may join later. Each recreates the graph from checked
+publications and computes unclaimed units: discovery and selection blocks,
+selection context refits, founder-completion ranges and their final gather,
+assembly batches, refinement components, painting and founder refit. A small
+founder completion is one whole-product unit. Painting and refit are whole-contig
+units. Each process finishes when the reconstruction cut through refit is complete.
+Genome-wide stages keep their ordinary workflow; this command launches no nodes.
+
+Each invocation needs the memory of a standalone reconstruction at its declared
+CPU budget: evidence, active workspaces and worker runtimes belong to that node.
+Memory does not divide by the number of nodes. The example budget above requires
+an allocation with more than 240 GiB available; choose both budgets for the
+resources actually assigned to the process. Logs and run records are separate
+for each invocation.
+
+A busy claim defers the task, releases its CPU seat and lets the scheduler run
+other ready work. Retries are five seconds apart. When all remaining work is held
+elsewhere, the process waits without occupying task CPUs and logs a heartbeat
+every 30 seconds. It resumes published records as on an ordinary restart. There
+is no idle timeout; long units can finish. Cold kernel warm-up can take minutes
+and occurs independently for every invocation.
+
+Use a shared filesystem with coherent cross-node POSIX flock (RDS Lustre is
+mounted with flock). A holder's death releases its claim; workers also watch their
+coordinator's death and exit, so survivors can recompute unpublished work. Never
+remove claim files to steal live work. Node-loss recovery depends on filesystem
+lock reclamation. A live process blocked in filesystem I/O can still hold a lock;
+a heartbeat reports coordinator liveness, not remote progress.
+
+All processes must use the same tree throughout the run. Scheduling code is in
+the derivation identity, so checkpoints from an older source tree require a new
+run root. Concurrent `run` commands restricted to one contig use this same
+reconstruction route, but also execute their larger workflow cut; use
+`reconstruct` after evidence preparation for a reconstruction-only measurement.

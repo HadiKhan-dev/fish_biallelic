@@ -9,9 +9,11 @@ updates its previous sweep's messages in place, recomputing per sample only the 
 pass changed and those whose start message changed; over consecutive sample ranges); (ii) computes
 the window proposals of the panel at the start of the sweep (proposals.py; a window whose inputs
 are bitwise unchanged since the search last solved it reuses that solve): for every founder and
-every fine window the canonical maximiser of the binned surrogate (exact unless a beam-capped
-programme truncates: counted as beam_truncations), and where an L1 context
-exists for every founder and every coarse window the same over L1 span tuples; (iii) runs one exact
+every fine window a binned-surrogate offer: a completed exact programme gives the canonical
+maximiser; if a focal frontier exceeds 64 kept paths, seeded search gives a heuristic answer,
+rescored by the ordinary surrogate, without an optimality certificate or a beam_truncations count.
+Where an L1 context exists, every founder and every coarse window uses the same hybrid over L1
+span tuples; (iii) runs one exact
 acceptance pass (acceptance.py), its direction alternating between sweeps; (iv) recomputes the
 exact F, which must equal the start F plus the accepted gains. A sweep that accepts nothing stops
 the search at a fixed point of the offered moves under the gain threshold and coarse-move guard.
@@ -36,6 +38,7 @@ import hashlib
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 
@@ -302,8 +305,8 @@ class SweepEngine:
         """A sequential count continuation sharing the evidence and completed fits.
 
         choices maps (fit label, canonical input panel) to a tied output panel.
-        Replaying from the original input reconstructs the same bootstrap labels,
-        count-cycle history and best-by-K state before the chosen decision.
+        Replaying from the original input reconstructs the same bootstrap labels
+        and best-by-K state before the chosen decision.
         """
         branch = copy.copy(self)
         branch.ledger = self.ledger.branch(choices)
@@ -512,24 +515,26 @@ class SweepEngine:
         the panel's rows in the window and the messages at its ends, and normalised max-plus
         messages of panels that differ only further away are often bitwise equal, so a template
         whose inputs equal the cached ones takes its cached result. The templates to solve run one
-        Numba thread each, as many at once as the live share allows (budget.thread_map)."""
-        frontier_bytes = self.config.frontier_bytes
+        Numba thread each, as many at once as the live share allows (budget.thread_map). With fewer templates
+        than CPUs, they run as concurrent children of the share instead (budget.concurrent), each holding at most
+        the CPUs its focal problems can use (WindowSolver.focal_chunk_cap), and a template's focal problems run in
+        chunks on its child's map (WindowSolver._template; the results are those of one call)."""
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             fwd = fwd.flanks(a for a, _ in self.windows.spans)
             bwd = bwd.flanks(c for _, c in self.windows.spans)
 
         memo = self._window_memo
 
-        def run(index):
+        def run(index, team=None):
             key = None
             if memo is not None:
                 a, c = self.windows.spans[index]
-                key = memo.key(index, a, c, X, fwd, bwd, frontier_bytes, convention)
+                key = memo.key(index, a, c, X, fwd, bwd, convention)
                 result = memo.lookup(key)
                 if result is not None:
                     self.windows.work.reused(ordinals[index], result)
                     return result
-            result = self.windows.solve(index, X, fwd, bwd, frontier_bytes, convention, ordinal=ordinals[index])
+            result = self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
             if memo is not None:
                 memo.store(key, result)
             return result
@@ -549,12 +554,23 @@ class SweepEngine:
         # Largest templates first (their workspace estimate tracks their work), so the map's tail holds small
         # solves; each result is stored at its own index, so the order changes timing only.
         order = sorted(range(len(todo)), key=lambda i: (-sizes[i], i))
-        solved = budget.thread_map(
-            run,
-            [todo[i] for i in order],
-            item_bytes=[sizes[i] for i in order],
-            label="founder_refinement window solves",
-        )
+        caps = [windows.focal_chunk_cap(todo[i], self.workspace.samples, len(X)) for i in order]
+        if max(caps, default=1) > 1 and int(budget.threads()) > len(todo):
+            solved = [None] * len(order)
+            for position, value in budget.concurrent(
+                [partial(run, todo[i]) for i in order],
+                [sizes[i] for i in order],
+                label="founder_refinement window solves",
+                caps=caps,
+            ):
+                solved[position] = value
+        else:
+            solved = budget.thread_map(
+                run,
+                [todo[i] for i in order],
+                item_bytes=[sizes[i] for i in order],
+                label="founder_refinement window solves",
+            )
         computed = [None] * len(todo)
         for i, value in zip(order, solved, strict=False):
             computed[i] = value
@@ -1086,6 +1102,10 @@ class SweepEngine:
             return self._choose_fit(token, cached)
         done = self._load(f"{label}.done")
         if done is not None and (not done["summary"].get("tied_panels") or "variants" in done):
+            # The fit's own tie-class decisions count once per computed fit, resumed or not.
+            if self.counter is not None:
+                for kind, decisions, inside_tie, wide, boundary in done["tie_counts"]:
+                    self.counter.add_counts(kind, decisions, inside_tie, wide, boundary)
             payloads = done.get("variants", (done,))
             variants = tuple(
                 Fit(
@@ -1129,6 +1149,9 @@ class SweepEngine:
                 searches[index] = result
             (X_fwd, fwd), (X_rev, rev) = searches
         executed = (fwd,) if rev is None else (fwd, rev)
+        # This fit's own tie-class decisions: added to the component's counter and kept in its done record, so
+        # that a component resumed from the record reports the same tie counts.
+        fit_ties = ties.TieCounter()
         chosen = "fwd"
         tied_panels = ()
         tied_scores = tied_switches = ()
@@ -1145,7 +1168,7 @@ class SweepEngine:
                 values, content=contents, descending=True
             )
             tie_rules.add_decision(
-                self.counter,
+                fit_ties,
                 "assembly.refine_converge",
                 result,
                 values,
@@ -1169,8 +1192,9 @@ class SweepEngine:
             }
             tied_scores = tuple(by_panel[panel][0] for panel in tied_panels)
             tied_switches = tuple(by_panel[panel][1] for panel in tied_panels)
-            if self.counter is not None:
-                self.counter.note("assembly.refine_converge.symmetric", inside_tie=True)
+            fit_ties.note("assembly.refine_converge.symmetric", inside_tie=True)
+        if self.counter is not None:
+            self.counter.merge(fit_ties)
         X, kept = (X_rev, rev) if chosen == "rev" else (X_fwd, fwd)
         # Canonical founder order of the fit (weak-junction founder pairs follow the permutation).
         X, order = tie_rules.canonical_rows(np.asarray(X, np.int64))
@@ -1252,7 +1276,11 @@ class SweepEngine:
             )
             for fit in variants
         ]
-        self._save(f"{label}.done", dict(payloads[0], variants=payloads))
+        tie_counts = [
+            [entry.kind, entry.decisions, entry.inside_tie, entry.wide, entry.boundary]
+            for entry in fit_ties.record().entries
+        ]
+        self._save(f"{label}.done", dict(payloads[0], variants=payloads, tie_counts=tie_counts))
         self.ledger.fits[token] = tuple(variants)
         return self._choose_fit(token, variants)
 

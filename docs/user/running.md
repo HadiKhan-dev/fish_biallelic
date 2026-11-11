@@ -175,6 +175,67 @@ success/clean stop, 2 for settings or checkpoint mismatch, 3 for input errors,
 4 for resource errors, 130 for interruption, and 1 for an unexpected failure
 with an error report.
 
+## Leaving contigs out of the final analysis
+
+Set the configured contigs to leave out in the run section:
+
+```toml
+[run]
+exclude_contigs = ["chr7", "chr12"]
+```
+
+You can change this on an existing run without initialising again:
+
+```sh
+haplotypes run cross.toml --set 'run.exclude_contigs=["chr7"]' --cores 8
+```
+
+Evidence and the relatedness barrier still use every `[input] contigs` entry.
+A `run` never schedules discovery, selection rounds, assembly or its contexts,
+painting or refit for an excluded contig, including with `stop_after` or
+`max_contigs`. Existing reconstruction records stay available. An explicit
+`reconstruct --contig` command can work on an excluded contig; removing its
+exclusion resumes reconstruction from those records.
+
+Pedigree uses the included contigs; family phase, recombination, export,
+evaluation and per-contig reports run only for those contigs. Relatedness families
+and the pedigree sibling guard still use evidence from excluded contigs. To
+remove a contig from relatedness as well, remove it from `[input] contigs` and
+start a new run. Sample eligibility
+and all model rules are unchanged. Unknown contig names and an empty remaining
+set are errors. The pedigree's existing minimum-contig checks apply to the
+remaining contigs, including its informative-contig check after preparation.
+
+Each nonempty exclusion set has separate immutable downstream records. Its
+reports and exports are in `RUN/analyses/<included-set digest>/`; the directory's
+`analysis_contigs.json`, export `manifest.json` and evaluation `summary.json`
+list the configured, included and excluded contigs. Earlier sets remain readable and changing back reuses their
+products. `status` lists the current set and that set's workflow markers.
+`RUN/analysis_selection.json` owns the active selection. Ordinary shards keep
+`RUN/config.toml` unchanged; it describes the initialized settings. Workflow
+commands using that recorded file, and the recorded-run commands, read the active
+selection from JSON unless explicitly overridden. External configurations and
+Python Settings objects specify their own selection. Use the same `--set` on
+each shard when scattering a new selection. Do not change the active selection while
+submitting shards for another set. A `phase --contig` shard refuses an excluded
+contig; `reconstruct --contig` continues to accept it. `pedigree` and `report`
+use the same selection as `run`.
+
+The Python reader can select a stored analysis set explicitly:
+
+```python
+from haplotype_reconstruction.results.reader import Results
+included = Results("RUN", exclude_contigs=("chr7",))
+original = Results("RUN", exclude_contigs=())
+```
+
+An empty exclusion uses the ordinary output paths and identity parameters. Code
+source hashes still change when upgrading software; source identities are checked
+independently of the exclusion setting. Use the same software version while
+resuming and changing sets. Scientific checkpoints from 4.13 cannot be resumed
+with this implementation because changed source hashes change product identities;
+use a new run when upgrading from 4.13.
+
 ## Optional pair reports and re-export
 
 To request the pairwise IBD chain and `relatedness/pairs.csv`, set
