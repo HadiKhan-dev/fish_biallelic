@@ -1,48 +1,21 @@
-# Simulation and templates
+# Simulation
 
 Simulation keeps its generating model and truth separate from inference. Explicit named streams preserve generator type, call shape, draw order and contig order. N is generated or observed individuals as stated, L sites, F founder haplotypes and C contigs. The independent-site and fragment read models have different dependence assumptions. Stored pedigree descriptions are truth annotations, never inference metadata.
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
-
-<a id="ou20"></a>
-## ou20 Template builder (windowed discovery on fixed-error evidence)
-
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
-
-Build templates by overlapping physical windows of fixed-error read evidence, discovering only informative windows and collecting results by window index. Convert called discovered alleles to probabilities and uncalled cells to neutral allele mass. Use the declared missing-length fallback when needed. The template-building model is separate from inference on simulated observations.
-
-Implementation: [interface/templates/builder.py](../../haplotype_reconstruction/interface/templates/builder.py).
-
-Parameters by name: `WINDOW_BP`, `WINDOW_SHIFT_BP`, `TEMPLATE_HAPLOTYPES`, `WINDOW_EVIDENCE_FACTOR`, `WINDOW_ALLOWANCE_BYTES`, `CONTIG_CELL_BYTES`, `UNDECLARED_LENGTH_BP`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(windows · K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
-
-<a id="ou21"></a>
-## ou21 Naive window linker
-
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
-
-Link admitted windows by repeated best-path dynamic programming with first-candidate exact ties, then penalise used nodes and edges before selecting another path. Reconstruct within the named equality tolerance and merge overlaps through signed information with the declared cancellation and inversion rules. This linker is an approximation used only to generate templates. `EDGE_DIVISOR` scales junction rewards relative to the node and edge penalties; changing that scale can change selected paths. Compiler arithmetic reassociation is disabled. Rebuilding templates may change subsequent simulation truth.
-
-
-Implementation: [interface/templates/linker.py](../../haplotype_reconstruction/interface/templates/linker.py).
-
-Parameters by name: `NODE_PENALTY`, `EDGE_PENALTY`, `GAP_SCORE`, `EDGE_DIVISOR`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(W K² overlap); O(W K² L_w); O(count · W · K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ou22"></a>
 ## ou22 Synthetic example generator
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Generate each example contig from its named spawned stream, with independent binary founder haplotypes and evenly spaced positions. Write certain template allele probabilities and a complete validated simulation configuration. Check contig/site/length bounds. The default example contains three diploid founders and three contigs; it demonstrates software wiring rather than biological realism or benchmark accuracy.
+Write a complete coalescent configuration with an exact count of segregating sites, three diploid cross founders and an explicit effective population size. The seed, contig count, site count and chromosome length flags set its generating design. The example demonstrates software wiring.
 
-Implementation: [simulation/example.py](../../haplotype_reconstruction/simulation/example.py), [interface/example.py](../../haplotype_reconstruction/interface/example.py).
+Implementation: [interface/example.py](../../haplotype_reconstruction/interface/example.py).
 
 Parameters by name: `EXAMPLE_HAPLOTYPES`, `EXAMPLE_COHORTS`, `EXAMPLE_DEPTH`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(F L) generated template cells per contig.
+Cost and scope: configuration text only; generation occurs at init.
 
 <a id="ou23"></a>
 ## ou23 Founder materialisation from templates
@@ -190,6 +163,36 @@ Cost and scope: Sum of generation and read-sampling costs; whole-contig read arr
 
 **Example:** see [OU22](#ou22).
 
-<a id="templates"></a>
 
-**Templates:** see [OU20](#ou20).
+
+## Sources, stocks and segregating sites
+
+A coalescent source samples two stable source IDs per generation-zero stock individual and one reference leaf. Stocks share their pedigree and selected last-generation individuals across contigs; mutation-free label meioses use independent stock streams. The cross assigns a separate founder-haplotype axis to these selected mosaics.
+
+The structured SMC′ genealogy is traversed twice with its Generator state restored. The first pass measures branch length separating the carried sources; the second places mutations at the independently selected integer bp sites. An intensity profile multiplies separating length. Count mode chooses the smallest exponential clocks, per-Mb mode uses a finite clock threshold, and supplied positions with zero separating length are recorded as dropped. Flat map intervals receive sites. The reference leaf determines REF coding and is never carried by a cross founder.
+
+Source IDs are stable across contigs. Stored source rows include only IDs carried at retained markers; the row-to-ID mapping accompanies every panel. Stock ages share the source generation-zero clock, an approximation for histories short relative to source coalescence.
+
+Implementation: [stocks.py](../../haplotype_reconstruction/simulation/stocks.py), [source.py](../../haplotype_reconstruction/simulation/source.py), [genealogy.py](../../haplotype_reconstruction/simulation/genealogy.py), [sites.py](../../haplotype_reconstruction/simulation/sites.py).
+
+Structural input errors are checked before draws. The source, stock, site and cross steps of all pending contigs run concurrently as single-core tasks; each contig's read and truth arrays then belong to one engine lane and are released when its truth and reads are published. Results do not depend on the number of CPUs or on task order. The released cross seed schedule is replayed over the full configured axis; source, profile, site and stock streams depend on contig identifiers.
+
+## Read loss, regional depth and call-set sites
+
+These options are off by default; a configuration that does not name them draws exactly the reads and sites it drew before.
+
+**Shared read loss at two scales.** With `site_loss_fraction` f1 > 0, each occupied window of `site_depth_window_bp` (each site when the width is zero) is impaired independently with probability f1, and an impaired window keeps the share 1 - L of its reads, L ~ Uniform(0, 1). With `site_loss_fine_fraction` f2 > 0 the same law acts independently on the windows floor(position_bp / `site_loss_fine_window_bp`). Both multiply the lognormal site factor B_i, are shared by all samples and are used by both samplers. Loss is not renormalised: `depth` is the unimpaired depth, and the expected mean depth is depth (1 - f1/2)(1 - f2/2). The draws follow the lognormal draws on the contig's read stream, coarse then fine; a zero fraction consumes no draw. Two scales give a site-depth correlation that falls quickly over a few hundred bp and slowly over kilobases, as real call sets show; one window width gives a single linear decay.
+
+**Regional depth per sample.** With `region_depth_cv` > 0, every sample has an independent mean-one lognormal factor per occupied window of `region_depth_window_bp`, drawn from that sample's own regional stream and multiplied into its site intensities before its reads are sampled. It represents the slow, library-specific variation of depth along a chromosome.
+
+**Sites of a call set.** `[simulation.sites] variant_against = "reference"` places sites on the branches that separate the carried sources or separate them from the reference haplotype, so positions where the whole cohort differs from the reference appear at their genealogical rate; the default `"cohort"` keeps only sites that segregate among the cross's founders. `spurious_fraction` = s adds positions with no true variant: with an exact `count` they are round(s x count) of the total, otherwise round(g s / (1 - s)) for g genealogical sites; they are drawn by a second race with the profile's weights alone, carry the reference allele in every source, and are marked in the truth (`spurious`).
+
+The preset `short_read_cohort` and the reference configuration `configs/cohort_callset.toml` set these, the heterozygote balance of the artefact layer and the paired-end sampler to resemble a 290-sample short-read cohort at a median depth of about 7.5. The generated statistics vary between realisations: on 3 Mb the site-depth correlation at 150-400 bp differs between seeds by 0.1 or more, so compare several seeds rather than one.
+
+Implementation: [reads.py](../../haplotype_reconstruction/simulation/reads.py), [sites.py](../../haplotype_reconstruction/simulation/sites.py). Parameters and units are in the [settings reference](../reference/settings.md).
+
+## Call-set artefacts
+
+The optional reference_blocks preset transforms sampled counts with independent site and sample streams. Heterozygous cells receive beta-binomial balance; systematic sites replace hom-reference ALT errors; non-reference misses combine hard-site, renewal-stretch and sample terms; uncalled cells form constant logarithmic-depth-band blocks reporting their minimum depth and no ALT reads. Regions multiply the three miss terms before clipping. Truth stores missed, block and systematic-site masks before the reads completion record.
+
+Implementation: [artefacts.py](../../haplotype_reconstruction/simulation/artefacts.py). Parameters and units are in the [settings reference](../reference/settings.md).

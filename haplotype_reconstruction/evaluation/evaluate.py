@@ -62,7 +62,14 @@ INTERPRETATION = (
     "Phase is scored per sample and released phase set (a component split at the sample's released phase "
     "breaks) over correctly called true heterozygotes released phased; genotype errors are counted "
     "separately, never as phase errors. Map truth uses correct edges "
-    "within inferred observable spans. Unexecuted stages are not evaluated."
+    "within inferred observable spans. Unexecuted stages are not evaluated. "
+    "identity_set_ columns use set-valued labels on fixed 100-truth-marker windows: with at least 16 calls "
+    "and best errors <= max(1, floor(0.05 * calls)), the set contains every cross-founder haplotype less than "
+    "2 mismatches above the best. Set size median counts labelled cells only. Continuity is correct when "
+    "consecutive labelled windows have intersecting sets; direct windows are adjacent, gap windows are not. "
+    "Set coverage pairs are consecutive windows with median sampled copy count >= 1 for that founder, "
+    "at most 3 windows apart; coverage requires one row containing it at both ends and in every labelled "
+    "window between. The released identity columns are unchanged."
 )
 SEGMENT_INTERPRETATION = (
     "set_aligned_errors are sites on a set's minority orientation, switch_errors orientation changes "
@@ -386,7 +393,7 @@ def evaluate_chromosome(
     output row dictionaries are new. Invalid sample/position axes raise InputError.
     """
     from .founders import evaluate_founders, represented_ancestry
-    from .identity import copy_counts, identity_counts, stratum_counts
+    from .identity import copy_counts, identity_counts, identity_set_counts, identity_window_diversity, stratum_counts
     from .tasks import ChromosomeEvaluation
 
     contig, truth = inputs.contig, inputs.truth
@@ -404,6 +411,7 @@ def evaluate_chromosome(
         represented = represented_ancestry(truth.painting, positions, len(founder_truth))
         counts = copy_counts(truth.painting, positions, len(founder_truth))
         grid = dict(haplotypes=founder_truth, positions=positions)
+        diversity = identity_window_diversity(truth, founder_truth)
         for stage, stage_panels in inputs.founders.items():
             panels = [(panel.positions, panel.calls) for panel in stage_panels]
             summary, components, matches = evaluate_founders(
@@ -417,6 +425,10 @@ def evaluate_chromosome(
                     for key, value in identity_counts(panels, grid, counts, identity_flags(stage_panels)).items()
                 }
             )
+            summary.update(
+                {f"identity_set_{key}": value for key, value in identity_set_counts(panels, grid, counts).items()}
+            )
+            summary.update(diversity)
             founders.append(summary)
             component_rows.extend(components)
             matching_rows.extend(matches)

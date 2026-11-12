@@ -5,8 +5,8 @@
     recombination RUN   the recombination stage of a run whose family phase is recorded (runs or resumes it)
     evaluate RUN        simulations: accuracy against the known truth
     export RUN DEST     re-export a run's founder and sample VCFs (and founder-track TSVs)
-    example DEST        a small synthetic example (templates + configuration)
-    templates           simulation templates from a VCF (naive builder)
+    example DEST        a small coalescent simulation configuration
+    observations CONFIG export simulated observations and a bound truth sidecar
     init / evidence / relatedness / reconstruct / pedigree / phase / report: cuts of the same graph
 
 Settings come from the configuration (see docs/configuration.md); scientific switches are changed with
@@ -29,7 +29,7 @@ def _add_run_options(command):
     command.add_argument("--vcf", help="Input VCF/BCF with FORMAT/AD ([input] vcf).")
     command.add_argument(
         "--templates",
-        help='Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation").',
+        help='Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input.',
     )
     command.add_argument("--output", help="Run directory ([run] output).")
     command.add_argument("--checkpoints", help="Checkpoint directory ([run] checkpoints).")
@@ -116,6 +116,19 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--contigs", nargs="+")
     evaluate.add_argument("--cores", type=int)
 
+    evaluate.add_argument("--truth", type=Path, help="Bound observation-package truth directory.")
+    evaluate.add_argument("--output", type=Path, help="Evaluation destination with --truth.")
+    evaluate.add_argument("--release-tree", type=Path, help="Source root of the run's release, with --truth.")
+    evaluate.add_argument("--release-python", type=Path, help="Interpreter for the release reader, with --truth.")
+    evaluate.add_argument("--timeout", type=float, default=600.0, help="Release-reader timeout in seconds.")
+
+    observations = commands.add_parser("observations", help="Publish simulated BCF observations and bound truth.")
+    observations.add_argument("config", type=Path, metavar="CONFIG")
+    observations.add_argument("--output", type=Path, required=True, metavar="DIR")
+    observations.add_argument("--preset", choices=("tromau", "generic"))
+    observations.add_argument("--cores", type=int)
+    observations.add_argument("--set", dest="overrides", action="append", default=[], metavar="SECTION.KEY=VALUE")
+
     export = commands.add_parser(
         "export",
         help="Write a finished run's founder VCF and phased sample VCF (the files of the run's export "
@@ -148,18 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--contigs", nargs="+")
     export.add_argument("--cores", type=int)
 
-    example = commands.add_parser("example", help="Create synthetic templates and a runnable configuration.")
+    example = commands.add_parser("example", help="Create a coalescent count-mode simulation configuration.")
     example.add_argument("destination", type=Path, metavar="DEST")
     example.add_argument("--seed", type=int, default=400)
     example.add_argument("--contigs", type=int, default=3, help="Number of synthetic contigs.")
     example.add_argument("--sites", type=int, default=1200)
     example.add_argument("--length-bp", type=int, default=12_000_000)
-
-    templates = commands.add_parser("templates", help="Build simulation templates from a VCF (naive builder).")
-    templates.add_argument("--vcf", required=True)
-    templates.add_argument("--output", required=True, type=Path)
-    templates.add_argument("--contigs", nargs="+")
-    templates.add_argument("--cores", type=int)
 
     return parser
 
@@ -206,6 +213,7 @@ def _command_workflow(args: argparse.Namespace) -> int:
         args.config, preset=args.preset, options=options, overrides=args.overrides, fallback_contigs=selected
     )
     from dataclasses import replace
+
     from ..results.paths import active_exclusions
     from .settings.load import parse_override
 
@@ -265,10 +273,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         from .example import example_command
 
         return example_command(args)
-    if args.command == "templates":
-        from .run import templates_command
+    if args.command == "observations":
+        from .run import observations_command
 
-        return templates_command(args)
+        return observations_command(args)
     if args.command == "evaluate":
         from .run import evaluate_command
 

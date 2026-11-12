@@ -113,7 +113,7 @@ FILTER/site-set/omission lines, the simulation note when appropriate, and column
 Observed [full sample](../examples/full.samples.header.vcf.txt) and
 [kept sample](../examples/kept.samples.header.vcf.txt) headers are captured from real
 produced files. Full and kept files each have one VCFv4.2 declaration and an
-explicit `haplotype_reconstruction_release=4.14` header. htslib's inserted line is
+explicit `haplotype_reconstruction_release=4.15` header. htslib's inserted line is
 `##FILTER=<ID=PASS,Description="All filters passed">`.
 
 ## VCF and BCF indexes
@@ -246,8 +246,8 @@ and component durations remain in assembly records, and task durations in run re
 Feedback searches belong to selection's context assemblies.
 
 Checkpoint layout markers, invocation records, export manifests and VCF/BCF
-headers identify the writer release. 4.14 refuses earlier checkpoints and exports;
-re-run their original inputs with 4.14 in a new output root. The published
+headers identify the writer release. 4.15 refuses earlier checkpoints and exports;
+re-run their original inputs with 4.15 in a new output root. The published
 format-1 kernel manifest and standalone payload-file codecs remain available.
 
 Task resource detail is retained in `run_records/*.tasks.jsonl`, including after
@@ -263,7 +263,7 @@ failed tasks retain measured publish times when their exception reaches the
 coordinator, or null when the worker dies without reporting them. Missing measurements for failed
 tasks are not estimated. Nested stage timers retain inclusive and exclusive
 wall time separately; summed task wall time can exceed invocation wall time.
-Invocation JSON records identify release 4.14 and use the current `run-record-v5`
+Invocation JSON records identify release 4.15 and use the current `run-record-v5`
 schema. Readers use the retained task log for detail and the bounded aggregates
 for status. Earlier invocation formats are refused.
 
@@ -679,6 +679,18 @@ founder haplotypes at the component's markers.
 | `split_charged_segment_cost` | Segment errors plus the switch cost for every switch and for one switch per row at each component start after the contig's first; it never falls when a component is cut |
 | `STRATUM_copy_COUNT` | One-to-one correct, wrong and missing alleles (and the truth total) of alleles whose true founder has no (`absent`), one (`single`) or several (`multi`) sampled copies |
 | `identity_*` | Continuity assertions on a fixed truth-marker window grid: a row labelled with founders in consecutive windows asserts continuity, correct when the labels agree; `direct` for adjacent windows, `gap` across unlabelled windows; flagged assertions lie at a row's identity flag; coverage pairs are eligible window pairs of a founder, covered when one row holds it in both |
+| `identity_window_sources_median` | Median over the fixed identity truth windows of distinct stable source IDs carried anywhere by cross-founder mosaics in each window |
+| `identity_window_sequences_median` | Median over those windows of distinct complete cross-founder allele sequences; different source IDs may have identical sequences |
+| `identity_set_labelled_cells` | Labelled row-window cells under the set-valued cross-founder rule |
+| `identity_set_size_median` | Median founder-set size among labelled cells |
+| `identity_set_direct_correct`, `identity_set_direct_wrong` | Adjacent labelled-window assertions with intersecting or disjoint founder sets |
+| `identity_set_gap_correct`, `identity_set_gap_wrong` | Assertions across unlabelled windows with intersecting or disjoint founder sets |
+| `identity_set_coverage_pairs`, `identity_set_coverage_covered` | Eligible founder-window pairs and pairs held by one row throughout the labelled intervening windows |
+
+The two `identity_window_` diversity columns use all truth markers, including the
+last partial 100-marker window, and are repeated for each founder stage. They use
+only founder mosaics and rebuilt founder alleles; predictions, sample selection
+and quality-control removal do not change them.
 
 Represented ancestry means present in a sampled homologue, not independently
 identifiable. The [evaluation method](../methods/evaluation.md) states the window
@@ -722,22 +734,49 @@ or cohort-derived parent labels.
 
 These are checkpoint products, not loose output tables: run-level
 `simulation/manifest`, and per-contig `simulation/reads`, `simulation/truth`.
-Their schema is 1. The manifest binds state, requested/realised seed, contigs,
+Their schema is 2. The manifest binds state, requested/realised seed, contigs,
 source identity, analysed sample IDs and observed/generated pedigree tables.
-Reads store positions int64[L] and AD counts int32[N,L,2]. Truth stores founder
-haplotypes, diploid sample alleles, ancestry chunks and true crossovers. Chunk
-bounds are `[start,end)`, with the final chunk including the last marker.
+Reads store positions int64[L] and AD counts int32[N,L,2]. Truth stores compact
+source haplotypes and their stable IDs, cross-founder mosaics, diploid sample
+alleles, both cross-founder and source paintings, inherited flips, reference
+orientation and true float crossovers. Painting bounds are half-open marker-index
+intervals. Optional missed-cell, block-cell and systematic-site masks are published
+with truth before reads mark completion. The manifest also stores stock pedigrees,
+selected individuals and population names.
 The generated [record reference](../reference/records.md) lists their fields.
 Explicit-pedigree sex and generation descriptions are stored as truth metadata;
 no inference step reads them. `simulation/truth_pedigree.csv` is the public summary.
 
 ## D9: founder templates
 
-`CONTIG.npz` contains `positions` int64[L], strictly increasing 1-based positions,
-and `allele_probabilities` float64[H,L,2] for REF/ALT probabilities. Consecutive
+`CONTIG.npz` contains `positions` int64[L], strictly increasing positions, and
+`alleles` int8[H,L] in REF/ALT coding or legacy `allele_probabilities`
+float64[H,L,2]. Unknown alleles (-1) require the explicit draw policy. Consecutive
 haplotype rows form diploid founders, so H is even. Templates supply founder
-material to simulations; they do not contain inferred family labels. The synthetic
-example has six haplotype rows, giving three diploid founders.
+material to simulations; they do not contain inferred family labels. A coalescent configuration generates its panel internally and stores stable source IDs with compact rows.
+
+## D10: observation packages
+
+`haplotypes observations CONFIG --output DIR` writes one immutable package:
+
+| File | Meaning |
+|---|---|
+| `observations.bcf` | Indexed multi-contig REF/ALT AD observations, including zero-depth and monomorphic sites |
+| `observations.bcf.csi` | BCF coordinate index |
+| `inference.toml` | Explicit inference settings accepted by the previous release, with `run.stop_after` empty |
+| `truth/manifest.json` | Generator version, truth schema, stock records, sample/site axes and content bindings |
+| `truth/contig_INDEX.npz` | Pickle-free truth record; INDEX is a six-digit contig ordinal starting at 000000 |
+
+The BCF header declares source `synthetic-observations` and each contig's full
+producer length (the last marker position for file sources). Truth stays outside
+the header. After moving a package, use `--set input.vcf=PATH/observations.bcf`
+to point at its BCF; absolute paths and paths relative to the working directory
+are accepted. Override copied map and interval file paths in the same way.
+CLI overrides retain the content binding of `inference.toml`; copied tables
+are also content-bound. `haplotypes evaluate RUN
+--truth DIR/truth` checks bindings and scores the full founder truth grid; phase
+and genotype truth use the retained site and sample axes, with removed sites
+reported separately.
 
 ## Results readers
 

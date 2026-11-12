@@ -1,5 +1,90 @@
 # Changelog
 
+## 4.15.0 (12 November 2026)
+
+This release replaces the simulator: founders are now drawn from a structured coalescent with optional random-mating
+stocks, sites are placed where the sample actually varies, and a call-set artefact layer and a short-read cohort read
+model bring simulated observations close to real call sets. The pedigree's sibling guard now tests a child whose own
+family placement is a majority but not a strong one, and family phase saves its intermediate results, so an
+interrupted phase correction resumes where it stopped. 4.15 does not read or resume 4.14 checkpoints or exports:
+regenerate simulations and rerun original inputs in a new output root.
+
+**Simulation: where founders come from.** Every simulated haplotype is a mosaic of source haplotypes. The source is
+either a file of haplotypes, as before, or a sample from a structured coalescent with recombination (the SMC'
+approximation) on a population tree given in the configuration: population sizes in individuals, split times in
+generations, and a reference haplotype whose allele is REF. Optional stocks then pass the sources through explicit
+random-mating generations before the cross takes its founders, so that founders share long recent segments as bred
+lines do. The cross itself, its meioses and both read samplers keep their released laws. A file source without
+stocks reproduces 4.14 draw for draw (checked on four configurations and an eight-contig run: every truth, read and
+evidence array identical).
+
+**Simulation: sites.** Sites are mutations on the branches of the genealogy that separate the haplotypes the cross
+actually carries, so every site segregates in the simulated cohort. `[simulation.sites]` takes an exact `count`, a
+density `per_mb`, or a `positions` file; the `cascade` profile clusters sites at five nested scales and masks a share
+of the sequence, which gives spacing like a real call set. `variant_against = "reference"` also keeps sites where the
+whole cohort differs from the reference, and `spurious_fraction` adds sites with no true variant, both as real call
+sets have them.
+
+**Simulation: truth and evaluation.** The truth records which source every founder segment descends from, two
+paintings of every sample (by cross founder, as before, and by source, which is identity by descent), the mutations
+of the cross and the masks of the artefact layer. Founder haplotypes are rebuilt from the mosaics on demand. The
+evaluation keeps its cross-founder axis and gains set-valued identity columns: where several founders are
+indistinguishable within the label margin, an assertion is right when it names any of them. Two further columns
+count the distinct sources and cross-founder sequences carried on the truth-window grid.
+
+**Simulation: call-set artefacts and read models.** An optional artefact layer acts on the simulated allele counts in
+this order: over-dispersed allele balance at heterozygotes, systematic alternative reads at homozygous-reference
+sites, calling with missed genotypes (single sites and stretches), and depth-band reference blocks. Each has its own
+random stream and truth mask. The read model gains a shared loss of reads in impaired windows at two scales
+(`site_loss_fraction` with the existing window, `site_loss_fine_fraction` with `site_loss_fine_window_bp`) and a
+per-sample regional depth factor (`region_depth_cv`, `region_depth_window_bp`). The preset `short_read_cohort` and
+the reference configuration `configs/cohort_callset.toml` set them to resemble a 290-sample short-read cohort at a
+median depth of about 7.5. Older configurations give the reads they gave before: every new setting defaults to off.
+
+**Simulation: observation packages.** `haplotypes observations CONFIG --output DIR` writes one indexed BCF with allele
+depths, an inference configuration that reads it as an ordinary call set, and a truth sidecar;
+`haplotypes evaluate RUN --truth DIR/truth` scores any run on those observations. Two releases can so be compared on
+exactly the same observations.
+
+**Simulation: settings and speed.** `[simulation.genome]`, `[simulation.sites]`, `[simulation.source]` with its
+populations, and `[simulation.stocks.NAME]` describe a generated cohort; pedigree tables gain a `stock` column.
+`simulation.templates` and `--templates` are read as `[simulation.source] kind = "file"` with a loader message. The
+`templates` command and its builder are removed; `haplotypes example` writes a coalescent configuration. Contigs are
+generated concurrently: the genealogy, stock and site steps of all contigs run side by side and each contig's reads
+then use a lane of the run's CPUs. Results do not depend on the number of CPUs.
+
+**Pedigree: sibling guard.** The guard withholds a parent edge when the proposed parent looks like one more full sib
+of the child's relatedness family. It used to skip a child placed in its family on less than three quarters of the
+relatedness support units, so a child with a hesitant placement was never tested, and one sib-as-parent edge escaped
+in a long F3 simulation. The child is now tested whenever its family is a strict majority of its support units
+(`focal_support`, 0.5); witnesses must still reach `member_support` (0.75). On 38 saved known-truth decisions the
+escaped edge is withheld by all 13 witnesses, ten true edges are newly tested and all kept, and none of 1,793 true
+edges is withheld. An edge can differ from 4.14 only where the child's support lies between one half and three
+quarters.
+
+**Family phase: intermediate checkpoints.** Phase correction of a contig used to be all or nothing. It now saves each
+component's solved models, its released samples in batches of 16, and the finished component, in a partial container
+beside the contig checkpoint that is bound to the phase identity and removed once the contig's phase is published. A
+run interrupted during phase correction resumes from the last saved unit; the batch size is storage granularity only
+and all pending samples are still released concurrently. Results are identical to an uninterrupted run (14
+interruption points tested).
+
+**Validation.** The default suite and the stage tier (360 tests in four shards) pass. Generating 320 samples on 22
+contigs with 1.5 million sites each takes 5 min 22 s on a 76-core node with a peak of 19 GiB. Configurations written
+for 4.14 reproduce its simulations exactly (five configurations: every truth, read and evidence array). The end-to-end
+matrix of seventeen cases (sixteen simulated crosses and TroMau) was compared with the 4.14.0 run of each case. In
+sixteen cases every released result is identical: relatedness, paintings, founders, the pedigree calls of both tiers,
+phase, recombination, the exported VCF records and, for the simulated cases, all truth metrics. In nine of those the
+sibling-guard table lists children it now counts or tests, and no call changes; on TroMau that is one child with two
+parent edges, tested by four witnesses and kept. In the long F3 case the guard withholds the one sib-as-parent edge
+that 4.14 released, and that child's phase improves with it: 3,249 set-aligned errors and one switch error fewer.
+With its checkpoints the family phase stage takes up to half a minute longer per run (TroMau: 406 s to 428 s of a
+47-minute run).
+
+**Erratum for 4.14.** The example chromosome has about 278 phase sets per sample, not 945: 945 is the number of
+phase-break positions per sample.
+
+
 ## 4.14.0 (11 November 2026)
 
 This release lets one chromosome run on several nodes at once, bounds the two searches that produced multi-hour units

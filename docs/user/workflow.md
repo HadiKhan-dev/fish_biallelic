@@ -7,7 +7,7 @@ initialised run.
 
 | Step | Form | Required published inputs |
 |---|---|---|
-| Initialise once | `haplotypes init cross.toml` | Configuration and source observations/templates |
+| Initialise once | `haplotypes init cross.toml` | Configuration and source observations/source configuration |
 | Evidence per contig | `haplotypes evidence cross.toml --contig chr1` | Initialisation |
 | Relatedness gather | `haplotypes relatedness cross.toml` | Evidence from every configured contig |
 | Reconstruct per contig | `haplotypes reconstruct cross.toml --contig chr1` | That contig's evidence; includes discovery through painting and refit |

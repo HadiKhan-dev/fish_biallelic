@@ -1,0 +1,14 @@
+[simulation]
+founders = {base = 3}
+
+[simulation.source]
+kind = "coalescent"
+
+[simulation.source.populations.ancestral]
+size = 500.0
+
+[simulation.stocks.base]
+population = "ancestral"
+founders = 3
+size = 3
+generations = 0

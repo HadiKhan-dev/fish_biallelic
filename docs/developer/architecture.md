@@ -157,7 +157,7 @@ provenance can include a path or timestamp, but changing only a timestamp does n
 change consumed evidence. A changed payload or incompatible derivation refuses
 reuse. The release label stays outside scientific dependency closures, while
 the full source digest retains it for provenance. A separate checkpoint layout
-marker identifies release 4.14: readers and resumers refuse other releases
+marker identifies release 4.15: readers and resumers refuse other releases
 before reading scientific products. Invocation records and export manifests and
 headers carry the same release label. The format-1 kernel manifest and standalone
 payload-file codecs remain published interfaces. Check the current configuration

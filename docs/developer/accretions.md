@@ -38,8 +38,6 @@ These are algebraic factors, not measured operation counts or timings. See [cost
 | outputs / [OU13](../methods/export.md#ou13) | Painting and assembly diagnostic tables | support statistics formatted by one helper; same tables, values and text. |
 | outputs / [OU17](../methods/export.md#ou17) | Stage summary tables (founder_refit, family_phase) | readers project recorded diagnostics. |
 | outputs / [OU19](../methods/export.md#ou19) | Ties and ambiguity report | typed projection after the science, no feedback. |
-| outputs / [OU20](../methods/simulation.md#ou20) | Template builder (windowed discovery on fixed-error evidence) | a scientific generating assumption of the simulation templates; changing it changes simulation truth. |
-| outputs / [OU21](../methods/simulation.md#ou21) | Naive window linker | a scientific generating assumption of the simulation templates (path and overlap rules). |
 | outputs / [OU22](../methods/simulation.md#ou22) | Synthetic example generator | seeded onboarding generator outside production inference. |
 | painting-refit / [PR14](../methods/painting.md#pr14) | Decoder execution: memory-granted sample batches and the packed-emission cache | kept as execution organisation (every sample and bin is processed); batch sizing does not select scientific work. |
 | pedigree-decision / [PD07](../methods/pedigree.md#pd07) | Junction-density order probability (graph visit order, role probability) | a scientific rule (graph visit order decides conflicting cycles); any change needs its own review. |

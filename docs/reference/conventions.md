@@ -89,6 +89,7 @@ The stream name preserves generator construction and draw order, not just a seed
 | `simulation.reads` |
 | `simulation.contig_reads` |
 | `simulation.sample_reads` |
+| `simulation.sample_region` |
 | `simulation.observation` |
 | `templates.example` |
 

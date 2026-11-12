@@ -1,10 +1,11 @@
 """The run configuration: one typed tree of user settings (TOML sections), strictly validated.
 
-Sections: run (where results go, final-analysis contigs, where to stop), execution (CPUs, lanes, scratch; never part of any scientific
-identity), input (VCF or simulation, contigs), quality (evidence QC and read calibration), genetic_map (inference
-prior), pedigree, family_phase, recombination, export (the final founder and sample VCFs), simulation (+ reads;
-generating parameters only). Stage-internal constants are not settings: they are the defaults of each stage's own
-config (stages/configure.py maps these sections into them).
+Sections: run (paths, final-analysis contigs, where to stop), execution (CPUs,
+lanes, scratch; never scientific identity), input (VCF or simulation, contigs),
+quality (QC and read calibration), genetic_map (inference prior), pedigree,
+family_phase, recombination, export, and simulation (source, genome, sites, stocks,
+reads and artefacts; generating parameters only). Internal constants remain in
+stage parameter modules; stages/configure.py maps settings into them.
 
 The pipeline reads only the observations (VCF/BCF, or the simulated reads) and the genetic map. Sample names
 are identifiers. The settings loader rejects sample-metadata sections.
@@ -18,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
+
+from ...simulation import parameters as generating
 
 
 def setting(default: Any, kind: str, doc: str, choices: tuple = (), *, affects_results: bool = True) -> Any:
@@ -60,7 +63,9 @@ class RunSection:
         None, "path", "Checkpoint directory; default OUTPUT/checkpoints.", affects_results=False
     )
     exclude_contigs: tuple[str, ...] = setting(
-        (), "strings", "Configured contigs to omit from pedigree and final downstream analysis. "
+        (),
+        "strings",
+        "Configured contigs to omit from pedigree and final downstream analysis. "
         "Evidence and relatedness still use every input contig; run skips excluded reconstruction "
         "and retains its existing records. Change this set on resume to compute separate final products.",
     )
@@ -126,7 +131,7 @@ class InputSection:
     kind: str = setting(
         "vcf",
         "str",
-        "Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates.",
+        "Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from a file panel or a coalescent genealogy.",
         ("vcf", "simulation"),
     )
     vcf: Path | None = setting(None, "path", "Input VCF/BCF (kind = vcf).")
@@ -225,7 +230,7 @@ class ExportSection:
 @dataclass(frozen=True)
 class SimulationReadsSection:
     preset: str = setting(
-        "", "str", "Generating read preset; explicit read keys override its values.", ("", "realistic")
+        "", "str", "Generating read preset; explicit read keys override its values.", ("", "realistic", "short_read_cohort")
     )
     error_rate: float = setting(0.02, "float", "Generating sequencing error rate.")
     depth_cv: float = setting(0.0, "float", "Between-sample depth coefficient of variation.")
@@ -243,14 +248,138 @@ class SimulationReadsSection:
     count_dispersion: float = setting(
         0.0, "float", "Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson."
     )
+    site_loss_fraction: float = setting(
+        generating.SITE_LOSS_FRACTION, "float",
+        "Impaired share of site-depth windows; uniform retained share, not renormalised. Depth is unimpaired depth."
+    )
+    region_depth_cv: float = setting(
+        generating.REGION_DEPTH_CV, "float", "Mean-one lognormal depth CV per sample and physical window; 0 = off."
+    )
+    region_depth_window_bp: int = setting(
+        generating.REGION_DEPTH_WINDOW_BP, "int", "Regional depth window width in bp; positive when regional CV is nonzero."
+    )
+    site_loss_fine_fraction: float = setting(
+        generating.SITE_LOSS_FINE_FRACTION, "float",
+        "Impaired share of independent fine windows; uniform retained share, multiplied without renormalisation; 0 = off."
+    )
+    site_loss_fine_window_bp: int = setting(
+        generating.SITE_LOSS_FINE_WINDOW_BP, "int", "Fine-loss window width in bp; positive when fine loss is nonzero."
+    )
+
+
+
+@dataclass(frozen=True)
+class SimulationGenomeSection:
+    contigs: tuple[str, ...] = setting((), "strings", "Generated contig names; must match input.contigs in order.")
+    length_bp: int | tuple = setting(0, "lengths", "Positive integer bp length, or a table keyed by contig.")
+
+
+@dataclass(frozen=True)
+class SimulationSitesSection:
+    count: int | None = setting(None, "optional_int", "Exact positive number of distinct written sites, including spurious sites.")
+    per_mb: float | None = setting(None, "optional_float", "Expected sites per Mb; exclusive with count and positions.")
+    positions: Path | None = setting(None, "path", "Sorted unique integer bp positions file; profile must be none.")
+    profile: str = setting("none", "str", "Spatial intensity profile.", ("none", "cascade"))
+    sigmas: tuple[float, ...] = setting(
+        generating.PROFILE_SIGMAS, "floats", "Log-intensity SDs at 10, 100, 1000, 10000, 100000 bp."
+    )
+    masked_fraction: float = setting(
+        generating.PROFILE_MASKED_FRACTION, "float", "Stationary masked share of the cascade profile."
+    )
+    masked_mean_bp: float = setting(
+        generating.PROFILE_MASKED_MEAN_BP, "float", "Mean exponential masked-stretch length in bp."
+    )
+    variant_against: str = setting(
+        generating.VARIANT_AGAINST, "str", "Variant separating set: carried sources, or carried sources plus reference.",
+        ("cohort", "reference")
+    )
+    spurious_fraction: float = setting(
+        generating.SPURIOUS_FRACTION, "float", "Fraction of written sites with reference alleles only; count includes these sites."
+    )
+
+
+@dataclass(frozen=True)
+class SimulationPopulationSection:
+    size: float = setting(0.0, "float", "Positive diploid effective population size in individuals.")
+    parent: str = setting("", "str", "Parent population; empty identifies the single root.")
+    split_generations: float | None = setting(
+        None, "optional_float", "Finite nonnegative split time in generations; non-root only."
+    )
+
+
+@dataclass(frozen=True)
+class SimulationSourceSection:
+    kind: str = setting("file", "str", "Source genealogy or a fixed file panel.", ("file", "coalescent"))
+    file: Path | None = setting(None, "path", "Directory containing one source NPZ per contig.")
+    unknown: str = setting("refuse", "str", "Policy for file alleles coded -1.", ("refuse", "draw"))
+    reference_population: str = setting(
+        "", "str", "Population of the reference leaf; empty selects the first population."
+    )
+    populations: tuple = setting((), "populations", "Named constant-size populations and their split tree.")
+
+
+@dataclass(frozen=True)
+class SimulationStockSection:
+    population: str = setting("", "str", "Source population of this stock's generation zero.")
+    founders: int = setting(0, "int", "Generation-zero diploid individuals; at least two.")
+    size: int = setting(0, "int", "Diploid individuals in each later generation; at least two.")
+    generations: int = setting(0, "int", "Nonnegative number of random-mating stock generations.")
+
+
+@dataclass(frozen=True)
+class SimulationArtefactsSection:
+    preset: str = setting("", "str", "Named call-set preset; explicit keys override it.", ("", "reference_blocks"))
+    enabled: bool = setting(False, "bool", "Apply call-set artefacts after read sampling.")
+    hard_sites: float = setting(generating.ARTEFACT_HARD_SITES, "float", "Probability of a hard site.")
+    hard_miss: float = setting(generating.ARTEFACT_HARD_MISS, "float", "Miss probability contributed by a hard site.")
+    stretch_cover: float = setting(
+        generating.ARTEFACT_STRETCH_COVER, "float", "Long-axis low-sensitivity covered share."
+    )
+    stretch_sites: float = setting(
+        generating.ARTEFACT_STRETCH_SITES, "float", "Mean geometric stretch length in sites."
+    )
+    stretch_miss: float = setting(
+        generating.ARTEFACT_STRETCH_MISS, "float", "Miss probability inside a low-sensitivity stretch."
+    )
+    miss: float = setting(generating.ARTEFACT_MISS, "float", "Baseline non-reference miss probability.")
+    miss_sample_cv: float = setting(
+        generating.ARTEFACT_MISS_SAMPLE_CV, "float", "Sample miss-factor coefficient of variation."
+    )
+    call_min_alt_fraction: float = setting(
+        generating.ARTEFACT_CALL_MIN_ALT_FRACTION, "float", "Minimum ALT fraction calling a hom-reference cell."
+    )
+    block_band: float = setting(generating.ARTEFACT_BLOCK_BAND, "float", "Relative logarithmic depth-band width.")
+    balance_dispersion: float = setting(
+        generating.ARTEFACT_BALANCE_DISPERSION, "float", "Beta-binomial heterozygote intraclass correlation."
+    )
+    systematic_sites: float = setting(
+        generating.ARTEFACT_SYSTEMATIC_SITES, "float", "Probability of a systematic ALT-error site."
+    )
+    systematic_lo: float = setting(
+        generating.ARTEFACT_SYSTEMATIC_LO, "float", "Lower systematic ALT-error probability."
+    )
+    systematic_hi: float = setting(
+        generating.ARTEFACT_SYSTEMATIC_HI, "float", "Upper systematic ALT-error probability."
+    )
+    regions: tuple = setting((), "regions", "Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps.")
+
+
+NAMED_SECTIONS = {"populations": SimulationPopulationSection, "stocks": SimulationStockSection}
 
 
 @dataclass(frozen=True)
 class SimulationSection:
     seed: int | str = setting(400, "seed", 'Simulation seed, or "random" (the realised seed is recorded).')
-    templates: Path | None = setting(None, "path", "Directory of chromosome NPZ founder templates.")
+    founders: tuple = setting((), "counts", "Random cross founders by stock: {STOCK = number of individuals}.")
+    genome: SimulationGenomeSection = section(SimulationGenomeSection, "Generated genome extent.")
+    sites: SimulationSitesSection = section(SimulationSitesSection, "Segregating-site clocks and intensity.")
+    source: SimulationSourceSection = section(SimulationSourceSection, "Source panel or structured genealogy.")
+    stocks: tuple = setting((), "stocks", "Named stock pedigrees preceding the cross.")
+    artefacts: SimulationArtefactsSection = section(
+        SimulationArtefactsSection, "Call-set artefact model, off by default."
+    )
     cohorts: tuple[int, ...] = setting((20, 100, 200), "ints", "Individuals in successive cohorts.")
-    depth: float = setting(5.0, "float", "Mean read depth.")
+    depth: float = setting(5.0, "float", "Unimpaired site depth; mean is depth * (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2).")
     generating_rate_cm_per_mb: float = setting(5.0, "float", "Generating fallback recombination rate.")
     generating_map: Path | None = setting(None, "path", "Generating genetic map (independent of inference).")
     backcross_fraction: float = setting(0.0, "float", "Fraction of later matings with an actual parent.")
@@ -261,7 +390,7 @@ class SimulationSection:
         None,
         "path",
         "Explicit pedigree table (TSV: sample, parent1, parent2, sex, "
-        "generation, observed); replaces cohorts and the random matings.",
+        "generation, observed, stock); replaces cohorts and the random matings.",
     )
     reads: SimulationReadsSection = section(SimulationReadsSection, "Generating read model.")
 
@@ -298,6 +427,7 @@ class Settings:
         """Contigs one at a time ([execution] serial, implied by max_contigs > 0)."""
         return self.execution.serial or self.execution.max_contigs > 0
 
+
 def schema_fields(cls) -> list:
     """The configuration fields of a section class, in declaration order."""
     return [item for item in fields(cls) if "kind" in item.metadata]
@@ -306,7 +436,15 @@ def schema_fields(cls) -> list:
 def to_dict(value) -> Any:
     """Plain data (paths as strings, None as "") of a config object."""
     if hasattr(value, "__dataclass_fields__"):
-        return {item.name: to_dict(getattr(value, item.name)) for item in schema_fields(type(value))}
+        return {
+            item.name: (
+                {name: to_dict(v) for name, v in getattr(value, item.name)}
+                if item.metadata["kind"] in (*NAMED_SECTIONS, "counts")
+                or (item.metadata["kind"] == "lengths" and isinstance(getattr(value, item.name), tuple))
+                else to_dict(getattr(value, item.name))
+            )
+            for item in schema_fields(type(value))
+        }
     if isinstance(value, tuple):
         return [to_dict(item) for item in value]
     if isinstance(value, Path):
@@ -324,6 +462,9 @@ def reference_rows(cls=Settings, prefix: tuple = ()) -> list[dict]:
         kind = item.metadata["kind"]
         if kind == "section":
             rows.extend(reference_rows(type(item.default_factory()), (*prefix, item.name)))
+            continue
+        if kind in NAMED_SECTIONS:
+            rows.extend(reference_rows(NAMED_SECTIONS[kind], (*prefix, item.name, "NAME")))
             continue
         default = item.default
         rows.append(

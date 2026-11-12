@@ -232,9 +232,9 @@ original = Results("RUN", exclude_contigs=())
 An empty exclusion uses the ordinary output paths and identity parameters. Code
 source hashes still change when upgrading software; source identities are checked
 independently of the exclusion setting. Use the same software version while
-resuming and changing sets. Scientific checkpoints from 4.13 cannot be resumed
+resuming and changing sets. Scientific checkpoints from 4.14 cannot be resumed
 with this implementation because changed source hashes change product identities;
-use a new run when upgrading from 4.13.
+use a new run when upgrading from 4.14.
 
 ## Optional pair reports and re-export
 

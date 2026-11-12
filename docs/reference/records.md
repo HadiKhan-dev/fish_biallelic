@@ -3648,6 +3648,8 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `()` |
 | `observed` | `PedigreeTable &#124; None` | obs | () | 1 | PedigreeTable &#124; None | True | `None` |
 | `generated` | `PedigreeTable &#124; None` | obs | () | 1 | PedigreeTable &#124; None | True | `None` |
+| `stocks` | `tuple` | obs | () | 1 | tuple | True | `()` |
+| `populations` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `()` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `SCHEMA` |
 
 ## truth.TruthPainting
@@ -3657,10 +3659,10 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `offsets` | `np.ndarray` | obs | ('N+1',) | index | int64 | True | `required` |
-| `start` | `np.ndarray` | obs | ('chunks',) | bp | int64 | True | `required` |
-| `end` | `np.ndarray` | obs | ('chunks',) | bp | int64 | True | `required` |
-| `hap1` | `np.ndarray` | obs | ('chunks',) | index | int64 | True | `required` |
-| `hap2` | `np.ndarray` | obs | ('chunks',) | index | int64 | True | `required` |
+| `start` | `np.ndarray` | obs | ('chunks',) | index | int64 | True | `required` |
+| `end` | `np.ndarray` | obs | ('chunks',) | index | int64 | True | `required` |
+| `hap1` | `np.ndarray` | obs | ('chunks',) | index | int32 | True | `required` |
+| `hap2` | `np.ndarray` | obs | ('chunks',) | index | int32 | True | `required` |
 
 ## truth.TruthCrossovers
 
@@ -3676,6 +3678,25 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | `offsets` | `np.ndarray` | obs | ('gametes+1',) | index | int64 | True | `required` |
 | `positions` | `np.ndarray` | obs | ('crossovers',) | bp | float64 | True | `required` |
 
+## truth.FounderMosaics
+
+Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstruction/simulation/truth.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `offsets` | `np.ndarray` | obs | ('F2+1',) | index | int64 | True | `required` |
+| `start` | `np.ndarray` | obs | ('segments',) | index | int64 | True | `required` |
+| `source` | `np.ndarray` | obs | ('segments',) | index | int32 | True | `required` |
+
+## truth.TruthFlips
+
+Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstruction/simulation/truth.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `offsets` | `np.ndarray` | obs | ('2N+1',) | index | int64 | True | `required` |
+| `markers` | `np.ndarray` | obs | ('flips',) | index | int64 | True | `required` |
+
 ## truth.ContigTruth
 
 Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstruction/simulation/truth.py).
@@ -3684,10 +3705,22 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 |---|---|---|---|---|---|---|---|
 | `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
 | `positions` | `np.ndarray` | obs | ('L',) | bp | int64 | True | `required` |
-| `founder_haplotypes` | `np.ndarray` | obs | ('F', 'L') | 1 | int8 | True | `required` |
 | `alleles` | `np.ndarray` | obs | ('N', 'L', '2') | 1 | int8 | True | `required` |
 | `painting` | `TruthPainting` | obs | () | 1 | TruthPainting | True | `required` |
 | `crossovers` | `TruthCrossovers` | obs | () | 1 | TruthCrossovers | True | `required` |
+| `source_haplotypes` | `np.ndarray` | obs | ('S', 'L') | 1 | int8 | True | `required` |
+| `source_id` | `np.ndarray` | obs | ('S',) | index | int32 | True | `required` |
+| `source_population` | `np.ndarray` | obs | ('S',) | index | int32 | True | `required` |
+| `total_sources` | `int` | obs | () | 1 | int | True | `required` |
+| `reference_derived` | `np.ndarray` | obs | ('L',) | 1 | bool | True | `required` |
+| `founder_mosaics` | `FounderMosaics` | obs | () | 1 | FounderMosaics | True | `required` |
+| `source_painting` | `TruthPainting` | obs | () | 1 | TruthPainting | True | `required` |
+| `flips` | `TruthFlips` | obs | () | 1 | TruthFlips | True | `required` |
+| `dropped_positions` | `np.ndarray` | obs | ('D',) | bp | int64 | True | `required` |
+| `missed` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
+| `block` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
+| `systematic_site` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
+| `spurious` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `SCHEMA` |
 
 ## pedigree.PedigreeTable

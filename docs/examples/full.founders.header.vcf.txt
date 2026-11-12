@@ -1,7 +1,7 @@
 ##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##source=haplotype-reconstruction
-##haplotype_reconstruction_release=4.14
+##haplotype_reconstruction_release=4.15
 ##contig=<ID=c,length=30>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown (withheld, or no painted carrier observes it) or outside the column's component; no imputation">
 ##FILTER=<ID=r1,Description="Site quality r1: total depth outside the contig's clean depth core (either tail)">

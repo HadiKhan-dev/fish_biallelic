@@ -48,6 +48,7 @@ STREAMS = (
     "simulation.reads",  # source.py: master producing one seed per contig
     "simulation.contig_reads",  # source.py: worker uses the already drawn seed
     "simulation.sample_reads",  # reads.py: one stream per sample from a seed drawn on the contig stream
+    "simulation.sample_region",  # reads.py: one stream per sample for its regional depth factors
     "simulation.observation",  # design.py: subsampling after pedigree creation
     "templates.example",  # templates/example.py: SeedSequence child per contig
 )
@@ -88,6 +89,8 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
         return np.random.default_rng(seed + 1_000_000)
     if name == "simulation.sample_reads":
         return np.random.default_rng(np.random.SeedSequence([int(seed), 4_000_000, int(index)]))
+    if name == "simulation.sample_region":
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 5_000_000, int(index)]))
     if name == "simulation.observation":
         return np.random.default_rng(np.random.SeedSequence([int(seed), 3_000_000]))
     if name in ("simulation.founders", "templates.example"):

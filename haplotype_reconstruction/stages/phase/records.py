@@ -7,9 +7,9 @@ the shared Haldane formula belongs in science.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -204,8 +204,12 @@ def derivation(
         raise InvariantError("phase requires every upstream derivation identity")
     return Derivation(
         code_dependency_identity(CODE_ROOTS) if code is None else code,
-        dict(contig=contig, sample_ids=tuple(sample_ids), phase=parameters,
-             **(dict(included_contigs=included_contigs) if included_contigs else {})),
+        dict(
+            contig=contig,
+            sample_ids=tuple(sample_ids),
+            phase=parameters,
+            **(dict(included_contigs=included_contigs) if included_contigs else {}),
+        ),
         NumericalPolicy.current() if policy is None else policy,
         asdict(identities),
         tie_reverse=bool(reverse),
@@ -358,7 +362,14 @@ def expected(
     return expected
 
 
-def result_reader(store, manifest, *, product, contig=None, elapsed_seconds=None):
+def result_reader(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+    elapsed_seconds: float | None = None,
+) -> Reader | None:
     """Read the publication using the same expected phase derivation as its writer."""
     if contig is None or not (store.contig(contig).has(KEY) or store.contig(contig).has(BINDING_KEY)):
         return None
@@ -374,3 +385,203 @@ def progress(file: CheckpointFile) -> dict[str, Any]:
         complete=info is not None,
         **({} if info is None else dict(decoded_bytes=info.decoded_bytes)),
     )
+
+
+# Persist every numerical/model field, including cached pedigree orders and
+# transition logs. Only execution callbacks and thread-local scratch are rebuilt.
+_MODEL_FIELDS = (
+    "E",
+    "N",
+    "S",
+    "B",
+    "par",
+    "lstay",
+    "lmove",
+    "mstay",
+    "mmove",
+    "ain",
+    "astay",
+    "bout",
+    "init_copy",
+    "init_bottom",
+    "child_tracks",
+    "reverse",
+    "order",
+    "rank",
+    "desc",
+    "release_desc",
+    "affected",
+    "mark",
+    "X",
+    "V",
+    "history",
+    "settled",
+    "pairing_odds",
+    "pairing_moves",
+    "pairings",
+    "reads",
+    "_sweep_waves",
+    "_initial_waves",
+)
+_MODEL_EXECUTION_FIELDS = {"config", "map_work", "_scratch"}
+
+
+def encode_unit(unit: tuple, value: Any) -> dict[str, Any]:
+    """Encode exact unit state as plain values and arrays, without model instances."""
+    from dataclasses import replace
+
+    from ...contracts.payload import to_payload
+    from ...core.errors import InvariantError
+
+    kind = unit_kind(unit)
+    if kind == "solve":
+        models, parents = value
+        encoded = []
+        for model in models:
+            if set(vars(model)) != set(_MODEL_FIELDS) | _MODEL_EXECUTION_FIELDS:
+                raise InvariantError("phase solved-model codec does not cover every model field")
+            state = {name: getattr(model, name) for name in _MODEL_FIELDS}
+            # Lists of pairing triples may contain NumPy scalar indices.
+            state["pairings"] = [[int(p), int(b), float(g)] for p, b, g in model.pairings]
+            state["pairing_moves"] = [[int(p), int(b), float(g)] for p, b, g in model.pairing_moves]
+            encoded.append(dict(state=state, parameters=to_payload(model.config)))
+        return dict(schema=1, models=encoded, parents=parents)
+    if kind == "release":
+        return dict(schema=1, releases=[[to_payload(sample) for sample in solved] for solved in value])
+    # The ordinary contract codec requires string mapping keys. Restore these
+    # sample indices explicitly, rather than silently changing their types.
+    state = replace(value, withheld={}, pairing={})
+    payload = to_payload(state)
+    payload["withheld"] = {str(k): list(v) for k, v in value.withheld.items()}
+    payload["pairing"] = {str(k): list(v) for k, v in value.pairing.items()}
+    return dict(schema=1, component=payload)
+
+
+def decode_unit(unit: tuple, payload: Mapping[str, Any]) -> Any:
+    """Restore exact arrays/dtypes; solved models get fresh execution-only scratch."""
+    import threading
+    from dataclasses import replace
+
+    from ...contracts.payload import from_payload
+    from ...contracts.phase import PhaseComponentState, SampleRelease
+    from ...contracts.roles import require_schema
+    from ...science.phase.model import LabelModel
+
+    require_schema(payload, 1)
+    kind = unit_kind(unit)
+    if kind == "solve":
+        models = []
+        for saved in payload["models"]:
+            state = saved["state"]
+            if set(state) != set(_MODEL_FIELDS):
+                from ...core.errors import InputError
+
+                raise InputError("phase solved-model payload has incompatible fields")
+            model = LabelModel.__new__(LabelModel)
+            for name in _MODEL_FIELDS:
+                setattr(model, name, state[name])
+            model.pairings = [tuple(row) for row in model.pairings]
+            model.pairing_moves = [tuple(row) for row in model.pairing_moves]
+            model.config = from_payload(PhaseParameters, saved["parameters"])
+            model.map_work = None
+            model._scratch = threading.local()
+            models.append(model)
+        return tuple(models), payload["parents"]
+    if kind == "release":
+        return tuple(tuple(from_payload(SampleRelease, sample) for sample in solved) for solved in payload["releases"])
+    saved = payload["component"]
+    state = from_payload(PhaseComponentState, saved)
+    return replace(
+        state,
+        withheld={int(k): tuple(v) for k, v in saved["withheld"].items()},
+        pairing={int(k): tuple(v) for k, v in saved["pairing"].items()},
+    )
+
+
+def unit_kind(unit: tuple) -> str:
+    """Validate the three science unit names before constructing storage keys."""
+    from ...core.errors import InvariantError
+
+    if (
+        not isinstance(unit, tuple)
+        or len(unit) not in (2, 3)
+        or type(unit[0]) is not int
+        or unit[0] < 0
+        or unit[1] not in ("solve", "release", "component")
+        or (unit[1] == "release") != (len(unit) == 3)
+        or (len(unit) == 3 and (type(unit[2]) is not int or unit[2] < 0))
+    ):
+        raise InvariantError(f"invalid phase intermediate unit {unit!r}")
+    return unit[1]
+
+
+_UnitValue = TypeVar("_UnitValue")
+
+
+class PhaseMemo:
+    """Task-owned durable units beside the contig checkpoint, independent of scratch.
+
+    The container protocol commits each record atomically and recovers torn tails.
+    Keys and publication identities bind the full externally derived phase identity,
+    component, unit, batch and fixed batch size. Other identities are never loaded.
+    This execution capability is deliberately not a scientific product record.
+    """
+
+    def __init__(self, contig: CheckpointFile, expected: Derivation) -> None:
+        from pathlib import Path
+
+        from .parameters import PHASE_RELEASE_BATCH
+
+        path = Path(contig.path)
+        self.file = CheckpointFile(
+            path.with_name(path.name + ".phase.partial"),
+            kind="contig",
+            name=contig.name,
+            nthreads=contig.nthreads,
+            clevel=contig.clevel,
+        )
+        self.identity = expected.identity
+        self.batch = PHASE_RELEASE_BATCH
+        self.reused = 0
+
+    def binding(self, unit: tuple) -> tuple[str, str]:
+        """Return the owned partial key and its independently derived identity."""
+        from ...core.digest import json_digest
+
+        kind = unit_kind(unit)
+        identity = json_digest(dict(phase=self.identity, unit=unit, release_batch=self.batch))
+        suffix = f"/{unit[2]}" if kind == "release" else ""
+        return f"phase/{self.identity}/{self.batch}/{unit[0]}/{kind}{suffix}", identity
+
+    def lookup(self, unit: tuple) -> Any | None:
+        """Load a stored unit without computing; missing units return None."""
+        from ...store.protocol import resume
+
+        key, identity = self.binding(unit)
+        saved = resume(self.file, key, identity)
+        if saved is not None:
+            value = decode_unit(unit, saved.payload)
+            self.reused += 1
+            return value
+        return None
+
+    def __call__(self, unit: tuple, compute: Callable[[], _UnitValue]) -> _UnitValue:
+        saved = self.lookup(unit)
+        if saved is not None:
+            return saved
+        value = compute()
+        self.save(unit, value)
+        return value
+
+    def save(self, unit: tuple, value: Any) -> None:
+        """Durably publish one complete unit; a test may interrupt after this returns."""
+        from ...store.protocol import publish
+
+        key, identity = self.binding(unit)
+        publish(self.file, key, identity, encode_unit(unit, value))
+
+    def remove(self) -> None:
+        """Called by the stage only after final completion and successful full decoding."""
+        from pathlib import Path
+
+        Path(self.file.path).unlink(missing_ok=True)

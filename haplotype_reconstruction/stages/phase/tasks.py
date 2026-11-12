@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..configure import ResolvedConfiguration
     from ...contracts.genetic_map import GeneticMapSet
+    from ..configure import ResolvedConfiguration
 
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -26,12 +26,14 @@ from ...contracts.painting import Painting
 from ...contracts.pedigree import ParentEdges
 from ...contracts.phase import PhasedSamples, PhaseInputIdentities, PhaseObservations
 from ...contracts.refit import FounderRefit
-from ...science.phase.component import PhaseWorkspace
+from ...science.phase.component import PhaseMemo, PhaseWorkspace
 from ...science.phase.parameters import PhaseParameters
 from ...science.selection.parameters import LANE_WIDTH
 from ...store.container import CheckpointFile
 from ...store.protocol import Derivation
-from ..framework import RecordKey, ResourceRequest, Task
+from ..context import StageRun, default_scratch
+from ..framework import RecordKey, ResourceRequest, Task, TaskKey
+from ..inputs.products import required_dense_evidence, required_product, task_inputs
 from .boundaries import validate_parent_edges, validate_sample_order
 
 T = TypeVar("T")
@@ -72,6 +74,7 @@ def execute_contig(
     *,
     storage: str = "auto",
     root: str | Path | None = None,
+    memo: PhaseMemo | None = None,
 ) -> PhasedSamples:
     """Check canonical boundaries, then compute every component and assemble a complete contig."""
     import numpy as np
@@ -81,6 +84,7 @@ def execute_contig(
     from ...science.phase.component import phase_contig
     from ...science.phase.window import site_windows
     from ...store.mapped import discard_pages, mapped_array
+    from .parameters import PHASE_RELEASE_BATCH
     from .records import canonical_component_inputs, validate_canonical_inputs
 
     validate_canonical_inputs(evidence, painting, refit, edges, genetic_map, identities)
@@ -147,6 +151,8 @@ def execute_contig(
         PhaseWorkspace(
             windowed=windowed,
             scores=False,
+            memo=memo,
+            release_batch=PHASE_RELEASE_BATCH,
             prepare_likelihoods=prepare_likelihoods if windowed else None,
             map_work=map_work,
             concurrent=concurrent,
@@ -172,6 +178,7 @@ def publish_contig(
 ) -> PhasedSamples:
     """Validate external identities before resume; write completion after all scientific records."""
     from ...core.errors import InvariantError
+    from ...engine.records import record_diagnostic
     from ...store.protocol import mark_complete
     from . import records
 
@@ -188,25 +195,26 @@ def publish_contig(
     )
     if actual.identity != expected.identity:
         raise InvariantError("phase task inputs differ from its supplied derivation")
+    memo = records.PhaseMemo(file, expected)
     saved = records.load(file, expected)
     if saved is not None:
+        mark_complete(file, records.KEY, {records.KEY: expected.identity})
+        memo.remove()
+        record_diagnostic(f"{evidence.contig}: family phase reused 0 intermediate units; final record resumed")
         return saved
     product = execute_contig(
-        evidence, painting, refit, edges, genetic_map, parameters, identities, storage=storage, root=root
+        evidence, painting, refit, edges, genetic_map, parameters, identities, storage=storage, root=root, memo=memo
     )
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
+    if records.load(file, expected) is None:
+        raise InvariantError("completed phase record is not readable")
+    memo.remove()
+    record_diagnostic(f"{evidence.contig}: family phase reused {memo.reused} intermediate units")
     return product
 
 
-from ..inputs.products import task_inputs, required_product, required_dense_evidence
-from ..context import StageRun
-from ..context import default_scratch
-
-
-def run(
-    root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet, scratch: str | None
-) -> str:
+def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet, scratch: str | None) -> str:
     """Bind the canonical typed upstream products to family phase's complete-contig publisher."""
     from ...contracts.phase import PhaseInputIdentities
     from ...core.digest import json_digest
@@ -240,9 +248,12 @@ def run(
     return expected.identity
 
 
-def task(key, context: StageRun) -> Task:
+def task(key: TaskKey, context: StageRun) -> Task:
     """Declare the production complete-contig phase publisher."""
     return Task(
-        key, run, (context.root, key.scope, context.resolved, context.maps, context.scratch),
-        outputs=(RecordKey(key.scope, "phase"),), resources=ResourceRequest(1, context.cores),
+        key,
+        run,
+        (context.root, key.scope, context.resolved, context.maps, context.scratch),
+        outputs=(RecordKey(key.scope, "phase"),),
+        resources=ResourceRequest(1, context.cores),
     )

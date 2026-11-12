@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import tempfile
 import traceback
@@ -16,7 +17,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import ResourceError, SettingsError
 from ..core.files import atomic_path
@@ -30,10 +31,9 @@ if TYPE_CHECKING:
     from ..contracts.contigs import AnalysisContigs
     from ..contracts.genetic_map import GeneticMapSet
     from ..contracts.recombination import RecombinationMap
-    from ..core.ties import TieCensus, TieSettings
-    from ..engine.graph import Expansion, RecordKey, Task, TaskKey
+    from ..core.ties import TieCensus
+    from ..engine.graph import Task, TaskKey
     from ..engine.records import RunRecorder
-    from ..outputs.export.records import ExportConfig
     from ..results.reader import Results
     from ..stages.configure import ResolvedConfiguration, StageConfigs
     from ..stages.graph import Cut, RunGraph
@@ -299,9 +299,12 @@ def _analysis_selection(prepared: PreparedRun, selection: AnalysisContigs) -> No
             temporary.write_text(json.dumps(selection.document(), indent=2) + "\n")
     if selection.excluded or (output / "analysis_selection.json").exists():
         with atomic_path(output / "analysis_selection.json") as temporary:
-            temporary.write_text(json.dumps(dict(selection.document(),
-                                                 output_directory=str(output_directory(output, selection))), indent=2)
-                                 + "\n")
+            temporary.write_text(
+                json.dumps(
+                    dict(selection.document(), output_directory=str(output_directory(output, selection))), indent=2
+                )
+                + "\n"
+            )
 
 
 def _initialise(prepared: PreparedRun, *, tie_reverse: bool, tie_keep: tuple[str, ...]) -> ResolvedConfiguration:
@@ -372,9 +375,9 @@ def _resume_configuration(
     """Verify the full init binding and attach an already materialised source read-only."""
     from ..core.errors import SettingsError
     from ..stages.configure import resolve
+    from ..stages.init import records as init_records
     from ..store.protocol import resume
     from ..store.store import CheckpointStore
-    from ..stages.init import records as init_records
 
     assert prepared.source is not None
     store = CheckpointStore(prepared.paths.checkpoints, nthreads=prepared.cores)
@@ -409,8 +412,11 @@ def _analysis_reader(prepared, selection):
     from ..results.reader import Results
     from ..stages.analysis import location
 
-    return Results(prepared.paths.output, checkpoints=location(prepared.paths.checkpoints, selection),
-                   exclude_contigs=selection.excluded)
+    return Results(
+        prepared.paths.output,
+        checkpoints=location(prepared.paths.checkpoints, selection),
+        exclude_contigs=selection.excluded,
+    )
 
 
 def _map_output(function, items):
@@ -431,9 +437,9 @@ def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict
 
     store = CheckpointStore(prepared.paths.checkpoints)
     costs = {}
-    lengths = {}
+    lengths: dict[str, int] = {}
     if prepared.source is not None and prepared.source.kind == "vcf":
-        lengths = prepared.source.inner.header.lengths
+        lengths = cast(Any, prepared.source.inner).header.lengths
     for contig in resolved.contigs:
         file = store.contig(contig)
         costs[contig] = float(max(1, lengths.get(contig, 1)))
@@ -448,13 +454,21 @@ def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None):
     """Bind the stage-owned factories for the selected graph cut."""
     import importlib
 
+    from ..stages.analysis import FINAL_STAGES, location, output_directory
     from ..stages.catalog import STAGES
     from ..stages.context import StageRun
-    from ..stages.analysis import FINAL_STAGES, location, output_directory
 
-    context = StageRun(str(prepared.paths.checkpoints), str(prepared.paths.output), resolved,
-                       prepared.genetic_maps, prepared.manifest, prepared.cores, ties,
-                       prepared.source, str(_scratch_base(prepared)))
+    context = StageRun(
+        str(prepared.paths.checkpoints),
+        str(prepared.paths.output),
+        resolved,
+        prepared.genetic_maps,
+        prepared.manifest,
+        prepared.cores,
+        ties,
+        prepared.source,
+        str(_scratch_base(prepared)),
+    )
     actions = {} if outputs is None else {key: value for key, value in outputs.items() if key in cut.nodes}
     for key in cut.nodes:
         if key not in actions:
@@ -465,8 +479,12 @@ def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None):
                 manifest = prepared.manifest
                 if resolved.analysis.excluded:
                     manifest = dict(manifest, analysis=resolved.analysis.document())
-                bound = replace(context, root=root, manifest=manifest,
-                                output=str(output_directory(prepared.paths.output, resolved.analysis)))
+                bound = replace(
+                    context,
+                    root=root,
+                    manifest=manifest,
+                    output=str(output_directory(prepared.paths.output, resolved.analysis)),
+                )
             actions[key] = module.task(key, bound)
     return actions
 
@@ -478,10 +496,9 @@ def _complete_workflow(
 
     from ..core.errors import InvariantError
     from ..engine.graph import RecordKey
+    from ..stages.analysis import location, output_directory
     from ..stages.graph import complete_cut
     from ..store.store import CheckpointStore
-
-    from ..stages.analysis import location, output_directory
 
     selection = prepared.analysis
     store = CheckpointStore(location(prepared.paths.checkpoints, selection))
@@ -499,7 +516,6 @@ def _complete_workflow(
         if task.key.stage == "pedigree":
             # The stored decision replies with its publication receipt, never the product:
             # check it against the independently bound reader and the record on disk.
-            from ..results.reader import Results
 
             reader = _analysis_reader(prepared, selection)
             request = reader.stage_request("pedigree")
@@ -591,10 +607,8 @@ def _phase_report(output: Path, reader: Results) -> Path:
 def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict[TaskKey, Task]:
     """Declare output dependencies before cuts, preserving separate scientific release records."""
 
-    from ..engine.graph import RecordKey, ResourceRequest, ResultRef, Task, TaskKey
+    from ..engine.graph import ResourceRequest, TaskKey
     from ..outputs.reports.tasks import run_tasks
-    from ..results.reader import Results
-
     from ..stages.analysis import location, output_directory
 
     reader = _analysis_reader(prepared, resolved.analysis)
@@ -606,12 +620,18 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
         return TaskKey(stage, "run" if c == "run" else "contig", c)
 
     for c in resolved.analysis.included:
-        release_inputs = tuple(key(stage, c) for stage in ("assembly", "painting", "refit", "evidence"))
         from ..stages.context import StageRun
         from ..stages.sites.tasks import task as sites_task
 
-        context = StageRun(root, str(output), resolved, prepared.genetic_maps, prepared.manifest, prepared.cores,
-                           source=prepared.source)
+        context = StageRun(
+            root,
+            str(output),
+            resolved,
+            prepared.genetic_maps,
+            prepared.manifest,
+            prepared.cores,
+            source=prepared.source,
+        )
         actions[key("sites", c)] = sites_task(key("sites", c), context)
         from ..stages.release.tasks import task as release_task
 
@@ -619,8 +639,9 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
         if prepared.settings.export.enabled:
             from ..stages.export.tasks import task as export_task
 
-            actions[key("export", c)] = export_task(key("export", c), context,
-                                                   full_length=prepared.settings.export.full_length)
+            actions[key("export", c)] = export_task(
+                key("export", c), context, full_length=prepared.settings.export.full_length
+            )
     dependencies = {
         "quality": tuple(key("evidence", c) for c in resolved.analysis.included),
         "painting": tuple(key("painting", c) for c in resolved.analysis.included),
@@ -637,17 +658,16 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     if prepared.settings.export.enabled:
         from ..stages.export.tasks import manifest_tasks
 
-        declarations = manifest_tasks(context, full_length=prepared.settings.export.full_length,
-                                      contigs=resolved.analysis.included)
+        declarations = manifest_tasks(
+            context, full_length=prepared.settings.export.full_length, contigs=resolved.analysis.included
+        )
         actions.update((task.key, task) for task in declarations)
         manifest_key = declarations[-1].key
     dependencies["complete"] = tuple(dict.fromkeys(k for values in dependencies.values() for k in values))
     dependencies["science"] = dependencies["complete"]
     if prepared.settings.export.enabled:
         dependencies["complete"] += (manifest_key,)
-    for task in run_tasks(
-        reader, output, dependencies, reverse_conventions=reader.manifest["ties"]["reverse"]
-    ):
+    for task in run_tasks(reader, output, dependencies, reverse_conventions=reader.manifest["ties"]["reverse"]):
         if task.key.round == "recombination" and task.key.unit == "contig":
             task = replace(task, function=_recombination_contig, kwargs={})
         elif task.key.round == "phase":
@@ -687,12 +707,11 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
 
 def _prerequisites(prepared, resolved, cut):
     """Resolve the cut's prerequisites through stage-owned requests and one receipt check."""
+    from ..outputs.export.records import SCHEMA, ExportConfig
     from ..results.reader import Results
+    from ..stages.analysis import FINAL_STAGES
     from ..stages.init import records as init_records
     from ..stages.init.tasks import check
-    from ..outputs.export.records import SCHEMA, ExportConfig
-
-    from ..stages.analysis import FINAL_STAGES
 
     selected = _analysis_reader(prepared, resolved.analysis)
     upstream = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints, exclude_contigs=())
@@ -704,7 +723,9 @@ def _prerequisites(prepared, resolved, cut):
             values[key] = check(str(prepared.paths.checkpoints), init_records.expected(results.manifest, resolved))
             continue
         if key.stage == "export":
-            identity = export_records.expected(results, contig, ExportConfig(full_length=prepared.settings.export.full_length))
+            identity = export_records.expected(
+                results, contig, ExportConfig(full_length=prepared.settings.export.full_length)
+            )
             saved = results.output_receipt("outputs/export", identity, SCHEMA, contig)
             if saved is None:
                 raise SettingsError(f"{contig}: current export is not published")
@@ -766,8 +787,10 @@ def execute(
     )
     if resolved is not None:
         if command == "phase" and contig not in resolved.analysis.included:
-            raise SettingsError(f"{contig}: excluded from the final analysis; included contigs: "
-                                + ", ".join(resolved.analysis.included))
+            raise SettingsError(
+                f"{contig}: excluded from the final analysis; included contigs: "
+                + ", ".join(resolved.analysis.included)
+            )
     tasks: tuple[Task, ...] = ()
     completed: dict[TaskKey, Any] = {}
     cut = None
@@ -775,7 +798,15 @@ def execute(
         assert resolved is not None
         from ..engine.graph import TaskKey, run_graph
         from ..results.reader import Results
-        from ..stages.graph import Node, bind_tasks, build_graph, execution_options, workflow_cut, task_preloads, with_kernel_tasks
+        from ..stages.graph import (
+            Node,
+            bind_tasks,
+            build_graph,
+            execution_options,
+            task_preloads,
+            with_kernel_tasks,
+            workflow_cut,
+        )
 
         output_actions = _output_actions(prepared, resolved)
         output_nodes = tuple(Node(task.key, task.depends_on) for task in output_actions.values())
@@ -805,6 +836,7 @@ def execute(
         completed = _prerequisites(prepared, resolved, cut)
         from ..core.ties import TieSettings
 
+        assert prepared.manifest is not None
         ties = TieSettings(
             reverse=bool(prepared.manifest["ties"]["reverse"]),
             keep=tuple(prepared.manifest["ties"].get("keep", ())),
@@ -859,6 +891,7 @@ def execute(
         if command == "init":
             _initialise(prepared, tie_reverse=tie_reverse, tie_keep=tie_keep)
             return RunResult("complete", "init", settings.input.contigs)
+        assert resolved is not None
         _analysis_selection(prepared, resolved.analysis)
         if command not in {"evidence", "reconstruct", "phase"}:
             _output_selection(prepared.paths.output, settings)
@@ -930,13 +963,12 @@ def _load_recorded_settings(
     from ..engine.runtime import configure_worker
     from .settings.load import load_settings
 
-    # The container codec needs NumPy, but not Numba. Establish the scalar
-    # library policy before reading it; select the actual Numba capacity from
-    # the checked settings before returning to any scientific command imports.
+    # The container codec needs NumPy; settings validation remains numerical-library lazy.
+    # Select the actual Numba capacity after the checked settings have been read.
     configure_worker(1)
     paths = RunPaths.from_directory(directory)
     _existing_store(paths)
-    requested = {}
+    requested: dict[str, dict[str, Any]] = {}
     active = active_exclusions(directory)
     if active is not None:
         requested["run"] = {"exclude_contigs": list(active)}
@@ -1008,56 +1040,43 @@ def _evaluation_tasks(tasks: Any, reader: Any, *, cores: int, recorder: Any) -> 
     return [result[task.key] for task in declarations]
 
 
-def templates_command(args: argparse.Namespace) -> int:
-    """Apply the numerical/runtime boundary before template generation imports or computes template windows."""
-    from ..core.errors import InputError
-    from ..engine.runtime import affinity_cpus, configure_worker, kernel_run, start_run
+def observations_command(args: argparse.Namespace) -> int:
+    """Load resolved settings and dispatch the observation-package producer."""
+    from ..engine.runtime import affinity_cpus, configure_worker
+    from .observations import write_observations
+    from .settings.load import load_settings
 
-    available = affinity_cpus()
-    cores = available if args.cores is None else args.cores
-    if not isinstance(cores, int) or isinstance(cores, bool) or cores < 1:
-        raise SettingsError("template cores must be a positive integer")
-    if cores > available:
-        raise ResourceError("template cores must fit the current CPU affinity")
-    contigs = tuple(args.contigs or ())
-    if not contigs or len(set(contigs)) != len(contigs):
-        raise InputError("templates need the unique contigs to model (--contigs)")
-    configure_worker(cores)
-    from ..core.kernels import declarations
-    from ..engine.kernels import cache_directory, cache_key
-    from ..stages.inputs.vcf import inspect
-    from .templates.builder import templates_command as build
-
-    try:
-        header = inspect(args.vcf)
-    except OSError as error:
-        raise InputError(f"cannot read input source: {error}") from error
-    missing = [contig for contig in contigs if contig not in header.contigs]
-    if missing:
-        raise InputError(f"{args.vcf}: contigs not in the header: {', '.join(missing)}")
-    output = args.output.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise InputError("template output directory must be new or empty")
-    roots = tuple(
-        dict.fromkeys(
-            (
-                "haplotype_reconstruction.interface.templates.builder",
-                "haplotype_reconstruction.interface.templates.linker",
-                "haplotype_reconstruction.science.evidence.run",
-                "haplotype_reconstruction.science.discovery.run",
-                *(entry.module for entry in declarations()),
-            )
-        )
-    )
-    cache_base = output.parent / ".haplotypes-kernels"
-    cache = cache_directory(cache_key(("haplotype_reconstruction.engine.workers", *roots)), base=cache_base / "active")
-    start_run(cores, preload=roots, cache_directory=cache)
-    with kernel_run(store=cache_base / "store"):
-        return build(args)
+    configure_worker(affinity_cpus() if args.cores is None else args.cores)
+    options = {} if args.cores is None else {"execution": {"cores": args.cores}}
+    settings = load_settings(args.config, preset=args.preset, options=options, overrides=args.overrides)
+    target = write_observations(settings, args.output)
+    print(f"Observations written to {target}", flush=True)
+    return 0
 
 
 def evaluate_command(args: argparse.Namespace) -> int:
     """Validate every requested product before runtime writes, then schedule evaluation."""
+    if getattr(args, "truth", None) is not None:
+        from ..engine.runtime import affinity_cpus, configure_worker
+        from .observations import evaluate_with_truth
+
+        configure_worker(affinity_cpus() if args.cores is None else args.cores)
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise SettingsError("evaluate timeout must be finite and positive")
+        evaluate_with_truth(
+            args.run_directory,
+            args.truth,
+            output=args.output,
+            stages=tuple(args.stages),
+            contigs=args.contigs,
+            release_tree=args.release_tree,
+            python=args.release_python,
+            timeout=args.timeout,
+        )
+        print("Evaluation with bound truth completed", flush=True)
+        return 0
+    if any(getattr(args, key, None) is not None for key in ("output", "release_tree", "release_python")):
+        raise SettingsError("evaluate --output, --release-tree and --release-python require --truth")
     settings = _load_recorded_settings(args.run_directory, args.cores)
     prepared, _ = _recorded_run(settings, args.run_directory)
     from ..evaluation.evaluate import collect, plan_evaluation, write_evaluation
@@ -1150,15 +1169,14 @@ def _check_recombination_bindings(
     """Check all downstream bindings before any recombination task or report is written."""
     from ..contracts.roles import require_schema
     from ..core.errors import InvariantError
+    from ..results.protocol import check_receipt
+    from ..stages.analysis import location
     from ..stages.recombination import records
     from ..store.protocol import read_items
-    from ..results.protocol import check_receipt
-
-    from ..stages.analysis import location
     from ..store.store import CheckpointStore
 
     store = CheckpointStore(location(store.root, resolved.analysis))
-    candidate = dict(store.manifest("run"), **resolved.manifest())
+    candidate = dict(cast(dict[str, Any], store.manifest("run")), **resolved.manifest())
 
     def check(contig: str) -> None:
         file = store.contig(contig)
@@ -1201,7 +1219,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     from ..engine.graph import run_graph
     from ..engine.records import record_run, run_log
     from ..engine.runtime import kernel_run
-    from ..stages.graph import Node, bind_tasks, build_graph, workflow_cut, task_preloads
+    from ..stages.graph import Node, bind_tasks, build_graph, task_preloads, workflow_cut
     from ..store.store import CheckpointStore
     from .settings.load import write_settings
     from .settings.schema import to_dict
@@ -1211,8 +1229,9 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     _check_recombination_bindings(store, prepared.manifest, resolved)
     outputs = _output_actions(prepared, resolved)
     graph = build_graph(
-        resolved.contigs, output_nodes=tuple(Node(task.key, task.depends_on) for task in outputs.values()),
-        analysis=resolved.analysis
+        resolved.contigs,
+        output_nodes=tuple(Node(task.key, task.depends_on) for task in outputs.values()),
+        analysis=resolved.analysis,
     )
     cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)
@@ -1247,8 +1266,9 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
 
         saved = load_settings(prepared.paths.output / "config.toml")
         # Active exclusion is owned by analysis_selection.json, not by this settings snapshot.
-        recorded = replace(prepared.settings, run=replace(prepared.settings.run,
-                                                          exclude_contigs=saved.run.exclude_contigs))
+        recorded = replace(
+            prepared.settings, run=replace(prepared.settings.run, exclude_contigs=saved.run.exclude_contigs)
+        )
         write_settings(recorded, prepared.paths.output / "config.toml")
     return RunResult("complete", None, resolved.analysis.included)
 

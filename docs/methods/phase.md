@@ -254,13 +254,19 @@ Cost and scope: Resident evidence is O(N L); window storage bounds the live site
 <a id="fp23"></a>
 ## fp23 Product record, stage identity and resume
 
-Publish one typed PhasedSamples product per contig, binding painting, refit, sample order, breakpoints and the exact ParentEdges conditioning digest. Require matched component order and schema. Reuse only a compatible complete publication; a completion marker alone is insufficient. Only final published products resume—intermediate family-phase iterations are not durable restart states.
+Publish one typed PhasedSamples product per contig, binding painting, refit, sample order, breakpoints and the exact ParentEdges conditioning digest. Require matched component order and schema. Reuse only a compatible complete publication; a completion marker alone is insufficient. The stage supplies an optional storage-free `PhaseWorkspace.memo(unit, compute)` capability. For each painted component, it commits the two solved models and parents (`solve`), both solves' releases in fixed consecutive storage batches (`release/b`), then the assembled component (`component`). The memo's noncomputing `lookup(unit)` loads any stored batch subset before release work starts. All pending samples from both solves share one concurrent map and the task's CPU authority, including elastic interval threads. When the last sample in a batch finishes, `save(unit, value)` publishes that batch immediately. Batches may complete and be stored in any order; the returned releases retain canonical sample order. Storage batches never partition scheduling. Without the capability, the original computation path runs. A solve's internal sweeps remain indivisible.
+
+Partial records live in `<contig>.ckpt.phase.partial` beside the contig checkpoint in the run's checkpoint root, independently of scratch. The ordinary container protocol publishes each complete unit atomically and recovers torn tails. Keys and identities bind the full task derivation (inputs, parameters, code and numerical policy), component, unit, batch and batch size; a different derivation is ignored. Codecs preserve exact array values and dtypes, transition logs, pedigree orders and both solves' histories. Execution callbacks and thread scratch are recreated.
+
+`PHASE_RELEASE_BATCH = 16` in [stage parameters](../../haplotype_reconstruction/stages/phase/parameters.py) is measured in samples: fixed consecutive blocks of canonical sample order, with a shorter final batch, for both solves together. It amortises durable writes and bounds the work lost within each incomplete storage batch, independently of cores and workers. Batch size enters partial identities, with no change to scientific decisions. The task log reports the number of intermediate units reused.
+
+The final contig record is published last. The stage completes its marker and fully decodes the final product before removing its partial container. A retry after a crash between final publication, marker creation and cleanup completes those steps without repeating science. These files are pipeline-owned restart intermediates; keeping or removing scratch does not affect their lifetime. Resident and windowed routes share the same unit identities and exact outputs.
 
 Implementation: [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(N L); O(E M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: the final product stores O(N L) calls and O(E M) chain values. The partial container additionally retains both solved model states, every release batch and the assembled component until final readback. Serialization and durability add stage work; the scientific iteration and candidate limits remain the named parameters above.
 
 <a id="fp24"></a>
 ## fp24 Diagnostics, summary and legacy fields (coverage, zero frames)

@@ -29,6 +29,7 @@ __all__ = [
     "EvaluationTask",
     "EvaluationReader",
     "evaluate_task",
+    "plan_evaluation",
 ]
 
 
@@ -138,11 +139,126 @@ def evaluate_task(task: EvaluationTask, reader: EvaluationReader) -> ChromosomeE
     else:
         phase = cast(PhaseArrays | None, raw_phase)
     recombination = reader.recombination(task.contig) if automatic or "recombination" in task.requested else None
+    truth = reader.simulation_truth(task.contig)
+    founders = {stage: reader.stage_panels(task.contig, stage) for stage in task.founder_stages}
+    if getattr(reader, "truth_sidecar", None) is not None:
+        return _evaluate_projected(task, reader, truth, founders, phase, recombination)
     inputs = ChromosomeInput(
         task.contig,
-        reader.simulation_truth(task.contig),
-        {stage: reader.stage_panels(task.contig, stage) for stage in task.founder_stages},
+        truth,
+        founders,
         phase,
         recombination,
     )
     return evaluate_chromosome(inputs, task.names, task.requested, parent_counts=task.parent_counts)
+
+
+class _TruthEvaluationReader:
+    """Give the native planner a sidecar pedigree without inventing run truth."""
+
+    def __init__(self, reader, truth):
+        from dataclasses import replace
+
+        from ..core.errors import InputError
+
+        self.reader, self.truth_sidecar = reader, truth
+        self.root, self.checkpoints, self.contigs = reader.root, reader.checkpoints, reader.contigs
+        names = tuple(reader.manifest["sample_ids"])
+        manifest = truth.manifest
+        if manifest.observed is None:
+            raise InputError("complete observation truth has no observed pedigree")
+        by_name = {name: i for i, name in enumerate(manifest.sample_ids)}
+        if len(set(names)) != len(names) or set(names) - set(by_name):
+            raise InputError("run sample axis differs from observation truth")
+        self._manifest = replace(
+            manifest,
+            sample_ids=names,
+            observed=manifest.observed.take(np.asarray([by_name[n] for n in names], np.int64)),
+        )
+
+    def __getattr__(self, name):
+        reader = self.__dict__.get("reader")
+        if reader is None:
+            raise AttributeError(name)
+        return getattr(reader, name)
+
+    def simulation_manifest(self):
+        return self._manifest
+
+    def simulation_truth(self, contig):
+        return self.truth_sidecar.truth(contig)
+
+
+def plan_evaluation(reader, *, truth=None, stages=("available",), contigs=None):
+    """Plan native or VCF-route evaluation, returning the reader used by tasks.
+
+    A run without a simulation manifest requires an explicitly bound truth
+    sidecar. The native planner still validates all requested stage publications.
+    Callers dispatch the returned tasks with the returned evaluation reader.
+    """
+    from .evaluate import plan_evaluation as native_plan
+
+    if truth is None:
+        report, tasks = native_plan(reader, stages=stages, contigs=contigs)
+        return report, tasks, reader
+    from ..results.truth import TruthSidecar
+
+    sidecar = truth if isinstance(truth, TruthSidecar) else TruthSidecar(truth)
+    sidecar.validate_run(reader)
+    evaluation_reader = _TruthEvaluationReader(reader, sidecar)
+    report, tasks = native_plan(evaluation_reader, stages=stages, contigs=contigs)
+    report["observation_truth"] = sidecar.description()
+    return report, tasks, evaluation_reader
+
+
+def _evaluate_projected(task, reader, truth, founders, phase, recombination):
+    """Use two independent truth views without changing any scoring arithmetic."""
+    from ..results.truth import project_truth
+    from .evaluate import evaluate_chromosome
+
+    # The founder scorer sees the immutable truth positions, founder axis and
+    # sampled-homologue painting, including markers and samples absent after QC.
+    full = evaluate_chromosome(
+        ChromosomeInput(task.contig, truth, founders), truth.sample_ids, task.founder_stages or ("pedigree",)
+    )
+    row, phase_groups, skipped = dict(full.chromosome), [], []
+    axes = reader.observation_axes(task.contig)
+    row.update(
+        truth_sites=len(truth.positions),
+        sites=len(axes.positions),
+        qc_removed_sites=len(truth.positions) - len(axes.positions),
+        qc_removed_positions=np.setdiff1d(truth.positions, axes.positions).tolist(),
+    )
+    automatic = task.requested in (("available",), ("all",))
+    if not automatic:
+        from ..core.errors import InputError
+
+        if "family_phase" in task.requested and phase is None:
+            raise InputError(f"{task.contig}: no completed family phase")
+        if "recombination" in task.requested and recombination is None:
+            raise InputError(f"{task.contig}: no completed recombination map")
+    if phase is not None:
+        names = tuple(phase["sample_ids"])
+        projected = project_truth(truth, phase["positions"], names)
+        counts = None
+        if task.parent_counts is not None:
+            by_name = dict(zip(task.names, task.parent_counts, strict=True))
+            counts = np.asarray([by_name[name] for name in names], np.int64)
+        scored = evaluate_chromosome(
+            ChromosomeInput(task.contig, projected, {}, phase), names, ("family_phase",), parent_counts=counts
+        )
+        row.update(scored.chromosome)
+        phase_groups.extend(scored.phase_groups)
+    elif automatic:
+        skipped.append(f"{task.contig}/family_phase")
+    if recombination is not None:
+        names = tuple(recombination.sample_ids)
+        projected = project_truth(truth, axes.positions, names)
+        scored = evaluate_chromosome(
+            ChromosomeInput(task.contig, projected, {}, recombination=recombination), names, ("recombination",)
+        )
+        # The phase product owns the scored site count when it exists.
+        row.update({key: value for key, value in scored.chromosome.items() if key != "sites"})
+    elif automatic:
+        skipped.append(f"{task.contig}/recombination")
+    return ChromosomeEvaluation(row, full.founders, full.components, full.matches, phase_groups, skipped)

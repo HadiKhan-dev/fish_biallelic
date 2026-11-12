@@ -1,0 +1,74 @@
+# Synthetic cohort call-set reference configuration; observation generation only.
+# Unimpaired depth: 10.2 * (1 - 0.42 / 2) * (1 - 0.1 / 2) = 7.6551 before finite-window variation.
+version = 4
+preset = ""
+
+[execution]
+cores = 8
+
+[input]
+kind = "simulation"
+contigs = ["c1"]
+
+[genetic_map]
+rate_cm_per_mb = 5.0
+
+[simulation]
+cohorts = [145, 145]
+founders = {A = 18, B = 8}
+depth = 10.2
+seed = 9101
+generating_rate_cm_per_mb = 5.0
+
+[simulation.reads]
+preset = "short_read_cohort"
+
+[simulation.artefacts]
+enabled = true
+hard_sites = 0.0
+hard_miss = 0.0
+stretch_cover = 0.0
+stretch_sites = 1.0
+stretch_miss = 0.0
+miss = 0.0
+miss_sample_cv = 0.0
+call_min_alt_fraction = 0.0
+block_band = 0.5
+balance_dispersion = 0.026
+systematic_sites = 0.0
+systematic_lo = 0.0
+systematic_hi = 0.0
+
+[simulation.genome]
+contigs = ["c1"]
+length_bp = 3000000
+
+[simulation.sites]
+count = 17000
+profile = "cascade"
+variant_against = "reference"
+spurious_fraction = 0.15
+
+[simulation.source]
+kind = "coalescent"
+reference_population = "p0"
+
+[simulation.source.populations.p0]
+size = 1000.0
+
+[simulation.source.populations.p1]
+size = 1000.0
+parent = "p0"
+split_generations = 300.0
+
+[simulation.stocks.A]
+population = "p0"
+founders = 30
+size = 50
+generations = 15
+
+[simulation.stocks.B]
+population = "p1"
+founders = 30
+size = 50
+generations = 15

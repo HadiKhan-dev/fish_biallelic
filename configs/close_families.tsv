@@ -1,0 +1,45 @@
+sample	parent1	parent2	sex	generation	observed	stock
+founder0				0	0	left
+founder1				0	0	left
+founder2				0	0	left
+founder3				0	0	left
+founder4				0	0	left
+founder5				0	0	left
+founder6				0	0	left
+founder7				0	0	left
+founder8				0	0	left
+founder9				0	0	left
+founder10				0	0	right
+founder11				0	0	right
+founder12				0	0	right
+founder13				0	0	right
+founder14				0	0	right
+founder15				0	0	right
+founder16				0	0	right
+founder17				0	0	right
+founder18				0	0	right
+founder19				0	0	right
+adult0	founder0	founder10		1	1	
+adult1	founder1	founder11		1	1	
+adult2	founder2	founder12		1	1	
+adult3	founder3	founder13		1	1	
+adult4	founder4	founder14		1	1	
+adult5	founder5	founder15		1	1	
+adult6	founder6	founder16		1	1	
+adult7	founder7	founder17		1	1	
+adult8	founder8	founder18		1	1	
+adult9	founder9	founder19		1	1	
+adult10	founder0	founder10		1	1	
+adult11	founder1	founder11		1	1	
+child0_0	adult0	adult1		2	1	
+child0_1	adult0	adult1		2	1	
+child1_0	adult2	adult3		2	1	
+child1_1	adult2	adult3		2	1	
+child2_0	adult4	adult5		2	1	
+child2_1	adult4	adult5		2	1	
+child3_0	adult6	adult7		2	1	
+child3_1	adult6	adult7		2	1	
+child4_0	adult8	adult9		2	1	
+child4_1	adult8	adult9		2	1	
+child5_0	adult10	adult11		2	1	
+child5_1	adult10	adult11		2	1	

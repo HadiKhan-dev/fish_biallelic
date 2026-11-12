@@ -712,8 +712,10 @@ class SiblingGuardParameters:
 
     Attributes:
       minimum_family: an edge is tested only when at least this many supported members remain, counting c.
-      member_support: a family member counts when its family is its best placement on at least this share of
-        chromosomes (relatedness member support); c itself must reach it.
+      focal_support: c uses its family only when its best-placement share of relatedness support units is strictly
+        greater than this threshold (dimensionless share); NaN leaves the edge untested.
+      member_support: a witness counts when its family is its best placement on at least this share of relatedness
+        support units (dimensionless share); c counts towards minimum_family regardless of its own support.
     """
 
     minimum_family: int = field(
@@ -728,8 +730,18 @@ class SiblingGuardParameters:
         default=0.75,
         metadata={
             "provenance": (
-                "PD23; fraction 0.75 of chromosomes must support a family member in its best relatedness "
+                "PD23; fraction 0.75 of relatedness support units must support a witness in its best relatedness "
                 "placement."
+            ),
+        },
+    )
+    focal_support: float = field(
+        default=0.5,
+        metadata={
+            "units": "share",
+            "provenance": (
+                "PD23; strict best-placement share of relatedness support units (dimensionless); require a "
+                "majority for the focal child while retaining the stricter member_support bar for witnesses."
             ),
         },
     )
@@ -739,6 +751,8 @@ class SiblingGuardParameters:
             raise SettingsError(
                 f"pedigree guard minimum_family={self.minimum_family!r} must be an integer of at least 2"
             )
+        if not 0.5 <= self.focal_support < 1.0:
+            raise SettingsError(f"pedigree guard focal_support={self.focal_support!r} must lie in [0.5, 1)")
         if not 0.5 <= self.member_support <= 1.0:
             raise SettingsError(f"pedigree guard member_support={self.member_support!r} must lie in [0.5, 1]")
 

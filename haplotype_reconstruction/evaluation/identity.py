@@ -28,6 +28,12 @@ row lies in its interval (the flag's position: the first marker of the block rig
 assertions are counted separately, never as errors avoided; covered pairs are also reported without flagged
 assertions (a consumer that drops flagged continuity). Splitting rows or dropping assertions can raise the share of
 correct assertions without raising coverage, so the counts are read together, not as one score.
+
+Set-valued identity is reported separately by identity_set_counts. A labelled window contains every founder
+within LABEL_MARGIN mismatches of the best, under the same call-count and best-error cutoffs. Consecutive
+labelled windows assert continuity correctly when their sets intersect. Set coverage requires median copy
+count >= 1, without a founder-distance cutoff, and one row containing the founder at both endpoints and in
+every labelled window between them. All released single-label counts above retain their definitions.
 """
 
 from __future__ import annotations
@@ -48,13 +54,9 @@ STRATA = ("absent", "single", "multi")
 
 
 def copy_counts(painting, positions, founders: int) -> np.ndarray:
-    """int32 [F, L]: sampled homologues carrying founder haplotype f at each marker (chunk bounds as
-    founders.represented_ancestry: [start, end) bp, the chunk ending at the last marker includes it)."""
-    positions = np.asarray(positions)
-    starts = np.searchsorted(positions, np.asarray(painting.start))
-    ends_bp = np.asarray(painting.end)
-    ends = np.searchsorted(positions, ends_bp)
-    ends[ends_bp == positions[-1]] = len(positions)
+    """int32 [F, L]: sampled homologues carrying founder f, from marker-index intervals."""
+    starts = np.asarray(painting.start, dtype=np.int64)
+    ends = np.asarray(painting.end, dtype=np.int64)
     change = np.zeros((founders, len(positions) + 1), np.int64)
     for haplotype in (np.asarray(painting.hap1), np.asarray(painting.hap2)):
         keep = (haplotype >= 0) & (haplotype < founders)
@@ -192,3 +194,120 @@ def identity_counts(panels, truth, counts, flags=None) -> dict:
             result[f"coverage_covered_unflagged_{name}"] += unflagged
     result["windows"] = int(windows)
     return result
+
+
+def _row_window_label_sets(calls, index, window, haplotypes, windows) -> np.ndarray:
+    """bool [F, W] membership for one row; an all-false window is unlabelled.
+
+    Only one row's founder-by-window mismatch table is built, as in the released
+    label evaluator. No row-by-founder-by-window array is retained.
+    """
+    if not len(haplotypes):
+        return np.zeros((0, windows), dtype=bool)
+    called = calls >= 0
+    where = window[called]
+    n = np.bincount(where, minlength=windows)
+    called_index, values = index[called], calls[called]
+    mismatches = np.stack(
+        [np.bincount(where, weights=values != founder[called_index], minlength=windows) for founder in haplotypes]
+    )
+    best = mismatches.min(axis=0)
+    labelled = (n >= LABEL_MIN_CALLS) & (best <= np.maximum(LABEL_MIN_ERRORS, np.floor(LABEL_ERROR_FRACTION * n)))
+    return (mismatches - best < LABEL_MARGIN) & labelled
+
+
+def identity_set_counts(panels, truth, counts) -> dict:
+    """Set labels, continuity and coverage beside the released identity_counts.
+
+    Inputs have the same axes as identity_counts: panels [(positions, calls [K, L])],
+    truth dict(haplotypes [F, L], positions [L]), and sampled copy counts [F, L].
+    Results have no prefix; publication adds identity_set_. The median set size is
+    over labelled cells only (None when none are labelled).
+
+    Working storage is O(F * W + L), independent of the number of panel rows.
+    Coverage is a shared bitmap of eligible pair endpoints, updated one row at a
+    time; labels never cross component boundaries. No new compiled kernels are used.
+    """
+    haplotypes = np.asarray(truth["haplotypes"])
+    positions = np.asarray(truth["positions"])
+    founders, markers = haplotypes.shape
+    windows = (markers + IDENTITY_WINDOW_MARKERS - 1) // IDENTITY_WINDOW_MARKERS
+    eligible = np.zeros((founders, windows), dtype=bool)
+    for w in range(windows):
+        part = slice(w * IDENTITY_WINDOW_MARKERS, min(markers, (w + 1) * IDENTITY_WINDOW_MARKERS))
+        eligible[:, w] = np.median(counts[:, part], axis=1) >= 1
+
+    # At each eligible right endpoint, record the distance to its preceding
+    # eligible window. Zero means that there is no eligible pair within the limit.
+    pair_gap = np.zeros((founders, windows), dtype=np.int32)
+    for founder in range(founders):
+        chosen = np.flatnonzero(eligible[founder])
+        gaps = np.diff(chosen)
+        keep = gaps <= COVERAGE_MAX_GAP
+        pair_gap[founder, chosen[1:][keep]] = gaps[keep]
+    covered = np.zeros_like(eligible)
+    size_counts = np.zeros(founders + 1, dtype=np.int64)
+    result: dict = dict(direct_correct=0, direct_wrong=0, gap_correct=0, gap_wrong=0)
+    for sites, calls in panels:
+        index = np.searchsorted(positions, np.asarray(sites))
+        window = index // IDENTITY_WINDOW_MARKERS
+        for calls_row in np.asarray(calls):
+            members = _row_window_label_sets(calls_row, index, window, haplotypes, windows)
+            sizes = members.sum(axis=0)
+            size_counts += np.bincount(sizes, minlength=founders + 1)
+            labelled = sizes > 0
+            chosen = np.flatnonzero(labelled)
+            right = np.any(members[:, chosen[:-1]] & members[:, chosen[1:]], axis=0)
+            direct = np.diff(chosen) == 1
+            result["direct_correct"] += int(np.count_nonzero(direct & right))
+            result["direct_wrong"] += int(np.count_nonzero(direct & ~right))
+            result["gap_correct"] += int(np.count_nonzero(~direct & right))
+            result["gap_wrong"] += int(np.count_nonzero(~direct & ~right))
+            for gap in range(1, min(COVERAGE_MAX_GAP, windows - 1) + 1):
+                bridge = members[:, :-gap] & members[:, gap:]
+                for offset in range(1, gap):
+                    stop = windows - gap + offset
+                    bridge &= members[:, offset:stop] | ~labelled[offset:stop]
+                covered[:, gap:] |= bridge & (pair_gap[:, gap:] == gap)
+
+    size_counts[0] = 0
+    labelled_cells = int(size_counts.sum())
+    median = None
+    if labelled_cells:
+        cumulative = np.cumsum(size_counts)
+        middle = np.searchsorted(cumulative, [(labelled_cells - 1) // 2, labelled_cells // 2], side="right")
+        median = float(middle.sum() / 2)
+    result.update(
+        labelled_cells=labelled_cells,
+        size_median=median,
+        coverage_pairs=int(np.count_nonzero(pair_gap)),
+        coverage_covered=int(np.count_nonzero(covered)),
+    )
+    return result
+
+
+def identity_window_diversity(truth, founder_haplotypes) -> dict:
+    """Median distinct carried source IDs and founder sequences on the truth grid.
+
+    Sources count every source segment overlapping a window, including a segment
+    that starts before it. Sequences compare the complete cross-founder alleles
+    within each window. The last partial window counts once, like every other.
+    Neither diagnostic depends on reconstructed panels or sampled copy counts.
+    """
+    mosaics = truth.founder_mosaics
+    markers = len(truth.positions)
+    sources, sequences = [], []
+    for start in range(0, markers, IDENTITY_WINDOW_MARKERS):
+        stop = min(start + IDENTITY_WINDOW_MARKERS, markers)
+        carried: set[int] = set()
+        for first, end in zip(mosaics.offsets[:-1], mosaics.offsets[1:], strict=True):
+            starts = mosaics.start[first:end]
+            left = np.searchsorted(starts, start, side="right") - 1
+            right = np.searchsorted(starts, stop, side="left")
+            carried.update(map(int, mosaics.source[first + left : first + right]))
+        sources.append(len(carried))
+        sequences.append(len(np.unique(founder_haplotypes[:, start:stop], axis=0)))
+    return dict(
+        identity_window_sources_median=float(np.median(sources)) if sources else 0.0,
+        identity_window_sequences_median=float(np.median(sequences)) if sequences else 0.0,
+    )

@@ -5,8 +5,9 @@ A parent of c is a parent of every full sib of c, so it is Mendelian-compatible 
 as c's parent (a sib, grandparent or half sib that happens to be compatible with c itself) is excluded from most of
 c's other sibs. For a released Tier-B edge p -> c (``ParentEdges`` before the guard), the members tested are:
 
-* c's full-sib family in the relatedness product: the members with support at least ``member_support`` (c itself must
-  reach it, else the family is c alone), without p;
+* c's full-sib family in the relatedness product when c's support is strictly greater than ``focal_support``
+  (including c whatever its own support, otherwise c alone): witnesses with support at least ``member_support``,
+  without p;
 * without any member released as a parent or child of c or of another member (no full sib is anyone's parent or child:
   ``linked``);
 * without any member with a released parent that is neither p nor a released parent of c (the ``half_sib``
@@ -65,7 +66,15 @@ def edge_families(
         released_parents.setdefault(child, set()).add(parent)
     out = []
     for parent, child in zip(np.asarray(parents).tolist(), np.asarray(children).tolist(), strict=False):
-        family = [int(m) for m in relatedness.supported_family(child, guard.member_support) if int(m) != parent]
+        if relatedness.member_support[child] > guard.focal_support:
+            members = np.flatnonzero(relatedness.family == relatedness.family[child])
+            family = [
+                int(m)
+                for m in members
+                if int(m) != parent and (int(m) == child or relatedness.member_support[m] >= guard.member_support)
+            ]
+        else:
+            family = [child]
         # A member released as a parent or child of the child or of another member is no full sib of the family.
         linked = {
             m for m in family if m != child and any((m, x) in released or (x, m) in released for x in family if x != m)

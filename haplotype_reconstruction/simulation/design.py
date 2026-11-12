@@ -12,9 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
+from ..contracts.roles import record_field
 from ..core.errors import InputError, SettingsError
 from ..core.random import stream
-from .parameters import MUTATION_RATE_PER_BP
+from . import parameters as generating
+from .artefacts import ArtefactModel
+from .artefacts import ArtefactRegion as ArtefactRegion
+from .parameters import MUTATION_RATE_PER_BP, PROFILE_MASKED_FRACTION, PROFILE_MASKED_MEAN_BP, PROFILE_SIGMAS
+from .sites import Profile, SiteMode
 
 
 @dataclass(frozen=True)
@@ -67,7 +72,13 @@ class ReadModel:
     site_depth_cv adds a mean-one lognormal site factor shared by samples; a positive
     site_depth_window_bp shares that factor within fixed physical windows instead. Independent
     mean-one gamma cell factors give count variance mu + count_dispersion * mu**2 conditional
-    on sample/site factors. Zero CV/dispersion consumes no extra random draws.
+    on sample/site factors. site_loss_fraction impairs a shared site window with that
+    probability and retains a uniform share of reads, without renormalisation: depth is
+    the depth at an unimpaired site and the mean is depth * (1 - site_loss_fraction / 2)
+    * (1 - site_loss_fine_fraction / 2). The independent fine loss uses occupied windows
+    of site_loss_fine_window_bp, multiplies the coarse factor, and is drawn after it.
+    region_depth_cv supplies an independent mean-one lognormal factor per sample and
+    physical window of region_depth_window_bp. Zero CV/dispersion consumes no extra random draws.
     """
 
     error_rate: float = 0.02
@@ -80,6 +91,16 @@ class ReadModel:
     site_depth_cv: float = 0.0
     site_depth_window_bp: int = 0
     count_dispersion: float = 0.0
+    site_loss_fraction: float = record_field("obs", units="1", dtype="float64", default=generating.SITE_LOSS_FRACTION)
+    region_depth_cv: float = record_field("obs", units="1", dtype="float64", default=generating.REGION_DEPTH_CV)
+    region_depth_window_bp: int = record_field("obs", units="bp", dtype="int", default=generating.REGION_DEPTH_WINDOW_BP)
+
+    site_loss_fine_fraction: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.SITE_LOSS_FINE_FRACTION
+    )
+    site_loss_fine_window_bp: int = record_field(
+        "obs", units="bp", dtype="int", default=generating.SITE_LOSS_FINE_WINDOW_BP
+    )
 
     def __post_init__(self):
         if not 0 < self.error_rate < 0.5:
@@ -92,6 +113,24 @@ class ReadModel:
             int(self.site_depth_window_bp) != self.site_depth_window_bp or self.site_depth_window_bp < 0
         ):
             raise SettingsError("site_depth_window_bp must be a nonnegative integer")
+        if not 0 <= self.site_loss_fraction < 1:
+            raise SettingsError("site_loss_fraction must be in [0, 1)")
+        if not 0 <= self.site_loss_fine_fraction < 1:
+            raise SettingsError("site_loss_fine_fraction must be in [0, 1)")
+        if not math.isfinite(self.site_loss_fine_window_bp) or (
+            int(self.site_loss_fine_window_bp) != self.site_loss_fine_window_bp or self.site_loss_fine_window_bp < 0
+        ):
+            raise SettingsError("site_loss_fine_window_bp must be a nonnegative integer")
+        if self.site_loss_fine_fraction and not self.site_loss_fine_window_bp:
+            raise SettingsError("positive site_loss_fine_fraction requires positive site_loss_fine_window_bp")
+        if not math.isfinite(self.region_depth_cv) or self.region_depth_cv < 0:
+            raise SettingsError("region_depth_cv must be finite and nonnegative")
+        if not math.isfinite(self.region_depth_window_bp) or (
+            int(self.region_depth_window_bp) != self.region_depth_window_bp or self.region_depth_window_bp < 0
+        ):
+            raise SettingsError("region_depth_window_bp must be a nonnegative integer")
+        if self.region_depth_cv and not self.region_depth_window_bp:
+            raise SettingsError("positive region_depth_cv requires positive region_depth_window_bp")
         if not math.isfinite(self.count_dispersion) or self.count_dispersion < 0:
             raise SettingsError("count_dispersion must be finite and nonnegative")
         if not 0 < self.heterozygote_alt_probability < 1:
@@ -110,6 +149,138 @@ class ReadModel:
 
 
 @dataclass(frozen=True)
+class PopulationSpec:
+    """A constant diploid effective size and an optional split into its parent."""
+
+    name: str = record_field("obs", dtype="str")
+    size: float = record_field("obs", units="individuals", dtype="float64")
+    parent: str = record_field("obs", dtype="str", default="")
+    split_generations: float | None = record_field("obs", units="generations", dtype="float64 | None", default=None)
+
+
+@dataclass(frozen=True)
+class StockSpec:
+    """Generation zero founders, then size individuals for each of generations rounds."""
+
+    name: str = record_field("obs", dtype="str")
+    population: str = record_field("obs", dtype="str")
+    founders: int = record_field("obs", units="individuals", dtype="int")
+    size: int = record_field("obs", units="individuals", dtype="int")
+    generations: int = record_field("obs", units="generations", dtype="int")
+
+    def __post_init__(self):
+        for name, lower in (("founders", 2), ("size", 2), ("generations", 0)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < lower:
+                raise SettingsError(f"stock {self.name}: {name} must be an integer >= {lower}")
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    """File coding or a structured coalescent with one reference leaf."""
+
+    kind: str = record_field("obs", dtype="str", default="file")
+    file: Path | None = record_field("obs", dtype="Path | None", default=None)
+    unknown: str = record_field("obs", dtype="str", default="refuse")
+    reference_population: str = record_field("obs", dtype="str", default="")
+    populations: tuple[PopulationSpec, ...] = record_field("obs", dtype="tuple[PopulationSpec, ...]", default=())
+
+    def __post_init__(self):
+        if self.kind not in ("file", "coalescent"):
+            raise SettingsError("source kind must be file or coalescent")
+        if self.unknown not in ("refuse", "draw"):
+            raise SettingsError("source unknown must be refuse or draw")
+        if self.file is not None:
+            object.__setattr__(self, "file", Path(self.file))
+        if self.kind == "file":
+            if self.file is None:
+                raise SettingsError("file source needs simulation.source.file")
+            if self.populations or self.reference_population:
+                raise SettingsError("file source cannot configure coalescent populations")
+        else:
+            if self.file is not None or self.unknown != "refuse":
+                raise SettingsError("coalescent source cannot configure file or unknown")
+            self.population_tree()
+
+    def population_tree(self):
+        """Validate the named tree before draws and return its kernel arrays."""
+        from .genealogy import validate_population_tree
+
+        names = tuple(p.name for p in self.populations)
+        if not names or len(set(names)) != len(names) or any(not n for n in names):
+            raise SettingsError("coalescent populations must have unique nonempty names")
+        if self.reference_population and self.reference_population not in names:
+            raise SettingsError("unknown source reference_population")
+        if any(p.parent and p.parent not in names for p in self.populations):
+            raise SettingsError("unknown source population parent")
+        if any(p.parent and p.split_generations is None for p in self.populations):
+            raise SettingsError("each non-root population needs split_generations")
+        if any(not p.parent and p.split_generations is not None for p in self.populations):
+            raise SettingsError("the root population has no split_generations")
+        parent = np.array([names.index(p.parent) if p.parent else -1 for p in self.populations], np.int64)
+        split = np.array([p.split_generations if p.parent else np.inf for p in self.populations], float)
+        size = np.array([p.size for p in self.populations], float)
+        validate_population_tree(np.array([0, 0], np.int64), parent, split, size)
+        return names, parent, split, size
+
+
+@dataclass(frozen=True)
+class ProfileSpec:
+    """JSON-compatible profile specification; arrays are made only for generation."""
+
+    kind: str = record_field("obs", dtype="str", default="none")
+    sigmas: tuple[float, ...] = record_field("obs", axes=("scale",), dtype="tuple[float, ...]", default=PROFILE_SIGMAS)
+    masked_fraction: float = record_field("obs", dtype="float64", default=PROFILE_MASKED_FRACTION)
+    masked_mean_bp: float = record_field("obs", units="bp", dtype="float64", default=PROFILE_MASKED_MEAN_BP)
+
+    def __post_init__(self):
+        object.__setattr__(self, "sigmas", tuple(self.sigmas))
+        self.parameters()
+
+    def parameters(self):
+        return Profile(self.kind, self.sigmas, self.masked_fraction, self.masked_mean_bp)
+
+
+@dataclass(frozen=True)
+class SiteSpec:
+    """Exactly one site-selection mode and a spatial intensity profile."""
+
+    count: int | None = record_field("obs", units="sites", dtype="int | None", default=None)
+    per_mb: float | None = record_field("obs", units="sites/Mb", dtype="float64 | None", default=None)
+    positions: Path | None = record_field("obs", dtype="Path | None", default=None)
+    profile: ProfileSpec = record_field("obs", dtype="ProfileSpec", default_factory=ProfileSpec)
+
+    variant_against: str = record_field("obs", dtype="str", default=generating.VARIANT_AGAINST)
+    spurious_fraction: float = record_field("obs", units="1", dtype="float64", default=generating.SPURIOUS_FRACTION)
+
+    def __post_init__(self):
+        if self.variant_against not in ("cohort", "reference"):
+            raise SettingsError("variant_against must be cohort or reference")
+        if not 0 <= self.spurious_fraction < 1:
+            raise SettingsError("spurious_fraction must be in [0, 1)")
+
+    def mode(self, length):
+        if self.positions is None:
+            mode = SiteMode(count=self.count, per_mb=self.per_mb)
+        else:
+            if self.count is not None or self.per_mb is not None or self.profile.kind != "none":
+                raise SettingsError("positions requires profile = none and no count or per_mb")
+            try:
+                text = Path(self.positions).read_text().split()
+                values = np.array([int(v) for v in text], np.int64)
+            except (OSError, ValueError, OverflowError) as error:
+                raise SettingsError(f"cannot read integer site positions: {error}") from error
+            mode = SiteMode(positions=values)
+            if np.any(values < 1) or np.any(values > length):
+                raise SettingsError("site positions must lie in the generated genome extent")
+        if mode.count is not None and mode.count > length:
+            raise SettingsError("site count exceeds the number of integer genome positions")
+        if mode.per_mb is not None and mode.per_mb * length / 1e6 >= length:
+            raise SettingsError("per_mb target must be below the number of integer genome positions")
+        return mode
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """A known-pedigree simulation from founder templates.
 
@@ -117,13 +288,14 @@ class SimulationConfig:
     ``allele_probabilities`` float[H, L, 2]: H founder haplotypes, consecutive pairs form the
     founders). contigs: simulated contigs, in this order (the order is part of the random
     streams). seed: None = drawn at random once and bound in the store. cohorts: cohort sizes
-    (cohort 1 descends from the founders). depth: mean read depth. generating_rate_cm_per_mb /
+    (cohort 1 descends from the founders). depth: read depth at an unimpaired site; site loss reduces the mean by (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2).
+    generating_rate_cm_per_mb /
     generating_map: the generating genetic map (map file contigs; others the rate).
     mutation_rate_per_bp: per-site mutation probability per meiosis (internal constant).
     """
 
-    templates: Path
-    contigs: tuple[str, ...]
+    templates: Path | None = None
+    contigs: tuple[str, ...] = ()
     seed: int | None = 400
     cohorts: tuple[int, ...] = (20, 100, 200)
     depth: float = 5.0
@@ -132,21 +304,109 @@ class SimulationConfig:
     design: SimulationDesign = field(default_factory=SimulationDesign)
     reads: ReadModel = field(default_factory=ReadModel)
     mutation_rate_per_bp: float = MUTATION_RATE_PER_BP
+    source: SourceSpec | None = None
+    stocks: tuple[StockSpec, ...] = ()
+    founders: tuple[tuple[str, int], ...] = ()
+    genome_contigs: tuple[str, ...] = ()
+    length_bp: int | tuple[tuple[str, int], ...] = 0
+    sites: SiteSpec | None = None
+    artefacts: ArtefactModel = field(default_factory=ArtefactModel)
 
     def __post_init__(self):
-        object.__setattr__(self, "templates", Path(self.templates))
+        if self.templates is not None:
+            object.__setattr__(self, "templates", Path(self.templates))
+        if self.source is None:
+            object.__setattr__(self, "source", SourceSpec(file=self.templates))
+        elif self.templates is not None and (self.source.kind != "file" or self.source.file != self.templates):
+            raise SettingsError("templates and source.file disagree")
+        object.__setattr__(self, "templates", self.source.file)
         object.__setattr__(self, "contigs", tuple(map(str, self.contigs)))
         object.__setattr__(self, "cohorts", tuple(int(size) for size in self.cohorts))
         if self.generating_map is not None:
             object.__setattr__(self, "generating_map", Path(self.generating_map))
         if not self.contigs or len(set(self.contigs)) != len(self.contigs):
             raise SettingsError("simulation contigs must be unique and non-empty")
-        if not self.cohorts or any(size < 2 for size in self.cohorts):
+        if self.design.pedigree is None and (not self.cohorts or any(size < 2 for size in self.cohorts)):
             raise SettingsError("each generated cohort must have at least two individuals")
         if not math.isfinite(self.depth) or self.depth <= 0:
             raise SettingsError("depth must be finite and positive")
         if self.seed is not None and int(self.seed) != self.seed:
             raise SettingsError("seed must be an integer or None (random)")
+        if not math.isfinite(self.generating_rate_cm_per_mb) or self.generating_rate_cm_per_mb < 0:
+            raise SettingsError("generating_rate_cm_per_mb must be finite and nonnegative")
+        if self.genome_contigs and self.genome_contigs != self.contigs:
+            raise SettingsError("simulation.genome.contigs and input.contigs must have the same order")
+        if len({s.name for s in self.stocks}) != len(self.stocks):
+            raise SettingsError("stock names must be unique")
+        if self.source.kind == "coalescent":
+            names, *_ = self.source.population_tree()
+            if not self.stocks or any(s.population not in names for s in self.stocks):
+                raise SettingsError("coalescent stocks must name known source populations")
+            if self.sites is None:
+                raise SettingsError("coalescent source requires simulation.sites")
+            for contig in self.contigs:
+                length = self.contig_length(contig)
+                self.sites.mode(length)
+        elif self.sites is not None or self.genome_contigs or self.length_bp:
+            raise SettingsError("file sources fix their sites and extent; genome and sites settings do not apply")
+        if self.design.pedigree is not None:
+            # The stage reads and validates the table before realising a seed.
+            # Keeping I/O there also permits callers to supply parsed rows.
+            pass
+        elif self.stocks:
+            self.founder_stocks(None)
+        elif self.founders:
+            raise SettingsError("founders requires configured stocks")
+        if self.design.pedigree is None:
+            if self.design.observe_cohorts and max(self.design.observe_cohorts) > len(self.cohorts):
+                raise SettingsError("an observed cohort was not generated")
+            candidates = sum(
+                n
+                for i, n in enumerate(self.cohorts, 1)
+                if not self.design.observe_cohorts or i in self.design.observe_cohorts
+            )
+            if int(candidates * self.design.observed_fraction) < 3:
+                raise SettingsError("observation selection retains fewer than three individuals")
+
+    def contig_length(self, contig):
+        length = self.length_bp if isinstance(self.length_bp, int) else dict(self.length_bp).get(contig, 0)
+        if isinstance(length, bool) or not isinstance(length, int) or length < 1:
+            raise SettingsError(f"{contig}: genome length_bp must be a positive integer")
+        if not isinstance(self.length_bp, int) and set(dict(self.length_bp)) != set(self.contigs):
+            raise SettingsError("genome length_bp must name exactly the configured contigs")
+        return length
+
+    def founder_stocks(self, rows):
+        """Stock name per cross founder in its received order; validate capacity."""
+        names = tuple(s.name for s in self.stocks)
+        if rows is not None:
+            if self.founders:
+                raise SettingsError("explicit pedigree sets its own founder stocks; omit founders")
+            founders = [r for r in rows if not r.parent1]
+            if not self.stocks:
+                if any(r.stock for r in rows):
+                    raise SettingsError("pedigree stock requires configured stocks")
+                return ()
+            order = tuple(r.stock or (names[0] if len(names) == 1 else "") for r in founders)
+            if any(r.stock for r in rows if r.parent1):
+                raise SettingsError("pedigree stock belongs on founder rows only")
+        else:
+            requests = dict(self.founders)
+            if not requests or any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in requests.values()):
+                raise SettingsError("random cohorts require founders = {STOCK = positive integer}")
+            if set(requests) - set(names):
+                raise SettingsError("founders names an unknown stock")
+            order = tuple(name for name in names for _ in range(requests.get(name, 0)))
+        minimum = 1 if rows is not None else 2
+        if len(order) < minimum or any(name not in names for name in order):
+            raise SettingsError("cross founders require known stocks (stock column required with multiple stocks)")
+        for stock in self.stocks:
+            available = stock.size if stock.generations else stock.founders
+            if order.count(stock.name) > available:
+                raise SettingsError(
+                    f"stock {stock.name}: requested {order.count(stock.name)} individuals, available {available}"
+                )
+        return order
 
 
 PEDIGREE_COLUMNS = ("sample", "parent1", "parent2", "sex", "generation", "observed")
@@ -163,6 +423,7 @@ class PedigreeRow:
     sex: str
     generation: str
     observed: bool
+    stock: str = ""
 
 
 def parse_pedigree_table(text: str, *, label: str = "pedigree") -> tuple[PedigreeRow, ...]:
@@ -177,7 +438,7 @@ def parse_pedigree_table(text: str, *, label: str = "pedigree") -> tuple[Pedigre
     missing = [name for name in PEDIGREE_COLUMNS if name not in header]
     if missing:
         raise InputError(f"{path}: missing pedigree columns {', '.join(missing)}")
-    column = {name: header.index(name) for name in PEDIGREE_COLUMNS}
+    column = {name: header.index(name) for name in (*PEDIGREE_COLUMNS, "stock") if name in header}
     rows, seen, founders_done = [], set(), False
     for number, fields in enumerate(lines[1:], start=2):
         fields = fields + [""] * (len(header) - len(fields))
@@ -192,6 +453,7 @@ def parse_pedigree_table(text: str, *, label: str = "pedigree") -> tuple[Pedigre
             value["sex"],
             value["generation"],
             observed in ("1", "true"),
+            value.get("stock", ""),
         )
         if not row.sample or row.sample in seen:
             raise InputError(f"{path}:{number}: sample names must be unique and non-empty")

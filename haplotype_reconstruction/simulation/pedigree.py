@@ -30,6 +30,7 @@ from ..contracts.roles import record_field
 from ..core.errors import InputError
 from ..core.random import child_seeds, stream, structure_stream
 from .design import PedigreeRow, SimulationDesign
+from .haplotypes import Mosaic, transmit
 
 # ---------------------------------------------------------------------------------------------
 # Founders
@@ -69,17 +70,6 @@ def pair_founders(haplotypes) -> list[list[np.ndarray]]:
 # ---------------------------------------------------------------------------------------------
 
 
-def _segments_in_range(painting, range_start, range_end):
-    """Ancestry segments (start, end, founder) of ``painting`` clipped to [range_start, range_end)."""
-    result = []
-    for seg_start, seg_end, founder in painting:
-        overlap_start = max(seg_start, range_start)
-        overlap_end = min(seg_end, range_end)
-        if overlap_start < overlap_end:
-            result.append((overlap_start, overlap_end, founder))
-    return result
-
-
 def _map_crossovers(site_locs, chromosome_map, rng):
     """A Poisson process uniform in integrated genetic coordinates over the contig's sites."""
     start, end = float(site_locs[0]), float(site_locs[-1])
@@ -93,51 +83,31 @@ def _map_crossovers(site_locs, chromosome_map, rng):
 
 
 def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_rate, rng, chromosome_map=None):
-    """One gamete of a parent: (alleles int8[L], ancestry segments, crossover positions float64[]).
+    """One label-level gamete, its ancestry alias and unchanged float crossovers.
 
-    ``chromosome_map`` (a ChromosomeGeneticMap with a map) replaces the homogeneous
-    ``recombination_rate`` (per bp). Crossover positions are in bp (float).
+    The random draws and stopping conditions are those of the released array
+    meiosis, including the no-map terminal overshoot and repeated mutation hits.
+    ``ancestry_pair`` is retained as a task-interface alias of the parental mosaics.
     """
     using_map = chromosome_map is not None and chromosome_map.has_map
     start_phys = site_locs[0]
     end_phys = site_locs[-1]
     cur_loc = start_phys
-    cur_loc_index = 0
     using_hap = rng.choice([0, 1])
-    alleles, ancestry, crossovers = [], [], []
+    crossovers = []
     if not using_map and recombination_rate > 0:
-        # Exponential gaps rounded up to whole bp, from the first site until past the last.
         recombination_scale = 1.0 / recombination_rate
         while cur_loc <= end_phys:
             new_loc = cur_loc + np.ceil(rng.exponential(recombination_scale))
             new_loc_index = np.searchsorted(site_locs, new_loc)
-            alleles.append(hap_pair[using_hap][cur_loc_index:new_loc_index])
-            ancestry.extend(_segments_in_range(ancestry_pair[using_hap], cur_loc, min(new_loc, end_phys)))
             if new_loc <= end_phys:
                 crossovers.append(float(new_loc))
-            using_hap = 1 - using_hap
             cur_loc = new_loc
-            cur_loc_index = new_loc_index
-            if cur_loc_index >= len(site_locs):
+            if new_loc_index >= len(site_locs):
                 break
     else:
         events = _map_crossovers(site_locs, chromosome_map, rng) if using_map else np.empty(0, dtype=np.float64)
-        # A terminal boundary beyond the last marker includes the final allele while keeping the
-        # [start, end) ancestry convention.
-        terminal_loc = np.nextafter(float(end_phys), np.inf)
-        for event_index in range(len(events) + 1):
-            is_crossover = event_index < len(events)
-            new_loc = events[event_index] if is_crossover else terminal_loc
-            new_loc_index = np.searchsorted(site_locs, new_loc)
-            alleles.append(hap_pair[using_hap][cur_loc_index:new_loc_index])
-            ancestry.extend(_segments_in_range(ancestry_pair[using_hap], cur_loc, min(new_loc, end_phys)))
-            if is_crossover:
-                crossovers.append(float(new_loc))
-                using_hap = 1 - using_hap
-                cur_loc = new_loc
-                cur_loc_index = new_loc_index
-    result = np.concatenate(alleles)[: len(site_locs)]
-    # Mutations flip alleles (ancestry unchanged): exponential gaps rounded down.
+        crossovers.extend(float(event) for event in events)
     mutation_scale = 1.0 / mutation_rate
     mutated = []
     cur_loc = start_phys
@@ -147,9 +117,9 @@ def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_r
         if new_loc_index < len(site_locs):
             mutated.append(new_loc_index)
         cur_loc = new_loc
-    if mutated:
-        result[mutated] = 1 - result[mutated]
-    return result, ancestry, np.asarray(crossovers, dtype=np.float64)
+    events = np.asarray(crossovers, dtype=np.float64)
+    result = transmit(hap_pair, using_hap, events, np.unique(mutated).astype(np.int64), site_locs)
+    return result, result, events
 
 
 def _simulate_children(task, shared=None, budget=None):
@@ -230,13 +200,12 @@ class PedigreeTable:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class SimulatedContig:
-    """The generated individuals of one contig, in pedigree order (one entry per individual).
+    """Generated Mosaic pairs in pedigree order; ancestry aliases those same pairs.
 
-    haplotypes: [maternal, paternal] int8[L] alleles; ancestry: per haplotype, segments (start,
-    end, founder haplotype index); gametes: per gamete, (child row, parent slot 0/1, parent name,
-    crossover positions float64[]).
+    Gametes retain (child row, parent slot, parent name, float crossover positions).
+    No individual stores an allele array here, including unobserved parents.
     """
 
     haplotypes: list = record_field("obs", axes=(), units="1", dtype="list")
@@ -299,7 +268,7 @@ def _child_tasks(parent_pairs, seeds, haplotypes_by_contig, ancestries_by_contig
 
 
 def simulate_pedigree(
-    founders_by_contig: Sequence[Sequence[Sequence[NDArray[np.int8]]]],
+    founders_by_contig: Sequence[Sequence[Sequence[Mosaic]]],
     sites_by_contig: Sequence[NDArray[np.int64]],
     cohort_sizes: Sequence[int],
     *,
@@ -313,7 +282,7 @@ def simulate_pedigree(
 ) -> tuple[PedigreeTable, list[SimulatedContig]]:
     """Simulate the cohorts on every contig with one shared pedigree structure.
 
-    founders_by_contig[c]: list of founders [hap0, hap1] (int8[L_c]); sites_by_contig[c]: int64[L_c];
+    founders_by_contig[c]: list of founders [Mosaic, Mosaic]; sites_by_contig[c]: int64[L_c];
     chromosome_maps[c]: the contig's generating ChromosomeGeneticMap (None: the homogeneous rate).
     Returns (PedigreeTable of every generated individual, [SimulatedContig per contig]).
     """
@@ -321,12 +290,9 @@ def simulate_pedigree(
     master = stream("simulation.master", seed=seed)
     structure = structure_stream(master)
 
-    # Founder ancestry: haplotype h of the founders covers the whole contig.
+    # Founder mosaics already carry the source and cross-founder labels.
     parents_by_contig = [list(founders) for founders in founders_by_contig]
-    ancestries_by_contig = []
-    for founders, sites in zip(founders_by_contig, sites_by_contig, strict=False):
-        start, end = sites[0], sites[-1]
-        ancestries_by_contig.append([[[(start, end, 2 * i)], [(start, end, 2 * i + 1)]] for i in range(len(founders))])
+    ancestries_by_contig = [list(founders) for founders in founders_by_contig]
     parent_ids = [f"Founder_{i}" for i in range(len(founders_by_contig[0]))]
     contigs = [SimulatedContig([], [], []) for _ in range(n_contigs)]
     samples, cohorts, parent1, parent2 = [], [], [], []
@@ -409,7 +375,7 @@ def simulate_pedigree(
 
 
 def simulate_explicit_pedigree(
-    founders_by_contig: Sequence[Sequence[Sequence[NDArray[np.int8]]]],
+    founders_by_contig: Sequence[Sequence[Sequence[Mosaic]]],
     sites_by_contig: Sequence[NDArray[np.int64]],
     rows: tuple[PedigreeRow, ...],
     *,
@@ -445,9 +411,8 @@ def simulate_explicit_pedigree(
     contigs = [SimulatedContig([None] * n, [None] * n, []) for _ in range(n_contigs)]
     for founder, index in enumerate(founder_rows):
         for c in range(n_contigs):
-            start, end = sites_by_contig[c][0], sites_by_contig[c][-1]
             contigs[c].haplotypes[index] = list(founders_by_contig[c][founder])
-            contigs[c].ancestry[index] = [[(start, end, 2 * founder)], [(start, end, 2 * founder + 1)]]
+            contigs[c].ancestry[index] = contigs[c].haplotypes[index]
     processes = int(budget)
     with _TaskRunner(runner) as pool:
         for level in range(1, max(depth.values()) + 1):

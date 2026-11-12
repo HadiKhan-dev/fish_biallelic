@@ -360,10 +360,8 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [OU18](export.md#ou18) — Core
 - [OU19](export.md#ou19) — Accretion
 
-## [Simulation and templates](simulation.md)
+## [Simulation](simulation.md)
 
-- [OU20](simulation.md#ou20) — Accretion
-- [OU21](simulation.md#ou21) — Accretion
 - [OU22](simulation.md#ou22) — Accretion
 - [OU23](simulation.md#ou23) — Core
 - [OU24](simulation.md#ou24) — Core

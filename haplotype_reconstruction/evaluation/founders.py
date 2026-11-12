@@ -87,29 +87,23 @@ def _ancestry_mask(events, counts, offsets, founder_count, sites):
 
 
 def represented_ancestry(painting, positions, founder_count: int) -> np.ndarray:
-    """bool [F, L]: founder f is present in some sampled homologue at site l.
+    """bool [F, L]: founder f is present in a sampled homologue at marker l.
 
-    Presence in a sampled homologue, not independent-lineage identifiability. ``painting`` is the contig's
-    simulation.truth.TruthPainting (chunks [start, end) bp; the chunk ending at the last marker includes it).
+    Painting bounds are half-open marker-index intervals, including the terminal
+    marker through end=len(positions). Presence is independent of identifiability.
     """
     positions = np.asarray(positions)
     starts = np.asarray(painting.start, dtype=np.int64)
     ends = np.asarray(painting.end, dtype=np.int64)
     endpoints: list[list[int]] = [[] for _ in range(founder_count)]
     changes: list[list[int]] = [[] for _ in range(founder_count)]
-    bounds = (
-        np.searchsorted(positions, np.stack([starts, ends], axis=1))
-        if len(starts)
-        else np.empty((0, 2), dtype=np.int64)
-    )
-    last_position = positions[-1]
-    for end, first_hap, second_hap, (left, right) in zip(
-        ends.tolist(), np.asarray(painting.hap1).tolist(), np.asarray(painting.hap2).tolist(), bounds, strict=False
+    for left, right, first_hap, second_hap in zip(
+        starts.tolist(),
+        ends.tolist(),
+        np.asarray(painting.hap1).tolist(),
+        np.asarray(painting.hap2).tolist(),
+        strict=True,
     ):
-        # The terminal endpoint includes the last marker; internal boundaries
-        # remain half-open, exactly as in the truth producer.
-        if end == last_position:
-            right = len(positions)
         for founder in {first_hap, second_hap}:
             if 0 <= founder < founder_count:
                 endpoints[founder].extend((left, right))

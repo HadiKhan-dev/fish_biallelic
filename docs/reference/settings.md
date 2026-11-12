@@ -35,7 +35,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `kind` | str | `"vcf"` | vcf, simulation | yes | Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates. Provenance: Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from founder templates. |
+| `kind` | str | `"vcf"` | vcf, simulation | yes | Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from a file panel or a coalescent genealogy. Provenance: Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from a file panel or a coalescent genealogy. |
 | `vcf` | path | `""` | — | yes | Input VCF/BCF (kind = vcf). Provenance: Input VCF/BCF (kind = vcf). |
 | `contigs` | strings | `[]` | — | yes | Contigs to analyse, in order (required unless the preset lists them). Provenance: Contigs to analyse, in order (required unless the preset lists them). |
 ## quality
@@ -83,21 +83,87 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
 | `seed` | seed | `400` | — | yes | Simulation seed, or "random" (the realised seed is recorded). Provenance: Simulation seed, or "random" (the realised seed is recorded). |
-| `templates` | path | `""` | — | yes | Directory of chromosome NPZ founder templates. Provenance: Directory of chromosome NPZ founder templates. |
+| `founders` | counts | `[]` | — | yes | Random cross founders by stock: {STOCK = number of individuals}. Provenance: Random cross founders by stock: {STOCK = number of individuals}. |
+## simulation.genome
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `contigs` | strings | `[]` | — | yes | Generated contig names; must match input.contigs in order. Provenance: Generated contig names; must match input.contigs in order. |
+| `length_bp` | lengths | `0` | — | yes | Positive integer bp length, or a table keyed by contig. Provenance: Positive integer bp length, or a table keyed by contig. |
+## simulation.sites
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `count` | optional_int | `""` | — | yes | Exact positive number of distinct written sites, including spurious sites. Provenance: Exact positive number of distinct written sites, including spurious sites. |
+| `per_mb` | optional_float | `""` | — | yes | Expected sites per Mb; exclusive with count and positions. Provenance: Expected sites per Mb; exclusive with count and positions. |
+| `positions` | path | `""` | — | yes | Sorted unique integer bp positions file; profile must be none. Provenance: Sorted unique integer bp positions file; profile must be none. |
+| `profile` | str | `"none"` | none, cascade | yes | Spatial intensity profile. Provenance: Spatial intensity profile. |
+| `sigmas` | floats | `[0.9, 0.6, 0.7, 0.6, 0.45]` | — | yes | Log-intensity SDs at 10, 100, 1000, 10000, 100000 bp. Provenance: Log-intensity SDs at 10, 100, 1000, 10000, 100000 bp. |
+| `masked_fraction` | float | `0.1` | — | yes | Stationary masked share of the cascade profile. Provenance: Stationary masked share of the cascade profile. |
+| `masked_mean_bp` | float | `6000.0` | — | yes | Mean exponential masked-stretch length in bp. Provenance: Mean exponential masked-stretch length in bp. |
+| `variant_against` | str | `"cohort"` | cohort, reference | yes | Variant separating set: carried sources, or carried sources plus reference. Provenance: Variant separating set: carried sources, or carried sources plus reference. |
+| `spurious_fraction` | float | `0.0` | — | yes | Fraction of written sites with reference alleles only; count includes these sites. Provenance: Fraction of written sites with reference alleles only; count includes these sites. |
+## simulation.source
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `kind` | str | `"file"` | file, coalescent | yes | Source genealogy or a fixed file panel. Provenance: Source genealogy or a fixed file panel. |
+| `file` | path | `""` | — | yes | Directory containing one source NPZ per contig. Provenance: Directory containing one source NPZ per contig. |
+| `unknown` | str | `"refuse"` | refuse, draw | yes | Policy for file alleles coded -1. Provenance: Policy for file alleles coded -1. |
+| `reference_population` | str | `""` | — | yes | Population of the reference leaf; empty selects the first population. Provenance: Population of the reference leaf; empty selects the first population. |
+## simulation.source.populations.NAME
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `size` | float | `0.0` | — | yes | Positive diploid effective population size in individuals. Provenance: Positive diploid effective population size in individuals. |
+| `parent` | str | `""` | — | yes | Parent population; empty identifies the single root. Provenance: Parent population; empty identifies the single root. |
+| `split_generations` | optional_float | `""` | — | yes | Finite nonnegative split time in generations; non-root only. Provenance: Finite nonnegative split time in generations; non-root only. |
+## simulation.stocks.NAME
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `population` | str | `""` | — | yes | Source population of this stock's generation zero. Provenance: Source population of this stock's generation zero. |
+| `founders` | int | `0` | — | yes | Generation-zero diploid individuals; at least two. Provenance: Generation-zero diploid individuals; at least two. |
+| `size` | int | `0` | — | yes | Diploid individuals in each later generation; at least two. Provenance: Diploid individuals in each later generation; at least two. |
+| `generations` | int | `0` | — | yes | Nonnegative number of random-mating stock generations. Provenance: Nonnegative number of random-mating stock generations. |
+## simulation.artefacts
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `preset` | str | `""` | reference_blocks | yes | Named call-set preset; explicit keys override it. Provenance: Named call-set preset; explicit keys override it. |
+| `enabled` | bool | `false` | — | yes | Apply call-set artefacts after read sampling. Provenance: Apply call-set artefacts after read sampling. |
+| `hard_sites` | float | `0.01` | — | yes | Probability of a hard site. Provenance: Probability of a hard site. |
+| `hard_miss` | float | `0.9` | — | yes | Miss probability contributed by a hard site. Provenance: Miss probability contributed by a hard site. |
+| `stretch_cover` | float | `0.03` | — | yes | Long-axis low-sensitivity covered share. Provenance: Long-axis low-sensitivity covered share. |
+| `stretch_sites` | float | `6.0` | — | yes | Mean geometric stretch length in sites. Provenance: Mean geometric stretch length in sites. |
+| `stretch_miss` | float | `0.8` | — | yes | Miss probability inside a low-sensitivity stretch. Provenance: Miss probability inside a low-sensitivity stretch. |
+| `miss` | float | `0.012` | — | yes | Baseline non-reference miss probability. Provenance: Baseline non-reference miss probability. |
+| `miss_sample_cv` | float | `0.5` | — | yes | Sample miss-factor coefficient of variation. Provenance: Sample miss-factor coefficient of variation. |
+| `call_min_alt_fraction` | float | `0.15` | — | yes | Minimum ALT fraction calling a hom-reference cell. Provenance: Minimum ALT fraction calling a hom-reference cell. |
+| `block_band` | float | `0.5` | — | yes | Relative logarithmic depth-band width. Provenance: Relative logarithmic depth-band width. |
+| `balance_dispersion` | float | `0.05` | — | yes | Beta-binomial heterozygote intraclass correlation. Provenance: Beta-binomial heterozygote intraclass correlation. |
+| `systematic_sites` | float | `0.03` | — | yes | Probability of a systematic ALT-error site. Provenance: Probability of a systematic ALT-error site. |
+| `systematic_lo` | float | `0.1` | — | yes | Lower systematic ALT-error probability. Provenance: Lower systematic ALT-error probability. |
+| `systematic_hi` | float | `0.4` | — | yes | Upper systematic ALT-error probability. Provenance: Upper systematic ALT-error probability. |
+| `regions` | regions | `[]` | — | yes | Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps. Provenance: Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps. |
+## simulation
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
 | `cohorts` | ints | `[20, 100, 200]` | — | yes | Individuals in successive cohorts. Provenance: Individuals in successive cohorts. |
-| `depth` | float | `5.0` | — | yes | Mean read depth. Provenance: Mean read depth. |
+| `depth` | float | `5.0` | — | yes | Unimpaired site depth; mean is depth * (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2). Provenance: Unimpaired site depth; mean is depth * (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2). |
 | `generating_rate_cm_per_mb` | float | `5.0` | — | yes | Generating fallback recombination rate. Provenance: Generating fallback recombination rate. |
 | `generating_map` | path | `""` | — | yes | Generating genetic map (independent of inference). Provenance: Generating genetic map (independent of inference). |
 | `backcross_fraction` | float | `0.0` | — | yes | Fraction of later matings with an actual parent. Provenance: Fraction of later matings with an actual parent. |
 | `backcross_start_cohort` | int | `3` | — | yes | First cohort with backcrosses. Provenance: First cohort with backcrosses. |
 | `observe_cohorts` | ints | `[]` | — | yes | Only sequence these cohorts (empty: all). Provenance: Only sequence these cohorts (empty: all). |
 | `observed_fraction` | float | `1.0` | — | yes | Random fraction of eligible individuals sequenced. Provenance: Random fraction of eligible individuals sequenced. |
-| `pedigree` | path | `""` | — | yes | Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. Provenance: Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed); replaces cohorts and the random matings. |
+| `pedigree` | path | `""` | — | yes | Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed, stock); replaces cohorts and the random matings. Provenance: Explicit pedigree table (TSV: sample, parent1, parent2, sex, generation, observed, stock); replaces cohorts and the random matings. |
 ## simulation.reads
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `preset` | str | `""` | realistic | yes | Generating read preset; explicit read keys override its values. Provenance: Generating read preset; explicit read keys override its values. |
+| `preset` | str | `""` | realistic, short_read_cohort | yes | Generating read preset; explicit read keys override its values. Provenance: Generating read preset; explicit read keys override its values. |
 | `error_rate` | float | `0.02` | — | yes | Generating sequencing error rate. Provenance: Generating sequencing error rate. |
 | `depth_cv` | float | `0.0` | — | yes | Between-sample depth coefficient of variation. Provenance: Between-sample depth coefficient of variation. |
 | `heterozygote_alt_probability` | float | `0.5` | — | yes | Alternate-read probability in heterozygotes. Provenance: Alternate-read probability in heterozygotes. |
@@ -108,6 +174,11 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `site_depth_cv` | float | `0.0` | — | yes | Shared site-depth lognormal CV (population mean one); 0 = off. Provenance: Shared site-depth lognormal CV (population mean one); 0 = off. |
 | `site_depth_window_bp` | int | `0` | — | yes | Share site factors within physical windows of this width; 0 = independent sites. Provenance: Share site factors within physical windows of this width; 0 = independent sites. |
 | `count_dispersion` | float | `0.0` | — | yes | Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. Provenance: Gamma-Poisson cell dispersion alpha: variance = mean + alpha * mean squared; 0 = Poisson. |
+| `site_loss_fraction` | float | `0.0` | — | yes | Impaired share of site-depth windows; uniform retained share, not renormalised. Depth is unimpaired depth. Provenance: Impaired share of site-depth windows; uniform retained share, not renormalised. Depth is unimpaired depth. |
+| `region_depth_cv` | float | `0.0` | — | yes | Mean-one lognormal depth CV per sample and physical window; 0 = off. Provenance: Mean-one lognormal depth CV per sample and physical window; 0 = off. |
+| `region_depth_window_bp` | int | `0` | — | yes | Regional depth window width in bp; positive when regional CV is nonzero. Provenance: Regional depth window width in bp; positive when regional CV is nonzero. |
+| `site_loss_fine_fraction` | float | `0.0` | — | yes | Impaired share of independent fine windows; uniform retained share, multiplied without renormalisation; 0 = off. Provenance: Impaired share of independent fine windows; uniform retained share, multiplied without renormalisation; 0 = off. |
+| `site_loss_fine_window_bp` | int | `0` | — | yes | Fine-loss window width in bp; positive when fine loss is nonzero. Provenance: Fine-loss window width in bp; positive when fine loss is nonzero. |
 
 ## Presets
 

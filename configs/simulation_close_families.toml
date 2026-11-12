@@ -1,0 +1,44 @@
+version = 4
+
+[input]
+kind = "simulation"
+contigs = ["c1", "c2"]
+
+[execution]
+cores = 4
+
+[simulation]
+seed = 400
+depth = 5.0
+pedigree = "configs/close_families.tsv"
+
+[simulation.genome]
+contigs = ["c1", "c2"]
+length_bp = 1000000
+
+[simulation.sites]
+count = 10000
+profile = "cascade"
+
+[simulation.source]
+kind = "coalescent"
+reference_population = "ancestral"
+
+[simulation.source.populations.ancestral]
+size = 500.0
+
+# Optional call-set artefacts, applied after reads:
+# [simulation.artefacts]
+# preset = "reference_blocks"
+
+[simulation.stocks.left]
+population = "ancestral"
+founders = 6
+size = 30
+generations = 12
+
+[simulation.stocks.right]
+population = "ancestral"
+founders = 6
+size = 30
+generations = 12

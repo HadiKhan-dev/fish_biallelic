@@ -44,27 +44,6 @@ Source: [haplotype_reconstruction/evaluation/parameters.py](../../haplotype_reco
 | `COVERAGE_MAX_GAP` | `3` | See model | Windows; maximum gap bridged by continuity evaluation. |
 | `TASK_ALLOWANCE_BYTES` | `256 << 20` | See model | Bytes of fixed allowance in the evaluation task working-set estimate. |
 | `PHASE_METRIC` | `'released_phase_v3'` | See model | Published identifier of the released-phase metric definition. |
-## interface.templates.parameters
-
-Source: [haplotype_reconstruction/interface/templates/parameters.py](../../haplotype_reconstruction/interface/templates/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `NODE_PENALTY` | `10.0` | See model | Path-score units; penalise a used row and similar rows to spread template paths. |
-| `EDGE_PENALTY` | `10.0` | See model | Path-score units; penalise each used internal junction. |
-| `GAP_SCORE` | `1.0` | See model | Junction score assigned to window pairs with no physical overlap. |
-| `EDGE_DIVISOR` | `3.0` | See model | Dimensionless divisor of junction rewards relative to path penalties. |
-| `PATH_TOLERANCE` | `1e-09` | See model | Absolute path-score tolerance for reconstructing a best path. |
-| `CANCELLATION_TOLERANCE` | `1e-09` | See model | Dimensionless denominator tolerance for cancellation of opposing information. |
-| `BISECTION_STEPS` | `60` | See model | Iterations for inverting signed information to an allele probability. |
-| `SIMILARITY_CUTOFF` | `50.0` | See model | Percent mismatches; junction similarity is zero above this cutoff. |
-| `WINDOW_BP` | `100000` | See model | bp; physical span of each template-discovery window. |
-| `WINDOW_SHIFT_BP` | `50000` | See model | bp; stride between overlapping template-discovery windows. |
-| `TEMPLATE_HAPLOTYPES` | `6` | See model | Maximum paths extracted for each contig template panel. |
-| `UNDECLARED_LENGTH_BP` | `300000000` | See model | bp; assumed contig length when the input header omits it. |
-| `WINDOW_EVIDENCE_FACTOR` | `8` | See model | Dimensionless multiplier of the reported dense evidence and site-axis bytes. |
-| `WINDOW_ALLOWANCE_BYTES` | `1280 << 20` | See model | Bytes of fixed allowance in the reported window working set. |
-| `CONTIG_CELL_BYTES` | `32` | See model | Bytes per sample-site in the declared contig working-set estimate. |
 ## science.assembly.alleles.parameters
 
 Source: [haplotype_reconstruction/science/assembly/alleles/parameters.py](../../haplotype_reconstruction/science/assembly/alleles/parameters.py).
@@ -842,7 +821,8 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `minimum_family` | `3` | See model | PD23; require at least 3 supported family members including the child before testing an edge. |
-| `member_support` | `0.75` | See model | PD23; fraction 0.75 of chromosomes must support a family member in its best relatedness placement. |
+| `member_support` | `0.75` | See model | PD23; fraction 0.75 of relatedness support units must support a witness in its best relatedness placement. |
+| `focal_support` | `0.5` | share | PD23; strict best-placement share of relatedness support units (dimensionless); require a majority for the focal child while retaining the stricter member_support bar for witnesses. |
 ## science.pedigree.parameters — PedigreeParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -1217,6 +1197,49 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `FRAGMENT_SD_LIMIT` | `6` | See model | Standard deviations above the mean; upper fragment-length clipping bound. |
 | `READS_BYTES_PER_CELL` | `48` | See model | Bytes per sample-site cell in the reported read working-set estimate. |
 | `READS_WORKER_BYTES` | `1 << 30` | See model | Bytes of fixed worker allowance in the reported read working-set estimate. |
+| `READ_BLOCKS_PER_CORE` | `2` | See model | Sample blocks per allocated CPU; execution grain, with independent sample streams. |
+| `SOURCE_BYTES_PER_SITE` | `3` | See model | Bytes per source-site cell: derived, indexed and REF-coded mutation panels. |
 | `EXAMPLE_HAPLOTYPES` | `6` | See model | Founder haplotype count for the synthetic onboarding example. |
 | `EXAMPLE_COHORTS` | `(20, 30, 30)` | See model | Individuals in each successive cohort of the synthetic example. |
 | `EXAMPLE_DEPTH` | `5.0` | See model | Expected reads per site and sample in the synthetic example. |
+| `GENEALOGY_WORK_LIMIT` | `50000000.0` | See model | Genealogy traversal safety limits; these refuse work without changing the SMC' law. generation-Morgans; frozen first-tree length times contig-length proxy. |
+| `GENEALOGY_RECORD_BLOCK` | `65536` | See model | intervals per allocation step; avoids an up-front ceiling-sized record. |
+| `GENEALOGY_INTERVAL_LIMIT` | `60000000` | See model | intervals; two float64 records use at most 960 MB of payload. |
+| `SITE_CHUNK_BP` | `262144` | See model | integer bp per weight/clock chunk; bounds scratch memory, never a model scale. |
+| `PROFILE_SCALES_BP` | `(10, 100, 1000, 10000, 100000)` | See model | bp; frozen cascade cell lengths. |
+| `PROFILE_SIGMAS` | `(0.9, 0.6, 0.7, 0.6, 0.45)` | See model | log-intensity SD per scale; prototype defaults. |
+| `PROFILE_MASKED_FRACTION` | `0.1` | See model | stationary covered share; prototype default, exact Boolean mask law. |
+| `PROFILE_MASKED_MEAN_BP` | `6000.0` | See model | bp; mean exponential stretch length, prototype default. |
+| `SITE_BISECTION_STEPS` | `80` | See model | iterations; resolves the clock threshold to float64 precision. |
+| `ARTEFACT_PRESET` | `'reference_blocks'` | See model | Call-set artefact defaults; enabling the named preset uses these values. Name of the generating call-set preset. |
+| `ARTEFACT_ENABLED` | `False` | See model | Whether the count transformation is applied. |
+| `ARTEFACT_HARD_SITES` | `0.01` | See model | Probability that a site has the hard-site miss term. |
+| `ARTEFACT_HARD_MISS` | `0.9` | See model | Non-reference miss probability from a hard site. |
+| `ARTEFACT_STRETCH_COVER` | `0.03` | See model | Long-axis covered share of low-sensitivity stretches. |
+| `ARTEFACT_STRETCH_SITES` | `6.0` | See model | Sites; geometric mean length of a low-sensitivity stretch. |
+| `ARTEFACT_STRETCH_MISS` | `0.8` | See model | Non-reference miss probability inside a stretch. |
+| `ARTEFACT_MISS` | `0.012` | See model | Baseline non-reference miss probability before sample/region factors. |
+| `ARTEFACT_MISS_SAMPLE_CV` | `0.5` | See model | Dimensionless CV of a mean-one lognormal baseline factor. |
+| `ARTEFACT_CALL_MIN_ALT_FRACTION` | `0.15` | See model | Minimum ALT/read fraction calling a hom-reference cell. |
+| `ARTEFACT_BLOCK_BAND` | `0.5` | See model | Relative width of logarithmic depth bands, dimensionless; reproduces the measured share of cells in identical-depth runs. |
+| `ARTEFACT_BALANCE_DISPERSION` | `0.05` | See model | Beta-binomial intraclass correlation of heterozygous reads. |
+| `ARTEFACT_SYSTEMATIC_SITES` | `0.03` | See model | Probability of a shared systematic ALT-error site; reproduces the measured false-ALT read share. |
+| `ARTEFACT_SYSTEMATIC_LO` | `0.1` | See model | Lower endpoint of the uniform systematic ALT/read probability. |
+| `ARTEFACT_SYSTEMATIC_HI` | `0.4` | See model | Upper endpoint of the uniform systematic ALT/read probability. |
+| `ARTEFACT_SITE_STREAM` | `'simulation.artefact.sites'` | See model | Stream keyed by realised seed and contig ID. |
+| `ARTEFACT_SAMPLE_STREAM` | `'simulation.artefact.sample'` | See model | Stream keyed by seed, sample ID and contig ID. |
+| `ARTEFACT_RENEWAL_BATCH` | `1024` | See model | Renewal intervals per vectorised allocation; no process truncation. |
+| `SITE_LOSS_FRACTION` | `0.0` | See model | Optional cohort read/site extensions; all default to the released off state. Impaired share of site-depth windows, dimensionless, in [0, 1). |
+| `REGION_DEPTH_CV` | `0.0` | See model | Per-sample, per-window mean-one lognormal depth CV, dimensionless. |
+| `REGION_DEPTH_WINDOW_BP` | `0` | See model | bp; a positive physical width is required when regional CV is nonzero. |
+| `VARIANT_AGAINST` | `'cohort'` | See model | Separating set: carried sources, or carried sources plus reference. |
+| `SPURIOUS_FRACTION` | `0.0` | See model | Share of written sites without a genealogical ALT allele, in [0, 1). |
+| `SITE_LOSS_FINE_FRACTION` | `0.0` | See model | Impaired share of independent fine windows, dimensionless, in [0, 1). |
+| `SITE_LOSS_FINE_WINDOW_BP` | `0` | See model | bp; positive when the fine impairment fraction is positive. |
+## stages.phase.parameters
+
+Source: [haplotype_reconstruction/stages/phase/parameters.py](../../haplotype_reconstruction/stages/phase/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `PHASE_RELEASE_BATCH` | `16` | See model | Units: samples per consecutive canonical-order storage batch, for both solves together. Sixteen amortises durable publications while limiting repeated work within each incomplete storage batch. All pending samples share the full task CPU authority. The bound changes write granularity and partial identities; each sample's computation and available task CPUs are independent of it. |

@@ -10,12 +10,7 @@ haplotypes status example/run
 haplotypes evaluate example/run --cores 4
 ```
 
-`example` writes templates and a complete configuration. By default it creates
-three contigs with 1,200 sites each and six independent synthetic founder
-haplotypes, paired into three diploid founders. The templates use Bernoulli marker
-alleles at evenly spaced positions. They are a **software wiring example**, not a
-reference genome, realistic diversity model or calibrated accuracy benchmark.
-The generated configuration records the seed and paths.
+`example` writes a complete coalescent configuration with an exact site count, three diploid founders and three contigs by default. Its source effective size is an explicit generating assumption.
 
 `run` initialises a new run automatically: it resolves and binds the configuration,
 contig/sample order and simulation seed, then materialises the observations and

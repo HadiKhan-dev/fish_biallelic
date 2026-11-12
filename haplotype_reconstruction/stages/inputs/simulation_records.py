@@ -1,9 +1,9 @@
 """Decode simulation records for results without importing stage orchestration.
 
-Run-level manifest schema 1 binds the realised seed and ordered truth tables.
+Run-level manifest schema 2 binds the realised seed and ordered truth tables.
 Contig reads and truth require independently supplied expected payload identity;
 store.protocol.resume validates the immutable envelope before these decoders check
-or reconstruct the schema-1 values. Publication, seed binding and resume scheduling
+or reconstruct the schema-2 values. Publication, seed binding and resume scheduling
 remain in stages.inputs.simulation (P3 ruling 8).
 """
 
@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...contracts.roles import require_schema
 from ...core.errors import InputError
-from ...simulation.truth import MANIFEST, READS, SCHEMA, TRUTH, ContigTruth, SimulationManifest, truth_from_record
+from ...simulation.truth import (
+    MANIFEST,
+    READS,
+    TRUTH,
+    ContigTruth,
+    SimulationManifest,
+    require_simulation_schema,
+    truth_from_record,
+)
 from ...store.container import CheckpointFile
 from ...store.protocol import read_items, resume
 from ...store.store import CheckpointStore
@@ -26,7 +33,7 @@ def load_manifest(store: CheckpointStore) -> SimulationManifest | None:
     payload = store.control(MANIFEST)
     if payload is None:
         return None
-    require_schema(payload, SCHEMA)
+    require_simulation_schema(payload)
     return SimulationManifest.from_record(payload)
 
 
@@ -35,7 +42,7 @@ def load_reads(file: CheckpointFile, identity: str) -> dict[str, Any]:
     record = resume(file, READS, identity)
     if record is None:
         raise InputError(f"{file.label}: no simulated reads")
-    require_schema(record.payload, SCHEMA)
+    require_simulation_schema(record.payload)
     return record.payload
 
 
@@ -45,7 +52,7 @@ def check_reads(file: CheckpointFile, identity: str) -> None:
     record = read_items(file, READS, identity, ("schema",))
     if record is None:
         raise InputError(f"{file.label}: no simulated reads")
-    require_schema(record.payload, SCHEMA)
+    require_simulation_schema(record.payload)
 
 
 def load_truth(file: CheckpointFile, identity: str) -> ContigTruth:

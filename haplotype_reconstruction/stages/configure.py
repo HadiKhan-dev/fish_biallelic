@@ -51,6 +51,8 @@ class SettingsView(Protocol):
     """Structural boundary to interface settings, without an upward interface import."""
 
     @property
+    def run(self) -> Any: ...
+    @property
     def input(self) -> Any: ...
     @property
     def quality(self) -> Any: ...
@@ -177,7 +179,18 @@ def configure(settings: SettingsView) -> StageConfigs:
 
 def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> SimulationConfig:
     """Carry every simulation setting without drawing a seed until init resolves it."""
-    from ..simulation.design import ReadModel, SimulationConfig, SimulationDesign
+    from ..simulation.design import (
+        ArtefactModel,
+        ArtefactRegion,
+        PopulationSpec,
+        ProfileSpec,
+        ReadModel,
+        SimulationConfig,
+        SimulationDesign,
+        SiteSpec,
+        SourceSpec,
+        StockSpec,
+    )
 
     section = settings.simulation
     reads = section.reads
@@ -187,7 +200,58 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
             raise SettingsError("configured simulation seed differs from the bound seed")
         seed = realised_seed
     return SimulationConfig(
-        templates=section.templates,
+        source=SourceSpec(
+            kind=section.source.kind,
+            file=section.source.file,
+            unknown=section.source.unknown,
+            reference_population=section.source.reference_population,
+            populations=tuple(
+                PopulationSpec(name, p.size, p.parent, p.split_generations) for name, p in section.source.populations
+            ),
+        ),
+        stocks=tuple(StockSpec(name, s.population, s.founders, s.size, s.generations) for name, s in section.stocks),
+        founders=section.founders,
+        genome_contigs=section.genome.contigs,
+        length_bp=section.genome.length_bp,
+        sites=(
+            SiteSpec(
+                section.sites.count,
+                section.sites.per_mb,
+                section.sites.positions,
+                ProfileSpec(
+                    section.sites.profile,
+                    section.sites.sigmas,
+                    section.sites.masked_fraction,
+                    section.sites.masked_mean_bp,
+                ),
+                variant_against=section.sites.variant_against,
+                spurious_fraction=section.sites.spurious_fraction,
+            )
+            if section.source.kind == "coalescent" or section.sites != type(section.sites)()
+            else None
+        ),
+        artefacts=ArtefactModel(
+            **{
+                f: getattr(section.artefacts, f)
+                for f in (
+                    "enabled",
+                    "hard_sites",
+                    "hard_miss",
+                    "stretch_cover",
+                    "stretch_sites",
+                    "stretch_miss",
+                    "miss",
+                    "miss_sample_cv",
+                    "call_min_alt_fraction",
+                    "block_band",
+                    "balance_dispersion",
+                    "systematic_sites",
+                    "systematic_lo",
+                    "systematic_hi",
+                )
+            },
+            regions=tuple(ArtefactRegion(*r) for r in section.artefacts.regions),
+        ),
         contigs=tuple(settings.input.contigs),
         seed=seed,
         cohorts=tuple(section.cohorts),
@@ -212,6 +276,11 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
             site_depth_cv=reads.site_depth_cv,
             site_depth_window_bp=reads.site_depth_window_bp,
             count_dispersion=reads.count_dispersion,
+            site_loss_fraction=reads.site_loss_fraction,
+            site_loss_fine_fraction=reads.site_loss_fine_fraction,
+            site_loss_fine_window_bp=reads.site_loss_fine_window_bp,
+            region_depth_cv=reads.region_depth_cv,
+            region_depth_window_bp=reads.region_depth_window_bp,
         ),
     )
 
@@ -295,8 +364,15 @@ def resolve(
     related = getattr(settings, "relatedness", None)
     outputs = OutputSelection(bool(settings.export.enabled), bool(getattr(related, "pairwise_ibd", False)))
     return ResolvedConfiguration(
-        parameters, order, samples, tuple(seeds.items()), map_ids, sim, canonical_json(jsonable(document)), outputs,
-        AnalysisContigs(order, tuple(settings.run.exclude_contigs)) if analysis is None else analysis
+        parameters,
+        order,
+        samples,
+        tuple(seeds.items()),
+        map_ids,
+        sim,
+        canonical_json(jsonable(document)),
+        outputs,
+        AnalysisContigs(order, tuple(settings.run.exclude_contigs)) if analysis is None else analysis,
     )
 
 

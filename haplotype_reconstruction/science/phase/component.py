@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 import numpy as np
 
@@ -50,6 +50,19 @@ from .release import ReleaseInputs, release_sample, shared_windows
 __all__ = ["PhaseWorkspace", "phase_component", "component_emissions"]
 
 
+_MemoValue = TypeVar("_MemoValue")
+
+
+class PhaseMemo(Protocol):
+    """Exact unit reuse, with noncomputing lookup and independent publication."""
+
+    def __call__(self, unit: tuple, compute: Callable[[], _MemoValue]) -> _MemoValue: ...
+
+    def lookup(self, unit: tuple) -> Any | None: ...
+
+    def save(self, unit: tuple, value: Any) -> None: ...
+
+
 @dataclass(frozen=True)
 class PhaseWorkspace:
     """Explicit release storage capability: whole arrays or complete-bin projections.
@@ -57,6 +70,11 @@ class PhaseWorkspace:
     Site evidence is a supplied ndarray (possibly memory mapped); the stage owns
     its lifetime. Carrier evidence always uses its fixed EVIDENCE_CHUNK boundaries. The optional
     map capability returns results in input order; it cannot choose arithmetic order.
+    The optional memo returns an exact unit value or calls compute once. Units are
+    (component, "solve"), (component, "release", batch), and (component, "component").
+    A supplied memo requires the stage's fixed positive release_batch in samples;
+    batches are storage units only. All pending releases share the same map and
+    CPU authority; completed batches are published in completion order.
     """
 
     windowed: bool = record_field("diagnostic", units="1", dtype="bool", stored=False, default=False)
@@ -76,6 +94,10 @@ class PhaseWorkspace:
     # per-sample admission. Otherwise releases share reusable map workers.
     concurrent_releases: Callable[..., list[Any]] | None = record_field(
         "diagnostic", units="1", dtype="Callable[..., list[Any]] | None", stored=False, default=None
+    )
+    memo: PhaseMemo | None = record_field("diagnostic", units="1", dtype="PhaseMemo | None", stored=False, default=None)
+    release_batch: int | None = record_field(
+        "diagnostic", units="samples", dtype="int | None", stored=False, default=None
     )
 
 
@@ -244,15 +266,71 @@ def _sample_releases(solves, inputs, sites, breaks, uncertainties, parameters, w
         _release_arguments(solved, inputs, sites, breaks, uncertainty, parameters, workspace)
         for solved, uncertainty in zip(solves, uncertainties, strict=True)
     ]
-    work = [arguments for job in jobs for arguments in job]
+    if workspace.memo is None:
+        return _release_work(jobs, workspace)
+    batch = workspace.release_batch
+    if type(batch) is not int or batch <= 0:
+        from ...core.errors import InvariantError
+
+        raise InvariantError("phase memo requires a positive release batch size")
+    from threading import Lock
+
+    samples = len(jobs[0])
+    releases: list[list[Any]] = [[None] * samples for _ in jobs]
+    remaining = {}
+    for number, first in enumerate(range(0, samples, batch)):
+        end = min(first + batch, samples)
+        saved = workspace.memo.lookup((inputs.component, "release", number))
+        if saved is None:
+            remaining[number] = len(jobs) * (end - first)
+        else:
+            for output, values in zip(releases, saved, strict=True):
+                output[first:end] = values
+    guard = Lock()
+
+    def completed(solve, sample, value):
+        number = sample // batch
+        ready = None
+        with guard:
+            releases[solve][sample] = value
+            remaining[number] -= 1
+            if remaining[number] == 0:
+                first = number * batch
+                ready = tuple(tuple(values[first : first + batch]) for values in releases)
+        if ready is not None:
+            workspace.memo.save((inputs.component, "release", number), ready)
+
+    work = [
+        (solve, sample, arguments, completed)
+        for solve, job in enumerate(jobs)
+        for sample, arguments in enumerate(job)
+        if sample // batch in remaining
+    ]
+    if work:
+        _map_releases(_release_pending, work, workspace)
+    return tuple(tuple(values) for values in releases)
+
+
+def _release_pending(job, map_work=None):
+    """Compute one pending sample on its existing share; publish its batch when complete."""
+    solve, sample, arguments, completed = job
+    value = _release_one(arguments, map_work=map_work)
+    completed(solve, sample, value)
+
+
+def _map_releases(function, work, workspace):
+    """One shared map for all pending releases, preserving elastic interval authority."""
     if workspace.concurrent_releases is not None:
-        # A remaining sample can use freed CPUs for its independent hard-cut
-        # intervals, rather than keeping the release tail on one thread.
-        released = workspace.concurrent_releases([partial(_release_one, arguments) for arguments in work])
-    elif workspace.map_work is not None:
-        released = workspace.map_work(_release_one, work)
-    else:
-        released = [_release_one(arguments) for arguments in work]
+        return workspace.concurrent_releases([partial(function, arguments) for arguments in work])
+    if workspace.map_work is not None:
+        return workspace.map_work(function, work)
+    return [function(arguments) for arguments in work]
+
+
+def _release_work(jobs, workspace):
+    """Map independent releases in solve order, retaining each sample's arithmetic order."""
+    work = [arguments for job in jobs for arguments in job]
+    released = _map_releases(_release_one, work, workspace)
     ends = np.cumsum([len(job) for job in jobs])
     return tuple(released[end - len(job) : end] for job, end in zip(jobs, ends.tolist(), strict=True))
 
@@ -299,11 +377,25 @@ def phase_component(
     evidence/parameters propagate to the task boundary. No randomness is used.
     """
     workspace = PhaseWorkspace() if workspace is None else workspace
-    emissions = component_emissions(inputs, windowed=workspace.windowed)
-    rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
-    models, parents = _solve_models(
-        inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent
-    )
+    if workspace.memo is None:
+        return _phase_component(inputs, parameters, workspace)
+    return workspace.memo((inputs.component, "component"), lambda: _phase_component(inputs, parameters, workspace))
+
+
+def _phase_component(inputs, parameters, workspace):
+    if workspace.memo is None:
+        emissions = component_emissions(inputs, windowed=workspace.windowed)
+        rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
+        models, parents = _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)
+    else:
+        rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
+
+        def solve():
+            emissions = component_emissions(inputs, windowed=workspace.windowed)
+            return _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)
+
+        models, parents = workspace.memo((inputs.component, "solve"), solve)
+        emissions = models[0].E
     model, mirror = models
     bin_edges = component_bin_edges(inputs.painting, inputs.refit.positions)
     junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges)

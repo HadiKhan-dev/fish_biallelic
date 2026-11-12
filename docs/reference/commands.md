@@ -14,7 +14,7 @@ Initialize if needed, then run or resume the graph.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -40,7 +40,7 @@ Validate inputs and initialize the run manifest.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -66,7 +66,7 @@ Record one contig's evidence.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -93,7 +93,7 @@ Gather relatedness from every contig's evidence.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -119,7 +119,7 @@ Reconstruct and refit one contig; concurrent invocations share unclaimed units.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -146,7 +146,7 @@ Gather the genome-wide pedigree.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -172,7 +172,7 @@ Phase, map and export one contig.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -199,7 +199,7 @@ Publish tables from available records.
 | `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
 | `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
 | `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
-| `--templates` | 1 | `—` | — | Simulate from these founder templates ([simulation] templates; sets [input] kind = "simulation"). |
+| `--templates` | 1 | `—` | — | Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input. |
 | `--output` | 1 | `—` | — | Run directory ([run] output). |
 | `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
 | `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
@@ -250,6 +250,24 @@ Evaluate a simulation run against its truth.
 | `--stages` | + | `['available']` | — | available (latest products), all, or stage names. |
 | `--contigs` | + | `—` | — |  |
 | `--cores` | 1 | `—` | — |  |
+| `--truth` | 1 | `—` | — | Bound observation-package truth directory. |
+| `--output` | 1 | `—` | — | Evaluation destination with --truth. |
+| `--release-tree` | 1 | `—` | — | Source root of the run's release, with --truth. |
+| `--release-python` | 1 | `—` | — | Interpreter for the release reader, with --truth. |
+| `--timeout` | 1 | `600.0` | — | Release-reader timeout in seconds. |
+
+## observations
+
+Publish simulated BCF observations and bound truth.
+
+| Argument | Arity | Default | Choices | Help |
+|---|---|---|---|---|
+| `-h, --help` | 0 | `—` | — | show this help message and exit |
+| `CONFIG` | 1 | `—` | — |  |
+| `--output` | 1 | `—` | — |  |
+| `--preset` | 1 | `—` | tromau, generic |  |
+| `--cores` | 1 | `—` | — |  |
+| `--set` | 1 | `[]` | — |  |
 
 ## export
 
@@ -268,7 +286,7 @@ Write a finished run's founder VCF and phased sample VCF (the files of the run's
 
 ## example
 
-Create synthetic templates and a runnable configuration.
+Create a coalescent count-mode simulation configuration.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|
@@ -278,15 +296,3 @@ Create synthetic templates and a runnable configuration.
 | `--contigs` | 1 | `3` | — | Number of synthetic contigs. |
 | `--sites` | 1 | `1200` | — |  |
 | `--length-bp` | 1 | `12000000` | — |  |
-
-## templates
-
-Build simulation templates from a VCF (naive builder).
-
-| Argument | Arity | Default | Choices | Help |
-|---|---|---|---|---|
-| `-h, --help` | 0 | `—` | — | show this help message and exit |
-| `--vcf` | 1 | `—` | — |  |
-| `--output` | 1 | `—` | — |  |
-| `--contigs` | + | `—` | — |  |
-| `--cores` | 1 | `—` | — |  |

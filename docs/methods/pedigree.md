@@ -559,11 +559,14 @@ Cost and scope: O(targets × N); O(D L). These terms describe the unit’s work/
 <a id="pd23"></a>
 ## pd23 Sibling-as-parent guard (fixed point and application)
 
-For each pre-guard Tier-B edge, identify supported family members, remove linked and half-sib members, then apply the strict-majority exclusion vote when enough tested members remain. Recompute every original edge against the retained set until no more withdrawals; withdrawals are irreversible. Run count release with that withheld set, re-slot, then verify the same edge and withheld sets. Filter withdrawn edges without renumbering remaining slots. Guarded views clear calls while retaining candidate lists; complete and diagnostic views stay pre-guard.
+For each pre-guard Tier-B edge p → c, use c's relatedness family only when its best-placement share of support
+units is strictly greater than `focal_support`; equality and NaN leave the edge untested. Select witnesses from that
+family with support at least `member_support`, excluding p. The child counts towards `minimum_family` regardless
+of its own support. Remove linked and half-sib members, then apply the strict-majority exclusion vote when enough tested members remain. Recompute every original edge against the retained set until no more withdrawals; withdrawals are irreversible. Run count release with that withheld set, re-slot, then verify the same edge and withheld sets. Filter withdrawn edges without renumbering remaining slots. Guarded views clear calls while retaining candidate lists; complete and diagnostic views stay pre-guard.
 
 Implementation: [science/pedigree/guard.py](../../haplotype_reconstruction/science/pedigree/guard.py).
 
-Parameters by name: `minimum_family`, `member_support`, `alpha`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_family`, `focal_support`, `member_support`, `alpha`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(E_rel · f²); O(dyads × L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

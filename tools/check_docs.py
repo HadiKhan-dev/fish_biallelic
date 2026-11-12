@@ -65,13 +65,14 @@ ENVIRONMENT_OWNERS = ("engine",)
 ENVIRONMENT_ATTRIBUTES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"})
 
 # Writers and the modules whose published file names the output dictionary must cover.
-OUTPUT_WRITERS = ("outputs", "evaluation/evaluate.py", "interface/example.py", "interface/templates/builder.py")
+OUTPUT_WRITERS = ("outputs", "evaluation/evaluate.py", "interface/example.py")
 OUTPUT_DICTIONARY = ("docs/user/outputs.md", "docs/reference/output-columns.md")
 # Variables holding a contig name or its percent-encoded file stem in writers' f-strings.
 CONTIG_NAMES = frozenset({"contig", "stem"})
 # Names built from another variable: (writer module, name pattern) -> where the concrete names come from. A pattern
 # whose source changes makes its entry stale, which is an error: the table is maintained with the writers.
 DYNAMIC_OUTPUTS = {
+    ("outputs/observations.py", "contig_*.npz"): ("names", ("contig_INDEX.npz",)),
     ("outputs/reports/tables.py", "*.csv"): (
         "names",
         (
@@ -97,7 +98,6 @@ DYNAMIC_OUTPUTS = {
         ),
     ),
     ("outputs/reports/pedigree.py", "*.csv"): ("keys", "outputs/reports/pedigree.py", "COLUMNS", "{}.csv"),
-    ("interface/example.py", "*.npz"): ("names", ("CONTIG.npz",)),
 }
 
 # Export file names are concatenated from a stem, a role and a format suffix (outputs/export/{run,vcf}.py).

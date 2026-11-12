@@ -17,8 +17,15 @@ Two samplers, chosen by ``ReadModel.read_length_bp``:
   disfavoured allele reports the other one with probability |2p - 1|); the error rate acts on
   homozygous cells only.
 
-Optional site factors are mean-one lognormal draws shared by all samples (one per site,
-or per occupied physical window). Optional independent gamma cell factors have mean one
+Optional site factors multiply shared mean-one lognormal draws by a uniform retained
+share in a Bernoulli-impaired fraction of sites/windows. Loss is not renormalised:
+depth means unimpaired depth, with expected sample mean
+depth * (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2).
+Independent fine-window loss multiplies the existing shared site factor, using the
+same uniform-retained-share law and draws after the coarse lognormal and C1 loss.
+Regional factors are independent mean-one lognormal draws per sample/physical window,
+from the sample's own regional stream; the reads are then sampled once at those intensities.
+With regional CV zero that stream is not created and no count changes. Optional independent gamma cell factors have mean one
 and variance count_dispersion. Conditional depth is Poisson in both samplers, hence gamma
 mixing gives negative-binomial marginals, Var(D | sample, site) = mu + alpha * mu**2.
 Fragments are drawn at the maximum target factor per sample and site-hits thinned to their
@@ -82,7 +89,10 @@ def read_inputs(
     if model.read_length_bp and (positions.shape != (sites,) or np.any(np.diff(positions) < 0)):
         raise SettingsError("fragment sampling needs sorted positions aligned with the haplotypes")
     factor = np.ascontiguousarray(_sample_factors(samples, model, rng), dtype=np.float64)
-    site_factor = _site_factors(positions, model, rng) if model.site_depth_cv else None
+    site_factor = (
+        _site_factors(positions, model, rng)
+        if model.site_depth_cv or model.site_loss_fraction or model.site_loss_fine_fraction else None
+    )
     if site_factor is not None:
         site_factor = np.ascontiguousarray(site_factor, dtype=np.float64)
     seed = int(rng.integers(0, 2**63))
@@ -101,16 +111,17 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
     elif out.shape != (stop - first, sites, 2):
         raise ValueError("read counts destination has the wrong shape")
     for row, i in enumerate(range(first, stop)):
-        out[row] = sample(
-            inputs.hap0[i],
-            inputs.hap1[i],
-            inputs.positions,
-            inputs.depth,
-            inputs.model,
-            float(inputs.factor[i]),
-            inputs.site_factor,
-            stream("simulation.sample_reads", seed=inputs.seed, index=i),
-        )
+        rng = stream("simulation.sample_reads", seed=inputs.seed, index=i)
+        args = (inputs.hap0[i], inputs.hap1[i], inputs.positions, inputs.depth, inputs.model, float(inputs.factor[i]))
+        target = inputs.site_factor
+        if inputs.model.region_depth_cv:
+            # The regional factors have their own stream per sample, so the reads are sampled once and a
+            # zero regional CV leaves the sample's read stream, and so every count, as it was.
+            regional = _region_factors(
+                inputs.positions, inputs.model, stream("simulation.sample_region", seed=inputs.seed, index=i)
+            )
+            target = regional if target is None else target * regional
+        out[row] = sample(*args, target, rng)
     return out
 
 
@@ -124,18 +135,51 @@ def _sample_factors(samples, model, rng):
 
 
 def _site_factors(positions, model, rng):
-    """Population mean one, without finite-contig renormalisation (which changes the law).
+    """Shared lognormal times independent coarse/fine losses, without renormalisation.
+
+    Population mean is (1 - coarse_fraction / 2) * (1 - fine_fraction / 2).
 
     Physical windows are anchored at bp zero; only occupied windows consume draws.
     Window zero uses independent sites. Spatial sharing is separate from fragment sharing.
     """
-    if not model.site_depth_cv:
-        return np.ones(len(positions))
-    sigma = np.sqrt(np.log1p(model.site_depth_cv**2))
+    sites = len(positions)
+    if not model.site_depth_cv and not model.site_loss_fraction and not model.site_loss_fine_fraction:
+        return np.ones(sites)
     if model.site_depth_window_bp:
         windows, inverse = np.unique(np.asarray(positions) // model.site_depth_window_bp, return_inverse=True)
-        return rng.lognormal(-sigma * sigma / 2, sigma, size=len(windows))[inverse]
-    return rng.lognormal(-sigma * sigma / 2, sigma, size=len(positions))
+        size = len(windows)
+    else:
+        inverse, size = None, sites
+    factor = np.ones(size)
+    if model.site_depth_cv:
+        sigma = np.sqrt(np.log1p(model.site_depth_cv**2))
+        factor = rng.lognormal(-sigma * sigma / 2, sigma, size=size)
+    if model.site_loss_fraction:
+        impaired = rng.random(size) < model.site_loss_fraction
+        retained = 1 - rng.random(size)
+        factor *= np.where(impaired, retained, 1.0)
+    factor = factor if inverse is None else factor[inverse]
+    if model.site_loss_fine_fraction:
+        windows, fine_inverse = np.unique(
+            np.asarray(positions) // model.site_loss_fine_window_bp, return_inverse=True
+        )
+        impaired = rng.random(len(windows)) < model.site_loss_fine_fraction
+        retained = 1 - rng.random(len(windows))
+        factor *= np.where(impaired, retained, 1.0)[fine_inverse]
+    return factor
+
+
+def _region_factors(positions, model, rng):
+    """Independent mean-one sample-window lognormal factors; zero CV consumes no draw.
+
+    Windows share the site-factor origin at bp zero. Only occupied windows are
+    drawn. No finite-contig or finite-sample normalisation changes the law.
+    """
+    if not model.region_depth_cv:
+        return np.ones(len(positions))
+    windows, inverse = np.unique(np.asarray(positions) // model.region_depth_window_bp, return_inverse=True)
+    sigma = np.sqrt(np.log1p(model.region_depth_cv**2))
+    return rng.lognormal(-sigma * sigma / 2, sigma, size=len(windows))[inverse]
 
 
 def _fragment_envelopes(positions, target, lo, span, f_max):
