@@ -814,15 +814,20 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `genotype_replacement_probability` | `0.01` | See model | PD22; probability 0.01 of uniform genotype replacement in the Mendelian compatibility ratio. |
 | `bet_sizes` | `(1 / 1024, 1 / 256, 1 / 64, 1 / 16, 1 / 4, 1.0)` | See model | PD22; dimensionless bet fractions from 1/1024 through 1 average exclusion evidence at several strengths. |
 | `window_widths_bp` | `(1000000, 5000000, 20000000)` | See model | PD22; physical window widths 1000000, 5000000 and 20000000 bp, half-overlapping plus the whole chromosome. |
-## science.pedigree.parameters — SiblingGuardParameters
+## science.pedigree.parameters — RelationshipParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `minimum_family` | `3` | See model | PD23; require at least 3 supported family members including the child before testing an edge. |
-| `member_support` | `0.75` | See model | PD23; fraction 0.75 of relatedness support units must support a witness in its best relatedness placement. |
-| `focal_support` | `0.5` | share | PD23; strict best-placement share of relatedness support units (dimensionless); require a majority for the focal child while retaining the stricter member_support bar for witnesses. |
+| `failure_region_rate` | `0.1` | 1/Morgan | PD28; one observed painting failure in fourteen Morgans motivates 0.1 regions per Morgan. |
+| `failure_region_length` | `0.05` | Morgan | PD28; observed painting failures span 4–8 cM, shorter than full-sib IBD0 segments. |
+| `isolated_error` | `0.001` | probability/bin | PD28; scale 1-q per bin; at most 0.03% wrong bins; no uninformative-bin penalty. |
+| `withholding_score` | `float(np.log(1000.0))` | nats | PD23; log(1000) survives higher-prior sensitivity; two top-band witnesses suffice. |
+| `sibship_prior` | `(0.46, 0.87, 0.98)` | probability | PD28; measured full-sib shares among 3556 same-family pairs in three support bands. |
+| `support_bounds` | `(0.5, 0.75)` | share | PD28; support bands of the measured same-family sibship calibration. |
+| `sibship_check_partners` | `16` | count | PD28; bounded ring check; 8 and 16 partners match all-partner validation scores. |
+| `reference_triples` | `400` | count | PD28; 400 reference triples give about 0.02 sampling error in bin infeasibility. |
 ## science.pedigree.parameters — PedigreeParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -840,7 +845,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `resampling` | `ResamplingParameters()` | See model | PD27; internal chromosome-bootstrap parameter group; units are declared by its fields. |
 | `release` | `ReleaseParameters()` | See model | PD27; internal evidence-tier parameter group; units are declared by its fields. |
 | `exclusion` | `ExclusionParameters()` | See model | PD27; internal full-marker exclusion parameter group; units are declared by its fields. |
-| `guard` | `SiblingGuardParameters()` | See model | PD27; internal sibling-as-parent guard parameter group; units are declared by its fields. |
+| `relationship` | `RelationshipParameters()` | See model | PD27; painting relationship evidence parameters, with units declared by each field. |
 ## science.pedigree.parameters — ScoringNumerics
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -879,13 +884,11 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
+| `relationship_sequence_chunk` | `32768` | count | PD28; bound binary sequence workspaces per contig task; execution grain only. |
 | `common_emission_cache_bytes` | `256 << 20` | See model | PS09; 268435456 bytes is the cutoff for retaining common child-emission caches. |
 | `bound_workspace_bytes` | `512 << 20` | See model | PS15; workspace target 536870912 bytes sizes pair-bound batches without limiting concurrency. |
 | `bound_batch_rows` | `4000000` | See model | PS15; at most 4000000 pair-bound workspace rows per batch. |
-| `exclusion_prefix_sites` | `64` | See model | PS21; unused workspace declaration of 64 sites; does not control the completed-window scanner. |
-| `exclusion_chunk_sites` | `4096` | See model | PS21; unused workspace declaration of 4096 sites; does not control the completed-window scanner. |
 | `exclusion_pattern_limit` | `1024` | See model | PS20; cache at most 1024 distinct genotype-likelihood patterns per sample before direct fallback. |
-| `family_parallel_minimum_work` | `200000` | See model | PD09; unused declaration of 200000 work terms; does not control family execution. |
 | `emission_sample_block` | `16` | See model | PS01; batches of 16 samples bound live recomputed-emission and genotype-likelihood storage. |
 | `family_lanes_per_thread` | `8` | See model | PD09; 8 interleaved independent-item lanes per supplied thread count distribute unequal family row counts. |
 | `family_claim_work` | `20000000` | See model | PD09; target 20000000 row-scan work terms per cavity iteration chunk. |
@@ -916,10 +919,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `JUNCTION_UNREACHABLE_COUNT` | `SCORING_NUMERICS.junction_unreachable_count` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BOUND_WORKSPACE_BYTES` | `PEDIGREE_WORKSPACE.bound_workspace_bytes` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BOUND_BATCH_ROWS` | `PEDIGREE_WORKSPACE.bound_batch_rows` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EXCLUSION_PREFIX_SITES` | `PEDIGREE_WORKSPACE.exclusion_prefix_sites` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EXCLUSION_CHUNK_SITES` | `PEDIGREE_WORKSPACE.exclusion_chunk_sites` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `EXCLUSION_PATTERN_LIMIT` | `PEDIGREE_WORKSPACE.exclusion_pattern_limit` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `FAMILY_PARALLEL_MINIMUM_WORK` | `PEDIGREE_WORKSPACE.family_parallel_minimum_work` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `NULL_ROUNDING_ULPS` | `SCORING_NUMERICS.null_rounding_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BRIDGE_FEASIBILITY_ULPS` | `SCORING_NUMERICS.bridge_feasibility_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BRIDGE_POST_TOLERANCE_FACTOR` | `SCORING_NUMERICS.bridge_post_tolerance_factor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |

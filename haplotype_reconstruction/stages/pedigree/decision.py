@@ -28,6 +28,8 @@ from ...contracts.pedigree import (
     Pedigree,
     PedigreeReportInputs,
     PreparedChromosome,
+    RelationshipEvidence,
+    RelationshipRequest,
     ReleasedDecision,
     SearchDiagnosticView,
 )
@@ -54,7 +56,7 @@ from ..framework import (
     publish_product,
 )
 from ..relatedness import families_records
-from . import exclusion, execution, prepare, relatives, scores
+from . import exclusion, execution, prepare, relationship, relatives, scores
 from .codec import PedigreeAdapter
 from .records import (
     FLOORED_SCORES,
@@ -172,7 +174,7 @@ def _request_identity(
         inputs.genome.sample_ids,
         inputs.contigs,
         inputs.genome.contigs,
-        replace(inputs.identities, exclusion=()),
+        replace(inputs.identities, exclusion=(), relationship=()),
         numerical_policy=policy,
     )
 
@@ -350,6 +352,23 @@ def _requested(
         if len(request.dyads)
         else ()
     )
+    relationship_parts = (
+        tuple(
+            _relationship_task(
+                p,
+                parameters,
+                request.relationship,
+                index,
+                cores=workers,
+                file=None if contig_files is None else contig_files[p.contig],
+                identity=None if contig_files is None else dict(identities.relationship)[p.contig],
+            )
+            for index, p in enumerate(inputs.prepared)
+        )
+        if len(request.relationship.dyads)
+        else ()
+    )
+    parts = parts + relationship_parts
     retained = retain((inputs, parameters, decided, request), "decision")
     gather = Task(
         TaskKey("pedigree", "release"),
@@ -366,7 +385,7 @@ def _requested(
 
 def _release_retained(
     reference: ResidentRef,
-    evidence: tuple[ExclusionEvidence, ...],
+    evidence: tuple[ExclusionEvidence | RelationshipEvidence, ...],
     *,
     workers: int = 1,
     file: CheckpointFile | None = None,
@@ -396,15 +415,26 @@ def _release(
     parameters: PedigreeParameters,
     decided: Decision,
     request: ExclusionRequest,
-    evidence: tuple[ExclusionEvidence, ...],
+    evidence: tuple[ExclusionEvidence | RelationshipEvidence, ...],
     *,
     workers: int = 1,
     file: CheckpointFile | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
 ) -> Expansion:
+    count_parts = len(inputs.contigs) if len(request.dyads) else 0
+    count_evidence = tuple(x for x in evidence[:count_parts] if isinstance(x, ExclusionEvidence))
+    relationship_evidence = tuple(x for x in evidence[count_parts:] if isinstance(x, RelationshipEvidence))
+    if len(count_evidence) != count_parts or len(relationship_evidence) != len(evidence) - count_parts:
+        raise InvariantError("decision task evidence kinds differ from the frozen requests")
     released = science.release_decision(
-        decided, request, evidence, inputs.relatedness, inputs.observed_counts, parameters
+        decided,
+        request,
+        count_evidence,
+        inputs.relatedness,
+        inputs.observed_counts,
+        parameters,
+        relationship_evidence=relationship_evidence,
     )
     search = panel.search_diagnostics(
         decided.scores.panel,
@@ -563,6 +593,53 @@ def _exclusion_task(
         outputs=(RecordKey(contig, exclusion.KEY),),
         resources=ResourceRequest(max_cores=cores),
         affinity=contig,
+        thread_argument="threads",
+    )
+
+
+def _relationship_stored(
+    reference: StoredPrepared,
+    parameters: PedigreeParameters,
+    request: RelationshipRequest,
+    contig_index: int,
+    *,
+    threads: int = 1,
+    file: CheckpointFile | None = None,
+    identity: str | None = None,
+) -> RelationshipEvidence:
+    # Check the owned publication before loading the large preparation on resume.
+    if file is not None:
+        assert identity is not None
+        previous = load_product(file, relationship.KEY, identity, relationship.RelationshipAdapter())
+        if previous is not None:
+            return previous
+    prepared = load_product(reference.file, PREPARED, reference.identity, prepare.PreparedAdapter())
+    if prepared is None:
+        raise InvariantError("relationship evidence requires complete prepared inputs")
+    return relationship.run(prepared, parameters, request, contig_index, threads=threads, file=file, identity=identity)
+
+
+def _relationship_task(
+    prepared: PreparedChromosome | StoredPrepared,
+    parameters: PedigreeParameters,
+    request: RelationshipRequest,
+    contig_index: int,
+    *,
+    cores: int,
+    file: CheckpointFile | None,
+    identity: str | None,
+) -> Task:
+    if not isinstance(prepared, StoredPrepared):
+        return relationship.task(prepared, parameters, request, contig_index, cores=cores, file=file, identity=identity)
+    return Task(
+        TaskKey("pedigree", "relationship", prepared.contig),
+        _relationship_stored,
+        args=(prepared, parameters, request, contig_index),
+        kwargs=dict(file=file, identity=identity),
+        inputs=(RecordKey(prepared.contig, PREPARED),),
+        outputs=(RecordKey(prepared.contig, relationship.KEY),),
+        affinity=prepared.contig,
+        resources=ResourceRequest(max_cores=cores),
         thread_argument="threads",
     )
 

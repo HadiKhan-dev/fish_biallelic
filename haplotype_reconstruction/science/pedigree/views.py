@@ -599,6 +599,7 @@ def _guard_relationship(row: RelationshipView, children: frozenset[int], status:
         row,
         parent1=NO_PARENT,
         parent2=NO_PARENT,
+        relationship_basis="",
         parents_before_guard=(row.parent1, row.parent2),
         parent_state=UNRESOLVED,
         observed_parent_count=float("nan"),
@@ -669,20 +670,39 @@ def apply_guard(views: PedigreeViews, guard: GuardRecord | GuardView) -> Pedigre
     guard = guard_view(guard) if isinstance(guard, GuardRecord) else guard
     withheld = frozenset((r.parent, r.child) for r in guard.rows if r.call == "withheld")
     children = frozenset(c for _, c in withheld)
+    basis = {(r.parent, r.child): r.relationship_basis for r in guard.rows if r.call != "withheld"}
+
+    def relationship_basis(row):
+        parents = [
+            p
+            for slot, p in enumerate((row.parent1, row.parent2))
+            if p >= 0
+            and (
+                not isinstance(row, PartialRelationshipView)
+                or (row.parent1_supported if slot == 0 else row.parent2_supported)
+            )
+        ]
+        if not parents:
+            return replace(row, relationship_basis="")
+        value = "family" if all(basis.get((p, row.sample)) == "family" for p in parents) else "pair_only"
+        return replace(row, relationship_basis=value)
+
     return replace(
         views,
         tier_b_relationships=tuple(
-            _guard_relationship(r, children, "tier_b_sibling_guard_withheld") for r in views.tier_b_relationships
+            relationship_basis(_guard_relationship(r, children, "tier_b_sibling_guard_withheld"))
+            for r in views.tier_b_relationships
         ),
         tier_a_relationships=tuple(
-            _guard_relationship(r, children, "tier_a_sibling_guard_withheld") for r in views.tier_a_relationships
+            relationship_basis(_guard_relationship(r, children, "tier_a_sibling_guard_withheld"))
+            for r in views.tier_a_relationships
         ),
         tier_b_partial_relationships=tuple(
-            _guard_partial(r, withheld, children, "tier_b_sibling_guard_withheld")
+            relationship_basis(_guard_partial(r, withheld, children, "tier_b_sibling_guard_withheld"))
             for r in views.tier_b_partial_relationships
         ),
         tier_a_partial_relationships=tuple(
-            _guard_partial(r, withheld, children, "tier_a_sibling_guard_withheld")
+            relationship_basis(_guard_partial(r, withheld, children, "tier_a_sibling_guard_withheld"))
             for r in views.tier_a_partial_relationships
         ),
         tier_b_candidate_sets=tuple(_guard_candidate(r, withheld, children) for r in views.tier_b_candidate_sets),
@@ -697,22 +717,24 @@ def apply_guard(views: PedigreeViews, guard: GuardRecord | GuardView) -> Pedigre
 
 
 def guard_view(guard: GuardRecord) -> GuardView:
-    """Project the final guard votes without losing integer/untested missingness."""
+    """Project the final relationship evidence and fixed-point receipt."""
     return GuardView(
         tuple(
             GuardViewRow(
                 v.family.parent,
                 v.family.child,
-                len(v.family.supported),
-                sum(reason == "linked" for _, reason in v.family.dropped),
-                sum(reason == "half_sib" for _, reason in v.family.dropped),
-                v.family.dropped,
                 len(v.family.tested),
-                v.excluded,
+                v.set_aside,
+                v.against,
+                v.supporting,
+                v.pair_score,
+                v.family_score,
+                v.score,
                 v.call,
                 v.evidence_call,
                 v.withdrawal_iteration,
                 v.withholding_basis,
+                v.relationship_basis,
             )
             for v in guard.votes
         ),

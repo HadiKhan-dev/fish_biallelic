@@ -1,5 +1,67 @@
 # Changelog
 
+## 4.15.1 (12 November 2026)
+
+This release replaces the sibling guard's vote by a relationship model on the paintings. A proposed parent must be
+able to share a haplotype with the child along every chromosome, and it is compared with the child's relatedness
+family as a parent of the child's full sibs against one more full sib. Scoring, orientation, calibration, resampling
+and the release tiers keep their definitions. Released relationship tables gain a column that says whether an edge
+is supported by the child's family or rests on the pair alone. Pedigree products use schema 5: rerun earlier
+analyses in a new output root.
+
+**Pedigree: what the guard observes.** In every painting bin the stage knows the two founder classes of each sample.
+A parent and its child share a class in every bin; two full sibs share none on about a quarter of the genome. Three
+samples can be full sibs only if two parental genotypes explain all three. The guard reduces each pair to the sequence
+"some class shared or none", and each trio to "feasible as three full sibs or not", along the chromosome.
+
+**Pedigree: the model.** A sequence is scored under four two-state processes on genetic distance: always feasible
+apart from rare painting-failure regions, feasible on three quarters of the genome in long tracts (as full sibs
+share), on half (as more distant relatives), and never. Where the state is infeasible the observation follows the
+cohort's own chance of sharing in that bin, estimated per painting component, so that crosses with few founders lose
+power exactly where chance sharing hides the difference. The evidence of a sequence is its always-feasible log
+likelihood minus the best of the four, summed over chromosomes first; it is zero or negative.
+
+**Pedigree: the decision.** For an edge p → c the score is the pair's evidence plus one contribution from every
+other member w of c's relatedness family: the evidence that p is also a parent of w minus the evidence that c, p and
+w are three full sibs. Each contribution is bounded by the prior odds that w really is a full sib of c, measured on
+known-truth relatedness families in three bands of family support (0.46, 0.87, 0.98); a member that the rest of the
+family contradicts as a sib of c is set aside. The edge is withheld when the score is below −log 1000. The score is a
+sum of dependent profile likelihood ratios in nats, not posterior odds. The minimum family size, the support
+thresholds for the child and its witnesses, the half-sib cleaning rule and the majority vote over genotype exclusions
+are removed; genotype exclusion remains in the count release. The fixed point over withdrawn edges, irreversible
+withdrawals and their effect on parent counts are unchanged.
+
+**Pedigree: what cannot be resolved.** A relative whose sharing with the child is masked by identical founder
+classes, and whose child has no informative family, cannot be told from a parent by any of this evidence. Such an
+edge stays released and is marked: `relationship_basis` in the four released relationship tables is `family` when
+the family evidence supports every released parent of the sample beyond the withholding score, and `pair_only`
+otherwise.
+
+**Pedigree: records and reports.** `pedigree/sibling_guard.csv` now lists, per edge, the witnesses, how many were
+set aside, counted against or for the edge, the pair, family and total scores, and the calls. Relationship evidence
+is computed per chromosome and resumes per chromosome. A family of f members costs at most 16 f sibship checks per
+child, so large sibships stay quadratic.
+
+**Removed.** The guard's own parameter group (`minimum_family`, `focal_support`, `member_support`), the `guard_dyads`
+field of the exclusion summary, the support-filtered family selector of the relatedness product, and three pedigree
+workspace declarations that controlled nothing. `pedigree/sibling_guard.csv` loses `supported_members`,
+`dropped_linked`, `dropped_half_sib`, `dropped_members`, `tested_members` and `excluded_members`.
+
+**Validation.** The default suite and the stage tier (402 tests in four shards) pass. On the saved pedigree
+inputs of sixteen known-truth simulations the stage's scores equal an independent reference implementation (first
+pass to 1e-6, final calls equal). The end-to-end matrix of seventeen cases was compared with the 4.15.0 run of each
+case. In the sixteen simulated crosses all 962 released parent edges are the same and all are true (174 with family
+support, 788 on the pair alone); the six sib-as-parent edges that 4.15.0 withheld are withheld again, with scores
+between −22.7 and −54.0 against a threshold of −6.9. On TroMau the 68 released edges are the same (14 with family
+support, 54 on the pair alone), and 27 edges that the vote could not test are now tested and kept. In all seventeen
+cases relatedness, paintings, founders, phase, recombination and, for the simulated cases, all truth metrics are
+identical. Nine new simulated crosses with small sibships, half sibs, three-quarter sibs and sequenced relatives of
+unsequenced parents hold 273 parent-offspring pairs among their sequenced samples: 4.15.0 releases 256 of them and
+4.15.1 releases 258, and neither releases a false edge. The two additional edges are true edges that the vote
+withheld because the child's relatedness family contained samples that are not its full sibs. None of these crosses
+has a false edge that 4.15.0 releases, so the six edges above remain the evidence that the model withholds what the
+vote withheld. Run time is unchanged (TroMau: 47 minutes in both releases).
+
 ## 4.15.0 (12 November 2026)
 
 This release replaces the simulator: founders are now drawn from a structured coalescent with optional random-mating

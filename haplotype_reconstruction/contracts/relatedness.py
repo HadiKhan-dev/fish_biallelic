@@ -1,7 +1,7 @@
 """Separate family calls, optional pair reports, and their immutable reader view.
 
 Separate products prevent optional pair reporting from changing the family product.
-Only record definitions and the preserved inclusive supported_family view live here.
+Only record definitions and immutable product views live here.
 No relatedness estimation, canonicalisation, storage, or optional-report imports.
 """
 
@@ -45,9 +45,6 @@ class RelatednessFamilies:
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
-
-    def supported_family(self, sample: int, minimum_support: float) -> NDArray[np.int64]:
-        return supported_family(self, sample, minimum_support)
 
 
 @dataclass(frozen=True)
@@ -110,17 +107,3 @@ class Relatedness:
     @property
     def parents(self) -> NDArray[np.int64]:
         return self.families.parents
-
-    def supported_family(self, sample: int, minimum_support: float) -> NDArray[np.int64]:
-        return supported_family(self.families, sample, minimum_support)
-
-
-def supported_family(families: RelatednessFamilies | Relatedness, sample: int, minimum: float) -> NDArray[np.int64]:
-    """Inclusive support rule, preserving NaN exclusion and ascending sample indices.
-
-    An unsupported focal sample (including NaN) returns its singleton. No numbering or support is recomputed here.
-    """
-    if not families.member_support[sample] >= minimum:
-        return np.asarray([sample], dtype=np.int64)
-    members = np.flatnonzero(families.family == families.family[sample])
-    return members[families.member_support[members] >= minimum]

@@ -41,6 +41,7 @@ _UNSET = object()
 STREAMS = (
     "assembly.count.bootstrap",  # count_rule/criterion.py: JSON decision key
     "pedigree.bootstrap",  # pedigree/resampling.py: replicate then contig
+    "pedigree.relationship.reference",  # component then triple, on sorted sample identifiers
     "simulation.structure",  # Python MT via structure_stream(master), not stream()
     "simulation.master",  # pedigree.py: cohort/depth then contig then child
     "simulation.child",  # pedigree.py: mother's gamete then father's
@@ -71,6 +72,7 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
     ``seed`` is the original integer seed; pedigree defaults to 20260725. Count
     bootstrap accepts its JSON ``key`` or an already derived ``seed``. Founders
     and templates take the zero-based contig ``index`` in the bound contig order.
+    Relationship references use seed + contig index and the component index in ``key``.
     Missing seeds and unknown names raise ValueError. No global state is mutated.
     """
     if name == "simulation.structure":
@@ -81,10 +83,13 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
         if seed is not None:
             raise ValueError("count bootstrap requires either key or seed, not both")
         seed = bootstrap_seed(key)
-    if name == "pedigree.bootstrap" and seed is None:
+    if name in ("pedigree.bootstrap", "pedigree.relationship.reference") and seed is None:
         seed = PEDIGREE_BOOTSTRAP_SEED
     if seed is None:
         raise ValueError(f"{name}: a realised seed is required")
+    if name == "pedigree.relationship.reference":
+        component = 0 if key is _UNSET else int(key)
+        return np.random.default_rng([seed + int(index), component])
     if name == "simulation.reads":
         return np.random.default_rng(seed + 1_000_000)
     if name == "simulation.sample_reads":

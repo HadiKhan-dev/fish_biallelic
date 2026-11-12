@@ -290,13 +290,10 @@ empty lists. The replay budget bounds executed continuations, not all recorded
 alternatives, which is why these lists also use child rows.
 
 `pedigree/cell_items.csv` separates the following cohort-sized collections. Its
-key is `source_table, sample, column, item` for sample tables and
-`source_table, parent, child, column, item` for `sibling_guard`. Unused sample or
-parent/child keys are empty. `source_table` omits `.csv`, `column` is snake_case,
+key is `source_table, sample, column, item`. Parent/child keys are empty. `source_table` omits `.csv`, `column` is snake_case,
 `item` is zero-based and `value` is JSON. Parent cells give item counts. Empty
 collections have count zero and no item rows. Items retain record order; they
-are grouped by table and column, then parent-row input order (recorded order for
-the sibling guard).
+are grouped by table and column, then parent-row input order.
 
 | Parent table | Collection columns | Decoded item |
 |---|---|---|
@@ -305,12 +302,11 @@ the sibling guard).
 | `diagnostics` | `parent1_candidate_set`, `parent2_candidate_set` | Sample name |
 | `diagnostics` | `configuration_support_set`, `evidence_configuration_set` | Original formatted configuration item, including its recorded decimal text |
 | `exclusion_diagnostics` | `compatible_candidates`, `supported_reverse_candidates`, `remaining_candidates` | Sample name |
-| `sibling_guard` | `dropped_members` | Original sample/reason item |
 
 To reconstruct tuple text for a candidate or exclusion cell, form a tuple of
 decoded items and use Python `repr`; configuration items become inner tuples.
 Brace-set cells join decoded names with commas inside braces. Support,
-evidence-configuration and dropped-member cells join decoded items with
+and evidence-configuration cells join decoded items with
 semicolons. This recovers their complete former cell text, including item order
 and formatting, without parsing delimiters inside sample identifiers.
 
@@ -390,8 +386,7 @@ local/graph and finite identity-score alternatives in ascending configuration ro
 
 Interval-bearing exclusion tables append the lower, upper and exactness columns
 shown in the generated dictionary. A non-exact interval has an empty point `log_e`.
-Exclusion evidence can exist for guard dyads even when there are no count-release
-targets. released relationship views are post-guard; complete relationships,
+Exclusion evidence is scored only for count-release target dyads. Released relationship views are post-guard; complete relationships,
 selection/search diagnostics and relative contrasts describe pre-guard evidence.
 
 `pedigree/evidence_calibration.json` serialises the typed calibration report
@@ -405,7 +400,7 @@ fields of the linked records, in declaration order.
 | `omitted` | Object: each omitted contig and the reason |
 | `reach` | What chromosome resampling can release with this many informative chromosomes ([`TierReach`](../reference/records.md#pedigreetierreach)) |
 | `family_solve` | The final reciprocal solve and resampling convergence diagnostics ([`FamilySolveRecord`](../reference/records.md#pedigreefamilysolverecord)) |
-| `exclusion` | The count evidence's model and coverage: `model`, `alpha`, `genotype_replacement_probability`, `conditional_on_supported_edge_directions`, `candidate_dyads`, `guard_dyads`, `contigs`, `status` and the further fields of [`ExclusionSummary`](../reference/records.md#pedigreeexclusionsummary) that are present |
+| `exclusion` | The count evidence's model and coverage: `model`, `alpha`, `genotype_replacement_probability`, `conditional_on_supported_edge_directions`, `candidate_dyads`, `contigs`, `status` and the further fields of [`ExclusionSummary`](../reference/records.md#pedigreeexclusionsummary) that are present |
 | `eligibility` | The unrestricted candidate universe; it states that no sample metadata or parentage truth was used ([`EligibilityRecord`](../reference/records.md#pedigreeeligibilityrecord)) |
 | `sibling_guard` | Edges tested and withheld by the sibling-as-parent guard ([`GuardSummary`](../reference/records.md#pedigreeguardsummary)) |
 
@@ -473,10 +468,10 @@ and identity columns are listed in their own sections.
 | `painting/assembly_search.csv (prefix)` | `contig`, `level`, `first_variant_1based`, `last_variant_1based` |
 | `painting/founder_counts.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `founder_rows`, `founder_count_ambiguous`, `undecided_count_cycles`, `count_step_founders_before`, `count_step_ambiguous_decisions`, `count_step_decisions`, `join_count_cycles`, `join_undecided_cycles`, `join_ambiguous_count_calls`, `feedback_join_count_cycles`, `feedback_join_undecided_cycles`, `feedback_join_ambiguous_count_calls` |
 | `painting/sample_switches.csv` | `contig`, `sample_index`, `sample`, `painted_components`, `painted_switches`, `cohort_median_switches`, `switches_over_cohort_median` |
-| `pedigree/tier_b_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `release_evidence` |
-| `pedigree/tier_b_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `release_evidence` |
-| `pedigree/tier_a_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status` |
-| `pedigree/tier_a_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum` |
+| `pedigree/tier_b_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `release_evidence`, `relationship_basis` |
+| `pedigree/tier_b_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `release_evidence`, `relationship_basis` |
+| `pedigree/tier_a_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `relationship_basis` |
+| `pedigree/tier_a_partial_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status`, `parent1_supported`, `parent2_supported`, `exact_configuration_resolved`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `relationship_basis` |
 | `pedigree/complete_relationships.csv` | `sample`, `parent1`, `parent2`, `parent_state`, `observed_parent_count`, `inference_status` |
 | `pedigree/tier_b_candidate_sets.csv` | `sample`, `parent_state`, `observed_parent_count`, `parent1`, `parent2`, `parent1_candidates`, `parent2_candidates`, `configuration_candidates`, `exact_configuration_resolved`, `inference_status`, `parent1_supported`, `parent2_supported`, `observed_parent_count_minimum`, `observed_parent_count_maximum`, `tier_b_final_state_call`, `tier_b_release_evidence` |
 | `pedigree/parent_state_calls.csv` | `sample`, `selected_parent_state`, `local_winner_parent_state`, `observed_parent_count`, `local_observed_parent_count`, `inference_status`, `dag_displaced`, `graph_conflict`, `graph_tie_conflict`, `graph_direction_resolved_alternative`, `selected_parent_role_probability`, `tier_a_state_call`, `tier_b_state_call`, `tier_b_final_state_call`, `tier_b_release_evidence` |
@@ -489,7 +484,7 @@ and identity columns are listed in their own sections.
 | `pedigree/evidence_summary.csv` | `contig`, `informative_markers`, `mean_minimum_ancestry_junctions`, `mean_callable_haplotype_bins` |
 | `pedigree/chromosome_summary.csv` | `contig`, `component_count`, `scored_component_count`, `informative_markers`, `omitted_reason` |
 | `pedigree/relative_contrasts.csv` | `sample`, `candidate_parent`, `views`, `proxy_model`, `m1_minus_second_degree_proxy_nats`, `m1_minus_full_sib_proxy_nats`, `usable_chromosomes`, `negative_chromosomes_second_degree`, `negative_chromosomes_full_sib`, `min_chromosome_contrast_second_degree` |
-| `pedigree/sibling_guard.csv` | `parent`, `child`, `supported_members`, `dropped_linked`, `dropped_half_sib`, `dropped_members`, `tested_members`, `excluded_members`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis` |
+| `pedigree/sibling_guard.csv` | `parent`, `child`, `witnesses`, `set_aside`, `against`, `supporting`, `pair_score`, `family_score`, `score`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis` |
 | `recombination/coverage.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `component` |
 | `recombination/crossovers.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `left_origin_probability`, `right_origin_probability`, `joint_endpoint_probability_lower_bound`, `component`, `reported_left_bp`, `reported_right_bp`, `in_reversed_segment` |
 | `recombination/junctions.csv` | `contig`, `locus`, `left_bp`, `right_bp`, `calls_left_bp`, `calls_right_bp`, `calls`, `parents_with_calls`, `odd_meioses`, `decidable_meioses`, `switch_fraction`, `flip_adjusted_switch_fraction`, `hotspot_ceiling`, `mixed_parents`, `all_or_none_parents`, `parents`, `children`, `mixing_log_lr`, `paired_locus`, `paired_odd_meioses`, `pairing_log_lr`, `pairing_tests`, `junction_log_lr`, `flagged`, `interpretation`, `nearest_supplied_breakpoint`, `breakpoint_distance_bp` |

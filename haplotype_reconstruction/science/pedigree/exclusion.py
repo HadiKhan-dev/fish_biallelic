@@ -21,7 +21,7 @@ DYAD_BATCH = EXCLUSION_DYAD_BATCH
 
 
 def log_threshold(sample_count: int, alpha: float) -> float:
-    """Exclusion log-e threshold shared by certificates, count release and the sibling guard."""
+    """Exclusion log-e threshold shared by certificates and count release."""
     return math.log(2 * sample_count / alpha)
 
 

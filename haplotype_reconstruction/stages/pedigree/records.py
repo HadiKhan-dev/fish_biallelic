@@ -29,7 +29,7 @@ from ..evidence import records as evidence_records
 from ..framework import load_product
 from ..painting import records as painting_records
 from ..relatedness import families_records
-from . import exclusion, prepare, scores, screen
+from . import exclusion, prepare, relationship, scores, screen
 from .codec import PedigreeAdapter
 
 __all__ = [
@@ -53,11 +53,12 @@ SCREEN = screen.SCREEN
 PANEL = screen.PANEL
 FLOORED_SCORES = scores.KEY
 EXCLUSION = exclusion.KEY
+RELATIONSHIP = relationship.KEY
 REQUEST = "pedigree/exclusion_request"
 
 # Prepared data depends on one contig; all other pedigree records depend on the analysed genome.
 SHARED_KEYS = (PREPARED,)
-ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, REQUEST)
+ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, RELATIONSHIP, REQUEST)
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class PedigreeDependencies:
     exclusion: tuple[tuple[str, str], ...] = ()
     reports: tuple[tuple[str, str], ...] = ()
     evidence: tuple[tuple[str, str], ...] = ()
+    relationship: tuple[tuple[str, str], ...] = ()
 
 
 def expected(
@@ -84,7 +86,7 @@ def expected(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-4 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-5 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
     Exclusion is empty only for an empty request; otherwise it covers configured C.
@@ -94,6 +96,7 @@ def expected(
         ("prepared", inputs.prepared, contigs),
         ("floored scores", inputs.floored_scores, informative_contigs),
         ("exclusion", inputs.exclusion, contigs if inputs.exclusion else ()),
+        ("relationship", inputs.relationship, contigs if inputs.relationship else ()),
         ("evidence", inputs.evidence, contigs if inputs.evidence else ()),
     ):
         if tuple(name for name, _ in actual) != expected:
@@ -107,6 +110,7 @@ def expected(
         (PREPARED, inputs.prepared),
         (FLOORED_SCORES, inputs.floored_scores),
         (EXCLUSION, inputs.exclusion),
+        (RELATIONSHIP, inputs.relationship),
         ("report", inputs.reports),
         ("evidence", inputs.evidence),
     ):
@@ -194,7 +198,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     contigs = AnalysisContigs.from_manifest(manifest).included
     eligibility = ParentEligibility.unrestricted(sample_ids)
 
-    def bind(c: str) -> tuple[str, str, dict[str, Any]]:
+    def bind(c: str) -> tuple[str, str, Mapping[str, Any]]:
         file = store.contig(c)
         evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
         painting = painting_records.result_reader(
@@ -293,7 +297,7 @@ def request_dependencies(
     parameters: PedigreeParameters,
     policy: NumericalPolicy | None,
 ) -> PedigreeDependencies:
-    """Bind the ordered request, including guard-only dyads, to every evidence record."""
+    """Bind separate count and relationship requests to their actual input records."""
     if tuple(c for c, _ in inputs.evidence) != request.contigs:
         raise InputError("pedigree exclusion/observed-count evidence must cover configured contigs in order")
     identities = (
@@ -316,7 +320,17 @@ def request_dependencies(
     )
     if inputs.exclusion and inputs.exclusion != identities:
         raise InputError("supplied exclusion identities disagree with the actual ordered request")
-    return replace(inputs, exclusion=identities)
+    related = (
+        tuple(
+            (c, relationship.derivation(parameters, identity, request.relationship, index, numerical_policy=policy))
+            for index, (c, identity) in enumerate(inputs.prepared)
+        )
+        if len(request.relationship.dyads)
+        else ()
+    )
+    if inputs.relationship and inputs.relationship != related:
+        raise InputError("supplied relationship identities disagree with the actual ordered request")
+    return replace(inputs, exclusion=identities, relationship=related)
 
 
 @dataclass(frozen=True)
@@ -372,7 +386,7 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
         bound.sample_ids,
         bound.contigs,
         bound.informative_contigs,
-        replace(bound.dependencies, exclusion=()),
+        replace(bound.dependencies, exclusion=(), relationship=()),
         numerical_policy=bound.policy,
     )
     request = load_product(store.run, REQUEST, request_id, RequestAdapter())
@@ -383,6 +397,8 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
     inputs = request_dependencies(bound.dependencies, request, bound.parameters, bound.policy)
     for c, identity in inputs.exclusion:
         _header(store.contig(c), EXCLUSION, identity)
+    for c, identity in inputs.relationship:
+        _header(store.contig(c), RELATIONSHIP, identity)
     identity = expected(
         bound.parameters,
         bound.sample_ids,
@@ -395,9 +411,9 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
 
 
 class RequestAdapter:
-    """Independently checked decision request; schema 1, no scientific reconstruction."""
+    """Independently checked decision request; schema 2, no scientific reconstruction."""
 
-    schema = 1
+    schema = 2
 
     def encode(self, request: ExclusionRequest) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(request)}

@@ -35,7 +35,7 @@ __all__ = [
     "TierThresholds",
     "ReleaseParameters",
     "ExclusionParameters",
-    "SiblingGuardParameters",
+    "RelationshipParameters",
     "PedigreeParameters",
     "ScoringNumerics",
     "PedigreeWorkspace",
@@ -57,10 +57,7 @@ __all__ = [
     "JUNCTION_UNREACHABLE_COUNT",
     "BOUND_WORKSPACE_BYTES",
     "BOUND_BATCH_ROWS",
-    "EXCLUSION_PREFIX_SITES",
-    "EXCLUSION_CHUNK_SITES",
     "EXCLUSION_PATTERN_LIMIT",
-    "FAMILY_PARALLEL_MINIMUM_WORK",
     "NULL_ROUNDING_ULPS",
     "BRIDGE_FEASIBILITY_ULPS",
     "BRIDGE_POST_TOLERANCE_FACTOR",
@@ -701,60 +698,103 @@ class ExclusionParameters:
 
 
 @dataclass(frozen=True)
-class SiblingGuardParameters:
-    """The sibling-as-parent guard on released edges (family consistency, science.pedigree.guard).
+class RelationshipParameters:
+    """Painting relationship process and score (PD28).
 
-    A released edge p -> c is tested when c's full-sib family in the relatedness product, without p, without members
-    released as a parent or child of c or of another member, and without members with a released parent other than p
-    and c's released parents, has enough supported members; it is withheld when a strict majority of the tested
-    members (c excluded) are Mendelian-excluded from p at the exclusion release's threshold (a parent of c is a parent
-    of every full sib of c).
-
-    Attributes:
-      minimum_family: an edge is tested only when at least this many supported members remain, counting c.
-      focal_support: c uses its family only when its best-placement share of relatedness support units is strictly
-        greater than this threshold (dimensionless share); NaN leaves the edge untested.
-      member_support: a witness counts when its family is its best placement on at least this share of relatedness
-        support units (dimensionless share); c counts towards minimum_family regardless of its own support.
+    Rates are per Morgan, lengths in Morgans, isolated_error scales chance-infeasibility per known bin,
+    withholding_score in nats, sibship_prior probabilities in increasing
+    support bands, support_bounds dimensionless shares, reference_triples and
+    sibship_check_partners counts.
     """
 
-    minimum_family: int = field(
-        default=3,
+    failure_region_rate: float = field(
+        default=0.1,
         metadata={
-            "provenance": (
-                "PD23; require at least 3 supported family members including the child before testing an edge."
-            ),
+            "units": "1/Morgan",
+            "provenance": "PD28; one observed painting failure in fourteen Morgans motivates 0.1 regions per Morgan.",
         },
     )
-    member_support: float = field(
-        default=0.75,
+    failure_region_length: float = field(
+        default=0.05,
         metadata={
-            "provenance": (
-                "PD23; fraction 0.75 of relatedness support units must support a witness in its best relatedness "
-                "placement."
-            ),
+            "units": "Morgan",
+            "provenance": "PD28; observed painting failures span 4–8 cM, shorter than full-sib IBD0 segments.",
         },
     )
-    focal_support: float = field(
-        default=0.5,
+    isolated_error: float = field(
+        default=1e-3,
+        metadata={
+            "units": "probability/bin",
+            "provenance": "PD28; scale 1-q per bin; at most 0.03% wrong bins; no uninformative-bin penalty.",
+        },
+    )
+    withholding_score: float = field(
+        default=float(np.log(1000.0)),
+        metadata={
+            "units": "nats",
+            "provenance": "PD23; log(1000) survives higher-prior sensitivity; two top-band witnesses suffice.",
+        },
+    )
+    sibship_prior: tuple[float, ...] = field(
+        default=(0.46, 0.87, 0.98),
+        metadata={
+            "units": "probability",
+            "provenance": "PD28; measured full-sib shares among 3556 same-family pairs in three support bands.",
+        },
+    )
+    support_bounds: tuple[float, ...] = field(
+        default=(0.5, 0.75),
         metadata={
             "units": "share",
-            "provenance": (
-                "PD23; strict best-placement share of relatedness support units (dimensionless); require a "
-                "majority for the focal child while retaining the stricter member_support bar for witnesses."
-            ),
+            "provenance": "PD28; support bands of the measured same-family sibship calibration.",
+        },
+    )
+    sibship_check_partners: int = field(
+        default=16,
+        metadata={
+            "units": "count",
+            "provenance": "PD28; bounded ring check; 8 and 16 partners match all-partner validation scores.",
+        },
+    )
+    reference_triples: int = field(
+        default=400,
+        metadata={
+            "units": "count",
+            "provenance": "PD28; 400 reference triples give about 0.02 sampling error in bin infeasibility.",
         },
     )
 
     def __post_init__(self) -> None:
-        if int(self.minimum_family) != self.minimum_family or self.minimum_family < 2:
-            raise SettingsError(
-                f"pedigree guard minimum_family={self.minimum_family!r} must be an integer of at least 2"
-            )
-        if not 0.5 <= self.focal_support < 1.0:
-            raise SettingsError(f"pedigree guard focal_support={self.focal_support!r} must lie in [0.5, 1)")
-        if not 0.5 <= self.member_support <= 1.0:
-            raise SettingsError(f"pedigree guard member_support={self.member_support!r} must lie in [0.5, 1]")
+        import math
+
+        for name in ("failure_region_rate", "failure_region_length"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise SettingsError(f"pedigree relationship {name} must be finite and positive")
+        if not 0 < self.isolated_error < 1:
+            raise SettingsError("pedigree relationship isolated_error must lie in (0, 1)")
+        if not math.isfinite(self.withholding_score) or self.withholding_score <= 0:
+            raise SettingsError("pedigree relationship withholding_score must be finite and positive")
+        if (
+            len(self.sibship_prior) != 3
+            or any(not 0 < p < 1 for p in self.sibship_prior)
+            or tuple(sorted(self.sibship_prior)) != self.sibship_prior
+        ):
+            raise SettingsError("pedigree relationship sibship_prior must contain three increasing probabilities")
+        if len(self.support_bounds) != 2 or not 0 <= self.support_bounds[0] < self.support_bounds[1] <= 1:
+            raise SettingsError("pedigree relationship support_bounds must contain two increasing shares")
+        if (
+            isinstance(self.sibship_check_partners, bool)
+            or not isinstance(self.sibship_check_partners, int)
+            or self.sibship_check_partners < 1
+        ):
+            raise SettingsError("pedigree relationship sibship_check_partners must be a positive integer")
+        if (
+            isinstance(self.reference_triples, bool)
+            or not isinstance(self.reference_triples, int)
+            or self.reference_triples < 1
+        ):
+            raise SettingsError("pedigree relationship reference_triples must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -841,11 +881,9 @@ class PedigreeParameters:
             "provenance": "PD27; internal full-marker exclusion parameter group; units are declared by its fields.",
         },
     )
-    guard: SiblingGuardParameters = field(
-        default_factory=SiblingGuardParameters,
-        metadata={
-            "provenance": "PD27; internal sibling-as-parent guard parameter group; units are declared by its fields.",
-        },
+    relationship: RelationshipParameters = field(
+        default_factory=RelationshipParameters,
+        metadata={"provenance": "PD27; painting relationship evidence parameters, with units declared by each field."},
     )
 
     def __post_init__(self) -> None:
@@ -1064,6 +1102,14 @@ class ScoringNumerics:
 class PedigreeWorkspace:
     """Storage dimensions only; estimates never reserve memory or limit concurrency."""
 
+    relationship_sequence_chunk: int = field(
+        default=32_768,
+        metadata={
+            "units": "count",
+            "provenance": "PD28; bound binary sequence workspaces per contig task; execution grain only.",
+        },
+    )
+
     common_emission_cache_bytes: int = field(
         default=256 << 20,
         metadata={
@@ -1085,23 +1131,6 @@ class PedigreeWorkspace:
             "provenance": "PS15; at most 4000000 pair-bound workspace rows per batch.",
         },
     )
-    exclusion_prefix_sites: int = field(
-        default=64,
-        metadata={
-            "provenance": (
-                "PS21; unused workspace declaration of 64 sites; does not control the completed-window scanner."
-            ),
-        },
-    )
-    exclusion_chunk_sites: int = field(
-        default=4096,
-        metadata={
-            "provenance": (
-                "PS21; unused workspace declaration of 4096 sites; does not control the completed-window "
-                "scanner."
-            ),
-        },
-    )
     exclusion_pattern_limit: int = field(
         default=1024,
         metadata={
@@ -1109,12 +1138,6 @@ class PedigreeWorkspace:
                 "PS20; cache at most 1024 distinct genotype-likelihood patterns per sample before direct "
                 "fallback."
             ),
-        },
-    )
-    family_parallel_minimum_work: int = field(
-        default=200_000,
-        metadata={
-            "provenance": "PD09; unused declaration of 200000 work terms; does not control family execution.",
         },
     )
 
@@ -1183,10 +1206,7 @@ JUNCTION_UNREACHABLE_STATE = SCORING_NUMERICS.junction_unreachable_state
 JUNCTION_UNREACHABLE_COUNT = SCORING_NUMERICS.junction_unreachable_count
 BOUND_WORKSPACE_BYTES = PEDIGREE_WORKSPACE.bound_workspace_bytes
 BOUND_BATCH_ROWS = PEDIGREE_WORKSPACE.bound_batch_rows
-EXCLUSION_PREFIX_SITES = PEDIGREE_WORKSPACE.exclusion_prefix_sites
-EXCLUSION_CHUNK_SITES = PEDIGREE_WORKSPACE.exclusion_chunk_sites
 EXCLUSION_PATTERN_LIMIT = PEDIGREE_WORKSPACE.exclusion_pattern_limit
-FAMILY_PARALLEL_MINIMUM_WORK = PEDIGREE_WORKSPACE.family_parallel_minimum_work
 
 NULL_ROUNDING_ULPS = SCORING_NUMERICS.null_rounding_ulps
 BRIDGE_FEASIBILITY_ULPS = SCORING_NUMERICS.bridge_feasibility_ulps

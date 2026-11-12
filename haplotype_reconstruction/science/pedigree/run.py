@@ -93,23 +93,14 @@ def complete_decision(state: decision.FullFit, resampled: Resampling, parameters
 def exclusion_request(
     decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeParameters
 ) -> ExclusionRequest:
-    """Order targets first, then sorted supported-family extras; freeze the exact exclusion query."""
+    """Freeze independent count-exclusion and painting-relationship queries."""
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
-    dyads = count.target_dyads(decided.tier_b, rows, decided.eligibility)
+    dyads = count.target_dyads(decided.tier_b, rows, decided.eligibility).reshape(-1, 2)
     before = api.edges(decided.partial_b, sample_ids)
-    target_set = {(int(c), int(p)) for c, p in dyads}
     families = guard.edge_families(sample_ids, before.parents, before.children, relatedness, parameters)
-    extra = np.asarray(
-        [
-            (int(s), int(p))
-            for s, p in guard.guard_dyads(families, parameters, all_supported=True)
-            if (int(s), int(p)) not in target_set
-        ],
-        dtype=np.int64,
-    ).reshape(-1, 2)
-    scored = np.concatenate([dyads.reshape(-1, 2), extra]).astype(np.int64)
-    scored.setflags(write=False)
-    return ExclusionRequest(sample_ids, tuple(contigs), scored, len(dyads), before)
+    relationship = guard.relationship_request(families, sample_ids, contigs, parameters)
+    dyads.setflags(write=False)
+    return ExclusionRequest(sample_ids, tuple(contigs), dyads, len(dyads), before, relationship)
 
 
 def release_decision(
@@ -119,6 +110,8 @@ def release_decision(
     relatedness: GuardRelatedness,
     observed_counts: np.ndarray,
     parameters: PedigreeParameters,
+    *,
+    relationship_evidence=(),
 ) -> ReleasedDecision:
     """Combine configured evidence, guard/count, orient and check the second guard; no scoring."""
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
@@ -152,7 +145,7 @@ def release_decision(
             exclusion_status = "evaluated"
     elif evidence:
         raise InvariantError("supplied exclusion evidence is outside the decision's path")
-    preliminary_guard = guard.fixed_point(before, relatedness, scored, lower, upper, parameters)
+    preliminary_guard = guard.fixed_point(before, relatedness, request.relationship, relationship_evidence, parameters)
     released = count.release_counts(
         CountReleaseBasis(
             decided.tier_b,
@@ -193,7 +186,7 @@ def release_decision(
     ordered_edges = api.edges(released.partial_b, sample_ids, orientation)
     if set(zip(ordered_edges.parents.tolist(), ordered_edges.children.tolist(), strict=True)) != edge_set:
         raise InvariantError("count release changed the edges the guard was scored for")
-    final_guard = guard.fixed_point(ordered_edges, relatedness, scored, lower, upper, parameters)
+    final_guard = guard.fixed_point(ordered_edges, relatedness, request.relationship, relationship_evidence, parameters)
     if final_guard.withheld != preliminary_guard.withheld:
         raise InvariantError("guard withdrawals differ after released slot ordering")
     pre_guard_calls = api.calls(released.tier_b, rows, orientation)
@@ -206,7 +199,6 @@ def release_decision(
         genotype_replacement_probability=parameters.exclusion.genotype_replacement_probability,
         conditional_on_supported_edge_directions=True,
         candidate_dyads=targets,
-        guard_dyads=len(scored) - targets,
         contigs=len(request.contigs),
         status=exclusion_status,
         released=int(np.count_nonzero(released.released)),
@@ -297,14 +289,14 @@ def relative_request(released: ReleasedDecision) -> RelativeRequest:
 def guard_summary(value) -> GuardSummary:
     """Summarize the final typed guard votes."""
     return GuardSummary(
-        "family-exclusion-v2",
+        "painting-relationship-v1",
         len(value.votes),
         sum(v.call != "untested" for v in value.votes),
         sum(v.call == "withheld" for v in value.votes),
         value.cleaning_iterations,
         value.cleaning_converged,
         value.cleaning_iteration_bound,
-        sum(v.withholding_basis == "prior_veto_abstention" for v in value.votes),
+        sum(v.call == "withheld" and v.evidence_call != "withheld" for v in value.votes),
     )
 
 

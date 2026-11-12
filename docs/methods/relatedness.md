@@ -215,7 +215,7 @@ Publish family fitting separately from the optional pair chain. Canonicalise fam
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
-Parameters by name: `member_support`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters: supplied typed inputs and the stage's [parameter record](../reference/parameters.md).
 
 Cost and scope: Family products scale with N; optional pair products have N(N−1)/2 rows and O(N² L) chain work.
 

@@ -1,142 +1,197 @@
-"""The sibling-as-parent guard: released edges whose parent is Mendelian-excluded
-from most of the child's full sibs.
+"""Painting relationship evidence on every pre-guard Tier-B edge (PD23).
 
-A parent of c is a parent of every full sib of c, so it is Mendelian-compatible with each of them. A relative released
-as c's parent (a sib, grandparent or half sib that happens to be compatible with c itself) is excluded from most of
-c's other sibs. For a released Tier-B edge p -> c (``ParentEdges`` before the guard), the members tested are:
-
-* c's full-sib family in the relatedness product when c's support is strictly greater than ``focal_support``
-  (including c whatever its own support, otherwise c alone): witnesses with support at least ``member_support``,
-  without p;
-* without any member released as a parent or child of c or of another member (no full sib is anyone's parent or child:
-  ``linked``);
-* without any member with a released parent that is neither p nor a released parent of c (the ``half_sib``
-  heuristic: incomplete or wrong parent lists can also remove genuine full sibs);
-* without c itself.
-
-The edge is tested when at least ``minimum_family`` - 1 members remain (|F| >= minimum_family counting c), and withheld
-when a strict majority of them are Mendelian-excluded from p: full-marker exclusion log E(p, s) >= log(2N/alpha), the
-evidence and threshold of the stage's count release (pedigree.exclusion, ExclusionParameters.alpha). Otherwise it is
-kept (tested) or untested. The guard reads the relatedness product (genotype likelihoods), the released edges and the
-exclusion evidence of the member dyads (genotype likelihoods); no painting, label or metadata.
-
-Cleaning uses only edges that remain. ``fixed_point`` repeatedly withdraws majority-vetoed edges, then reports
-all votes against the final edge set. Withdrawals are irreversible: a withdrawn edge whose final vote no longer
-vetoes is an explicit abstention, not a certified majority. With E initial edges, at most E changing passes and one
-unchanged pass are possible. Family support does not guarantee that most witnesses are actual offspring of p;
-an unsequenced shared co-parent can produce a wrong-member majority and veto a true edge. Absence of a released
-edge is not absence of a biological parent. The per-dyad exclusion threshold does not bound this family error.
-
+The fixed point withdraws irreversibly, recomputing linked-family cleaning against
+surviving edges. Likelihoods are summed over contigs before taking process margins;
+all possible witnesses are scored once. Count release and call application retain
+those withdrawals.
 Method: docs/methods/pedigree.md#sibling-as-parent-guard.
 """
 
 from __future__ import annotations
 
+import math
+from dataclasses import replace
+
 import numpy as np
 
-from ...contracts.pedigree import NO_PARENT, UNRESOLVED, EdgeFamily, GuardRecord, GuardVote, ParentEdges, PedigreeCalls
+from ...contracts.pedigree import (
+    NO_PARENT,
+    UNRESOLVED,
+    EdgeFamily,
+    GuardRecord,
+    GuardVote,
+    ParentEdges,
+    PedigreeCalls,
+    RelationshipRequest,
+)
 from ...core.errors import InputError, InvariantError
-from . import exclusion
 from .parameters import PedigreeParameters
+from .relationship import evidence
 
-__all__ = ["edge_families", "guard_dyads", "decide", "withheld_edges", "fixed_point", "apply_calls"]
-
+__all__ = ["edge_families", "relationship_request", "decide", "withheld_edges", "fixed_point", "apply_calls"]
 WITHHELD, KEPT, UNTESTED = "withheld", "kept", "untested"
-LINKED, HALF_SIB = "linked", "half_sib"
+LINKED = "linked"
 STATUS = "tier_b_sibling_guard_withheld"
 STATUS_A = "tier_a_sibling_guard_withheld"
 
 
-def edge_families(
-    sample_ids, parents, children, relatedness, config: PedigreeParameters, *, cleaning_edges=None
-) -> list[EdgeFamily]:
-    """The members of every released edge p -> c (``parents``/``children``: the released edges before the guard, on
-    the axis ``sample_ids``). ``cleaning_edges`` supplies the surviving premises, independently of which edges
-    are being reported; omitted only for a single-pass diagnostic."""
+def edge_families(sample_ids, parents, children, relatedness, config: PedigreeParameters, *, cleaning_edges=None):
+    """Whole relatedness families, without the proposed parent or linked members."""
     if tuple(relatedness.sample_ids) != tuple(sample_ids):
         raise InputError("the relatedness product's sample axis differs from the pedigree's")
-    guard = config.guard
     released = (
-        set(zip(np.asarray(parents).tolist(), np.asarray(children).tolist(), strict=False))
+        set(zip(np.asarray(parents).tolist(), np.asarray(children).tolist(), strict=True))
         if cleaning_edges is None
         else set(cleaning_edges)
     )
-    released_parents: dict[int, set[int]] = {}
+    adjacent: dict[int, set[int]] = {}
     for parent, child in released:
-        released_parents.setdefault(child, set()).add(parent)
+        adjacent.setdefault(parent, set()).add(child)
+        adjacent.setdefault(child, set()).add(parent)
     out = []
-    for parent, child in zip(np.asarray(parents).tolist(), np.asarray(children).tolist(), strict=False):
-        if relatedness.member_support[child] > guard.focal_support:
-            members = np.flatnonzero(relatedness.family == relatedness.family[child])
-            family = [
-                int(m)
-                for m in members
-                if int(m) != parent and (int(m) == child or relatedness.member_support[m] >= guard.member_support)
-            ]
-        else:
-            family = [child]
-        # A member released as a parent or child of the child or of another member is no full sib of the family.
-        linked = {
-            m for m in family if m != child and any((m, x) in released or (x, m) in released for x in family if x != m)
-        }
-        # A different released parent is a half-sib heuristic, not proof: parent sets can be incomplete or wrong.
-        allowed = released_parents.get(child, set()) | {parent}
-        half_sib = {
-            m for m in family if m != child and m not in linked and not released_parents.get(m, set()) <= allowed
-        }
-        dropped = tuple((m, LINKED) for m in family if m in linked) + tuple(
-            (m, HALF_SIB) for m in family if m in half_sib
+    for parent, child in zip(np.asarray(parents).tolist(), np.asarray(children).tolist(), strict=True):
+        members = (
+            np.flatnonzero(relatedness.family == relatedness.family[child])
+            if relatedness.family[child] >= 0
+            else [child]
         )
-        tested = tuple(m for m in family if m != child and m not in linked and m not in half_sib)
-        out.append(EdgeFamily(parent, child, tuple(m for m in family if m != child), dropped, tested))
+        family = sorted((int(m) for m in members if int(m) != parent), key=lambda m: sample_ids[m])
+        family_set = set(family)
+        linked = {m for m in family if m != child and adjacent.get(m, set()) & family_set}
+        supported = tuple(m for m in family if m != child)
+        out.append(
+            EdgeFamily(
+                parent,
+                child,
+                supported,
+                tuple((m, LINKED) for m in supported if m in linked),
+                tuple(m for m in supported if m not in linked),
+                tuple(sorted((int(m) for m in members if int(m) != child), key=lambda m: sample_ids[m])),
+            )
+        )
     return out
 
 
-def guard_dyads(families: list[EdgeFamily], config: PedigreeParameters, *, all_supported=False) -> np.ndarray:
-    """int64 [D, 2] (member, parent) dyads the guard needs exclusion evidence for (sorted, unique): the tested members
-    of every edge with enough of them. ``all_supported`` scores the superset needed by fixed-point cleaning:
-    a dropped member can return after its cleaning edge is withdrawn."""
-    dyads = {
-        (s, f.parent)
-        for f in families
-        if len(f.supported if all_supported else f.tested) >= config.guard.minimum_family - 1
-        for s in (f.supported if all_supported else f.tested)
+def check_partner_map(family: EdgeFamily, limit: int, *, current=True):
+    """Next P on the fixed family ring, then filter by the current witness set.
+
+    A proposed parent inside the family keeps its ring position. Filtering never
+    advances the window to replace absent members. Build indices once per edge.
+    """
+    ring = family.ring or family.supported
+    positions = {member: i for i, member in enumerate(ring)}
+    members = family.tested if current else family.supported
+    allowed = set(members)
+    return {
+        w: tuple(
+            ring[(positions[w] + offset) % len(ring)]
+            for offset in range(1, min(limit, len(ring) - 1) + 1)
+            if ring[(positions[w] + offset) % len(ring)] in allowed
+        )
+        for w in members
     }
-    return np.asarray(sorted(dyads), dtype=np.int64).reshape(-1, 2)
 
 
-def decide(
-    families: list[EdgeFamily],
-    dyads: np.ndarray,
-    log_e: np.ndarray,
-    log_e_upper: np.ndarray | None,
-    config: PedigreeParameters,
-    sample_count: int,
-) -> list[tuple[float, str]]:
-    """(excluded members, NaN when untested; call) per family. ``dyads``/``log_e``/``log_e_upper``: the exclusion
-    evidence of (at least) guard_dyads(families) as (child, candidate) rows of any order; a member is excluded from the
-    parent when log E >= log(2N/alpha), the threshold of the count release (N = ``sample_count``)."""
-    threshold = exclusion.log_threshold(sample_count, config.exclusion.alpha)
-    evidence = {}
-    for k, (a, b) in enumerate(np.asarray(dyads, dtype=np.int64).reshape(-1, 2).tolist()):
-        lower = float(log_e[k])
-        upper = lower if log_e_upper is None else float(log_e_upper[k])
-        if lower < threshold <= upper and lower != upper:
-            raise InputError("unresolved exclusion interval requires exact refinement")
-        evidence[(a, b)] = evidence[(b, a)] = lower >= threshold
-    out = []
+def relationship_request(families, sample_ids, contigs, config: PedigreeParameters | None = None):
+    """Score the original pair and every original family member, including linked ones.
+
+    Cleaning can admit a linked member after a premise is withdrawn. Requesting
+    the whole original family covers both returning and removed witnesses.
+    """
+    parameters = (config or PedigreeParameters()).relationship
+    dyads, trios = set(), set()
     for f in families:
-        if len(f.tested) < config.guard.minimum_family - 1:
-            out.append((np.nan, UNTESTED))
-            continue
-        excluded = sum(evidence[(s, f.parent)] for s in f.tested)
-        out.append((excluded, WITHHELD if 2 * excluded > len(f.tested) else KEPT))
+        dyads.add(tuple(sorted((f.child, f.parent))))
+        partners = check_partner_map(f, parameters.sibship_check_partners, current=False)
+        for w in f.supported:
+            dyads.add(tuple(sorted((w, f.parent))))
+            trios.add(tuple(sorted((f.child, f.parent, w))))
+            for other in partners[w]:
+                trios.add(tuple(sorted((f.child, w, other))))
+    return RelationshipRequest(
+        tuple(sample_ids),
+        tuple(contigs),
+        np.array(sorted(dyads), dtype=np.int64).reshape(-1, 2),
+        np.array(sorted(trios), dtype=np.int64).reshape(-1, 3),
+    )
+
+
+def summed_margins(request, records):
+    """Sum each process over chromosomes before forming evidence against feasibility."""
+    pair = np.zeros((len(request.dyads), 4))
+    trio = np.zeros((len(request.trios), 4))
+    if len(records) != (len(request.contigs) if len(request.dyads) else 0):
+        raise InputError("relationship evidence must cover configured contigs in order")
+    for c, record in zip(request.contigs, records, strict=bool(records)):
+        if (
+            record.contig != c
+            or record.sample_ids != request.sample_ids
+            or not np.array_equal(record.dyads, request.dyads)
+            or not np.array_equal(record.trios, request.trios)
+        ):
+            raise InputError("relationship evidence differs from its frozen request")
+        pair += record.pair_log_likelihoods
+        trio += record.trio_log_likelihoods
+    return (
+        dict(zip(map(tuple, request.dyads.tolist()), evidence(pair), strict=True)),
+        dict(zip(map(tuple, request.trios.tolist()), evidence(trio), strict=True)),
+    )
+
+
+def decide(families, pair_margins, trio_margins, config: PedigreeParameters, member_support):
+    """Profile likelihood score = pair margin plus checked witness contributions, in nats."""
+    p = config.relationship
+    threshold = p.withholding_score
+    out = []
+    supports = np.nan_to_num(member_support, nan=0.0)
+    for f in families:
+        margin = float(pair_margins[tuple(sorted((f.child, f.parent)))])
+        contribution = 0.0
+        set_aside = against = supporting = 0
+        partners = check_partner_map(f, p.sibship_check_partners)
+        for w in f.tested:
+            dpar = float(pair_margins[tuple(sorted((w, f.parent)))])
+            dsib = float(trio_margins[tuple(sorted((f.child, f.parent, w)))])
+            support = min(supports[f.child], supports[w])
+            band = int(support >= p.support_bounds[0]) + int(support >= p.support_bounds[1])
+            prior = p.sibship_prior[band]
+            price = max(0.0, math.log(prior / (1.0 - prior)))
+            others = partners[w]
+            family_contradicts = (
+                bool(others)
+                and float(np.median([trio_margins[tuple(sorted((f.child, w, other)))] for other in others])) <= -price
+            )
+            v = 0.0 if family_contradicts else max(dpar, -price) - max(dsib, -price)
+            contribution += v
+            set_aside += int(family_contradicts or (dpar <= -price and dsib <= -price))
+            against += int(v < -1.0)
+            supporting += int(v > 1.0)
+        total = margin + contribution
+        call = WITHHELD if total < -threshold else (UNTESTED if not f.tested and margin == 0.0 else KEPT)
+        basis = "family" if total > threshold else "pair_only"
+        withholding = ("pair" if margin < -threshold else "family") if call == WITHHELD else "none"
+        out.append(
+            GuardVote(
+                f,
+                set_aside,
+                against,
+                supporting,
+                margin,
+                contribution,
+                total,
+                "" if call == WITHHELD else basis,
+                call,
+                call,
+                0,
+                withholding,
+            )
+        )
     return out
 
 
-def withheld_edges(families: list[EdgeFamily], decisions: list[tuple[float, str]]) -> frozenset:
-    """The (parent, child) edges the guard withholds."""
-    return frozenset((f.parent, f.child) for f, (_, call) in zip(families, decisions, strict=False) if call == WITHHELD)
+def withheld_edges(families, decisions):
+    """The (parent, child) edges the relationship evidence withholds."""
+    return frozenset((f.parent, f.child) for f, v in zip(families, decisions, strict=True) if v.call == WITHHELD)
 
 
 def _unresolve(calls: PedigreeCalls, children, status_name: str = STATUS) -> PedigreeCalls:
@@ -150,49 +205,37 @@ def _unresolve(calls: PedigreeCalls, children, status_name: str = STATUS) -> Ped
     return PedigreeCalls(state, parents, tuple(status))
 
 
-def fixed_point(
-    edges: ParentEdges,
-    relatedness,
-    dyads: np.ndarray,
-    log_e: np.ndarray,
-    log_e_upper: np.ndarray | None,
-    config: PedigreeParameters,
-) -> GuardRecord:
-    """Contract the retained edge set in at most E+1 passes; withdrawals never reverse.
-
-    Final votes describe the final premises. A prior veto that no longer has a
-    majority remains an explicit abstention. Inputs are not mutated; a straddling
-    exclusion interval raises instead of inventing evidence (PD23).
-    """
-    initial = set(zip(edges.parents.tolist(), edges.children.tolist(), strict=False))
+def fixed_point(edges, relatedness, request, records, config: PedigreeParameters):
+    """Contract retained edges in at most E+1 passes, with irreversible withdrawals."""
+    pair, trio = summed_margins(request, records)
+    initial = set(zip(edges.parents.tolist(), edges.children.tolist(), strict=True))
     retained = initial.copy()
-    withdrawn: dict[tuple[int, int], int] = {}
+    withdrawn = {}
     for iteration in range(1, len(initial) + 2):
         families = edge_families(
             edges.sample_ids, edges.parents, edges.children, relatedness, config, cleaning_edges=retained
         )
-        decisions = decide(families, dyads, log_e, log_e_upper, config, len(edges.sample_ids))
+        decisions = decide(families, pair, trio, config, relatedness.member_support)
         removed = retained & withheld_edges(families, decisions)
         if not removed:
             break
-        withdrawn.update((edge, iteration) for edge in removed)
+        for vote in decisions:
+            key = (vote.family.parent, vote.family.child)
+            if key in removed:
+                withdrawn[key] = (iteration, vote.withholding_basis)
         retained.difference_update(removed)
     else:
         raise InvariantError("sibling guard did not converge within its E+1 pass bound")
-    votes = tuple(
-        GuardVote(
-            family,
-            excluded,
-            WITHHELD if (family.parent, family.child) in withdrawn else call,
-            call,
-            withdrawn.get((family.parent, family.child), 0),
-            ("final_majority" if call == WITHHELD else "prior_veto_abstention")
-            if (family.parent, family.child) in withdrawn
-            else "none",
-        )
-        for family, (excluded, call) in zip(families, decisions, strict=False)
-    )
-    return GuardRecord(votes, iteration, True, len(initial) + 1)
+    votes = []
+    for vote in decisions:
+        key = (vote.family.parent, vote.family.child)
+        if key in withdrawn:
+            number, basis = withdrawn[key]
+            vote = replace(
+                vote, call=WITHHELD, relationship_basis="", withdrawal_iteration=number, withholding_basis=basis
+            )
+        votes.append(vote)
+    return GuardRecord(tuple(votes), iteration, True, len(initial) + 1)
 
 
 def apply_calls(

@@ -1981,6 +1981,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `supported` | `tuple[int, ...]` | state | () | 1 | tuple[int, ...] | True | `required` |
 | `dropped` | `tuple[tuple[int, str], ...]` | state | () | 1 | tuple[tuple[int, str], ...] | True | `required` |
 | `tested` | `tuple[int, ...]` | state | () | 1 | tuple[int, ...] | True | `required` |
+| `ring` | `tuple[int, ...]` | state | () | 1 | tuple[int, ...] | True | `()` |
 
 ## pedigree.GuardVote
 
@@ -1989,9 +1990,15 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `family` | `EdgeFamily` | state | () | 1 | EdgeFamily | True | `required` |
-| `excluded` | `int &#124; float` | state | () | 1 | int &#124; float | True | `required` |
-| `call` | `str` | state | () | 1 | str | True | `required` |
-| `evidence_call` | `str` | state | () | 1 | str | True | `required` |
+| `set_aside` | `int` | state | () | count | int | True | `required` |
+| `against` | `int` | state | () | count | int | True | `required` |
+| `supporting` | `int` | state | () | count | int | True | `required` |
+| `pair_score` | `float` | evidence | () | nats | float64 | True | `required` |
+| `family_score` | `float` | evidence | () | nats | float64 | True | `required` |
+| `score` | `float` | evidence | () | nats | float64 | True | `required` |
+| `relationship_basis` | `str` | call | () | 1 | str | True | `required` |
+| `call` | `str` | call | () | 1 | str | True | `required` |
+| `evidence_call` | `str` | call | () | 1 | str | True | `required` |
 | `withdrawal_iteration` | `int` | state | () | 1 | int | True | `required` |
 | `withholding_basis` | `str` | state | () | 1 | str | True | `required` |
 
@@ -2042,7 +2049,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `5` |
 
 ## pedigree.PedigreeResult
 
@@ -2156,7 +2163,6 @@ Extends `SummaryMapping`.
 | `genotype_replacement_probability` | `float` | report | () | 1 | float | True | `required` |
 | `conditional_on_supported_edge_directions` | `bool` | report | () | 1 | bool | True | `required` |
 | `candidate_dyads` | `int` | report | () | 1 | int | True | `required` |
-| `guard_dyads` | `int` | report | () | 1 | int | True | `required` |
 | `contigs` | `int` | obs | () | 1 | int | True | `required` |
 | `status` | `str` | report | () | 1 | str | True | `required` |
 | `released` | `int` | report | () | 1 | int | True | `required` |
@@ -2234,6 +2240,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `release_evidence` | `str &#124; None` | report | () | 1 | str &#124; None | True | `None` |
 | `parent_slot_basis` | `str &#124; None` | report | () | 1 | str &#124; None | True | `None` |
 | `parents_before_guard` | `tuple[int, int] &#124; None` | report | () | 1 | tuple[int, int] &#124; None | True | `None` |
+| `relationship_basis` | `str` | report | () | 1 | str | True | `''` |
 
 ## pedigree.PartialRelationshipView
 
@@ -2255,6 +2262,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `release_evidence` | `str &#124; None` | report | () | 1 | str &#124; None | True | `None` |
 | `parent_slot_basis` | `str &#124; None` | report | () | 1 | str &#124; None | True | `None` |
 | `parents_before_guard` | `tuple[int, int] &#124; None` | report | () | 1 | tuple[int, int] &#124; None | True | `None` |
+| `relationship_basis` | `str` | report | () | 1 | str | True | `''` |
 
 ## pedigree.CandidateView
 
@@ -2553,16 +2561,18 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 |---|---|---|---|---|---|---|---|
 | `parent` | `int` | report | () | 1 | int64 | True | `required` |
 | `child` | `int` | report | () | 1 | int64 | True | `required` |
-| `supported_members` | `int` | report | () | 1 | int64 | True | `required` |
-| `dropped_linked` | `int` | report | () | 1 | int64 | True | `required` |
-| `dropped_half_sib` | `int` | report | () | 1 | int64 | True | `required` |
-| `dropped_members` | `tuple[tuple[int, str], ...]` | report | () | 1 | tuple[tuple[int, str], ...] | True | `required` |
-| `tested_members` | `int` | report | () | 1 | int64 | True | `required` |
-| `excluded_members` | `int &#124; float` | report | () | 1 | int &#124; float | True | `required` |
+| `witnesses` | `int` | report | () | 1 | int64 | True | `required` |
+| `set_aside` | `int` | report | () | 1 | int64 | True | `required` |
+| `against` | `int` | report | () | 1 | int64 | True | `required` |
+| `supporting` | `int` | report | () | 1 | int64 | True | `required` |
+| `pair_score` | `float` | report | () | nats | float64 | True | `required` |
+| `family_score` | `float` | report | () | nats | float64 | True | `required` |
+| `score` | `float` | report | () | nats | float64 | True | `required` |
 | `call` | `str` | report | () | 1 | str | True | `required` |
 | `evidence_call` | `str` | report | () | 1 | str | True | `required` |
 | `withdrawal_iteration` | `int` | report | () | 1 | int64 | True | `required` |
 | `withholding_basis` | `str` | report | () | 1 | str | True | `required` |
+| `relationship_basis` | `str` | report | () | 1 | str | True | `required` |
 
 ## pedigree.GuardView
 
@@ -2596,6 +2606,44 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `chromosomes` | `tuple[ChromosomeSummaryView, ...]` | report | () | 1 | tuple[ChromosomeSummaryView, ...] | True | `required` |
 | `relatives` | `RelativeContrasts` | report | () | 1 | RelativeContrasts | True | `required` |
 
+## pedigree.RelationshipRequest
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `dyads` | `np.ndarray` | state | ('D', '2') | 1 | int64 | True | `required` |
+| `trios` | `np.ndarray` | state | ('T', '3') | 1 | int64 | True | `required` |
+
+## pedigree.RelationshipChance
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `component_index` | `int` | obs | () | 1 | int64 | True | `required` |
+| `pair_chance` | `np.ndarray` | evidence | ('B',) | probability | float64 | True | `required` |
+| `pair_persistence` | `float` | evidence | () | probability | float64 | True | `required` |
+| `trio_chance` | `np.ndarray` | evidence | ('B',) | probability | float64 | True | `required` |
+| `trio_persistence` | `float` | evidence | () | probability | float64 | True | `required` |
+| `reference_triples` | `np.ndarray` | state | ('K', '3') | 1 | int64 | True | `required` |
+
+## pedigree.RelationshipEvidence
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `contig` | `str` | obs | () | 1 | str | True | `required` |
+| `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `dyads` | `np.ndarray` | state | ('D', '2') | 1 | int64 | True | `required` |
+| `trios` | `np.ndarray` | state | ('T', '3') | 1 | int64 | True | `required` |
+| `pair_log_likelihoods` | `np.ndarray` | evidence | ('D', '4') | nats | float64 | True | `required` |
+| `trio_log_likelihoods` | `np.ndarray` | evidence | ('T', '4') | nats | float64 | True | `required` |
+| `components` | `tuple[RelationshipChance, ...]` | evidence | () | 1 | tuple[RelationshipChance, ...] | True | `required` |
+
 ## pedigree.ExclusionRequest
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
@@ -2607,6 +2655,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `dyads` | `np.ndarray` | state | ('D', '2') | 1 | int64 | True | `required` |
 | `target_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `before_edges` | `ParentEdges` | state | () | 1 | ParentEdges | True | `required` |
+| `relationship` | `RelationshipRequest` | state | () | 1 | RelationshipRequest | True | `required` |
 
 ## pedigree.PedigreePrecheck
 

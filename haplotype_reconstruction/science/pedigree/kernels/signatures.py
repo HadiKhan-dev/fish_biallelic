@@ -2491,3 +2491,25 @@ OVERLOADS = {
         ),
     ),
 }
+
+# Relationship kernels receive owned contiguous work arrays through public wrappers.
+_rel_i1 = types.Array(types.int64, 1, "C")
+_rel_i2 = types.Array(types.int64, 2, "C")
+_rel_i3 = types.Array(types.int64, 3, "C")
+_rel_b2 = types.Array(types.boolean, 2, "C")
+_rel_x2 = types.Array(types.int8, 2, "C")
+_rel_f1 = types.Array(types.float64, 1, "C")
+_rel_f2 = types.Array(types.float64, 2, "C")
+OVERLOADS.update(
+    {
+        "relationship._pair_chance": ((_rel_i3, _rel_b2),),
+        "relationship._pair_value": ((_rel_i3, _rel_b2, types.int64, types.int64, types.int64),),
+        "relationship._feasible3": ((_rel_i2,),),
+        "relationship._pair_sequence": ((_rel_i3, _rel_b2, _rel_i2),),
+        "relationship._trio_sequence": ((_rel_i3, _rel_b2, _rel_i2),),
+        "relationship._pair_persistence": ((_rel_i3, _rel_b2),),
+        "relationship._process_log_likelihoods": (
+            (_rel_x2, _rel_f1, _rel_i1, _rel_i1, _rel_f1, _rel_f1, _rel_f2, types.float64),
+        ),
+    }
+)

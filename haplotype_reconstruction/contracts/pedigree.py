@@ -633,8 +633,8 @@ class Decision:
 
 @dataclass(frozen=True)
 class EdgeFamily:
-    """The members of one released edge's test (sample indices): ``supported`` = c's supported family without c and
-    p; ``dropped`` = (member, reason) pairs; ``tested`` = the remaining members."""
+    """The members of one released edge's test (sample indices): ``supported`` = c's whole relatedness family
+    without c and p; ``dropped`` = (member, reason) pairs; ``tested`` = the remaining members."""
 
     parent: int = record_field("state", axes=(), units="1", dtype="int")
     child: int = record_field("state", axes=(), units="1", dtype="int")
@@ -644,17 +644,25 @@ class EdgeFamily:
     )
     tested: tuple[int, ...] = record_field("state", axes=(), units="1", dtype="tuple[int, ...]")
 
+    ring: tuple[int, ...] = record_field("state", units="1", dtype="tuple[int, ...]", default=())
+
 
 @dataclass(frozen=True)
 class GuardVote:
-    """One edge's final witnesses and irreversible withdrawal (PD23)."""
+    """One edge's final relationship evidence and irreversible withdrawal (PD23)."""
 
-    family: EdgeFamily = record_field("state", axes=(), units="1", dtype="EdgeFamily")
-    excluded: int | float = record_field("state", axes=(), units="1", dtype="int | float")
-    call: str = record_field("state", axes=(), units="1", dtype="str")
-    evidence_call: str = record_field("state", axes=(), units="1", dtype="str")
-    withdrawal_iteration: int = record_field("state", axes=(), units="1", dtype="int")
-    withholding_basis: str = record_field("state", axes=(), units="1", dtype="str")
+    family: EdgeFamily = record_field("state", dtype="EdgeFamily")
+    set_aside: int = record_field("state", units="count", dtype="int")
+    against: int = record_field("state", units="count", dtype="int")
+    supporting: int = record_field("state", units="count", dtype="int")
+    pair_score: float = record_field("evidence", units="nats", dtype="float64")
+    family_score: float = record_field("evidence", units="nats", dtype="float64")
+    score: float = record_field("evidence", units="nats", dtype="float64")
+    relationship_basis: str = record_field("call", dtype="str")
+    call: str = record_field("call", dtype="str")
+    evidence_call: str = record_field("call", dtype="str")
+    withdrawal_iteration: int = record_field("state", dtype="int")
+    withholding_basis: str = record_field("state", dtype="str")
 
 
 @dataclass(frozen=True)
@@ -679,15 +687,10 @@ class GuardRelatedness:
     family: np.ndarray = record_field("evidence", axes=("N",), units="1", dtype="int64")
     member_support: np.ndarray = record_field("evidence", axes=("N",), units="1", dtype="float64")
 
-    def supported_family(self, sample: int, minimum_support: float) -> np.ndarray:
-        if not self.member_support[sample] >= minimum_support:
-            return np.asarray([sample], dtype=np.int64)
-        return np.flatnonzero((self.family == self.family[sample]) & (self.member_support >= minimum_support))
-
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 4 with joint
+    """Complete released pedigree and retained numerical state, published atomically as schema 5 with joint
     transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -710,7 +713,7 @@ class Pedigree:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(4)
+    schema: int = schema_field(5)
 
 
 @dataclass(frozen=True)
@@ -913,7 +916,6 @@ class ExclusionSummary(SummaryMapping):
     genotype_replacement_probability: float = record_field("report", axes=(), units="1", dtype="float")
     conditional_on_supported_edge_directions: bool = record_field("report", axes=(), units="1", dtype="bool")
     candidate_dyads: int = record_field("report", axes=(), units="1", dtype="int")
-    guard_dyads: int = record_field("report", axes=(), units="1", dtype="int")
     contigs: int = record_field("obs", axes=(), units="1", dtype="int")
     status: str = record_field("report", axes=(), units="1", dtype="str")
     released: int = record_field("report", axes=(), units="1", dtype="int")
@@ -995,6 +997,8 @@ class RelationshipView:
     parent_slot_basis: str | None = record_field("report", dtype="str | None", default=None)
     parents_before_guard: tuple[int, int] | None = record_field("report", dtype="tuple[int, int] | None", default=None)
 
+    relationship_basis: str = record_field("report", dtype="str", default="")
+
 
 @dataclass(frozen=True)
 class PartialRelationshipView:
@@ -1014,6 +1018,8 @@ class PartialRelationshipView:
     release_evidence: str | None = record_field("report", dtype="str | None", default=None)
     parent_slot_basis: str | None = record_field("report", dtype="str | None", default=None)
     parents_before_guard: tuple[int, int] | None = record_field("report", dtype="tuple[int, int] | None", default=None)
+
+    relationship_basis: str = record_field("report", dtype="str", default="")
 
 
 @dataclass(frozen=True)
@@ -1344,20 +1350,22 @@ class PedigreeViews:
 
 @dataclass(frozen=True)
 class GuardViewRow:
-    """Final PD23 report values, with dropped members retained as indexed reason pairs."""
+    """Final PD23 relationship evidence, in original edge order."""
 
     parent: int = record_field("report", dtype="int64")
     child: int = record_field("report", dtype="int64")
-    supported_members: int = record_field("report", dtype="int64")
-    dropped_linked: int = record_field("report", dtype="int64")
-    dropped_half_sib: int = record_field("report", dtype="int64")
-    dropped_members: tuple[tuple[int, str], ...] = record_field("report", dtype="tuple[tuple[int, str], ...]")
-    tested_members: int = record_field("report", dtype="int64")
-    excluded_members: int | float = record_field("report", dtype="int | float")
+    witnesses: int = record_field("report", dtype="int64")
+    set_aside: int = record_field("report", dtype="int64")
+    against: int = record_field("report", dtype="int64")
+    supporting: int = record_field("report", dtype="int64")
+    pair_score: float = record_field("report", units="nats", dtype="float64")
+    family_score: float = record_field("report", units="nats", dtype="float64")
+    score: float = record_field("report", units="nats", dtype="float64")
     call: str = record_field("report", dtype="str")
     evidence_call: str = record_field("report", dtype="str")
     withdrawal_iteration: int = record_field("report", dtype="int64")
     withholding_basis: str = record_field("report", dtype="str")
+    relationship_basis: str = record_field("report", dtype="str")
 
 
 @dataclass(frozen=True)
@@ -1394,14 +1402,79 @@ class PedigreeReportInputs:
 
 
 @dataclass(frozen=True)
+class RelationshipRequest:
+    """All unordered dyads/trios any guard iteration can need, frozen once."""
+
+    sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    dyads: np.ndarray = record_field("state", axes=("D", "2"), dtype="int64")
+    trios: np.ndarray = record_field("state", axes=("T", "3"), dtype="int64")
+
+    def __post_init__(self) -> None:
+        for rows, width in ((self.dyads, 2), (self.trios, 3)):
+            if rows.ndim != 2 or rows.shape[1] != width or rows.dtype != np.int64:
+                raise InputError("relationship request has invalid sequence axes")
+            if len(rows) and (
+                np.any(rows < 0) or np.any(rows >= len(self.sample_ids)) or np.any(np.diff(rows, axis=1) <= 0)
+            ):
+                raise InputError("relationship request requires distinct sorted sample indices")
+            if len(set(map(tuple, rows.tolist()))) != len(rows):
+                raise InputError("relationship request contains duplicate sequences")
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class RelationshipChance:
+    """Cohort-derived chance laws and sampled triples for one independent component."""
+
+    component_index: int = record_field("obs", dtype="int64")
+    pair_chance: np.ndarray = record_field("evidence", axes=("B",), units="probability", dtype="float64")
+    pair_persistence: float = record_field("evidence", units="probability", dtype="float64")
+    trio_chance: np.ndarray = record_field("evidence", axes=("B",), units="probability", dtype="float64")
+    trio_persistence: float = record_field("evidence", units="probability", dtype="float64")
+    reference_triples: np.ndarray = record_field("state", axes=("K", "3"), dtype="int64")
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class RelationshipEvidence:
+    """Four process log likelihoods summed over this contig's independent components."""
+
+    contig: str = record_field("obs", dtype="str")
+    sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    dyads: np.ndarray = record_field("state", axes=("D", "2"), dtype="int64")
+    trios: np.ndarray = record_field("state", axes=("T", "3"), dtype="int64")
+    pair_log_likelihoods: np.ndarray = record_field("evidence", axes=("D", "4"), units="nats", dtype="float64")
+    trio_log_likelihoods: np.ndarray = record_field("evidence", axes=("T", "4"), units="nats", dtype="float64")
+    components: tuple[RelationshipChance, ...] = record_field("evidence", dtype="tuple[RelationshipChance, ...]")
+
+    def __post_init__(self) -> None:
+        if self.pair_log_likelihoods.shape != (len(self.dyads), 4) or self.trio_log_likelihoods.shape != (
+            len(self.trios),
+            4,
+        ):
+            raise InputError("relationship likelihood axes differ from request")
+        if np.any(~np.isfinite(self.pair_log_likelihoods[:, 0])) or np.any(
+            ~np.isfinite(self.trio_log_likelihoods[:, 0])
+        ):
+            raise InputError("feasible relationship likelihoods must be finite")
+        if np.any(np.isnan(self.pair_log_likelihoods)) or np.any(np.isnan(self.trio_log_likelihoods)):
+            raise InputError("relationship likelihoods contain NaN")
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
 class ExclusionRequest:
-    """Canonical target prefix followed by guard-only dyads, for every configured contig."""
+    """Count-only exclusion query and the independently scored relationship request."""
 
     sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
     dyads: np.ndarray = record_field("state", axes=("D", "2"), dtype="int64")
     target_count: int = record_field("state", dtype="int64")
     before_edges: ParentEdges = record_field("state", dtype="ParentEdges")
+    relationship: RelationshipRequest = record_field("state", dtype="RelationshipRequest")
 
     @property
     def dyad_digest(self) -> str:

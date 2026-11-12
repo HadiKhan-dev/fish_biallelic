@@ -31,6 +31,7 @@ COLUMNS = {
         "ObservedParentCount",
         "InferenceStatus",
         "ReleaseEvidence",
+        "RelationshipBasis",
     ],
     "tier_b_partial_relationships": [
         "Sample",
@@ -45,8 +46,17 @@ COLUMNS = {
         "ObservedParentCountMinimum",
         "ObservedParentCountMaximum",
         "ReleaseEvidence",
+        "RelationshipBasis",
     ],
-    "tier_a_relationships": ["Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus"],
+    "tier_a_relationships": [
+        "Sample",
+        "Parent1",
+        "Parent2",
+        "ParentState",
+        "ObservedParentCount",
+        "InferenceStatus",
+        "RelationshipBasis",
+    ],
     "tier_a_partial_relationships": [
         "Sample",
         "Parent1",
@@ -59,6 +69,7 @@ COLUMNS = {
         "ExactConfigurationResolved",
         "ObservedParentCountMinimum",
         "ObservedParentCountMaximum",
+        "RelationshipBasis",
     ],
     "complete_relationships": ["Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus"],
     "tier_b_candidate_sets": [
@@ -286,12 +297,13 @@ COLUMNS = {
     "sibling_guard": [
         "Parent",
         "Child",
-        "SupportedMembers",
-        "DroppedLinked",
-        "DroppedHalfSib",
-        "DroppedMembers",
-        "TestedMembers",
-        "ExcludedMembers",
+        "Witnesses",
+        "SetAside",
+        "Against",
+        "Supporting",
+        "PairScore",
+        "FamilyScore",
+        "Score",
         "Call",
         "EvidenceCall",
         "WithdrawalIteration",
@@ -302,10 +314,10 @@ COLUMNS = {
 
 # Empty row-dict frames have no header. Fixed-column frames retain their full header.
 EMPTY_COLUMNS = {
-    "tier_b_relationships": ("ReleaseEvidence",),
-    "tier_b_partial_relationships": (),
-    "tier_a_relationships": (),
-    "tier_a_partial_relationships": (),
+    "tier_b_relationships": ("ReleaseEvidence", "RelationshipBasis"),
+    "tier_b_partial_relationships": ("RelationshipBasis",),
+    "tier_a_relationships": ("RelationshipBasis",),
+    "tier_a_partial_relationships": ("RelationshipBasis",),
     "complete_relationships": (),
     "tier_b_candidate_sets": ("TierBFinalStateCall", "TierBReleaseEvidence"),
     "diagnostics": ("TierBFinalStateCall", "TierBReleaseEvidence"),
@@ -506,7 +518,6 @@ EXCLUSION_SUMMARY_FIELDS = (
     "genotype_replacement_probability",
     "conditional_on_supported_edge_directions",
     "candidate_dyads",
-    "guard_dyads",
     "contigs",
     "status",
     "chromosomes",
@@ -562,6 +573,7 @@ TIER_B_RELATIONSHIPS_COLUMNS = (
     "ObservedParentCount",
     "InferenceStatus",
     "ReleaseEvidence",
+    "RelationshipBasis",
 )
 """Columns in published order.
 
@@ -572,6 +584,7 @@ TIER_B_RELATIONSHIPS_COLUMNS = (
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     InferenceStatus: inference status (1).
     ReleaseEvidence: release evidence (1).
+    RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
 """
 
 TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
@@ -587,6 +600,7 @@ TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
     "ObservedParentCountMinimum",
     "ObservedParentCountMaximum",
     "ReleaseEvidence",
+    "RelationshipBasis",
 )
 """Columns in published order.
 
@@ -602,9 +616,18 @@ TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
     ObservedParentCountMinimum: observed parent count minimum (1).
     ObservedParentCountMaximum: observed parent count maximum (1).
     ReleaseEvidence: release evidence (1).
+    RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
 """
 
-TIER_A_RELATIONSHIPS_COLUMNS = ("Sample", "Parent1", "Parent2", "ParentState", "ObservedParentCount", "InferenceStatus")
+TIER_A_RELATIONSHIPS_COLUMNS = (
+    "Sample",
+    "Parent1",
+    "Parent2",
+    "ParentState",
+    "ObservedParentCount",
+    "InferenceStatus",
+    "RelationshipBasis",
+)
 """Columns in published order.
 
     Sample: sample identifier (text).
@@ -613,6 +636,7 @@ TIER_A_RELATIONSHIPS_COLUMNS = ("Sample", "Parent1", "Parent2", "ParentState", "
     ParentState: released M0/M1/M2 state label (text).
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     InferenceStatus: inference status (1).
+    RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
 """
 
 TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
@@ -627,6 +651,7 @@ TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
     "ExactConfigurationResolved",
     "ObservedParentCountMinimum",
     "ObservedParentCountMaximum",
+    "RelationshipBasis",
 )
 """Columns in published order.
 
@@ -641,6 +666,7 @@ TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
     ExactConfigurationResolved: exact configuration resolved (1).
     ObservedParentCountMinimum: observed parent count minimum (1).
     ObservedParentCountMaximum: observed parent count maximum (1).
+    RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
 """
 
 COMPLETE_RELATIONSHIPS_COLUMNS = (
@@ -1146,12 +1172,13 @@ RELATIVE_CONTRASTS_COLUMNS = (
 SIBLING_GUARD_COLUMNS = (
     "Parent",
     "Child",
-    "SupportedMembers",
-    "DroppedLinked",
-    "DroppedHalfSib",
-    "DroppedMembers",
-    "TestedMembers",
-    "ExcludedMembers",
+    "Witnesses",
+    "SetAside",
+    "Against",
+    "Supporting",
+    "PairScore",
+    "FamilyScore",
+    "Score",
     "Call",
     "EvidenceCall",
     "WithdrawalIteration",
@@ -1159,18 +1186,19 @@ SIBLING_GUARD_COLUMNS = (
 )
 """Columns in published order.
 
-    Parent: sequenced parent identifier (text).
+    Parent: proposed sequenced parent identifier (text).
     Child: child identifier (text).
-    SupportedMembers: supported members (1).
-    DroppedLinked: dropped linked (1).
-    DroppedHalfSib: dropped half sib (1).
-    DroppedMembers: number of ordered items in pedigree/cell_items.csv (count).
-    TestedMembers: tested members (1).
-    ExcludedMembers: excluded members (1).
-    Call: call (1).
-    EvidenceCall: evidence call (1).
-    WithdrawalIteration: withdrawal iteration (1).
-    WithholdingBasis: withholding basis (1).
+    Witnesses: final family members after linked cleaning, excluding child and proposed parent (count).
+    SetAside: witnesses at their prior-odds price under both hypotheses (count).
+    Against: witnesses contributing less than minus one nat (count).
+    Supporting: witnesses contributing more than one nat (count).
+    PairScore: feasible minus best four-process pair log likelihood (nats).
+    FamilyScore: sum of priced witness contributions (nats).
+    Score: pair plus family score Lambda (nats).
+    Call: withheld, kept or untested; withdrawals are irreversible (text).
+    EvidenceCall: call under final retained-edge premises (text).
+    WithdrawalIteration: first withdrawal pass, zero when retained (count).
+    WithholdingBasis: pair, family or none; first-withdrawal basis is retained (text).
 """
 
 EXCLUSION_INTERVAL_COLUMNS = ("LogELower", "LogEUpper", "LogEExact")
@@ -1209,7 +1237,7 @@ COLLECTION_COLUMNS = {
         "EvidenceConfigurationSet",
     ),
     "exclusion_diagnostics": ("CompatibleCandidates", "SupportedReverseCandidates", "RemainingCandidates"),
-    "sibling_guard": ("DroppedMembers",),
+    "sibling_guard": (),
 }
 
 CELL_ITEM_COLUMNS = ("source_table", "sample", "parent", "child", "column", "item", "value")

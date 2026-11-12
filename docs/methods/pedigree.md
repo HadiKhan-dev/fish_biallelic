@@ -214,6 +214,7 @@ minimum-switch unordered trajectory pair per bin, taking the first minimum path 
 the explicit reversal convention. Alternative equally parsimonious whole paths are not integrated. Build the
 schedule, its local homologue classes, the mask of bins with both painted labels known and the number T of distinct
 whole-component trajectories together. Count summaries for graph ordering come from that same trace.
+[PD28](#pd28) rebuilds these schedules for relationship evidence.
 
 The direction evidence is the joint likelihood of the two samples' scheduled homologues, defined in
 [PD06](#finite-continuous-direction). Reset its four-state phase law independently at each component.
@@ -244,11 +245,11 @@ Cost and scope: O(D L). These terms describe the unit’s work/storage dimension
 <a id="ps21"></a>
 ## ps21 Completed-window exclusion certificate
 
-Visit sites in order, saving starting-window prefixes before evaluating completed windows in stable stop order. Subtract the declared numerical guards and certify only when the completed-window lower bound proves the genome threshold. Otherwise finish and reduce bets outside windows in the reference order. Store exact values as point intervals and certified values with an unbounded upper endpoint. Publish exclusion whenever target or guard dyads exist, even without release targets.
+Visit sites in order, saving starting-window prefixes before evaluating completed windows in stable stop order. Subtract the declared numerical guards and certify only when the completed-window lower bound proves the genome threshold. Otherwise finish and reduce bets outside windows in the reference order. Store exact values as point intervals and certified values with an unbounded upper endpoint. Publish exclusion only when count-release target dyads exist.
 
 Implementation: [science/pedigree/exclusion_bound.py](../../haplotype_reconstruction/science/pedigree/exclusion_bound.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
 
-Parameters by name: `guard`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `alpha`, `genotype_replacement_probability`, `bet_sizes`, `window_widths_bp`, `exclusion_pattern_limit`, `exclusion_dyad_batch`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: At most the full bet/window dyad scan; certification can stop a dyad after a completed window proves the threshold.
 
@@ -352,8 +353,8 @@ and epsilon = `chromosome_error_probability`, its robust orientation log odds ar
 
 Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
 contig order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
-configuration scores. Reciprocal messages, calibration, resampling, release tiers and the sibling guard retain their
-existing definitions. The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
+configuration scores. Reciprocal messages, calibration, resampling, release tiers retain their
+existing definitions; the relationship guard is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
 and reports; it is a separate quantity. This intermediate direction evidence differs from final released
 orientation log odds.
 
@@ -559,16 +560,61 @@ Cost and scope: O(targets × N); O(D L). These terms describe the unit’s work/
 <a id="pd23"></a>
 ## pd23 Sibling-as-parent guard (fixed point and application)
 
-For each pre-guard Tier-B edge p → c, use c's relatedness family only when its best-placement share of support
-units is strictly greater than `focal_support`; equality and NaN leave the edge untested. Select witnesses from that
-family with support at least `member_support`, excluding p. The child counts towards `minimum_family` regardless
-of its own support. Remove linked and half-sib members, then apply the strict-majority exclusion vote when enough tested members remain. Recompute every original edge against the retained set until no more withdrawals; withdrawals are irreversible. Run count release with that withheld set, re-slot, then verify the same edge and withheld sets. Filter withdrawn edges without renumbering remaining slots. Guarded views clear calls while retaining candidate lists; complete and diagnostic views stay pre-guard.
+Test every pre-guard Tier-B edge p → c using the painting relationship evidence in [PD28](#pd28).
+The guard has no parameter group of its own; its numerical settings are the relationship parameters in PD28.
+Use every member of c's relatedness family except c and p, removing a member linked by a released parent
+edge to c or another member. Relatedness support sets the witness's prior price; it does not filter membership.
+There is no minimum family size or different-parent cleaning rule.
+
+For each sequence let d be its FEASIBLE log likelihood minus the largest of its four process log likelihoods,
+including FEASIBLE itself, after summing each process over configured contigs. The pair margin is m = d(c,p).
+For witness w, d_par = d(w,p) and d_sib = d(c,p,w). Its full-sib prior pi is `sibship_prior` at the band of
+the smaller support of c and w, bounded by `support_bounds`; unknown support uses the lowest band.
+The price is c_w = max(0, log(pi/(1−pi))). First check each witness against the family itself: with at least one
+other witness, d_fam(w) is the median of d(c,w,w′) over its current check partners. The child's ring is all other
+relatedness-family members in sorted identifier order, cyclically. Select the next `sibship_check_partners` after w
+on that fixed ring, then keep only the edge's current witnesses; do not refill the window after filtering. With no
+retained partner, the witness is not checked. At most P+2 family members give exactly the all-partner check. For an even count use the mean of
+the two middle values. If d_fam(w) <= −c_w, set the witness aside under both hypotheses, contribute zero and count
+it in `set_aside`. A single witness has no family check. Otherwise the contribution is
+`v_w = max(d_par, −c_w) − max(d_sib, −c_w)`. Either hypothesis can set a witness aside at its prior penalty.
+The final score is `Lambda = m + sum(v_w)`, in nats. This sum combines profile likelihood ratios of separate
+sequences; witnesses share c and p and are dependent. It has no posterior-odds interpretation. The
+`withholding_score` of log(1000) nats is calibrated on known-truth designs including three-quarter siblings.
+
+Withhold below `−withholding_score`. A retained edge has `family` evidence above the positive score threshold,
+and `pair_only` evidence otherwise. An edge without witnesses and with zero pair margin is `untested`;
+a nonzero pair margin is tested even without a family. A prior at most one half has price zero and contributes no evidence, giving an effective support floor of 0.5.
+A single witness cannot withhold while the pair margin is above
+`−(withholding_score − top price)`, where the top price is log(0.98/0.02). Two top-band witnesses can still withhold. The sibling-guard table reports final witnesses, set-aside/against/supporting counts,
+pair/family/total score, final evidence call, irreversible call, withdrawal iteration and pair/family basis.
+A witness is against below −1 nat and supporting above +1 nat. Set-aside counts include a contradicted family
+check or both hypothesis margins at or below minus its price. Withholding basis is `pair` when the pair margin
+alone crosses the negative threshold, otherwise
+`family`; a retained edge has `none`.
+
+Recompute all original edges against the retained edge set until no more withdrawals, in at most E+1 passes.
+Withdrawals are irreversible; a prior withdrawal can remain an abstention under final premises, recorded by its
+separate evidence call and first-withdrawal basis. Freeze requests for every original family member, including
+linked members that can return after a premise is withdrawn. Request dyads (w,p), trios (c,p,w) and the bounded
+ring trios (c,w,w′), in addition to the focal pair (c,p), for every original family member other than c and p.
+Trio requests are unordered and deduplicated across every role. There are at most (f−1)P ring trios per child and
+O(f²P) sequences per family.
+Accumulate witnesses in sorted identifier order. Sum process log likelihoods in component order, then contigs
+in configured order, before taking any maximum. All withdrawals in a pass use one snapshot of retained edges. Score each requested dyad and trio once.
+Run count release with the withheld set, re-slot, then verify identical edge and withheld sets. Filter withdrawn
+edges without renumbering remaining slots. Guarded views clear calls while retaining candidate lists; complete and
+diagnostic views stay pre-guard. The four released relationship tables gain `relationship_basis`; a row with
+multiple released parents is `family` only if every one has family evidence, otherwise `pair_only`, and is empty
+when no parent is released. Existing guard-withheld status texts are retained.
 
 Implementation: [science/pedigree/guard.py](../../haplotype_reconstruction/science/pedigree/guard.py).
 
-Parameters by name: `minimum_family`, `focal_support`, `member_support`, `alpha`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `withholding_score`, `sibship_prior`, `support_bounds`, `sibship_check_partners`. Values and rationale are in the
+[generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(E_rel · f²); O(dyads × L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: linked cleaning uses retained-edge adjacency; ring checks take O(E · f · P) per pass.
+Chromosome evidence is scored once, including members that can return in later passes.
 
 <a id="pd24"></a>
 ## pd24 Released parent order and ParentEdges
@@ -608,13 +654,85 @@ Cost and scope: O(B · S² · m); O(K²). These terms describe the unit’s work
 <a id="pd27"></a>
 ## pd27 Stage orchestration, records, identities and consistency checks
 
-Validate samples and informative-contig reach, then prepare, screen, bound and score before full decision/resampling. Build target and guard dyads, score exclusion, solve the guard, perform count release, orient slots and construct the typed product. Recheck edge/withheld consistency and reject a count resting on a withheld direction. Publish only under the checked identity; execution and formatting stay outside the pure decision steps.
+Validate samples and informative-contig reach, then prepare, screen, bound and score before full decision/resampling. Build count-exclusion and relationship requests, score them per contig, solve the guard, perform count release, orient slots and construct the typed product. Recheck edge/withheld consistency and reject a count resting on a withheld direction. Publish only under the checked identity; execution and formatting stay outside the pure decision steps.
 
 Implementation: [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/decision.py](../../haplotype_reconstruction/stages/pedigree/decision.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
-Parameters by name: `evidence_calibration`, `reverse_conventions`, `preparation`, `scoring`, `panel`, `exposure`, `direction`, `selection`, `resampling`, `release`, `exclusion`, `guard`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `evidence_calibration`, `reverse_conventions`, `preparation`, `scoring`, `panel`, `exposure`, `direction`, `selection`, `resampling`, `release`, `exclusion`, `relationship`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Sum of preparation, scoring, decision, resampling, exclusion and report-view work; independent contig/fit tasks are placed by key.
+
+<a id="pd28"></a>
+## pd28 Painting relationship observations, processes and chance laws
+
+Rebuild the minimum-switch schedules exactly as [PS19](#ps19). Each sample has two bin-local classes and a mask
+requiring both painted labels. Class numbers compare samples within a bin only. The pair observation is zero
+when either class of one sample matches either class of the other, and one otherwise. The trio observation is zero
+if two latent parents, each carrying at most two classes with repeats allowed, can explain all three unordered
+genotypes as full siblings; otherwise it is one. More than four distinct classes among the six is infeasible.
+An observation needing an unknown label is skipped.
+
+The model is defined on the grid of known bins. The chance chain conditions on the previous known observation
+of that component, and the state chain uses the summed Haldane distance between consecutive known bins. This is
+the observation-grid model rather than a marginalisation of latent emissions at unknown bins.
+
+The distance of prepared selector boundary theta is `−0.5 log(1−2 theta)` Morgans. Distances add through skipped
+bins; there is no extra switch floor in this evidence. Each component starts independently in the stationary law
+of a continuous-time S/N process. With R = lambda_in + lambda_out and pi_N = lambda_in/R, a known-bin gap g gives
+`P(S→N) = pi_N (1−exp(−R g))` and `P(N→S) = (1−pi_N) (1−exp(−R g))`.
+S emits one with probability `isolated_error * (1−q_t)` and zero with the complementary probability; an isolated
+painting error can show infeasibility only where the chance law permits it. N emits a cohort chance chain with first-bin P(0)=q_t,
+`P(1|previous 1)=s`, and `P(1|previous 0)=min(1−1e−6,(1−q_t)(1−s)/q_t)`.
+Use a scaled forward sum and accumulate natural log likelihoods. The four processes, in stored order, are
+FEASIBLE (`failure_region_rate`, `1/failure_region_length`), FS-like (4/3,4), D2-like (2,2), and NEVER (always N).
+Rates are per Morgan; the failure length is in Morgans. FS-like and D2-like rates match the occupancy and mean
+flux of the biological processes, not their tract-length laws. With bin-specific q_t the chance chain is not
+stationary at q_t; q_t supplies its first-bin law and the specified conditional transition. Independent components and contigs contribute additively
+before the process comparison in [PD23](#pd23).
+
+Estimate chance laws separately for each component from the entire cohort. Clip both persistence estimates to
+[0.01,0.99]. If f_a is the frequency of class a
+among homologues of samples with both labels known, the pair chance law is
+`q_t = 1 − sum_ab f_a f_b (1−f_a−[a!=b]f_b)^2`, clipped to [1e−9,1−1e−9].
+This pair chance law describes two independent genotypes drawn from the cohort class frequencies. In 15 of 16
+validation cases it is 0.002–0.046 below the cohort's empirical pair sharing. The trio chance law is the empirical
+feasibility of relationship-blind cohort triples.
+Pair persistence pools adjacent-bin 1→1 events over all unordered sample pairs, without a requested-pair filter.
+Unknown bins break persistence event adjacency; component boundaries never supply events. The no-event
+persistence is 0.5. A bin with no known homologues uses the upper clipped chance probability.
+
+Draw `reference_triples` triples of distinct samples per component without regard to relationships. Draw on the
+sample identifiers in sorted order using the named `pedigree.relationship.reference` PCG64 stream seeded by the
+pedigree bootstrap seed plus the zero-based configured contig index and the semantic component index as the
+stream key. Each component has its own stream; completion order cannot select draws.
+Identifiers serve as keys only. Trio phi_t is the fraction of known references with observation one;
+`q_t = clip(1−phi_t, 1e−3, 1−1e−3)`. With no known references phi_t is zero. Pool adjacent 1→1 events over the
+reference triples for trio persistence, again using 0.5 without events. Store the references and both chance laws
+with each component's evidence. Per-contig records bind preparation, parameters, request, axes and random seed;
+completed contigs resume independently and are published under an owned relationship key. Requested observations
+are scored in fixed chunks of `relationship_sequence_chunk` sequences (execution grain only). Binary sequence
+workspace is O(chunk · B), with at most two such arrays during likelihood conversion; likelihood outputs remain
+O(requests · 4). The all-pairs persistence estimator stores two integer vectors of length N and does not allocate
+an N²-by-B observation array.
+
+**Limits.** This score combines profile likelihood ratios on scheduled paintings with calibrated witness priors.
+Witnesses are dependent, and the score is not a posterior probability. Bin resolution, painting errors and cohort
+representation affect the evidence. Feasibility alone
+does not establish direction or parenthood. Relatives masked by shared founder classes without informative
+sibship evidence can remain released as `pair_only`; the model reports that limit. Direction, calibration,
+resampling, release tiers and the genotype exclusion evidence for count release retain their own definitions.
+
+Implementation: [science/pedigree/relationship.py](../../haplotype_reconstruction/science/pedigree/relationship.py),
+[stages/pedigree/relationship.py](../../haplotype_reconstruction/stages/pedigree/relationship.py).
+
+Parameters by name: `failure_region_rate`, `failure_region_length`, `isolated_error`, `withholding_score`,
+`sibship_prior`, `support_bounds`, `reference_triples`, `sibship_check_partners`, `relationship_sequence_chunk`,
+`bootstrap_seed`. Values, units and rationale are in the
+[generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(B) per requested sequence and process; O(E · f · P) requested work before deduplication,
+including ring sibship checks, with at most O(f²P) distinct sequences per family. Pair persistence uses
+O(N² B) and reference trios O(K_ref B) per component. Sequence kernels parallelise over independent sequences.
 
 <!-- named mechanism anchors -->
 

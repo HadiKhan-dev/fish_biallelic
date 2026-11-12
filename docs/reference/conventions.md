@@ -82,6 +82,7 @@ The stream name preserves generator construction and draw order, not just a seed
 |---|
 | `assembly.count.bootstrap` |
 | `pedigree.bootstrap` |
+| `pedigree.relationship.reference` |
 | `simulation.structure` |
 | `simulation.master` |
 | `simulation.child` |

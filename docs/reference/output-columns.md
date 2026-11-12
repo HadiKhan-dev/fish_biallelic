@@ -230,6 +230,7 @@ Source: [`TIER_B_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/outputs/
 | 5 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 6 | `inference_status` | inference status (1). |
 | 7 | `release_evidence` | release evidence (1). |
+| 8 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -251,6 +252,7 @@ Source: [`TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/
 | 10 | `observed_parent_count_minimum` | observed parent count minimum (1). |
 | 11 | `observed_parent_count_maximum` | observed parent count maximum (1). |
 | 12 | `release_evidence` | release evidence (1). |
+| 13 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -266,6 +268,7 @@ Source: [`TIER_A_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/outputs/
 | 4 | `parent_state` | released M0/M1/M2 state label (text). |
 | 5 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 6 | `inference_status` | inference status (1). |
+| 7 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -286,6 +289,7 @@ Source: [`TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/
 | 9 | `exact_configuration_resolved` | exact configuration resolved (1). |
 | 10 | `observed_parent_count_minimum` | observed parent count minimum (1). |
 | 11 | `observed_parent_count_maximum` | observed parent count maximum (1). |
+| 12 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -609,18 +613,19 @@ Source: [`SIBLING_GUARD_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 
 | Position | Column | Meaning and unit |
 |---|---|---|
-| 1 | `parent` | sequenced parent identifier (text). |
+| 1 | `parent` | proposed sequenced parent identifier (text). |
 | 2 | `child` | child identifier (text). |
-| 3 | `supported_members` | supported members (1). |
-| 4 | `dropped_linked` | dropped linked (1). |
-| 5 | `dropped_half_sib` | dropped half sib (1). |
-| 6 | `dropped_members` | number of ordered items in pedigree/cell_items.csv (count). |
-| 7 | `tested_members` | tested members (1). |
-| 8 | `excluded_members` | excluded members (1). |
-| 9 | `call` | call (1). |
-| 10 | `evidence_call` | evidence call (1). |
-| 11 | `withdrawal_iteration` | withdrawal iteration (1). |
-| 12 | `withholding_basis` | withholding basis (1). |
+| 3 | `witnesses` | final family members after linked cleaning, excluding child and proposed parent (count). |
+| 4 | `set_aside` | witnesses at their prior-odds price under both hypotheses (count). |
+| 5 | `against` | witnesses contributing less than minus one nat (count). |
+| 6 | `supporting` | witnesses contributing more than one nat (count). |
+| 7 | `pair_score` | feasible minus best four-process pair log likelihood (nats). |
+| 8 | `family_score` | sum of priced witness contributions (nats). |
+| 9 | `score` | pair plus family score Lambda (nats). |
+| 10 | `call` | withheld, kept or untested; withdrawals are irreversible (text). |
+| 11 | `evidence_call` | call under final retained-edge premises (text). |
+| 12 | `withdrawal_iteration` | first withdrawal pass, zero when retained (count). |
+| 13 | `withholding_basis` | pair, family or none; first-withdrawal basis is retained (text). |
 
 ## exclusion interval columns
 
