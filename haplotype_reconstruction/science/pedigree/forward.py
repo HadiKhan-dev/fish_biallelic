@@ -8,7 +8,7 @@ the two parents. Emissions multiply the child's per-marker
 likelihoods of the two transmitted alleles (with mismatch probability) over its observed markers
 of the bin. Each score pools two views with equal weight: tempered (bin emissions raised to the
 information exponent) and full strength, run in one pass that shares the emission products. Their
-average is a composite score, not two independent data sets or a calibrated posterior.
+average is a composite score, not two independent data sets or posterior probabilities.
 
 Called founder alleles project to the same 0/1 value in every candidate, so their emission products
 are cached per child and bin (NaN marks entries needing the candidate-specific path) in batches of

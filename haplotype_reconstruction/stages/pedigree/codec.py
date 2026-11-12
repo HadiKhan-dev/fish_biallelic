@@ -1,7 +1,7 @@
 """Publish complete pedigree records as plain stored-field dictionaries and lists.
 
 The record codec owns recursive field/schema/type validation. This pedigree adapter owns only
-whole-product completeness of schema-5 products: composed reports and views, a search row for
+whole-product completeness of schema-6 products: composed reports and views, a search row for
 every sample and a summary for every configured chromosome. A cold reader never repairs reports
 or reruns science.
 """
@@ -20,9 +20,9 @@ __all__ = ["PedigreeAdapter"]
 
 
 class PedigreeAdapter:
-    """Lossless schema-5 fields, decoded to read-only arrays by the shared record codec codec."""
+    """Lossless schema-6 fields, decoded to read-only arrays by the shared record codec codec."""
 
-    schema = 5
+    schema = 6
 
     def encode(self, product: records.Pedigree) -> Mapping[str, Any]:
         require_schema({"schema": product.schema}, self.schema)

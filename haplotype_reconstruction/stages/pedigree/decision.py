@@ -17,7 +17,6 @@ from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
 from ...contracts.payload import from_payload
 from ...contracts.pedigree import (
-    CalibrationRecord,
     ChromosomeScores,
     ChromosomeSummaryView,
     Decision,
@@ -237,32 +236,10 @@ def run(
         found = _resumed(file, inputs, parameters, numerical_policy)
         if found is not None:
             return _reply(found[0], found[1], receipt)
-    started = science.start_full_fit(inputs.genome, parameters)
+    state = science.start_full_fit(inputs.genome, parameters)
     options: dict[str, Any] = dict(
         file=file, contig_files=contig_files, numerical_policy=numerical_policy, receipt=receipt
     )
-    return execution.calibrate(
-        started.calibration,
-        workers,
-        stage="pedigree",
-        affinity=_AFFINITY,
-        then=_calibrated,
-        args=(inputs, parameters, started),
-        kwargs=options,
-    )
-
-
-def _calibrated(
-    fitted: tuple[float, CalibrationRecord],
-    inputs: DecisionStageInputs,
-    parameters: PedigreeParameters,
-    started: science.decision.FitStart,
-    *,
-    workers: int,
-    **options: Any,
-) -> Pedigree | dict[RecordKey, str] | Expansion:
-    """Finish the full fit with its evidence scale, then resample (serially, or as fit subtasks)."""
-    state = science.finish_full_fit(started, fitted, parameters)
     planned = resampling.plan(state.inputs, parameters, workers)
     if planned.worker_count == 1:
         results = (resampling.evaluate_task(state.inputs, task) for task in planned.tasks)

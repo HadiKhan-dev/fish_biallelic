@@ -59,6 +59,11 @@ is schema defaults, preset, TOML, ordinary CLI options, then repeatable `--set`
 overrides. Unknown keys and invalid values are errors. See the generated
 [settings reference](../reference/settings.md).
 
+Pedigree decisions use the composite log likelihoods directly. Existing configurations carrying
+the pedigree table's `evidence_calibration` key with `"off"` or `"predictive"` load with one removal warning; the key is
+discarded and is absent from the resolved configuration. Other legacy values are errors.
+The composite evidence is not claimed to give calibrated posterior probabilities.
+
 ```sh
 haplotypes run cross.toml --cores 8
 haplotypes status run

@@ -1,4 +1,4 @@
-"""Genome-wide consistent M1 floor, fixed before calibration and resampling.
+"""Genome-wide consistent M1 floor, fixed before decision and resampling.
 
 Retain identities with total raw M1 >= best eligible total - 60*T(total markers).
 Retained identities keep raw chromosome scores. Every excluded identity takes

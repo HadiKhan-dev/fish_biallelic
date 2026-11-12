@@ -13,9 +13,6 @@ contigs = ["chr1", "chr2", "chr3"]       # required: the contigs to analyse, in 
 # [quality]
 # read_calibration = true           # fit the read model from allele depths (default)
 
-# [pedigree]
-# evidence_calibration = "predictive"
-
 # [execution]
 # cores = "auto"
 # memory_limit = "auto"

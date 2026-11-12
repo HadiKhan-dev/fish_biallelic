@@ -162,7 +162,6 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         FamilyParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
         PairwiseIbdParameters(),
         PedigreeParameters(
-            evidence_calibration=settings.pedigree.evidence_calibration,
             exposure=ExposureParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
         ),
         RefitParameters(),

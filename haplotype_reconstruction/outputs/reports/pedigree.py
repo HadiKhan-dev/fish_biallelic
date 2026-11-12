@@ -528,7 +528,7 @@ EXCLUSION_SUMMARY_FIELDS = (
 def write_pedigree(
     output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None, *, map_work=None
 ) -> list[Path]:
-    """Write every table of ``product.views``, the calibration and the run summary; returns the paths written.
+    """Write every table of ``product.views``, the run summary; returns the paths written.
     ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
     per-sample tables list their rows in it (the records keep the canonical order)."""
     from .tables import frame_in_input_order
@@ -544,7 +544,6 @@ def write_pedigree(
     names = [field.name for field in fields(product.views) if field.name in frames and frames[field.name] is not None]
     written = list(map(write_table, names)) if map_work is None else map_work(write_table, names)
     written.append(write_rows(directory / "cell_items.csv", items, columns=CELL_ITEM_COLUMNS))
-    written.append(write_json(directory / "evidence_calibration.json", record_mapping(product.calibration)))
     written.append(
         write_json(
             directory / "summary.json",

@@ -155,9 +155,9 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ou15"></a>
-## ou15 Pedigree tables, calibration and summary JSON (pass-through)
+## ou15 Pedigree tables and summary JSON (pass-through)
 
-Format all pedigree tables from PedigreeViews, preserving ordered columns, tuple representations, missing encodings and ParentSlotBasis. Stable-sort Sample tables to input order; leave other table axes unchanged. Write calibration and summary fields in their specified order. These report JSONs permit the documented nonfinite values, unlike evaluation’s strict JSON.
+Format all pedigree tables from PedigreeViews, preserving ordered columns, tuple representations, missing encodings and ParentSlotBasis. Stable-sort Sample tables to input order; leave other table axes unchanged. Write summary fields in their specified order. These report JSONs permit the documented nonfinite values, unlike evaluation’s strict JSON.
 
 Implementation: [outputs/reports/pedigree.py](../../haplotype_reconstruction/outputs/reports/pedigree.py).
 

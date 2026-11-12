@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import Field, dataclass, fields, replace
+from dataclasses import Field, dataclass, fields
 from typing import Any, ClassVar
 
 import numpy as np
@@ -227,11 +227,6 @@ class Alternatives:
     @property
     def n_samples(self) -> int:
         return len(self.child_rows)
-
-    def scaled(self, scale: float) -> Alternatives:
-        """The same rows with every log likelihood multiplied by ``scale``."""
-        return replace(self, log_likelihoods=self.log_likelihoods * scale)
-
 
 @dataclass(frozen=True)
 class JunctionEvidence:
@@ -592,8 +587,8 @@ class CountRelease:
 class Decision:
     """Everything the release, exclusion and report steps read.
 
-    scores: genome-floor transformed chromosome scores (unscaled); inputs: the fit inputs (alternatives
-    carry the evidence scale); full / orientation / adjusted (state, identity scores) / trace: the
+    scores: genome-floor transformed chromosome scores; inputs: the fit inputs;
+    full / orientation / adjusted (state, identity scores) / trace: the
     full-data fit and its per-row terms; sensitivity: (priors, selection) per alternative prior;
     informative: int64 [N] chromosomes whose own evidence picks a unique state; informative_units: float64 [N]
     their map units (read by the tier rules).
@@ -620,7 +615,6 @@ class Decision:
     partial_a: PartialEdges = record_field("state", axes=(), units="1", dtype="PartialEdges")
     partial_b: PartialEdges = record_field("state", axes=(), units="1", dtype="PartialEdges")
     candidates: CandidateSets = record_field("state", axes=(), units="1", dtype="CandidateSets")
-    calibration: CalibrationRecord = record_field("state", axes=(), units="1", dtype="CalibrationRecord")
     reach: TierReach = record_field("state", axes=(), units="1", dtype="TierReach")
     family_solve: FamilySolveRecord = record_field("state", axes=(), units="1", dtype="FamilySolveRecord")
     tie_events: TieCounts = record_field("diagnostic", dtype="TieCounts")
@@ -690,7 +684,7 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 5 with joint
+    """Complete released pedigree and retained numerical state, published atomically as schema 6 with joint
     transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -702,7 +696,6 @@ class Pedigree:
     tier_a: PedigreeCalls = record_field("call", axes=(), units="1", dtype="PedigreeCalls")
     complete: PedigreeCalls = record_field("call", axes=(), units="1", dtype="PedigreeCalls")
     reach: TierReach = record_field("report", axes=(), units="1", dtype="TierReach")
-    calibration: CalibrationRecord = record_field("state", axes=(), units="1", dtype="CalibrationRecord")
     eligibility: EligibilityRecord = record_field("state", axes=(), units="1", dtype="EligibilityRecord")
     panel: CandidatePanel = record_field("state", axes=(), units="1", dtype="CandidatePanel")
     support: SupportRecord = record_field("call", axes=(), units="1", dtype="SupportRecord")
@@ -713,7 +706,7 @@ class Pedigree:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(5)
+    schema: int = schema_field(6)
 
 
 @dataclass(frozen=True)
@@ -823,55 +816,6 @@ class SummaryMapping(Mapping[str, object]):
 
     def __len__(self) -> int:
         return sum(getattr(self, f.name) is not None for f in fields(self))
-
-
-@dataclass(frozen=True)
-class CalibrationRecord(SummaryMapping):
-    """PD03's fitted scale, fallback and objective evidence; no unrecognised dictionary keys."""
-
-    mode: str = record_field("state", axes=(), units="1", dtype="str")
-    scale: float = record_field("state", axes=(), units="1", dtype="float")
-    selected: bool = record_field("state", axes=(), units="1", dtype="bool")
-    status: str = record_field("state", axes=(), units="1", dtype="str")
-    truth_used: bool = record_field("state", axes=(), units="1", dtype="bool")
-    parent_count_prior_fitted: bool = record_field("state", axes=(), units="1", dtype="bool")
-    conditional_on_fixed_paintings_and_candidate_panel: bool = record_field("state", axes=(), units="1", dtype="bool")
-    resampling_conditions_on_fitted_scale: bool = record_field("state", axes=(), units="1", dtype="bool")
-    interpretation: str = record_field("state", axes=(), units="1", dtype="str")
-    estimator: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
-    partitions: dict[str, list[str]] | None = record_field(
-        "state", axes=(), units="1", dtype="dict[str, list[str]] | None", default=None
-    )
-    testing_fold: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
-    training_scheme: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
-    search_scale_bounds: list[float] | None = record_field(
-        "state", axes=(), units="1", dtype="list[float] | None", default=None
-    )
-    eligible_children: int | None = record_field("state", axes=(), units="1", dtype="int | None", default=None)
-    omitted_nonfinite_alternatives: int | None = record_field(
-        "state", axes=(), units="1", dtype="int | None", default=None
-    )
-    expanded_objective_terms: int | None = record_field("state", axes=(), units="1", dtype="int | None", default=None)
-    aggregated_objective_terms: int | None = record_field("state", axes=(), units="1", dtype="int | None", default=None)
-    objective_aggregation: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
-    reciprocal_dominant_rows_excluded_per_fold: list[int] | None = record_field(
-        "state", axes=(), units="1", dtype="list[int] | None", default=None
-    )
-    fitted_scale: float | None = record_field("state", axes=(), units="1", dtype="float | None", default=None)
-    optimizer_success: bool | None = record_field("state", axes=(), units="1", dtype="bool | None", default=None)
-    at_search_boundary: bool | None = record_field("state", axes=(), units="1", dtype="bool | None", default=None)
-    selection_gain: float | None = record_field("state", axes=(), units="nats", dtype="float | None", default=None)
-    search_log_scale_grid: list[float] | None = record_field(
-        "state", axes=(), units="1", dtype="list[float] | None", default=None
-    )
-    search_predictive_grid: list[float] | None = record_field(
-        "state", axes=(), units="nats", dtype="list[float] | None", default=None
-    )
-    untouched_test_gain: float | None = record_field("state", axes=(), units="nats", dtype="float | None", default=None)
-    fitted_untouched_test_gain: float | None = record_field(
-        "state", axes=(), units="nats", dtype="float | None", default=None
-    )
-    seconds: float | None = record_field("diagnostic", axes=(), units="s", dtype="float | None", default=None)
 
 
 @dataclass(frozen=True)

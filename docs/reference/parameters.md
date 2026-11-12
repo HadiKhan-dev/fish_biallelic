@@ -672,28 +672,6 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `label_continuity_maximum_loser_ratio` | `0.1` | share | Maximum switch-loser to switch-winner sample ratio (dimensionless); protects shared recombinant lineages during row relabelling. |
 | `label_continuity_check_budget` | `64` | count | Maximum charged candidate checks per search iteration, including tie peers (candidates). An unresolved class withholds its repair and ends the search with check_budget_reached; capability rejections need no decode or charge. Bounds trial work at large founder counts. |
 | `viterbi_tie` | `VITERBI_TIE` | nats | Viterbi predecessor tie quantum (nats); noise_quantum(1.9e-6) places the preference for fewer track changes above the measured score-gap noise scale. |
-## science.pedigree.parameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `EVIDENCE_CALIBRATION_MODES` | `('off', 'predictive')` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-## science.pedigree.parameters — CalibrationNumerics
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `log_scale_bounds` | `(float(np.log(0.001)), float(np.log(100.0)))` | See model | PD03; dimensionless log-scale search interval, corresponding to evidence weights 0.001 through 100. |
-| `grid_points` | `33` | See model | PD03; 33 grid points spanning the log-scale interval before interior-maximum refinement. |
-| `optimizer_xatol` | `1e-05` | See model | PD03; absolute optimizer tolerance of 1e-5 in dimensionless log scale. |
-| `minimum_gain` | `1e-08` | See model | PD03; predictive gain must exceed 1e-8 nats to apply the fitted evidence scale. |
-| `boundary_margin` | `0.01` | See model | PD03; exclude optima within 0.01 dimensionless log-scale units of a search endpoint. |
-| `refine_tolerance` | `1e-14` | See model | PD03; relative log-scale refinement tolerance 1e-14, scaled by max(1, abs(log scale)). |
-| `refine_iterations` | `60` | See model | PD03; at most 60 safeguarded refinement iterations per interior maximum. |
-| `bracket_expansions` | `30` | See model | PD03; at most 30 expansions to bracket the derivative root during refinement. |
-| `parallel_minimum_terms` | `200000` | See model | PD03; 200000 likelihood terms trigger executor use; an execution work threshold. |
 ## science.pedigree.parameters — WinnerNumerics
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -709,8 +687,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `CALIBRATION_NUMERICS` | `CalibrationNumerics()` | See model | Fixed model numerics are versioned by source identity, not additional user settings. |
-| `WINNER_NUMERICS` | `WinnerNumerics()` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `WINNER_NUMERICS` | `WinnerNumerics()` | See model | Fixed model numerics are versioned by source identity, not additional user settings. |
 ## science.pedigree.parameters — PreparationParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -834,7 +811,6 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `evidence_calibration` | `'predictive'` | See model | PD27; categorical mode predictive fits a held-out-chromosome evidence weight; off uses unit weight. |
 | `reverse_conventions` | `False` | See model | PD27; boolean false selects the default explicit arbitrary tie convention. |
 | `preparation` | `PreparationParameters()` | See model | PD27; internal marker-selection and tempering parameter group; units are declared by its fields. |
 | `scoring` | `ScoringParameters()` | See model | PD27; internal projected-transmission parameter group; units are declared by its fields. |

@@ -57,11 +57,6 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
 | `pairwise_ibd` | bool | `false` | — | no | Write pairwise IBD reports (O(N² L)); off by default. Provenance: Write pairwise IBD reports (O(N² L)); off by default. |
-## pedigree
-
-| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
-|---|---|---|---|---|---|
-| `evidence_calibration` | str | `"predictive"` | predictive, off | yes | Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence. Provenance: Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence. |
 ## family_phase
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |

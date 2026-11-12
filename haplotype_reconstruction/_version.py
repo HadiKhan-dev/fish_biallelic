@@ -1,3 +1,3 @@
 """Release label, loaded lazily and outside scientific dependency closures."""
 
-__version__ = "4.15.1"
+__version__ = "4.15.2"

@@ -1,7 +1,6 @@
 """Bind the pedigree decision rules to explicit, immutable parameters.
 
-Only ``evidence_calibration`` is a user setting
-(TOML ``[pedigree] evidence_calibration``); the groups below are internal model constants, documented
+The groups below are internal model constants, documented
 here and in docs/configuration.md. Each group is bound into the identity of exactly the records it
 affects: ``preparation`` into prepared factors, ``scoring`` into screens and scores, ``panel`` into the
 M2 candidate panel, direction mismatch probability into scores, and the remaining decision parameters
@@ -21,9 +20,7 @@ import numpy as np
 from ...core.errors import SettingsError
 
 __all__ = [
-    "CalibrationNumerics",
     "WinnerNumerics",
-    "CALIBRATION_NUMERICS",
     "WINNER_NUMERICS",
     "PreparationParameters",
     "ScoringParameters",
@@ -79,72 +76,6 @@ __all__ = [
     "EXCLUSION_DYAD_BATCH",
 ]
 
-EVIDENCE_CALIBRATION_MODES = ("off", "predictive")
-
-
-@dataclass(frozen=True)
-class CalibrationNumerics:
-    """Fixed search bounds, accuracy and budgets of predictive calibration (PD03)."""
-
-    log_scale_bounds: tuple[float, float] = field(
-        default=(float(np.log(0.001)), float(np.log(100.0))),
-        metadata={
-            "provenance": (
-                "PD03; dimensionless log-scale search interval, corresponding to evidence weights 0.001 through "
-                "100."
-            ),
-        },
-    )
-    grid_points: int = field(
-        default=33,
-        metadata={
-            "provenance": "PD03; 33 grid points spanning the log-scale interval before interior-maximum refinement.",
-        },
-    )
-    optimizer_xatol: float = field(
-        default=1e-5,
-        metadata={
-            "provenance": "PD03; absolute optimizer tolerance of 1e-5 in dimensionless log scale.",
-        },
-    )
-    minimum_gain: float = field(
-        default=1e-8,
-        metadata={
-            "provenance": "PD03; predictive gain must exceed 1e-8 nats to apply the fitted evidence scale.",
-        },
-    )
-    boundary_margin: float = field(
-        default=0.01,
-        metadata={
-            "provenance": "PD03; exclude optima within 0.01 dimensionless log-scale units of a search endpoint.",
-        },
-    )
-    refine_tolerance: float = field(
-        default=1e-14,
-        metadata={
-            "provenance": "PD03; relative log-scale refinement tolerance 1e-14, scaled by max(1, abs(log scale)).",
-        },
-    )
-    refine_iterations: int = field(
-        default=60,
-        metadata={
-            "provenance": "PD03; at most 60 safeguarded refinement iterations per interior maximum.",
-        },
-    )
-    bracket_expansions: int = field(
-        default=30,
-        metadata={
-            "provenance": "PD03; at most 30 expansions to bracket the derivative root during refinement.",
-        },
-    )
-    parallel_minimum_terms: int = field(
-        default=200_000,
-        metadata={
-            "provenance": "PD03; 200000 likelihood terms trigger executor use; an execution work threshold.",
-        },
-    )
-
-
 @dataclass(frozen=True)
 class WinnerNumerics:
     """Exact winner and graph-confidence tolerances; no user-facing tuning (PD11-PD13)."""
@@ -172,7 +103,6 @@ class WinnerNumerics:
 
 
 # Fixed model numerics are versioned by source identity, not additional user settings.
-CALIBRATION_NUMERICS = CalibrationNumerics()
 WINNER_NUMERICS = WinnerNumerics()
 
 
@@ -265,9 +195,8 @@ class PanelParameters:
     # some leave-one-chromosome-out fit, a valid upper bound on its joint M2 likelihood (pedigree.pair_bound: both
     # parents' transmission chains against the child's genotypes, bin by bin, summed over the fit's chromosomes)
     # comes within this many raw nats of the child's best known configuration there (M0 or a retained M1). A pair
-    # left out therefore has an M2 more than this far below the best configuration in every such fit. 150 raw nats
-    # are 33 nats at the 0.22 evidence scale fitted on bc8. Pairs outside contribute nothing to the M2 evidence (a
-    # lower bound).
+    # left out therefore has an M2 more than this far below the best configuration in every such fit.
+    # Pairs outside contribute nothing to the M2 evidence (a lower bound).
     pair_relevance_margin: float = field(
         default=150.0,
         metadata={
@@ -799,19 +728,8 @@ class RelationshipParameters:
 
 @dataclass(frozen=True)
 class PedigreeParameters:
-    """All pedigree settings; ``evidence_calibration`` is the only user-visible field."""
+    """Internal pedigree model and execution parameters."""
 
-    # "predictive": one cross-chromosome evidence scale fitted on held-out chromosomes (<= 1);
-    # "off": unscaled composite evidence.
-    evidence_calibration: str = field(
-        default="predictive",
-        metadata={
-            "provenance": (
-                "PD27; categorical mode predictive fits a held-out-chromosome evidence weight; off uses unit "
-                "weight."
-            ),
-        },
-    )
     # The run's explicit tie convention (reverses arbitrary orders); never read from the environment.
     reverse_conventions: bool = field(
         default=False,
@@ -885,14 +803,6 @@ class PedigreeParameters:
         default_factory=RelationshipParameters,
         metadata={"provenance": "PD27; painting relationship evidence parameters, with units declared by each field."},
     )
-
-    def __post_init__(self) -> None:
-        if self.evidence_calibration not in EVIDENCE_CALIBRATION_MODES:
-            raise SettingsError(
-                f"pedigree evidence_calibration must be one of {EVIDENCE_CALIBRATION_MODES}, "
-                f"not {self.evidence_calibration!r}"
-            )
-
 
 @dataclass(frozen=True)
 class ScoringNumerics:

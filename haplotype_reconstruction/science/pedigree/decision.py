@@ -1,6 +1,6 @@
 """Genome-wide decision from the chromosome scores (before the full-marker count release).
 
-Steps: configuration rows of the eligible universe -> predictive evidence scale -> the full-data
+Steps: configuration rows of the eligible universe -> the full-data
 fit (orientation, exposure gate, family terms, state, identity, graph) -> prior sensitivity of M0 ->
 chromosome bootstrap and LOCO refits -> per-child support -> Tier A / Tier B / complete views,
 marginal edges and candidate sets.
@@ -16,7 +16,6 @@ from typing import Any
 import numpy as np
 
 from ...contracts.pedigree import (
-    CalibrationRecord,
     Decision,
     DecisionTrace,
     FamilySolveRecord,
@@ -28,7 +27,7 @@ from ...contracts.pedigree import (
 from ...core.numerics import ordered_sum
 from ...core.ties import TieCounter
 from . import alternatives as alternatives_module
-from . import calibration, release, resampling, selection
+from . import release, resampling, selection
 from .alternatives import Alternatives
 from .eligibility import ParentEligibility
 from .orientation import junction_evidence
@@ -39,10 +38,8 @@ from .ties import unique_finite_winner
 __all__ = [
     "informative_chromosomes",
     "child_units",
-    "FitStart",
     "FullFit",
     "start_fit",
-    "finish_fit",
     "decide_resampled",
 ]
 
@@ -73,7 +70,7 @@ def child_units(edges: np.ndarray, edge_units: np.ndarray, n_samples: int) -> np
 
 @dataclass(frozen=True)
 class FullFit:
-    """The decision state before resampling: stacked rows, evidence scale, fit inputs and the full-data fit.
+    """The decision state before resampling: stacked rows, fit inputs and the full-data fit.
 
     ``counter`` is the decision's one tie counter: the full fit's events, then the informative-chromosome
     events after resampling (decide_resampled), in that order.
@@ -82,7 +79,6 @@ class FullFit:
     scores: GenomeScores
     eligibility: ParentEligibility
     inputs: DecisionInputs
-    calibration: CalibrationRecord
     full: Selection
     orientation: Orientation
     adjusted: tuple[np.ndarray, np.ndarray]
@@ -91,18 +87,8 @@ class FullFit:
     counter: TieCounter
 
 
-@dataclass(frozen=True)
-class FitStart:
-    """The full fit before its evidence scale: contiguous scores, alternatives and the prepared PD03 problem."""
-
-    scores: GenomeScores
-    eligibility: ParentEligibility
-    alternatives: Alternatives
-    calibration: calibration.CalibrationProblem
-
-
-def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeParameters) -> FitStart:
-    """Prepare rows and the calibration problem; the stage may run its scale search in rounds."""
+def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeParameters) -> FullFit:
+    """Build the full-data fit from the alternatives' composite log likelihoods as supplied."""
     # np.argwhere's Fortran memory order must not choose downstream reductions.
     # Any: each value replaces an ndarray field by name, which mypy cannot match from a **mapping to the fields.
     contiguous: dict[str, Any] = {
@@ -112,15 +98,6 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
     }
     scores = replace(scores, **contiguous)
     alternatives = alternatives_module.build(scores, eligibility)
-    return FitStart(scores, eligibility, alternatives, calibration.problem(scores, alternatives, config))
-
-
-def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], config: PedigreeParameters) -> FullFit:
-    """Complete the scaled fit inputs, the full-data fit and its prior sensitivity."""
-    scores, eligibility, alternatives = started.scores, started.eligibility, started.alternatives
-    scale, calibration_report = fitted
-    if scale != 1.0:
-        alternatives = alternatives.scaled(scale)
     inputs = DecisionInputs(
         alternatives,
         selection.build_exposure(scores, alternatives, config.exposure),
@@ -146,7 +123,7 @@ def finish_fit(started: FitStart, fitted: tuple[float, CalibrationRecord], confi
         for priors in config.selection.prior_sensitivity
     )
     return FullFit(
-        scores, eligibility, inputs, calibration_report, full, orientation, adjusted, trace, sensitivity, counter
+        scores, eligibility, inputs, full, orientation, adjusted, trace, sensitivity, counter
     )
 
 
@@ -202,7 +179,6 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
         partial_a,
         partial_b,
         candidates,
-        state.calibration,
         resampling.reach(resampled.multiplicities, inputs.exposure.units, config),
         family_solve,
         tie_events,

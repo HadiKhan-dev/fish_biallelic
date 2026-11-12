@@ -20,7 +20,6 @@ _RELEASE_414_KEYS = {
     "quality": ("site_filter", "sample_filter", "read_calibration"),
     "genetic_map": ("rate_cm_per_mb", "file", "rate_is_measured"),
     "relatedness": ("pairwise_ibd",),
-    "pedigree": ("evidence_calibration",),
     "family_phase": ("protected_intervals",),
     "recombination": ("order_breakpoints",),
     "export": ("enabled", "full_length"),

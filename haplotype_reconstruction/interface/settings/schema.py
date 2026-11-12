@@ -2,7 +2,7 @@
 
 Sections: run (paths, final-analysis contigs, where to stop), execution (CPUs,
 lanes, scratch; never scientific identity), input (VCF or simulation, contigs),
-quality (QC and read calibration), genetic_map (inference prior), pedigree,
+quality (QC and read calibration), genetic_map (inference prior),
 family_phase, recombination, export, and simulation (source, genome, sites, stocks,
 reads and artefacts; generating parameters only). Internal constants remain in
 stage parameter modules; stages/configure.py maps settings into them.
@@ -177,16 +177,6 @@ class GeneticMapSection:
         "pedigree's map-length rule counts chromosome lengths from it where no map "
         "covers them. Off: the rate is a placeholder and only a supplied map's span "
         "counts.",
-    )
-
-
-@dataclass(frozen=True)
-class PedigreeSection:
-    evidence_calibration: str = setting(
-        "predictive",
-        "str",
-        "Cross-chromosome pedigree evidence scaling: predictive, or off for unscaled evidence.",
-        ("predictive", "off"),
     )
 
 
@@ -416,7 +406,6 @@ class Settings:
     quality: QualitySection = section(QualitySection, "Evidence quality control and read model.")
     genetic_map: GeneticMapSection = section(GeneticMapSection, "Inference genetic map.")
     relatedness: RelatednessSection = section(RelatednessSection, "Optional relatedness output selection.")
-    pedigree: PedigreeSection = section(PedigreeSection, "Pedigree inference.")
     family_phase: FamilyPhaseSection = section(FamilyPhaseSection, "Family phase.")
     recombination: RecombinationSection = section(RecombinationSection, "Recombination maps.")
     export: ExportSection = section(ExportSection, "Final products: founder and sample VCFs.")
@@ -490,7 +479,6 @@ __all__ = [
     "QualitySection",
     "GeneticMapSection",
     "RelatednessSection",
-    "PedigreeSection",
     "FamilyPhaseSection",
     "RecombinationSection",
     "ExportSection",

@@ -389,8 +389,6 @@ shown in the generated dictionary. A non-exact interval has an empty point `log_
 Exclusion evidence is scored only for count-release target dyads. Released relationship views are post-guard; complete relationships,
 selection/search diagnostics and relative contrasts describe pre-guard evidence.
 
-`pedigree/evidence_calibration.json` serialises the typed calibration report
-([`CalibrationRecord`](../reference/records.md#pedigreecalibrationrecord)).
 `pedigree/summary.json` has these keys, in order. The nested objects carry the
 fields of the linked records, in declaration order.
 

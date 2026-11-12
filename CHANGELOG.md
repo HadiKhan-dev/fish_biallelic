@@ -1,5 +1,51 @@
 # Changelog
 
+## 4.15.2 (12 November 2026)
+
+This release removes the pedigree stage's predictive evidence weight. The stage now uses its composite evidence as
+the model states it. Nothing else in the inference changes. Pedigree products use schema 6: rerun earlier analyses
+in a new output root.
+
+**What was removed.** Since before 2.0 the stage fitted one weight for all of its evidence by predicting held-out
+chromosomes, and applied it when it was below one. The weight was meant to temper evidence that is right in
+direction but overconfident in size. It did not measure that. In a cross with small full-sib families and one
+sequenced parent per family, at depths 1 to 3, the fitted weight was 0.0013 to 0.0019: all parent evidence was
+scaled away, every sample was called "zero observed parents" and none of 23 true parent edges was released; with
+unit weight all 23 are released and no false edge. The cause is structural. The stage's hypotheses are zero, one or
+two sequenced parents; a full sib scored as a parent fits well on chromosomes where the two share and badly
+elsewhere, and hedging towards the prior predicts such held-out chromosomes better than any use of the evidence. A
+child with a sequenced parent can lose only a bounded amount under that hedging, while a child with sequenced sibs
+and no sequenced parent can gain without bound, so the pooled optimum is "discard the evidence" whenever such
+children are common. In cohorts without sequenced parents the optimum sat on the lower search bound and was ignored
+for that reason alone. Where a moderate weight was applied (0.20 to 0.80 in six runs) it came from one to four
+children whose training-fold winner, a relative's row or a reversed edge, failed on one held-out fold, and it was
+not confirmed on the test fold.
+
+**Why it is removed rather than repaired.** Three repairs were examined on saved runs and on constructed cohorts:
+refusing a weight that overturns decisions the held-out data confirm, requiring confirmation on the test fold
+across children, and bounding each child's influence. Each fails a constructed case: a cohort with real twentyfold
+overconfidence in which tempering helps is refused by the first two; a mixed cohort lets a harmful weight through
+the first; the third still discards the evidence in sibling-only cohorts. A sound weight needs a likelihood that
+represents relatives, or an external calibration panel. Unit weight is not a calibration either: the composite
+evidence is conditional on the paintings and the candidate panel, and resampling over chromosomes remains the
+stage's statement of stability.
+
+**Settings.** `[pedigree] evidence_calibration` no longer exists. A configuration that still carries it loads with
+one message and the key is ignored for either value. `pedigree/evidence_calibration.json` is no longer written.
+
+**Validation.** The default suite and the stage tier (402 tests in four shards) pass. On saved inputs the decision
+arrays, calls and reports equal those of 4.15.1 run with the weight switched off, byte for byte. The end-to-end
+matrix of seventeen cases was compared with the 4.15.1 run of each case. In the fourteen simulated crosses in which
+4.15.1 applied no weight, every released result is identical. In the two in which it applied one (0.22 and 0.23),
+the pedigree calls, relationships and everything downstream are identical and only the stage's score tables
+differ. On TroMau, where 4.15.1 applied 0.20, the complete relationship table is unchanged; Tier B releases 69
+parent edges instead of 68 (one child, unresolved at a state margin of 2.5, becomes a one-parent call at 31.8),
+one state-only call becomes unresolved, and Tier A gains two two-parent children; phase and recombination follow
+these calls. In all seventeen cases the results equal 4.15.1 with the weight off. The small-family cross that
+exposed the fault releases 23 of 23 true parent edges at depths 1, 2 and 3, with no false edge, where 4.15.1
+released none. In twelve further known-truth runs at depths 1 and 2 (three crosses, with the weight and without)
+the released edges are the same either way and all true: no case was found in which the weight protected a call.
+
 ## 4.15.1 (12 November 2026)
 
 This release replaces the sibling guard's vote by a relationship model on the paintings. A proposed parent must be

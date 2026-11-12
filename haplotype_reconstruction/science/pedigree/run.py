@@ -16,7 +16,6 @@ import numpy as np
 
 from ...contracts.pedigree import (
     NO_PARENT,
-    CalibrationRecord,
     CountExclusion,
     CountReleaseBasis,
     Decision,
@@ -47,7 +46,6 @@ from .resampling import minimum_contigs_for_tier
 __all__ = [
     "precheck",
     "start_full_fit",
-    "finish_full_fit",
     "complete_decision",
     "exclusion_request",
     "release_decision",
@@ -72,17 +70,10 @@ def precheck(
     return PedigreePrecheck(n_samples, contigs, minimum, tier_minimum, contigs < tier_minimum, basis)
 
 
-def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FitStart:
-    """Prepare the full fit and its evidence-scale search (calibration.solve on ``.calibration``)."""
+def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FullFit:
+    """Fit the supplied composite evidence after checking the informative contig axis."""
     precheck(len(scores.sample_ids), len(scores.contigs), parameters)
     return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids), parameters)
-
-
-def finish_full_fit(
-    started: decision.FitStart, fitted: tuple[float, CalibrationRecord], parameters: PedigreeParameters
-) -> decision.FullFit:
-    """Finish the full fit after its evidence-scale search."""
-    return decision.finish_fit(started, fitted, parameters)
 
 
 def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeParameters) -> Decision:
@@ -247,7 +238,6 @@ def assemble(
         released.tier_a,
         released.complete,
         decided.reach,
-        decided.calibration,
         decided.eligibility.summary(),
         decided.scores.panel,
         support_record(decided),

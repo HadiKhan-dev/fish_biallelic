@@ -263,10 +263,41 @@ def _migrate_templates(mapping: dict) -> dict:
     return mapping
 
 
+def _drop_legacy_pedigree(mapping: dict) -> tuple[dict, bool]:
+    """Remove the obsolete key before schema validation without changing the caller's mapping."""
+    pedigree = mapping.get("pedigree")
+    if not isinstance(pedigree, dict):
+        return mapping, False
+    pedigree = dict(pedigree)
+    removed = "evidence_calibration" in pedigree
+    if removed:
+        value = pedigree.pop("evidence_calibration")
+        if not isinstance(value, str) or value not in ("off", "predictive"):
+            raise SettingsError('[pedigree] evidence_calibration expects "off" or "predictive"')
+    mapping = dict(mapping)
+    if pedigree:
+        mapping["pedigree"] = pedigree
+    else:
+        mapping.pop("pedigree")
+    return mapping, removed
+
+
+def _warn_removed_pedigree() -> None:
+    import warnings
+
+    warnings.warn(
+        "[pedigree] evidence_calibration removed in 4.15.2; "
+        "the pedigree stage uses the composite evidence at unit weight",
+        FutureWarning,
+        stacklevel=3,
+    )
+
+
 def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     """A typed Settings from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
     _check_removed(mapping)
     mapping = _migrate_templates(mapping)
+    mapping, removed_pedigree = _drop_legacy_pedigree(mapping)
     simulation = mapping.get("simulation", {})
     artefacts = simulation.get("artefacts", {}) if isinstance(simulation, dict) else {}
     if isinstance(artefacts, dict) and artefacts.get("preset") == "reference_blocks":
@@ -296,6 +327,8 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
         raise SettingsError(
             f"settings version {settings.version!r} is not 4; current TOML settings require version = 4"
         )
+    if removed_pedigree:
+        _warn_removed_pedigree()
     return settings
 
 
@@ -326,9 +359,12 @@ def load_settings(
     for text in overrides:
         name, value = parse_override(text)
         _assign(sets, name, value)
-    layers = tuple(_migrate_templates(layer) for layer in (user, options or {}, sets))
+    migrated = tuple(_drop_legacy_pedigree(_migrate_templates(layer)) for layer in (user, options or {}, sets))
+    layers = tuple(layer for layer, _ in migrated)
+    removed_pedigree = any(removed for _, removed in migrated)
     chosen = preset or next((layer["preset"] for layer in reversed(layers) if layer.get("preset")), "")
-    merged = preset_mapping(chosen) if chosen else {}
+    merged, removed_preset = _drop_legacy_pedigree(preset_mapping(chosen) if chosen else {})
+    removed_pedigree = removed_pedigree or removed_preset
     given = set()
     for layer in layers:
         merged = _merge(merged, layer)
@@ -339,6 +375,8 @@ def load_settings(
         merged.setdefault("input", {})["contigs"] = list(fallback_contigs)
         config = build_settings(merged, cwd=cwd)
     validate(config, given)
+    if removed_pedigree:
+        _warn_removed_pedigree()
     return config
 
 

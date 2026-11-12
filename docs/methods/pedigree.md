@@ -278,7 +278,7 @@ Cost and scope: O(N²). These terms describe the unit’s work/storage dimension
 <a id="pd02"></a>
 ## pd02 Decision input assembly: eligible-edge stacking and configuration rows
 
-Decode contig score records one at a time, copying eligible edges in child-major/ascending-parent order. Require identical junction-dyad order across contigs. For each child enumerate M0, ascending M1 identities and canonical panel M2 pairs in that order. Keep full and scored state multiplicities separate. Indexing arrays are C-contiguous; apply the calibrated evidence scale once, after calibration.
+Decode contig score records one at a time, copying eligible edges in child-major/ascending-parent order. Require identical junction-dyad order across contigs. For each child enumerate M0, ascending M1 identities and canonical panel M2 pairs in that order. Keep full and scored state multiplicities separate. Indexing arrays are C-contiguous; use the composite log likelihoods as supplied.
 
 
 Implementation: [science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
@@ -286,17 +286,6 @@ Implementation: [science/pedigree/stacking.py](../../haplotype_reconstruction/sc
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
 Cost and scope: O(C (N² + T)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
-
-<a id="pd03"></a>
-## pd03 Cross-chromosome predictive evidence scale lambda
-
-Assign informative contigs to ordered folds, holding out the test fold. Skip insufficient folds or alternatives; centre training, validation, combined and test terms under their specified masks before merging byte-identical M1 terms. Evaluate the grid, refine every eligible interior maximum and require all attempted optimisations to succeed. Choose the winning objective class by closeness to unit scale, then convention. Apply only a successful interior sub-unit scale with positive predictive gain; otherwise use unit scale. Untouched test gains are reported but never select the scale.
-
-Implementation: [science/pedigree/calibration.py](../../haplotype_reconstruction/science/pedigree/calibration.py), [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py).
-
-Parameters by name: `evidence_calibration`, `state_priors`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(3 × terms); O(C E). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd04"></a>
 ## pd04 Weighted genome likelihood with one M0 contamination mixture
@@ -353,7 +342,7 @@ and epsilon = `chromosome_error_probability`, its robust orientation log odds ar
 
 Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
 contig order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
-configuration scores. Reciprocal messages, calibration, resampling, release tiers retain their
+configuration scores. Reciprocal messages, resampling, release tiers retain their
 existing definitions; the relationship guard is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
 and reports; it is a separate quantity. This intermediate direction evidence differs from final released
 orientation log odds.
@@ -658,7 +647,7 @@ Validate samples and informative-contig reach, then prepare, screen, bound and s
 
 Implementation: [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/decision.py](../../haplotype_reconstruction/stages/pedigree/decision.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
-Parameters by name: `evidence_calibration`, `reverse_conventions`, `preparation`, `scoring`, `panel`, `exposure`, `direction`, `selection`, `resampling`, `release`, `exclusion`, `relationship`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `reverse_conventions`, `preparation`, `scoring`, `panel`, `exposure`, `direction`, `selection`, `resampling`, `release`, `exclusion`, `relationship`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: Sum of preparation, scoring, decision, resampling, exclusion and report-view work; independent contig/fit tasks are placed by key.
 
@@ -719,7 +708,7 @@ an N²-by-B observation array.
 Witnesses are dependent, and the score is not a posterior probability. Bin resolution, painting errors and cohort
 representation affect the evidence. Feasibility alone
 does not establish direction or parenthood. Relatives masked by shared founder classes without informative
-sibship evidence can remain released as `pair_only`; the model reports that limit. Direction, calibration,
+sibship evidence can remain released as `pair_only`; the model reports that limit. Direction,
 resampling, release tiers and the genotype exclusion evidence for count release retain their own definitions.
 
 Implementation: [science/pedigree/relationship.py](../../haplotype_reconstruction/science/pedigree/relationship.py),
@@ -762,9 +751,6 @@ O(N² B) and reference trios O(K_ref B) per component. Sequence kernels parallel
 
 **Converged final reciprocal solve:** see [PD10](#pd10).
 
-<a id="cross-chromosome-evidence-calibration"></a>
-
-**Cross chromosome evidence calibration:** see [PD03](#pd03).
 
 <a id="exposure-and-junction-counts"></a>
 

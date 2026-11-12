@@ -28,10 +28,13 @@ inferred map feeds back into founder or pedigree inference.
 
 Discovery and assembly fit finite candidate panels with the specified search
 orders and budgets. Pedigree uses a bounded M2 candidate panel, composite evidence,
-chromosome-level calibration and release rules; support fractions are not a claim
+chromosome resampling and release rules; support fractions are not a claim
 that all possible joint pedigrees were enumerated. Family phase releases modular,
 conditional calls rather than a single globally identified biological haplotype
 assignment. Missingness and ambiguity can remain after a converged fit.
+
+Pedigree decisions use the composite log likelihoods as supplied. Their confidence is conditional on the
+paintings, candidate panel and likelihood family; it is not claimed to be a calibrated posterior probability.
 
 The [methods pages](../methods/index.md) name each carried rule and approximation.
 The following cost exceptions are explicit in 4.0:

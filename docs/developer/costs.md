@@ -42,7 +42,7 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [pedigree.prepare](../methods/pedigree.md) | O(N B S²) sources; O(N M S) ALT; O(N B(S²+128S)) bridges | 24 N B S²+1.25 evidence+painting+2GiB | ≤ K³ | S31:right weights 7688 bytes/sample/bin |
 | [pedigree.screen_pair_bound](../methods/pedigree.md) | O(R² B G³) pair bound G≤S+1; O(C² P) panel; O(D L) exclusion | 16 N(B-1)S² geometry; 4 P/contig; stack streamed | ≤ K³ | N2500 B1000 S31≈38GB geometry; 414M pairs≈1.7GB/contig |
 | [pedigree.scores_exposure](../methods/pedigree.md) | O((E/2+T)B S(S+1)/2) exposure; O(N B J²) junctions; O(C N²) order/fit | 8 N B S(S+1)/2 masses; 32 N² outputs; 40 N² family | ≤ K³ | S31:496 features×3123750 unordered edges×B |
-| [pedigree.decision](../methods/pedigree.md) | O(C(N²+T)) stack; O(terms)/calibration; graph O(N(N+edges)+A) | four 8 C E arrays+likelihood/junction; N² dominant | no K term | N2500 C22 each 8 C E≈1.1GB |
+| [pedigree.decision](../methods/pedigree.md) | O(C(N²+T)) stack; graph O(N(N+edges)+A) | four 8 C E arrays+likelihood/junction; N² dominant | no K term | N2500 C22 each 8 C E≈1.1GB |
 | [pedigree.resampling_release](../methods/pedigree.md) | ≤1000+C fits; O(C A+C N²+I(A+N²)+R A+R N²+R² T+graph)/fit | ≈80 N²/worker | no K term | N2500≈500000000 bytes/fit worker |
 | [phase.solve](../methods/phase.md) | O(B(N S³+S² sum A_n))/sweep; O(children B S³) pairing | 8 N S² B emissions; O(B(S+2)²G) pointers | ≤ K³ | N2500 S31 B3000–3300:57.66–63.426GB emissions |
 | [phase.release](../methods/phase.md) | O(N B(S+2)³ G) posterior; O(N L S²) site; O(E B) chains | 12 N L spool+5 N L site+E | ≤ K³ | K30 S31 L330000≈3e8 pair visits/sample |

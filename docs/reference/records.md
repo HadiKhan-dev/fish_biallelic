@@ -1964,7 +1964,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `partial_a` | `PartialEdges` | state | () | 1 | PartialEdges | True | `required` |
 | `partial_b` | `PartialEdges` | state | () | 1 | PartialEdges | True | `required` |
 | `candidates` | `CandidateSets` | state | () | 1 | CandidateSets | True | `required` |
-| `calibration` | `CalibrationRecord` | state | () | 1 | CalibrationRecord | True | `required` |
 | `reach` | `TierReach` | state | () | 1 | TierReach | True | `required` |
 | `family_solve` | `FamilySolveRecord` | state | () | 1 | FamilySolveRecord | True | `required` |
 | `tie_events` | `TieCounts` | diagnostic | () | 1 | TieCounts | True | `required` |
@@ -2038,7 +2037,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `tier_a` | `PedigreeCalls` | call | () | 1 | PedigreeCalls | True | `required` |
 | `complete` | `PedigreeCalls` | call | () | 1 | PedigreeCalls | True | `required` |
 | `reach` | `TierReach` | report | () | 1 | TierReach | True | `required` |
-| `calibration` | `CalibrationRecord` | state | () | 1 | CalibrationRecord | True | `required` |
 | `eligibility` | `EligibilityRecord` | state | () | 1 | EligibilityRecord | True | `required` |
 | `panel` | `CandidatePanel` | state | () | 1 | CandidatePanel | True | `required` |
 | `support` | `SupportRecord` | call | () | 1 | SupportRecord | True | `required` |
@@ -2049,7 +2047,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `5` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `6` |
 
 ## pedigree.PedigreeResult
 
@@ -2072,44 +2070,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
 | `children` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
 | `parents` | `np.ndarray` | state | ('N', 'N') | 1 | bool | True | `required` |
-
-## pedigree.CalibrationRecord
-
-Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
-
-Extends `SummaryMapping`.
-
-| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
-|---|---|---|---|---|---|---|---|
-| `mode` | `str` | state | () | 1 | str | True | `required` |
-| `scale` | `float` | state | () | 1 | float | True | `required` |
-| `selected` | `bool` | state | () | 1 | bool | True | `required` |
-| `status` | `str` | state | () | 1 | str | True | `required` |
-| `truth_used` | `bool` | state | () | 1 | bool | True | `required` |
-| `parent_count_prior_fitted` | `bool` | state | () | 1 | bool | True | `required` |
-| `conditional_on_fixed_paintings_and_candidate_panel` | `bool` | state | () | 1 | bool | True | `required` |
-| `resampling_conditions_on_fitted_scale` | `bool` | state | () | 1 | bool | True | `required` |
-| `interpretation` | `str` | state | () | 1 | str | True | `required` |
-| `estimator` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `partitions` | `dict[str, list[str]] &#124; None` | state | () | 1 | dict[str, list[str]] &#124; None | True | `None` |
-| `testing_fold` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `training_scheme` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `search_scale_bounds` | `list[float] &#124; None` | state | () | 1 | list[float] &#124; None | True | `None` |
-| `eligible_children` | `int &#124; None` | state | () | 1 | int &#124; None | True | `None` |
-| `omitted_nonfinite_alternatives` | `int &#124; None` | state | () | 1 | int &#124; None | True | `None` |
-| `expanded_objective_terms` | `int &#124; None` | state | () | 1 | int &#124; None | True | `None` |
-| `aggregated_objective_terms` | `int &#124; None` | state | () | 1 | int &#124; None | True | `None` |
-| `objective_aggregation` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `reciprocal_dominant_rows_excluded_per_fold` | `list[int] &#124; None` | state | () | 1 | list[int] &#124; None | True | `None` |
-| `fitted_scale` | `float &#124; None` | state | () | 1 | float &#124; None | True | `None` |
-| `optimizer_success` | `bool &#124; None` | state | () | 1 | bool &#124; None | True | `None` |
-| `at_search_boundary` | `bool &#124; None` | state | () | 1 | bool &#124; None | True | `None` |
-| `selection_gain` | `float &#124; None` | state | () | nats | float &#124; None | True | `None` |
-| `search_log_scale_grid` | `list[float] &#124; None` | state | () | 1 | list[float] &#124; None | True | `None` |
-| `search_predictive_grid` | `list[float] &#124; None` | state | () | nats | list[float] &#124; None | True | `None` |
-| `untouched_test_gain` | `float &#124; None` | state | () | nats | float &#124; None | True | `None` |
-| `fitted_untouched_test_gain` | `float &#124; None` | state | () | nats | float &#124; None | True | `None` |
-| `seconds` | `float &#124; None` | diagnostic | () | s | float &#124; None | True | `None` |
 
 ## pedigree.FamilySolveRecord
 

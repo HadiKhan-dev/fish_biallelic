@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haplotype-reconstruction"
-version = "4.15.1"
+version = "4.15.2"
 description = "Founder-haplotype reconstruction, pedigree, phase and recombination maps for experimental crosses"
 readme = "README.md"
 license = "MIT"
