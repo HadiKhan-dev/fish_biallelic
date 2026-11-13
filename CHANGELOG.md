@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.17.0 (13 November 2026)
+
+This release stops the assembly joins from repeating a search whose inputs differ only in which of several identical
+rows a founder copies. Released results are identical to 4.16.1.
+
+**Assembly: one join search per distinct join view.** When the components handed to a join come in tied
+alternatives, the join runs once for every combination of them (up to 16). Where two founder rows of an input are
+identical on a block (an "alias" row: same calls, often both uncalled), several of those combinations give the join
+search exactly the same input: the same sites, kept masks, calls after the common usable-site masks, atomic spans and
+pattern of founders that share a prepared row. The search reads nothing else from its inputs, so those combinations
+now share one search, and each combination's record is the shared outcome mapped through its own input rows. Every
+record equals the record of searching that combination alone; nothing is merged and no family is dropped. Inputs that
+are equal only up to relabelling are still searched separately, and with the tie census switched on every
+combination is searched.
+
+**Diagnostics.** Join work counters now count each search once instead of once per combination, and the join's
+shadow diagnostic (and its `parent_shadow_join` event) gains `searches` and `branch_search`, which say how many
+searches ran and which search served each combination.
+
+**Effect.** On one chromosome of a real cross of 52 hybrid samples (a 4.14 run with the same join code) the
+repeated searches cost about 160,000 CPU-s, of which this release removes about 150,000: the three level-3 joins with
+two identical branches each fall from 7,304, 4,081 and 2,056 s to about half; the same chromosome of a real cichlid
+cross saves about 80 s; simulations have no alias rows and are unchanged.
+Repeats inside one join (an inner replay after a tie between identical rows) are not yet removed.
+
+**Validation.** The default suite and the stage tier (four shards) pass. On saved join inputs of those two real
+chromosomes (levels 1 to 4), nine joins replayed with this release give records equal to the saved ones in every
+released field.
+
 ## 4.16.1 (13 November 2026)
 
 This release lets the pedigree stage assess a run that holds too little material for its chromosome resampling:
