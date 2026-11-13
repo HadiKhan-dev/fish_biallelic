@@ -52,6 +52,17 @@ def scored_morgans(prepared: PreparedChromosome, interval_cap: float) -> float:
     return float(sum(np.sum(interval_morgans(component, interval_cap)) for component in prepared.components))
 
 
+def working_morgans(prepared: PreparedChromosome) -> float:
+    """Configured transition distance of scored components (PS04), for reports only.
+
+    Invert the actual selector probabilities, including any working-map fallback/floor. This is not measured
+    exposure and is never used by a gate, likelihood, tier or call.
+    """
+    return float(
+        sum(np.sum(-0.5 * np.log1p(-2.0 * component.selector_switch_probability)) for component in prepared.components)
+    )
+
+
 def score_chromosome(
     prepared: PreparedChromosome,
     screen: ChromosomeScreen,
@@ -146,6 +157,7 @@ def score_chromosome(
         junction_dyads=dyads,
         transmission_log_likelihood=transmission_log_likelihood,
         scored_morgans=scored_morgans(prepared, config.exposure.unit_morgans),
+        working_morgans=working_morgans(prepared),
         edge_exposed_morgans=total(9),
         pair_exposed_morgans=total(10),
     )

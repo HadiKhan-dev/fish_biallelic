@@ -69,6 +69,9 @@ class GenomeScores:
     informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
     transmission_log_likelihood float64 [C, D] in nats (ChromosomeScores);
     scored_morgans float64 [C] (NaN where unknown);
+    working_morgans float64 [C]: sum of -0.5 ln(1 - 2 theta) over scored components' selector boundaries,
+    the configured working-map distance of PS04. It is NOT measured exposure, and never enters a gate or
+    decision; reports alone use it to describe painted junctions per Morgan.
     edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier
     records).
     """
@@ -98,6 +101,10 @@ class GenomeScores:
     )
     pair_exposed_morgans: np.ndarray | None = record_field(
         "evidence", axes=("C", "T"), units="Morgans", dtype="float64", default=None
+    )
+
+    working_morgans: np.ndarray = record_field(
+        "report", axes=("C",), units="Morgans", dtype="float64", kw_only=True
     )
 
     def edge_starts(self) -> np.ndarray:
@@ -684,8 +691,8 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 6 with joint
-    transmission direction likelihoods and columnar exclusion evidence."""
+    """Complete released pedigree and retained numerical state, published atomically as schema 7 with working-map
+    diagnostics, joint transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -706,7 +713,7 @@ class Pedigree:
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(6)
+    schema: int = schema_field(7)
 
 
 @dataclass(frozen=True)
@@ -1590,6 +1597,9 @@ class ChromosomeScores:
     scored_morgans: measured map length (Morgans) between adjacent bins of the scored components
         (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans;
         0 without a measured map).
+    working_morgans: configured working-map distance, sum of -0.5 ln(1 - 2 theta) over the scored
+        components' selector boundaries (PS04). This is NOT measured exposure and never enters a gate or
+        decision; it is retained only for reports.
     edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length
         over which the pair (child and both panel parents) is exposed: each measured interval between adjacent
         bins counts as far as it is exposed at both ends."""
@@ -1613,7 +1623,8 @@ class ChromosomeScores:
     scored_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64")
     edge_exposed_morgans: np.ndarray = record_field("state", axes=("N", "N"), units="Morgans", dtype="float64")
     pair_exposed_morgans: np.ndarray = record_field("state", axes=("T",), units="Morgans", dtype="float64")
-    schema: int = schema_field(2)
+    working_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float64", kw_only=True)
+    schema: int = schema_field(3)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)

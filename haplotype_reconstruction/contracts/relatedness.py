@@ -18,10 +18,13 @@ from .roles import freeze_record_arrays, record_field, schema_field
 
 @dataclass(frozen=True)
 class RelatednessFamilies:
-    """Full-sib families with aligned parent/support and half-sib tables.
+    """Full-sib families with aligned parent-slot/support and half-sib tables.
 
     Families are numbered by smallest member; half_sib and gains share one sorted
-    row order. NaN parent support denotes a latent slot, and search_margin may be
+    row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's
+    would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another
+    close relative. Parent calls, direction and their support belong to the pedigree stage.
+    NaN slot support denotes a latent slot, and search_margin may be
     NaN when the alternate search was not measured. Canonicalisation is RL1 science.
     """
 

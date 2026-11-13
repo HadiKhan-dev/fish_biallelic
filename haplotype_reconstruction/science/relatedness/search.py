@@ -33,15 +33,18 @@ _DEFAULT_FAMILY = FamilyParameters()
 class FamilyFit:
     """The fitted families (sample indices of the run's axis).
 
-    members: one int64 array per family (sorted). parents: int64 [F, 2] sequenced parent per slot, -1 latent.
+    members: one int64 array per family (sorted). parents: int64 [F, 2] sequenced sample per parent slot, -1 latent.
     member_support: float64 [N] share of support units (``ranges``) on which the sample's family is its best placement
     (for a one-member family: on which staying alone beats joining any family; a latent one-member family is the
     sample alone, a tie, so it scores 0). parent_support: float64 [F, 2] share
-    of support units on which the sequenced parent
-    beats a latent one (NaN for a latent slot). half_sib: int64 [H, 2] pairs of latent families sharing one latent
+    of support units on which the slot sample
+    beats a latent slot (NaN for a latent slot). half_sib: int64 [H, 2] pairs of latent families sharing one latent
     parent better than not (gain above log N), half_sib_gain: float64 [H]. loglik: the objective. sweeps: search
     sweeps used; converged: whether the last sweep changed nothing. search: the search kept ("best_improvement" or
     "content_order"); search_margin: its objective minus the other search's.
+    A slot sample's genotypes serve the model as a parent's would: it may be a parent, child (the two directions
+    tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong
+    to the pedigree stage.
     """
 
     members: tuple[np.ndarray, ...]
@@ -377,13 +380,62 @@ def _content_moves(part: _Partition) -> int:
 
 
 def _sweeps(part: _Partition, moves, penalty: float, max_sweeps: int, keep_versions=()):
-    """Sweeps of parent assignment, ``moves`` and one merge until a sweep changes nothing; (sweeps, converged)."""
+    """Sweeps of slot assignment, ``moves``, kept-slot splits and one merge; (sweeps, converged)."""
     sweeps, changed = 0, 1
     while changed and sweeps < max_sweeps:
         thread_count(part.threads)
-        changed = _assign_parents(part, penalty, keep_versions) + moves(part) + _merge_one(part)
+        changed = _assign_parents(part, penalty, keep_versions) + moves(part) + _split_moves(part, penalty)
+        changed += _merge_one(part)
         sweeps += 1
     return sweeps, not changed
+
+
+def _split_moves(part: _Partition, penalty: float) -> int:
+    """Leave a family with at least two members for a new singleton keeping one sequenced slot sample.
+
+    Repeatedly select the largest gain strictly above log N, at most N moves per sweep. Gains within the
+    tolerance tie by the member's evidence rank, then the kept sample's rank. Rescore the selected leave on the
+    current partition before applying it; the singleton likelihood is partition-independent and kept for the fit.
+    The kept edge already existed, so this move introduces no ancestry or cycle. The other slot stays latent
+    until ordinary slot assignment in a later sweep.
+    """
+    changed = 0
+    for _ in range(part.N):
+        thread_count(part.threads)
+        families = [int(f) for f in part.live() if len(part.members[f]) >= 2 and (part.slots[f] >= 0).any()]
+        part.sync_leave([c for f in families for c in part.members[f]])
+        offers = []
+        for f in families:
+            for c in part.members[f]:
+                for u in part.slots[f]:
+                    if u < 0:
+                        continue
+                    gain = float(part.leave[c] + part.singleton_slot_loglik(c, u))
+                    if gain > penalty:
+                        offers.append((gain, int(c), int(u)))
+        if not offers:
+            break
+        j = _top(
+            np.asarray([offer[0] for offer in offers]),
+            [(part.evidence_rank[c], part.evidence_rank[u]) for _, c, u in offers],
+            part.parameters.gain_tolerance,
+        )
+        _, c, u = offers[j]
+        f = int(part.of[c])
+        a, b = part.slots[f]
+        fresh = (
+            family_loglik_parallel(part.S[f], part.C[c], -1.0, part.law(a), part.law(b), 0, part.M)
+            - part.ll[f]
+            + part.singleton_slot_loglik(c, u)
+        )
+        if not fresh > penalty:
+            continue
+        h = part.move(c, -1)
+        part.slots[h] = (u, -1)
+        part.ll[h] = part.singleton_slot_loglik(c, u)
+        part.touch(h)
+        changed += 1
+    return changed
 
 
 def _merge_one(part: _Partition) -> int:

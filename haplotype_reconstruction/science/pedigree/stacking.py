@@ -42,7 +42,7 @@ def stack(
     flat = edges[:, 0] * n + edges[:, 1]
     columns: dict[str, list[np.ndarray]] = {name: [] for name in (*_STACKED, *_EDGES)}
     contigs: list[str]
-    contigs, bins, markers, morgans, pair_morgans = [], [], [], [], []
+    contigs, bins, markers, morgans, pair_morgans, working = [], [], [], [], [], []
     dyads = np.empty((0, 2), dtype=np.int64)
     for value in chromosomes:
         if value.contig in contigs:
@@ -57,6 +57,7 @@ def stack(
         bins.append(value.total_bins)
         markers.append(value.informative_markers)
         morgans.append(value.scored_morgans)
+        working.append(value.working_morgans)
         for name in _STACKED:
             columns[name].append(np.array(getattr(value, name), copy=True))
         for name in _EDGES:
@@ -91,6 +92,7 @@ def stack(
         junction_dyads=dyads,
         transmission_log_likelihood=gathered("transmission_log_likelihood"),
         scored_morgans=np.asarray(morgans, dtype=np.float64),
+        working_morgans=np.asarray(working, dtype=np.float64),
         edge_exposed_morgans=gathered("edge_exposed_morgans"),
         pair_exposed_morgans=np.ascontiguousarray(np.stack(pair_morgans), dtype=np.float64),
     )

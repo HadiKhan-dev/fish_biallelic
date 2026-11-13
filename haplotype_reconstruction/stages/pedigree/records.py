@@ -86,7 +86,7 @@ def expected(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-6 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-7 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
     Exclusion is empty only for an empty request; otherwise it covers configured C.

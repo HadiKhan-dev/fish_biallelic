@@ -30,9 +30,9 @@ KEY = "pedigree/floored_scores"
 
 
 class ScoresAdapter:
-    """Schema-2 score product: the M1 field is already the fixed genome profile."""
+    """Schema-3 score product: the M1 field is already the fixed genome profile."""
 
-    schema = 2
+    schema = 3
 
     def encode(self, value: ChromosomeScores) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value)}

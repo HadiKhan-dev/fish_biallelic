@@ -398,60 +398,61 @@ Source: [`DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | 35 | `selected_parent_role_probability` | selected parent role probability (1). |
 | 36 | `raw_ancestry_junction_count` | raw ancestry junction count (1). |
 | 37 | `callable_ancestry_haplotype_bin_count` | callable ancestry haplotype bin count (1). |
-| 38 | `adjusted_ancestry_junction_burden` | adjusted ancestry junction burden (1). |
-| 39 | `ancestry_painting_callability_fraction` | ancestry painting callability fraction (1). |
-| 40 | `informative_contig_count` | informative contig count (1). |
-| 41 | `informative_map_units` | informative map units (1). |
-| 42 | `local_state_bootstrap_fraction` | local state bootstrap fraction (1). |
-| 43 | `local_configuration_bootstrap_fraction` | local configuration bootstrap fraction (1). |
-| 44 | `graph_configuration_bootstrap_fraction` | graph configuration bootstrap fraction (1). |
-| 45 | `selected_graph_configuration_bootstrap_fraction` | selected graph configuration bootstrap fraction (1). |
-| 46 | `selected_graph_parent1_bootstrap_fraction` | selected graph parent1 bootstrap fraction (1). |
-| 47 | `selected_graph_parent2_bootstrap_fraction` | selected graph parent2 bootstrap fraction (1). |
-| 48 | `parent1_bootstrap_fraction` | parent1 bootstrap fraction (1). |
-| 49 | `parent2_bootstrap_fraction` | parent2 bootstrap fraction (1). |
-| 50 | `local_state_loco_fraction` | local state loco fraction (1). |
-| 51 | `local_configuration_loco_fraction` | local configuration loco fraction (1). |
-| 52 | `graph_configuration_loco_fraction` | graph configuration loco fraction (1). |
-| 53 | `selected_graph_configuration_loco_fraction` | selected graph configuration loco fraction (1). |
-| 54 | `selected_graph_parent1_loco_fraction` | selected graph parent1 loco fraction (1). |
-| 55 | `selected_graph_parent2_loco_fraction` | selected graph parent2 loco fraction (1). |
-| 56 | `parent1_loco_fraction` | parent1 loco fraction (1). |
-| 57 | `parent2_loco_fraction` | parent2 loco fraction (1). |
-| 58 | `state_winner_margin` | state winner margin (nats). |
-| 59 | `conditional_identity_margin` | conditional identity margin (nats). |
-| 60 | `unconstrained_winner_margin` | unconstrained winner margin (nats). |
-| 61 | `selected_aggregate_utility` | selected aggregate utility (nats). |
-| 62 | `selected_minus_unconstrained_best` | selected minus unconstrained best (1). |
-| 63 | `state_log_evidence0` | state log evidence0 (nats). |
-| 64 | `state_log_evidence1` | state log evidence1 (nats). |
-| 65 | `state_log_evidence2` | state log evidence2 (nats). |
-| 66 | `state_support0` | state support0 (1). |
-| 67 | `state_support1` | state support1 (1). |
-| 68 | `state_support2` | state support2 (1). |
-| 69 | `scored_candidate_count2` | scored candidate count2 (1). |
-| 70 | `m2_candidate_screen_incomplete` | m2 candidate screen incomplete (1). |
-| 71 | `prior_sensitivity_local_state_agreement_fraction` | prior sensitivity local state agreement fraction (1). |
-| 72 | `prior_sensitivity_local_identity_agreement_fraction` | prior sensitivity local identity agreement fraction (1). |
-| 73 | `prior_sensitivity_graph_agreement_fraction` | prior sensitivity graph agreement fraction (1). |
-| 74 | `prior_sensitivity_selected_state_minimum_support` | prior sensitivity selected state minimum support (1). |
-| 75 | `inference_status` | inference status (1). |
-| 76 | `tier_a_state_call` | tier a state call (1). |
-| 77 | `tier_b_state_call` | tier b state call (1). |
-| 78 | `tier_a_exact_configuration` | tier a exact configuration (1). |
-| 79 | `tier_b_exact_configuration` | tier b exact configuration (1). |
-| 80 | `tier_a_exact_pair` | tier a exact pair (1). |
-| 81 | `tier_b_exact_pair` | tier b exact pair (1). |
-| 82 | `tier_a_parent1` | tier a parent1 (1). |
-| 83 | `tier_a_parent2` | tier a parent2 (1). |
-| 84 | `tier_b_parent1` | tier b parent1 (1). |
-| 85 | `tier_b_parent2` | tier b parent2 (1). |
-| 86 | `configuration_support_set` | number of ordered items in pedigree/cell_items.csv (count). |
-| 87 | `parent1_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
-| 88 | `parent2_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
-| 89 | `evidence_configuration_set` | number of ordered items in pedigree/cell_items.csv (count). |
-| 90 | `tier_b_final_state_call` | tier b final state call (1). |
-| 91 | `tier_b_release_evidence` | tier b release evidence (1). |
+| 38 | `painted_junctions_per_morgan` | minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan). |
+| 39 | `adjusted_ancestry_junction_burden` | adjusted ancestry junction burden (1). |
+| 40 | `ancestry_painting_callability_fraction` | ancestry painting callability fraction (1). |
+| 41 | `informative_contig_count` | informative contig count (1). |
+| 42 | `informative_map_units` | informative map units (1). |
+| 43 | `local_state_bootstrap_fraction` | local state bootstrap fraction (1). |
+| 44 | `local_configuration_bootstrap_fraction` | local configuration bootstrap fraction (1). |
+| 45 | `graph_configuration_bootstrap_fraction` | graph configuration bootstrap fraction (1). |
+| 46 | `selected_graph_configuration_bootstrap_fraction` | selected graph configuration bootstrap fraction (1). |
+| 47 | `selected_graph_parent1_bootstrap_fraction` | selected graph parent1 bootstrap fraction (1). |
+| 48 | `selected_graph_parent2_bootstrap_fraction` | selected graph parent2 bootstrap fraction (1). |
+| 49 | `parent1_bootstrap_fraction` | parent1 bootstrap fraction (1). |
+| 50 | `parent2_bootstrap_fraction` | parent2 bootstrap fraction (1). |
+| 51 | `local_state_loco_fraction` | local state loco fraction (1). |
+| 52 | `local_configuration_loco_fraction` | local configuration loco fraction (1). |
+| 53 | `graph_configuration_loco_fraction` | graph configuration loco fraction (1). |
+| 54 | `selected_graph_configuration_loco_fraction` | selected graph configuration loco fraction (1). |
+| 55 | `selected_graph_parent1_loco_fraction` | selected graph parent1 loco fraction (1). |
+| 56 | `selected_graph_parent2_loco_fraction` | selected graph parent2 loco fraction (1). |
+| 57 | `parent1_loco_fraction` | parent1 loco fraction (1). |
+| 58 | `parent2_loco_fraction` | parent2 loco fraction (1). |
+| 59 | `state_winner_margin` | state winner margin (nats). |
+| 60 | `conditional_identity_margin` | conditional identity margin (nats). |
+| 61 | `unconstrained_winner_margin` | unconstrained winner margin (nats). |
+| 62 | `selected_aggregate_utility` | selected aggregate utility (nats). |
+| 63 | `selected_minus_unconstrained_best` | selected minus unconstrained best (1). |
+| 64 | `state_log_evidence0` | state log evidence0 (nats). |
+| 65 | `state_log_evidence1` | state log evidence1 (nats). |
+| 66 | `state_log_evidence2` | state log evidence2 (nats). |
+| 67 | `state_support0` | state support0 (1). |
+| 68 | `state_support1` | state support1 (1). |
+| 69 | `state_support2` | state support2 (1). |
+| 70 | `scored_candidate_count2` | scored candidate count2 (1). |
+| 71 | `m2_candidate_screen_incomplete` | m2 candidate screen incomplete (1). |
+| 72 | `prior_sensitivity_local_state_agreement_fraction` | prior sensitivity local state agreement fraction (1). |
+| 73 | `prior_sensitivity_local_identity_agreement_fraction` | prior sensitivity local identity agreement fraction (1). |
+| 74 | `prior_sensitivity_graph_agreement_fraction` | prior sensitivity graph agreement fraction (1). |
+| 75 | `prior_sensitivity_selected_state_minimum_support` | prior sensitivity selected state minimum support (1). |
+| 76 | `inference_status` | inference status (1). |
+| 77 | `tier_a_state_call` | tier a state call (1). |
+| 78 | `tier_b_state_call` | tier b state call (1). |
+| 79 | `tier_a_exact_configuration` | tier a exact configuration (1). |
+| 80 | `tier_b_exact_configuration` | tier b exact configuration (1). |
+| 81 | `tier_a_exact_pair` | tier a exact pair (1). |
+| 82 | `tier_b_exact_pair` | tier b exact pair (1). |
+| 83 | `tier_a_parent1` | tier a parent1 (1). |
+| 84 | `tier_a_parent2` | tier a parent2 (1). |
+| 85 | `tier_b_parent1` | tier b parent1 (1). |
+| 86 | `tier_b_parent2` | tier b parent2 (1). |
+| 87 | `configuration_support_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 88 | `parent1_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 89 | `parent2_candidate_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 90 | `evidence_configuration_set` | number of ordered items in pedigree/cell_items.csv (count). |
+| 91 | `tier_b_final_state_call` | tier b final state call (1). |
+| 92 | `tier_b_release_evidence` | tier b release evidence (1). |
 
 ## pedigree/call_explanations.csv
 
@@ -818,10 +819,10 @@ Source: [`FAMILY_COLUMNS`](../../haplotype_reconstruction/outputs/reports/relate
 | 1 | `sample` | sample identifier (text). |
 | 2 | `family` | canonical dense family rank, ordered by smallest member (1). |
 | 3 | `family_support` | fraction of chromosomes supporting this sample-family assignment (1). |
-| 4 | `parent1` | first parent identifier; empty for an unobserved parent (text). |
-| 5 | `parent1_support` | fraction of chromosomes supporting the first parent slot (1). |
-| 6 | `parent2` | second parent identifier; empty for an unobserved parent (text). |
-| 7 | `parent2_support` | fraction of chromosomes supporting the second parent slot (1). |
+| 4 | `parent_slot1` | first slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text). |
+| 5 | `parent_slot1_support` | fraction of nonempty support units on which the first slot sample beats its latent replacement; parent calls, direction and their support belong to the pedigree stage (1). |
+| 6 | `parent_slot2` | second slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text). |
+| 7 | `parent_slot2_support` | fraction of nonempty support units on which the second slot sample beats its latent replacement; the two directions tie for a one-member family (1). |
 
 ## relatedness/pairs.csv (optional; off by default)
 

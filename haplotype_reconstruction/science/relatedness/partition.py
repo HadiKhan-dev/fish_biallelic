@@ -72,6 +72,7 @@ class _Partition:
         self._slot_logliks: dict[tuple[int, int], np.ndarray] = {}  # (f, version)
         self._member_parent: dict[tuple[int, int], dict[int, float]] = {}  # (f, version)
         self._merge_pairs: dict[tuple[int, int, int, int], np.ndarray] = {}  # (f, version f, g, version g)
+        self._singleton_slot: dict[tuple[int, int], float] = {}  # (member, kept slot sample), for the fit
         self._children_slots: np.ndarray | None = None  # families by sequenced parent, for the slots seen
         self._children: dict[int, list[int]] = {}
         self._posterior = None  # float32 genotype posteriors for the slot screen
@@ -98,6 +99,18 @@ class _Partition:
     def score(self, f):
         u, v = self.slots[f]
         return family_loglik_parallel(self.S[f], self.S[f], 0.0, self.law(u), self.law(v), 0, self.M)
+
+    def singleton_slot_loglik(self, c, u):
+        """One-member family c with slot sample u and one latent slot, kept across both searches of this fit.
+
+        This likelihood depends only on c and u, not on the partition or its family versions.
+        """
+        key = (int(c), int(u))
+        value = self._singleton_slot.get(key)
+        if value is None:
+            value = family_loglik_parallel(self.C[c], self.C[c], 0.0, self.logpost[u], self.logpi, 0, self.M)
+            self._singleton_slot[key] = value
+        return value
 
     def own_sum(self, f):
         """Detach child terms or a saved start sum before an in-place update."""

@@ -621,11 +621,15 @@ Cost and scope: O(N log N). These terms describe the unit’s work/storage dimen
 
 Construct typed report views after the declared release, slot and guard steps. Distinguish the final Tier-B count-consistent state call from pre-release state support. Keep diagnostic alternatives in internal row order, exact exclusion values separate from interval endpoints, and unresolved scalar values missing. Format tuples, names and ParentSlotBasis only in outputs. Reports cannot feed a new decision.
 
+`painted_junctions_per_morgan` is the sample's minimum painted founder switches, summed over scored chromosomes, divided by twice its callable painted map length. For chromosome c, callable length is `working_morgans[c] * callable_bins[c,n] / (2 * total_bins[c])`; the rate is per homologue per Morgan of the configured working map. Working length sums the Haldane distances `-0.5 * log(1 - 2 * theta)` of the actual selector transitions over scored components and bin boundaries (PS04). It includes the configured fallback rate even when that rate is not declared measured, and is distinct from the measured exposure used by pedigree gates. Zero callable length gives NaN. The number is reported only and never enters a gate, tier or parent-call decision.
+
+Values of a few per Morgan reflect the crossovers of the cross's generations: supported simulation designs give values from 0 to 4. Values far above that, such as 25–46 in a real cohort with many unrelated founders, indicate fragmented paintings; parent calls based on those paintings are not reliable. These ranges describe interpretation, not decision thresholds. The rate depends on the configured map and scales inversely with its length: doubling a configured recombination rate doubles the denominator and halves this number. An erroneous configured rate therefore rescales the diagnostic.
+
 Implementation: [outputs/reports/pedigree.py](../../haplotype_reconstruction/outputs/reports/pedigree.py), [science/pedigree/views.py](../../haplotype_reconstruction/science/pedigree/views.py).
 
 Parameters by name: `report_edge_coverage`, `report_pair_explainability`, `support_set_coverage`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(A + N·columns); O(A log A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(A + N·columns); O(A log A). The report-only junction rate adds O(C N) arithmetic and O(N) temporary storage. These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd26"></a>
 ## pd26 Relative-proxy contrasts
@@ -704,7 +708,9 @@ workspace is O(chunk · B), with at most two such arrays during likelihood conve
 O(requests · 4). The all-pairs persistence estimator stores two integer vectors of length N and does not allocate
 an N²-by-B observation array.
 
-**Limits.** This score combines profile likelihood ratios on scheduled paintings with calibrated witness priors.
+**Limits.** The pedigree stage cannot assign parents in a cross with many unrelated founders and few offspring per founder. It works from reconstructed founder haplotypes, which require many offspring per founder. In such a cross it leaves every sample without an assigned parent, including samples whose parents are sequenced.
+
+This score combines profile likelihood ratios on scheduled paintings with calibrated witness priors.
 Witnesses are dependent, and the score is not a posterior probability. Bin resolution, painting errors and cohort
 representation affect the evidence. Feasibility alone
 does not establish direction or parenthood. Relatives masked by shared founder classes without informative

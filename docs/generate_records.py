@@ -61,6 +61,8 @@ def render():
                 f"Source: [{path.relative_to(ROOT).as_posix()}](../../{path.relative_to(ROOT).as_posix()}).",
                 "",
             ]
+            if node.name in ("RelatednessFamilies", "GenomeScores", "ChromosomeScores"):
+                out += [cell(ast.get_docstring(node)), ""]
             if node.bases:
                 out += ["Extends " + ", ".join(f"`{ast.unparse(base)}`" for base in node.bases) + ".", ""]
             out += [

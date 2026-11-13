@@ -1,5 +1,49 @@
 # Changelog
 
+## 4.15.3 (13 November 2026)
+
+This release lets the relatedness family search separate half and three-quarter sibs from a family that has
+sequenced samples in its parent slots, and it names those slots for what they are. Nothing else in the inference
+changes.
+
+**Relatedness: one more move in the family search.** A sample could leave a family only for a new one-member
+family with two latent parents. A half or three-quarter sib that had been placed in a family whose slots were then
+filled by sequenced samples could therefore not leave it, because leaving lost both at once, although the family
+objective preferred the separate arrangement. In every sweep, after the single-sample moves and before the merge, a
+member of a family with at least two members may now leave for a new one-member family that keeps one of the
+family's slot samples; the other slot stays latent until the ordinary assignment of the next sweep. The move must
+raise the objective by more than log N, as an assignment must, and follows the existing tolerance and content-key
+tie rules. The objective, the penalties and the support definitions are unchanged.
+
+**Relatedness: parent slots are not parent calls.** `relatedness/families.csv` now publishes `parent_slot1`,
+`parent_slot1_support`, `parent_slot2` and `parent_slot2_support` in place of `parent1`, `parent1_support`,
+`parent2` and `parent2_support`. A slot sample is a sequenced sample whose genotypes serve the family model as a
+parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another
+close relative: on 23 known-truth simulated crosses, 415 of 1,130 slot samples are not parents of the family.
+Parent calls, their direction and their support are the pedigree stage's.
+
+**Pedigree: painted junctions per Morgan.** The per-sample diagnostics table reports minimum painted founder
+switches per homologue per Morgan of callable painting on the configured working map. The pedigree summary
+reports the median, minimum, maximum and definition. The number describes painting fragmentation and never
+enters a decision, tier or parent call. It uses the model's working-map transitions, including a configured
+fallback rate; errors in the configured rate rescale the diagnostic. Measured exposure retains its meaning.
+Pedigree products use schema 7: rerun earlier analyses in a new output root.
+
+**Pedigree: representation limit.** The pedigree stage cannot assign parents in a cross with many unrelated
+founders and few offspring per founder. It works from reconstructed founder haplotypes, which require many
+offspring per founder. In such a cross it leaves every sample without an assigned parent, including samples
+whose parents are sequenced. The user and methods documentation state this limitation.
+
+**Validation.** The default suite and the stage tier (four shards) pass. On the saved family-fit inputs of 23
+known-truth simulated crosses and one real cohort the new search never ends at a lower objective than 4.15.2 (12
+unchanged, gains up to 19,279 log units elsewhere), and members whose true parents differ from their family's
+majority fall from 187 to 162. At 320 samples the families that equal a whole true sibship rise from 50 to 111
+(depth 1) and from 122 to 225 (depth 5) of 282; the family fit takes about a quarter longer (about 90 seconds). The
+end-to-end matrix of seventeen cases was compared with the 4.15.2 run of each case: only the relatedness tables and
+the pedigree stage's witness report differ; paintings, founders, every released pedigree table (962 simulated
+edges, 69 Tier B edges on TroMau), family phase, recombination and all truth metrics are identical. Three cases
+rerun on the final tree, with the reported junction number, are identical again apart from the added column.
+
 ## 4.15.2 (12 November 2026)
 
 This release removes the pedigree stage's predictive evidence weight. The stage now uses its composite evidence as

@@ -145,6 +145,7 @@ COLUMNS = {
         "SelectedParentRoleProbability",
         "RawAncestryJunctionCount",
         "CallableAncestryHaplotypeBinCount",
+        "PaintedJunctionsPerMorgan",
         "AdjustedAncestryJunctionBurden",
         "AncestryPaintingCallabilityFraction",
         "InformativeContigCount",
@@ -320,7 +321,7 @@ EMPTY_COLUMNS = {
     "tier_a_partial_relationships": ("RelationshipBasis",),
     "complete_relationships": (),
     "tier_b_candidate_sets": ("TierBFinalStateCall", "TierBReleaseEvidence"),
-    "diagnostics": ("TierBFinalStateCall", "TierBReleaseEvidence"),
+    "diagnostics": ("PaintedJunctionsPerMorgan", "TierBFinalStateCall", "TierBReleaseEvidence"),
     "call_explanations": ("TierBFinalStateCall", "TierBReleaseEvidence"),
     "alternative_explanations": (),
     "search_diagnostics": (),
@@ -431,7 +432,9 @@ def _exclusion_frame(view: records.ExclusionEvidenceView, names: Sequence[str], 
     return pd.DataFrame(columns)
 
 
-def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd.DataFrame | None]:
+def render(
+    product: records.PedigreeViews, names: Sequence[str], *, painted_junctions_per_morgan: np.ndarray | None = None
+) -> dict[str, pd.DataFrame | None]:
     """Render numeric rows and text only; never choose or recompute a scientific value."""
     result = {}
     for table, fixed_columns in COLUMNS.items():
@@ -488,8 +491,11 @@ def render(product: records.PedigreeViews, names: Sequence[str]) -> dict[str, pd
         if oriented and values and values[0].parent_slot_basis is not None:
             columns.insert(columns.index("Parent2") + 1, "ParentSlotBasis")
         result[table] = pd.DataFrame(
-            [{c: _value(c, getattr(v, snake(c)), names, table) for c in columns} for v in values], columns=columns
+            [{c: _value(c, getattr(v, snake(c)), names, table) for c in columns
+              if c != "PaintedJunctionsPerMorgan"} for v in values], columns=columns
         )
+        if table == "diagnostics" and painted_junctions_per_morgan is not None:
+            result[table]["PaintedJunctionsPerMorgan"] = [painted_junctions_per_morgan[v.sample] for v in values]
         if oriented:
             for slot, column in enumerate(("Parent1", "Parent2")):
                 if any(v.parents_before_guard is not None and v.parents_before_guard[slot] >= 0 for v in values):
@@ -525,6 +531,35 @@ EXCLUSION_SUMMARY_FIELDS = (
 )
 
 
+_PAINTED_JUNCTION_DEFINITION = (
+    "Minimum painted founder switches summed over scored chromosomes, divided by twice the callable painted "
+    "working-map length: sum(junctions) / (2 * sum(working_morgans * callable_bins / (2 * total_bins))). "
+    "Junctions per homologue per Morgan of the configured map; NaN at zero denominator. "
+    "Reported only, never used in a gate or decision; scales inversely with configured map length."
+)
+
+
+def _painted_junction_rates(scores: records.GenomeScores) -> np.ndarray:
+    """Report-only switches per homologue per Morgan of callable painting on the working map."""
+    callable_morgans = np.sum(
+        scores.working_morgans[:, None] * scores.callable_bins / (2.0 * scores.total_bins[:, None]), axis=0
+    )
+    return np.divide(
+        scores.junctions.sum(axis=0), 2.0 * callable_morgans,
+        out=np.full(len(scores.sample_ids), np.nan), where=callable_morgans > 0,
+    )
+
+
+def _painted_junction_summary(rates: np.ndarray) -> dict[str, float | str]:
+    available = rates[~np.isnan(rates)]
+    return dict(
+        median=float(np.median(available)) if len(available) else float("nan"),
+        minimum=float(np.min(available)) if len(available) else float("nan"),
+        maximum=float(np.max(available)) if len(available) else float("nan"),
+        definition=_PAINTED_JUNCTION_DEFINITION,
+    )
+
+
 def write_pedigree(
     output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None, *, map_work=None
 ) -> list[Path]:
@@ -533,7 +568,8 @@ def write_pedigree(
     per-sample tables list their rows in it (the records keep the canonical order)."""
     from .tables import frame_in_input_order
 
-    frames = render(product.views, product.sample_ids)
+    rates = _painted_junction_rates(product.retained.decision.scores)
+    frames = render(product.views, product.sample_ids, painted_junctions_per_morgan=rates)
     exclusion = record_mapping(product.exclusion)
     directory = Path(output) / "pedigree"
     items = separate_collections(frames, product.views, product.sample_ids, input_ids)
@@ -555,6 +591,7 @@ def write_pedigree(
                 exclusion={name: exclusion[name] for name in EXCLUSION_SUMMARY_FIELDS if name in exclusion},
                 eligibility=record_mapping(product.eligibility),
                 sibling_guard=record_mapping(product.guard_summary),
+                painted_junctions_per_morgan=_painted_junction_summary(rates),
             ),
         )
     )
@@ -798,6 +835,7 @@ DIAGNOSTICS_COLUMNS = (
     "SelectedParentRoleProbability",
     "RawAncestryJunctionCount",
     "CallableAncestryHaplotypeBinCount",
+    "PaintedJunctionsPerMorgan",
     "AdjustedAncestryJunctionBurden",
     "AncestryPaintingCallabilityFraction",
     "InformativeContigCount",
@@ -892,6 +930,7 @@ DIAGNOSTICS_COLUMNS = (
     SelectedParentRoleProbability: selected parent role probability (1).
     RawAncestryJunctionCount: raw ancestry junction count (1).
     CallableAncestryHaplotypeBinCount: callable ancestry haplotype bin count (1).
+    PaintedJunctionsPerMorgan: minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan).
     AdjustedAncestryJunctionBurden: adjusted ancestry junction burden (1).
     AncestryPaintingCallabilityFraction: ancestry painting callability fraction (1).
     InformativeContigCount: informative contig count (1).

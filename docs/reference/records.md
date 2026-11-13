@@ -1583,6 +1583,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
+Decision input: every informative contig's scores stacked in contig order (not a record). contigs: informative contigs (C); arrays carry a leading contig axis C. edges: int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [C, E] on this axis: the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure of non-edges and self coverage) are never read by the decision or the report. zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C]; informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and transmission_log_likelihood float64 [C, D] in nats (ChromosomeScores); scored_morgans float64 [C] (NaN where unknown); working_morgans float64 [C]: sum of -0.5 ln(1 - 2 theta) over scored components' selector boundaries, the configured working-map distance of PS04. It is NOT measured exposure, and never enters a gate or decision; reports alone use it to describe painted junctions per Morgan. edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier records).
+
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
@@ -1605,6 +1607,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `scored_morgans` | `np.ndarray &#124; None` | evidence | ('C',) | Morgans | float64 | True | `None` |
 | `edge_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'E') | Morgans | float64 | True | `None` |
 | `pair_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'T') | Morgans | float64 | True | `None` |
+| `working_morgans` | `np.ndarray` | report | ('C',) | Morgans | float64 | True | `required` |
 
 ## pedigree.ExclusionEvidence
 
@@ -2047,7 +2050,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `6` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `7` |
 
 ## pedigree.PedigreeResult
 
@@ -2704,6 +2707,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
+Composite evidence of one informative contig, summed over its components (``pedigree/scores``). zero [N], one [N, N], two [T]: M0 / M1 / M2 log likelihoods (panel row order); -inf where ineligible. edge_matched, edge_exposed: float64 [N, N] symmetric posterior-expected painting bins in which the pair shares an anchored founder / is testable for one (diagnostic / gate). pair_explained, pair_exposed: float64 [T] the same for a child and both panel parents. total_bins: painting bins of the scored components. junctions: int64 [N] minimum founder switches of each painting (phase-invariant). callable_bins: int64 [N] observed haplotype-bin labels behind the junction count. informative_markers: selected markers of the scored components. component_count, scored_component_count: painting components / prepared components. junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every eligible edge, in row-major order (the same for every chromosome of a run). transmission_log_likelihood: float64 [D] joint log likelihood (nats) of the two samples' scheduled homologues under c <- p (science.pedigree.transmission.log_likelihood). scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans; 0 without a measured map). working_morgans: configured working-map distance, sum of -0.5 ln(1 - 2 theta) over the scored components' selector boundaries (PS04). This is NOT measured exposure and never enters a gate or decision; it is retained only for reports. edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length over which the pair (child and both panel parents) is exposed: each measured interval between adjacent bins counts as far as it is exposed at both ends.
+
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `contig` | `str` | state | () | 1 | str | True | `required` |
@@ -2725,7 +2730,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `scored_morgans` | `float` | state | () | Morgans | float64 | True | `required` |
 | `edge_exposed_morgans` | `np.ndarray` | state | ('N', 'N') | Morgans | float64 | True | `required` |
 | `pair_exposed_morgans` | `np.ndarray` | state | ('T',) | Morgans | float64 | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
+| `working_morgans` | `float` | report | () | Morgans | float64 | True | `required` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
 
 ## pedigree.CompactM1
 
@@ -3315,6 +3321,8 @@ Source: [haplotype_reconstruction/contracts/refit.py](../../haplotype_reconstruc
 ## relatedness.RelatednessFamilies
 
 Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
+
+Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science.
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|

@@ -53,7 +53,7 @@ Cost and scope: O(P · L/ibd_site_step · c). These terms describe the unit’s 
 <a id="rl05"></a>
 ## rl05 Family-model site terms (child terms, latent prior, sequenced-parent posterior)
 
-Construct child-genotype terms, the latent Hardy–Weinberg parent prior and sequenced-parent genotype posterior on family sites. Floor logs before using them in the composite model; normalise posterior states in the declared order. A sequenced sample’s posterior is not a true parent label.
+Construct child-genotype terms, the latent Hardy–Weinberg parent prior and sequenced-parent genotype posterior on family sites. Floor logs before using them in the composite model; normalise posterior states in the declared order. A slot sample is a sequenced sample whose genotypes serve the family model as a parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another close relative. Parent calls, direction and their support belong to the pedigree stage.
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
@@ -107,9 +107,9 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(9 N² M); O(N M); O(9 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl10"></a>
-## rl10 Parent assignment (one per open family per sweep)
+## rl10 Parent-slot assignment (one per open family per sweep)
 
-For each family’s first free parent slot, offer its best non-member and eligible member candidates. Rank offers by gain and content, then enforce the log-sample-count penalty, per-sweep use rules and acyclicity at application. Only one non-member is offered per family; failure does not trigger a second-best search.
+For each family’s first free parent slot, offer its best non-member and eligible member candidates. Rank offers by gain and content, then enforce the log-sample-count penalty, per-sweep use rules and acyclicity at application. Only one non-member is offered per family; failure does not trigger a second-best search. A slot sample is a sequenced sample whose genotypes serve the family model as a parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another close relative. Parent calls, direction and their support belong to the pedigree stage.
 
 Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
 
@@ -129,15 +129,19 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(N F); O(N M); O(N² F). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl12"></a>
-## rl12 Content-order first-improvement moves
+## rl12 Content-order moves and leaving with one kept parent slot
 
 Visit samples in fixed content order. Compare the new-singleton target first and valid live families thereafter, using the declared key tie rule. Apply a sufficient gain immediately and refresh changed-family leave gains. This first-improvement schedule is intentionally distinct from the best-improvement search.
+
+In both searches, after single-sample moves and before the merge, a member of a family with at least two members and one sequenced slot may leave for a new one-member family. Its first slot keeps one of the source family's sequenced samples and its second slot is latent. The gain is `leave_gain(c) + loglik({c}; u, latent)`. Apply the best gain strictly above log N (one additional sequenced slot), one move at a time, until none qualifies or N moves have been applied in the sweep. Gains within the tolerance tie by the member's evidence rank, then the kept sample's evidence rank. Rescore the selected leave on the current partition before application. The edge already existed, so no new ancestry or cycle arises. The second slot is offered only by ordinary assignment in the next sweep.
+
+Keep each one-member likelihood for the fit, across both searches: it depends only on the member and kept sample, never on family versions. Up to two such likelihoods per eligible member are needed for its source family's slots.
 
 Implementation: [science/relatedness/search.py](../../haplotype_reconstruction/science/relatedness/search.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(N M); O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: Content-order moves use O(N M); O(N). Kept-slot likelihood work is O(N M), cached for the fit; candidate scans are bounded by N moves per sweep. There is no dependence on founder count K.
 
 <a id="rl13"></a>
 ## rl13 One merge per sweep
@@ -153,7 +157,7 @@ Cost and scope: O(F²); O(9 M); O(F² M). These terms describe the unit’s work
 <a id="rl14"></a>
 ## rl14 Sweep loop, the two searches and the kept fit
 
-Agglomerate, save the starting partition, then run parent assignment, best-improvement moves and one-merge sweeps. Restore the start and repeat with content-order moves. Stop each search at no change or its sweep cap. Keep the second only when it clears the total-objective tolerance; retain explicit convergence and search-margin diagnostics.
+Agglomerate, save the starting partition, then run parent-slot assignment, best-improvement moves, kept-slot splits and one-merge sweeps. Restore the start and repeat with content-order moves. Stop each search at no change or its sweep cap. Keep the second only when it clears the total-objective tolerance; retain explicit convergence and search-margin diagnostics.
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
@@ -184,9 +188,9 @@ Parameters by name: `support_unit_morgans`, `rate_is_measured`. Values, units an
 Cost and scope: O(M_c log M_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl17"></a>
-## rl17 Member support and parent support
+## rl17 Member support and parent-slot support
 
-For each nonempty support unit, compare a member’s stay likelihood with other families/new singleton and compare each named parent slot with its latent replacement. Count strict supported gains and divide by nonempty units. Latent-parent support is missing. These support comparisons have their own target exclusions, distinct from search-cycle rules.
+For each nonempty support unit, compare a member’s stay likelihood with other families/new singleton and compare each named parent slot with its latent replacement. Count strict supported gains and divide by nonempty units. Latent-slot support is missing. A slot sample is a sequenced sample whose genotypes serve the family model as a parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. These support comparisons have their own target exclusions, distinct from search-cycle rules.
 
 Implementation: [science/relatedness/support.py](../../haplotype_reconstruction/science/relatedness/support.py).
 

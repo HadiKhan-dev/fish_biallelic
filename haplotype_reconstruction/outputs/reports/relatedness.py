@@ -1,7 +1,10 @@
 """OUTPUT/relatedness/: the relatedness stage's families, pairwise IBD summaries and half-sib links.
 
 families.csv: one row per sample (its family, the share of chromosomes on which that family is its best placement,
-the family's two parents: a sequenced sample or empty for a latent parent, with the parent's chromosome support).
+the family's two parent slots: a sequenced sample or empty for a latent slot, with the slot's support).
+A slot sample's genotypes serve the model as a parent's would; it may be a parent, child (the two directions tie
+for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the
+pedigree stage.
 pairs.csv: one row per sample pair (posterior IBD0/IBD1/IBD2 shares of jointly observed sites, their count, and the
 IBD0 and IBD2 stretch evidence). half_sib_links.csv: latent families better explained as sharing one latent parent.
 summary.json: the fit (with the family search kept and its margin). These are inferences from genotype likelihoods
@@ -37,10 +40,10 @@ def write_relatedness(
             Sample=ids,
             Family=product.family,
             FamilySupport=product.member_support,
-            Parent1=[parent(product.parents[f, 0]) for f in product.family],
-            Parent1Support=[product.parent_support[f, 0] for f in product.family],
-            Parent2=[parent(product.parents[f, 1]) for f in product.family],
-            Parent2Support=[product.parent_support[f, 1] for f in product.family],
+            ParentSlot1=[parent(product.parents[f, 0]) for f in product.family],
+            ParentSlot1Support=[product.parent_support[f, 0] for f in product.family],
+            ParentSlot2=[parent(product.parents[f, 1]) for f in product.family],
+            ParentSlot2Support=[product.parent_support[f, 1] for f in product.family],
         )
     )
     links = pd.DataFrame(
@@ -89,16 +92,18 @@ def write_relatedness(
 # Published report column schemas.
 # Row-dict tables use a headerless empty constructor; these constants do not
 # impose columns on those tables. Scientific values remain upstream contract fields.
-FAMILY_COLUMNS = ("Sample", "Family", "FamilySupport", "Parent1", "Parent1Support", "Parent2", "Parent2Support")
+FAMILY_COLUMNS = (
+    "Sample", "Family", "FamilySupport", "ParentSlot1", "ParentSlot1Support", "ParentSlot2", "ParentSlot2Support"
+)
 """Columns in published order.
 
     Sample: sample identifier (text).
     Family: canonical dense family rank, ordered by smallest member (1).
     FamilySupport: fraction of chromosomes supporting this sample-family assignment (1).
-    Parent1: first parent identifier; empty for an unobserved parent (text).
-    Parent1Support: fraction of chromosomes supporting the first parent slot (1).
-    Parent2: second parent identifier; empty for an unobserved parent (text).
-    Parent2Support: fraction of chromosomes supporting the second parent slot (1).
+    ParentSlot1: first slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text).
+    ParentSlot1Support: fraction of nonempty support units on which the first slot sample beats its latent replacement; parent calls, direction and their support belong to the pedigree stage (1).
+    ParentSlot2: second slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text).
+    ParentSlot2Support: fraction of nonempty support units on which the second slot sample beats its latent replacement; the two directions tie for a one-member family (1).
 """
 
 PAIR_COLUMNS = ("SampleA", "SampleB", "IBD0", "IBD1", "IBD2", "Sites", "IBD0Evidence", "IBD2Evidence")
