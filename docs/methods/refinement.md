@@ -387,12 +387,35 @@ Parameters by name: `polish`. Values and provenance are in the [generated parame
 
 Cost and scope: One single-direction fit per polished start; each ordinary fixed point can add escape, long-repair and bridge searches.
 
+The search owns one last-problem entry per beam template or gain/bridge window. Entries are
+replaced when their keyed inputs change, discarded at fit end and rebuilt after interruption;
+no store enters a checkpoint or is shared between alternative polishes or count refits. Fixed
+ownership binds evidence and sample order, masks, prepared-row coding, emissions, map costs,
+coarse context, K and search controls. Keys compare numerical array dtype, shape and content
+using content digests. The dimension-only residence bound, including the union of possible tied
+donors, is stated in `PolishStores` in
+[polish_cache.py](../../haplotype_reconstruction/science/assembly/refinement/polish_cache.py)
+and included in fit and component memory admission. Store size does not grow with sweep count.
+Only physical polish work is avoided; proposal order, accepted moves and exact scores are preserved.
+
+
 <a id="rs15"></a>
 ## rs15 Window-beam proposer and beam escape
 
 Canonicalise founder order, construct the map-aware binned surrogate and apply the box gate. Rank beam children by anchored quantised bounds, retain the bounded cut cohort, remove dominated children, and restore flat child order. Retain only a changed final path clearing the beam gain rule. Apply one guarded acceptance pass over the offers and verify its exact gain. Beam width and cohort truncation limit the searched paths.
 
 Implementation: [science/assembly/refinement/beam.py](../../haplotype_reconstruction/science/assembly/refinement/beam.py).
+
+A beam entry binds template kind and unit span, width, content convention, window rows and
+both surrogate flanks. Order founders by their window rows, breaking duplicate-row ties by
+current index, and permute both flanks' unordered-pair states into that single frame. Store all
+focal answers in the frame; restore current focal order before collecting proposals or accepting
+moves. Duplicate local rows can cause a miss when their framed flanks differ; a hit still binds
+the complete framed problem. Candidate alphabets and their content order are reconstructible
+from window rows and fixed context. The max-plus recursions take maxima over founder states
+and sum along sites/bins and samples in their existing order. Founder renaming permutes state
+values without changing arithmetic or path ties, which are over content-ordered candidates.
+
 
 Parameters by name: `POLISH_BEAM_WIDTH`. Values and provenance are in the [generated parameter reference](../reference/parameters.md); conventions are explicit [tie policies](../developer/ties.md).
 
@@ -420,11 +443,22 @@ time limit and are not part of this evidence.
 <a id="rs16"></a>
 ## rs16 Long repair (long one-founder moves with one private correction)
 
-Generate long-window beam offers, choose the incumbent and agreement-ranked donors, then enumerate deduplicated private corrections. Score every variant exactly; filter by the strict acceptance threshold before forming the maximum gain band. Select the content-smallest rows in that band, offer them as coarse moves and verify accepted gains. A rejected chosen variant does not trigger a search through the offer’s discarded variants.
+Generate long-window beam offers, choose the incumbent and agreement-ranked donors, then enumerate deduplicated private corrections. Obtain each variant's exact scalar gain from its last-problem window table or score it freshly; filter by the strict acceptance threshold before forming the maximum gain band. Select the content-smallest rows in that band, offer them as coarse moves and verify accepted gains. A rejected chosen variant does not trigger a search through the offer’s discarded variants.
 
 Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `LONG_WINDOW`, `LONG_STRIDE`, `LONG_CORRECTION`, `LONG_DONORS`, `LONG_BEAM_WIDTH`, `BRIDGE_BATCH_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Regenerate variants at every fixed point in current labels: three equally agreeing donors can
+have different correction rows, and their index tie determines which two survive. Neither the
+variant set nor its selected best member is reused up to founder labels. A scalar-gain table
+binds the block span, framed current rows, exact forward flank at the start and exact backward
+flank at the end. Each scalar names the mapped focal and actual candidate row bytes; only that
+same mapped candidate can hit. The current rows and end flank reconstruct the start backward
+flank and block normalisers deterministically, so those redundant inputs need no separate key.
+Gain recursions are max-plus over founder states, with sample sums in fixed order. All retained
+gains use the forward orientation, even after a reverse acceptance sweep; reverse-oriented gains
+are excluded because their arithmetic can differ in the last bits.
 
 Cost and scope: O(B K / LONG_STRIDE); O(N · LONG_WINDOW blocks · K²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -436,6 +470,14 @@ Choose each fine-window precursor in the maximum gain band, apply it privately, 
 Implementation: [science/assembly/refinement/fit.py](../../haplotype_reconstruction/science/assembly/refinement/fit.py).
 
 Parameters by name: `BRIDGE_BATCH_BYTES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Precursor scalar gains may use the framed gain tables. Local bridge trials instead bind plain
+current window rows and exact flanks, the selected precursor's focal, rows and scalar gain.
+Precursor ties, pair ties and final offer ties read founder indices: a bridge-window result is
+therefore never reused up to relabelling. Store only its local cut/pair/gain trials, reconstruct
+the current precursor index, and repeat grouping and global selection in their original order.
+A whole acceptance pass or converged panel is not a reusable answer under these keys. Ordinary
+window proposal caches, initial sweeps and solver tables keep their own execution paths.
 
 Cost and scope: O(#windows x N x 8 blocks x K^2); O(N K^3). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

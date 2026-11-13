@@ -77,6 +77,7 @@ from .parameters import (
     SWITCH_PENALTY,
     RefinementParameters,
 )
+from .polish_cache import GainBook, PolishStores, search_store_bytes
 from .proposals import WindowSolver
 from .reductions import panel_objective
 from .workspace import sample_ranges, sample_threads
@@ -405,7 +406,10 @@ class SweepEngine:
 
     def fit_bytes(self, founders, polish=False):
         """Declared message/acceptance working set of one search; cost only."""
-        return costs.fit_bytes(self.workspace, founders, self.guarded, self.cached_boundaries, polish)
+        size = costs.fit_bytes(self.workspace, founders, self.guarded, self.cached_boundaries, polish)
+        if polish:
+            size += search_store_bytes(founders, self.blocks, self.beam.templates)
+        return size
 
     # ------------------------------------------------------------------ messages and proposals
     def _full_messages(self, X, lex, budget):
@@ -607,7 +611,7 @@ class SweepEngine:
                     proposals.append((kind, a, c, k, np.asarray(rows, np.int64)))
         return proposals, stats
 
-    def beam_escape(self, X, F, budget, convention):
+    def beam_escape(self, X, F, budget, convention, stores=None):
         """Polish: one exact acceptance pass over the beam bank of panel X at an ordinary fixed point (forward
         orientation, the search's content convention). Returns (panel or None, its per-sample scores, exact
         gain, record, the bank's fine offers as bridge precursors).
@@ -618,7 +622,7 @@ class SweepEngine:
         founders = len(X)
         order = sorted(range(founders), key=lambda f: (tuple(int(x) for x in X[f]), f))
         canonical = np.ascontiguousarray(np.asarray(X, np.int64)[order])
-        Yc, scores, gain, record, fine = self._beam_escape_canonical(canonical, F, budget, convention)
+        Yc, scores, gain, record, fine = self._beam_escape_canonical(canonical, F, budget, convention, stores)
         Y = None
         if Yc is not None:
             Y = np.empty_like(Yc)
@@ -626,9 +630,9 @@ class SweepEngine:
         fine = [(a, c, order[k], rows) for a, c, k, rows in fine]
         return Y, scores, gain, record, fine
 
-    def _beam_escape_canonical(self, X, F, budget, convention):
+    def _beam_escape_canonical(self, X, F, budget, convention, stores=None):
         """beam_escape on a panel in canonical founder order."""
-        offers, beam_stats = self.beam.generate(X, budget, convention)
+        offers, beam_stats = self.beam.generate(X, budget, convention, stores=stores)
         fine = [(a, c, k, rows) for kind, a, c, k, rows in offers if kind == "fine"]
         record = dict(
             offers=len(offers),
@@ -706,7 +710,7 @@ class SweepEngine:
             )
         return Xo, scores, actual, record, fine
 
-    def long_repair(self, X, F, budget, convention):
+    def long_repair(self, X, F, budget, convention, stores=None):
         """Polish only: long one-founder moves at an ordinary fixed point.
 
         WindowBeam offers on LONG_WINDOW-block windows (stride LONG_STRIDE; the window's best path that differs from
@@ -723,7 +727,9 @@ class SweepEngine:
         X = np.ascontiguousarray(X, np.int64)
         starts = sorted(set(range(0, max(1, blocks - LONG_WINDOW + 1), LONG_STRIDE)) | {max(0, blocks - LONG_WINDOW)})
         templates = [("fine", a, min(blocks, a + LONG_WINDOW)) for a in starts]
-        offers, beam_stats = self.beam.generate(X, budget, convention, templates=templates, width=LONG_BEAM_WIDTH)
+        offers, beam_stats = self.beam.generate(
+            X, budget, convention, templates=templates, width=LONG_BEAM_WIDTH, stores=stores
+        )
         record = dict(
             offers=len(offers),
             windows=int(beam_stats["windows"]),
@@ -733,6 +739,8 @@ class SweepEngine:
             repaired=0,
             accepted=0,
         )
+        # Regenerate in current labels: three equally agreeing donors can change
+        # which two survive index ties. Only same-candidate scalar gains are reused.
         cands = []
         for _kind, a, c, k, rows in offers:
             base = np.asarray(rows, np.int64)
@@ -769,10 +777,12 @@ class SweepEngine:
             threads = max(1, int(budget.threads()))
             with budget.scope(threads):
                 haps = orient.haps(X)
-            gains = []
+            book = None if stores is None else GainBook(stores, X, fwd, bwd)
+            gains, todo = ([None] * len(cands), list(range(len(cands)))) if book is None else book.lookup(cands)
             chunk = max(1, BRIDGE_BATCH_BYTES // max(1, 24 * self.workspace.samples * fwd.shape[2]))
-            for m0 in range(0, len(cands), chunk):
-                part = cands[m0 : m0 + chunk]
+            for m0 in range(0, len(todo), chunk):
+                indices = todo[m0 : m0 + chunk]
+                part = [cands[m] for m in indices]
                 fb = np.asarray([a for a, _, _, _ in part], np.int64)
                 eb = np.asarray([c for _, c, _, _ in part], np.int64)
                 focal = np.asarray([k for _, _, k, _ in part], np.int64)
@@ -800,7 +810,10 @@ class SweepEngine:
                         np.ascontiguousarray(bwd[eb]),
                         sums,
                     )
-                gains.extend(float(sum(per[m])) for m in range(len(part)))
+                for i, m in enumerate(indices):
+                    gains[m] = float(sum(per[i]))
+                    if book is not None:
+                        book.remember(cands[m], gains[m])
             groups = {}
             for (a, c, k, r), gain in zip(cands, gains, strict=False):
                 if gain > TOL:
@@ -833,7 +846,7 @@ class SweepEngine:
                 scale=abs(F),
                 reverse=convention,
             )
-            del fwd, bwd, fcnt, bcnt, fscale, bscale
+            del book, fwd, bwd, fcnt, bcnt, fscale, bscale
         accepted = int(acc["fine"] + acc["coarse"] + acc["exchange"])
         predicted = float(acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"])
         record.update(
@@ -891,7 +904,7 @@ class SweepEngine:
             )
         )
 
-    def bridge(self, X, fine_props, budget, convention=None):
+    def bridge(self, X, fine_props, budget, convention=None, stores=None):
         """bridge_search under a reservation of its transients: a full message set,
         the precursor batches' three S x Q gathers and one window's local forward/backward chains."""
         if not fine_props:
@@ -906,9 +919,9 @@ class SweepEngine:
             + 2 * span * 8 * self.workspace.samples * states
         )
         with budget.reserve(nbytes, label="founder_refinement bridge"):
-            return self.bridge_search(X, fine_props, budget, convention)
+            return self.bridge_search(X, fine_props, budget, convention, stores)
 
-    def bridge_search(self, X, fine_props, budget, convention=None):
+    def bridge_search(self, X, fine_props, budget, convention=None, stores=None):
         """The best fine-window/suffix bridge of panel X (forward block order), or None.
 
         At an ordinary fixed point the fine proposals of the sweep (the surrogate's window
@@ -935,34 +948,43 @@ class SweepEngine:
         row_offsets = np.zeros(len(fine_props) + 1, np.int64)
         row_offsets[1:] = np.cumsum([c - a for a, c, _, _ in fine_props])
         rows = np.concatenate([np.asarray(r, np.int64) for _, _, _, r in fine_props])
-        content = []
-        # Bounded batches: three S x Q message copies per precursor.
+        book = None if stores is None else GainBook(stores, X, fwd, bwd)
+        content, todo = (
+            ([None] * len(fine_props), list(range(len(fine_props)))) if book is None else book.lookup(fine_props)
+        )
+        # Bounded batches: three S x Q message copies per missing precursor.
         chunk = max(1, BRIDGE_BATCH_BYTES // max(1, 24 * ws.samples * fwd.shape[2]))
-        for m0 in range(0, len(fine_props), chunk):
-            m1 = min(len(fine_props), m0 + chunk)
-            sums = np.zeros((m1 - m0, ws.samples))
-            for m in range(m0, m1):
+        for m0 in range(0, len(todo), chunk):
+            part = todo[m0 : m0 + chunk]
+            sums = np.zeros((len(part), ws.samples))
+            for i, m in enumerate(part):
                 a, c = fine_props[m][0], fine_props[m][1]
                 for b in range(a, c):
-                    sums[m - m0] += bscale[b]
-            ro = row_offsets[m0 : m1 + 1] - row_offsets[m0]
-            with budget.scope(sample_threads(self.workspace.samples, budget)):  # the live share, per chunk
+                    sums[i] += bscale[b]
+            ro = np.zeros(len(part) + 1, np.int64)
+            ro[1:] = np.cumsum([row_offsets[m + 1] - row_offsets[m] for m in part])
+            part_rows = np.concatenate([rows[row_offsets[m] : row_offsets[m + 1]] for m in part])
+            index = np.asarray(part, np.int64)
+            with budget.scope(sample_threads(self.workspace.samples, budget)):
                 per = gains_kernels.candidate_gains(
                     haps,
                     leaves,
                     win,
                     offsets,
-                    np.ascontiguousarray(fwd[fb[m0:m1]]),
-                    np.ascontiguousarray(bwd[fb[m0:m1]]),
-                    focal[m0:m1],
-                    fb[m0:m1],
-                    eb[m0:m1],
-                    rows[row_offsets[m0] : row_offsets[m1]],
+                    np.ascontiguousarray(fwd[fb[index]]),
+                    np.ascontiguousarray(bwd[fb[index]]),
+                    np.ascontiguousarray(focal[index]),
+                    np.ascontiguousarray(fb[index]),
+                    np.ascontiguousarray(eb[index]),
+                    part_rows,
                     ro,
-                    np.ascontiguousarray(bwd[eb[m0:m1]]),
+                    np.ascontiguousarray(bwd[eb[index]]),
                     sums,
                 )
-            content.extend(float(sum(per[m])) for m in range(m1 - m0))
+            for i, m in enumerate(part):
+                content[m] = float(sum(per[i]))
+                if book is not None:
+                    book.remember(fine_props[m], content[m])
         windows = {}
         for m, (a, c, _k, _r) in enumerate(fine_props):
             windows.setdefault((a, c), []).append(m)
@@ -1021,7 +1043,31 @@ class SweepEngine:
         # Windows have no accepted edits in common: every trial starts from X.
         # Bound their aggregate scratch, and copy checkpoint flanks on the parent
         # thread before dispatch (MessageSet's reconstruction cache is mutable).
-        pending = list(sorted(best.items()))
+        pending = []
+        cached = {}
+        keys = {}
+        for unit, choice in sorted(best.items()):
+            a, c = unit
+            _, m = choice
+            found = None
+            if book is not None:
+                r = rows[row_offsets[m] : row_offsets[m + 1]]
+                key = book.window_key(a, c, focal[m], r, content[m])
+                keys[unit] = key
+                found = stores.lookup(stores.bridge, unit, key)
+            if found is None:
+                pending.append((unit, choice))
+            else:
+                # Only the local trial is retained. Current proposal index and
+                # global offer ordering are reconstructed on every invocation.
+                trials, count = found
+                cached[unit] = (
+                    [
+                        ((cut, u, v, a, c, int(focal[m]), tuple(int(x) for x in fine_props[m][3])), cut, u, v, gain, m)
+                        for cut, u, v, gain in trials
+                    ],
+                    count,
+                )
         per_window = [
             2 * founders * int(ws.offsets[-1])
             + 16 * (c - a + 2) * ws.samples * fwd.shape[2]
@@ -1045,10 +1091,15 @@ class SweepEngine:
                 label="founder_refinement bridge windows",
             ):
                 values[index] = result
-            for found, count in values:
-                offers.extend(found)
-                evaluated += count
+            for (unit, _), (found, count) in zip(pending[first:stop], values, strict=True):
+                cached[unit] = found, count
+                if book is not None:
+                    stores.bridge[unit] = keys[unit], (tuple(entry[1:5] for entry in found), count)
             first = stop
+        for unit in sorted(best):
+            found, count = cached[unit]
+            offers.extend(found)
+            evaluated += count
         if not offers:
             return None
         # Offers within the quantum of the largest gain are tied: content order of (cut, pair, window, founder, rows).
@@ -1309,6 +1360,9 @@ class SweepEngine:
         F, history, junctions, converged, sweep = F0, [], (), False, 0
         # Each direction owns its proposal cache: the two conventions' proposals differ from sweep 0.
         cache = ProposalCache()
+        # Only this polish search owns these bounded answers. A resumed search
+        # starts empty; no store enters the ledger or a scientific record.
+        stores = PolishStores() if polish else None
         # This search's own messages of the panel its last sweep started from, updated in place by
         # the next sweep: (panel, messages); a reversed pass keeps their forward half only, so the
         # search holds no more message arrays than its forward passes do.
@@ -1447,7 +1501,7 @@ class SweepEngine:
             if accepted == 0 and polish:
                 # Polish: a beam escape pass at the ordinary fixed point (beam_escape); its fine
                 # offers are the bridge precursors.
-                Y, scores, gain, escape_record, fine_props = self.beam_escape(X, F_new, budget, first == "rev")
+                Y, scores, gain, escape_record, fine_props = self.beam_escape(X, F_new, budget, first == "rev", stores)
                 acc.update(
                     escape_offers=escape_record["offers"],
                     escape_windows=escape_record["windows"],
@@ -1465,7 +1519,7 @@ class SweepEngine:
                 stats = dict(stats, escape=escape_record)
             if accepted == 0 and polish:
                 # Polish: long one-founder moves with one private correction (long_repair).
-                Y, scores, gain, long_record = self.long_repair(X, F_new, budget, first == "rev")
+                Y, scores, gain, long_record = self.long_repair(X, F_new, budget, first == "rev", stores)
                 acc.update(
                     long_offers=long_record["offers"],
                     long_windows=long_record["windows"],
@@ -1483,7 +1537,7 @@ class SweepEngine:
                 stats = dict(stats, long=long_record)
             if accepted == 0 and polish and fine_props:
                 # Polish: fine-window/suffix bridges at an ordinary fixed point (bridge()).
-                found = self.bridge(X, fine_props, budget, convention=(first == "rev"))
+                found = self.bridge(X, fine_props, budget, convention=(first == "rev"), stores=stores)
                 if found is not None:
                     Y, predicted, bridge_record = found
                     scores = self.per_sample(Y, budget)

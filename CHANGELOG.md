@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.16.0 (13 November 2026)
+
+This release makes the polish of a refined component reuse its own local results. No objective, threshold, search
+order, count decision, family or release rule changes, and released results are identical to 4.15.3.
+
+**Refinement: the polish keeps its last local answers.** A polish fit asks the same local questions again at every
+fixed point: the beam solutions of its escape templates and the exact gains of its long-repair candidates. Most
+inputs do not change between fixed points, but a bridge move exchanges founder suffixes and so renames founders
+downstream, which made a plain comparison of inputs fail. The polish search now keeps, for each template and each
+long-repair window, the key of its last problem (window rows and both flanks, compared up to one relabelling of the
+founders) and the answers, and reuses them when the key is unchanged. Long-repair variants are generated afresh in
+the current labels at every fixed point and only the scalar gains of the same candidates are reused; bridge windows
+keep plain keys, because their selections break ties by founder index. One entry is kept per template or window,
+nothing is recorded, and an interrupted fit rebuilds its stores. Work counters of the polish describe the work
+done and are lower on reuse.
+
+**Effect.** The polish of a long component is two to three times faster. In a 2,800-block simulation the
+level-4 component, which is mostly polish, falls from 8,463 s to 3,489 s on 112 cores. In a real cross of 52
+samples the polish of the two largest level-3 components (16 and 17 founders, 934 and 900 blocks) falls from
+2,328 s to 1,026 s and from 1,869 s to 828 s, with about a quarter of the processor time. A component whose time is
+nearly all count pass is not shortened by this release.
+
+**Validation.** The default suite and the stage tier (four shards) pass, including fixtures with founder
+relabellings, exact ties, duplicate rows, an interrupted and resumed polish, and a component of 30 founders and 320
+samples. Twenty-one captured components (100 to 2,800 blocks, 13 to 15 founders after refinement) give the same
+refined panels and founder counts as 4.15.3; on two of them every polish sweep was compared and the ordered
+proposals, accepted moves and objective values are equal. The polishes of the two real components above end at
+the same panels and objective, sweep counts and accepted moves. The end-to-end matrix of seventeen cases is
+identical to 4.15.3's in every result.
+
 ## 4.15.3 (13 November 2026)
 
 This release lets the relatedness family search separate half and three-quarter sibs from a family that has

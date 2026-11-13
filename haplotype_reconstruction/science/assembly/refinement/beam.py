@@ -515,9 +515,10 @@ class WindowBeam:
                 paths.append(np.asarray(sorted(unique), np.int64))
         return groups, paths
 
-    def generate(self, X, budget, convention=None, focals=None, templates=None, width=None):
+    def generate(self, X, budget, convention=None, focals=None, templates=None, width=None, stores=None):
         """Proposals [(kind, first block, end block, founder, rows)] for panel X and statistics. templates:
-        [(kind, first unit, end unit)] to solve instead of the component's (the polish's long windows)."""
+        [(kind, first unit, end unit)] to solve instead of the component's (the polish's long windows).
+        stores: this polish search's last beam problems, restored in current focal order."""
         templates = self.templates if templates is None else templates
         width = BEAM_WIDTH if width is None else int(width)
         X = np.ascontiguousarray(X, np.int64)
@@ -613,6 +614,24 @@ class WindowBeam:
                     if not len(tasks):
                         continue
 
+                    results = [None] * len(tasks)
+                    problems = []
+                    per = len(focals)
+                    # Polish requests every focal. Other callers' restricted banks
+                    # remain fresh; no partial result can populate a complete slot.
+                    retained = stores is not None and np.array_equal(focals, np.arange(len(X)))
+                    if retained:
+                        for j, (a, c) in enumerate((a, c) for label, a, c in templates if label == kind):
+                            A, C = groups[a][0], groups[c - 1][1]
+                            key, frame, position = stores.beam_problem(
+                                kind, a, c, width, reverse, X[:, A:C], ff[A], gg[C]
+                            )
+                            slot = kind, int(a), int(c)
+                            found = stores.lookup(stores.beam, slot, key)
+                            problems.append((slot, key, frame))
+                            if found is not None:
+                                results[j * per : (j + 1) * per] = [found[position[f]] for f in focals]
+                    todo = [t for t in range(len(tasks)) if results[t] is None]
                     # Each (window, founder) beam is independent. Dynamic template
                     # mapping lends freed CPUs while the bank runs and avoids a
                     # static prange chunk waiting behind its most expensive beam.
@@ -627,7 +646,7 @@ class WindowBeam:
                         ),
                     ]
                     order = sorted(
-                        range(len(tasks)),
+                        todo,
                         key=lambda t: (-int(unit_work[tasks[t, 1]] - unit_work[tasks[t, 0]]), t),
                     )
 
@@ -654,9 +673,13 @@ class WindowBeam:
                         )
 
                     solved = budget.map(solve, order)
-                    results = [None] * len(tasks)
                     for t, result in zip(order, solved, strict=True):
                         results[t] = result
+                    if retained:
+                        for j in sorted({t // per for t in todo}):
+                            slot, key, frame = problems[j]
+                            block = results[j * per : (j + 1) * per]
+                            stores.beam[slot] = key, [block[f] for f in frame]
                     paths = [result[0] for result in results]
                     values = np.asarray([result[1] for result in results])
                     counts = np.asarray([result[2] for result in results])
@@ -687,8 +710,9 @@ class WindowBeam:
                         seen.add(key)
                         proposals.append((kind, a, c, int(f), rows))
                     stats["windows"] += len(tasks)
-                    stats["dp"] += len(tasks)
-                    stats["templates_solved"] += len(tasks) // max(1, len(focals))
+                    stats["dp"] += len(todo)
+                    stats["templates_solved"] += len(todo) // max(1, per)
+                    stats["templates_reused"] += (len(tasks) - len(todo)) // max(1, per)
         stats.update(changed=len(proposals))
         return proposals, stats
 

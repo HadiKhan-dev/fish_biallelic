@@ -21,6 +21,7 @@ from .parameters import (
     SCORE_LEDGER_BYTES,
     SEED_STARTS,
 )
+from .polish_cache import search_store_bytes
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
 __all__ = ["component_bytes", "component_work", "fit_bytes", "traceback_bytes", "component_task_bytes"]
@@ -205,7 +206,13 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     beam_bins = max(maximum_total_bins, max(sum(bins[a : a + 64]) for a in range(blocks)))
     beam = 8 * samples * q * (6 * 64 + 12 + beam_bins) + 8 * samples * beam_bins * beam_bins
     score = 2 * maximum_k * sites + min(sites * q, 1 << 31) + 8 * samples
-    child = search + window + max(proposal, guard, beam, score)
+    # Import at call time: proposals itself imports seeded_search_bytes above.
+    # Admission owns only dimensions; it never creates a proposer or a store.
+    from .proposals import window_templates
+
+    templates = window_templates(blocks, None if context is None else context[0])
+    polish_stores = search_store_bytes(maximum_k, blocks, templates) if config.polish else 0
+    child = search + window + max(proposal, guard, beam, score) + polish_stores
     # The count driver evaluates shadow families in waves whose TOTAL scratch is
     # bounded by COUNT_FANOUT_BYTES. Charging a full FAMILY_BYTES to every CPU
     # made small components reserve tens of GiB for scratch that cannot coexist.
