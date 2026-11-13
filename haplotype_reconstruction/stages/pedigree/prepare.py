@@ -1,7 +1,7 @@
 """Prepare and publish one contig's pedigree inputs (PS01–PS05, PS22).
 
 The task borrows painting/evidence, owns its result, and publishes only a complete
-schema-1 product. Identities bind source derivations and numerical policy. Worker
+schema-2 product. Identities bind source derivations and numerical policy. Worker
 counts and emission workspace sizes do not enter that identity.
 """
 
@@ -12,12 +12,14 @@ from dataclasses import dataclass, fields, replace
 from functools import partial
 from typing import Any
 
+import numpy as np
+
 from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap, GeneticMapSet
 from ...contracts.painting import Painting
 from ...contracts.payload import from_payload, to_payload
-from ...contracts.pedigree import ParentEligibility, PreparedChromosome
+from ...contracts.pedigree import ChromosomeSummaryView, ParentEligibility, PreparedChromosome
 from ...contracts.roles import require_schema
 from ...core.concurrency import threaded_each
 from ...core.digest import json_digest
@@ -26,6 +28,7 @@ from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResultRef
 from ...science.pedigree import prepare as science
 from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
+from ...science.pedigree.regimes import Layout
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
@@ -36,17 +39,30 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-1 prepared record; derived views are not persisted."""
+    """Lossless schema-2 prepared record; derived views are not persisted."""
 
-    schema = 1
+    schema = 2
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
-        return {"schema": self.schema, **to_payload(value)}
+        return {"schema": self.schema, **to_payload(value), "layout": [
+            dict(selector=c.selector_switch_probability, measured=c.measured_morgans,
+                 bins=c.n_bins, markers=c.informative_markers) for c in value.components]}
 
     def decode(self, payload: Mapping[str, Any]) -> PreparedChromosome:
-        require_schema(payload, self.schema)
+        require_schema(payload, (1, self.schema))
         names = {f.name for f in fields(PreparedChromosome)}
-        return from_payload(PreparedChromosome, {k: v for k, v in payload.items() if k != "schema" or k in names})
+        # Schema 1 has the same prepared scientific arrays; schema 2 adds only a small layout header.
+        return from_payload(PreparedChromosome, {**{k: v for k, v in payload.items() if k in names},
+                                                "schema": self.schema})
+
+
+def layout_summary(header: Mapping[str, Any], parameters: PedigreeParameters) -> tuple[Layout, ChromosomeSummaryView]:
+    """Prepared header to the classifier and original chromosome report summary; no block arrays."""
+    parts = header["layout"]
+    measured = float(sum(np.minimum(p["measured"], parameters.exposure.unit_morgans).sum() for p in parts))
+    return (Layout(header["contig"], measured, tuple(p["selector"] for p in parts)),
+            ChromosomeSummaryView(header["contig"], header["component_count"], len(parts),
+                                  sum(p["markers"] for p in parts), header["omitted_reason"]))
 
 
 def derivation(
@@ -153,7 +169,7 @@ def prepare_stored(
     )
     cached = read_items(file, KEY, identity, ("schema", "contig", "omitted_reason"))
     if cached is not None:
-        require_schema(cached.payload, 1)
+        require_schema(cached.payload, PreparedAdapter.schema)
         if cached.payload["contig"] != contig:
             raise InputError("prepared contig differs from its configured axis")
         return PreparedReference(contig, identity, cached.payload["omitted_reason"])
@@ -216,6 +232,7 @@ def _scores_stored(
     chromosome: int,
     screen_identity: str,
     panel_identity: str,
+    regime: str,
     sample_ids: tuple[str, ...],
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
@@ -229,12 +246,14 @@ def _scores_stored(
     if panel is None:
         raise InputError("floored scores require the complete candidate panel")
     identity = scores.derivation(
-        parameters, reference.identity, screen_identity, panel, numerical_policy=numerical_policy
+        parameters, reference.identity, screen_identity, panel, numerical_policy=numerical_policy, regime=regime
     )
     file = store.contig(reference.contig)
-    cached = read_items(file, scores.KEY, identity, ("schema", "contig"))
+    cached = read_items(file, scores.KEY, identity, ("schema", "contig", "form"))
     if cached is not None:
         require_schema(cached.payload, scores.ScoresAdapter.schema)
+        if cached.payload.get("form", "standard") != regime:
+            raise InputError("score record form differs from the run regime")
         return reference.contig, identity
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
@@ -249,6 +268,7 @@ def _scores_stored(
         threads=threads,
         file=file,
         identity=identity,
+        regime=regime,
     )
     return reference.contig, identity
 
@@ -259,6 +279,7 @@ def _after_bounds(
     manifest: Mapping[str, Any],
     references: tuple[PreparedReference, ...],
     screen_identity: str,
+    regime: str,
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     maximum_cores: int,
@@ -300,6 +321,7 @@ def _after_bounds(
                 k,
                 screen_identity,
                 identity,
+                regime,
                 tuple(manifest["sample_ids"]),
                 parameters,
                 numerical_policy,
@@ -325,14 +347,42 @@ def _after_prepared(
     maximum_cores: int,
     *,
     threads: int = 1,
-) -> Expansion:
+) -> Expansion | dict[RecordKey, str]:
     from ...science.pedigree.run import precheck
-    from . import screen
+    from . import decision, screen
+    from ...science.pedigree import regimes
 
     informative = tuple(r for r in references if r.omitted_reason is None)
     sample_ids = tuple(manifest["sample_ids"])
     precheck(len(sample_ids), len(informative), parameters, basis="informative")
     eligibility = ParentEligibility.unrestricted(sample_ids)
+    store = CheckpointStore(root, nthreads=threads)
+    summaries, layouts = [], []
+    for r in references:
+        header = read_items(store.contig(r.contig), KEY, r.identity,
+                            ("schema", "contig", "component_count", "omitted_reason", "layout"))
+        if header is None:
+            raise InputError("missing complete prepared chromosome")
+        require_schema(header.payload, PreparedAdapter.schema)
+        layout, summary = layout_summary(header.payload, parameters)
+        summaries.append(summary)
+        if r.omitted_reason is None:
+            layouts.append(layout)
+    classification = regimes.classify(layouts, parameters)
+    if classification.name == "not_assessable":
+        from .records import PedigreeDependencies
+        dependencies = PedigreeDependencies(eligibility.identity(), "", "",
+            tuple((r.contig, r.identity) for r in references), (), regime=classification.name)
+        # Bind the same evidence causes as bound_inputs, without requiring screen/panel/fits.
+        from ..evidence import records as evidence_records
+        dependencies = replace(dependencies, evidence=tuple((r.contig,
+            evidence_records.result_reader(store, manifest, product="evidence", contig=r.contig).identity)
+            for r in references))
+        reply = decision.finish_not_assessable(sample_ids, tuple(r.contig for r in references),
+            tuple(summaries), classification, parameters, dependencies,
+            file=store.run, numerical_policy=numerical_policy, receipt=True)
+        assert isinstance(reply, dict)
+        return reply
     identity = screen.screen_derivation(
         parameters,
         eligibility.identity(),
@@ -371,6 +421,7 @@ def _after_prepared(
             manifest,
             informative,
             identity,
+            classification.name,
             parameters,
             numerical_policy,
             maximum_cores,

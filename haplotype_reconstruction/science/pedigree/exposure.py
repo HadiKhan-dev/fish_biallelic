@@ -135,7 +135,7 @@ def _edges(
             # so keep its nonnegative bound and exposure never rounds below the match.
             block_exposure = _unit(block_match + max(0.0, full_nonmatch))
             edge_exposure += block_exposure
-            if block > 0:
+            if block > 0 and len(interval_morgans):
                 # min(): the larger joint probability of exposure at both ends the two marginals allow.
                 edge_morgans += min(previous, block_exposure) * interval_morgans[block - 1]
             previous = block_exposure
@@ -211,7 +211,7 @@ def _pairs(
             explained[row] += block_explained
             block_exposure = _unit(block_explained + max(0.0, full_nonexplained))
             exposed[row] += block_exposure
-            if block > 0:
+            if block > 0 and len(interval_morgans):
                 exposed_morgans[row] += min(previous, block_exposure) * interval_morgans[block - 1]
             previous = block_exposure
     return explained, exposed, exposed_morgans
@@ -225,6 +225,7 @@ def expected_structure(
     available: np.ndarray,
     claim_threads=lambda: None,
     interval_morgans: np.ndarray | None = None,
+    *, bins_only: bool = False,
 ):
     """(edge matched [N, N], edge exposed [N, N], pair explained [T], pair exposed [T]) in bins, then (edge exposed
     [N, N], pair exposed [T]) in measured map length.
@@ -253,7 +254,9 @@ def expected_structure(
         if interval_morgans is None
         else np.ascontiguousarray(interval_morgans, dtype=np.float64)
     )
-    if len(intervals) != max(n_bins - 1, 0):
+    if bins_only:
+        intervals = np.empty(0)
+    if not bins_only and len(intervals) != max(n_bins - 1, 0):
         raise InputError("interval_morgans needs one length per pair of adjacent bins")
     claim_threads()
     both, any_presence, full_presence = _presence(masses, feature_of, state_anchored, pair_anchored, available)

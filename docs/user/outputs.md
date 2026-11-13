@@ -374,6 +374,7 @@ The 17 parent CSV names, in publication order, are `tier_b_relationships`,
 `parent_state_calls`, `diagnostics`, `call_explanations`, `alternative_explanations`,
 `search_diagnostics`, `exclusion_evidence`, `exclusion_diagnostics`,
 `evidence_summary`, `chromosome_summary`, `relative_contrasts`, `sibling_guard`.
+`block_summary.csv` is additionally published for nonstandard regimes; it is empty when not assessed.
 `cell_items.csv` follows these parent tables. Optional views can be absent;
 absence is distinct from an empty available table.
 
@@ -398,20 +399,59 @@ fields of the linked records, in declaration order.
 
 | Key | Meaning |
 |---|---|
-| `informative_contigs` | Contigs that supplied pedigree evidence, in configuration order |
+| `regime` | `standard`, `low_material` or `not_assessable`, chosen from the prepared layout before fitting |
+| `informative_contigs` | Real contigs that supplied pedigree evidence, in configuration order |
 | `omitted` | Object: each omitted contig and the reason |
-| `reach` | What chromosome resampling can release with this many informative chromosomes ([`TierReach`](../reference/records.md#pedigreetierreach)) |
+| `reach` | What the regime can assess; low-material and not-assessable statements use blocks ([`TierReach`](../reference/records.md#pedigreetierreach)) |
 | `family_solve` | The final reciprocal solve and resampling convergence diagnostics ([`FamilySolveRecord`](../reference/records.md#pedigreefamilysolverecord)) |
 | `exclusion` | The count evidence's model and coverage: `model`, `alpha`, `genotype_replacement_probability`, `conditional_on_supported_edge_directions`, `candidate_dyads`, `contigs`, `status` and the further fields of [`ExclusionSummary`](../reference/records.md#pedigreeexclusionsummary) that are present |
 | `eligibility` | The unrestricted candidate universe; it states that no sample metadata or parentage truth was used ([`EligibilityRecord`](../reference/records.md#pedigreeeligibilityrecord)) |
 | `sibling_guard` | Edges tested and withheld by the sibling-as-parent guard ([`GuardSummary`](../reference/records.md#pedigreeguardsummary)) |
 | `painted_junctions_per_morgan` | Report-only working-map painting fragmentation: `median`, `minimum`, `maximum` over samples and `definition` |
 
+Low-material tables include `regime`, use `lobo` rather than `loco` support columns,
+and report `informative_block_count`. `block_summary.csv` gives the real contig, decision
+block index, original component, inclusive first/last bins, nominal grid index, configured
+working Morgans, bin count and selected-marker count. The reach record's legacy
+`informative_contigs` field counts fit rows: blocks in this regime. Exclusion and relationship
+tables retain their real chromosome meaning. Tier A tables are empty and marked not assessed
+in reach; Tier A does not affect parent slot order. Every row of the Tier B tables carries
+`low_material_resampling`, released or not, as rows of a standard run carry `chromosome_resampling`;
+independently released counts carry `low_material_exclusion`. These are conditional stability/evidence labels, not confidence
+percentages. Family phase and recombination use their Tier B edges normally.
+
+When `regime` is `not_assessable`, all samples are unresolved with bounds [0,2], no edges
+or count releases, and no complete best guesses beyond unresolved rows. Search and fit
+reports are absent; `family_solve` and sibling-guard diagnostics are null. This is a completed
+stage and resumes without score, panel or fit records.
+
+The working map controls the component-local partition, including a configured fallback rate
+that is not declared measured. An incorrect rate changes block count and can change regime.
+The 1/1.5-Morgan thresholds and selector clipping make this change discontinuous. Blocks on a
+chromosome are dependent; bootstrap shares are not calibrated probabilities. Panel exclusion
+is guaranteed for full data and leave-one-chromosome-out fits only, with incomplete-panel
+flags retained for block resampling.
+
+Measured reliability bands, conditional on full-run upstream reconstruction, span 41 simulated
+runs and 1,794 overlapping layouts. At four blocks, 7,367 simulated parent edges and 42
+non-parent edges were released (60% recall), with one incorrect zero-parent call among 590.
+At five: 8,763/22 (82% recall), two among 976 zero calls; at six: 9,017/14 (90%), zero
+among 1,269; at seven/eight: 22,202/23 (96%), one among 4,547. These are simulation
+summaries, not per-call confidence percentages. At four blocks the non-parent share among
+released edges ranged from none to 0.3% for standard, backcross, large-family and three-quarter
+sib cohorts, 0.8% for tied-likelihood cohorts, 3.4% for small families and 3.7% for mixed
+cohorts with relatives of unsequenced parents. A parent-free cohort released three edges,
+all non-parent edges by simulation truth. At six blocks all types were at or below 0.4%
+except small families (1.3%). The evidence covers closed inbred simulated designs, subsets
+using full-run upstream fits, and no single simulated chromosome containing three or more
+blocks. It does not establish independence, long-single-chromosome reliability or end-to-end
+performance on a newly prepared low-material input.
+
 `pedigree/diagnostics.csv` places the per-sample `painted_junctions_per_morgan` column beside the raw junction and callable haplotype-bin counts. The matching summary object has `median`, `minimum`, `maximum` over samples with a defined rate, and `definition`; all three statistics are NaN when no sample has callable map length.
 
 `painted_junctions_per_morgan` is the sample's minimum painted founder switches, summed over scored chromosomes, divided by twice its callable painted map length. For chromosome c, callable length is `working_morgans[c] * callable_bins[c,n] / (2 * total_bins[c])`; the rate is per homologue per Morgan of the configured working map. Working length sums the Haldane distances `-0.5 * log(1 - 2 * theta)` of the actual selector transitions over scored components and bin boundaries (PS04). It includes the configured fallback rate even when that rate is not declared measured, and is distinct from the measured exposure used by pedigree gates. Zero callable length gives NaN. The number is reported only and never enters a gate, tier or parent-call decision.
 
-Values of a few per Morgan reflect the crossovers of the cross's generations: supported simulation designs give values from 0 to 4. Values far above that, such as 25–46 in a real cohort with many unrelated founders, indicate fragmented paintings; parent calls based on those paintings are not reliable. These ranges describe interpretation, not decision thresholds. The rate depends on the configured map and scales inversely with its length: doubling a configured recombination rate doubles the denominator and halves this number. An erroneous configured rate therefore rescales the diagnostic.
+Values of a few per Morgan reflect the crossovers of the cross's generations: in simulations of supported designs the cohort median is between 0 and 2.6 per Morgan and single samples reach about 7. Values far above that, such as 25–46 in a real cohort with many unrelated founders, indicate fragmented paintings; parent calls based on those paintings are not reliable. These ranges describe interpretation, not decision thresholds. The rate depends on the configured map and scales inversely with its length: doubling a configured recombination rate doubles the denominator and halves this number. An erroneous configured rate therefore rescales the diagnostic.
 
 These report JSON files permit NaN where recorded; evaluation JSON below requires
 null for undefined values.
@@ -491,6 +531,7 @@ and identity columns are listed in their own sections.
 | `pedigree/exclusion_evidence.csv` | `sample`, `candidate_parent`, `log_e`, `observed_sites` |
 | `pedigree/exclusion_diagnostics.csv` | `sample`, `eligible_candidates`, `compatible_candidates`, `supported_reverse_candidates`, `remaining_candidates`, `weakest_exclusion_log_e`, `threshold_log_e`, `complete_candidate_evidence`, `released`, `release_conditional_on_supported_directions` |
 | `pedigree/evidence_summary.csv` | `contig`, `informative_markers`, `mean_minimum_ancestry_junctions`, `mean_callable_haplotype_bins` |
+| `pedigree/block_summary.csv` | Nonstandard only: `contig`, `block`, `component`, `first_bin`, `last_bin`, `nominal_index`, `working_morgans`, `bins`, `informative_markers`, `regime` |
 | `pedigree/chromosome_summary.csv` | `contig`, `component_count`, `scored_component_count`, `informative_markers`, `omitted_reason` |
 | `pedigree/relative_contrasts.csv` | `sample`, `candidate_parent`, `views`, `proxy_model`, `m1_minus_second_degree_proxy_nats`, `m1_minus_full_sib_proxy_nats`, `usable_chromosomes`, `negative_chromosomes_second_degree`, `negative_chromosomes_full_sib`, `min_chromosome_contrast_second_degree` |
 | `pedigree/sibling_guard.csv` | `parent`, `child`, `witnesses`, `set_aside`, `against`, `supporting`, `pair_score`, `family_score`, `score`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis` |

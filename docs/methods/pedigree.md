@@ -4,6 +4,52 @@ Pedigree inference compares no-, one- and two-observed-parent states using paint
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
+## Prepared-layout regimes and map blocks
+
+A single regime is chosen before score tasks, uniformly for every child. After omission,
+standard requires both at least `ceil(minimum_exposed_units)` informative contigs and
+Tier B reach under the configured seeded chromosome draws. Standard uses the chromosome
+model and computes no blocks. Otherwise at least four occupied blocks gives low material;
+fewer gives a completed `not_assessable` pedigree: unresolved states, count bounds [0,2],
+no edges or counts, no best guesses and absent fit diagnostics. Fewer than three samples
+remains an input error.
+
+Partition each scored component independently. For selector probability theta, each
+boundary distance is `-0.5 * log(1 - 2 * min(theta, 0.499999))`, without another cap.
+Coordinates start at zero. If T is the last coordinate, let whole=floor(T); the nominal
+count is one when whole=0, otherwise whole+1 when T-whole>=0.5, else whole.
+A bin's nominal index is min(floor(coordinate), count-1). Omit empty nominal blocks;
+retain occupied blocks in component order. A one-bin component is one block. The boundary
+belongs to the bin on its right. The configured map is used whether declared measured
+or not. An incorrect rate changes the number of blocks and may change the regime;
+clipping and thresholds at 1 and 1.5 Morgans prevent a proportionality claim.
+
+Low material uses one unit per block in all exposure, informative and reach rules;
+lengths are descriptors only. The existing bin/fraction gates remain. Tier B configuration
+and parent bootstrap thresholds are 0.95; leave-one-block-out (LOBO) requires 1.0.
+Tier A configurations and marginal edges are not assessed and do not enter slot ordering.
+Full-marker exclusion, relationship evidence and slot observed counts keep real chromosomes.
+Independent count exclusion remains available after resampling abstentions. Nonconverged
+resamples abstain for every sample and remain in their original denominators.
+
+Forward log increments in both views are credited per bin without restarting chains.
+Junctions use the original component's traced minimum-switch schedule; observed painted
+labels determine callability. Transmission retains its whole-component four-state filter.
+Genome retention, temperatures and the panel are fixed. Retained M1 uses raw block scores;
+other identities share the child's floor `M0_block + bins_block/bins_chr * (F_chr-M0_chr)`.
+This is an imputed profile, not raw M1. The panel exclusion guarantee covers full-data and
+leave-one-chromosome-out fits only, not every block omission; capped/incomplete diagnostics
+remain. Resampling is conditional on full-data preparations, source factors and schedules:
+later increments still depend on the filter states propagated through an omitted block.
+It measures conditional stability, not calibrated confidence or independent segregation.
+
+LOBO aggregation is linear in block count: full additive totals minus one block, distinct
+presence counts minus that block's flags, and graph-order moment totals minus its moments.
+No quadratic block-by-block omission vectors are stored. Each fit still refits family and
+graph selection. Arrays cost H times their eligible-edge/panel axes; for example each
+float64 H by E array costs 8 H E bytes, plus N by N orientation statistics, shared inputs,
+score decode/stack buffers and worker scratch.
+
 <a id="ps01"></a>
 ## ps01 Scoring-side candidate universe, dyad sets and evidence-free candidates
 
@@ -314,6 +360,10 @@ Cost and scope: O(C (E + T)). These terms describe the unit’s work/storage dim
 <a id="pd06"></a>
 ## pd06 Joint-transmission orientation evidence and the direction correction
 
+In low material the nonlinear robust direction transform below is applied to each block,
+with the configured chromosome error probability interpreted per block. The cap is per
+block. This is a block-level orientation model; it does not claim chromosome equivalence.
+
 For an ordered dyad (child c, parent p), score the joint likelihood of their four scheduled homologues.
 One homologue of c is a meiotic copy of p's two scheduled homologues. The hidden state is (h, s): which child
 homologue is copied, and which parental homologue the meiotic selector carries. At the start of each component
@@ -369,6 +419,9 @@ independent of founder count once the schedules are built.
 
 <a id="pd07"></a>
 ## pd07 Junction-density order probability (graph visit order, role probability)
+
+Low material applies this contrast, variance and comparison-count condition to block rows.
+LOBO removes the omitted block's four additive moment contributions before normalization.
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
@@ -483,7 +536,7 @@ Cost and scope: O(C A + C N² (PD07) + (4 + I)(A + N²) + R A + R N² + R² T + 
 <a id="pd17"></a>
 ## pd17 Tier reach and chromosome-count precheck
 
-Compute the maximum achievable bootstrap and leave-one-contig-out support from distinct represented contigs and their map units. Derive each tier’s minimum contig count from both support requirements rather than hard-coding it. Refuse too little informative evidence and report unreachable tiers. Reach is an evidence-availability statement, not a released pedigree call.
+Compute the maximum achievable bootstrap and leave-one-contig-out support from distinct represented contigs and their map units. Derive each tier’s minimum contig count from both support requirements rather than hard-coding it. Choose the prepared-layout regime above and publish a completed unresolved product when fewer than four blocks remain. Report unreachable tiers. Reach is an evidence-availability statement, not a released pedigree call.
 
 Implementation: [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
 
@@ -623,7 +676,7 @@ Construct typed report views after the declared release, slot and guard steps. D
 
 `painted_junctions_per_morgan` is the sample's minimum painted founder switches, summed over scored chromosomes, divided by twice its callable painted map length. For chromosome c, callable length is `working_morgans[c] * callable_bins[c,n] / (2 * total_bins[c])`; the rate is per homologue per Morgan of the configured working map. Working length sums the Haldane distances `-0.5 * log(1 - 2 * theta)` of the actual selector transitions over scored components and bin boundaries (PS04). It includes the configured fallback rate even when that rate is not declared measured, and is distinct from the measured exposure used by pedigree gates. Zero callable length gives NaN. The number is reported only and never enters a gate, tier or parent-call decision.
 
-Values of a few per Morgan reflect the crossovers of the cross's generations: supported simulation designs give values from 0 to 4. Values far above that, such as 25–46 in a real cohort with many unrelated founders, indicate fragmented paintings; parent calls based on those paintings are not reliable. These ranges describe interpretation, not decision thresholds. The rate depends on the configured map and scales inversely with its length: doubling a configured recombination rate doubles the denominator and halves this number. An erroneous configured rate therefore rescales the diagnostic.
+Values of a few per Morgan reflect the crossovers of the cross's generations: in simulations of supported designs the cohort median is between 0 and 2.6 per Morgan and single samples reach about 7. Values far above that, such as 25–46 in a real cohort with many unrelated founders, indicate fragmented paintings; parent calls based on those paintings are not reliable. These ranges describe interpretation, not decision thresholds. The rate depends on the configured map and scales inversely with its length: doubling a configured recombination rate doubles the denominator and halves this number. An erroneous configured rate therefore rescales the diagnostic.
 
 Implementation: [outputs/reports/pedigree.py](../../haplotype_reconstruction/outputs/reports/pedigree.py), [science/pedigree/views.py](../../haplotype_reconstruction/science/pedigree/views.py).
 

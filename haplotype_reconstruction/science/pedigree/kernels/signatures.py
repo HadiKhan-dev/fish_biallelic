@@ -2513,3 +2513,31 @@ OVERLOADS.update(
         ),
     }
 )
+
+
+# Low-material forwards use the same production arrays, with no common-product cache.
+_block_forward = tuple(dict.fromkeys(
+    (types.int64,) * 4 + signature[4:25] + (types.none, first_cached, types.none)
+    for signature in OVERLOADS["forward.score_path"]
+    for first_cached in (types.int64, types.literal(0))))
+_block_axis = (types.Array(types.int64, 1, "C"), types.int64)
+OVERLOADS["forward.score_path_blocks"] = tuple(signature + _block_axis for signature in _block_forward)
+OVERLOADS["forward.score_block_rows"] = tuple(dict.fromkeys(
+    (types.Array(types.int64, 2, "C"), *_block_axis, types.Array(types.boolean, 1, "C")) + signature[4:25]
+    for signature in _block_forward))
+OVERLOADS["transmission.blocks"] = ((
+    types.Array(types.int64, 2, "C"), types.Array(types.int64, 3, "C"),
+    types.Array(types.int64, 3, "C"), types.Array(types.boolean, 2, "C"),
+    types.Array(types.float64, 1, "C"), types.int64, types.float64,
+    types.Array(types.int64, 1, "C"), types.int64),)
+
+
+OVERLOADS["orientation._order_statistics"] = tuple(
+    (types.Array(types.float64, 2, "C", readonly=readonly),
+     types.Array(types.float64, 2, "C", readonly=readonly),
+     types.Array(types.float64, 1, "C", readonly=readonly)) for readonly in (False, True))
+OVERLOADS["orientation._omit_order_probability"] = tuple(
+    (types.Array(types.float64, 3, "C", readonly=totals_readonly),
+     types.Array(types.float64, 1, "C", readonly=rows_readonly),
+     types.Array(types.float64, 1, "C", readonly=rows_readonly), types.float64)
+    for totals_readonly in (False, True) for rows_readonly in (False, True))

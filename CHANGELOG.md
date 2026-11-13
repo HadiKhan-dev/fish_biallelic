@@ -1,5 +1,72 @@
 # Changelog
 
+## 4.16.1 (13 November 2026)
+
+This release lets the pedigree stage assess a run that holds too little material for its chromosome resampling:
+one or two long chromosomes, or a few short ones. Such a run used to be refused or to release nothing. A run the
+released rule can assess is not touched: its scores, calls, edges and reports are those of 4.16.0.
+
+**Pedigree: a low-material regime, chosen from the amount of material.** The stage's support comes from resampling
+whole chromosomes, so a cross with fewer than three informative chromosomes could not be assessed however long
+those chromosomes were. The stage now chooses one regime for the whole run from the prepared layout, before any
+score is computed:
+
+- *standard*: at least three informative chromosomes and Tier B reachable by chromosome resampling. Everything is
+  as released and no block is computed.
+- *low material*: otherwise, each scored component is cut into blocks of one Morgan of the configured map (a
+  component shorter than one Morgan is one block, and a tail of half a Morgan or more is its own block). A run
+  with at least four blocks is assessed on them: each block counts as one unit, the forward recursions run
+  unbroken along the chromosome and their per-bin increments are summed per block, parent floors are shared out by
+  bins, and the orientation model is applied per block. Tier B needs a bootstrap share of 0.95 over blocks and
+  every leave-one-block-out fit; Tier A is not assessed. The Tier B tables carry the evidence labels
+  `low_material_resampling` or `low_material_exclusion` in place of `chromosome_resampling`, a `Regime` column,
+  `LOBO` in place of `LOCO` in the support columns, and there is a new `block_summary.csv`.
+- *not assessable*: fewer than four blocks. The stage completes with every sample unresolved, parent-count bounds
+  of 0 to 2 and no edges, instead of raising an error; family phase, recombination and export run on it as on any
+  pedigree without edges. Fewer than three samples is still an input error.
+
+So one chromosome of ten Morgans and two of five are both assessed on ten blocks. The blocks use the configured
+map whether or not it is declared measured: a wrong configured rate changes the number of blocks, and with it the
+regime, so it is stated in the documentation as a dependence of this regime.
+
+**What a low-material call means.** Blocks of one chromosome are not independent, and the bootstrap share is a
+stability measure, not a probability. The documentation gives the measured error bands instead. On 41 simulated
+runs with known pedigrees, cut down to 1,794 layouts of two to eight blocks: at four blocks 7,367 true parent
+edges and 42 others were released (60 % of the true edges), at five 8,763 and 22 (82 %), at six 9,017 and 14
+(90 %), at seven or eight 22,202 and 23 (96 %); wrong "no sequenced parent" calls were 4 of 7,382. At four blocks
+the share of non-parents among released edges was at most 0.3 % in standard, backcross and large-family designs,
+0.8 % in designs with tied likelihoods, 3.4 % in small families and 3.7 % in mixed cohorts with relatives of
+unsequenced parents. Two and three blocks were measured too and are withheld (280 and 203 non-parents released).
+
+**Records.** The prepared pedigree record (schema 2) carries a small layout header from which the regime is
+recomputed on resume; score records (schema 4) have a block form for low-material runs; the pedigree product
+(schema 8) records the regime. Checkpoints of the pedigree stage from 4.16.0 are recomputed.
+
+**Corrections to earlier notes.** The 4.15.3 entry said that "415 of 1,130 slot samples are not parents of the
+family". The count is of pairs: on 23 known-truth simulated crosses, in 415 of the 1,130 pairs of a family member
+and a filled slot of its family, the slot sample is not a parent of that member. The documentation said that
+supported simulation designs give 0 to 4 painted junctions per Morgan; measured on the 16 simulated cases of the
+4.16.0 release matrix, the cohort median is between 0 and 2.6 per Morgan and single samples reach about 7.
+
+**Validation.** The default suite (4,660 tests) and the stage tier (four shards) pass. The fifteen cases of the
+end-to-end matrix that the chromosome rule assesses, the real cross among them, are identical to 4.16.0 in every
+table, report and VCF record; their only difference is the new `regime` entry of `pedigree/summary.json`. The
+other two cases enter the low-material regime: a backcross with three chromosomes of 1.6 to 2 Morgans (six
+blocks) goes from no released edge to 104 supported parent edges of its 120 true ones, none wrong, and a cohort
+without sequenced parents releases nothing. On the saved inputs of the 1,794 measured layouts the release makes the decisions of the
+reference measurement in every one: the same edges and state calls from four blocks, nothing below.
+
+**End to end on little material.** Forty-eight simulated crosses were run through the whole pipeline with only
+this material: one chromosome of 10, 5, 4 or 3 Morgans, two of 5, or four of 1; four cohort types of about 40 to
+60 samples; depth 1 and 5. The eight runs with three Morgans complete as not assessable and release nothing. In
+the other forty, 815 edges were released, 4 of them not parent edges; none was reversed, and none of 514 "no
+sequenced parent" calls was wrong. True parent edges released, by cohort type, at four, five and ten blocks:
+standard cohorts 147 of 240, 83 of 120 and 236 of 240; mixed cohorts with relatives of unsequenced parents 87 of
+120, 43 of 60 and 118 of 120 (two non-parents at four blocks); small families 16 of 92, 20 of 46 and 61 of 92
+(one non-parent at four blocks); cohorts without a sequenced parent released one edge in ten runs. So with four or
+five blocks the regime is conservative, and in small families, where a child has one sequenced parent, it releases
+few edges: the true parent is usually the best candidate, but its support over so few blocks stays below 0.95.
+
 ## 4.16.0 (13 November 2026)
 
 This release makes the polish of a refined component reuse its own local results. No objective, threshold, search
@@ -49,7 +116,8 @@ tie rules. The objective, the penalties and the support definitions are unchange
 `parent_slot1_support`, `parent_slot2` and `parent_slot2_support` in place of `parent1`, `parent1_support`,
 `parent2` and `parent2_support`. A slot sample is a sequenced sample whose genotypes serve the family model as a
 parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another
-close relative: on 23 known-truth simulated crosses, 415 of 1,130 slot samples are not parents of the family.
+close relative: on 23 known-truth simulated crosses, in 415 of the 1,130 pairs of a family member and a filled
+slot of its family, the slot sample is not a parent of that member (wording corrected in 4.16.1).
 Parent calls, their direction and their support are the pedigree stage's.
 
 **Pedigree: painted junctions per Morgan.** The per-sample diagnostics table reports minimum painted founder

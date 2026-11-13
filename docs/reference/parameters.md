@@ -672,6 +672,18 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `label_continuity_maximum_loser_ratio` | `0.1` | share | Maximum switch-loser to switch-winner sample ratio (dimensionless); protects shared recombinant lineages during row relabelling. |
 | `label_continuity_check_budget` | `64` | count | Maximum charged candidate checks per search iteration, including tie peers (candidates). An unresolved class withholds its repair and ends the search with check_budget_reached; capability rejections need no decode or charge. Bounds trial work at large founder counts. |
 | `viterbi_tie` | `VITERBI_TIE` | nats | Viterbi predecessor tie quantum (nats); noise_quantum(1.9e-6) places the preference for fewer track changes above the measured score-gap noise scale. |
+## science.pedigree.parameters
+
+Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `LOW_MATERIAL_BLOCK_MORGANS` | `1.0` | See model | Frozen low-material regime (DESIGN_4154 revision 3, A1–A4). Distances are configured Morgans. |
+| `LOW_MATERIAL_TAIL_MORGANS` | `0.5` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `LOW_MATERIAL_SWITCH_CLIP` | `0.499999` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `LOW_MATERIAL_MINIMUM_BLOCKS` | `4` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `LOW_MATERIAL_BOOTSTRAP` | `0.95` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `LOW_MATERIAL_LEAVE_ONE_OUT` | `1.0` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 ## science.pedigree.parameters — WinnerNumerics
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).

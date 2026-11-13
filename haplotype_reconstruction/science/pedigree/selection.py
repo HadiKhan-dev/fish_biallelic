@@ -24,6 +24,7 @@ from ...contracts.pedigree import (
     ExposureEvidence,
     GenomeScores,
     LocalGraphChoices,
+    OmissionTotals,
     Selection,
     edge_index,
 )
@@ -83,20 +84,34 @@ def map_units(morgans, config: ExposureParameters) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------- gate and scores
-def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParameters) -> np.ndarray:
+def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParameters, *, omitted=None) -> np.ndarray:
     """bool [A]: configurations testable on the weighted chromosomes (M0 always): every edge (and an M2 pair) exposed
     in enough bins, enough of the fit's painted bins and on chromosomes holding enough map units."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
-    edge_exposed = ordered_sum(exposure.edge_exposed, axis=0, weights=weights)
-    pair_exposed = ordered_sum(exposure.pair_exposed, axis=0, weights=weights)
-    total_bins = float(ordered_sum(exposure.total_bins, axis=0, weights=weights))
+    totals = inputs.omission_totals
+    if omitted is None:
+        edge_exposed = ordered_sum(exposure.edge_exposed, axis=0, weights=weights)
+        pair_exposed = ordered_sum(exposure.pair_exposed, axis=0, weights=weights)
+        total_bins = float(ordered_sum(exposure.total_bins, axis=0, weights=weights))
+    else:
+        totals = inputs.omission_totals
+        assert totals is not None
+        edge_exposed = totals.edge_exposed - exposure.edge_exposed[omitted]
+        pair_exposed = totals.pair_exposed - exposure.pair_exposed[omitted]
+        total_bins = totals.total_bins - float(exposure.total_bins[omitted])
     edge_fraction = np.divide(edge_exposed, total_bins, out=np.zeros_like(edge_exposed), where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed), where=total_bins > 0.0)
     # Exposed chromosomes count by their map units (a short chromosome once), not one each.
-    weights = np.ascontiguousarray(weights, dtype=np.float64)
-    edge_units = _units_present(exposure.edge_present, weights, exposure.edge_units)
-    pair_units = _units_present(exposure.pair_present, weights, exposure.pair_units)
+    if omitted is None:
+        weights = np.ascontiguousarray(weights, dtype=np.float64)
+        edge_units = _units_present(exposure.edge_present, weights, exposure.edge_units)
+        pair_units = _units_present(exposure.pair_present, weights, exposure.pair_units)
+    else:
+        assert totals is not None
+        bit = np.uint64(1) << np.uint64(omitted % 64)
+        edge_units = totals.edge_units - ((exposure.edge_present[omitted // 64] & bit) != 0)
+        pair_units = totals.pair_units - ((exposure.pair_present[omitted // 64] & bit) != 0)
     edge_ok = (
         (edge_exposed >= config.minimum_edge_exposed_bins)
         & (edge_fraction >= config.minimum_exposed_fraction)
@@ -124,6 +139,7 @@ def fit_scores(
     orientation: Orientation,
     config: PedigreeParameters,
     trace: dict | None = None,
+    *, omitted=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(state scores, identity scores) [A] of one weighted fit, family terms included.
 
@@ -131,12 +147,19 @@ def fit_scores(
     propagation differs from the panel-admission fold that omits zero-weight rows.
     """
     alternatives = inputs.alternatives
+    with np.errstate(invalid="ignore"):
+        if omitted is None:
+            raw = ordered_sum(alternatives.log_likelihoods, axis=0, weights=weights)
+        else:
+            totals = inputs.omission_totals
+            assert totals is not None
+            raw = totals.genetic - alternatives.log_likelihoods[omitted]
     aggregate = alternatives_module.mix_m0(
-        ordered_sum(alternatives.log_likelihoods, axis=0, weights=weights),
+        raw,
         alternatives,
         config.selection.m0_contamination_probability,
     )
-    gate = testable(weights, inputs, config.exposure)
+    gate = testable(weights, inputs, config.exposure, omitted=omitted)
     nonzero = alternatives.states != M0
     state_scores = aggregate.copy()
     identity_scores = aggregate.copy()
@@ -271,11 +294,15 @@ def select(
 
 
 def fit(
-    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeParameters, trace: dict | None = None, *, counter=None
+    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeParameters, trace: dict | None = None, *, counter=None, omitted=None
 ) -> tuple[Selection, Orientation, tuple[np.ndarray, np.ndarray]]:
     """One weighted fit with the configured priors: (selection, orientation, (state, identity))."""
-    orientation = fit_orientation(inputs.junctions, weights)
-    scores = fit_scores(weights, inputs, orientation, config, trace)
+    if omitted is None:
+        orientation = fit_orientation(inputs.junctions, weights)
+    else:
+        from .orientation import fit_omitting
+        orientation = fit_omitting(inputs.junctions, inputs.omission_totals, omitted)
+    scores = fit_scores(weights, inputs, orientation, config, trace, omitted=omitted)
     selection = select(
         *scores, inputs.alternatives, config.selection.state_priors, orientation, config, counter=counter
     )
@@ -299,6 +326,8 @@ def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: Exp
         raise InputError("a configuration row names a parent outside the eligible edges")
 
     def units(morgans, shape):
+        if scores.regime == "low_material":
+            return np.ones(shape, dtype=np.float64)
         return map_units(np.full(shape, np.nan) if morgans is None else morgans, config)
 
     return ExposureEvidence(
@@ -312,3 +341,20 @@ def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: Exp
         units(edge_exposed_morgans, edge_exposed.shape),
         units(pair_exposed_morgans, pair_exposed.shape),
     )
+
+
+
+def omission_totals(inputs):
+    """One O(H) pass over additive inputs; no H by H omission vectors or caches."""
+    from .orientation import _order_statistics
+    exposure, junctions = inputs.exposure, inputs.junctions
+    weights = np.ones(len(exposure.total_bins))
+    return OmissionTotals(
+        ordered_sum(inputs.alternatives.log_likelihoods, axis=0),
+        ordered_sum(exposure.edge_exposed, axis=0), ordered_sum(exposure.pair_exposed, axis=0),
+        float(ordered_sum(exposure.total_bins)),
+        _units_present(exposure.edge_present, weights, exposure.edge_units),
+        _units_present(exposure.pair_present, weights, exposure.pair_units),
+        junctions.junctions.sum(axis=0), junctions.callable_bins.sum(axis=0),
+        junctions.pair_log_odds.sum(axis=0),
+        _order_statistics(junctions.junctions, junctions.callable_bins, junctions.total_bins))

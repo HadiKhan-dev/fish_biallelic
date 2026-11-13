@@ -10,6 +10,7 @@ from ...contracts.payload import from_payload, to_payload
 from ...contracts.pedigree import (
     CandidatePanel,
     ChromosomeScores,
+    LowMaterialChromosomeScores,
     ChromosomeSummaryView,
     CompactM1,
     ParentEligibility,
@@ -30,17 +31,18 @@ KEY = "pedigree/floored_scores"
 
 
 class ScoresAdapter:
-    """Schema-3 score product: the M1 field is already the fixed genome profile."""
+    """Schema-4 score product: the M1 field is already the fixed genome profile."""
 
-    schema = 3
+    schema = 4
 
     def encode(self, value: ChromosomeScores) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value)}
 
     def decode(self, payload: Mapping[str, Any]) -> ChromosomeScores:
         require_schema(payload, self.schema)
-        names = {f.name for f in fields(ChromosomeScores)}
-        return from_payload(ChromosomeScores, {k: v for k, v in payload.items() if k != "schema" or k in names})
+        form = LowMaterialChromosomeScores if payload.get("form") == "low_material" else ChromosomeScores
+        names = {f.name for f in fields(form)}
+        return from_payload(form, {k: v for k, v in payload.items() if k != "schema" or k in names})
 
 
 def derivation(
@@ -51,6 +53,7 @@ def derivation(
     *,
     reverse: bool | None = None,
     numerical_policy: NumericalPolicy | None = None,
+    regime: str = "standard",
 ) -> str:
     """No second flooring: bind the fixed screen and canonical panel row digest."""
     reverse = parameters.reverse_conventions if reverse is None else reverse
@@ -62,6 +65,8 @@ def derivation(
             direction_mismatch_probability=parameters.direction.mismatch_probability,
             score_schema=ScoresAdapter.schema,
             m1_values="fixed-genome-profile",
+            regime=regime,
+            partition=(1.0, 1.5, 0.5, 0.499999, "component-grid-occupied-bins"),
         ),
         numerical_policy or NumericalPolicy.current(),
         dict(prepared=prepared_identity, screen=screen_identity, trios=array_digest(panel.trios)),
@@ -81,6 +86,7 @@ def run(
     reverse: bool | None = None,
     file: CheckpointFile | None = None,
     identity: str | None = None,
+    regime: str = "standard",
 ) -> ChromosomeScores:
     """Expand only this chromosome's M1 profile and evaluate the fixed panel."""
     if (file is None) != (identity is None):
@@ -90,13 +96,19 @@ def run(
         assert identity is not None
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
+            if (getattr(previous, "form", "standard") != regime):
+                raise InputError("score record form differs from the run regime")
             return previous
     one = compact.chromosome_reference(chromosome, eligibility)
     with thread_team(default=threads):
         # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
-        product = score_chromosome_selective(
-            prepared, one, panel.trios, eligibility, parameters, claim_threads, reverse=reverse
-        )
+        if regime == "low_material":
+            from ...science.pedigree.block_scoring import score
+            product = score(prepared, compact, chromosome, panel, eligibility, parameters, claim_threads, reverse=reverse)
+        else:
+            product = score_chromosome_selective(
+                prepared, one, panel.trios, eligibility, parameters, claim_threads, reverse=reverse
+            )
     if file is not None:
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)

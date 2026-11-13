@@ -524,6 +524,12 @@ def build(
         EvidenceSummaryView(c, int(scores.informative_markers[i]), float(mean_junctions[i]), float(mean_callable[i]))
         for i, c in enumerate(scores.contigs)
     )
+    if scores.regime == "low_material":
+        evidence_summary = tuple(EvidenceSummaryView(c,
+            int(scores.informative_markers[scores.block_chromosome == i].sum()),
+            float(np.mean(scores.junctions[scores.block_chromosome == i].sum(axis=0))),
+            float(np.mean(scores.callable_bins[scores.block_chromosome == i].sum(axis=0))))
+            for i, c in enumerate(scores.real_contigs))
     return PedigreeViews(
         tuple(replace(r, release_evidence=evidence[r.sample]) for r in relationships(release.tier_b, rows)),
         partial_relationships(release.partial_b, True),

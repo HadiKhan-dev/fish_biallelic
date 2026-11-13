@@ -99,7 +99,7 @@ def _accumulate(
                         graph_parent[np.searchsorted(edges, child * n_samples + parent)] += count
 
 
-def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities: np.ndarray) -> FitArrays:
+def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities: np.ndarray, *, omissions=False) -> FitArrays:
     """Selections of a chunk of multiplicity vectors: local rows, graph rows, local states and the
     nonconverged flag of each vector."""
     n_replicates = len(multiplicities)
@@ -112,7 +112,8 @@ def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities:
     graph_exhausted = np.zeros(n_replicates, dtype=np.bool_)
     for replicate, weights in enumerate(multiplicities):
         try:
-            chosen, _, _ = selection.fit(weights, inputs, config)
+            chosen, _, _ = (selection.fit(np.empty(0), inputs, config, omitted=int(weights[0]))
+                             if omissions else selection.fit(weights, inputs, config))
         except FamilyMessageNonConvergence:
             nonconverged[replicate] = True
             continue
@@ -144,6 +145,8 @@ class ResamplingPlan:
 
 def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> ResamplingPlan:
     """Draw the bootstrap multiplicities and order the independent fits for at most ``cpus`` workers."""
+    from .regimes import effective
+    config = effective(config, inputs.regime)
     alternatives = inputs.alternatives
     n_contigs = alternatives.log_likelihoods.shape[0]
     replicates = config.resampling.bootstrap_replicates
@@ -164,8 +167,11 @@ def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> R
     tasks: list[FitTask] = []
     if n_contigs > 1:
         for omitted in range(n_contigs):
-            weights = np.ones((1, n_contigs), dtype=np.float64)
-            weights[0, omitted] = 0.0
+            if inputs.regime == "low_material":
+                weights = np.array([[omitted]], dtype=np.int64)
+            else:
+                weights = np.ones((1, n_contigs), dtype=np.float64)
+                weights[0, omitted] = 0.0
             tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
     tasks += [
         (
@@ -182,7 +188,8 @@ def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> R
 def evaluate_task(inputs: DecisionInputs, task: FitTask) -> FitResult:
     """One planned task: (is_loco, draws, selections of its multiplicity vectors)."""
     is_loco, weights, task_draws, task_config = task
-    return is_loco, task_draws, evaluate(inputs, task_config, weights)
+    return is_loco, task_draws, evaluate(inputs, task_config, weights,
+        omissions=is_loco and inputs.regime == "low_material")
 
 
 def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[FitResult]) -> Resampling:

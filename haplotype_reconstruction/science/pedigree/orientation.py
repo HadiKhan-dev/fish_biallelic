@@ -199,3 +199,71 @@ def parent_role_probability(row: int, rows: np.ndarray, orientation: Orientation
     if not parents:
         return 1.0
     return float(np.prod(orientation.order_probability[int(rows[row, 0]), parents]))
+
+
+@kernel(overloads=OVERLOADS["orientation._order_statistics"], cache=True, nogil=True)
+def _order_statistics(junctions, callable_bins, total_bins):
+    """Additive four-moment statistics of the block-level graph-order model."""
+    h, n = junctions.shape
+    result = np.zeros((n, n, 4))
+    for child in range(n):
+        for parent in range(child):
+            for block in range(h):
+                if total_bins[block] <= 0:
+                    continue
+                fc = min(1.0, callable_bins[block, child] / (2 * total_bins[block]))
+                fp = min(1.0, callable_bins[block, parent] / (2 * total_bins[block]))
+                common = max(0.0, fc + fp - 1.0)
+                if common <= 0:
+                    continue
+                dc, dp = junctions[block, child] / fc, junctions[block, parent] / fp
+                delta = dc - dp
+                result[child, parent, 0] += common
+                result[child, parent, 1] += common * delta
+                result[child, parent, 2] += common * delta * delta
+                result[child, parent, 3] += common * ((1-fc)*dc/fc + (1-fp)*dp/fp)
+    return result
+
+
+@kernel(overloads=OVERLOADS["orientation._omit_order_probability"], cache=True, nogil=True)
+def _omit_order_probability(totals, junctions, callable_bins, total_bins):
+    """O(N²) order probabilities after removing one block's moment contributions."""
+    n = len(junctions)
+    result = np.full((n, n), .5)
+    for child in range(n):
+        for parent in range(child):
+            count, mean, square, missing = totals[child, parent]
+            if total_bins > 0:
+                fc = min(1.0, callable_bins[child] / (2*total_bins))
+                fp = min(1.0, callable_bins[parent] / (2*total_bins))
+                common = max(0.0, fc+fp-1.0)
+                if common > 0:
+                    dc, dp = junctions[child]/fc, junctions[parent]/fp
+                    delta = dc-dp
+                    count -= common
+                    mean -= common*delta
+                    square -= common*delta*delta
+                    missing -= common*((1-fc)*dc/fc+(1-fp)*dp/fp)
+            if count <= ORDER_MINIMUM_WEIGHT:
+                continue
+            variance = max(0.0, square-mean*mean/count) * count/(count-1.0)
+            variance += missing + ORDER_VARIANCE_OFFSET
+            probability = .5 * (1+math.erf(mean/math.sqrt(2*variance)))
+            result[child,parent] = probability
+            result[parent,child] = 1-probability
+    return result
+
+
+def fit_omitting(evidence, totals, omitted):
+    """The same block-level model, using totals minus the omitted block."""
+    counts = totals.junctions - evidence.junctions[omitted]
+    exposure = totals.callable_bins - evidence.callable_bins[omitted]
+    full = 2.0 * (totals.total_bins - evidence.total_bins[omitted])
+    fractions = np.divide(exposure, full, out=np.zeros_like(exposure), where=full > 0)
+    adjusted = np.divide(counts, fractions, out=np.full_like(counts, np.nan), where=fractions > 0)
+    values = totals.pair_log_odds - evidence.pair_log_odds[omitted]
+    log_odds = np.zeros((len(counts), len(counts)))
+    log_odds[evidence.pair_child, evidence.pair_parent] = values
+    log_odds[evidence.pair_parent, evidence.pair_child] = -values
+    return Orientation(_omit_order_probability(totals.order_statistics, evidence.junctions[omitted],
+        evidence.callable_bins[omitted], float(evidence.total_bins[omitted])), log_odds, adjusted, fractions)

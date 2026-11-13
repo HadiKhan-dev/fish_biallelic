@@ -10,7 +10,7 @@ Method: docs/methods/pedigree.md#one-weighted-fit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace, fields
 from typing import Any
 
 import numpy as np
@@ -19,6 +19,8 @@ from ...contracts.pedigree import (
     Decision,
     DecisionTrace,
     FamilySolveRecord,
+    TierCalls,
+    PartialEdges,
     GenomeScores,
     Orientation,
     Resampling,
@@ -45,7 +47,7 @@ __all__ = [
 
 
 def informative_chromosomes(alternatives: Alternatives, *, counter=None) -> np.ndarray:
-    """bool [C, N]: chromosomes with any unique parent-count evidence winner, regardless of the genome-wide call."""
+    """bool [C, N]: fit rows with a unique parent-count winner (blocks in low material)."""
     winners = np.zeros((len(alternatives.log_likelihoods), alternatives.n_samples), dtype=np.bool_)
     states = np.arange(3, dtype=np.int64)
     for contig, likelihoods in enumerate(alternatives.log_likelihoods):
@@ -109,7 +111,10 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
             scores.junction_dyads,
             scores.transmission_log_likelihood,
         ),
+        regime=scores.regime,
     )
+    if scores.regime == "low_material":
+        inputs = replace(inputs, omission_totals=selection.omission_totals(inputs))
     trace: dict = {}
     counter = TieCounter()
     full, orientation, adjusted = selection.fit(np.ones(len(scores.contigs)), inputs, config, trace, counter=counter)
@@ -131,20 +136,37 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
     """Support, tiers, views and candidate sets from the full fit and its resampling."""
     scores, eligibility, inputs = state.scores, state.eligibility, state.inputs
     alternatives, full, trace, counter = inputs.alternatives, state.full, state.trace, state.counter
-    winners = informative_chromosomes(alternatives, counter=counter)
+    if scores.regime == "low_material":
+        # PD15 block decisions are a different diagnostic scope from the genome
+        # solve; the winner/tie algorithm itself stays exactly the released one.
+        block_counter = TieCounter()
+        winners = informative_chromosomes(alternatives, counter=block_counter)
+        for event in block_counter.record().entries:
+            counter.add_counts(event.kind.replace("pedigree.winner", "pedigree.informative_block.winner"),
+                               event.decisions, event.inside_tie, event.wide, event.boundary)
+    else:
+        winners = informative_chromosomes(alternatives, counter=counter)
     informative = winners.sum(axis=0).astype(np.int64)
     informative_units = ordered_sum(
-        winners * child_units(scores.edges, inputs.exposure.edge_units, alternatives.n_samples), axis=0
+        winners * (np.ones(winners.shape) if scores.regime == "low_material" else
+                   child_units(scores.edges, inputs.exposure.edge_units, alternatives.n_samples)), axis=0
     )
     tie_events = counter.record()
     log_odds = trace["orientation_log_odds"]
     evidence = release.child_evidence(
         full, list(state.sensitivity), resampled, alternatives, informative_units, log_odds, config
     )
-    tier_a = release.tier_calls("tier_a", config.release.tier_a, full, evidence, eligibility, config)
+    n = alternatives.n_samples
+    low = scores.regime == "low_material"
+    tier_a = (TierCalls(np.full(n, -1, np.int8), np.full(n, -1, np.int64), ("not_assessed",) * n,
+                         np.zeros(n, bool), np.zeros(n, bool), np.zeros(n, bool), np.zeros((n, 2), bool))
+              if low else release.tier_calls("tier_a", config.release.tier_a, full, evidence, eligibility, config))
     tier_b = release.tier_calls("tier_b", config.release.tier_b, full, evidence, eligibility, config)
     complete = release.complete_calls(full, eligibility, alternatives)
-    partial_a = release.partial_edges("tier_a", config.release.tier_a, tier_a, evidence, alternatives, config)
+    partial_a = (PartialEdges(np.full((n, 2), -1, np.int64), np.zeros((n, 2), bool), np.zeros(n, bool),
+                  np.zeros(n, np.int64), np.full(n, 2, np.int64), np.full(n, -1, np.int8),
+                  ("not_assessed",) * n, ("",) * n) if low else
+                 release.partial_edges("tier_a", config.release.tier_a, tier_a, evidence, alternatives, config))
     partial_b = release.partial_edges("tier_b", config.release.tier_b, tier_b, evidence, alternatives, config)
     candidates = release.candidate_sets(tier_b, partial_b, full, alternatives, resampled, log_odds, config)
     direction = config.direction
@@ -161,6 +183,11 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
         nonconverged_bootstrap_replicates=int(resampled.bootstrap.nonconverged),
         nonconverged_loco_replicates=int(resampled.loco.nonconverged),
     )
+    reach = resampling.reach(resampled.multiplicities, inputs.exposure.units, config)
+    if low:
+        reach = replace(reach, tier_a_reachable=False, minimum_contigs_tier_a=0,
+            statement=f"{len(scores.contigs)} informative blocks: Tier B assessable with low-material resampling; Tier A not assessed",
+            unit_morgans=float("nan"))
     return Decision(
         scores,
         eligibility,
@@ -179,7 +206,7 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
         partial_a,
         partial_b,
         candidates,
-        resampling.reach(resampled.multiplicities, inputs.exposure.units, config),
+        reach,
         family_solve,
         tie_events,
         informative_units,

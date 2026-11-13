@@ -76,6 +76,14 @@ __all__ = [
     "EXCLUSION_DYAD_BATCH",
 ]
 
+# Frozen low-material regime (DESIGN_4154 revision 3, A1–A4). Distances are configured Morgans.
+LOW_MATERIAL_BLOCK_MORGANS = 1.0
+LOW_MATERIAL_TAIL_MORGANS = 0.5
+LOW_MATERIAL_SWITCH_CLIP = 0.499999
+LOW_MATERIAL_MINIMUM_BLOCKS = 4
+LOW_MATERIAL_BOOTSTRAP = 0.95
+LOW_MATERIAL_LEAVE_ONE_OUT = 1.0
+
 @dataclass(frozen=True)
 class WinnerNumerics:
     """Exact winner and graph-confidence tolerances; no user-facing tuning (PD11-PD13)."""

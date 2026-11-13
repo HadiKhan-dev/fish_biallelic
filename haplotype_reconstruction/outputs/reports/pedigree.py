@@ -283,6 +283,7 @@ COLUMNS = {
     ],
     "evidence_summary": ["Contig", "InformativeMarkers", "MeanMinimumAncestryJunctions", "MeanCallableHaplotypeBins"],
     "chromosome_summary": ["Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason"],
+    "block_summary": ["Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins", "InformativeMarkers"],
     "relative_contrasts": [
         "Sample",
         "CandidateParent",
@@ -438,6 +439,8 @@ def render(
     """Render numeric rows and text only; never choose or recompute a scientific value."""
     result = {}
     for table, fixed_columns in COLUMNS.items():
+        if table == "block_summary" and product.regime == "standard":
+            continue
         values = getattr(product, table)
         columns = list(fixed_columns)
         if table in EMPTY_COLUMNS and not values:
@@ -513,6 +516,12 @@ def render(
                 cleaning_converged=guard.cleaning_converged,
                 cleaning_iteration_bound=guard.cleaning_iteration_bound,
             )
+    if product.regime != "standard":
+        for frame in result.values():
+            if frame is not None:
+                frame.rename(columns={c: c.replace("LOCO", "LOBO").replace("InformativeContigCount", "InformativeBlockCount")
+                                      for c in frame.columns}, inplace=True)
+                frame["Regime"] = product.regime
     return result
 
 
@@ -541,9 +550,15 @@ _PAINTED_JUNCTION_DEFINITION = (
 
 def _painted_junction_rates(scores: records.GenomeScores) -> np.ndarray:
     """Report-only switches per homologue per Morgan of callable painting on the working map."""
-    callable_morgans = np.sum(
-        scores.working_morgans[:, None] * scores.callable_bins / (2.0 * scores.total_bins[:, None]), axis=0
-    )
+    if scores.regime == "low_material":
+        length = np.asarray([scores.working_morgans[scores.block_chromosome == i].sum() for i in range(len(scores.real_contigs))])
+        bins = np.asarray([scores.total_bins[scores.block_chromosome == i].sum() for i in range(len(scores.real_contigs))])
+        callable_bins = np.stack([scores.callable_bins[scores.block_chromosome == i].sum(axis=0) for i in range(len(scores.real_contigs))])
+        callable_morgans = np.sum(length[:, None] * callable_bins / (2 * bins[:, None]), axis=0)
+    else:
+        callable_morgans = np.sum(
+            scores.working_morgans[:, None] * scores.callable_bins / (2.0 * scores.total_bins[:, None]), axis=0
+        )
     return np.divide(
         scores.junctions.sum(axis=0), 2.0 * callable_morgans,
         out=np.full(len(scores.sample_ids), np.nan), where=callable_morgans > 0,
@@ -568,7 +583,8 @@ def write_pedigree(
     per-sample tables list their rows in it (the records keep the canonical order)."""
     from .tables import frame_in_input_order
 
-    rates = _painted_junction_rates(product.retained.decision.scores)
+    rates = (np.full(len(product.sample_ids), np.nan) if product.retained is None
+             else _painted_junction_rates(product.retained.decision.scores))
     frames = render(product.views, product.sample_ids, painted_junctions_per_morgan=rates)
     exclusion = record_mapping(product.exclusion)
     directory = Path(output) / "pedigree"
@@ -584,6 +600,7 @@ def write_pedigree(
         write_json(
             directory / "summary.json",
             dict(
+                regime=product.regime,
                 informative_contigs=list(product.informative_contigs),
                 omitted=dict(product.omitted),
                 reach=record_mapping(product.reach),
@@ -1349,3 +1366,18 @@ def separate_collections(frames, views, names, input_ids=None):
                     )
             frame[column] = counts
     return items
+
+
+BLOCK_SUMMARY_COLUMNS = ("Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins", "InformativeMarkers")
+"""Low-material block table, in decision order.
+
+    Contig: original informative chromosome identifier (text).
+    Block: zero-based block on the decision axis (1).
+    Component: original painting component index (1).
+    FirstBin: first bin in the original component, zero-based inclusive (1).
+    LastBin: last bin in the original component, zero-based inclusive (1).
+    NominalIndex: occupied one-Morgan grid index in its component (1).
+    WorkingMorgans: configured map length assigned to the block, including its entering boundary (Morgans).
+    Bins: scored painting bins in the block (1).
+    InformativeMarkers: selected markers in the block (1).
+"""

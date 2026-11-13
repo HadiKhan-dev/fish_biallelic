@@ -218,3 +218,82 @@ def log_likelihood(
         np.asarray([part.n_trajectories for part in components], dtype=np.int64),
         float(mismatch_probability),
     )
+
+
+@kernel(overloads=OVERLOADS["transmission.blocks"], cache=True, parallel=True, nogil=True)
+def blocks(dyads, trajectories, classes, known, switch, trajectory_count, mismatch, block_of_bin, n_blocks):
+    """float64 [D, blocks]: per-block sums of the joint transmission log likelihood of ordered dyads (child, parent)
+    on ONE component (science.pedigree.transmission._log_likelihood, same arithmetic)."""
+    bins = trajectories.shape[1]
+    output = np.zeros((len(dyads), n_blocks))
+    alternative = 1.0 / max(1, trajectory_count - 1)
+    for d in prange(len(dyads)):
+        child = dyads[d, 0]
+        parent = dyads[d, 1]
+        mass = np.zeros((2, 2))
+        nxt = np.zeros((2, 2))
+        informative = known[child, 0] and known[parent, 0]
+        normalization = 0.0
+        for ch in range(2):
+            for ph in range(2):
+                emission = 1.0
+                if informative:
+                    emission = 1.0 - mismatch if classes[child, 0, ch] == classes[parent, 0, ph] else mismatch
+                mass[ch, ph] = 0.25 * emission
+                normalization += mass[ch, ph]
+        for ch in range(2):
+            for ph in range(2):
+                mass[ch, ph] /= normalization
+        output[d, block_of_bin[0]] += math.log(normalization)
+        for boundary in range(bins - 1):
+            left = boundary
+            right = boundary + 1
+            target = block_of_bin[right]
+            sp = min(0.5, max(TRANSMISSION_SWITCH_FLOOR, switch[boundary]))
+            cl1, cl2 = trajectories[child, left, 0], trajectories[child, left, 1]
+            cr1, cr2 = trajectories[child, right, 0], trajectories[child, right, 1]
+            c_straight = int(cl1 != cr1) + int(cl2 != cr2)
+            c_crossed = int(cl1 != cr2) + int(cl2 != cr1)
+            c_min = min(c_straight, c_crossed)
+            c_count = int(c_straight == c_min) + int(c_crossed == c_min)
+            pl1, pl2 = trajectories[parent, left, 0], trajectories[parent, left, 1]
+            pr1, pr2 = trajectories[parent, right, 0], trajectories[parent, right, 1]
+            p_straight = int(pl1 != pr1) + int(pl2 != pr2)
+            p_crossed = int(pl1 != pr2) + int(pl2 != pr1)
+            p_min = min(p_straight, p_crossed)
+            p_count = int(p_straight == p_min) + int(p_crossed == p_min)
+            increment = p_min * math.log(sp * alternative) + (2 - p_min) * math.log(1.0 - sp)
+            informative = known[child, right] and known[parent, right]
+            nxt[:, :] = 0.0
+            for c_cross in range(2):
+                if (c_straight if c_cross == 0 else c_crossed) != c_min:
+                    continue
+                for ch in range(2):
+                    n_ch = ch ^ c_cross
+                    c_weight = 1.0 / c_count
+                    changed = trajectories[child, left, 1 - ch] != trajectories[child, right, 1 - n_ch]
+                    c_weight *= sp * alternative if changed else 1.0 - sp
+                    for p_cross in range(2):
+                        if (p_straight if p_cross == 0 else p_crossed) != p_min:
+                            continue
+                        for ph in range(2):
+                            path = mass[ch, ph]
+                            if path == 0.0:
+                                continue
+                            for s in range(2):
+                                n_ph = (ph ^ s) ^ p_cross
+                                weight = c_weight * (sp if s == 1 else 1.0 - sp) / p_count
+                                emission = 1.0
+                                if informative:
+                                    emission = 1.0 - mismatch if classes[child, right, n_ch] == classes[parent, right, n_ph] else mismatch
+                                nxt[n_ch, n_ph] += path * weight * emission
+            normalization = nxt[0, 0] + nxt[0, 1] + nxt[1, 0] + nxt[1, 1]
+            if normalization <= 0.0:
+                for later in range(target, n_blocks):
+                    output[d, later] = -np.inf
+                break
+            for ch in range(2):
+                for ph in range(2):
+                    mass[ch, ph] = nxt[ch, ph] / normalization
+            output[d, target] += increment + math.log(normalization)
+    return output

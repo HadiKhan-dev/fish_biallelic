@@ -38,7 +38,7 @@ from ...contracts.pedigree import (
     SupportRecord,
 )
 from ...core.errors import InputError, InvariantError
-from . import api, count, decision, exclusion, guard
+from . import api, count, decision, exclusion, guard, regimes
 from .eligibility import ParentEligibility
 from .parameters import PedigreeParameters
 from .resampling import minimum_contigs_for_tier
@@ -56,7 +56,7 @@ __all__ = [
 def precheck(
     n_samples: int, contigs: int, parameters: PedigreeParameters, *, basis: str = "informative"
 ) -> PedigreePrecheck:
-    """Reject N<3 or C<ceil(exposure units); report the configured tier-reach warning.
+    """Reject N<3; report chromosome eligibility and the configured reach warning.
 
     Workflow callers apply the configured check only when they will reach pedigree;
     start_full_fit applies the informative check after preparation omits uninformative contigs.
@@ -64,27 +64,44 @@ def precheck(
     if n_samples < 3:
         raise InputError(f"pedigree requires at least 3 samples; received {n_samples}")
     minimum = int(math.ceil(parameters.exposure.minimum_exposed_units))
-    if contigs < minimum:
-        raise InputError(f"pedigree requires at least {minimum} {basis} contigs; received {contigs}")
     tier_minimum = minimum_contigs_for_tier(parameters.release.tier_b, minimum)
     return PedigreePrecheck(n_samples, contigs, minimum, tier_minimum, contigs < tier_minimum, basis)
 
 
-def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FullFit:
+def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters, *, prepared=None) -> decision.FullFit | Pedigree:
     """Fit the supplied composite evidence after checking the informative contig axis."""
     precheck(len(scores.sample_ids), len(scores.contigs), parameters)
-    return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids), parameters)
+    if prepared is not None:
+        from . import not_assessable
+        from ...contracts.pedigree import ChromosomeSummaryView
+        classified = regimes.classify(tuple(regimes.layout(p, parameters) for p in prepared
+                                            if p.omitted_reason is None), parameters)
+        if classified.name == "not_assessable":
+            summary = tuple(ChromosomeSummaryView(p.contig, p.component_count, len(p.components),
+                                                 p.informative_markers, p.omitted_reason) for p in prepared)
+            return not_assessable.product(scores.sample_ids, tuple(p.contig for p in prepared),
+                                          summary, classified.reach, parameters)
+    if scores.regime in ("low_material", "not_assessable"):
+        classified = regimes.for_blocks(len(scores.contigs), parameters)
+        if classified.name == "not_assessable":
+            from . import not_assessable
+            if not scores.chromosome_summary and scores.informative_contigs:
+                raise InputError("not-assessable scored inputs require their prepared chromosome summaries")
+            return not_assessable.product(scores.sample_ids, scores.informative_contigs,
+                                          scores.chromosome_summary, classified.reach, parameters)
+    return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids), regimes.effective(parameters, scores.regime))
 
 
 def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeParameters) -> Decision:
     """Complete the decision after resampling: support, tiers, views and candidate sets."""
-    return decision.decide_resampled(state, resampled, parameters)
+    return decision.decide_resampled(state, resampled, regimes.effective(parameters, state.scores.regime))
 
 
 def exclusion_request(
     decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeParameters
 ) -> ExclusionRequest:
     """Freeze independent count-exclusion and painting-relationship queries."""
+    parameters = regimes.effective(parameters, decided.scores.regime)
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
     dyads = count.target_dyads(decided.tier_b, rows, decided.eligibility).reshape(-1, 2)
     before = api.edges(decided.partial_b, sample_ids)
@@ -105,6 +122,7 @@ def release_decision(
     relationship_evidence=(),
 ) -> ReleasedDecision:
     """Combine configured evidence, guard/count, orient and check the second guard; no scoring."""
+    parameters = regimes.effective(parameters, decided.scores.regime)
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
     if request.sample_ids != sample_ids or relatedness.sample_ids != sample_ids:
         raise InvariantError("exclusion/relatedness sample axes differ from the decision")
@@ -165,12 +183,13 @@ def release_decision(
         sample_ids,
         [
             api.calls(released.tier_b, rows).parents,
-            api.calls(decided.tier_a, rows).parents,
+            *([api.calls(decided.tier_a, rows).parents] if decided.scores.regime == "standard" else []),
             api.calls(decided.complete, rows).parents,
             decided.candidates.parents,
             np.where(released.partial_b.supported, released.partial_b.parents, NO_PARENT),
             np.where(decided.partial_b.supported, decided.partial_b.parents, NO_PARENT),
-            np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT),
+            *([np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT)]
+              if decided.scores.regime == "standard" else []),
         ],
         reverse=parameters.reverse_conventions,
     )
@@ -228,10 +247,22 @@ def assemble(
         reports,
         parameters,
     )
+    if decided.scores.regime == "low_material":
+        from .low_labels import label_views
+        numeric = label_views(numeric, released)
+        from dataclasses import replace
+        from ...contracts.pedigree import BlockSummaryView
+        scores = decided.scores
+        assert scores.block_chromosome is not None
+        numeric = replace(numeric, regime="low_material", block_summary=tuple(
+            BlockSummaryView(scores.real_contigs[int(scores.block_chromosome[i])], i, d.component,
+                d.first_bin, d.stop_bin - 1, d.nominal_index, d.working_morgans,
+                int(scores.total_bins[i]), int(scores.informative_markers[i]))
+            for i, d in enumerate(scores.block_descriptors)))
     product = Pedigree(
         decided.scores.sample_ids,
         released.request.contigs,
-        decided.scores.contigs,
+        decided.scores.informative_contigs,
         omitted,
         released.calls,
         released.edges,
@@ -248,6 +279,7 @@ def assemble(
         exclusion=released.exclusion,
         retained=PedigreeRetained(decided, released.count_release, released.orientation_ranks, released.request),
         reports_complete=True,
+        regime=decided.scores.regime,
     )
     return PedigreeResult(product, decided, released.count_release, released.orientation_ranks, released.exclusion)
 

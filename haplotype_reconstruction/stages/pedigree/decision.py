@@ -36,12 +36,12 @@ from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
 from ...engine.cpu import TASK_THREADS
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
-from ...science.pedigree import panel, resampling, stacking
+from ...science.pedigree import not_assessable, regimes, panel, resampling, stacking
 from ...science.pedigree import run as science
 from ...science.pedigree.parameters import ExclusionParameters, PedigreeParameters
 from ...science.pedigree.resampling import FitResult
 from ...store.container import CheckpointFile
-from ...store.protocol import NumericalPolicy, claim
+from ...store.protocol import NumericalPolicy, claim, read_items
 from ...store.store import CheckpointStore
 from ..evidence import records as evidence_records
 from ..framework import (
@@ -157,7 +157,7 @@ def _identity(
         parameters,
         inputs.genome.sample_ids,
         inputs.contigs,
-        inputs.genome.contigs,
+        inputs.genome.informative_contigs,
         _dependencies(inputs, request, parameters, policy),
         numerical_policy=policy,
     )
@@ -172,7 +172,7 @@ def _request_identity(
         parameters,
         inputs.genome.sample_ids,
         inputs.contigs,
-        inputs.genome.contigs,
+        inputs.genome.informative_contigs,
         replace(inputs.identities, exclusion=(), relationship=()),
         numerical_policy=policy,
     )
@@ -203,6 +203,16 @@ def _resumed(
 ) -> tuple[str, Pedigree] | None:
     if not file.has(PRODUCT):
         return None
+    classification = _classification(inputs, parameters)
+    if classification.name == "not_assessable":
+        dependencies = replace(inputs.identities, panel="", relatedness_families="", floored_scores=(),
+                               regime=classification.name)
+        identity = expected(parameters, inputs.genome.sample_ids, inputs.contigs,
+            tuple(p.contig for p in inputs.prepared if _summary(p).omitted_reason is None), dependencies,
+            numerical_policy=numerical_policy)
+        cached = load_product(file, PRODUCT, identity, PedigreeAdapter())
+        return None if cached is None else (identity, cached)
+    inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
     request_id = _request_identity(inputs, parameters, numerical_policy)
     request = load_product(file, REQUEST, request_id, RequestAdapter())
     if request is None:
@@ -210,6 +220,40 @@ def _resumed(
     identity = _identity(inputs, request, parameters, numerical_policy)
     cached = load_product(file, PRODUCT, identity, PedigreeAdapter())
     return None if cached is None else (identity, cached)
+
+
+def _classification(inputs: DecisionStageInputs, parameters: PedigreeParameters) -> regimes.Regime:
+    """Recompute the branch from resident layouts or the same small stored headers."""
+    layouts = []
+    for value in inputs.prepared:
+        if isinstance(value, PreparedChromosome):
+            if value.omitted_reason is None:
+                layouts.append(regimes.layout(value, parameters))
+        else:
+            stored = read_items(value.file, prepare.KEY, value.identity,
+                ("schema", "contig", "component_count", "omitted_reason", "layout"))
+            if stored is None:
+                raise InvariantError("pedigree requires its complete prepared layout")
+            if stored.payload["omitted_reason"] is None:
+                layouts.append(prepare.layout_summary(stored.payload, parameters)[0])
+    return regimes.classify(tuple(layouts), parameters)
+
+
+def finish_not_assessable(
+    sample_ids: tuple[str, ...], contigs: tuple[str, ...], summary: tuple[ChromosomeSummaryView, ...],
+    classification: regimes.Regime, parameters: PedigreeParameters, identities: PedigreeDependencies,
+    *, file: CheckpointFile | None = None, numerical_policy: NumericalPolicy | None = None, receipt: bool = False,
+) -> Pedigree | dict[RecordKey, str]:
+    identity = expected(parameters, sample_ids, contigs,
+                        tuple(s.contig for s in summary if s.omitted_reason is None), identities,
+                        numerical_policy=numerical_policy)
+    adapter = PedigreeAdapter()
+    cached = load_product(file, PRODUCT, identity, adapter) if file is not None else None
+    product = cached if cached is not None else adapter.decode(adapter.encode(
+        not_assessable.product(sample_ids, contigs, summary, classification.reach, parameters)))
+    if file is not None and cached is None:
+        publish_product(file, PRODUCT, identity, product, adapter)
+    return _reply(identity, product, receipt)
 
 
 def run(
@@ -236,7 +280,19 @@ def run(
         found = _resumed(file, inputs, parameters, numerical_policy)
         if found is not None:
             return _reply(found[0], found[1], receipt)
+    classification = _classification(inputs, parameters)
+    if classification is not None and classification.name == "not_assessable":
+        return finish_not_assessable(inputs.genome.sample_ids, inputs.contigs,
+            tuple(_summary(p) for p in inputs.prepared), classification, parameters,
+            replace(inputs.identities, panel="", relatedness_families="", floored_scores=(), regime=classification.name),
+            file=file, numerical_policy=numerical_policy, receipt=receipt)
+    if classification is not None:
+        if classification.name == "low_material" and inputs.genome.regime != "low_material":
+            raise InputError("prepared low-material layout requires block-complete scores")
+        inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
     state = science.start_full_fit(inputs.genome, parameters)
+    if isinstance(state, Pedigree):
+        raise InputError("score block axis differs from its prepared layout")
     options: dict[str, Any] = dict(
         file=file, contig_files=contig_files, numerical_policy=numerical_policy, receipt=receipt
     )
@@ -679,6 +735,11 @@ def run_stored(
             return product_receipt(reader.identity)
     bound = bound_inputs(store, manifest)
     parameters = bound.parameters
+    if bound.dependencies.regime == "not_assessable":
+        completed_receipt = finish_not_assessable(bound.sample_ids, bound.contigs, bound.summary, bound.classification,
+            parameters, bound.dependencies, file=store.run, numerical_policy=bound.policy, receipt=True)
+        assert isinstance(completed_receipt, dict)
+        return completed_receipt
     precheck(len(bound.sample_ids), len(bound.contigs), parameters, basis="configured")
     precheck(len(bound.sample_ids), len(bound.informative_contigs), parameters, basis="informative")
 
@@ -690,7 +751,9 @@ def run_stored(
             yield value
             del value
 
-    genome = stacking.stack(bound.sample_ids, bound.panel, chromosome_scores(), bound.eligibility)
+    assert bound.panel is not None
+    genome = stacking.stack(bound.sample_ids, bound.panel, chromosome_scores(), bound.eligibility,
+                            regime=bound.dependencies.regime)
     family = families_records.load(store.run, bound.dependencies.relatedness_families)
     if family is None or family.sample_ids != bound.sample_ids:
         raise InputError("relatedness/families sample axis differs from the pedigree")

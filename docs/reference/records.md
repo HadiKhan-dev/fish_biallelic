@@ -1608,6 +1608,11 @@ Decision input: every informative contig's scores stacked in contig order (not a
 | `edge_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'E') | Morgans | float64 | True | `None` |
 | `pair_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'T') | Morgans | float64 | True | `None` |
 | `working_morgans` | `np.ndarray` | report | ('C',) | Morgans | float64 | True | `required` |
+| `regime` | `str` | state | () | 1 | str | True | `'standard'` |
+| `real_contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `()` |
+| `block_chromosome` | `np.ndarray &#124; None` | obs | ('H',) | 1 | int64 | True | `None` |
+| `block_descriptors` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `()` |
+| `chromosome_summary` | `tuple[ChromosomeSummaryView, ...]` | obs | () | 1 | tuple[ChromosomeSummaryView, ...] | True | `()` |
 
 ## pedigree.ExclusionEvidence
 
@@ -1721,6 +1726,23 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `edge_units` | `np.ndarray` | evidence | ('C', 'E') | 1 | float64 | True | `required` |
 | `pair_units` | `np.ndarray` | evidence | ('C', 'T') | 1 | float64 | True | `required` |
 
+## pedigree.OmissionTotals
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `genetic` | `np.ndarray` | evidence | ('A',) | nats | float64 | True | `required` |
+| `edge_exposed` | `np.ndarray` | evidence | ('E',) | 1 | float64 | True | `required` |
+| `pair_exposed` | `np.ndarray` | evidence | ('T',) | 1 | float64 | True | `required` |
+| `total_bins` | `float` | evidence | () | 1 | float | True | `required` |
+| `edge_units` | `np.ndarray` | evidence | ('E',) | 1 | float64 | True | `required` |
+| `pair_units` | `np.ndarray` | evidence | ('T',) | 1 | float64 | True | `required` |
+| `junctions` | `np.ndarray` | evidence | ('N',) | 1 | float64 | True | `required` |
+| `callable_bins` | `np.ndarray` | evidence | ('N',) | 1 | float64 | True | `required` |
+| `pair_log_odds` | `np.ndarray` | evidence | ('U',) | 1 | float64 | True | `required` |
+| `order_statistics` | `np.ndarray` | evidence | ('N', 'N', '4') | 1 | float64 | True | `required` |
+
 ## pedigree.DecisionInputs
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
@@ -1730,6 +1752,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `alternatives` | `Alternatives` | evidence | () | 1 | Alternatives | True | `required` |
 | `exposure` | `ExposureEvidence` | evidence | () | 1 | ExposureEvidence | True | `required` |
 | `junctions` | `JunctionEvidence` | evidence | () | 1 | JunctionEvidence | True | `required` |
+| `regime` | `str` | state | () | 1 | str | True | `'standard'` |
+| `omission_totals` | `OmissionTotals &#124; None` | evidence | () | 1 | OmissionTotals &#124; None | True | `None` |
 
 ## pedigree.Selection
 
@@ -2041,16 +2065,17 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `complete` | `PedigreeCalls` | call | () | 1 | PedigreeCalls | True | `required` |
 | `reach` | `TierReach` | report | () | 1 | TierReach | True | `required` |
 | `eligibility` | `EligibilityRecord` | state | () | 1 | EligibilityRecord | True | `required` |
-| `panel` | `CandidatePanel` | state | () | 1 | CandidatePanel | True | `required` |
-| `support` | `SupportRecord` | call | () | 1 | SupportRecord | True | `required` |
-| `sibling_guard` | `GuardRecord` | call | () | 1 | GuardRecord | True | `required` |
+| `panel` | `CandidatePanel &#124; None` | state | () | 1 | CandidatePanel &#124; None | True | `required` |
+| `support` | `SupportRecord &#124; None` | call | () | 1 | SupportRecord &#124; None | True | `required` |
+| `sibling_guard` | `GuardRecord &#124; None` | call | () | 1 | GuardRecord &#124; None | True | `required` |
 | `views` | `PedigreeViews` | report | () | 1 | PedigreeViews | True | `required` |
-| `family_solve` | `FamilySolveRecord` | state | () | 1 | FamilySolveRecord | True | `required` |
-| `guard_summary` | `GuardSummary` | report | () | 1 | GuardSummary | True | `required` |
+| `family_solve` | `FamilySolveRecord &#124; None` | state | () | 1 | FamilySolveRecord &#124; None | True | `required` |
+| `guard_summary` | `GuardSummary &#124; None` | report | () | 1 | GuardSummary &#124; None | True | `required` |
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
-| `retained` | `PedigreeRetained` | state | () | 1 | PedigreeRetained | True | `required` |
+| `retained` | `PedigreeRetained &#124; None` | state | () | 1 | PedigreeRetained &#124; None | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `7` |
+| `regime` | `str` | state | () | 1 | str | True | `'standard'` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `8` |
 
 ## pedigree.PedigreeResult
 
@@ -2491,6 +2516,22 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `log_e_upper` | `np.ndarray &#124; None` | report | ('D',) | nats | float64 | True | `None` |
 | `log_e_exact` | `np.ndarray &#124; None` | report | ('D',) | 1 | bool | True | `None` |
 
+## pedigree.BlockSummaryView
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `contig` | `str` | report | () | 1 | str | True | `required` |
+| `block` | `int` | report | () | 1 | int | True | `required` |
+| `component` | `int` | report | () | 1 | int | True | `required` |
+| `first_bin` | `int` | report | () | 1 | int | True | `required` |
+| `last_bin` | `int` | report | () | 1 | int | True | `required` |
+| `nominal_index` | `int` | report | () | 1 | int | True | `required` |
+| `working_morgans` | `float` | report | () | Morgans | float | True | `required` |
+| `bins` | `int` | report | () | 1 | int | True | `required` |
+| `informative_markers` | `int` | report | () | 1 | int | True | `required` |
+
 ## pedigree.PedigreeViews
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
@@ -2515,6 +2556,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `relative_contrasts` | `RelativeContrasts &#124; None` | report | () | 1 | RelativeContrasts &#124; None | True | `required` |
 | `sibling_guard` | `GuardView &#124; None` | report | () | 1 | GuardView &#124; None | True | `required` |
 | `exclusion_intervals` | `bool` | report | () | 1 | bool | True | `False` |
+| `regime` | `str` | report | () | 1 | str | True | `'standard'` |
+| `block_summary` | `tuple[BlockSummaryView, ...]` | report | () | 1 | tuple[BlockSummaryView, ...] | True | `()` |
 
 ## pedigree.GuardViewRow
 
@@ -2701,7 +2744,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `components` | `tuple[PreparedComponent, ...]` | state | ('components',) | 1 | tuple[PreparedComponent, ...] | True | `required` |
 | `omitted_reason` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 
 ## pedigree.ChromosomeScores
 
@@ -2731,7 +2774,52 @@ Composite evidence of one informative contig, summed over its components (``pedi
 | `edge_exposed_morgans` | `np.ndarray` | state | ('N', 'N') | Morgans | float64 | True | `required` |
 | `pair_exposed_morgans` | `np.ndarray` | state | ('T',) | Morgans | float64 | True | `required` |
 | `working_morgans` | `float` | report | () | Morgans | float64 | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
+
+## pedigree.MapBlock
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `component` | `int` | obs | () | 1 | int | True | `required` |
+| `first_bin` | `int` | obs | () | 1 | int | True | `required` |
+| `stop_bin` | `int` | obs | () | 1 | int | True | `required` |
+| `working_morgans` | `float` | report | () | Morgans | float | True | `required` |
+| `nominal_index` | `int` | obs | () | 1 | int | True | `required` |
+
+## pedigree.BlockScores
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `descriptors` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `required` |
+| `retained_pairs` | `np.ndarray` | state | ('R', '2') | 1 | int64 | True | `required` |
+| `one_raw` | `np.ndarray` | evidence | ('H', 'R') | nats | float64 | True | `required` |
+| `floors` | `np.ndarray` | evidence | ('H', 'N') | nats | float64 | True | `required` |
+| `zero` | `np.ndarray` | evidence | ('H', 'N') | nats | float64 | True | `required` |
+| `two` | `np.ndarray` | evidence | ('H', 'T') | nats | float64 | True | `required` |
+| `edge_matched` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
+| `edge_exposed` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
+| `pair_explained` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
+| `pair_exposed` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
+| `total_bins` | `np.ndarray` | obs | ('H',) | painting bins | float64 | True | `required` |
+| `informative_markers` | `np.ndarray` | obs | ('H',) | 1 | int64 | True | `required` |
+| `junctions` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `callable_bins` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `transmission_log_likelihood` | `np.ndarray` | evidence | ('H', 'D') | nats | float64 | True | `required` |
+
+## pedigree.LowMaterialChromosomeScores
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+Extends `ChromosomeScores`.
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `blocks` | `BlockScores` | state | () | 1 | BlockScores | True | `required` |
+| `form` | `str` | state | () | 1 | str | True | `'low_material'` |
 
 ## pedigree.CompactM1
 

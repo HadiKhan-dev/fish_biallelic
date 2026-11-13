@@ -96,6 +96,14 @@ def render() -> str:
         ),
         "",
     ]
+    out += [
+        "Pedigree regime variations: nonstandard view tables append `regime` "
+        "(`low_material` or `not_assessable`). Low-material support columns replace "
+        "`loco` with `lobo`, and `informative_contig_count` becomes `informative_block_count`. "
+        "The block table is published only for nonstandard regimes (empty for not assessable). "
+        "Tier A tables are empty in both nonstandard regimes. Standard tables retain their released columns.",
+        "",
+    ]
     for path, constant, names, meanings in columns():
         key = path.stem + "." + constant
         if path.stem == "pedigree":

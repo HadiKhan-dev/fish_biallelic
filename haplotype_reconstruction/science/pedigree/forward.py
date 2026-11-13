@@ -669,6 +669,232 @@ def score_path(
     return tempered_log, full_log
 
 
+@kernel(overloads=OVERLOADS["forward.score_path_blocks"], cache=True, nogil=True)
+def score_path_blocks(
+    child,
+    first_parent,
+    second_parent,
+    mode,
+    pi,
+    candidate_alt,
+    stay,
+    alpha,
+    beta,
+    row_arm,
+    column_arm,
+    pivot,
+    excursion,
+    branch,
+    state_alt,
+    child_gl,
+    coefficient,
+    site_index,
+    site_start,
+    site_stop,
+    exponent,
+    null_diagonal,
+    null_off,
+    null_frequency,
+    mismatch,
+    common_products,
+    first_cached_child,
+    common_powered,
+    block_of_bin,
+    n_blocks,
+):
+    """[H, 2] tempered/full log increments, credited to the bin's block without chain resets.
+
+    The views keep their own forward state, scaling and underflow path and each stops at its first
+    non-finite increment; they share the observed-marker emission products (or their logarithms),
+    which the full view applies with exponent one.
+    """
+    states = state_alt.shape[0]
+    bins = exponent.shape[1]
+    tempered = np.empty((states, states), dtype=np.float64)
+    full = np.empty_like(tempered)
+    work = np.empty_like(tempered)
+    scratch = np.empty_like(tempered)
+    prefix = np.empty(states + 1, dtype=np.float64)
+    suffix = np.empty(states + 1, dtype=np.float64)
+    for first in range(states):
+        for second in range(states):
+            if mode == 0:
+                tempered[first, second] = null_frequency[child, 0, first] * null_frequency[child, 0, second]
+            elif mode == 1:
+                tempered[first, second] = pi[first_parent, 0, first] * null_frequency[child, 0, second]
+            else:
+                tempered[first, second] = pi[first_parent, 0, first] * pi[second_parent, 0, second]
+            full[first, second] = tempered[first, second]
+    output = np.zeros((n_blocks, 2))
+    tempered_alive = True
+    full_alive = True
+    for block in range(bins):
+        target = block_of_bin[block]
+        if block > 0:
+            boundary = block - 1
+            if tempered_alive:
+                advance(
+                    tempered,
+                    scratch,
+                    child,
+                    first_parent,
+                    second_parent,
+                    mode,
+                    boundary,
+                    stay,
+                    alpha,
+                    beta,
+                    row_arm,
+                    column_arm,
+                    pivot,
+                    excursion,
+                    branch,
+                    null_diagonal,
+                    null_off,
+                    null_frequency,
+                    prefix,
+                    suffix,
+                )
+            if full_alive:
+                advance(
+                    full,
+                    scratch,
+                    child,
+                    first_parent,
+                    second_parent,
+                    mode,
+                    boundary,
+                    stay,
+                    alpha,
+                    beta,
+                    row_arm,
+                    column_arm,
+                    pivot,
+                    excursion,
+                    branch,
+                    null_diagonal,
+                    null_off,
+                    null_frequency,
+                    prefix,
+                    suffix,
+                )
+
+        stable_product = True
+        for first in range(states):
+            for second in range(states):
+                if common_products is not None:
+                    saved = common_products[child - first_cached_child, block, first, second]
+                    if np.isfinite(saved):
+                        work[first, second] = saved
+                        continue
+                product = 1.0
+                for slot in range(site_start[child, block], site_stop[child, block]):
+                    site = site_index[slot]
+                    first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
+                    second_alt = candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
+                    value = site_likelihood(
+                        child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
+                    )
+                    if value <= 0.0:
+                        product = 0.0
+                        break
+                    product *= value
+                    if not np.isfinite(product) or product < _SMALLEST_NORMAL:
+                        stable_product = False
+                        break
+                work[first, second] = product
+                if not stable_product:
+                    break
+            if not stable_product:
+                break
+        if not stable_product:
+            for first in range(states):
+                for second in range(states):
+                    log_emission = 0.0
+                    for slot in range(site_start[child, block], site_stop[child, block]):
+                        site = site_index[slot]
+                        first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
+                        second_alt = (
+                            candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
+                        )
+                        value = site_likelihood(
+                            child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
+                        )
+                        if value <= 0.0:
+                            log_emission = -np.inf
+                            break
+                        log_emission += math.log(value)
+                    work[first, second] = log_emission
+
+        if tempered_alive:
+            eta = exponent[child, block]
+            powered = None if common_powered is None else common_powered[child - first_cached_child, block]
+            if eta == 0.0:
+                # A zero exponent makes the tempered emission uniform.
+                scratch[:] = 1.0
+                increment = _apply_probability_emission(tempered, scratch, eta, powered)
+            elif stable_product:
+                increment = _apply_probability_emission(tempered, work, eta, powered)
+            else:
+                for first in range(states):
+                    for second in range(states):
+                        scratch[first, second] = eta * work[first, second]
+                increment = _apply_log_emission(tempered, scratch)
+            if np.isfinite(increment):
+                output[target, 0] += increment
+            else:
+                tempered_alive = False
+                for later in range(target, n_blocks):
+                    output[later, 0] = -np.inf
+        if full_alive:
+            if stable_product:
+                increment = _apply_probability_emission(full, work, 1.0, None)
+            else:
+                increment = _apply_log_emission(full, work)
+            if np.isfinite(increment):
+                output[target, 1] += increment
+            else:
+                full_alive = False
+                for later in range(target, n_blocks):
+                    output[later, 1] = -np.inf
+        if not tempered_alive and not full_alive:
+            break
+    return output
+
+
+@kernel(overloads=OVERLOADS["forward.score_block_rows"], cache=True, parallel=True, nogil=True)
+def score_block_rows(rows, block_of_bin, n_blocks, available, pi, candidate_alt, stay, alpha, beta,
+                     row_arm, column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient,
+                     site_index, site_start, site_stop, exponent, null_diagonal, null_off, null_frequency, mismatch):
+    """Pooled [R,H] contributions; unavailable parental slots follow the original raw M1/M0 fallback."""
+    output = np.empty((len(rows), n_blocks))
+    for row in prange(len(rows)):
+        child, first, second = rows[row, 0], rows[row, 1], rows[row, 2]
+        if first >= 0 and not available[first]:
+            first = -1
+        if second >= 0 and not available[second]:
+            second = -1
+        if first < 0 and second >= 0:
+            first, second = second, -1
+        mode = int(first >= 0) + int(second >= 0)
+        views = score_path_blocks(child, max(first, 0), max(second, 0), mode, pi, candidate_alt,
+            stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch, state_alt,
+            child_gl, coefficient, site_index, site_start, site_stop, exponent, null_diagonal,
+            null_off, null_frequency, mismatch, None, 0, None, block_of_bin, n_blocks)
+        for block in range(n_blocks):
+            output[row, block] = 0.5 * (views[block, 0] + views[block, 1])
+    return output
+
+
+def component_block_scores(projection, terms, rows, block_of_bin, n_blocks):
+    return score_block_rows(np.ascontiguousarray(rows, dtype=np.int64), block_of_bin, n_blocks,
+        np.array(projection.available, copy=True), projection.pi, projection.candidate_alt, projection.stay,
+        projection.alpha, projection.beta, projection.row_arm, projection.column_arm, projection.pivot,
+        projection.excursion, projection.branch, projection.state_alt, terms.gl, terms.coefficient,
+        terms.site_index, terms.site_start, terms.site_stop, terms.exponent, terms.null_diagonal,
+        terms.null_off, terms.null_frequency, terms.mismatch)
+
+
 @kernel(overloads=OVERLOADS["forward.named_column_powers"], cache=True, parallel=True, nogil=True)
 def named_column_powers(products, exponent, child_start):
     """For the M1 screen's completed cache (_fill_named_first_products): per child and bin, the largest named-first

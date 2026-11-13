@@ -107,6 +107,18 @@ class GenomeScores:
         "report", axes=("C",), units="Morgans", dtype="float64", kw_only=True
     )
 
+    regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
+
+    real_contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]", default=(), kw_only=True)
+    block_chromosome: np.ndarray | None = record_field("obs", axes=("H",), dtype="int64", default=None, kw_only=True)
+    block_descriptors: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]", default=(), kw_only=True)
+
+    chromosome_summary: tuple[ChromosomeSummaryView, ...] = record_field("obs", dtype="tuple[ChromosomeSummaryView, ...]", default=(), kw_only=True)
+
+    @property
+    def informative_contigs(self) -> tuple[str, ...]:
+        return self.real_contigs or self.contigs
+
     def edge_starts(self) -> np.ndarray:
         """int64 [N + 1]: child c's eligible edges are edges[starts[c]:starts[c + 1]] (parents ascending)."""
         return np.searchsorted(self.edges[:, 0], np.arange(len(self.sample_ids) + 1)).astype(np.int64)
@@ -303,12 +315,29 @@ class ExposureEvidence:
 
 
 @dataclass(frozen=True)
+class OmissionTotals:
+    """One set of full-block totals for linear leave-one-block-out aggregation."""
+    genetic: np.ndarray = record_field("evidence", axes=("A",), units="nats", dtype="float64")
+    edge_exposed: np.ndarray = record_field("evidence", axes=("E",), dtype="float64")
+    pair_exposed: np.ndarray = record_field("evidence", axes=("T",), dtype="float64")
+    total_bins: float = record_field("evidence", dtype="float")
+    edge_units: np.ndarray = record_field("evidence", axes=("E",), dtype="float64")
+    pair_units: np.ndarray = record_field("evidence", axes=("T",), dtype="float64")
+    junctions: np.ndarray = record_field("evidence", axes=("N",), dtype="float64")
+    callable_bins: np.ndarray = record_field("evidence", axes=("N",), dtype="float64")
+    pair_log_odds: np.ndarray = record_field("evidence", axes=("U",), dtype="float64")
+    order_statistics: np.ndarray = record_field("evidence", axes=("N", "N", "4"), dtype="float64")
+
+
+@dataclass(frozen=True)
 class DecisionInputs:
     """What every weighted fit reads; shared read-only with resampling workers."""
 
     alternatives: Alternatives = record_field("evidence", axes=(), units="1", dtype="Alternatives")
     exposure: ExposureEvidence = record_field("evidence", axes=(), units="1", dtype="ExposureEvidence")
     junctions: JunctionEvidence = record_field("evidence", axes=(), units="1", dtype="JunctionEvidence")
+    regime: str = record_field("state", dtype="str", default="standard")
+    omission_totals: OmissionTotals | None = record_field("evidence", dtype="OmissionTotals | None", default=None)
 
 
 @dataclass(frozen=True)
@@ -691,7 +720,7 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 7 with working-map
+    """Complete released pedigree and retained numerical state, published atomically as schema 8 with working-map
     diagnostics, joint transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -704,16 +733,17 @@ class Pedigree:
     complete: PedigreeCalls = record_field("call", axes=(), units="1", dtype="PedigreeCalls")
     reach: TierReach = record_field("report", axes=(), units="1", dtype="TierReach")
     eligibility: EligibilityRecord = record_field("state", axes=(), units="1", dtype="EligibilityRecord")
-    panel: CandidatePanel = record_field("state", axes=(), units="1", dtype="CandidatePanel")
-    support: SupportRecord = record_field("call", axes=(), units="1", dtype="SupportRecord")
-    sibling_guard: GuardRecord = record_field("call", axes=(), units="1", dtype="GuardRecord")
+    panel: CandidatePanel | None = record_field("state", axes=(), units="1", dtype="CandidatePanel | None")
+    support: SupportRecord | None = record_field("call", axes=(), units="1", dtype="SupportRecord | None")
+    sibling_guard: GuardRecord | None = record_field("call", axes=(), units="1", dtype="GuardRecord | None")
     views: PedigreeViews = record_field("report", dtype="PedigreeViews", kw_only=True)
-    family_solve: FamilySolveRecord = record_field("state", dtype="FamilySolveRecord", kw_only=True)
-    guard_summary: GuardSummary = record_field("report", dtype="GuardSummary", kw_only=True)
+    family_solve: FamilySolveRecord | None = record_field("state", dtype="FamilySolveRecord | None", kw_only=True)
+    guard_summary: GuardSummary | None = record_field("report", dtype="GuardSummary | None", kw_only=True)
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
-    retained: PedigreeRetained = record_field("state", dtype="PedigreeRetained", kw_only=True)
+    retained: PedigreeRetained | None = record_field("state", dtype="PedigreeRetained | None", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
-    schema: int = schema_field(7)
+    regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
+    schema: int = schema_field(8)
 
 
 @dataclass(frozen=True)
@@ -1246,6 +1276,20 @@ class ExclusionEvidenceView:
 
 
 @dataclass(frozen=True)
+class BlockSummaryView:
+    """One occupied low-material block in decision order; bin endpoints are inclusive."""
+    contig: str = record_field("report", dtype="str")
+    block: int = record_field("report", dtype="int")
+    component: int = record_field("report", dtype="int")
+    first_bin: int = record_field("report", dtype="int")
+    last_bin: int = record_field("report", dtype="int")
+    nominal_index: int = record_field("report", dtype="int")
+    working_morgans: float = record_field("report", units="Morgans", dtype="float")
+    bins: int = record_field("report", dtype="int")
+    informative_markers: int = record_field("report", dtype="int")
+
+
+@dataclass(frozen=True)
 class PedigreeViews:
     """All 17 PD25 views before rendering; no DataFrames, names or formatted support sets.
 
@@ -1297,6 +1341,8 @@ class PedigreeViews:
     relative_contrasts: RelativeContrasts | None = record_field("report", axes=(), dtype="RelativeContrasts | None")
     sibling_guard: GuardView | None = record_field("report", dtype="GuardView | None")
     exclusion_intervals: bool = record_field("report", dtype="bool", default=False)
+    regime: str = record_field("report", dtype="str", default="standard")
+    block_summary: tuple[BlockSummaryView, ...] = record_field("report", dtype="tuple[BlockSummaryView, ...]", default=())
 
 
 @dataclass(frozen=True)
@@ -1571,7 +1617,7 @@ class PreparedChromosome:
     def informative_markers(self) -> int:
         return sum(component.informative_markers for component in self.components)
 
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1624,10 +1670,54 @@ class ChromosomeScores:
     edge_exposed_morgans: np.ndarray = record_field("state", axes=("N", "N"), units="Morgans", dtype="float64")
     pair_exposed_morgans: np.ndarray = record_field("state", axes=("T",), units="Morgans", dtype="float64")
     working_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float64", kw_only=True)
-    schema: int = schema_field(3)
+    schema: int = schema_field(4)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class MapBlock:
+    """A2 descriptor: original component, half-open bin span, right-boundary distance, grid index."""
+    component: int = record_field("obs", dtype="int")
+    first_bin: int = record_field("obs", dtype="int")
+    stop_bin: int = record_field("obs", dtype="int")
+    working_morgans: float = record_field("report", units="Morgans", dtype="float")
+    nominal_index: int = record_field("obs", dtype="int")
+
+
+@dataclass(frozen=True)
+class BlockScores:
+    """Low-material H rows on fixed eligible E, retained R, panel T and dyad D axes.
+
+    Raw retained M1 and the shared imputed child floor remain distinct. No exposed
+    Morgan field exists; the decision credits exactly one unit per block.
+    """
+    descriptors: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]")
+    retained_pairs: np.ndarray = record_field("state", axes=("R", "2"), dtype="int64")
+    one_raw: np.ndarray = record_field("evidence", axes=("H", "R"), units="nats", dtype="float64")
+    floors: np.ndarray = record_field("evidence", axes=("H", "N"), units="nats", dtype="float64")
+    zero: np.ndarray = record_field("evidence", axes=("H", "N"), units="nats", dtype="float64")
+    two: np.ndarray = record_field("evidence", axes=("H", "T"), units="nats", dtype="float64")
+    edge_matched: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
+    edge_exposed: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
+    pair_explained: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
+    pair_exposed: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
+    total_bins: np.ndarray = record_field("obs", axes=("H",), units="painting bins", dtype="float64")
+    informative_markers: np.ndarray = record_field("obs", axes=("H",), dtype="int64")
+    junctions: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    callable_bins: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("H", "D"), units="nats", dtype="float64")
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class LowMaterialChromosomeScores(ChromosomeScores):
+    """Schema-4 low form; ordinary chromosome products have no blocks/form fields."""
+    blocks: BlockScores = record_field("state", dtype="BlockScores", kw_only=True)
+    form: str = record_field("state", dtype="str", default="low_material", kw_only=True)
 
 
 @dataclass(frozen=True)

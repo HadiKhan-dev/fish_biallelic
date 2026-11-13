@@ -330,8 +330,6 @@ def run_checks(
         tier_b_minimum_contigs = minimum_contigs_for_tier(parameters.release.tier_b, minimum_scored_contigs)
     if minimum_scored_contigs is None or tier_b_minimum_contigs is None:
         raise SettingsError("pedigree parameters or both explicit contig thresholds are required")
-    if len(contigs) < minimum_scored_contigs:
-        raise SettingsError("too few configured contigs for pedigree; set stop_after = painting")
     if len(contigs) < tier_b_minimum_contigs:
         return ("configured contigs are below the pedigree tier-B minimum; informative contigs are rechecked",)
     return ()

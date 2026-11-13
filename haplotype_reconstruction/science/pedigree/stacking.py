@@ -12,7 +12,7 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from ...contracts.pedigree import CandidatePanel, ChromosomeScores, GenomeScores, ParentEligibility
+from ...contracts.pedigree import CandidatePanel, ChromosomeScores, ChromosomeSummaryView, GenomeScores, ParentEligibility
 from ...core.errors import InputError
 
 __all__ = ["stack"]
@@ -28,6 +28,7 @@ def stack(
     panel: CandidatePanel,
     chromosomes: Iterable[ChromosomeScores],
     eligibility: ParentEligibility,
+    *, regime: str = "standard",
 ) -> GenomeScores:
     """Own C-contiguous [C,E]/[C,T] arrays; chromosome inputs remain borrowed and unchanged.
 
@@ -35,6 +36,8 @@ def stack(
     reductions, rather than this incidental layout, define all sums downstream.
     Every ChromosomeScores.one_floored is consumed verbatim.
     """
+    if regime == "low_material":
+        return stack_blocks(sample_ids, panel, chromosomes, eligibility)
     if sample_ids != eligibility.sample_ids:
         raise InputError("score stacking eligibility differs from the sample axis")
     n = len(sample_ids)
@@ -96,3 +99,44 @@ def stack(
         edge_exposed_morgans=gathered("edge_exposed_morgans"),
         pair_exposed_morgans=np.ascontiguousarray(np.stack(pair_morgans), dtype=np.float64),
     )
+
+
+def stack_blocks(sample_ids, panel, chromosomes, eligibility):
+    """Flatten original chromosomes' occupied blocks in component order, with frozen M1 floors."""
+    n = len(sample_ids)
+    edges = np.ascontiguousarray(np.argwhere(eligibility.parents), dtype=np.int64)
+    keys = edges[:, 0] * n + edges[:, 1]
+    columns = {name: [] for name in (*_STACKED, "one", "edge_matched", "edge_exposed", "total_bins", "informative_markers")}
+    contigs, names, mapping, descriptors, lengths, summaries = [], [], [], [], [], []
+    dyads = None
+    for chromosome in chromosomes:
+        if getattr(chromosome, "form", "standard") != "low_material":
+            raise InputError("low-material stacking requires block-complete score records")
+        if chromosome.contig in contigs:
+            raise InputError("duplicate informative contig in pedigree scores")
+        summaries.append(ChromosomeSummaryView(chromosome.contig, chromosome.component_count,
+            chromosome.scored_component_count, chromosome.informative_markers, None))
+        b = chromosome.blocks
+        if dyads is None:
+            dyads = np.array(chromosome.junction_dyads, copy=True)
+        elif not np.array_equal(dyads, chromosome.junction_dyads):
+            raise InputError("block scores orient different dyads")
+        one = np.array(b.floors[:, edges[:, 0]], copy=True)
+        retained = np.searchsorted(keys, b.retained_pairs[:, 0] * n + b.retained_pairs[:, 1])
+        one[:, retained] = b.one_raw
+        columns["one"].append(one)
+        for name in columns:
+            if name != "one":
+                columns[name].append(np.asarray(getattr(b, name)))
+        names.extend(f"{chromosome.contig}:{d.component}:{d.nominal_index}" for d in b.descriptors)
+        mapping.extend([len(contigs)] * len(b.descriptors))
+        descriptors.extend(b.descriptors)
+        lengths.extend(d.working_morgans for d in b.descriptors)
+        contigs.append(chromosome.contig)
+    if not names:
+        raise InputError("low-material scores require occupied blocks")
+    gathered = {name: np.ascontiguousarray(np.concatenate(value)) for name, value in columns.items()}
+    return GenomeScores(sample_ids, tuple(names), panel, edges, **gathered,
+        junction_dyads=dyads, working_morgans=np.asarray(lengths), regime="low_material",
+        real_contigs=tuple(contigs), block_chromosome=np.asarray(mapping, dtype=np.int64),
+        block_descriptors=tuple(descriptors), chromosome_summary=tuple(summaries))
