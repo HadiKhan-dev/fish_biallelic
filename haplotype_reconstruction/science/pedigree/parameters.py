@@ -60,6 +60,7 @@ __all__ = [
     "BRIDGE_POST_TOLERANCE_FACTOR",
     "BRIDGE_POST_ULPS",
     "BRIDGE_BISECTION_LIMIT",
+    "BRIDGE_FOLD_DISCRIMINANT",
     "CERTIFICATE_GL_ULPS",
     "SELECTIVE_UPPER_ULPS",
     "SELECTIVE_UPPER_STATE_FACTOR",
@@ -945,6 +946,16 @@ class ScoringNumerics:
         },
     )
 
+    bridge_fold_discriminant: float = field(
+        default=2.0**-26,
+        metadata={
+            "provenance": (
+                "PS07; sqrt(machine epsilon): an all-small root whose fold state has 1 - q L at or below it takes "
+                "that state's diagonal product from the root equation, not from its square-root-folded quadratic."
+            ),
+        },
+    )
+
     certificate_gl_ulps: int = field(
         default=64,
         metadata={
@@ -1131,6 +1142,7 @@ BRIDGE_FEASIBILITY_ULPS = SCORING_NUMERICS.bridge_feasibility_ulps
 BRIDGE_POST_TOLERANCE_FACTOR = SCORING_NUMERICS.bridge_post_tolerance_factor
 BRIDGE_POST_ULPS = SCORING_NUMERICS.bridge_post_ulps
 BRIDGE_BISECTION_LIMIT = SCORING_NUMERICS.bridge_bisection_limit
+BRIDGE_FOLD_DISCRIMINANT = SCORING_NUMERICS.bridge_fold_discriminant
 CERTIFICATE_GL_ULPS = SCORING_NUMERICS.certificate_gl_ulps
 SELECTIVE_UPPER_ULPS = SCORING_NUMERICS.selective_upper_ulps
 SELECTIVE_UPPER_STATE_FACTOR = SCORING_NUMERICS.selective_upper_state_factor

@@ -31,6 +31,7 @@ and are needed only at stationary points and for the reported allele probabiliti
 
 from __future__ import annotations
 
+import copyreg
 from collections.abc import Callable
 from typing import NotRequired, TypedDict, cast
 
@@ -159,6 +160,10 @@ class PathModelInvariantError(InvariantError):
             f"{kind}: block={self.block!r}, K={self.k}, panel={self.panel_key}, "
             f"frequencies={self.frequencies}, offending={offending}"
         )
+
+    def __reduce__(self):
+        # Raised in graph workers: unpickle without __init__ (the default calls cls(message), a TypeError).
+        return copyreg.__newobj__, (type(self), *self.args), self.__dict__
 
 
 # Statistics levels of a backward pass (each includes the lower ones).

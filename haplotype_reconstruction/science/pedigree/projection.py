@@ -33,8 +33,12 @@ Bridge construction and checks (PS07):
    early when the midpoint equals an endpoint; return the endpoint with the smaller |H|, **the lower endpoint when the
    magnitudes are equal** (`abs(lower) <= abs(upper)`; independent of the convention).
    `bridge_postcheck_tolerance` is **not** a root tolerance.
-8. β from the root; **pivot** = the lowest state whose β is within `HALL_ULPS·ε·|top β|` of the largest (highest under
-   the reversal); β divided by the pivot's β; α and row arms from the off fractions.
+8. β from the root (branch 1: b + u; branch 2: the large state's share from the normalisation). **Fold closure** on
+   branch 1 (the q_max endpoint included): when the state of largest L (the first of the step-6 first-pass ties) has
+   `1 − q L <= BRIDGE_FOLD_DISCRIMINANT` (√ε), its u comes from the root equation, u = 1/q − 1 − Σ_{s≠c} u_s, not from
+   its own small root, which folds at q_max (a root within rounding of q_max moved that u by ~√ε). **pivot** = the
+   lowest state whose β is within `HALL_ULPS·ε·|top β|` of the largest (highest under the reversal); β divided by the
+   pivot's β; α and row arms from the off fractions.
 9. **Post-check** with `post_tolerance = max(8·bridge_postcheck_tolerance, 256 ε)`: rows with zero
    row mass first get `stay = 1`, `alpha = 0`, `column_arm = 0`; a stay or any transition entry **`< −post_tolerance`**
    is invalid; the maximum residual over (reachable rows' |row sum − 1|, |π_b(s)·stay − diagonal flow|, |reproduced
@@ -50,6 +54,7 @@ Method: docs/methods/pedigree.md#transmitted-state-projection
 
 from __future__ import annotations
 
+import copyreg
 import math
 from dataclasses import dataclass
 
@@ -65,6 +70,7 @@ from .kernels.signatures import OVERLOADS
 from .parameters import (
     BRIDGE_BISECTION_LIMIT,
     BRIDGE_FEASIBILITY_ULPS,
+    BRIDGE_FOLD_DISCRIMINANT,
     BRIDGE_POST_TOLERANCE_FACTOR,
     BRIDGE_POST_ULPS,
     HALL_ULPS,
@@ -146,6 +152,10 @@ class ProjectionInvariantError(InvariantError):
             f"{message}; sample={sample}, component={component}, boundary={boundary}, "
             f"branch={branch}, residual={residual!r}, condition={condition}"
         )
+
+    def __reduce__(self):
+        # Raised in graph workers: unpickle without __init__ (the default calls cls(message), a TypeError).
+        return copyreg.__newobj__, (type(self), *self.args), self.__dict__
 
 
 @kernel(overloads=OVERLOADS["projection._symmetrise"], cache=True, parallel=True, nogil=True)
@@ -662,6 +672,25 @@ def _bridges_kernel(
             qstar = np.empty(states, dtype=np.float64)
             for state in range(states):
                 u[state] = _small_diagonal_product(q, a[state], b[state])
+            if chosen_large < 0:
+                # Fold closure of an all-small root (the q_max endpoint included). The state of largest L (ties as
+                # in the search) sets q_max = 1/L, where its small root has a square-root fold: its discriminant
+                # factor f = 1 - q L carries an absolute rounding error of about eps, so for f <= sqrt(eps) the root
+                # keeps under half its bits and a root within rounding of q_max moved u by ~sqrt(eps) (column
+                # residual 1e-11 at a depth-1 exchange). There u comes from the root equation H0 = 0 instead,
+                # u = 1/q - 1 - (sum of the other u), which is smooth in q; both agree at the exact root.
+                for rank in range(states):
+                    state = states - 1 - rank if search_reverse else rank
+                    root_sum = math.sqrt(a[state]) + math.sqrt(b[state])
+                    if max_l - root_sum * root_sum <= feasibility_tolerance * max(1.0, max_l):
+                        if 1.0 - q * (root_sum * root_sum) <= BRIDGE_FOLD_DISCRIMINANT:
+                            others = 0.0
+                            for other in range(states):
+                                if other != state:
+                                    others += u[other]
+                            u[state] = max(0.0, 1.0 / q - 1.0 - others)
+                        break
+            for state in range(states):
                 qstar[state] = b[state] + u[state]
             small_total = 0.0
             if chosen_large >= 0:

@@ -61,9 +61,9 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'painting.relabel_rank'` | `ties.policy('painting.relabel_rank', kind='nll', reverse=convention_reverse)` | [label_continuity.py:878](../../haplotype_reconstruction/science/painting/label_continuity.py) |
 | `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:324](../../haplotype_reconstruction/science/pedigree/junctions.py) |
 | `'pedigree.screen.rank'` | `tie_rules.policy('pedigree.screen.rank', kind='probability', reverse=reverse)` | [panel.py:176](../../haplotype_reconstruction/science/pedigree/panel.py) |
-| `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:460](../../haplotype_reconstruction/science/pedigree/projection.py) |
-| `'pedigree.bridge.search'` | `policy('pedigree.bridge.search', kind='probability', reverse=reverse)` | [projection.py:462](../../haplotype_reconstruction/science/pedigree/projection.py) |
-| `'pedigree.bridge.pivot'` | `policy('pedigree.bridge.pivot', kind='probability', reverse=reverse)` | [projection.py:463](../../haplotype_reconstruction/science/pedigree/projection.py) |
+| `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:470](../../haplotype_reconstruction/science/pedigree/projection.py) |
+| `'pedigree.bridge.search'` | `policy('pedigree.bridge.search', kind='probability', reverse=reverse)` | [projection.py:472](../../haplotype_reconstruction/science/pedigree/projection.py) |
+| `'pedigree.bridge.pivot'` | `policy('pedigree.bridge.pivot', kind='probability', reverse=reverse)` | [projection.py:473](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'selection.bank.cavity'` | `fixed_policy('selection.bank.cavity', quanta.nll, reverse=reverse)` | [bank.py:231](../../haplotype_reconstruction/science/selection/bank.py) |
 | `kind` | `fixed_policy(kind, quantum, reverse=reverse)` | [bank.py:180](../../haplotype_reconstruction/science/selection/bank.py) |
 | `'selection.start.outcome'` | `fixed_policy('selection.start.outcome', tolerance, reverse=reverse)` | [rounds.py:84](../../haplotype_reconstruction/science/selection/rounds.py) |

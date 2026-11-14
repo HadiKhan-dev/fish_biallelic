@@ -866,6 +866,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `bridge_post_tolerance_factor` | `8.0` | See model | PS07; dimensionless multiplier 8 expands the configured bridge post-check tolerance. |
 | `bridge_post_ulps` | `256.0` | See model | PS07; 256 machine-epsilon units set the minimum bridge post-check tolerance. |
 | `bridge_bisection_limit` | `128` | See model | PS07; hard ceiling of 128 bisection halvings in the maximum-entropy bridge solve. |
+| `bridge_fold_discriminant` | `2.0 ** (-26)` | See model | PS07; sqrt(machine epsilon): an all-small root whose fold state has 1 - q L at or below it takes that state's diagonal product from the root equation, not from its square-root-folded quadratic. |
 | `certificate_gl_ulps` | `64` | See model | PS22; 64 scaled machine-epsilon units pad common genotype-likelihood logs outward in certificates. |
 | `selective_upper_ulps` | `4096` | See model | PS22; 4096 scaled machine-epsilon units pad selective M1 upper bounds outward. |
 | `selective_upper_state_factor` | `64` | See model | PS22; 64 times the state count supplies additional machine-epsilon padding for selective upper bounds. |
@@ -921,6 +922,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `BRIDGE_POST_TOLERANCE_FACTOR` | `SCORING_NUMERICS.bridge_post_tolerance_factor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BRIDGE_POST_ULPS` | `SCORING_NUMERICS.bridge_post_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `BRIDGE_BISECTION_LIMIT` | `SCORING_NUMERICS.bridge_bisection_limit` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `BRIDGE_FOLD_DISCRIMINANT` | `SCORING_NUMERICS.bridge_fold_discriminant` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `CERTIFICATE_GL_ULPS` | `SCORING_NUMERICS.certificate_gl_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `SELECTIVE_UPPER_ULPS` | `SCORING_NUMERICS.selective_upper_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `SELECTIVE_UPPER_STATE_FACTOR` | `SCORING_NUMERICS.selective_upper_state_factor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |

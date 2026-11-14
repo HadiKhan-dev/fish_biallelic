@@ -14,6 +14,7 @@ Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-informat
 
 from __future__ import annotations
 
+import copyreg
 import math
 
 import numpy as np
@@ -31,6 +32,10 @@ class SourceInferenceError(InvariantError):
     def __init__(self, message: str, sample: int, component: int, boundary: int):
         self.sample, self.component, self.boundary = sample, component, boundary
         super().__init__(f"{message}; sample={sample}, component={component}, boundary={boundary}")
+
+    def __reduce__(self):
+        # Raised in graph workers: unpickle without __init__ (the default calls cls(message), a TypeError).
+        return copyreg.__newobj__, (type(self), *self.args), self.__dict__
 
 
 @kernel(overloads=OVERLOADS["sources._hamming_contract"], cache=True, inline="always", nogil=True)

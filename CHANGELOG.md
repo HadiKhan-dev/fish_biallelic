@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.17.3 (14 November 2026)
+
+This release fixes a crash of the pedigree stage and makes errors raised in worker processes reach the run intact.
+Released decisions are identical to 4.17.2; continuous pedigree scores move by at most about 1e-8 nats.
+
+**Pedigree: the projected bridge near its fold.** The transmitted-state projection joins adjacent bins with a
+maximum-entropy bridge whose root is found by bisection on the all-small branch. When the state with the largest
+load sits at the edge of that branch (its discriminant factor 1 - qL near zero), its own root has a square-root
+fold: a root found to within one unit in the last place moved that state's share by about the square root of the
+machine precision, and the bridge then failed its exact post-check. On a simulated backcross at depth 1 one bridge
+of 104,160 on a 13-Morgan chromosome failed this way (column residual 1.0e-11 against a tolerance of 1.6e-12), and
+the pedigree stage stopped for the whole run. Within that fold zone (1 - qL at most the square root of the machine
+precision, `BRIDGE_FOLD_DISCRIMINANT`) the state's share now comes from the root equation itself, which is smooth in
+q and equals the folded root at the exact root; every other bridge is computed as before, bit for bit. The model is
+unchanged: the same bridge with the same exact marginals and persistence flow. On product-form bridges placed at
+set distances from the fold the error is at most 1.1e-16 inside the zone (it was up to the failure level before).
+
+**Errors from worker processes.** Three structured errors raised in workers (`ProjectionInvariantError`,
+`SourceInferenceError`, `PathModelInvariantError`) could not be rebuilt by the parent process, so a failing run
+reported an unrelated `TypeError` instead of the error. They now round-trip intact.
+
+**Correction: memory of 4.17.1 and 4.17.2.** Their notes understated the memory the new refinement stores take.
+Measured against 4.16.1 on the same node, with the two releases together, the peak memory of long refinement units
+rises by up to 5.8 GiB: 22.7 to 28.5 GiB on a whole simulated unit, 26.8 to 30.1 GiB on a 27-founder unit of a real
+cross, 26.7 to 32.3 GiB on a 30-founder unit (on a 112-core node); a whole unit of a 2,800-sample cohort was
+unchanged (21.7 to 21.3 GiB). On the same units the two releases together cut wall time by 8 to 32 % and CPU by 11 to
+36 %.
+
+**Validation.** The default suite and the stage tier (four shards) pass. Replays of the projection and the scores
+on the saved inputs of 19 runs (simulated crosses at depths 1 to 10.5 and a real cichlid cross) change only
+fold-zone bridges, none of which changes branch; the largest score change is 7.0e-9 nats. The relatedness and
+pedigree steps rerun on 14 saved runs release the same decisions as the stored products, and the simulated
+backcross that crashed now completes. On the release matrix of 17 crosses the released results are those of
+4.17.2.
+
 ## 4.17.2 (14 November 2026)
 
 This release removes more repeated and serial work from assembly and founder refinement, and removes the
