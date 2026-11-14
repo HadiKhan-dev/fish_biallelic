@@ -32,9 +32,6 @@ from .paths import RunPaths, active_exclusions
 from .protocol import ProductInputs, ProductReader
 
 if TYPE_CHECKING:
-    import numpy as np
-    from numpy.typing import NDArray
-
     from ..contracts.assembly import FounderRelease
     from ..contracts.evidence import EvidenceDecisions
     from ..contracts.painting import Painting
@@ -42,12 +39,12 @@ if TYPE_CHECKING:
     from ..contracts.pedigree import Pedigree
     from ..contracts.phase import PhasedSamples, PhaseSummary
     from ..contracts.recombination import Recombination
-    from ..contracts.relatedness import RelatednessFamilies, RelatednessPairs
+    from ..contracts.relatedness import RelatednessFamilies
     from ..contracts.release import ReleasedSites
     from ..core.ties import TieCounts
     from ..stages.inputs.simulation_records import ContigTruth, SimulationManifest
 
-__all__ = ["Results", "ProductReader", "RelatednessView"]
+__all__ = ["Results", "ProductReader"]
 
 
 @dataclass(frozen=True)
@@ -84,38 +81,6 @@ class PanelReader:
 
 
 @dataclass(frozen=True)
-class RelatednessView:
-    """Family product with optional selected pair fields; retained unselected pairs stay hidden."""
-
-    families: RelatednessFamilies
-    pair_product: RelatednessPairs | None = None
-
-    @property
-    def pairs(self) -> NDArray[np.int64] | None:
-        return None if self.pair_product is None else self.pair_product.pairs
-
-    @property
-    def ibd(self) -> NDArray[np.float64] | None:
-        return None if self.pair_product is None else self.pair_product.ibd
-
-    @property
-    def ibd_sites(self) -> NDArray[np.float64] | None:
-        return None if self.pair_product is None else self.pair_product.ibd_sites
-
-    @property
-    def lr_ibd0(self) -> NDArray[np.float64] | None:
-        return None if self.pair_product is None else self.pair_product.lr_ibd0
-
-    @property
-    def lr_ibd2(self) -> NDArray[np.float64] | None:
-        return None if self.pair_product is None else self.pair_product.lr_ibd2
-
-    def __getattr__(self, name: str) -> Any:
-        # Reports consume the unchanged family fields; no copying, renumbering or filtering.
-        return getattr(self.families, name)
-
-
-@dataclass(frozen=True)
 class TieSource:
     """An explicit record group and its unchanged recorded tie diagnostics for reporting."""
 
@@ -132,7 +97,7 @@ class Results(ProductInputs):
     Construction reads layout and the small manifest only. Product methods return
     None for absent products; unsupported schemas and changed derivations raise.
     The original input files are never opened. Each call refreshes publications,
-    including output_selection.json, so an off/on/off change is visible immediately.
+    including output_selection.json.
     """
 
     def __init__(
@@ -252,30 +217,18 @@ class Results(ProductInputs):
 
         return self._read(records, "release", contig)
 
-    def relatedness(self) -> RelatednessView | None:
-        """Apply the current output selection and expose pairs only when selected and recorded."""
+    def relatedness(self) -> RelatednessFamilies | None:
+        """Read the relatedness families product when recorded."""
         if not self._has(None, "relatedness"):
             return None
         from ..stages.relatedness import families_records
 
-        families = self._read(families_records, "families")
-        if families is None:
-            return None
-        selection = self.output_selection()
-        enabled = selection is not None and (
-            selection.get("pairwise_ibd", False) if isinstance(selection, Mapping) else selection.pairwise_ibd
-        )
-        pairs = None
-        if enabled:
-            from ..stages.relatedness import pairs_records
+        return self._read(families_records, "families")
 
-            pairs = self._read(pairs_records, "pairs")
-        return RelatednessView(families, pairs)
-
-    def stage_request(self, stage, contig=None, *, round_name="", pairs=False, **options):
+    def stage_request(self, stage, contig=None, *, round_name="", **options):
         """Ask the data table's record owner for a header-only workflow request."""
         spec = STAGES[stage]
-        adapter, product = (spec.pair_records, "pairs") if pairs else (spec.records, spec.product)
+        adapter, product = spec.records, spec.product
         if stage == "selection" and round_name:
             options["stage"] = "local_selection_" + round_name
         elif stage == "assembly" and round_name:

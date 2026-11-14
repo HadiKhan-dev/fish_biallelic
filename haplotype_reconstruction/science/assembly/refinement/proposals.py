@@ -2421,7 +2421,8 @@ def solve_focal(
 
     Preparation is O(N B (Q+R K)); seeded search is polynomial in its declared domains (seeded_search.search).
     Ordinary H rescoring is O(N B Q). Returns the exact solver's six-field status/rows/box/dp/frontier/fixing
-    tuple.
+    tuple and the seeded search's founder-order code (seeded_search.latent: 0 none, 1 ties that cannot change its
+    wishes, 2 order-sensitive).
     """
     _charge_window(work, 1, emissions, cols, offsets)
     units = len(emissions)
@@ -2452,7 +2453,7 @@ def solve_focal(
     tol = CANONICAL_TOL + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(incumbent_value))
     certificate = incumbent_value + tol - BOX_ARITHMETIC_MARGIN * max(1.0, abs(incumbent_value))
     if _join(start_n, start_c, upper[0]) <= certificate:
-        return UNCHANGED, incumbent.copy(), True, False, 0, 0
+        return UNCHANGED, incumbent.copy(), True, False, 0, 0, 0
     st, exact_rows, exact_box, exact_dp, exact_frontier, exact_fixing = solve_focal_reference(
         emissions,
         cols,
@@ -2473,7 +2474,7 @@ def solve_focal(
         work,
     )
     if st != FRONTIER_LIMIT and st != BEAM_LIMIT:
-        return st, exact_rows, exact_box, exact_dp, exact_frontier, exact_fixing
+        return st, exact_rows, exact_box, exact_dp, exact_frontier, exact_fixing, 0
     samples, states = start_n.shape
     total_bins = 0
     max_rows = 0
@@ -2517,7 +2518,7 @@ def solve_focal(
     exact = path_value(emissions, cols, focal, best, first, second, penalty, start_n, start_c, end)
     stats[0] += 1
     changed = exact > incumbent_value + tol
-    return (CHANGED if changed else UNCHANGED), best, False, True, exact_frontier, exact_fixing
+    return (CHANGED if changed else UNCHANGED), best, False, True, exact_frontier, exact_fixing, stats[7]
 
 
 @kernel(overloads=overloads_for(__name__, "solve_template"), cache=True, nogil=True)
@@ -2525,7 +2526,8 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, store_li
     """Every listed focal founder's problem of one window (shared emissions and flanks).
 
     cols[u, k] is founder k's row on unit u (the focal's incumbent); the alphabet of unit u is 0..sizes[u]-1.
-    Returns per focal (status, rows, box_certified, dp, frontier, fixing_dps) as arrays.
+    Returns per focal (status, rows, box_certified, dp, frontier, fixing_dps, seeded_order) as arrays; seeded_order:
+    the focal's seeded-search founder-order code (solve_focal).
 
     The flanks are the exact objective's messages (per-homologue transitions), whose entries can lie more than
     `penalty` below their maximum (a change of both homologues costs 2c). The surrogate's bounds assume Potts-
@@ -2566,8 +2568,9 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, store_li
     dp = np.zeros(n, np.bool_)
     frontier = np.zeros(n, np.int64)
     fixing = np.zeros(n, np.int64)
+    tied = np.zeros(n, np.int64)
     if n == 0:
-        return status, rows, box, dp, frontier, fixing
+        return status, rows, box, dp, frontier, fixing, tied
     # Shared by every focal problem: the closed start message, the value of the panel's own rows
     # (an incumbent path is the panel itself whatever the focal founder, so path_value performs
     # the same operations for every focal) and the per-state unit sums.
@@ -2586,7 +2589,7 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, store_li
     for i in range(n):
         k = focals[i]
         incumbent = np.ascontiguousarray(cols[:, k])
-        st, r, bx, used, fr, fx = solve_focal(
+        st, r, bx, used, fr, fx, tie = solve_focal(
             emissions,
             cols,
             cands,
@@ -2610,7 +2613,293 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, store_li
         dp[i] = used
         frontier[i] = fr
         fixing[i] = fx
-    return status, rows, box, dp, frontier, fixing
+        tied[i] = tie
+    return status, rows, box, dp, frontier, fixing, tied
+
+
+# ------------------------------------------------------------------ two-stage template solve (shared sweep 0)
+# solve_template split where the content-order convention first enters (a fit's two searches share stage 1 of every
+# sweep-0 template: SweepEngine._shared_sweep0). Stage 1 (convention-free): the window-shared
+# tables, and per focal the box certificate and the frontier programme (window_dp), whose children are ordered by
+# (-total, incumbent, parent, row) whatever the alphabet's listing order. Stage 2 (per convention): the canonical
+# fixing (_canonical_restricted walks the alphabet in convention order) and the seeded search on frontier overflow.
+# Stage 2 recomputes the tables and box bounds it needs without debiting them again and continues stage 1's work
+# account, so the template's account is the one-call account.
+S1_CERTIFIED, S1_UNCHANGED, S1_LOST, S1_CANONICAL, S1_LIMIT = 0, 1, 2, 3, 4
+
+
+@kernel(overloads=overloads_for(__name__, "solve_template_stage1"), cache=True, nogil=True)
+def solve_template_stage1(emissions, cols, sizes, focals, penalty, start, end, store_limit, work):
+    """Per focal: (code S1_*, programme value, programme path, frontier) of the convention-free stage."""
+    end = _closed_end(end, penalty)
+    shared = len(work) > WINDOW_SHARED + 1
+    used = work[1] if shared else 0
+    _charge_window(work, 0, emissions, cols, sizes)
+    if shared:
+        work[WINDOW_SHARED] += work[1] - used
+    units = len(emissions)
+    founders = cols.shape[1]
+    offsets = np.zeros(units + 1, np.int64)
+    for u in range(units):
+        offsets[u + 1] = offsets[u] + sizes[u]
+    cands = np.empty(offsets[units], np.int64)
+    for u in range(units):
+        for r in range(sizes[u]):
+            cands[offsets[u] + r] = r
+    states = founders * (founders + 1) // 2
+    first = np.empty(states, np.int64)
+    second = np.empty(states, np.int64)
+    q = 0
+    for a in range(founders):
+        for b in range(a, founders):
+            first[q] = a
+            second[q] = b
+            q += 1
+    n = len(focals)
+    code = np.zeros(n, np.int64)
+    value = np.zeros(n)
+    paths = np.zeros((n, units), np.int64)
+    frontier = np.zeros(n, np.int64)
+    if n == 0:
+        return code, value, paths, frontier
+    start_n, start_c = _closed_start(start, penalty)
+    k0 = focals[0]
+    used = work[1] if shared else 0
+    _charge_window(work, 13, emissions, cols, offsets)
+    if shared:
+        work[WINDOW_SHARED + 1] += work[1] - used
+    incumbent_value = path_value(
+        emissions, cols, k0, np.ascontiguousarray(cols[:, k0]), first, second, penalty, start_n, start_c, end
+    )
+    tables = List()
+    for u in range(units):
+        tables.append(_state_tables(emissions[u], cols[u], first, second))
+    for i in range(n):
+        k = focals[i]
+        incumbent = np.ascontiguousarray(cols[:, k])
+        _charge_window(work, 1, emissions, cols, offsets)
+        fz, bg = _focal_layout(k, first, second)
+        prefixes, suffixes, segs = List(), List(), List()
+        for u in range(units):
+            P, T, best, bx, by, mx, my = tables[u]
+            prefix, suffix, seg = _unit_tables(P, T, best, bx, by, mx, my, k, bg)
+            prefixes.append(prefix)
+            suffixes.append(suffix)
+            segs.append(seg)
+        upper = window_box(
+            emissions, cols, cands, offsets, k, first, second, penalty, end, fz, bg, prefixes, suffixes, segs
+        )
+        tol = CANONICAL_TOL + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(incumbent_value))
+        certificate = incumbent_value + tol - BOX_ARITHMETIC_MARGIN * max(1.0, abs(incumbent_value))
+        if _join(start_n, start_c, upper[0]) <= certificate:
+            code[i] = S1_CERTIFIED
+            continue
+        _charge_window(work, 1, emissions, cols, offsets)
+        lower = incumbent_value
+        margin = tol + (units + 1) * DOMINANCE_TOLERANCE + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(lower))
+        status, found, path, reached, truncated = window_dp(
+            emissions,
+            cols,
+            cands,
+            offsets,
+            k,
+            incumbent,
+            first,
+            second,
+            penalty,
+            start_n,
+            start_c,
+            0,
+            end,
+            upper,
+            lower,
+            margin,
+            DOMINANCE_TOLERANCE,
+            HYBRID_FRONTIER,
+            store_limit,
+            fz,
+            bg,
+            prefixes,
+            suffixes,
+            segs,
+            work,
+        )
+        frontier[i] = reached
+        if status == BACKSTOP:
+            code[i] = S1_LIMIT
+        elif status != OK:
+            code[i] = S1_LOST
+        elif incumbent_value >= found - tol:
+            code[i] = S1_UNCHANGED
+        else:
+            code[i] = S1_CANONICAL
+            value[i] = found
+            paths[i] = path
+    return code, value, paths, frontier
+
+
+@kernel(overloads=overloads_for(__name__, "solve_template_stage2"), cache=True, nogil=True)
+def solve_template_stage2(
+    emissions, cols, sizes, focals, penalty, start, end, store_limit, reverse, work, code, value, paths, frontier1
+):
+    """solve_template's results from stage 1's: per focal (status, rows, box_certified, dp, frontier, fixing_dps,
+    seeded_tie), equal to solve_template's for the same convention."""
+    end = _closed_end(end, penalty)
+    units = len(emissions)
+    founders = cols.shape[1]
+    offsets = np.zeros(units + 1, np.int64)
+    for u in range(units):
+        offsets[u + 1] = offsets[u] + sizes[u]
+    cands = np.empty(offsets[units], np.int64)
+    for u in range(units):
+        for r in range(sizes[u]):
+            cands[offsets[u] + r] = sizes[u] - 1 - r if reverse else r
+    states = founders * (founders + 1) // 2
+    first = np.empty(states, np.int64)
+    second = np.empty(states, np.int64)
+    q = 0
+    for a in range(founders):
+        for b in range(a, founders):
+            first[q] = a
+            second[q] = b
+            q += 1
+    n = len(focals)
+    status = np.zeros(n, np.int64)
+    rows = np.zeros((n, units), np.int64)
+    box = np.zeros(n, np.bool_)
+    dp = np.zeros(n, np.bool_)
+    frontier = np.zeros(n, np.int64)
+    fixing = np.zeros(n, np.int64)
+    tied = np.zeros(n, np.int64)
+    if n == 0:
+        return status, rows, box, dp, frontier, fixing, tied
+    start_n, start_c = _closed_start(start, penalty)
+    needed = False
+    for i in range(n):
+        if code[i] == S1_CANONICAL or code[i] == S1_LIMIT:
+            needed = True
+    incumbent_value = 0.0
+    tables = List()
+    if needed:
+        k0 = focals[0]
+        incumbent_value = path_value(
+            emissions, cols, k0, np.ascontiguousarray(cols[:, k0]), first, second, penalty, start_n, start_c, end
+        )
+    for u in range(units):
+        if needed:
+            tables.append(_state_tables(emissions[u], cols[u], first, second))
+    for i in range(n):
+        k = focals[i]
+        incumbent = np.ascontiguousarray(cols[:, k])
+        rows[i] = incumbent
+        c = code[i]
+        if c == S1_CERTIFIED:
+            status[i] = UNCHANGED
+            box[i] = True
+            continue
+        dp[i] = True
+        frontier[i] = frontier1[i]
+        if c == S1_LOST:
+            status[i] = LOST
+            continue
+        if c == S1_UNCHANGED:
+            status[i] = UNCHANGED
+            continue
+        fz, bg = _focal_layout(k, first, second)
+        prefixes, suffixes, segs = List(), List(), List()
+        for u in range(units):
+            P, T, best, bx, by, mx, my = tables[u]
+            prefix, suffix, seg = _unit_tables(P, T, best, bx, by, mx, my, k, bg)
+            prefixes.append(prefix)
+            suffixes.append(suffix)
+            segs.append(seg)
+        upper = window_box(
+            emissions, cols, cands, offsets, k, first, second, penalty, end, fz, bg, prefixes, suffixes, segs
+        )
+        tol = CANONICAL_TOL + PROGRAMME_RELATIVE_MARGIN * max(1.0, abs(incumbent_value))
+        reached_most = frontier1[i]
+        fixed = 0
+        if c == S1_CANONICAL:
+            target = value[i] - tol
+            st, chosen, fixed, reached = _canonical_restricted(
+                emissions,
+                cols,
+                cands,
+                offsets,
+                k,
+                incumbent,
+                first,
+                second,
+                penalty,
+                start_n,
+                start_c,
+                end,
+                upper,
+                np.ascontiguousarray(paths[i]),
+                target,
+                HYBRID_FRONTIER,
+                store_limit,
+                fz,
+                bg,
+                prefixes,
+                suffixes,
+                segs,
+                work,
+            )
+            if reached > reached_most:
+                reached_most = reached
+            if st != BACKSTOP:
+                changed = False
+                for u in range(units):
+                    if chosen[u] != incumbent[u]:
+                        changed = True
+                rows[i] = chosen
+                status[i] = CHANGED if changed else UNCHANGED
+                frontier[i] = reached_most
+                fixing[i] = fixed
+                continue
+        # Frontier overflow (in the programme or in the canonical fixing): solve_focal's seeded search.
+        samples = start_n.shape[0]
+        total_bins = 0
+        max_rows = 0
+        reversed_order = False
+        for u in range(units):
+            total_bins += emissions[u].shape[2]
+            max_rows = max(max_rows, offsets[u + 1] - offsets[u])
+            if offsets[u + 1] - offsets[u] > 1:
+                reversed_order = cands[offsets[u]] > cands[offsets[u + 1] - 1]
+        seeds = samples + 1
+        starts = 1 + SEED_STARTS + INTERVAL_SEED_STARTS
+        _debit(work, 15, 128, samples, total_bins + units + 1, states + max_rows * len(fz) + 1)
+        _debit(work, 15, 128, samples, total_bins, total_bins, states + 1)
+        _debit(work, 15, 128, samples, max_rows, total_bins, len(fz) + total_bins + 1)
+        _debit(work, 15, 128, seeds, seeds, units)
+        _debit(work, 15, 128, samples, units, units, total_bins)
+        _debit(work, 15, 128, samples, seeds, units, total_bins * (len(fz) + total_bins + 1) + units * len(fz))
+        _debit(work, 15, 128, INTERVAL_SEED_STARTS + SEED_STARTS + 1, seeds, units, units * (units + 1))
+        _debit(
+            work,
+            15,
+            128,
+            starts,
+            LOCAL_ITERATIONS,
+            samples,
+            (max_rows + 1) * total_bins * (len(fz) + total_bins + 1) + units * total_bins,
+        )
+        _debit(work, 15, 128, starts, LOCAL_ITERATIONS, len(cands) + 1, units)
+        _debit(work, 15, 128, samples, total_bins, states + 1)
+        fe, be, unit, bins = seeded_search.prepare(emissions, cols, cands, offsets, k, first, second, fz, bg)
+        whole = start_n + start_c.reshape((len(start_c), 1))
+        seeded, gained, stats = seeded_search.search(
+            fe, be, unit, bins, cands, offsets, incumbent, fz, bg, penalty, whole, end, upper, tol, reversed_order
+        )
+        exact = path_value(emissions, cols, k, seeded, first, second, penalty, start_n, start_c, end)
+        rows[i] = seeded
+        status[i] = CHANGED if exact > incumbent_value + tol else UNCHANGED
+        frontier[i] = reached_most
+        fixing[i] = fixed
+        tied[i] = stats[7]
+    return status, rows, box, dp, frontier, fixing, tied
 
 
 @kernel(overloads=overloads_for(__name__, "slice_list"), cache=True, nogil=True)
@@ -2861,7 +3150,9 @@ class WindowSolver:
         search = seeded_search_bytes(samples, len(unit_bins), total_bins, rows, founders)
         return tables + frontier + coarse + search
 
-    def _template(self, emissions, bins, cols, sizes, start, end, focals=None, convention=False, team=None):
+    def _template(
+        self, emissions, bins, cols, sizes, start, end, focals=None, convention=False, team=None, stage1=None
+    ):
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
         unit's bins). Returns [(focal, unit choices or None, diagnostic)].
 
@@ -2869,7 +3160,8 @@ class WindowSolver:
         (focal_chunks), the focal problems, which are independent, run as interleaved chunks on the team's map,
         each with its own account, and merge_focal_chunks merges them into the one-call result; when the merged
         account shows the one-call account exhausted, the template is solved in one call, which gives its
-        exhaustion receipt."""
+        exhaustion receipt. stage1: this window problem's convention-free stage (WindowSolver.stage1, all focals),
+        or None; it is then finished in this convention (solve_template_stage2: the same results and account)."""
         # The exact objective's backward messages end with a per-homologue transition
         # (up to 2c below the maximum, c map-derived), while the surrogate's bounds and dominance
         # assume a flank closed under its own flat switch (entries >= max - penalty). Close the end
@@ -2906,15 +3198,29 @@ class WindowSolver:
         def solve_chunk(chosen):
             return self._solve_chunk(emissions, cols, sizes, chosen, start, end, store_limit, convention, account)
 
-        chunks = 1
-        if team is not None:
-            chunks = min(len(focals), int(team.threads()), focal_chunks(samples, width, bins, founders, len(focals)))
         solution = None
-        if chunks > 1:
-            # Contiguous chunks: the kernels' declared signatures take C-ordered focal lists.
-            parts = [np.ascontiguousarray(focals[c::chunks]) for c in range(chunks)]
-            solution = merge_focal_chunks(team.thread_map(solve_chunk, parts, label="founder_refinement focal chunks"))
-        solved, step, work = solve_chunk(focals) if solution is None else solution
+        if stage1 is not None and len(focals) == founders:
+            solution = self._solve_stage2(emissions, cols, sizes, focals, start, end, store_limit, convention, stage1)
+            if solution[2][2] == WORK_LIMIT:
+                # The two stages debit in another order than one call: the one call below gives the exhaustion
+                # receipt (phase and units at the limit), as for exhausted focal chunks.
+                solution = None
+        if solution is not None:
+            solved, step, work = solution
+        else:
+            chunks = 1
+            if team is not None:
+                chunks = min(
+                    len(focals), int(team.threads()), focal_chunks(samples, width, bins, founders, len(focals))
+                )
+            solution = None
+            if chunks > 1:
+                # Contiguous chunks: the kernels' declared signatures take C-ordered focal lists.
+                parts = [np.ascontiguousarray(focals[c::chunks]) for c in range(chunks)]
+                solution = merge_focal_chunks(
+                    team.thread_map(solve_chunk, parts, label="founder_refinement focal chunks")
+                )
+            solved, step, work = solve_chunk(focals) if solution is None else solution
         if work[2] == WORK_LIMIT:
             # Discard every focal result of the template.
             out = [
@@ -2943,7 +3249,7 @@ class WindowSolver:
             return out
         out = []
         for k in focals:
-            status, rows, box, dp, frontier, fixing = solved[int(k)]
+            status, rows, box, dp, frontier, fixing, tied = solved[int(k)]
             if status == LOST:
                 raise InvariantError("window dynamic programme lost every feasible path")
             out.append(
@@ -2960,6 +3266,8 @@ class WindowSolver:
                         status=int(status),
                         work_limit=False,
                         work_retries=step,
+                        seeded_tie=bool(tied == 2),
+                        seeded_tie_any=bool(tied >= 1),
                     ),
                 )
             )
@@ -2974,7 +3282,7 @@ class WindowSolver:
         work = _new_work(*account)
         solved = {}
         try:
-            status, rows, box, dp, frontier, fixing = solve_template(
+            status, rows, box, dp, frontier, fixing, tied = solve_template(
                 emissions,
                 cols,
                 sizes,
@@ -2991,38 +3299,79 @@ class WindowSolver:
                 raise
             return solved, 0, work
         for i, k in enumerate(focals):
-            solved[int(k)] = (status[i], rows[i].copy(), box[i], dp[i], frontier[i], fixing[i])
+            solved[int(k)] = (status[i], rows[i].copy(), box[i], dp[i], frontier[i], fixing[i], tied[i])
         return solved, 0, work
 
-    def focal_chunk_cap(self, index, samples, founders):
-        """focal_chunks of template ``index`` for a panel of ``founders``: the most CPUs its solve can use."""
+    def _stage1(self, emissions, cols, sizes, start, end):
+        """The convention-free stage of one window problem (solve_template_stage1, every focal) with its work
+        account; the inputs are prepared as _template prepares them."""
+        end = np.maximum(end, end.max(axis=1, keepdims=True) - self.penalty)
+        founders = int(cols.shape[1])
+        samples = int(start.shape[0])
+        width = len(emissions)
+        bins = max(int(array.shape[2]) for array in emissions)
+        rows = max(map(int, sizes))
+        height = max(founders, rows)
+        work_budget = self.work_coefficient * samples * width * bins * bins * height**3
+        focals = np.arange(founders, dtype=np.int64)
+        samples, states = start.shape
+        store_limit = max(1, STORE_BYTES // max(1, 8 * samples * states))
+        cols = np.ascontiguousarray(cols, np.int64)
+        sizes = np.asarray(sizes, np.int64)
+        work = _new_work(work_budget, samples, width, founders, rows, bins, HYBRID_FRONTIER)
+        try:
+            code, value, paths, frontier = solve_template_stage1(
+                emissions, cols, sizes, focals, self.penalty, start, end, int(store_limit), work
+            )
+        except RuntimeError:
+            if work[2] != WORK_LIMIT:
+                raise
+            return dict(work=work, limited=True)
+        return dict(code=code, value=value, paths=paths, frontier=frontier, work=work, limited=False)
+
+    def _solve_stage2(self, emissions, cols, sizes, focals, start, end, store_limit, convention, stage1):
+        """_solve_chunk of every focal from a stage-1 state: the account continues stage 1's (a copy)."""
+        work = stage1["work"].copy()
+        solved = {}
+        if stage1["limited"]:
+            return solved, 0, work
+        try:
+            status, rows, box, dp, frontier, fixing, tied = solve_template_stage2(
+                emissions,
+                cols,
+                sizes,
+                focals,
+                self.penalty,
+                start,
+                end,
+                int(store_limit),
+                bool(convention),
+                work,
+                stage1["code"],
+                stage1["value"],
+                stage1["paths"],
+                stage1["frontier"],
+            )
+        except RuntimeError:
+            if work[2] != WORK_LIMIT:
+                raise
+            return solved, 0, work
+        for i, k in enumerate(focals):
+            solved[int(k)] = (status[i], rows[i].copy(), box[i], dp[i], frontier[i], fixing[i], tied[i])
+        return solved, 0, work
+
+    def stage1(self, index, X, fwd, bwd):
+        """The convention-free stage of template `index` for panel X with flanks fwd, bwd (every focal)."""
         kind, a, c = self.templates[index]
         if kind == "fine":
-            bins = max(int(self.arrays[b].shape[2]) for b in range(a, c))
-        else:
-            groups = self.coarse[0]
-            bins = max(sum(int(self.arrays[b].shape[2]) for b in range(*groups[unit])) for unit in range(a, c))
-        return focal_chunks(samples, c - a, bins, founders, founders)
+            emissions = slice_list(self.emissions, a, c)
+            return self._stage1(emissions, X[:, a:c].T, self.sizes[a:c], fwd[a], bwd[c])
+        emissions, cols, sizes, _, a0, c0 = self._coarse_problem(X, a, c)
+        return self._stage1(emissions, cols, sizes, fwd[a0], bwd[c0])
 
-    def fine(self, X, fwd, bwd, a, c, focals=None, convention=False, *, ordinal=None, team=None):
-        """Proposals of every (listed) founder on blocks [a, c): [(kind, a, c, k, rows | None,
-        diagnostic)]; team: the solve's CPU share or None (_template)."""
-        self.work.check(ordinal)
-        emissions = slice_list(self.emissions, a, c)
-        sizes = self.sizes[a:c]
-        bins = max(self.arrays[b].shape[2] for b in range(a, c))
-        solved = self._template(emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], focals, convention, team)
-        self.work.finish_bound(
-            ordinal, solved, X, "fine", [(b, b + 1) for b in range(a, c)], sizes, None, bool(convention)
-        )
-        return [("fine", a, c, k, rows, diagnostic) for k, rows, diagnostic in solved]
-
-    def coarse_window(self, X, fwd, bwd, i, j, convention=False, *, ordinal=None, team=None):
-        """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
-        tuples the founders use there and the L1 context paths, sorted lexicographically. The
-        window programme's canonical-tie order "incumbent, then ascending index" therefore
-        means incumbent, then content."""
-        self.work.check(ordinal)
+    def _coarse_problem(self, X, i, j):
+        """coarse_window's inputs over L1 spans [i, j): (gathered emissions, cols, sizes, alphabets, first block,
+        end block)."""
         groups, context = self.coarse
         alphabets, lookups = [], []
         for unit in range(i, j):
@@ -3041,11 +3390,77 @@ class WindowSolver:
             start, stop = groups[unit]
             for founder in range(len(X)):
                 cols[u, founder] = lookups[u][np.ascontiguousarray(X[founder, start:stop], np.int64).tobytes()]
-        a, c = groups[i][0], groups[j - 1][1]
+        return emissions, cols, [len(x) for x in alphabets], alphabets, groups[i][0], groups[j - 1][1]
+
+    def focal_chunk_cap(self, index, samples, founders):
+        """focal_chunks of template ``index`` for a panel of ``founders``: the most CPUs its solve can use."""
+        kind, a, c = self.templates[index]
+        if kind == "fine":
+            bins = max(int(self.arrays[b].shape[2]) for b in range(a, c))
+        else:
+            groups = self.coarse[0]
+            bins = max(sum(int(self.arrays[b].shape[2]) for b in range(*groups[unit])) for unit in range(a, c))
+        return focal_chunks(samples, c - a, bins, founders, founders)
+
+    def fine(
+        self,
+        X,
+        fwd,
+        bwd,
+        a,
+        c,
+        focals=None,
+        convention=False,
+        *,
+        ordinal=None,
+        team=None,
+        stage1=None,
+        completion=False,
+    ):
+        """Proposals of every (listed) founder on blocks [a, c): [(kind, a, c, k, rows | None,
+        diagnostic)]; team: the solve's CPU share or None (_template); completion: no work receipt is recorded
+        (solve)."""
+        self.work.check(ordinal)
+        emissions = slice_list(self.emissions, a, c)
+        sizes = self.sizes[a:c]
+        bins = max(self.arrays[b].shape[2] for b in range(a, c))
+        solved = self._template(
+            emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], focals, convention, team, stage1=stage1
+        )
+        if not completion:
+            self.work.finish_bound(
+                ordinal, solved, X, "fine", [(b, b + 1) for b in range(a, c)], sizes, None, bool(convention)
+            )
+        return [("fine", a, c, k, rows, diagnostic) for k, rows, diagnostic in solved]
+
+    def coarse_window(
+        self,
+        X,
+        fwd,
+        bwd,
+        i,
+        j,
+        convention=False,
+        *,
+        ordinal=None,
+        team=None,
+        stage1=None,
+        focals=None,
+        completion=False,
+    ):
+        """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
+        tuples the founders use there and the L1 context paths, sorted lexicographically. The
+        window programme's canonical-tie order "incumbent, then ascending index" therefore
+        means incumbent, then content."""
+        self.work.check(ordinal)
+        groups, _ = self.coarse
+        emissions, cols, sizes, alphabets, a, c = self._coarse_problem(X, i, j)
         bins = max(sum(self.arrays[b].shape[2] for b in range(*groups[unit])) for unit in range(i, j))
-        sizes = [len(x) for x in alphabets]
-        solved = self._template(emissions, bins, cols, sizes, fwd[a], bwd[c], convention=convention, team=team)
-        self.work.finish_bound(ordinal, solved, X, "coarse", groups[i:j], sizes, alphabets, bool(convention))
+        solved = self._template(
+            emissions, bins, cols, sizes, fwd[a], bwd[c], focals, convention=convention, team=team, stage1=stage1
+        )
+        if not completion:
+            self.work.finish_bound(ordinal, solved, X, "coarse", groups[i:j], sizes, alphabets, bool(convention))
         out = []
         for k, choice, diagnostic in solved:
             rows = None
@@ -3056,14 +3471,55 @@ class WindowSolver:
             out.append(("coarse", a, c, k, rows, diagnostic))
         return out
 
-    def solve(self, index, X, fwd, bwd, convention=False, *, ordinal=None, team=None):
+    def solve(
+        self,
+        index,
+        X,
+        fwd,
+        bwd,
+        convention=False,
+        *,
+        ordinal=None,
+        team=None,
+        stage1=None,
+        focals=None,
+        completion=False,
+    ):
         """The proposals of template `index` for panel X with messages fwd, bwd (a pure function of
         X's rows in the window and the flank messages fwd[a], bwd[c], within its work account);
-        team: the solve's CPU share or None (_template)."""
+        team: the solve's CPU share or None (_template); stage1: its convention-free stage for this panel and
+        these flanks (WindowSolver.stage1), or None; focals: the founders to solve (default all). completion:
+        the listed focals of a template whose other focals are reused exactly (a restated template: cache.relabel):
+        the call is checked against the logical stop (work.check) but records no work receipt, since the caller
+        receipts the whole template."""
         kind, a, c = self.templates[index]
         if kind == "fine":
-            return self.fine(X, fwd, bwd, a, c, convention=convention, ordinal=ordinal, team=team)
-        return self.coarse_window(X, fwd, bwd, a, c, convention, ordinal=ordinal, team=team)
+            return self.fine(
+                X,
+                fwd,
+                bwd,
+                a,
+                c,
+                focals,
+                convention=convention,
+                ordinal=ordinal,
+                team=team,
+                stage1=stage1,
+                completion=completion,
+            )
+        return self.coarse_window(
+            X,
+            fwd,
+            bwd,
+            a,
+            c,
+            convention,
+            ordinal=ordinal,
+            team=team,
+            stage1=stage1,
+            focals=focals,
+            completion=completion,
+        )
 
 
 __all__ = [
@@ -3073,6 +3529,8 @@ __all__ = [
     "solve_focal",
     "solve_focal_reference",
     "solve_template",
+    "solve_template_stage1",
+    "solve_template_stage2",
     "slice_list",
     "gather_macro",
     "window_templates",

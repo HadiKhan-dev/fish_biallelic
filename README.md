@@ -41,8 +41,6 @@ Snakemake example.
 - Generated [settings](docs/reference/settings.md), [parameters](docs/reference/parameters.md)
   and [commands](docs/reference/commands.md).
 
-Pairwise `relatedness/pairs.csv` is **off by default**. Enable it explicitly with
-`[relatedness] pairwise_ibd = true`; its cost is quadratic in sample count.
 Standalone export reads verified released products and has no `--vcf` option.
 
 See [LICENSE](LICENSE) for licensing and [CITATION.cff](CITATION.cff) for citation metadata.

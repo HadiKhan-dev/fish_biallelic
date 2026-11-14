@@ -2,7 +2,7 @@
 
 Owns pedigree's keys, checked dependency reads and identity construction; no scientific computation.
 Method: docs/methods/pedigree.md#products-and-published-tables (PD27.
-The relatedness input is families, never the optional pairwise-IBD report selection.
+The relatedness input is the families product.
 """
 
 from __future__ import annotations

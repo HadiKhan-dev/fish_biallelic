@@ -16,6 +16,49 @@ _LOG = logging.getLogger(__name__)
 
 CONTIG_LANE_CORES = 16
 STRAGGLER_RATIO = 2.0
+# At most this share of a round's declared work runs on minimum teams (minimum_teams): a team holds its CPUs through
+# its serial sections (66-82% lane efficiency at five threads on pearly chr3 l2 blocks), so the share bounds what a
+# crowded round can spend on teams, including rounds whose cost model overstates the spread of unit work.
+TEAM_WORK_SHARE = 0.125
+
+
+def minimum_teams(costs: Sequence[float], widths: Sequence[int], cores: int) -> tuple[int, ...]:
+    """Minimum CPU teams for the stragglers of one round of independent units, from their declared costs alone.
+
+    A unit whose declared cost is at least STRAGGLER_RATIO times the round's upper-median positive cost is a
+    straggler (the contig lanes' straggler definition). On a node crowded with its peers a unit starts on one CPU and
+    widens only as they finish, so a straggler would run several times longer than the round's other units.
+    Stragglers, heaviest first (ties to the lower index), take a minimum team of their useful width ``widths[i]``
+    (the CPUs their kernels use at full grain), capped at one contig lane's planned CPUs (CONTIG_LANE_CORES) and at
+    half of ``cores``: a lane admits a team within its equal share, and the round's other units keep CPUs. A
+    straggler whose cost is at least the round's cost per CPU (total / cores) is critical: on one CPU it would outlast
+    the balanced round, so it always takes its team. The other stragglers stop before their teamed declared cost would
+    exceed TEAM_WORK_SHARE of the round's. Every other unit's minimum is one CPU. A team is a CPU minimum for
+    scheduling only; it never changes a result.
+    """
+    count = len(costs)
+    if len(widths) != count:
+        raise SettingsError("minimum_teams needs one width per cost")
+    teams = [1] * count
+    cap = min(CONTIG_LANE_CORES, max(1, int(cores) // 2))
+    values = [max(0.0, float(value)) for value in costs]
+    positive = sorted(value for value in values if value > 0.0)
+    if cap < 2 or not positive:
+        return tuple(teams)
+    total = sum(values)
+    threshold = STRAGGLER_RATIO * positive[len(positive) // 2]
+    allowance = TEAM_WORK_SHARE * total
+    teamed = 0.0
+    for index in sorted(range(count), key=lambda i: (-values[i], i)):
+        value = values[index]
+        critical = value * int(cores) >= total
+        if value < threshold or (not critical and teamed + value > allowance):
+            break
+        width = min(cap, int(widths[index]))
+        if width >= 2:
+            teams[index] = width
+            teamed += 0.0 if critical else value
+    return tuple(teams)
 
 
 @dataclass(frozen=True)

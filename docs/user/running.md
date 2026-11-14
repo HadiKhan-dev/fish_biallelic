@@ -42,9 +42,6 @@ contigs = ["chr1", "chr2", "chr3", "chr4", "chr5"]
 [genetic_map]
 file = "data/cross.map"
 rate_is_measured = false
-
-[relatedness]
-pairwise_ibd = false
 ```
 
 `generic` supplies no contig list. `tromau` supplies the preset's configured
@@ -241,21 +238,7 @@ resuming and changing sets. Scientific checkpoints from 4.14 cannot be resumed
 with this implementation because changed source hashes change product identities;
 use a new run when upgrading from 4.14.
 
-## Optional pair reports and re-export
-
-To request the pairwise IBD chain and `relatedness/pairs.csv`, set
-`[relatedness] pairwise_ibd = true` before the invocation:
-
-```sh
-haplotypes relatedness cross.toml --set relatedness.pairwise_ibd=true --cores 8
-haplotypes report cross.toml --set relatedness.pairwise_ibd=true --cores 8
-```
-
-This is a persisted per-invocation output selection, outside every scientific
-identity. It costs O(N² L) and can be substantial. Turning it on does not recompute
-the family model. Turning it off hides any retained pair record and removes the
-stale CSV when reports are republished. Set the same selection on the report
-invocation that should publish the file.
+## Re-export
 
 `haplotypes export run destination` writes a finished run's released founders and
 samples to a new or empty directory. `--products` selects what is written: the default is

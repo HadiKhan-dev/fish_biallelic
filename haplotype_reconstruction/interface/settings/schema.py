@@ -386,15 +386,6 @@ class SimulationSection:
 
 
 @dataclass(frozen=True)
-class RelatednessSection:
-    """Select optional pair output without changing the family model."""
-
-    pairwise_ibd: bool = setting(
-        False, "bool", "Write pairwise IBD reports (O(N² L)); off by default.", affects_results=False
-    )
-
-
-@dataclass(frozen=True)
 class Settings:
     """The resolved configuration of one run (see the module docstring)."""
 
@@ -405,7 +396,6 @@ class Settings:
     input: InputSection = section(InputSection, "Observations and contigs.")
     quality: QualitySection = section(QualitySection, "Evidence quality control and read model.")
     genetic_map: GeneticMapSection = section(GeneticMapSection, "Inference genetic map.")
-    relatedness: RelatednessSection = section(RelatednessSection, "Optional relatedness output selection.")
     family_phase: FamilyPhaseSection = section(FamilyPhaseSection, "Family phase.")
     recombination: RecombinationSection = section(RecombinationSection, "Recombination maps.")
     export: ExportSection = section(ExportSection, "Final products: founder and sample VCFs.")
@@ -478,7 +468,6 @@ __all__ = [
     "InputSection",
     "QualitySection",
     "GeneticMapSection",
-    "RelatednessSection",
     "FamilyPhaseSection",
     "RecombinationSection",
     "ExportSection",

@@ -163,20 +163,47 @@ def advance(focal_emissions, background_emissions, rows, start, begin, stop, fz,
 @kernel(overloads=overloads_for(__name__, "latent"), cache=True, nogil=True)
 def latent(focal_emissions, background_emissions, unit, rows, fz, bg, penalty, start, end):
     """Trace the optimal bin states for sample-specific unit rows. O(N B Q). Stay wins transition ties, then the
-    first pair state."""
+    first pair state.
+
+    Returns (chosen, order): order[s] = 0 when sample s's trace took no exactly tied maximum at a step it uses (the
+    final state, or the switch source at a bin where the traced state switched): the trace is then decided by values
+    alone; 1 when it did, but every optimal trace (every resolution of every tie) gives the same verdict, per unit,
+    on whether the sample's path uses a focal state there (the only thing wishes reads from the trace): the
+    pair-state order, hence the founder labelling, cannot change wishes; 2 otherwise (order-sensitive). The set of
+    optimal traces is followed backwards from the tied final states through stays and every tied switch source,
+    O(B Q) per tied sample."""
     n, q = start.shape
     bins = focal_emissions.shape[1]
     chosen = np.empty((n, bins), np.int64)
     previous = np.empty((bins, q), np.int64)
+    arg_tied = np.zeros(bins, np.bool_)
+    ismax = np.zeros((bins, q), np.bool_)
+    order = np.zeros(n, np.int64)
     state_values = np.empty(q)
     out = np.empty(q)
+    has = np.zeros(q, np.bool_)
+    for c in range(len(fz)):
+        has[fz[c]] = True
+    reach = np.zeros(q, np.bool_)
+    nxt = np.zeros(q, np.bool_)
+    bgset = np.zeros(q, np.bool_)
+    bgnxt = np.zeros(q, np.bool_)
     for s in range(n):
         state_values[:] = start[s]
         for t in range(bins):
             arg = 0
+            tie = False
             for z in range(1, q):
                 if state_values[z] > state_values[arg]:
                     arg = z
+                    tie = False
+                elif state_values[z] == state_values[arg]:
+                    tie = True
+            arg_tied[t] = tie
+            if tie:
+                top = state_values[arg]
+                for z in range(q):
+                    ismax[t, z] = state_values[z] == top
             floor = state_values[arg] - penalty
             for z in range(q):
                 previous[t, z] = z if state_values[z] >= floor else arg
@@ -188,13 +215,94 @@ def latent(focal_emissions, background_emissions, unit, rows, fz, bg, penalty, s
                 out[z] = max(state_values[z], floor) + background_emissions[s, t, j]
             state_values[:] = out
         zbest = 0
+        flag = False
         for z in range(1, q):
             if state_values[z] + end[s, z] > state_values[zbest] + end[s, zbest]:
                 zbest = z
+                flag = False
+            elif state_values[z] + end[s, z] == state_values[zbest] + end[s, zbest]:
+                flag = True
+        best = state_values[zbest] + end[s, zbest]
         for t in range(bins - 1, -1, -1):
             chosen[s, t] = zbest
-            zbest = previous[t, zbest]
-    return chosen
+            source = previous[t, zbest]
+            if source != zbest and arg_tied[t]:
+                flag = True
+            zbest = source
+        if not flag:
+            continue
+        order[s] = 1
+        # Every optimal trace: reach = the states at bin tt on some optimal trace; per unit, positive = some trace
+        # uses a focal state in it, bgset = states on a trace that stays in background states through the unit
+        # from its last bin down to bin tt.
+        for z in range(q):
+            reach[z] = state_values[z] + end[s, z] == best
+        t = bins - 1
+        while t >= 0 and order[s] == 1:
+            u = unit[t]
+            b0 = t
+            while b0 > 0 and unit[b0 - 1] == u:
+                b0 -= 1
+            positive = False
+            negative = False
+            for z in range(q):
+                bgset[z] = reach[z] and not has[z]
+            tt = t
+            while True:
+                for z in range(q):
+                    if reach[z] and has[z]:
+                        positive = True
+                if tt == b0:
+                    for z in range(q):
+                        if bgset[z]:
+                            negative = True
+                if tt == 0:
+                    break
+                switch_reach = False
+                switch_bg = False
+                for z in range(q):
+                    nxt[z] = False
+                    bgnxt[z] = False
+                for z in range(q):
+                    if reach[z]:
+                        if previous[tt, z] == z:
+                            nxt[z] = True
+                        else:
+                            switch_reach = True
+                    if tt > b0 and bgset[z]:
+                        if previous[tt, z] == z:
+                            bgnxt[z] = True
+                        else:
+                            switch_bg = True
+                if switch_reach or switch_bg:
+                    if arg_tied[tt]:
+                        for a in range(q):
+                            if ismax[tt, a]:
+                                if switch_reach:
+                                    nxt[a] = True
+                                if switch_bg and not has[a]:
+                                    bgnxt[a] = True
+                    else:
+                        # The untied switch source: previous[tt, z] of any switching state.
+                        a = -1
+                        for z in range(q):
+                            if previous[tt, z] != z:
+                                a = previous[tt, z]
+                                break
+                        if switch_reach:
+                            nxt[a] = True
+                        if switch_bg and not has[a]:
+                            bgnxt[a] = True
+                for z in range(q):
+                    reach[z] = nxt[z]
+                    bgset[z] = bgnxt[z]
+                tt -= 1
+                if tt < b0:
+                    break
+            if positive and negative:
+                order[s] = 2
+            t = b0 - 1
+    return chosen, order
 
 
 @kernel(overloads=overloads_for(__name__, "wishes"), cache=True, nogil=True)
@@ -202,7 +310,8 @@ def wishes(
     focal_emissions, background_emissions, unit, bins, cands, offsets, incumbent, fz, bg, penalty, start, end, upper
 ):
     """Jointly choose each sample's whole-unit rows and hidden path. O(N (B^2 Q+R B K+R B^2)). Units unused by its
-    focal path retain the incumbent."""
+    focal path retain the incumbent. Returns (paths, order): the largest of the samples' latent order codes (0 no
+    used tie, 1 ties that cannot change wishes, 2 order-sensitive)."""
     n = start.shape[0]
     w = len(incumbent)
     paths = np.empty((n, w), np.int64)
@@ -227,7 +336,7 @@ def wishes(
         prefix = advance(
             focal_emissions, background_emissions, paths[:, u], prefix, bins[u], bins[u + 1], fz, bg, penalty
         )
-    chosen = latent(focal_emissions, background_emissions, unit, paths, fz, bg, penalty, start, end)
+    chosen, order = latent(focal_emissions, background_emissions, unit, paths, fz, bg, penalty, start, end)
     has = np.zeros(start.shape[1], np.bool_)
     for c in range(len(fz)):
         has[fz[c]] = True
@@ -238,7 +347,7 @@ def wishes(
                 uses = uses or has[chosen[s, t]]
             if not uses:
                 paths[s, u] = incumbent[u]
-    return paths
+    return paths, order.max()
 
 
 @kernel(overloads=overloads_for(__name__, "before"), cache=True, nogil=True)
@@ -678,8 +787,9 @@ def search(
 ):
     """Relevant wishes, restrictions and bounded single-unit ascent. O(N B^2 Q+N R (B K+B^2)+P^2 W+N P W (B K+B^2+W
     K)+INTERVAL_SEED_STARTS P W^3+L I (N (B K+B^2+W B+R (B K+B^2))+C W)). Stats: evaluations, relevant samples,
-    seeds, restrictions, starts, ascent steps, caps."""
-    stats = np.zeros(7, np.int64)
+    seeds, restrictions, starts, ascent steps, caps, and the wishes' order code (0 no used tie in a wish trace, 1 ties
+    that cannot change the wishes, 2 order-sensitive: the only founder-order dependence of the search)."""
+    stats = np.zeros(8, np.int64)
     width = len(incumbent)
     index = relevant_samples(background_emissions, bg, penalty, start, end, upper[0])
     stats[1] = len(index)
@@ -691,9 +801,10 @@ def search(
     ctx = context(background_emissions, start, end, fz, bg, penalty)
     initial = value(focal_emissions, unit, incumbent, ctx, penalty)
     stats[0] += 1
-    wish = wishes(
+    wish, order = wishes(
         focal_emissions, background_emissions, unit, bins, cands, offsets, incumbent, fz, bg, penalty, start, end, upper
     )
+    stats[7] = order
     raw = np.empty((len(wish) + 1, width), np.int64)
     raw[0] = incumbent
     raw[1:] = wish

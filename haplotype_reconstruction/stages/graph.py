@@ -443,12 +443,11 @@ def complete_cut(
 
 
 def stage_modules(task):
-    """Return the implementation owners behind a task's stage and product variant."""
+    """Return the implementation owners behind a task's stage."""
     spec = STAGES.get(task.key.stage)
     if spec is None:
         return None
-    modules = spec.pair_owners if task.key.stage == "relatedness" and task.key.unit == "pairs" else spec.owners
-    result = tuple("haplotype_reconstruction." + module for module in modules)
+    result = tuple("haplotype_reconstruction." + module for module in spec.owners)
     if task.key.stage == "assembly":
         from ..science.assembly.kernel_inventory import MODULES
 
@@ -472,7 +471,7 @@ def stage_kernel_modules(task: Task) -> tuple[str, ...]:
     spec = STAGES.get(task.key.stage)
     if spec is None:
         return ()
-    roots = spec.pair_kernel_roots if task.key.stage == "relatedness" and task.key.unit == "pairs" else spec.kernel_roots
+    roots = spec.kernel_roots
     if not roots:
         return ()
     # Tie kernels are the common numerical foundation; source identity still traverses the full task closure.

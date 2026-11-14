@@ -1,7 +1,6 @@
 """Execute the independent relatedness/families task under one runtime CPU team.
 
-Resume is by derivation before reading evidence. The output selection is outside
-scientific parameters; graph composition schedules the optional pairs task.
+Resume is by derivation before reading evidence.
 """
 
 from __future__ import annotations

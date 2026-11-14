@@ -61,6 +61,12 @@ one fixed-K fit; see [RS15](./refinement.md#rs15), [RS16](./refinement.md#rs16) 
 
 See [RS04](./refinement.md#rs04) for the model, decision order, parameters and limits.
 
+## reuse inside a search
+
+See [RS19](./refinement.md#rs19) for the restated window results after suffix exchanges, the relabelled message
+updates, the shared sweep 0 of a fit's two searches and the reused standing-offer gains, with their exactness
+conditions.
+
 ## shared switch guard
 
 See [RC08](./refinement.md#rc08) for the model, decision order, parameters and limits.

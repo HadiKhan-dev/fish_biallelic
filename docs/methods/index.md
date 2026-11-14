@@ -40,7 +40,6 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [RL01](relatedness.md#rl01) — Core
 - [RL02](relatedness.md#rl02) — Core
 - [RL03](relatedness.md#rl03) — Core
-- [RL04](relatedness.md#rl04) — Accretion
 - [RL05](relatedness.md#rl05) — Core
 - [RL06](relatedness.md#rl06) — Core
 - [RL07](relatedness.md#rl07) — Core

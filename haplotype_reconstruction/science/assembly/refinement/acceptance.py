@@ -69,6 +69,8 @@ from .parameters import (
     AFFECTED_GAIN_TOLERANCE,
     CONTENT_FULL_ROUNDS,
     EXCHANGE_ROUNDS,
+    GAIN_CACHE_MIN_SLOTS,
+    GAIN_CACHE_TEMPLATE_SLOTS,
     GUARD_TOLERANCE,
 )
 from .window import cover
@@ -325,6 +327,92 @@ def _truncate_ahead(ahead, x):
     )
 
 
+# ---------------------------------------------- reuse state of a pass (standing-offer gain cache, exchange log)
+# reuse = (keys uint64[C], check uint64[C], stamp int64[C], digests uint64[C, S], gains float64[C, S], stat int64[16],
+# exchange_log int64[E + 1, 3]). The first six are the standing-offer gain cache of one search and pass orientation
+# (one-slot placeholders when absent).
+# An entry holds the exact per-sample gains of one content item, identified by two 64-bit keys of (founder, block
+# range, item rows, the panel's rows on the range) and, per sample, a 64-bit digest of the messages the gain read
+# (forward at the item's start, backward at both ends, the backward normalisers of its blocks). stat: 0 enabled,
+# 1 verify, 2 stamp of the running pass (>= 1), 3 lookups, 4 item hits, 5 entries found with other messages,
+# 6 their samples with equal digests, 7 their samples, 8 inserts, 9 evictions, 10 verify mismatches,
+# 11 per-sample gains reused, 14 item-sites scored, 15 item-sites taken from the cache. stamp: 0 empty, -1 being
+# filled by the running call, else the last pass that used it. Exactness: a hit needs the item's two 64-bit keys and
+# every sample's 64-bit digest equal, so equal inputs up to a hash collision; the gains are then the bits a fresh
+# evaluation gives (gains.candidate_gains is a pure function of these inputs). Gains of the two pass orientations
+# differ in their last bits, so a table serves one orientation. exchange_log: row 0 holds the count, rows
+# 1.. the pass's accepted suffix exchanges in order as (junction, founder a, founder b); a one-row log logs nothing.
+G_ENABLED, G_VERIFY, G_STAMP, G_LOOKUPS, G_HITS, G_STALE, G_STALE_SAME, G_STALE_SAMPLES = 0, 1, 2, 3, 4, 5, 6, 7
+G_INSERTS, G_EVICTIONS, G_BAD, G_REUSED = 8, 9, 10, 11
+G_PROBES = 8
+
+
+@kernel(overloads=(), inline="always", nogil=True)
+def _mix64(h, x):
+    h = (h ^ x) * np.uint64(0x9E3779B97F4A7C15)
+    h = h ^ (h >> np.uint64(29))
+    h = h * np.uint64(0xBF58476D1CE4E5B9)
+    h = h ^ (h >> np.uint64(32))
+    return h
+
+
+@kernel(overloads=overloads_for(__name__, "_item_key"), cache=True, nogil=True)
+def _item_key(X, k, p1, p2, rows, r0, seed):
+    """64-bit key of the content item (founder k's rows rows[r0:] on [p1, p2)) on the panel X."""
+    h = _mix64(seed, np.uint64(k))
+    h = _mix64(h, np.uint64(p1))
+    h = _mix64(h, np.uint64(p2))
+    for t in range(p2 - p1):
+        h = _mix64(h, np.uint64(rows[r0 + t]))
+    for f in range(X.shape[0]):
+        for x in range(p1, p2):
+            h = _mix64(h, np.uint64(X[f, x]))
+    return h
+
+
+@kernel(overloads=overloads_for(__name__, "_sample_digests"), cache=True, nogil=True)
+def _sample_digests(fs, gs, ge, sums, out):
+    """out[s]: 64-bit digest of the bits of sample s's messages at the item's ends and its backward normalisers."""
+    samples, states = fs.shape
+    fu = fs.view(np.uint64)
+    gu = gs.view(np.uint64)
+    eu = ge.view(np.uint64)
+    su = sums.view(np.uint64)
+    for s in range(samples):
+        h = np.uint64(0x243F6A8885A308D3)
+        for q in range(states):
+            h = _mix64(h, fu[s, q])
+        for q in range(states):
+            h = _mix64(h, gu[s, q])
+        for q in range(states):
+            h = _mix64(h, eu[s, q])
+        out[s] = _mix64(h, su[s])
+
+
+@kernel(overloads=overloads_for(__name__, "_gain_slot"), cache=True, nogil=True)
+def _gain_slot(keys, check, stamp, k1, k2):
+    """(slot, found) of the item (k1, k2): its entry, else the slot to fill: an empty one of its probe run, else the
+    run's least recently used filled one; (-1, False) when the running call is filling all of them."""
+    cap = len(keys)
+    base = np.int64(k1 & np.uint64(cap - 1))
+    victim = -1
+    oldest = np.int64(0)
+    for t in range(G_PROBES):
+        j = (base + t) & (cap - 1)
+        if stamp[j] != 0 and keys[j] == k1 and check[j] == k2:
+            return j, True
+        if stamp[j] == -1:
+            continue
+        if stamp[j] == 0:
+            if victim < 0 or oldest != 0:
+                victim = j
+                oldest = 0
+        elif victim < 0 or (oldest != 0 and stamp[j] < oldest):
+            victim = j
+            oldest = stamp[j]
+    return victim, False
+
+
 # ------------------------------------------------------------------ candidates
 @kernel(overloads=overloads_for(__name__, "_set_rows"), cache=True, nogil=True)
 def _set_rows(haps, leaves, offsets, founder, start, rows, lo, hi):
@@ -412,6 +500,8 @@ def _score_items(
     ahead,
     acc,
     lex_item,
+    X,
+    reuse,
 ):
     """Exact gains of the items at junction p: with lex_item < 0 every item with the plain kernel (switch
     changes zero); with lex_item = i >= 0 item i alone with the lexicographic kernel, for its switch-cost
@@ -542,21 +632,147 @@ def _score_items(
                 switch[i] = changes
                 switches_s[i] = member_switches[m]
         else:
-            member_gains = candidate_gains(
-                haps,
-                leaves,
-                win,
-                offsets,
-                f_start,
-                g_start,
-                focal,
-                first_block,
-                end_block,
-                flat,
-                row_offsets,
-                g_end,
-                sums,
-            )
+            gkeys, gcheck, gstamp, gdig, ggain, gstat, _ = reuse
+            for m in range(n_mem):
+                gstat[14] += offsets[end_block[m]] - offsets[first_block[m]]
+            use = gstat[G_ENABLED] != 0
+            n_hit = 0
+            if use:
+                # Items whose inputs are those of a cached evaluation take its per-sample gains.
+                verify = gstat[G_VERIFY] != 0
+                stamp = gstat[G_STAMP]
+                slot = np.full(n_mem, -1, np.int64)
+                hit = np.zeros(n_mem, np.bool_)
+                dig = np.empty((n_mem, samples), np.uint64)
+                cached = np.empty((n_mem, samples))
+                for m in range(n_mem):
+                    i = members[m]
+                    k1 = _item_key(X, it_k[i], it_p1[i], it_p2[i], cand_rows, it_rs[i], np.uint64(0x6A09E667F3BCC908))
+                    k2 = _item_key(X, it_k[i], it_p1[i], it_p2[i], cand_rows, it_rs[i], np.uint64(0xBB67AE8584CAA73B))
+                    _sample_digests(f_start[m], g_start[m], g_end[m], sums[m], dig[m])
+                    j, found = _gain_slot(gkeys, gcheck, gstamp, k1, k2)
+                    slot[m] = j
+                    gstat[G_LOOKUPS] += 1
+                    if found and gstamp[j] > 0:
+                        same = 0
+                        for s in range(samples):
+                            if gdig[j, s] == dig[m, s]:
+                                same += 1
+                        if same == samples:
+                            hit[m] = True
+                            n_hit += 1
+                            gstat[G_HITS] += 1
+                            gstat[15] += offsets[end_block[m]] - offsets[first_block[m]]
+                            cached[m] = ggain[j]
+                            gstamp[j] = stamp
+                            continue
+                        gstat[G_STALE] += 1
+                        gstat[G_STALE_SAME] += same
+                        gstat[G_STALE_SAMPLES] += samples
+                    elif not found and j >= 0:
+                        gstat[G_INSERTS] += 1
+                        if gstamp[j] != 0:
+                            gstat[G_EVICTIONS] += 1
+                        gkeys[j] = k1
+                        gcheck[j] = k2
+                    if j >= 0:
+                        gstamp[j] = -1
+                if n_hit == 0 or verify:
+                    member_gains = candidate_gains(
+                        haps,
+                        leaves,
+                        win,
+                        offsets,
+                        f_start,
+                        g_start,
+                        focal,
+                        first_block,
+                        end_block,
+                        flat,
+                        row_offsets,
+                        g_end,
+                        sums,
+                    )
+                    if verify:
+                        for m in range(n_mem):
+                            if hit[m]:
+                                for s in range(samples):
+                                    if member_gains[m, s] != cached[m, s]:
+                                        gstat[G_BAD] += 1
+                                        break
+                else:
+                    n_miss = n_mem - n_hit
+                    member_gains = cached
+                    if n_miss > 0:
+                        sub = np.empty(n_miss, np.int64)
+                        t = 0
+                        for m in range(n_mem):
+                            if not hit[m]:
+                                sub[t] = m
+                                t += 1
+                        sub_f = np.empty((n_miss, samples, states))
+                        sub_g = np.empty((n_miss, samples, states))
+                        sub_e = np.empty((n_miss, samples, states))
+                        sub_sums = np.empty((n_miss, samples))
+                        sub_focal = np.empty(n_miss, np.int64)
+                        sub_first = np.empty(n_miss, np.int64)
+                        sub_end = np.empty(n_miss, np.int64)
+                        sub_offsets = np.zeros(n_miss + 1, np.int64)
+                        for t in range(n_miss):
+                            m = sub[t]
+                            sub_f[t] = f_start[m]
+                            sub_g[t] = g_start[m]
+                            sub_e[t] = g_end[m]
+                            sub_sums[t] = sums[m]
+                            sub_focal[t] = focal[m]
+                            sub_first[t] = first_block[m]
+                            sub_end[t] = end_block[m]
+                            sub_offsets[t + 1] = sub_offsets[t] + row_offsets[m + 1] - row_offsets[m]
+                        sub_flat = np.empty(sub_offsets[n_miss], np.int64)
+                        for t in range(n_miss):
+                            m = sub[t]
+                            for r in range(row_offsets[m + 1] - row_offsets[m]):
+                                sub_flat[sub_offsets[t] + r] = flat[row_offsets[m] + r]
+                        sub_gains = candidate_gains(
+                            haps,
+                            leaves,
+                            win,
+                            offsets,
+                            sub_f,
+                            sub_g,
+                            sub_focal,
+                            sub_first,
+                            sub_end,
+                            sub_flat,
+                            sub_offsets,
+                            sub_e,
+                            sub_sums,
+                        )
+                        for t in range(n_miss):
+                            member_gains[sub[t]] = sub_gains[t]
+                    gstat[G_REUSED] += n_hit * samples
+                for m in range(n_mem):
+                    j = slot[m]
+                    if j >= 0 and not hit[m]:
+                        ggain[j] = member_gains[m]
+                        gdig[j] = dig[m]
+                        gstamp[j] = stamp
+            else:
+                member_gains = candidate_gains(
+                    haps,
+                    leaves,
+                    win,
+                    offsets,
+                    f_start,
+                    g_start,
+                    focal,
+                    first_block,
+                    end_block,
+                    flat,
+                    row_offsets,
+                    g_end,
+                    sums,
+                )
             for m in range(n_mem):
                 i = members[m]
                 total = 0.0
@@ -797,9 +1013,10 @@ def pass_chunk(
     tie_q,
     reverse,
     optimistic,
+    reuse,
 ):
     """Junctions [j0, j1) of one acceptance pass (module docstring); haps, X and lab are modified in
-    place, acc (ACC_KEYS) accumulated.
+    place, acc (ACC_KEYS) accumulated; reuse: the pass's gain cache and exchange log (module notes at _mix64).
 
     State in: frontier0, the carried forward message f0 (counts fcnt0) at j0, gperm0 (current state
     -> stored state), lab (proposal founder label -> current row), the guard's sparse history `local` of
@@ -894,6 +1111,13 @@ def pass_chunk(
                 acc[_A_EXCHANGE] += 1
                 acc[_A_EXCHANGE_GAIN] += gains[best]
                 accepted_here = True
+                log = reuse[6]
+                logged = log[0, 0]
+                if logged + 1 < log.shape[0]:
+                    log[logged + 1, 0] = p
+                    log[logged + 1, 1] = a
+                    log[logged + 1, 2] = b
+                    log[0, 0] = logged + 1
         c0, c1 = cand_start[p], cand_start[p + 1]
         if c1 > c0:
             n_here = c1 - c0
@@ -979,6 +1203,8 @@ def pass_chunk(
                     ahead,
                     acc,
                     -1,
+                    X,
+                    reuse,
                 )
                 if optimistic:
                     for i in range(n_act):
@@ -1058,6 +1284,8 @@ def pass_chunk(
                             ahead,
                             acc,
                             i,
+                            X,
+                            reuse,
                         )
                         if lex_gain[i] != gain:
                             raise InvariantError("founder refinement: lexicographic and plain gains differ")
@@ -1207,6 +1435,8 @@ def accept_pass(
     *,
     reverse,
     optimistic=False,
+    exchanges=None,
+    gain_table=None,
 ):
     """One exact acceptance pass on `orientation` (workspace.Orientation); X (K x B, that orientation's
     block order) is modified in place.
@@ -1226,6 +1456,9 @@ def accept_pass(
     optimistic (unguarded passes only): the pass stops, with counters["lex_abort"] = 1 and X
     partly edited, at the first coarse item whose gain exceeds TOL; until then a guarded pass of the
     same inputs makes exactly the same decisions (its gains and orders equal the plain ones).
+    exchanges: None, or a list that receives the pass's accepted suffix exchanges in order as (junction of
+    this orientation, founder a, founder b). gain_table: None, or the search's gain cache of this orientation
+    (gain_cache), which the pass reads and fills.
     Returns (counters {ACC_KEYS}, junction_gain (B + 1), junction_pair (B + 1, 2)).
     """
     tie_q = policy("assembly.refine.accept", reverse=reverse).quantum(scale)
@@ -1278,6 +1511,9 @@ def accept_pass(
         start_fcnt = count3
     junction_gain = np.full(blocks + 1, -np.inf)
     junction_pair = np.zeros((blocks + 1, 2), np.int64)
+    # At most EXCHANGE_ROUNDS exchanges per junction and pass: the log cannot overflow.
+    log = np.zeros((EXCHANGE_ROUNDS * blocks + 1 if exchanges is not None else 1, 3), np.int64)
+    reuse = (*(disabled_gain_cache() if gain_table is None else gain_table), log)
     frontier, p = 0, 0
     while p < blocks:
         stop = min(blocks, p + JUNCTION_BATCH)
@@ -1315,6 +1551,7 @@ def accept_pass(
                 tie_q,
                 bool(reverse),
                 bool(optimistic and not guarded),
+                reuse,
             )
         pristine = pristine and not accepted
         junction_gain[p:stop] = jg
@@ -1322,6 +1559,8 @@ def accept_pass(
         p = stop
         if acc[_A_LEX_ABORT]:
             break
+    if exchanges is not None:
+        exchanges.extend((int(q), int(a), int(b)) for q, a, b in log[1 : 1 + log[0, 0]])
     record = {
         key: (int(round(value)) if key in INTEGER_KEYS else float(value))
         for key, value in zip(ACC_KEYS, acc.tolist(), strict=True)
@@ -1329,4 +1568,51 @@ def accept_pass(
     return record, junction_gain, junction_pair
 
 
-__all__ = ["pass_chunk", "candidate_arrays", "accept_pass"]
+def gain_cache(slots, samples):
+    """An empty standing-offer gain cache of `slots` entries (a power of two) for `samples` samples: one per
+    search and pass orientation; gain_cache_bytes(slots, samples) bytes."""
+    stat = np.zeros(16, np.int64)
+    stat[G_ENABLED] = 1
+    return (
+        np.zeros(slots, np.uint64),
+        np.zeros(slots, np.uint64),
+        np.zeros(slots, np.int64),
+        np.zeros((slots, samples), np.uint64),
+        np.zeros((slots, samples)),
+        stat,
+    )
+
+
+def gain_cache_bytes(slots, samples):
+    """Bytes of gain_cache(slots, samples)."""
+    return int(slots) * (24 + 16 * int(samples)) + 16 * 8
+
+
+def gain_cache_slots(templates):
+    """Slots of a search's gain table per pass orientation for `templates` window templates:
+    GAIN_CACHE_TEMPLATE_SLOTS per template, a power of two of at least GAIN_CACHE_MIN_SLOTS."""
+    wanted = max(GAIN_CACHE_MIN_SLOTS, GAIN_CACHE_TEMPLATE_SLOTS * int(templates))
+    return 1 << int(wanted - 1).bit_length()
+
+
+def disabled_gain_cache():
+    """The one-slot placeholder of a pass without the gain cache (stat[G_ENABLED] = 0)."""
+    return (
+        np.zeros(1, np.uint64),
+        np.zeros(1, np.uint64),
+        np.zeros(1, np.int64),
+        np.zeros((1, 1), np.uint64),
+        np.zeros((1, 1)),
+        np.zeros(16, np.int64),
+    )
+
+
+__all__ = [
+    "pass_chunk",
+    "candidate_arrays",
+    "accept_pass",
+    "gain_cache",
+    "gain_cache_bytes",
+    "gain_cache_slots",
+    "disabled_gain_cache",
+]

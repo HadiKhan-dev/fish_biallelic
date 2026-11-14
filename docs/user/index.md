@@ -19,6 +19,6 @@ calls or recombination rates.
 - [Methods](../methods/index.md): models, decision rules and approximations by semantic unit.
 
 An unresolved parent or missing allele is a result, not an invitation to fill it
-from a sample label. `relatedness/pairs.csv` is optional and off by default; the
-relatedness family model still runs. Simulation evaluation uses generated truth;
-it does not turn names or cohort labels in a real cross into known relationships.
+from a sample label. The relatedness stage reports full-sib families, not pairwise
+identity-by-descent shares ([why](../methods/relatedness.md#pairwise-identity-by-descent)).
+Simulation evaluation uses generated truth; it does not turn names or cohort labels in a real cross into known relationships.

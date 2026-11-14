@@ -14,15 +14,12 @@ class Stage:
     product: str
     owners: tuple[str, ...] = ()
     kernel_roots: tuple[str, ...] = ()
-    pair_kernel_roots: tuple[str, ...] = ()
     kernels: tuple[str, ...] = ()
     steps: tuple[str, ...] = ()
     prefix: str = ""
     status: bool = False
     panels: tuple[str, ...] = ()
     evaluation: tuple[str, ...] = ()
-    pair_records: str | None = None
-    pair_owners: tuple[str, ...] = ()
 
 
 # Module paths keep catalog reads independent of scientific imports.
@@ -53,12 +50,9 @@ STAGES = {
         "families",
         owners=("stages.relatedness.families_task",),
         kernel_roots=("science.relatedness.run", "science.evidence.likelihoods"),
-        pair_kernel_roots=("science.relatedness.ibd", "science.evidence.likelihoods"),
         kernels=("relatedness",),
         steps=("relatedness",),
         prefix="relatedness",
-        pair_records="stages.relatedness.pairs_records",
-        pair_owners=("stages.relatedness.pairs_task",),
     ),
     "discovery": Stage(
         "stages.discovery.tasks",

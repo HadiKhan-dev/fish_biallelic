@@ -1,4 +1,4 @@
-"""Enumerate unordered sample pairs for family fitting and pairwise IBD."""
+"""Enumerate unordered sample pairs for family fitting."""
 
 import numba
 import numpy as np

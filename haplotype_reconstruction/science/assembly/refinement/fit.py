@@ -57,9 +57,9 @@ from .. import orders as tie_rules
 from . import checkpoints, costs
 from . import gains as gains_kernels
 from . import messages as kernels
-from .acceptance import MOVE_COARSE, MOVE_FINE, TOL, accept_pass
+from .acceptance import MOVE_COARSE, MOVE_FINE, TOL, accept_pass, gain_cache, gain_cache_bytes, gain_cache_slots
 from .beam import WindowBeam
-from .cache import Orientation, ProposalCache, WindowStore
+from .cache import Orientation, ProposalCache, WindowStore, merge_focals, state_permutation, template_receipt
 from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
 from .ledger import FitLedger
 from .objective import score_panel, score_switches_direct, selected_alleles
@@ -202,12 +202,126 @@ def _fit_summary(payload):
     return FitSummary(**values)
 
 
+def _block_labels(exchanges, founders, blocks, reverse):
+    """The label map a pass's accepted suffix exchanges leave on every block, or None when none moved a label.
+
+    exchanges: [(junction p of the pass's orientation, a, b)] in pass order; an exchange at p swaps the paths of
+    labels a and b on the pass's blocks >= p. Returns sigma int64 (B, K) in forward block order: label k on block b
+    now holds the path label sigma[b, k] held at the pass's start."""
+    if not exchanges:
+        return None
+    sigma = np.empty((blocks, founders), np.int64)
+    current = np.arange(founders, dtype=np.int64)
+    i = 0
+    for pb in range(blocks):
+        while i < len(exchanges) and exchanges[i][0] <= pb:
+            _, a, b = exchanges[i]
+            current[a], current[b] = current[b], current[a]
+            i += 1
+        sigma[blocks - 1 - pb if reverse else pb] = current
+    if not np.any(sigma != np.arange(founders)):
+        return None
+    return sigma
+
+
+def _relabel_messages(fwd, bwd, fcnt, bcnt, sigma):
+    """Restate held boundary messages (and switch counts) in the labels sigma leaves, in place: the forward
+    message at boundary x in block x - 1's labels, the backward one at x in block x's (dense and checkpointed
+    layouts; bwd/bcnt None: not held). The max-plus recursions take maxima and add per-state terms (no sum over
+    states, no index tie-break), so renaming founders permutes their states bit for bit; the boundary-0 and
+    boundary-B messages are uniform."""
+    blocks, founders = sigma.shape
+    identity = ~np.any(sigma != np.arange(founders), axis=1)
+    maps = {}
+
+    def states(block):
+        key = sigma[block].tobytes()
+        found = maps.get(key)
+        if found is None:
+            found = maps[key] = state_permutation(sigma[block])
+        return found
+
+    if fwd.dense:
+        # One permutation per maximal run of blocks [b0, b1) with one non-identity map.
+        b = 0
+        while b < blocks:
+            e = b + 1
+            while e < blocks and np.array_equal(sigma[e], sigma[b]):
+                e += 1
+            if not identity[b]:
+                perm = states(b)
+                for array in (fwd.data, fcnt):
+                    if array is not None:
+                        array[b + 1 : e + 1] = array[b + 1 : e + 1][:, :, perm]
+                if bwd is not None:
+                    for array in (bwd.data, bcnt):
+                        if array is not None:
+                            array[b:e] = array[b:e][:, :, perm]
+            b = e
+        return
+    for t, x in enumerate(np.asarray(fwd.bounds, np.int64)):
+        x = int(x)
+        if x >= 1 and not identity[x - 1]:
+            perm = states(x - 1)
+            for array in (fwd.data, fcnt):
+                if array is not None:
+                    array[t] = array[t][:, perm]
+        if bwd is not None and x < blocks and not identity[x]:
+            perm = states(x)
+            for array in (bwd.data, bcnt):
+                if array is not None:
+                    array[t] = array[t][:, perm]
+
+
+def _handed(holder):
+    """A shallow copy of the dict `holder` (or None), after which `holder` is emptied: the caller's reference no longer
+    keeps the contents alive."""
+    if holder is None:
+        return None
+    handed = dict(holder)
+    holder.clear()
+    return handed
+
+
+def _copy_messages(arrays):
+    """A private deep copy of a message state (fwd, bwd, fcnt, bcnt, fscale, bscale)."""
+    fwd, bwd, fcnt, bcnt, fscale, bscale = arrays
+    fc = None if fcnt is None else fcnt.copy()
+    bc = None if bcnt is None else bcnt.copy()
+    return (
+        checkpoints.BoundaryMessages(fwd.data.copy(), fc, fwd.bounds, fwd.haps, fwd.orientation, True),
+        checkpoints.BoundaryMessages(bwd.data.copy(), bc, bwd.bounds, bwd.haps, bwd.orientation, False),
+        fc,
+        bc,
+        fscale.copy(),
+        bscale.copy(),
+    )
+
+
+def _relabelled_changes(panel, X, sigma):
+    """Blocks whose messages update_messages must recompute after _relabel_messages(sigma): those where X differs
+    from the held panel renamed by sigma, and both blocks at every junction where sigma changes (there the held
+    path continuity differs). Exact for any sigma: on every other block the renamed held messages are X's."""
+    renamed = np.take_along_axis(panel, np.ascontiguousarray(sigma.T), axis=0)
+    changed = np.any(renamed != X, axis=0)
+    jump = np.flatnonzero(np.any(sigma[1:] != sigma[:-1], axis=1)) + 1
+    changed[jump] = True
+    changed[jump - 1] = True
+    return changed
+
+
 __all__ = ["SweepEngine", "PAIR_TABLE_BYTES"]
 
 
 class SweepEngine:
     """The fixed inputs of every converged fit of one component (workspace, window solver,
     both orientations, fit records)."""
+
+    # Reference path (tests): each search computes its own sweep 0, and every exact reuse inside a search (restated
+    # window results with their work receipts, relabelled message updates, cached standing-offer gains) is computed
+    # afresh as well and compared; the fresh value is used and a difference raises InvariantError. A run with it
+    # computes what the search computes without any of this reuse; off in production.
+    verify_reuse = False
 
     def __init__(
         self,
@@ -433,7 +547,14 @@ class SweepEngine:
         size = costs.fit_bytes(self.workspace, founders, self.guarded, self.cached_boundaries, polish)
         if polish:
             size += search_store_bytes(founders, self.blocks, self.beam.templates)
+        # The search's two standing-offer gain tables (one per pass orientation).
+        size += 2 * gain_cache_bytes(self._gain_slots(), self.workspace.samples)
         return size
+
+    def _gain_slots(self):
+        """Slots of a search's gain table per orientation: GAIN_CACHE_TEMPLATE_SLOTS per window template, a power of two
+        of at least GAIN_CACHE_MIN_SLOTS."""
+        return gain_cache_slots(len(self.windows.spans))
 
     # ------------------------------------------------------------------ messages and proposals
     def _full_messages(self, X, lex, budget):
@@ -475,14 +596,16 @@ class SweepEngine:
                             )
         return arrays
 
-    def _messages(self, X, budget, held=None, lex=None):
+    def _messages(self, X, budget, held=None, lex=None, sigma=None):
         """The messages of panel X (with switch counts when lex, default: under the guard).
 
         held: (panel, messages) of an earlier panel, owned by the caller: updated in place to X's
         where X differs from that panel (update_messages(_lex), bitwise the full computation); a
         held backward half of None is computed whole. Held messages without switch
         counts are not updated to lexicographic ones (computed whole); held counts are dropped
-        when lex is False (the scores of both recursions are the same)."""
+        when lex is False (the scores of both recursions are the same). sigma: the label map the
+        pass's suffix exchanges left (_block_labels), or None: the held messages are first restated in those
+        labels, and only the blocks _relabelled_changes names are recomputed."""
         lex = self.guarded if lex is None else bool(lex)
         if held is not None and lex and held[1][2] is None:
             held = None
@@ -503,7 +626,11 @@ class SweepEngine:
         for msg, cnt in ((fwd, fcnt), (bwd, bcnt)):
             msg.haps, msg.counts = haps, cnt
             msg.clear()
-        changed = np.any(panel != X, axis=0)
+        if sigma is not None:
+            _relabel_messages(fwd, bwd if known else None, fcnt, bcnt if known else None, sigma)
+            changed = _relabelled_changes(panel, X, sigma)
+        else:
+            changed = np.any(panel != X, axis=0)
         count3 = np.zeros((1, 1, 1))
         for s0, s1, n in sample_ranges(samples, budget):
             with budget.scope(n):
@@ -536,7 +663,7 @@ class SweepEngine:
                             )
         return fwd, bwd, fcnt, bcnt, fscale, bscale
 
-    def proposals(self, X, fwd, bwd, budget, cache=None, convention=None, prefix=None, tag=None):
+    def proposals(self, X, fwd, bwd, budget, cache=None, convention=None, prefix=None, tag=None, stage1=None):
         """Every window template's proposals for panel X with messages fwd, bwd.
 
         cache (a search's ProposalCache, updated in place): a window problem is a pure function of
@@ -548,7 +675,8 @@ class SweepEngine:
         the CPUs its focal problems can use (WindowSolver.focal_chunk_cap), and a template's focal problems run in
         chunks on its child's map (WindowSolver._template; the results are those of one call).
         The component's window store (component_store) serves and keeps every solve; tag: the count
-        fit's token (label, start panel) under which its keys are tracked for pinning, or None."""
+        fit's token (label, start panel) under which its keys are tracked for pinning, or None. stage1: every
+        template's convention-free stage for this panel and these messages (_shared_sweep0), or None."""
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             fwd = fwd.flanks(a for a, _ in self.windows.spans)
             bwd = bwd.flanks(c for _, c in self.windows.spans)
@@ -557,9 +685,14 @@ class SweepEngine:
         if store is not None and store.solver is not self.windows:
             raise InvariantError("a window store serves only the component solver it was created for")
 
+        def stage1_of(index):
+            return None if stage1 is None else stage1[index]
+
         def run(index, team=None):
             if store is None:
-                return self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
+                return self.windows.solve(
+                    index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team, stage1=stage1_of(index)
+                )
             a, c = self.windows.spans[index]
             key = store.key(index, a, c, X, fwd, bwd, convention)
             result = store.claim(key, tag)
@@ -568,7 +701,9 @@ class SweepEngine:
                 self.windows.work.reused(ordinals[index], result)
                 return result
             try:
-                result = self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
+                result = self.windows.solve(
+                    index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team, stage1=stage1_of(index)
+                )
                 store.store(key, result, tag)
             finally:
                 store.release(key)
@@ -577,23 +712,73 @@ class SweepEngine:
         spans = self.windows.spans
         results = [None] * len(spans)
         todo = list(range(len(spans))) if cache is None else cache.lookup(spans, X, fwd, bwd, results)
+        restated = [] if cache is None else cache.restated_hits
+        if self.verify_reuse and restated:
+            self._verify_restated(X, fwd, bwd, budget, cache, convention, results)
+        # Restated hits whose order-sensitive focals are solved afresh (their completions).
+        completing = {} if cache is None else cache.partial_hits
         if prefix is None:
             prefix = (self.bind_fits(1)[0], 0, 0)
-        ordinals = self.windows.work.bind(prefix, todo)
+        # A restated hit answers exactly a problem the released search solves (relabel leaves a problem the renaming
+        # maps to itself unrestated): it is bound and receipted like that solve (its logical account), with no
+        # new physical work, so the logical work prefix and the solved/reused split are the released ones.
+        ordinals = self.windows.work.bind(prefix, todo + restated)
+        for index in restated:
+            if index not in completing:
+                self.windows.work.reused(ordinals[index], results[index])
+                if store is not None:
+                    # The component's store keeps what the search would have solved here: the same problems with the
+                    # same results, so other fits meet them as without the restatement.
+                    store.store(store.key(index, *spans[index], X, fwd, bwd, convention), results[index], tag)
+
+        def complete(index, team=None):
+            # A focal's result does not depend on which other focals share its call (merge_focal_chunks); the
+            # completion's debits are at most the full solve's, which stayed within the account. The template's
+            # receipt is its restated one (recorded with the merged result, in this map, before any stop is raised).
+            key = None
+            if store is not None:
+                key = store.key(index, *spans[index], X, fwd, bwd, convention)
+                stored = store.claim(key, tag)
+                if stored is not None:
+                    # Some fit of the component solved this very problem: its result, every focal included.
+                    self.windows.work.reused(ordinals[index], stored)
+                    return stored
+            try:
+                fresh = self.windows.solve(
+                    index,
+                    X,
+                    fwd,
+                    bwd,
+                    convention,
+                    ordinal=ordinals[index],
+                    team=team,
+                    focals=completing[index],
+                    completion=True,
+                )
+                merged = merge_focals(results[index], fresh)
+                if store is not None:
+                    store.store(key, merged, tag)
+            finally:
+                if store is not None:
+                    store.release(key)
+            self.windows.work.reused(ordinals[index], merged)
+            return merged
+
         windows = self.windows
+        work = [(index, run) for index in todo] + [(index, complete) for index in completing]
         sizes = [
             windows.template_bytes(*windows.templates[index], self.workspace.samples, len(X))
             + (0 if store is None else store.transient_bytes(*spans[index], X, fwd, bwd))
-            for index in todo
+            for index, _ in work
         ]
         # Largest templates first (their workspace estimate tracks their work), so the map's tail holds small
         # solves; each result is stored at its own index, so the order changes timing only.
-        order = sorted(range(len(todo)), key=lambda i: (-sizes[i], i))
-        caps = [windows.focal_chunk_cap(todo[i], self.workspace.samples, len(X)) for i in order]
-        if max(caps, default=1) > 1 and int(budget.threads()) > len(todo):
+        order = sorted(range(len(work)), key=lambda i: (-sizes[i], i))
+        caps = [windows.focal_chunk_cap(work[i][0], self.workspace.samples, len(X)) for i in order]
+        if max(caps, default=1) > 1 and int(budget.threads()) > len(work):
             solved = [None] * len(order)
             for position, value in budget.concurrent(
-                [partial(run, todo[i]) for i in order],
+                [partial(work[i][1], work[i][0]) for i in order],
                 [sizes[i] for i in order],
                 label="founder_refinement window solves",
                 caps=caps,
@@ -601,18 +786,20 @@ class SweepEngine:
                 solved[position] = value
         else:
             solved = budget.thread_map(
-                run,
-                [todo[i] for i in order],
+                lambda item: item[1](item[0]),
+                [work[i] for i in order],
                 item_bytes=[sizes[i] for i in order],
                 label="founder_refinement window solves",
             )
-        computed = [None] * len(todo)
+        computed = [None] * len(work)
         for i, value in zip(order, solved, strict=False):
             computed[i] = value
-        for index, value in zip(todo, computed, strict=False):
+        for (index, _), value in zip(work, computed, strict=False):
             results[index] = value
         if cache is not None:
-            cache.store(spans, X, fwd, bwd, todo, computed)
+            cache.store(spans, X, fwd, bwd, todo, computed[: len(todo)])
+            for index in completing:
+                cache.keep(index, results[index])
         proposals = []
         stats = dict(
             windows=0,
@@ -622,8 +809,8 @@ class SweepEngine:
             max_frontier=0,
             fallbacks=0,
             changed=0,
-            templates_solved=len(todo),
-            templates_reused=len(spans) - len(todo),
+            templates_solved=len(todo) + len(restated),
+            templates_reused=len(spans) - len(todo) - len(restated),
             beam_truncations=0,
             beam_fallbacks=0,
         )
@@ -1152,15 +1339,121 @@ class SweepEngine:
         )
         return Y, float(gain), record
 
-    def _sweep_inputs(self, X, budget, cache, held=None, convention=None, lex=None, prefix=None, tag=None):
-        """The messages of panel X and its window proposals (pure functions of the panel and the convention)."""
-        message_state = self._messages(X, budget, held, lex)
-        proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention, prefix, tag)
+    def _sweep_inputs(
+        self, X, budget, cache, held=None, convention=None, lex=None, prefix=None, tag=None, sigma=None, shared=None
+    ):
+        """The messages of panel X and its window proposals (pure functions of the panel and the convention).
+
+        sigma: the label map of the previous pass's suffix exchanges (_block_labels) or None: the held
+        messages and the proposal cache are restated in it. shared: this search's sweep-0 inputs from
+        _shared_sweep0 (its own message set and the templates' convention-free stage) or None."""
+        stage1 = None
+        if shared is not None:
+            message_state, stage1 = shared["messages"], shared["stage1"]
+        else:
+            message_state = self._messages(X, budget, held, lex, sigma)
+            if self.verify_reuse and sigma is not None and held is not None:
+                self._verify_messages(X, message_state, budget)
+        if sigma is not None:
+            cache.relabel(self.windows.spans, sigma)
+        proposals, stats = self.proposals(
+            X, message_state[0], message_state[1], budget, cache, convention, prefix, tag, stage1=stage1
+        )
         return dict(
             messages=message_state,
             proposals=proposals,
             stats=stats,
         )
+
+    def _verify_messages(self, X, message_state, budget):
+        """verify_reuse: the relabelled message update must equal the full computation bit for bit."""
+        full = self._full_messages(X, message_state[2] is not None, budget)
+        for name, x, y in zip(("fwd", "bwd", "fcnt", "bcnt", "fscale", "bscale"), message_state, full, strict=True):
+            x, y = getattr(x, "data", x), getattr(y, "data", y)
+            if (x is None) != (y is None) or (x is not None and not np.array_equal(x, y)):
+                raise InvariantError(f"founder refinement {self.name}: relabelled message update differs ({name})")
+
+    def _verify_restated(self, X, fwd, bwd, budget, cache, convention, results):
+        """verify_reuse: every restated proposal-cache hit is solved afresh and must equal the restatement (rows,
+        focal diagnostics and the template's work receipt), except its order-sensitive focals, which the search
+        solves afresh anyway (counted in cache.verify_flagged, and in verify_flagged_differ when the restatement
+        would have differed); the fresh result is kept."""
+        from .work_limit import WindowWorkState
+
+        clone = copy.copy(self.windows)
+        clone.work = WindowWorkState(self.windows.work.source_start)
+        hits = list(cache.restated_hits)
+        fresh = budget.thread_map(
+            lambda index: clone.solve(index, X, fwd, bwd, convention),
+            hits,
+            item_bytes=[
+                self.windows.template_bytes(*self.windows.templates[i], self.workspace.samples, len(X)) for i in hits
+            ],
+            label="founder_refinement window solves",
+        )
+        names = ("certified", "dp", "frontier", "fixing_dps", "fallback", "status", "seeded_tie")
+        for index, value in zip(hits, fresh, strict=True):
+            old = results[index]
+            flagged = set(cache.partial_hits.pop(index, ()))
+            if template_receipt(old[0][5]) != template_receipt(value[0][5]):
+                raise InvariantError(
+                    f"founder refinement {self.name}: restated work receipt differs (template {index})"
+                )
+            for x, y in zip(old, value, strict=True):
+                same = x[:4] == y[:4] and (x[4] is None) == (y[4] is None)
+                same = same and (x[4] is None or np.array_equal(x[4], y[4]))
+                same = same and all(x[5].get(name) == y[5].get(name) for name in names)
+                if int(y[3]) in flagged:
+                    cache.verify_flagged += 1
+                    cache.verify_flagged_differ += int(not same)
+                elif not same:
+                    raise InvariantError(
+                        f"founder refinement {self.name}: restated window result differs (template {index}, "
+                        f"focal {y[3]})"
+                    )
+            results[index] = value
+            cache.keep(index, value)
+
+    def _shared_sweep0(self, start, budget):
+        """What a fit's two searches share in sweep 0: the start panel's full messages (computed once; the
+        reverse-first search takes a private copy) and the convention-free solve stage (WindowSolver.stage1) of
+        every template that the component's window store does not already hold in both conventions (a held one is
+        taken from the store), both pure functions of the start panel. Returns {first: {messages, stage1}}; each
+        search pops its own entry, so nothing stays referenced beyond its sweep 0."""
+        X = np.ascontiguousarray(start, np.int64).copy()
+        lex = self.guarded
+        with budget.reserve(2 * self.message_bytes(len(X), lex), label="founder_refinement shared sweep 0"):
+            arrays = self._full_messages(X, lex, budget)
+            spans = self.windows.spans
+            with budget.scope(sample_threads(self.workspace.samples, budget)):
+                fwd = arrays[0].flanks(a for a, _ in spans)
+                bwd = arrays[1].flanks(c for _, c in spans)
+            windows = self.windows
+            store = self._window_store
+            needed = [
+                i
+                for i in range(len(spans))
+                if store is None
+                or not all(
+                    store.holds(store.key(i, *spans[i], X, fwd, bwd, convention)) for convention in (False, True)
+                )
+            ]
+            sizes = {i: windows.template_bytes(*windows.templates[i], self.workspace.samples, len(X)) for i in needed}
+            order = sorted(needed, key=lambda i: (-sizes[i], i))
+            solved = budget.thread_map(
+                lambda index: windows.stage1(index, X, fwd, bwd),
+                order,
+                item_bytes=[sizes[i] for i in order],
+                label="founder_refinement window solves",
+            )
+            stage1 = [None] * len(spans)
+            for i, value in zip(order, solved, strict=True):
+                stage1[i] = value
+            copy_of = _copy_messages(arrays)
+        return {
+            "fwd": dict(messages=arrays, stage1=stage1),
+            "rev": dict(messages=copy_of, stage1=stage1),
+        }
 
     # ------------------------------------------------------------------ fixed-K fit
     def converge(self, start, label: str, budget: RefinementExecution, polish: bool = False, *, ordinal=None) -> Fit:
@@ -1226,9 +1519,13 @@ class SweepEngine:
         # The two searches differ in their start direction and in their content-order convention
         # (forward-first: the default order, reverse-first: the reversed one), so the kept fit is the better of
         # both conventions rather than a product of one (equal F with different panels: flagged tied_panels).
-        # Their sweep-0 proposals differ; only the initial exact objective, independent of direction and
-        # convention, is shared.
+        # Their sweep-0 proposals differ. What does not depend on direction or convention is computed once: the
+        # initial exact objective and, when neither search resumes, the start panel's messages and every
+        # template's convention-free solve stage (_shared_sweep0).
         initial_scores = self.per_sample(start, budget)
+        shared = None
+        if not polish and not self.verify_reuse and self._fresh_searches(label):
+            shared = self._shared_sweep0(start, budget)
         if polish:
             # Polish fits run the forward-first search only, with the whole budget (its extra move families
             # dominate its cost; the count pass's fits keep the best of two). No reverse search runs: the
@@ -1245,7 +1542,7 @@ class SweepEngine:
             for index, result in budget.concurrent(
                 [
                     lambda child, first=first: self._converge_direction(
-                        start, label, first, child, initial_scores, polish, ordinal
+                        start, label, first, child, initial_scores, polish, ordinal, shared
                     )
                     for first in ("fwd", "rev")
                 ],
@@ -1390,13 +1687,28 @@ class SweepEngine:
         self.ledger.fits[token] = tuple(variants)
         return self._choose_fit(token, variants)
 
-    def _converge_direction(self, start, label, first, budget, initial_scores=None, polish=False, ordinal=None):
+    def _fresh_searches(self, label):
+        """Neither search of fit `label` has a record (sweep 0 is shared only when both compute it)."""
+        if self.records is None:
+            return True
+        return all(
+            self._load(f"{label}.{first}.done") is None and self._load(f"{label}.{first}.sweep0") is None
+            for first in ("fwd", "rev")
+        )
+
+    def _converge_direction(
+        self, start, label, first, budget, initial_scores=None, polish=False, ordinal=None, shared=None
+    ):
         """_search under one window lease of the panel's K: every kernel of the search reads the same
         streaming window (stages.assembly.storage.Windows.lease; nothing for a resident component)."""
         with self.workspace.windows.lease(len(start)):
-            return self._search(start, label, first, budget, initial_scores, polish, ordinal)
+            # The search's own sweep-0 inputs leave the shared dict here; _handed empties this frame's holder so the
+            # search alone references them and drops them after its sweep 0 (a reference kept in this frame would hold
+            # that message set for the whole search).
+            mine = None if shared is None else shared.pop(first)
+            return self._search(start, label, first, budget, initial_scores, polish, ordinal, _handed(mine))
 
-    def _search(self, start, label, first, budget, initial_scores=None, polish=False, ordinal=None):
+    def _search(self, start, label, first, budget, initial_scores=None, polish=False, ordinal=None, shared=None):
         """One search from start: sweeps until one accepts nothing (or the reported sweep limit);
         the first pass runs forward (first "fwd") or reversed ("rev"), later passes alternate.
         Records <label>.<first>.sweep<n> (that sweep's state and history entry) and .done.
@@ -1434,6 +1746,10 @@ class SweepEngine:
         lex_next = True
         limit = self.config.sweep_limit
         resumed = 0
+        # The label map the last pass's suffix exchanges left (None: no exchange), and this search's standing-offer
+        # gain tables by pass orientation.
+        sigma = None
+        tables = {}
         while sweep < limit:
             saved = self._load(f"{label}.sweep{sweep}")
             if saved is None:
@@ -1458,7 +1774,10 @@ class SweepEngine:
                 lex=self.guarded and lex_next,
                 prefix=(ordinal, int(first == "rev"), sweep),
                 tag=tag,
+                sigma=sigma,
+                shared=shared if (sweep == 0 and resumed == 0) else None,
             )
+            shared = sigma = None
             held = None
             lex = inputs["messages"][2] is not None
             fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
@@ -1473,7 +1792,13 @@ class SweepEngine:
                 else:
                     props.setdefault(a, []).append((_MOVE_CODES[kind], c, k, rows))
             lex_aborts = 0
+            table = tables.get(reverse)
+            if table is None:
+                table = tables[reverse] = gain_cache(self._gain_slots(), self.workspace.samples)
+                table[5][1] = int(self.verify_reuse)
+            table[5][2] = sweep + 1
             while True:
+                exchanges = []
                 with budget.scope(sample_threads(self.workspace.samples, budget)):
                     if reverse:
                         # The reversed pass stores the clamped forward messages; their per-block
@@ -1510,6 +1835,8 @@ class SweepEngine:
                     scale=abs(F),
                     reverse=(first == "rev"),
                     optimistic=self.guarded and not lex,
+                    exchanges=exchanges,
+                    gain_table=table,
                 )
                 if not acc["lex_abort"]:
                     break
@@ -1528,6 +1855,10 @@ class SweepEngine:
             held = (X, kept)
             del kept
             X = np.ascontiguousarray(Xo[:, ::-1]) if reverse else Xo
+            if exchanges:
+                sigma = _block_labels(exchanges, founders, blocks, reverse)
+            if table[5][10]:
+                raise InvariantError(f"founder refinement {self.name}.{label}:{sweep}: cached gains differ (verify)")
             accepted = acc["fine"] + acc["coarse"] + acc["exchange"]
             if accepted or current is None:
                 current = self.per_sample(X, budget)

@@ -9,11 +9,11 @@ if TYPE_CHECKING:
 
     from .reader import Results
 
-__all__ = ["Results", "StagePanel", "RelatednessView", "recorded_input_order", "open_results"]
+__all__ = ["Results", "StagePanel", "recorded_input_order", "open_results"]
 
 
 def __getattr__(name: str):
-    if name in ("Results", "RelatednessView"):
+    if name == "Results":
         from . import reader
 
         return getattr(reader, name)

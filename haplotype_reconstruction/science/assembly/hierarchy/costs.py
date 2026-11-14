@@ -14,6 +14,9 @@ from ..join.emissions import sites_per_bin
 
 # Cost only: estimated Python beam/archive residence in bytes per path-pair.
 POOL_BYTES_PER_PATH_PAIR = 200
+# Scheduling only: samples per thread of a straggler batch's minimum team, as one 64-sample selection lane block
+# (five threads at 304 samples; alone, a K-27 pearly context join kept 5.8 of 8 threads busy).
+TEAM_SAMPLES = 64
 
 
 def batch_threads(task: JoinTask) -> int:
@@ -28,6 +31,14 @@ def batch_threads(task: JoinTask) -> int:
     # ones use the live share even when the cohort contains few samples.
     grain = samples_per_thread(bins * founders * founders)
     return max(1, len(task.samples) // grain)
+
+
+def batch_team_width(task: JoinTask) -> int:
+    """A straggler batch's minimum team: one thread per TEAM_SAMPLES informative samples, within its useful width.
+
+    Per-thread work then stays at least that of TEAM_SAMPLES samples whatever the cohort size, so the team's
+    efficiency does not fall with N; the live share may still widen the batch to batch_threads."""
+    return max(1, min(batch_threads(task), -(-len(task.samples) // TEAM_SAMPLES)))
 
 
 def batch_work(task: JoinTask) -> int:

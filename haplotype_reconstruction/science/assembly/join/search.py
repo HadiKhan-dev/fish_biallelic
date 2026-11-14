@@ -44,6 +44,8 @@ Invariant: Only changed ordered pool content triggers additional count evidence;
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -218,6 +220,56 @@ def _paths(beam) -> list[tuple[int, ...]]:
     return list(dict.fromkeys(tuple(int(row) for row in path) for path, _ in beam))
 
 
+@dataclasses.dataclass
+class _Loop:
+    """The search loop's own state (part of the complete state at a sweep boundary, AJ29).
+
+    quota: the endpoint quota of the pool; ladder_top / quota_backstop: the saturation ladder's top and its
+    backstop; largest_pool: the largest candidate pool so far; sweeps (tier-1 sweeps plus accepted tier-2 moves and
+    saturation rungs), phase_sweeps (since the last count change: the sweep backstop's count), tier1_sweeps,
+    tier2_passes, tier2_accepted, saturation_steps, saturation_accepted; certified / backstop_reached /
+    pool_backstop: how the loop ended. Every field enters PanelSearch.state_key.
+    """
+
+    quota: int
+    ladder_top: int
+    quota_backstop: int
+    largest_pool: int
+    sweeps: int = 0
+    phase_sweeps: int = 0
+    tier1_sweeps: int = 0
+    tier2_passes: int = 0
+    tier2_accepted: int = 0
+    saturation_steps: int = 0
+    saturation_accepted: int = 0
+    certified: bool = False
+    backstop_reached: bool = False
+    pool_backstop: bool = False
+
+
+def _canonical(value):
+    """A plain, order-defined form of a state value for the state key: ints and floats as Python numbers (repr is
+    exact), sets sorted, dicts in insertion order, arrays as (dtype, shape, bytes)."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return float(value)
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        return ("array", contiguous.dtype.str, contiguous.shape, contiguous.tobytes())
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted(_canonical(item) for item in value)))
+    if isinstance(value, Mapping):
+        return ("map", tuple((_canonical(key), _canonical(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical(item) for item in value)
+    raise TypeError(f"no state-key form for {type(value).__name__}")
+
+
 class PanelSearch:
     """One join's certified panel search (see the module docstring); :meth:`run` executes it.
 
@@ -228,7 +280,36 @@ class PanelSearch:
     (``sizes``, with the changes that deleted a path without sequence of its own in
     ``cleanup_steps``) and the count tallies; the caches (exclusion forwards of the last panels,
     birth bounds by path set, beam re-runs), which never change results.
+
+    STATE_FIELDS (with the loop's _Loop) is the complete state at a sweep boundary: everything the rest of the
+    search reads that is neither a constant of the join, a pure cache, a record the search only appends to, nor a
+    work or tie counter. state_key digests it; a replay whose key equals an earlier execution's adopts that
+    execution's continuation (alternatives.ReplayMerge, AJ29).
     """
+
+    STATE_FIELDS = (
+        "selected",
+        "baseline_scores",
+        "likelihood",
+        "candidates",
+        "capacity",
+        "born",
+        "births_frozen",
+        "birth_sets",
+        "count_states",
+        "sizes",
+        "cleanup_steps",
+        "count",
+        "count_steps",
+        "_sweeps_run",
+        "_certify_runs",
+        "_terminal_choices",
+        "_plateau_candidates",
+        "_plateau_certified",
+        "refit_events",
+    )
+    # The bounded replays' merge index (alternatives.ReplayMerge; None: no merging).
+    merge = None
 
     def __init__(
         self,
@@ -247,9 +328,11 @@ class PanelSearch:
         choice_plan: Any = None,
         shared_layout: EmissionLayout | None = None,
         tie_settings: ties.TieSettings = DEFAULT_TIE_SETTINGS,
+        merge: Any = None,
     ) -> None:
         self.tie_settings = tie_settings
         self.choice_plan = choice_plan
+        self.merge = merge
         self.config = config
         # The batch linker's path score (join/beam.path_linkage): the data criterion inside
         # log-likelihood tie classes (None: panel content alone decides inside a class).
@@ -578,6 +661,29 @@ class PanelSearch:
         # Genuine accepted same-count/count moves end the uninterrupted flat
         # episode. A terminal continuation explicitly restores its visited set.
         self._plateau_certified = set()
+
+    def state_key(self, loop: _Loop) -> bytes:
+        """SHA-256 of the complete search state at a sweep boundary: STATE_FIELDS and the loop's fields.
+
+        The rest of the search is a deterministic function of this state (with its later serialized choices at
+        their defaults): two executions with one key continue identically. Floats enter by their exact value, the
+        pool by its ordered paths (digested once per pool list; pool lists are never changed in place).
+        """
+        digest = hashlib.sha256()
+        for name in self.STATE_FIELDS:
+            value = getattr(self, name)
+            if name == "candidates":
+                cached = getattr(self, "_pool_key", None)
+                if cached is None or cached[0] is not value:
+                    pool = np.asarray(value, dtype=np.int64).reshape(len(value), -1)
+                    cached = (value, hashlib.sha256(pool.tobytes() + repr(pool.shape).encode()).digest())
+                    self._pool_key = cached
+                encoded = cached[1]
+            else:
+                encoded = repr(_canonical(value)).encode()
+            digest.update(name.encode() + b"\0" + encoded + b"\0")
+        digest.update(b"loop\0" + repr(dataclasses.astuple(loop)).encode())
+        return digest.digest()
 
     # -- threads -------------------------------------------------------------------------------
 
@@ -1280,85 +1386,90 @@ class PanelSearch:
         """Search to a certified panel; optionally report the exact finalist switch prior."""
         outcome = self._search()
         if report_switches:
-            outcome = replace(outcome, minimum_switches=self.minimum_switch_count())
+            # The outcome's panel: a merged replay's own panel is the one it held at the merge.
+            outcome = replace(outcome, minimum_switches=self.minimum_switch_count(outcome.paths))
         return outcome
 
     def _search(self) -> JoinOutcome:
         config = self.config
-        quota = config.paths_per_endpoint
-        ladder_top = config.paths_per_endpoint * 2**POOL_QUOTA_DOUBLINGS
-        quota_backstop = config.paths_per_endpoint * 2**POOL_EXTENDED_DOUBLINGS
-        sweeps = phase_sweeps = tier1_sweeps = tier2_passes = tier2_accepted = 0
-        saturation_steps = saturation_accepted = 0
-        certified = backstop_reached = pool_backstop = False
-        largest_pool = len(self.candidates)
+        loop = _Loop(
+            quota=config.paths_per_endpoint,
+            ladder_top=config.paths_per_endpoint * 2**POOL_QUOTA_DOUBLINGS,
+            quota_backstop=config.paths_per_endpoint * 2**POOL_EXTENDED_DOUBLINGS,
+            largest_pool=len(self.candidates),
+        )
         final_forwards = None
         while True:
-            if phase_sweeps >= self.sweep_backstop:
-                backstop_reached = True
+            # A sweep boundary: the rest of the search reads only the state STATE_FIELDS and loop hold (AJ29).
+            if self.merge is not None:
+                merged = self.merge.boundary(self, loop)
+                if merged is not None:
+                    return merged
+            if loop.phase_sweeps >= self.sweep_backstop:
+                loop.backstop_reached = True
                 break
             best, record = self._tier1_sweep(self.selected, self.baseline_scores, self.likelihood)
-            record.update(sweep=tier1_sweeps + 1)
+            record.update(sweep=loop.tier1_sweeps + 1)
             self.events.append(record)
-            tier1_sweeps += 1
-            sweeps += 1
-            phase_sweeps += 1
+            loop.tier1_sweeps += 1
+            loop.sweeps += 1
+            loop.phase_sweeps += 1
             if best is not None:
                 apply_same_count(self, best[1], best[4])
                 continue
             # A tier-1 stall: count decisions first (re-certification only once they are quiescent).
             stall_forwards = self.panel_forwards(self.selected)
             if count_step(self, stall_forwards):
-                phase_sweeps = 0
+                loop.phase_sweeps = 0
                 continue
             # Tier 2 at the stall, on C0 plus the beam with the panel's multiplicity.
             pool_before = len(self.candidates)
-            pool = self._extension_pool(quota, self.selected)
+            pool = self._extension_pool(loop.quota, self.selected)
             # A fresh list with identical ordered content adds no count evidence.
             if pool != self.candidates:
                 self._set_pool(pool)
-                largest_pool = max(largest_pool, len(self.candidates))
+                loop.largest_pool = max(loop.largest_pool, len(self.candidates))
                 # The pool grew: births by its new paths are count moves of this stall too.
                 if count_step(self, stall_forwards):
-                    phase_sweeps = 0
+                    loop.phase_sweeps = 0
                     continue
-            tier2_passes += 1
+            loop.tier2_passes += 1
             best_move, record, forwards = self.certify(
-                self.selected, self.candidates, 0, True, self.capacity, key=f"t2/{tier2_passes}"
+                self.selected, self.candidates, 0, True, self.capacity, key=f"t2/{loop.tier2_passes}"
             )
             record.update(
                 tier=2,
-                tier2_pass=tier2_passes,
-                quota=quota,
+                tier2_pass=loop.tier2_passes,
+                quota=loop.quota,
                 pool_before=pool_before,
             )
             self.events.append(record)
             if best_move is not None:
-                tier2_accepted += 1
-                sweeps += 1
-                phase_sweeps += 1
+                loop.tier2_accepted += 1
+                loop.sweeps += 1
+                loop.phase_sweeps += 1
                 apply_same_count(self, best_move[3], best_move[4][1])
                 continue
             # Same-count certified and count-quiescent: duplicate-seed births (the chimera trap).
             if count_step(self, forwards, seeds=True):
-                phase_sweeps = 0
+                loop.phase_sweeps = 0
                 continue
             # Pool saturation: certify only when no doubled quota up to the ladder top adds an
             # improving replacement or accepted birth. The top is 256 for every join; once a
             # move was accepted at the 256 rung (the quota reached it) the ladder climbs on to
             # the backstop.
-            if quota >= ladder_top:
-                ladder_top = quota_backstop
-            if 2 * quota > ladder_top:
-                pool_backstop = True
+            if loop.quota >= loop.ladder_top:
+                loop.ladder_top = loop.quota_backstop
+            if 2 * loop.quota > loop.ladder_top:
+                loop.pool_backstop = True
                 final_forwards = forwards
                 break
             checked = set(self.candidates)
-            level = quota
+            level = loop.quota
             accepted = False
-            while not accepted and 2 * level <= ladder_top:
+            while not accepted and 2 * level <= loop.ladder_top:
                 level *= 2
-                saturation_steps += 1
+                loop.saturation_steps += 1
                 doubled = [path for path in self._extension_pool(level, self.selected) if path not in checked]
                 best_move, record, level_forwards = self.certify(
                     self.selected,
@@ -1366,12 +1477,12 @@ class PanelSearch:
                     len(self.candidates),
                     False,
                     len(self.candidates) + len(doubled),
-                    key=f"sat{saturation_steps}",
+                    key=f"sat{loop.saturation_steps}",
                 )
                 checked.update(doubled)
                 record.update(
                     stage="pool_saturation",
-                    quota=quota,
+                    quota=loop.quota,
                     tested_quota=level,
                     new_paths=len(doubled),
                 )
@@ -1387,15 +1498,15 @@ class PanelSearch:
                     # No fresh sweep/backstop/quota budget and no improvement
                     # counter. The chosen neighbor must pass its own continuation.
                     continue
-                certified = True
+                loop.certified = True
                 final_forwards = forwards
                 break
-            saturation_accepted += 1
-            sweeps += 1
-            phase_sweeps = 0
-            quota = level
-            self._set_pool(self._extension_pool(quota, self.selected))
-            largest_pool = max(largest_pool, len(self.candidates))
+            loop.saturation_accepted += 1
+            loop.sweeps += 1
+            loop.phase_sweeps = 0
+            loop.quota = level
+            self._set_pool(self._extension_pool(loop.quota, self.selected))
+            loop.largest_pool = max(loop.largest_pool, len(self.candidates))
         self.count["births_frozen"] = self.births_frozen
         if final_forwards is not None:
             self.count["final_paths_failing_death_test"] = final_census(self, final_forwards)
@@ -1405,25 +1516,25 @@ class PanelSearch:
             total_full_scores=self.evaluations,
             initialization=tuple(self.initialization),
             selected_initial_anchor=self.selected_anchor,
-            sweeps=sweeps,
-            tier1_sweeps=tier1_sweeps,
+            sweeps=loop.sweeps,
+            tier1_sweeps=loop.tier1_sweeps,
             sweep_backstop=self.sweep_backstop,
-            tier2_passes=tier2_passes,
-            tier2_accepted=tier2_accepted,
-            saturation_steps=saturation_steps,
-            saturation_accepted=saturation_accepted,
-            quota=quota,
-            ladder_top=ladder_top,
-            quota_backstop=quota_backstop,
+            tier2_passes=loop.tier2_passes,
+            tier2_accepted=loop.tier2_accepted,
+            saturation_steps=loop.saturation_steps,
+            saturation_accepted=loop.saturation_accepted,
+            quota=loop.quota,
+            ladder_top=loop.ladder_top,
+            quota_backstop=loop.quota_backstop,
             count=CountCensus(**self.count),
             count_exact_scores=self.counter.exact_scores,
             count_exact_sample_scores=self.counter.exact_sample_scores,
             pool_original=len(self.original_pool),
             pool_final=len(self.candidates),
-            pool_largest=largest_pool,
-            certified=certified,
-            backstop_reached=backstop_reached,
-            pool_backstop=pool_backstop,
+            pool_largest=loop.largest_pool,
+            certified=loop.certified,
+            backstop_reached=loop.backstop_reached,
+            pool_backstop=loop.pool_backstop,
             events=tuple(_plain(event) for event in self.events),
             tie_events=self.tie_counter.record(),
             work_counters={"beam_materialization_bounds": 0},
@@ -1453,6 +1564,7 @@ def search_panel(
     report_switches: bool = False,
     max_branches: int = MAX_BRANCHES,
     tie_settings: ties.TieSettings = DEFAULT_TIE_SETTINGS,
+    replay_merge: str = "on",
 ) -> JoinOutcome:
     """The certified panel of one joined batch.
 
@@ -1468,13 +1580,21 @@ def search_panel(
         summary's tie_events). max_branches: complete original-input executions, at
         most four including the primary; use one when an outer joint input family
         already consumes the branch budget. report_switches: return the exact final
-        minimum-switch prior even if the terminal panel is unique.
+        minimum-switch prior even if the terminal panel is unique. replay_merge: "on" (a replay whose
+        complete search state equals an earlier execution's at a sweep boundary adopts that execution's
+        continuation; its records are those of the full replay, its work and tie counters count only what ran),
+        "off" (every execution runs to its end), or "verify" (every execution runs to its end and each state
+        coincidence's adopted continuation is checked against it; alternatives.ReplayMergeMismatch otherwise).
     """
-    from .alternatives import resolve_replays, run_bounded_replays
+    from .alternatives import ReplayMerge, resolve_replays, run_bounded_replays
 
     shared_layout = None
     last_search = None
     shared_counter = counter if counter is not None else ties.SharedCounter()
+    if replay_merge not in ("on", "off", "verify"):
+        raise ValueError(f"unknown replay merge mode: {replay_merge}")
+    # One execution has nothing to merge with.
+    merge = ReplayMerge(verify=replay_merge == "verify") if replay_merge != "off" and max_branches > 1 else None
 
     def run(plan):
         nonlocal shared_layout, last_search
@@ -1496,10 +1616,14 @@ def search_panel(
             choice_plan=plan,
             shared_layout=shared_layout,
             tie_settings=tie_settings,
+            merge=merge,
         )
         shared_layout = last_search.layout
         try:
-            return last_search.run()
+            outcome = last_search.run()
+            if merge is not None:
+                merge.complete(last_search, outcome)
+            return outcome
         finally:
             # The finished CountStep owns bound callbacks to this search. Break
             # that cycle so sequential branches release their large caches now.

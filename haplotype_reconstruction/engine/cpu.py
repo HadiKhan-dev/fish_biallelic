@@ -1001,13 +1001,16 @@ class TaskBudget(CpuBudget):
     def claim(self, maximum: int | None = None, *, hold: int = 0) -> int:
         ceiling = self.maximum if maximum is None else min(self.maximum, max(1, maximum))
         floor = min(self.minimum, ceiling)
-        team = capped_threads(self.budget, ceiling, hold=hold)
+        # The declared minimum stays claimed through give-backs, as running children's CPUs do (hold): begin_task
+        # reserved it, and a minimum returned at one boundary would have to be won back from peers at the next.
+        # A phase capped below the minimum runs fewer threads but keeps the reservation.
+        team = capped_threads(self.budget, ceiling, hold=max(int(hold), min(self.minimum, self.maximum)))
         if isinstance(self.budget, PoolShareBudget) and team < floor:
             seat = pool_seat()
             assert seat is not None
             c = seat.counters
             with c.admission:
-                while read_counter(c.total) - (read_counter(c.claimed) - seat.claimed) < floor:
+                while seat.claimed < floor and read_counter(c.total) - (read_counter(c.claimed) - seat.claimed) < floor:
                     if read_counter(c.closed):
                         raise CancelledError("CPU group closed during minimum-team admission")
                     c.admission.wait(CPU_POLL_SECONDS)

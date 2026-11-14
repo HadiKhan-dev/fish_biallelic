@@ -1,1 +1,1 @@
-"""Publish independent families and optional pairwise IBD records; no import side effects."""
+"""Publish the independent relatedness families record; no import side effects."""

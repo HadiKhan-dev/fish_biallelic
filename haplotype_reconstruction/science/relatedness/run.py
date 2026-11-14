@@ -1,6 +1,6 @@
 """Build bound-order family terms and fit the full-sib partition.
 
-Owns family entries, never the optional IBD report. No storage or runtime policy.
+Owns family entries. No storage or runtime policy.
 Method: docs/methods/relatedness.md.
 The site axis and every reduction follow the supplied contig order.
 """

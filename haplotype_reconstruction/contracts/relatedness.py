@@ -1,14 +1,11 @@
-"""Separate family calls, optional pair reports, and their immutable reader view.
+"""Relatedness family calls and their measured fit summaries.
 
-Separate products prevent optional pair reporting from changing the family product.
-Only record definitions and immutable product views live here.
-No relatedness estimation, canonicalisation, storage, or optional-report imports.
+Only record definitions live here: no relatedness estimation, canonicalisation or storage.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -51,21 +48,6 @@ class RelatednessFamilies:
 
 
 @dataclass(frozen=True)
-class RelatednessPairs:
-    """Optional pairwise report; no family inference consumes these arrays."""
-
-    schema: int = schema_field(1)
-    pairs: NDArray[np.int64] = record_field("report", axes=("P", "2"), units="1", dtype="int64")
-    ibd: NDArray[np.float64] = record_field("report", axes=("P", "3"), units="probability", dtype="float64")
-    ibd_sites: NDArray[np.float64] = record_field("report", axes=("P",), units="site", dtype="float64")
-    lr_ibd0: NDArray[np.float64] = record_field("report", axes=("P",), units="nats", dtype="float64")
-    lr_ibd2: NDArray[np.float64] = record_field("report", axes=("P",), units="nats", dtype="float64")
-
-    def __post_init__(self) -> None:
-        freeze_record_arrays(self)
-
-
-@dataclass(frozen=True)
 class RelatednessDiagnostics:
     """Measured family-fit summaries; termination and fallback remain in families."""
 
@@ -77,36 +59,3 @@ class RelatednessDiagnostics:
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
-
-
-@dataclass(frozen=True)
-class Relatedness:
-    """Reader view of independent family and optional pair products; never stored.
-
-    Reconstructed by results from families and, only when requested, pairs. Arrays
-    belong to those immutable products and have their lifetime.
-    """
-
-    __payload_view__: ClassVar[bool] = True
-    families: RelatednessFamilies = record_field("call", dtype="RelatednessFamilies", stored=False)
-    pairs: RelatednessPairs | None = record_field("report", dtype="RelatednessPairs | None", stored=False, default=None)
-
-    @property
-    def sample_ids(self) -> tuple[str, ...]:
-        return self.families.sample_ids
-
-    @property
-    def contigs(self) -> tuple[str, ...]:
-        return self.families.contigs
-
-    @property
-    def family(self) -> NDArray[np.int64]:
-        return self.families.family
-
-    @property
-    def member_support(self) -> NDArray[np.float64]:
-        return self.families.member_support
-
-    @property
-    def parents(self) -> NDArray[np.int64]:
-        return self.families.parents

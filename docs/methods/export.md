@@ -146,7 +146,7 @@ Cost and scope: O(N · components). These terms describe the unit’s work/stora
 <a id="ou14"></a>
 ## ou14 Relatedness tables and summary
 
-Write relatedness family/support products in their declared row order, rendering unsequenced parent slots as empty names. Write pairs.csv only when the selected relatedness/pairs product exists, and remove a stale pair table when selection is off. Pairwise IBD is off by default; enabling it is an output selection outside scientific identities and does not recompute families.
+Write relatedness family/support products in their declared row order, rendering unsequenced parent slots as empty names. Remove a `relatedness/pairs.csv` found in the output directory: the stage publishes no pairwise table ([relatedness](relatedness.md#pairwise-identity-by-descent)).
 
 Implementation: [outputs/reports/relatedness.py](../../haplotype_reconstruction/outputs/reports/relatedness.py).
 

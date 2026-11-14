@@ -43,16 +43,14 @@ The following cost exceptions are explicit in 4.0:
 |---|---|---|
 | 0 | Rare context-coded local-selection screening, O(K⁵) per round | K⁵ is 24,300,000; this is an algebraic factor, not a measured operation count or runtime |
 | 0c | Discovery fitting O(N L K⁴), bounded replacement/archive/iteration searches; local-selection backstop O(N L K³ (K + L)) and context snaps O((K + L)²) passes | K⁴ is 810,000 and K³ is 27,000; full cost also depends on sample/site counts and the recorded search path |
-| 0d | Optional pairwise IBD output, O(N² L) | Independent of the founder-count ceiling; at N = 2,500 there are 3,123,750 unordered sample pairs |
 | 0e | Four worst-case costs above cubic in K: assembly joins' structural screening, refinement window fixing, painting label-continuity checks, founder-refit ties | Carried exactly and listed for review in 4.1; none binds on the validation inputs; see the [cost page](../developer/costs.md#exemptions-and-exceptions) |
 
 <!-- cost verdicts: summarized from the current cost table -->
 
-The [cost table](../developer/costs.md) covers 37 stage rows: 21 with at-most-cubic probed kernels, nine under retained exemptions or exceptions, two with the accepted natural-domain count cost, and five with no intrinsic K. The refinement-search gate remains provisional. The following rows have a retained exemption, exception or explicitly accepted above-cubic pass cost:
+The [cost table](../developer/costs.md) covers 36 stage rows: 21 with at-most-cubic probed kernels, eight under retained exemptions or exceptions, two with the accepted natural-domain count cost, and five with no intrinsic K. The refinement-search gate remains provisional. The following rows have a retained exemption, exception or explicitly accepted above-cubic pass cost:
 
 | Stage | Scope | At K = 30 |
 |---|---|---|
-| [relatedness.pairs](../methods/relatedness.md) | exemption 0d | N2500:3123750 pairs,224910000 bytes; off by default |
 | [discovery.fit](../methods/discovery.md) | exemption 0c | K⁴=810000; 50 iterations; ≤2 trajectories/start |
 | [discovery.search](../methods/discovery.md) | exemption 0c | 810000 N L; exact switch 12; 48/96 replacements; 6 panels/K; 50 iterations |
 | [selection.fit](../methods/selection.md) | exemption 0c | K²=900; snaps(140+2L)²; L400 release 393625600 bytes |

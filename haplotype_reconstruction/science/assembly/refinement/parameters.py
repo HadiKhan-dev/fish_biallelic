@@ -195,6 +195,12 @@ WINDOW_STORE_TRACKED_FITS = 128
 POLISH_SHARE_MIN_BYTES = 64 << 20
 POLISH_SHARE_MAX_BYTES = 2 << 30
 POLISH_SHARE_TEMPLATE_BYTES = 2 << 10
+# Standing-offer gain tables of a search (one per pass orientation): slots per window template and the smallest
+# table (rounded up to a power of two). In replays of captured refinement components the tables evicted under 0.1 %
+# of their inserts at K 15-30 on simulated crosses and 11-16 % on a hybrid cross at K 27-28. Runtime only: a missing
+# entry recomputes the same gains.
+GAIN_CACHE_TEMPLATE_SLOTS = 32
+GAIN_CACHE_MIN_SLOTS = 1024
 # Cumulative exact score miss admissions per component, shared by continuation branches.
 # Both limits bound storage only; saturation recomputes the same score. The byte
 # allowance keeps long panel keys from dominating small score vectors.

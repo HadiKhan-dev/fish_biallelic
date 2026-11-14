@@ -280,7 +280,7 @@ def _match_bound_configuration(
 
 def _output_selection(output: Path, settings: Settings) -> None:
     """Keep formatting choices beside their outputs, outside the checkpoint root."""
-    payload = dict(schema=1, export_enabled=settings.export.enabled, pairwise_ibd=settings.relatedness.pairwise_ibd)
+    payload = dict(schema=1, export_enabled=settings.export.enabled)
     with atomic_path(output / "output_selection.json") as temporary:
         temporary.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -651,8 +651,6 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
         "phase": tuple(key("phase", c) for c in resolved.analysis.included),
         "recombination": tuple(key("recombination", c) for c in resolved.analysis.included),
     }
-    if prepared.settings.relatedness.pairwise_ibd:
-        dependencies["relatedness"] += (TaskKey("relatedness", "pairs"),)
     if reader.synthetic:
         dependencies["truth"] = (key("init"),)
     if prepared.settings.export.enabled:
@@ -731,7 +729,7 @@ def _prerequisites(prepared, resolved, cut):
                 raise SettingsError(f"{contig}: current export is not published")
             values[key] = identity
             continue
-        request = results.stage_request(key.stage, contig, round_name=key.round, pairs=key.unit == "pairs")
+        request = results.stage_request(key.stage, contig, round_name=key.round)
         if results.receipt(request, contig) is None:
             raise SettingsError(f"workflow prerequisite {key.stage} for {key.scope} is not published")
         values[key] = request.identity
@@ -796,7 +794,7 @@ def execute(
     cut = None
     if command != "init":
         assert resolved is not None
-        from ..engine.graph import TaskKey, run_graph
+        from ..engine.graph import run_graph
         from ..results.reader import Results
         from ..stages.graph import (
             Node,
@@ -810,13 +808,6 @@ def execute(
 
         output_actions = _output_actions(prepared, resolved)
         output_nodes = tuple(Node(task.key, task.depends_on) for task in output_actions.values())
-        if settings.relatedness.pairwise_ibd:
-            output_nodes += (
-                Node(
-                    TaskKey("relatedness", "pairs"),
-                    tuple(TaskKey("evidence", "contig", c) for c in settings.input.contigs),
-                ),
-            )
         graph = build_graph(settings.input.contigs, output_nodes=output_nodes, analysis=resolved.analysis)
         painted: tuple[str, ...] = ()
         if settings.execution.max_contigs:

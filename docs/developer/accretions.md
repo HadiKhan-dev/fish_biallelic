@@ -8,7 +8,6 @@ An accretion is a retained special rule, bounded-search device or diagnostic who
 |---|---|---|
 | 0 | Context-coded selection screening | O(K⁴) per round from certificates and start de-duplication, plus at most 128 cubic exact-code solves; at K = 30 the quartic K-only factor is 810,000 |
 | 0c | Bounded discovery and selection searches | Discovery O(N L K⁴); selection backstop O(N L K³(K+L)) and context-snap passes O((K+L)²); K⁴ = 810,000 at K = 30. discovery's replacement starts (48/96) and archive beam (6/12), and selection's backstops, bank budgets, context snaps and LS10/LS17 caps bind at every K; they are bounded-search devices that need new search or stopping contracts, not larger constants |
-| 0d | Optional pairwise IBD | Off by default; O(N² L), with 3,123,750 unordered pairs at N = 2,500 |
 
 These are algebraic factors, not measured operation counts or timings. See [costs](costs.md) for their scope. Three further worst-case costs above cubic in K (assembly joins' structural screening, refinement window fixing and founder-refit ties) are carried exactly as documented exceptions under owner decision 0e, the treatment of 0c; the [cost page](costs.md#exemptions-and-exceptions) names them with their current scope.
 
@@ -53,7 +52,7 @@ These are algebraic factors, not measured operation counts or timings. See [cost
 | refinement-search / [RS06](../methods/refinement.md#rs06) | Shared messages and bounded search storage | Shared max-plus messages reuse unchanged path segments; storage admission follows actual problem dimensions and the fixed frontier. |
 | refinement-search / [RS07](../methods/refinement.md#rs07) | Per-template window work account and whole-component stop | The per-template work account stops an unfinished component and reports its domain. |
 | refinement-search / [RS18](../methods/refinement.md#rs18) | Weak label junctions (diagnostic) | reported intervals only. |
-| relatedness / [RL04](../methods/relatedness.md#rl04) | Pairwise three-state IBD chain and its genome-wide summaries | optional output (decision 0d); independent of family fit and pedigree. |
+| refinement-search / [RS19](../methods/refinement.md#rs19) | Exact reuse inside a fixed-K search (restated windows, relabelled messages, shared sweep 0, standing-offer gains) | exact reuse of renamed or unchanged problems; decisions, records and logical work accounts are those of computing afresh. |
 | relatedness / [RL18](../methods/relatedness.md#rl18) | Final half-sib links | released half-sib links; no feedback to fitted families or the pedigree; a scientific rule. |
 
 Numerical limits in the inventory labels identify the originating rules; their current values and provenance are authoritative only in the [generated parameter reference](../reference/parameters.md).

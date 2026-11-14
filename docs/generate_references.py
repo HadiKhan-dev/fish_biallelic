@@ -127,7 +127,7 @@ def render_settings() -> str:
         (
             "Empty strings represent an unset optional value. A default is not necessarily a complete "
             "runnable configuration. Scientific settings enter the relevant derivation; operational "
-            "fields are identified below. Pairwise IBD is an output selection and is off by default."
+            "fields are identified below."
         ),
         "",
     ]

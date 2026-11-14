@@ -340,6 +340,8 @@ Source: [haplotype_reconstruction/science/assembly/refinement/parameters.py](../
 | `POLISH_SHARE_MIN_BYTES` | `64 << 20` | See model | Scientific tolerances, search domains and fixed refinement controls. |
 | `POLISH_SHARE_MAX_BYTES` | `2 << 30` | See model | Scientific tolerances, search domains and fixed refinement controls. |
 | `POLISH_SHARE_TEMPLATE_BYTES` | `2 << 10` | See model | Scientific tolerances, search domains and fixed refinement controls. |
+| `GAIN_CACHE_TEMPLATE_SLOTS` | `32` | See model | Standing-offer gain tables of a search (one per pass orientation): slots per window template and the smallest table (rounded up to a power of two). In replays of captured refinement components the tables evicted under 0.1 % of their inserts at K 15-30 on simulated crosses and 11-16 % on a hybrid cross at K 27-28. Runtime only: a missing entry recomputes the same gains. |
+| `GAIN_CACHE_MIN_SLOTS` | `1024` | See model | Scientific tolerances, search domains and fixed refinement controls. |
 | `SCORE_LEDGER_ENTRIES` | `4096` | See model | Cumulative exact score miss admissions per component, shared by continuation branches. Both limits bound storage only; saturation recomputes the same score. The byte allowance keeps long panel keys from dominating small score vectors. |
 | `SCORE_LEDGER_BYTES` | `64 << 20` | See model | Retained miss allowance (bytes), reserved once per component. A fixed 64 MiB bounds multiplied component residence; large keys reduce the admitted count. |
 | `SCORE_LEDGER_ENTRY_OVERHEAD` | `512` | See model | Conservative bytes per miss for dictionary storage, admission counters and allocator slack; tuple/int keys and ndarray storage are charged separately. |
@@ -1019,14 +1021,6 @@ Source: [haplotype_reconstruction/science/refit/parameters.py](../../haplotype_r
 | `minimum_gain_nats` | `5.0` | nats | Minimum robust likelihood gain per changed allele cell (nats per cell); provides move hysteresis, with twice the gain required for a two-row move. |
 | `coordinate_sweeps` | `3` | 1 | Maximum single-row and two-row coordinate sweeps per site (sweeps); ends sooner if a sweep changes nothing. |
 | `fill_min_supporters` | `2` | 1 | Minimum painted carriers whose own reads favour a filled allele (samples); supplements the likelihood-gain requirement for an unknown cell. |
-## science.relatedness.ibd_parameters — PairwiseIbdParameters
-
-Source: [haplotype_reconstruction/science/relatedness/ibd_parameters.py](../../haplotype_reconstruction/science/relatedness/ibd_parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `ibd_site_step` | `10` | See model | Unconditional site stride for the optional pairwise IBD report (sites); thins report evidence independently of family fitting. |
-| `ibd_switch_rate` | `4.0` | See model | IBD-chain jump rate along the genetic map (per Morgan); determines exp(-rate times distance) stay weights. |
 ## science.relatedness.parameters — AlleleFrequencyParameters
 
 Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplotype_reconstruction/science/relatedness/parameters.py).

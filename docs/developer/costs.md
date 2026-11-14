@@ -8,7 +8,7 @@ N samples; K founder haplotypes; L sites (M selected sites); B bins or blocks; P
 
 ## Exemptions and exceptions
 
-The [mechanism register](accretions.md#cost-exemptions) identifies costly bounded searches and optional reports. Assembly structural screening, the local-selection context screen, refinement window fixing, the refinement count pass and founder-refit tie checks can exceed cubic work in founder count; painting label continuity is bounded per iteration by its check budget. Their method sections state the relevant candidate, frontier and work limits.
+The [mechanism register](accretions.md#cost-exemptions) identifies costly bounded searches. Assembly structural screening, the local-selection context screen, refinement window fixing, the refinement count pass and founder-refit tie checks can exceed cubic work in founder count; painting label continuity is bounded per iteration by its check budget. Their method sections state the relevant candidate, frontier and work limits.
 
 ## Natural-domain count refits
 
@@ -22,7 +22,6 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | --- | --- | --- | --- | --- |
 | [evidence](../methods/evidence.md) | GL O(N L); encoding O(N L log L); calibration O(N C) times fixed budgets | joint storage < 33 N L when coded; one-sample O(L + D) planning | no K term | K-independent |
 | [relatedness.families](../methods/relatedness.md) | O(N² M) screen; O(N² F) per sweep; O(F N M) support | 192 N M concatenate; 64 N M screens | no K term | F is families, not founders |
-| [relatedness.pairs](../methods/relatedness.md) | O(P L/10), P=N(N-1)/2; optional | 72 P | exemption 0d | N2500:3123750 pairs,224910000 bytes; off by default |
 | [discovery.fit](../methods/discovery.md) | O(N L K²) trajectory; O(N L K⁴) whole fitting term | 32 N×16384 transition cache; 24 B×1024 N patterns | exemption 0c | K⁴=810000; 50 iterations; ≤2 trajectories/start |
 | [discovery.search](../methods/discovery.md) | O(N L K⁴) fitting; O(N L K³) cavity; O(K³ + K² W + T K² √K) gauge cuts (W≤N, T≤2000) | 18 R L residual; 8 N S tile | exemption 0c | 810000 N L; 16 GW starts at every K; 48/96 replacements; 6 panels/K; 50 iterations |
 | [discovery.release](../methods/discovery.md) | O(N K L) release; O(K L log K) keys | 32 N×16384 plus patterns | ≤ K³ | linear release factor 30 |
@@ -48,7 +47,7 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [phase.release](../methods/phase.md) | O(N B(S+2)³ G) posterior; O(N L S²) site; O(E B) chains | 12 N L spool+5 N L site+E | ≤ K³ | K30 S31 L330000≈3e8 pair visits/sample |
 | [recombination](../methods/recombination.md) | O(E M) following; O(E Bm+calls) aggregate; O(loci² E+loci² parents grid) | 16 E Bm+phase chains | no K term | quadratic loci detector separate |
 | [sites_export](../methods/export.md) | O(M) scan; O(N M) sample VCF; O(M(C+K)) founder VCF; O(B K²) flags | 2 N L calls; O(M) sites | ≤ K² | N2500 M400000:1e9 cells; calls 2GB |
-| [reports](../methods/export.md) | O(N chunks K) painting writer; O(N²) optional pairs | one decoded product+buffers | ≤ K; optional pairs: exemption 0d | N2500 optional 3123750 rows |
+| [reports](../methods/export.md) | O(N chunks K) painting writer | one decoded product+buffers | ≤ K | linear in K |
 | [simulation](../methods/simulation.md) | O(N L) transmissions/reads; linear founders | 2 N L/contig haplotypes; 48 N L reads | ≤ K | N2500 L400000 C22 all-resident 44GB |
 | [evaluation](../methods/evaluation.md) | O(sum K L F) counts; O(K³) assignment; O(N L) phase; O(windows F²×100) | calls/truth/mask; no reordered calls copy | ≤ K³ | K30 F≤60; assignment 27000 units |
 | [contracts](../methods/core.md) | O(K L) views; O(B K²) partner changes | O(K L) panels; N L founder view | ≤ K² | partner pair factor 900 |

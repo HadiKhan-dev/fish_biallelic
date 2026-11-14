@@ -190,7 +190,6 @@ base column, position, meaning and unit, including all 17 pedigree tables.
 | `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component |
 | `relatedness/families.csv` | Input sample order; each member repeats its family's parent slots and support |
 | `relatedness/half_sib_links.csv` | Recorded sorted family-pair order |
-| `relatedness/pairs.csv` | Recorded sample-pair order; **optional and off by default** |
 | `pedigree/*.csv` | Stable input order where a `sample` column exists; otherwise recorded order |
 | `founder_refit/summary.csv`, `family_phase/summary.csv` | One recorded summary per contig |
 | `recombination/map.csv`, `recombination/crossovers.csv`, `recombination/meioses.csv`, `recombination/coverage.csv`, `recombination/junctions.csv`, `recombination/junction_members.csv`, `recombination/summary.csv` | bins, edges, calls or loci in recorded order; genome-wide tables concatenate contigs in configuration order |
@@ -337,19 +336,13 @@ collection cardinality, not a universal character limit for arbitrary sample
 names or custom parameter values. JSON summary documents may grow in rows or
 keys; they are documents rather than table cells.
 
-### Relatedness selection and JSON
+### Relatedness JSON
 
-`[relatedness] pairwise_ibd = true` enables the optional O(N² L) pair calculation.
-It is stored per invocation in `output_selection.json` in the output directory, outside every scientific
-identity. Families are unaffected. The results reader exposes pair fields only
-when selection is on **and** the checked `relatedness/pairs` publication exists.
-When off, report publication removes a stale pairs CSV while retaining the stored
-pair product for later use.
-
-family IDs are canonical dense ranks ordered by the family's smallest canonical
-member index. They are not that minimum index itself. Empty parent-slot cells denote latent
-slots. `relatedness/summary.json` contains exactly these keys, in order; there is
-no pair-selection key.
+The stage publishes families, their parent slots and half-sib links; it reports no pairwise
+identity-by-descent shares ([why](../methods/relatedness.md#pairwise-identity-by-descent)), and report
+publication removes a `relatedness/pairs.csv` left in the output directory. Family IDs are canonical dense
+ranks ordered by the family's smallest canonical member index. They are not that minimum index itself. Empty parent-slot cells denote latent
+slots. `relatedness/summary.json` contains exactly these keys, in order.
 
 | Key | Meaning |
 |---|---|
@@ -542,7 +535,6 @@ and identity columns are listed in their own sections.
 | `recombination/meioses.csv` | `contig`, `parent`, `child`, `parent_slot`, `released_chain_bins`, `followed_chain_bins`, `unresolved_chain_bins`, `called_crossovers`, `expected_crossovers`, `exposure_meiosis_bp` |
 | `recombination/summary.csv` | `contig`, `meioses`, `observable_meioses`, `crossovers`, `expected_crossovers`, `unresolved_bins`, `exposure_meiosis_bp`, `covered_bp`, `cumulative_observed_c_m`, `uncovered_bins`, `order_breakpoints`, `order_breakpoint_masked_sites`, `junction_loci`, `junction_loci_flagged`, `family_phase_converged`, `elapsed_seconds` |
 | `relatedness/families.csv` | `sample`, `family`, `family_support`, `parent_slot1`, `parent_slot1_support`, `parent_slot2`, `parent_slot2_support` |
-| `relatedness/pairs.csv (optional; off by default)` | `sample_a`, `sample_b`, `ibd0`, `ibd1`, `ibd2`, `sites`, `ibd0_evidence`, `ibd2_evidence` |
 | `relatedness/half_sib_links.csv` | `family_a`, `family_b`, `gain` |
 | `simulation/truth_pedigree.csv` | `sample`, `cohort`, `parent1`, `parent2` |
 | `founder_refit/summary.csv` | `contig`, `components`, `founder_rows`, `sites`, `called_alleles`, `changed_alleles`, `ambiguous_alleles`, `filled_alleles`, `changed_inference_alleles`, `changed_sites`, `median_changed_gain_nats`, `excluded_samples` |

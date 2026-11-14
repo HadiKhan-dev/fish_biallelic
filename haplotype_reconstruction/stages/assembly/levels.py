@@ -18,10 +18,16 @@ from haplotype_reconstruction.contracts.assembly import JoinRecord, JoinSettings
 from haplotype_reconstruction.contracts.panels import FounderComponent, PreparedPanel
 from haplotype_reconstruction.engine.cpu import thread_team
 from haplotype_reconstruction.engine.graph import ResourceRequest, ResultRef, Task, TaskKey
+from haplotype_reconstruction.engine.lanes import minimum_teams
 from haplotype_reconstruction.engine.workers import SharedArrayRef
 from haplotype_reconstruction.science.assembly.evidence import AssemblyEvidence
 from haplotype_reconstruction.science.assembly.hierarchy.batch import run_batch
-from haplotype_reconstruction.science.assembly.hierarchy.costs import batch_memory_bytes, batch_threads, batch_work
+from haplotype_reconstruction.science.assembly.hierarchy.costs import (
+    batch_memory_bytes,
+    batch_team_width,
+    batch_threads,
+    batch_work,
+)
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput, LevelPlan, compose_level, plan_level
 from haplotype_reconstruction.stages.framework import Expansion
 from haplotype_reconstruction.store.protocol import claim
@@ -108,12 +114,18 @@ def expand_level(
     plan = [(a, b, identities.get(index)) for index, (a, b) in enumerate(planned.partition.ranges)]
     if records is not None and not records.has("plan"):
         records.save("plan", dict(schema=1, batches=plan))
-    cached, pending = {}, []
+    cached, missing = {}, []
     for item in planned.tasks:
         stored = None if records is None else load_join(records.file, identities[item.index], index=item.index)
         if stored is not None:
             cached[item.index] = stored
             continue
+        missing.append(item)
+    # The level's straggler batches start on a minimum team of their useful width (engine minimum_teams).
+    works = [batch_work(item) for item in missing]
+    teams = minimum_teams(works, [batch_team_width(item) for item in missing], max_cores)
+    pending = []
+    for item, work, team in zip(missing, works, teams, strict=True):
         key = replace(parent, unit=f"{parent.unit}.batch{item.index}")
         # Batches are independent (each publishes its own join under a claim; the gather places them by index), so
         # they run side by side across the contig's lane. Pinning them to the parent's worker
@@ -123,7 +135,7 @@ def expand_level(
                 key,
                 execute_join,
                 args=(item, evidence.scoring if scoring_ref is None else scoring_ref, records, identities[item.index]),
-                resources=ResourceRequest(1, max_cores, batch_memory_bytes(item), cost=batch_work(item)),
+                resources=ResourceRequest(team, max(team, max_cores), batch_memory_bytes(item), cost=work),
                 thread_argument="cores",
             )
         )

@@ -236,11 +236,14 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     score = 2 * maximum_k * sites + min(sites * q, 1 << 31) + 8 * samples
     # Import at call time: proposals itself imports seeded_search_bytes above.
     # Admission owns only dimensions; it never creates a proposer or a store.
+    from .acceptance import gain_cache_bytes, gain_cache_slots
     from .proposals import window_templates
 
     templates = window_templates(blocks, None if context is None else context[0])
     polish_stores = search_store_bytes(maximum_k, blocks, templates) if config.polish else 0
-    child = search + window + max(proposal, guard, beam, score) + polish_stores
+    # Every search keeps a standing-offer gain table per pass orientation (acceptance.gain_cache).
+    gains = 2 * gain_cache_bytes(gain_cache_slots(len(templates)), samples)
+    child = search + window + max(proposal, guard, beam, score) + polish_stores + gains
     # The count driver evaluates shadow families in waves whose TOTAL scratch is
     # bounded by COUNT_FANOUT_BYTES. Charging a full FAMILY_BYTES to every CPU
     # made small components reserve tens of GiB for scratch that cannot coexist.

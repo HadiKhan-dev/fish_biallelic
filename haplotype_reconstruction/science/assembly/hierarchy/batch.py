@@ -267,6 +267,8 @@ def _record(task: JoinTask, searched: _LocalJoin) -> JoinRecord:
         full_scores=outcome.summary.total_full_scores,
         count_scores=outcome.summary.count_exact_scores,
         count_sample_scores=outcome.summary.count_exact_sample_scores,
+        # Replays merged into an earlier execution and the sweeps they adopted (present only when one merged).
+        **{name: value for name, value in outcome.summary.work_counters.items() if name.startswith("replay_merge")},
     )
     summary = replace(
         outcome.summary,

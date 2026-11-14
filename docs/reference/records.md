@@ -3432,19 +3432,6 @@ Full-sib families with aligned parent-slot/support and half-sib tables. Families
 | `search` | `str` | state | () | 1 | str | True | `''` |
 | `search_margin` | `float` | diagnostic | () | nats | float | True | `float('nan')` |
 
-## relatedness.RelatednessPairs
-
-Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
-
-| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
-|---|---|---|---|---|---|---|---|
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
-| `pairs` | `NDArray[np.int64]` | report | ('P', '2') | 1 | int64 | True | `required` |
-| `ibd` | `NDArray[np.float64]` | report | ('P', '3') | probability | float64 | True | `required` |
-| `ibd_sites` | `NDArray[np.float64]` | report | ('P',) | site | float64 | True | `required` |
-| `lr_ibd0` | `NDArray[np.float64]` | report | ('P',) | nats | float64 | True | `required` |
-| `lr_ibd2` | `NDArray[np.float64]` | report | ('P',) | nats | float64 | True | `required` |
-
 ## relatedness.RelatednessDiagnostics
 
 Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
@@ -3456,16 +3443,6 @@ Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reco
 | `chromosome_sites` | `tuple[int, ...]` | diagnostic | () | site | tuple[int, ...] | True | `required` |
 | `support_units` | `int` | diagnostic | () | 1 | int | True | `0` |
 | `search_margin` | `float` | diagnostic | () | nats | float | True | `float('nan')` |
-
-## relatedness.Relatedness
-
-Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
-
-| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
-|---|---|---|---|---|---|---|---|
-| `__payload_view__` | `ClassVar[bool]` | — | () | 1 | See type | True | `True` |
-| `families` | `RelatednessFamilies` | call | () | 1 | RelatednessFamilies | False | `required` |
-| `pairs` | `RelatednessPairs &#124; None` | report | () | 1 | RelatednessPairs &#124; None | False | `None` |
 
 ## release.ReleasedSites
 

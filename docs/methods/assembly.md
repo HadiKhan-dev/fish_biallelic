@@ -515,6 +515,8 @@ Cost and scope: One full score per continued panel and minimum-switch scoring pe
 
 Replay bounded original-input branches in FIFO prefix order, verifying the expected decision kind/source/panel set at each forced choice. Queue complete novel alternatives; stop on mismatch or whole-family budget overflow. Exclude the declared seed choices from forcing and record incomplete resolution rather than selecting a convenient subset.
 
+A replay that reaches the complete search state of an earlier execution merges into it. At every sweep boundary after an execution's forced prefix (after the primary's first serialized choice), the search digests its complete state: the panel with its per-sample scores and likelihood, the ordered candidate pool, born tags, freeze flags, count history and tallies, the counters that name decision sources, the terminal plateau episode and the loop's quota, ladder and pass counters (`PanelSearch.STATE_FIELDS` and the loop state; constants of the join, pure caches, append-only records and work counters are excluded, and a test classifies every attribute). The search is deterministic and every later choice of both executions takes its default, so a replay whose digest equals a completed execution's at some boundary would repeat that execution's continuation exactly: it stops there and adopts it (its later choices, records, families, final panel and counters). Its records equal the full replay's; its work and tie counters count only what ran, and the join records the merge (`replay_merges`, `replay_merged_sweeps`, the replay event's `merged_branches`). Replays that are alias images of the primary to the end, or that diverge, never merge and run in full. Cost: one SHA-256 of the state per boundary, the pool digested once per pool.
+
 Implementation: [science/assembly/join/__init__.py](../../haplotype_reconstruction/science/assembly/join/__init__.py), [science/assembly/join/alternatives.py](../../haplotype_reconstruction/science/assembly/join/alternatives.py), [science/assembly/join/search.py](../../haplotype_reconstruction/science/assembly/join/search.py).
 
 Parameters by name: `MAX_BRANCHES`, `join`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
@@ -628,7 +630,9 @@ Independent joined batches and refinement components carry dimension-only work
 estimates (samples, sites and founder-state/refit work). The engine starts larger
 ready units first; dependencies still separate hierarchy levels and result gathers
 still visit genomic component order. Synchronous context joins use the same batch
-cost ordering and keyed composition.
+cost ordering and keyed composition. A level's straggler batches (at least twice the level's upper-median
+work estimate) start on a minimum team of one thread per 64 informative samples within their
+sample width ([eng-23](execution.md#eng-23)); the team is a CPU minimum only.
 
 Stage expansion preserves the enclosing graph task's declared CPU maximum,
 rather than freezing the share passed when its parent first started. A join's

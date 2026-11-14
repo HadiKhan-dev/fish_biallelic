@@ -1,14 +1,15 @@
-"""OUTPUT/relatedness/: the relatedness stage's families, pairwise IBD summaries and half-sib links.
+"""OUTPUT/relatedness/: the relatedness stage's families and half-sib links.
 
 families.csv: one row per sample (its family, the share of chromosomes on which that family is its best placement,
 the family's two parent slots: a sequenced sample or empty for a latent slot, with the slot's support).
 A slot sample's genotypes serve the model as a parent's would; it may be a parent, child (the two directions tie
 for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the
 pedigree stage.
-pairs.csv: one row per sample pair (posterior IBD0/IBD1/IBD2 shares of jointly observed sites, their count, and the
-IBD0 and IBD2 stretch evidence). half_sib_links.csv: latent families better explained as sharing one latent parent.
+half_sib_links.csv: latent families better explained as sharing one latent parent.
 summary.json: the fit (with the family search kept and its margin). These are inferences from genotype likelihoods
-alone, not pedigree truth.
+alone, not pedigree truth. Releases up to 4.17.0 could also write pairs.csv, a pairwise IBD table whose model does
+not hold in a cross (docs/methods/relatedness.md, "Pairwise IBD"); a stale copy is removed when the tables are
+rewritten.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ...results.reader import RelatednessView
+    from ...contracts.relatedness import RelatednessFamilies
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,7 @@ from .tables import write_frame, write_json
 
 
 def write_relatedness(
-    output: str | Path, product: RelatednessView, input_ids: Sequence[str] | None = None
+    output: str | Path, product: RelatednessFamilies, input_ids: Sequence[str] | None = None
 ) -> list[Path]:
     """Write the product's tables; per-sample rows in the run's input order (``input_ids``)."""
     from .tables import frame_in_input_order
@@ -50,24 +51,8 @@ def write_relatedness(
         dict(FamilyA=product.half_sib[:, 0], FamilyB=product.half_sib[:, 1], Gain=product.half_sib_gain)
     )
     written = [write_frame(directory / "families.csv", frame_in_input_order(families, input_ids))]
-    if product.pairs is not None:
-        ibd = product.ibd
-        assert ibd is not None  # pairs and their IBD shares come from one recorded pair product
-        pairs = pd.DataFrame(
-            dict(
-                SampleA=ids[product.pairs[:, 0]],
-                SampleB=ids[product.pairs[:, 1]],
-                IBD0=ibd[:, 0],
-                IBD1=ibd[:, 1],
-                IBD2=ibd[:, 2],
-                Sites=product.ibd_sites,
-                IBD0Evidence=product.lr_ibd0,
-                IBD2Evidence=product.lr_ibd2,
-            )
-        )
-        written.append(write_frame(directory / "pairs.csv", pairs))
-    else:
-        (directory / "pairs.csv").unlink(missing_ok=True)
+    # Written only by earlier releases (an output run resumed under this one would otherwise keep it).
+    (directory / "pairs.csv").unlink(missing_ok=True)
     written.append(write_frame(directory / "half_sib_links.csv", links))
     written.append(
         write_json(
@@ -104,19 +89,6 @@ FAMILY_COLUMNS = (
     ParentSlot1Support: fraction of nonempty support units on which the first slot sample beats its latent replacement; parent calls, direction and their support belong to the pedigree stage (1).
     ParentSlot2: second slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text).
     ParentSlot2Support: fraction of nonempty support units on which the second slot sample beats its latent replacement; the two directions tie for a one-member family (1).
-"""
-
-PAIR_COLUMNS = ("SampleA", "SampleB", "IBD0", "IBD1", "IBD2", "Sites", "IBD0Evidence", "IBD2Evidence")
-"""Columns in published order.
-
-    SampleA: first sample identifier (text).
-    SampleB: second sample identifier (text).
-    IBD0: posterior share at jointly observed sites with zero alleles identical by descent (1).
-    IBD1: posterior share at jointly observed sites with one allele identical by descent (1).
-    IBD2: posterior share at jointly observed sites with two alleles identical by descent (1).
-    Sites: sites (1).
-    IBD0Evidence: recorded IBD0 stretch evidence (nats).
-    IBD2Evidence: recorded IBD2 stretch evidence (nats).
 """
 
 HALF_SIB_COLUMNS = ("FamilyA", "FamilyB", "Gain")

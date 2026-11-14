@@ -1,5 +1,75 @@
 # Changelog
 
+## 4.17.2 (14 November 2026)
+
+This release removes more repeated and serial work from assembly and founder refinement, and removes the
+relatedness stage's optional pairwise IBD report, which was wrong in crosses. Every other released result is
+identical to 4.17.1.
+
+**Assembly joins: a replay that rejoins the primary search stops there.** After an exact tie between identical rows,
+the join search replays the alternative to see where it leads. Many such replays reach the primary search's state a
+few sweeps later and then repeat its work. The search now keys its complete state (every attribute that decides how
+it continues) at each sweep boundary; a replay whose key equals the primary's at the same boundary adopts the
+primary's continuation. Records equal those of running both in full, which a verify mode checks at every
+coincidence. On saved joins of two real crosses, joins whose replay rejoined took 46 % less wall time (one fell from
+3,792 to 2,047 s); joins whose replays diverge are unchanged.
+
+**Scheduling: minimum thread teams for straggler units.** In a selection round or one level of joins, a unit whose
+declared cost is at least twice the round's upper-median cost (the engine's existing straggler definition) now gets
+a minimum team of threads: one per 64 samples, at most 16 and at most half the cores, held at every give-back. It no
+longer runs on one thread while hundreds of small units share the node. The heaviest critical units always get their
+team; the others stop before their declared cost passes one eighth of the round's. Results are identical. In a
+crowded selection round of a real cross, the two longest blocks ran 4.3 and 4.4 times faster and the round's wall
+time rose by 1 %. The rule ranks units by declared cost, so it misses units whose cost the declaration understates.
+
+**Founder refinement: exact reuse inside a search.** Renaming founders permutes every state-indexed quantity of a
+refinement search bit for bit, so work a search would repeat on a renamed or unchanged problem is now reused:
+- *Restated windows.* After a pass's suffix exchanges rename founder paths, held window problems whose ends carry one
+  renaming are restated in the new labels, and the proposal cache accepts one only when its rows and both flanks
+  equal the new panel's bitwise. The one place where a tie is broken by founder index (the seeded search's latent
+  trace takes the first tied pair state) is guarded: the trace now reports whether any resolution of its exact ties
+  could change what the search reads from it, and such focals are solved afresh.
+- *Relabelled messages.* Held block messages are permuted into the new labels before their update, which then
+  recomputes only the blocks where the panel changed and both blocks at every junction where the renaming changes.
+- *Shared sweep 0.* The two searches of a fit (forward-first and reverse-first) share the start panel's messages and
+  every sweep-0 window solve up to the point where their conventions differ.
+- *Standing-offer gains.* An acceptance pass reuses the exact per-sample gains of an item whose founder, rows, panel
+  and end messages equal an earlier evaluation's, keyed by two independent 64-bit hashes and a per-sample digest.
+
+Every decision, record and logical work account is the one computing afresh gives; a reference path recomputes and
+compares every reused value. On long refinement units these levers save 12 to 27 % of the CPU and 9 to 21 % of the
+wall time (a 27-founder unit of a real cross: CPU -22 %, wall -13 %); peak memory rises by 0.3 to 2.5 GiB on long
+units (27.3 to 29.8 GiB on that 27-founder unit).
+
+**Relatedness: the pairwise IBD report is removed.** The optional report (`[relatedness] pairwise_ibd`,
+`relatedness/pairs.csv`) ran a three-state IBD chain for every pair of samples. No decision read it: the family fit,
+the pedigree and every other released result are unchanged. Its emissions treated the alleles two samples do not
+share by descent as independent Hardy-Weinberg draws at the sample allele frequency. In a cross those alleles come
+from a few founder haplotypes in complete linkage disequilibrium over long blocks, and identity by state at sites
+where a parent is homozygous, or where the founder groups differ, reads as identity by descent. Against the
+simulated founder transmission in 27 simulated crosses at depths 1, 5 and 10.5, parent-offspring pairs received mean
+IBD0 shares of 0.22 to 0.59 per cross where the truth is 0, and full sibs 0.36 to 0.66 where it is 0.09 to 0.26; on a
+real cichlid cross the child-parent pairs the pedigree stage calls received IBD0 shares of 0.25 to 0.84. A sound
+pairwise statistic in a cross needs the founder haplotypes or the parents' genotypes, which the relatedness stage
+does not have. Sharing of founder haplotypes counted on the released paintings is sound (it agrees with the
+simulated transmission in 0.87 to 1.00 of the bins, and gives the real cross's called child-parent pairs IBD0 shares
+of 0 to 0.04), but it would be a new genome-wide product after painting and is not part of this release.
+
+A configuration that still sets `[relatedness] pairwise_ibd` to true or false loads with one warning and the key is
+ignored; any other value is an error. The `relatedness/pairs` record, the `RelatednessPairs` contract, the
+`PairwiseIbdParameters` record and the reader view `RelatednessView` are removed; `Results.relatedness()` returns the
+`RelatednessFamilies` product; `output_selection.json` records only `export_enabled`, and republishing reports
+removes a stale `relatedness/pairs.csv`. The run manifest no longer carries the pairwise parameter record, so a run
+initialised by an earlier release is refused on resume: rerun it in a new output root.
+
+**Validation.** The default suite and the stage tier (four shards) pass. Replays on saved inputs give records equal
+to the saved ones: joins of two real crosses with and without rejoining replays (verify mode checked every state
+coincidence, 830 in all); selection and join rounds with thread teams (14 selection blocks, 338 units of a crowded
+round and 642 blocks of a real cross); refinement units at levels 2 to 4 with the reuse levers, including 27- to
+30-founder units, checkpointed messages and runs interrupted and resumed. The relatedness families of seven saved
+runs are identical without the pairwise report. On the release matrix of 17 simulated and real crosses, the only
+differences from 4.17.1 are the removed pairwise IBD outputs.
+
 ## 4.17.1 (14 November 2026)
 
 This release stops founder refinement from solving the same problem again for each of several tied alternatives, and

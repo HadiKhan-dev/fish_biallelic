@@ -19,7 +19,6 @@ from haplotype_reconstruction.core.columns import column_name  # noqa: E402
 
 FILES = {
     "relatedness.FAMILY_COLUMNS": "relatedness/families.csv",
-    "relatedness.PAIR_COLUMNS": "relatedness/pairs.csv (optional; off by default)",
     "relatedness.HALF_SIB_COLUMNS": "relatedness/half_sib_links.csv",
     "evidence.SAMPLE_COLUMNS": "quality/samples.csv",
     "evidence.SEGMENT_COLUMNS": "quality/segments.csv",

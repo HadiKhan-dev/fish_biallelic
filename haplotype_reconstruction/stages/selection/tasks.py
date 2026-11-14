@@ -33,6 +33,7 @@ from ...contracts.selection import ContextProposal, RefitSummary
 from ...core.errors import InvariantError, SettingsError
 from ...core.ties import TieCount, TieCounts
 from ...engine.cpu import share_reader, thread_team
+from ...engine.lanes import minimum_teams
 from ...science.assembly.run import AssemblyResult
 from ...science.discovery.parameters import DiscoveryParameters
 from ...science.selection.context_refit import (
@@ -241,23 +242,35 @@ def round_expansion(
     count = min(len(pending), max(-(-len(pending) // CHUNK_BLOCKS), tasks_per_cpu * threads))
     average = sum(costs) / count if costs else 0.0
     remaining = float(sum(costs))
+    # The round's stragglers start on a minimum lane team, one thread per 64-sample lane block (engine
+    # minimum_teams); a cohort within one lane block has no team. A teamed block is a chunk of its own, never
+    # grouped, so its team is its own.
+    teams = minimum_teams(costs, [-(-observed_rows // LANE_WIDTH)] * len(pending), threads)
     chunks: list[list[BlockTask]] = []
     weights: list[float] = []
+    chunk_teams: list[int] = []
     target = average
-    for block, weight in zip(pending, costs, strict=True):
-        if chunks and len(chunks[-1]) < chunk_blocks and weights[-1] + weight <= target:
+    for block, weight, team in zip(pending, costs, teams, strict=True):
+        if (
+            chunks
+            and team == 1
+            and chunk_teams[-1] == 1
+            and len(chunks[-1]) < chunk_blocks
+            and weights[-1] + weight <= target
+        ):
             chunks[-1].append(block)
             weights[-1] += weight
         else:
             target = max(average / CHUNK_FLOOR, min(average, remaining / (CHUNK_WAVES * threads)))
             chunks.append([block])
             weights.append(float(weight))
+            chunk_teams.append(team)
         remaining -= weight
     tasks = []
     block_threads = (
         min(max_threads, max(1, -(-observed_rows // LANE_MIN_WIDTH))) if small_cohort else max_threads
     )
-    for chunk, weight in zip(chunks, weights, strict=True):
+    for chunk, weight, team in zip(chunks, weights, chunk_teams, strict=True):
         outputs: tuple[RecordKey, ...] = ()
         if scope is not None:
             for block in chunk:
@@ -272,10 +285,11 @@ def round_expansion(
                 kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
                 # Small-cohort chunks may grow within their useful-width cap.
                 # At larger sample counts only singleton chunks may grow;
-                # grouped chunks share the node through one CPU apiece.
+                # grouped chunks share the node through one CPU apiece. A
+                # straggler's chunk starts on its minimum team.
                 resources=ResourceRequest(
-                    1,
-                    block_threads if small_cohort or len(chunk) == 1 else 1,
+                    team,
+                    max(team, block_threads if small_cohort or len(chunk) == 1 else 1),
                     max(block_task_bytes(b, observed_rows) for b in chunk),
                     cost=weight,
                 ),

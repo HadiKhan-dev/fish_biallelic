@@ -1,8 +1,14 @@
 # Relatedness
 
-Relatedness fits a composite full-sib/half-sib family model from genotype likelihoods. Its latent or sequenced parent slots carry no sex, generation or sample-name prior. N is samples, M selected family sites, L pair-chain sites and U nonempty support units. The two bounded searches are alternatives, not an exhaustive pedigree search. Pairwise IBD is an optional output and is off by default.
+Relatedness fits a composite full-sib/half-sib family model from genotype likelihoods. Its latent or sequenced parent slots carry no sex, generation or sample-name prior. N is samples, M selected family sites and U nonempty support units. The two bounded searches are alternatives, not an exhaustive pedigree search. The stage estimates no pairwise identity-by-descent shares ([below](#pairwise-identity-by-descent)).
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
+
+## Pairwise identity by descent
+
+The stage reports no pairwise IBD0/IBD1/IBD2 shares. A pairwise IBD chain on genotype likelihoods treats the alleles two samples do not share by descent as independent Hardy–Weinberg draws at the sample allele frequency, with sites independent given the IBD state. In a cross every sample carries mosaics of a few founder haplotypes: alleles not shared by descent come from the same few haplotypes, in complete linkage disequilibrium over long blocks, and the sample frequency is the frequency of no base population. Identity by state at sites where a parent is homozygous, or where the founder groups differ, then reads as identity by descent; only the founder haplotypes or the parents' genotypes show which parental homologue a child received at such a site, and this stage runs before the founder haplotypes exist. Measured on 27 simulated crosses at depths 1, 5 and 10.5 against the simulated founder-haplotype transmission, such a chain gave parent–offspring pairs mean IBD0 shares of 0.22–0.59 per cross (the truth is 0) and full sibs 0.36–0.66 (the truth is 0.09–0.26); it was close to the truth only in a cross of 60 sequenced founders and their children. On the TroMau cross it gave the 69 child–parent pairs that the pedigree stage calls IBD0 shares of 0.25–0.84, where a parent and child share at least one homologue throughout.
+
+Sharing of founder haplotypes is defined once the founder haplotypes exist. The released paintings name, bin by bin, the founder rows each sample carries ([PR13](painting.md#pr13)), and the pedigree stage scores pairs of samples on the same painting classes ([PD28](pedigree.md#pd28)).
 
 <a id="rl01"></a>
 ## rl01 Genome-wide evidence pass and the concatenated site axis
@@ -27,28 +33,15 @@ Parameters by name: `iterations`, `clip`. Values, units and current rationale ar
 Cost and scope: O(6 · N · L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl03"></a>
-## rl03 Site selection and thinning (family sites, IBD sites)
+## rl03 Site selection and thinning (family sites)
 
-For family sites, apply the inclusive minor-frequency gate and compare the floating mean of the Boolean observation mask with the inclusive observed-share threshold, then thin the survivors. The optional pair chain takes the direct `::ibd_site_step` slice without those family gates; it handles joint observation inside the chain. Keep the two evidence axes separate.
+For family sites, apply the inclusive minor-frequency gate and compare the floating mean of the Boolean observation mask with the inclusive observed-share threshold, then thin the survivors.
 
-Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
 
-Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`, `ibd_site_step`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minor_allele_frequency`, `minimum_observed`, `family_site_step`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
-
-<a id="rl04"></a>
-## rl04 Pairwise three-state IBD chain and its genome-wide summaries
-
-**Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
-
-For each selected sample pair, run the three-state IBD chain along each contig with the stated allele-frequency emissions and map transition law. Aggregate posterior state shares over jointly observed sites and compute the recorded IBD0/IBD2 stretch evidence. This optional output costs quadratically in sample count and does not feed family fitting.
-
-Implementation: [science/relatedness/ibd.py](../../haplotype_reconstruction/science/relatedness/ibd.py).
-
-Parameters by name: `ibd_switch_rate`, `ibd_site_step`, `initial`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(P · L/ibd_site_step · c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl05"></a>
 ## rl05 Family-model site terms (child terms, latent prior, sequenced-parent posterior)
@@ -214,14 +207,14 @@ Cost and scope: O(18 M); O(F_lat² M). These terms describe the unit’s work/st
 <a id="rl19"></a>
 ## rl19 Product, identity, barrier placement, reuse, shard consumption and published tables
 
-Publish family fitting separately from the optional pair chain. Canonicalise family IDs as dense ranks by smallest member; keep membership and parent/support axes aligned. Schedule the family gather after all evidence, while independent reconstruction may overlap it. Persist pair selection outside scientific identities and render only selected, checked pair products.
+Publish the family fit. Canonicalise family IDs as dense ranks by smallest member; keep membership and parent/support axes aligned. Schedule the family gather after all evidence, while independent reconstruction may overlap it.
 
 
 Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
 Parameters: supplied typed inputs and the stage's [parameter record](../reference/parameters.md).
 
-Cost and scope: Family products scale with N; optional pair products have N(N−1)/2 rows and O(N² L) chain work.
+Cost and scope: Family products scale with N.
 
 <!-- named mechanism anchors -->
 
@@ -229,4 +222,4 @@ Cost and scope: Family products scale with N; optional pair products have N(N−
 
 <a id="pairwise-ibd"></a>
 
-**Pairwise ibd:** see [RL04](#rl04).
+**Pairwise ibd:** not estimated; see [Pairwise identity by descent](#pairwise-identity-by-descent).

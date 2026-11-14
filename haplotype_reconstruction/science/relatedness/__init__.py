@@ -1,1 +1,1 @@
-"""Estimate families and optional pairwise relatedness from observed evidence."""
+"""Estimate full-sib families and their parent slots from observed evidence."""

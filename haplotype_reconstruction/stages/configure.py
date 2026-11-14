@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
-    from ..science.relatedness.ibd_parameters import PairwiseIbdParameters
     from ..science.relatedness.parameters import FamilyParameters
     from ..science.selection.parameters import SelectionParameters
     from ..simulation.design import SimulationConfig
@@ -92,7 +91,6 @@ class OutputSelection:
     """Invocation-local output selection; never part of the init binding."""
 
     export_enabled: bool
-    pairwise_ibd: bool
 
 
 @dataclass(frozen=True)
@@ -105,7 +103,6 @@ class StageConfigs:
     assembly: AssemblyParameters
     painting: PaintingParameters
     relatedness: FamilyParameters
-    pairwise_ibd: PairwiseIbdParameters
     pedigree: PedigreeParameters
     founder_refit: RefitParameters
     family_phase: PhaseParameters
@@ -133,7 +130,6 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
-    from ..science.relatedness.ibd_parameters import PairwiseIbdParameters
     from ..science.relatedness.parameters import FamilyParameters
     from ..science.selection.parameters import SelectionParameters
 
@@ -160,7 +156,6 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         AssemblyParameters(),
         PaintingParameters(),
         FamilyParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
-        PairwiseIbdParameters(),
         PedigreeParameters(
             exposure=ExposureParameters(rate_is_measured=settings.genetic_map.rate_is_measured),
         ),
@@ -348,7 +343,7 @@ def resolve(
         seeds["simulation"] = seed
         sim = replace(simulation(settings, realised_seed=seed), contigs=order)
     # full_length is an output parameter too: changing it re-exports, never
-    # invalidates scientific records. Pairwise settings bind their own subrecord.
+    # invalidates scientific records.
     scientific = jsonable(parameters)
     scientific.pop("export")
     document = dict(
@@ -360,8 +355,7 @@ def resolve(
         map_identities=dict(map_ids),
         simulation=jsonable(sim),
     )
-    related = getattr(settings, "relatedness", None)
-    outputs = OutputSelection(bool(settings.export.enabled), bool(getattr(related, "pairwise_ibd", False)))
+    outputs = OutputSelection(bool(settings.export.enabled))
     return ResolvedConfiguration(
         parameters,
         order,
@@ -383,5 +377,5 @@ def bind_resolved(file: Any, resolved: ResolvedConfiguration, *, key: str = "con
 
 
 # Field-by-field migration map. Every unlisted leaf has the identical dotted
-# field name. Optional pairwise settings have their own parameter record. The archived
+# field name. The archived
 # configuration extractor checks the expanded map; unknown or missing baseline leaves raise.

@@ -6,16 +6,27 @@ the primary run. Inner concurrent seed choices remain source ambiguity; this pla
 continues observed certification neighbors, without enumerating entire plateaus or
 nearest-shadow count outcomes.
 
-Owns: bounded original-input replay plans and their releases.
+A replay whose complete search state (PanelSearch.state_key) equals an earlier execution's at a sweep
+boundary, both past their forced prefixes, continues exactly as that execution continued from there: the
+search is deterministic and every later serialized choice takes its default. ReplayMerge stops it there and
+adopts that continuation, so its records are those the full replay would have produced; only its work and tie
+counters (what actually ran) and the merge diagnostics differ.
+
+Owns: bounded original-input replay plans, their state merges and their releases.
 Must not: read files, environment, live memory or clocks, or emit logs/warnings.
 Method: docs/methods/assembly.md#aj29.
-Invariant: Replay is FIFO within MAX_BRANCHES; seed-refit choices are never independently forced.
+Invariant: Replay is FIFO within MAX_BRANCHES; seed-refit choices are never independently forced; a merged
+replay's records equal its full replay's.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+
+import numpy as np
 
 from haplotype_reconstruction.contracts.roles import record_field
 from haplotype_reconstruction.core import ties
@@ -182,6 +193,200 @@ def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
     )
 
 
+class ReplayMergeMismatch(RuntimeError):
+    """Verify mode: a continuation adopted at a state coincidence differs from the full replay's."""
+
+
+@dataclass(frozen=True)
+class _Boundary:
+    """Where one execution stood at a sweep boundary: the lengths of its append-only records (search events,
+    release families, observed and excluded serialized choices) and its sweeps."""
+
+    events: int
+    families: int
+    observed: int
+    excluded: int
+    sweeps: int
+
+
+@dataclass(frozen=True)
+class _Execution:
+    """A completed execution: its outcome and its whole serialized choice transcript."""
+
+    outcome: object
+    observed: tuple
+    excluded: tuple
+
+
+# The JoinSummary fields of a merged replay by origin. continuation: the adopted execution's final values (the
+# rest of the search is a function of the boundary state, which holds every counter these report); own: fixed
+# at the replay's construction; concatenated: the replay's records up to the boundary, then the adopted
+# execution's records after it; diagnostic: work and tie counters of what actually ran (and merge counters).
+MERGED_SUMMARY_FIELDS = dict(
+    continuation=(
+        "final_panel_size",
+        "final_likelihood",
+        "sweeps",
+        "tier1_sweeps",
+        "sweep_backstop",
+        "tier2_passes",
+        "tier2_accepted",
+        "saturation_steps",
+        "saturation_accepted",
+        "quota",
+        "ladder_top",
+        "quota_backstop",
+        "count",
+        "pool_original",
+        "pool_final",
+        "pool_largest",
+        "certified",
+        "backstop_reached",
+        "pool_backstop",
+    ),
+    own=("initialization", "selected_initial_anchor"),
+    concatenated=("events",),
+    diagnostic=("total_full_scores", "count_exact_scores", "count_exact_sample_scores", "tie_events", "work_counters"),
+)
+
+
+class ReplayMerge:
+    """Merge bounded replays into earlier executions at equal complete search states (AJ29).
+
+    PanelSearch calls boundary(search, loop) at every sweep boundary and search_panel calls complete(search,
+    outcome) when an execution ends. Boundaries are keyed only once the execution has made a serialized choice
+    and consumed its forced prefix (before that it can adopt no continuation, and none of its continuations can
+    be adopted: a merging replay's later choices are all defaults). A replay reaching a key that a completed
+    execution held stops there: its transcript continues with that execution's later choices, its records with
+    that execution's later records, its final panel, likelihood, counters and families are that execution's.
+    verify: run every execution to its end and check, at complete, each coincidence's adopted continuation
+    against the actual one (ReplayMergeMismatch otherwise; ``verified`` counts the checks).
+    """
+
+    def __init__(self, *, verify: bool = False) -> None:
+        self.verify = verify
+        self.verified = 0
+        self._known: dict[bytes, tuple[int, _Boundary]] = {}
+        self._executions: list[_Execution] = []
+        self._search = None
+        self._pending: list[tuple[bytes, _Boundary]] = []
+        self._matches: list[tuple[_Boundary, int, _Boundary]] = []
+
+    def boundary(self, search, loop):
+        """The merged outcome when this boundary's state was an earlier execution's, else None (continue)."""
+        plan = search.choice_plan
+        if plan is None:
+            return None
+        if search is not self._search:
+            self._search, self._pending, self._matches = search, [], []
+        if len(plan.observed) < max(1, len(plan.forced)):
+            return None
+        key = search.state_key(loop)
+        here = _Boundary(
+            len(search.events), len(search.release_families), len(plan.observed), len(plan.excluded), loop.sweeps
+        )
+        self._pending.append((key, here))
+        found = self._known.get(key)
+        if found is None:
+            return None
+        if self.verify:
+            self._matches.append((here, *found))
+            return None
+        index, there = found
+        target = self._executions[index]
+        plan.observed.extend(target.observed[there.observed :])
+        plan.excluded.extend(target.excluded[there.excluded :])
+        return _merged_outcome(search, target.outcome, there)
+
+    def complete(self, search, outcome) -> None:
+        """Record a finished (or merged) execution's boundaries; in verify mode check its coincidences first."""
+        if search is not self._search:
+            self._pending, self._matches = [], []
+        plan = search.choice_plan
+        execution = _Execution(outcome, tuple(plan.observed), tuple(plan.excluded))
+        for here, index, there in self._matches:
+            _verify_merge(execution, here, self._executions[index], there)
+            self.verified += 1
+        number = len(self._executions)
+        self._executions.append(execution)
+        for key, here in self._pending:
+            self._known.setdefault(key, (number, here))
+        self._search, self._pending, self._matches = None, [], []
+
+
+def _merged_outcome(search, target, there):
+    """The outcome of a replay that holds ``target``'s state at boundary ``there``: target's continuation after
+    the replay's own records; work and tie counters of what ran, with the merge counted."""
+    from .diagnostics import JoinOutcome, _plain
+
+    summary = target.summary
+    work = {name: value for name, value in summary.work_counters.items() if not name.startswith("replay_merge")}
+    summary = replace(
+        summary,
+        initialization=tuple(search.initialization),
+        selected_initial_anchor=search.selected_anchor,
+        events=(*(_plain(event) for event in search.events), *summary.events[there.events :]),
+        total_full_scores=search.evaluations,
+        count_exact_scores=search.counter.exact_scores,
+        count_exact_sample_scores=search.counter.exact_sample_scores,
+        tie_events=search.tie_counter.record(),
+        work_counters=dict(work, replay_merges=1, replay_merged_sweeps=summary.sweeps - there.sweeps),
+    )
+    return JoinOutcome(
+        paths=np.array(target.paths, copy=True),
+        log_likelihood=float(target.log_likelihood),
+        summary=summary,
+        release_alternatives=(*search.release_families, *target.release_alternatives[there.families :]),
+        minimum_switches=target.minimum_switches,
+    )
+
+
+def _comparable(value):
+    """An exactly comparable form of a record value (floats by their bits, arrays with dtype and shape)."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        named = tuple((field.name, _comparable(getattr(value, field.name))) for field in dataclasses.fields(value))
+        return (type(value).__name__, named)
+    if isinstance(value, np.ndarray):
+        return ("array", value.dtype.str, value.shape, _comparable(value.tolist()))
+    if isinstance(value, Mapping):
+        return ("map", tuple((key, _comparable(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_comparable(item) for item in value)
+    if isinstance(value, (float, np.floating)):
+        return ("float", float(value).hex())
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
+
+
+def _verify_merge(execution, here, target, there):
+    """The continuation ``target`` showed from ``there`` against the one ``execution`` actually ran from ``here``."""
+    actual, adopted = execution.outcome, target.outcome
+    pairs = dict(
+        paths=(actual.paths, adopted.paths),
+        log_likelihood=(actual.log_likelihood, adopted.log_likelihood),
+        minimum_switches=(actual.minimum_switches, adopted.minimum_switches),
+        events=(actual.summary.events[here.events :], adopted.summary.events[there.events :]),
+        release_alternatives=(
+            actual.release_alternatives[here.families :],
+            adopted.release_alternatives[there.families :],
+        ),
+        choices=(execution.observed[here.observed :], target.observed[there.observed :]),
+        excluded_choices=(execution.excluded[here.excluded :], target.excluded[there.excluded :]),
+        **{
+            f"summary.{name}": (getattr(actual.summary, name), getattr(adopted.summary, name))
+            for name in MERGED_SUMMARY_FIELDS["continuation"]
+        },
+    )
+    differ = [name for name, (a, b) in pairs.items() if _comparable(a) != _comparable(b)]
+    if differ:
+        raise ReplayMergeMismatch(
+            f"adopted continuation differs from the full replay in {differ} (sweep {here.sweeps})"
+        )
+
+
 def _family_key(family):
     return (
         family.get("reason"),
@@ -293,6 +498,13 @@ def resolve_replays(
         certified=certified,
         resolved=replay.complete and certified and len(survivors) == 1 and not families,
     )
+    merged = [outcome.summary.work_counters.get("replay_merges", 0) for outcome in outcomes]
+    if any(merged):
+        # Replays that adopted an earlier execution's continuation at an equal search state (ReplayMerge).
+        diagnostic.update(
+            merged_branches=merged,
+            merged_sweeps=[outcome.summary.work_counters.get("replay_merged_sweeps", 0) for outcome in outcomes],
+        )
     # Biological census/acceptance events describe the selected complete history.
     # Work totals account for every executed history, and the replay event reports
     # branch work separately without mixing their count-state semantics.
@@ -358,7 +570,10 @@ def observed_plateau_family(
 
 
 __all__ = [
+    "MERGED_SUMMARY_FIELDS",
     "PanelChoice",
+    "ReplayMerge",
+    "ReplayMergeMismatch",
     "ReplayMismatch",
     "ReplayChoices",
     "ReplayBranch",

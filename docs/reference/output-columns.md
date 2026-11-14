@@ -842,21 +842,6 @@ Source: [`FAMILY_COLUMNS`](../../haplotype_reconstruction/outputs/reports/relate
 | 6 | `parent_slot2` | second slot sample whose genotypes serve the family model as a parent's would; may be a parent, child, sib or another close relative; empty for a latent slot (text). |
 | 7 | `parent_slot2_support` | fraction of nonempty support units on which the second slot sample beats its latent replacement; the two directions tie for a one-member family (1). |
 
-## relatedness/pairs.csv (optional; off by default)
-
-Source: [`PAIR_COLUMNS`](../../haplotype_reconstruction/outputs/reports/relatedness.py).
-
-| Position | Column | Meaning and unit |
-|---|---|---|
-| 1 | `sample_a` | first sample identifier (text). |
-| 2 | `sample_b` | second sample identifier (text). |
-| 3 | `ibd0` | posterior share at jointly observed sites with zero alleles identical by descent (1). |
-| 4 | `ibd1` | posterior share at jointly observed sites with one allele identical by descent (1). |
-| 5 | `ibd2` | posterior share at jointly observed sites with two alleles identical by descent (1). |
-| 6 | `sites` | sites (1). |
-| 7 | `ibd0_evidence` | recorded IBD0 stretch evidence (nats). |
-| 8 | `ibd2_evidence` | recorded IBD2 stretch evidence (nats). |
-
 ## relatedness/half_sib_links.csv
 
 Source: [`HALF_SIB_COLUMNS`](../../haplotype_reconstruction/outputs/reports/relatedness.py).

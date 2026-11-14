@@ -263,41 +263,58 @@ def _migrate_templates(mapping: dict) -> dict:
     return mapping
 
 
-def _drop_legacy_pedigree(mapping: dict) -> tuple[dict, bool]:
-    """Remove the obsolete key before schema validation without changing the caller's mapping."""
-    pedigree = mapping.get("pedigree")
-    if not isinstance(pedigree, dict):
-        return mapping, False
-    pedigree = dict(pedigree)
-    removed = "evidence_calibration" in pedigree
-    if removed:
-        value = pedigree.pop("evidence_calibration")
-        if not isinstance(value, str) or value not in ("off", "predictive"):
-            raise SettingsError('[pedigree] evidence_calibration expects "off" or "predictive"')
-    mapping = dict(mapping)
-    if pedigree:
-        mapping["pedigree"] = pedigree
-    else:
-        mapping.pop("pedigree")
-    return mapping, removed
+# Keys whose computation a release removed, in sections the schema no longer has. A configuration that still sets
+# one loads with one FutureWarning per key and the value is ignored (it must still be a value the key accepted); a
+# section left empty is dropped.
+_RETIRED_KEYS = {
+    ("pedigree", "evidence_calibration"): (
+        lambda value: isinstance(value, str) and value in ("off", "predictive"),
+        'expects "off" or "predictive"',
+        "removed in 4.15.2; the pedigree stage uses the composite evidence at unit weight",
+    ),
+    ("relatedness", "pairwise_ibd"): (
+        lambda value: isinstance(value, bool),
+        "expects true or false",
+        "removed in 4.17.2: its pairwise IBD chain treated alleles not shared by descent as independent "
+        "population draws, which they are not in a cross; relatedness/pairs.csv is no longer written",
+    ),
+}
 
 
-def _warn_removed_pedigree() -> None:
+def _drop_legacy(mapping: dict) -> tuple[dict, frozenset[tuple[str, str]]]:
+    """Remove retired keys before schema validation without changing the caller's mapping."""
+    removed = set()
+    for section in dict.fromkeys(name for name, _ in _RETIRED_KEYS):
+        table = mapping.get(section)
+        if not isinstance(table, dict):
+            continue
+        table = dict(table)
+        for (owner, key), (accepts, expects, _) in _RETIRED_KEYS.items():
+            if owner == section and key in table:
+                if not accepts(table.pop(key)):
+                    raise SettingsError(f"[{section}] {key} {expects}")
+                removed.add((section, key))
+        mapping = dict(mapping)
+        if table:
+            mapping[section] = table
+        else:
+            mapping.pop(section)
+    return mapping, frozenset(removed)
+
+
+def _warn_removed(removed: Set[tuple[str, str]]) -> None:
     import warnings
 
-    warnings.warn(
-        "[pedigree] evidence_calibration removed in 4.15.2; "
-        "the pedigree stage uses the composite evidence at unit weight",
-        FutureWarning,
-        stacklevel=3,
-    )
+    for (section, key), (_, _, reason) in _RETIRED_KEYS.items():
+        if (section, key) in removed:
+            warnings.warn(f"[{section}] {key} {reason}", FutureWarning, stacklevel=3)
 
 
 def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     """A typed Settings from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
     _check_removed(mapping)
     mapping = _migrate_templates(mapping)
-    mapping, removed_pedigree = _drop_legacy_pedigree(mapping)
+    mapping, removed = _drop_legacy(mapping)
     simulation = mapping.get("simulation", {})
     artefacts = simulation.get("artefacts", {}) if isinstance(simulation, dict) else {}
     if isinstance(artefacts, dict) and artefacts.get("preset") == "reference_blocks":
@@ -327,8 +344,7 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
         raise SettingsError(
             f"settings version {settings.version!r} is not 4; current TOML settings require version = 4"
         )
-    if removed_pedigree:
-        _warn_removed_pedigree()
+    _warn_removed(removed)
     return settings
 
 
@@ -359,12 +375,11 @@ def load_settings(
     for text in overrides:
         name, value = parse_override(text)
         _assign(sets, name, value)
-    migrated = tuple(_drop_legacy_pedigree(_migrate_templates(layer)) for layer in (user, options or {}, sets))
+    migrated = tuple(_drop_legacy(_migrate_templates(layer)) for layer in (user, options or {}, sets))
     layers = tuple(layer for layer, _ in migrated)
-    removed_pedigree = any(removed for _, removed in migrated)
     chosen = preset or next((layer["preset"] for layer in reversed(layers) if layer.get("preset")), "")
-    merged, removed_preset = _drop_legacy_pedigree(preset_mapping(chosen) if chosen else {})
-    removed_pedigree = removed_pedigree or removed_preset
+    merged, removed_preset = _drop_legacy(preset_mapping(chosen) if chosen else {})
+    removed = removed_preset.union(*(names for _, names in migrated))
     given = set()
     for layer in layers:
         merged = _merge(merged, layer)
@@ -375,8 +390,7 @@ def load_settings(
         merged.setdefault("input", {})["contigs"] = list(fallback_contigs)
         config = build_settings(merged, cwd=cwd)
     validate(config, given)
-    if removed_pedigree:
-        _warn_removed_pedigree()
+    _warn_removed(removed)
     return config
 
 
