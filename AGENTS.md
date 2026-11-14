@@ -335,6 +335,14 @@ relying on any filename or relationship given here.
   configurations.
 - **Numerical constants:** do not scatter unexplained ones through scientific modules. Established low-level
   sentinels and capability flags may stay in their modules.
+- **No backward compatibility before the first public release** (owner, 14 Nov 2026: "we haven't yet released the
+  code to the world or anything").
+  - The package has had no public release. Version numbers are internal milestones, not compatibility promises.
+  - Remove superseded settings, outputs, records and API names outright. Add no deprecation warnings, retired-key
+    tables, migration code or compatibility shims, and no resume support for run roots or checkpoints written by
+    earlier versions.
+  - Update the lab's own configurations, harnesses and tests instead.
+  - Reproducibility of the current version (§2.3) and correct resume within one version still apply.
 
 ### 3.4 Environment
 
